@@ -189,6 +189,10 @@ impl ApplicationHandler for App {
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
                     .spawn(move || {
+                        // Coalesce redraw requests so a burst of pty output
+                        // doesn't drown the main thread in redraw events.
+                        let mut last_request = Instant::now() - Duration::from_secs(1);
+                        let min_interval = Duration::from_millis(16);
                         while let Ok(bytes) = out_rx.recv() {
                             let mut p = parser_clone.lock();
                             for ev in p.advance(&bytes) {
@@ -197,7 +201,10 @@ impl ApplicationHandler for App {
                                 }
                             }
                             drop(p);
-                            window_clone.request_redraw();
+                            if last_request.elapsed() >= min_interval {
+                                window_clone.request_redraw();
+                                last_request = Instant::now();
+                            }
                         }
                     })
                     .expect("spawn vt loop");
@@ -227,13 +234,18 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 if let (Some(r), Some(p)) = (self.renderer.as_mut(), self.parser.as_ref()) {
-                    let grid = p.lock();
-                    if let Err(e) =
-                        r.render(grid.grid(), &self.theme, true, self.selection.as_ref())
-                    {
-                        tracing::warn!("render error: {e}");
+                    // try_lock so the render thread never blocks behind the VT
+                    // thread on a burst of pty output. If we can't get it now,
+                    // a later redraw (the VT thread requests one after each
+                    // batch) will pick up the latest grid.
+                    if let Some(grid) = p.try_lock() {
+                        if let Err(e) =
+                            r.render(grid.grid(), &self.theme, true, self.selection.as_ref())
+                        {
+                            tracing::warn!("render error: {e}");
+                        }
+                        self.last_render = Instant::now();
                     }
-                    self.last_render = Instant::now();
                 }
             }
 
@@ -337,12 +349,13 @@ impl ApplicationHandler for App {
 
             _ => {}
         }
-
-        if let Some(w) = &self.window {
-            if self.last_render.elapsed() > Duration::from_millis(16) {
-                w.request_redraw();
-            }
-        }
+        // No heartbeat redraw here. Redraws are explicitly requested by:
+        //   - the VT thread when pty bytes arrive
+        //   - mouse drag (selection changed)
+        //   - keyboard input that clears selection
+        //   - WM resize / scale change
+        // Spinning a redraw at the end of every window_event tick produced
+        // a feedback loop that pinned the main thread on macOS.
     }
 }
 
