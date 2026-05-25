@@ -1,179 +1,101 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Sonic Terminal — Official App Icon
-  ==================================
-  Concept   Terminal window in profile, racing through cyan light trails.
-            The window contains the iconic shell prompt `>_`.
-  Palette   navy #0A1428 → #0E1A33 (squircle bg)
-            cyan glow  #5BD3F8 → #1E90F0  (window outline + trails)
-            white core #F4FBFF             (inner stroke highlight)
-  Geometry  1024×1024 master, iOS-style squircle (40% corner radius).
-            Designed to scale cleanly from 16px to 1024px.
--->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <!-- Background squircle -->
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%"   stop-color="#0F1B36"/>
-      <stop offset="100%" stop-color="#070D1C"/>
+    <radialGradient id="bg" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#0B2140"/>
+      <stop offset="58%" stop-color="#06162D"/>
+      <stop offset="100%" stop-color="#020814"/>
+    </radialGradient>
+
+    <linearGradient id="silver" x1="150" y1="42" x2="880" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="26%" stop-color="#D5DEE8"/>
+      <stop offset="52%" stop-color="#FFFFFF"/>
+      <stop offset="76%" stop-color="#AEB8C4"/>
+      <stop offset="100%" stop-color="#FFFFFF"/>
     </linearGradient>
 
-    <!-- Cyan-blue gradient for the outline + trails -->
-    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="0.5">
-      <stop offset="0%"   stop-color="#7FE8FF"/>
-      <stop offset="55%"  stop-color="#3DB8FE"/>
-      <stop offset="100%" stop-color="#1E6EE6"/>
-    </linearGradient>
-    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%"   stop-color="#7FE8FF" stop-opacity="0"/>
-      <stop offset="35%"  stop-color="#5BD3F8" stop-opacity="0.85"/>
-      <stop offset="100%" stop-color="#1E90F0" stop-opacity="0.95"/>
-    </linearGradient>
-    <linearGradient id="outline-highlight" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%"   stop-color="#F4FBFF" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#F4FBFF" stop-opacity="0.2"/>
+    <linearGradient id="sonic" x1="150" y1="250" x2="955" y2="825" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E8FFFF"/>
+      <stop offset="23%" stop-color="#93F4FF"/>
+      <stop offset="52%" stop-color="#26CFFF"/>
+      <stop offset="100%" stop-color="#1778E8"/>
     </linearGradient>
 
-    <!-- Outer neon glow filter for outline + trails -->
-    <filter id="neon" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="8" result="b1"/>
-      <feGaussianBlur stdDeviation="18" result="b2"/>
+    <linearGradient id="sonicSoft" x1="210" y1="430" x2="530" y2="690" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F7FFFF"/>
+      <stop offset="48%" stop-color="#7FEFFF"/>
+      <stop offset="100%" stop-color="#168CF4"/>
+    </linearGradient>
+
+    <linearGradient id="streak" x1="470" y1="0" x2="960" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0B1E3A" stop-opacity="0"/>
+      <stop offset="42%" stop-color="#56E4FF" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#1778EA" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <filter id="cyanGlow" x="80" y="160" width="900" height="760" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.22  0 0 0 0 0.78  0 0 0 0 1  0 0 0 .68 0" result="glow"/>
       <feMerge>
-        <feMergeNode in="b2"/>
-        <feMergeNode in="b1"/>
+        <feMergeNode in="glow"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <filter id="soft-glow" x="-10%" y="-10%" width="120%" height="120%">
-      <feGaussianBlur stdDeviation="4" result="b"/>
+
+    <filter id="silverGlow" x="10" y="10" width="1004" height="1004" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="2.2" result="blur"/>
       <feMerge>
-        <feMergeNode in="b"/>
+        <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
 
-    <!-- iOS-style squircle clip — superellipse approximation -->
-    <clipPath id="squircle">
-      <path d="M 512 16
-               C 880 16 1008 144 1008 512
-               C 1008 880 880 1008 512 1008
-               C 144 1008 16 880 16 512
-               C 16 144 144 16 512 16 Z"/>
+    <clipPath id="appClip">
+      <rect x="26" y="26" width="972" height="972" rx="202"/>
     </clipPath>
   </defs>
 
-  <!-- ===== Squircle background ===== -->
-  <g clip-path="url(#squircle)">
+  <g clip-path="url(#appClip)">
     <rect width="1024" height="1024" fill="url(#bg)"/>
-
-    <!-- Subtle top sheen -->
-    <ellipse cx="512" cy="-80" rx="640" ry="220" fill="#FFFFFF" opacity="0.04"/>
-
-    <!-- =========== Speed trails (right side) ============ -->
-    <!-- Each trail: thin rounded rect with cyan gradient + neon glow.
-         Pattern: dense in middle row, sparser top/bottom, all start in
-         the window area and bleed off the right edge of the squircle. -->
-    <g filter="url(#neon)">
-      <!-- top band -->
-      <rect x="610" y="280" width="320" height="14" rx="7" fill="url(#trail)"/>
-      <rect x="740" y="318" width="220" height="10" rx="5" fill="url(#trail)"/>
-      <rect x="660" y="350" width="300" height="14" rx="7" fill="url(#trail)"/>
-
-      <!-- middle (dense) -->
-      <rect x="600" y="392" width="380" height="18" rx="9" fill="url(#trail)"/>
-      <rect x="690" y="430" width="270" height="12" rx="6" fill="url(#trail)"/>
-      <rect x="620" y="460" width="370" height="16" rx="8" fill="url(#trail)"/>
-      <rect x="700" y="498" width="280" height="14" rx="7" fill="url(#trail)"/>
-      <rect x="640" y="528" width="340" height="18" rx="9" fill="url(#trail)"/>
-      <rect x="690" y="566" width="290" height="12" rx="6" fill="url(#trail)"/>
-      <rect x="620" y="596" width="370" height="16" rx="8" fill="url(#trail)"/>
-      <rect x="700" y="634" width="270" height="12" rx="6" fill="url(#trail)"/>
-
-      <!-- bottom band -->
-      <rect x="650" y="676" width="320" height="14" rx="7" fill="url(#trail)"/>
-      <rect x="720" y="712" width="240" height="10" rx="5" fill="url(#trail)"/>
-      <rect x="640" y="744" width="290" height="12" rx="6" fill="url(#trail)"/>
-    </g>
-
-    <!-- =========== Terminal window frame ============ -->
-    <!-- Outer cyan stroke, left-side only (right side dissolves into trails).
-         Rounded corners, no fill. -->
-    <g filter="url(#neon)">
-      <!-- Window outline: top, left, bottom — right is "cut" by trails -->
-      <path d="M 220 250
-               L 700 250
-               L 700 300
-               L 220 300
-               L 220 760
-               L 700 760
-               L 700 720"
-            fill="none"
-            stroke="url(#cyan)"
-            stroke-width="14"
-            stroke-linejoin="round"
-            stroke-linecap="round"/>
-      <!-- Title-bar separator (the horizontal line under the dots) -->
-      <line x1="220" y1="338" x2="700" y2="338"
-            stroke="url(#cyan)" stroke-width="8" stroke-linecap="round" opacity="0.95"/>
-    </g>
-
-    <!-- Inner highlight stroke for crispness -->
-    <g>
-      <path d="M 220 250
-               L 700 250
-               L 700 300
-               L 220 300
-               L 220 760
-               L 700 760
-               L 700 720"
-            fill="none"
-            stroke="url(#outline-highlight)"
-            stroke-width="3"
-            stroke-linejoin="round"
-            stroke-linecap="round"/>
-    </g>
-
-    <!-- =========== Window dots (traffic lights — cyan-tinted) ============ -->
-    <g filter="url(#soft-glow)">
-      <circle cx="278" cy="294" r="16" fill="#5BD3F8"/>
-      <circle cx="338" cy="294" r="16" fill="#5BD3F8" opacity="0.85"/>
-      <circle cx="398" cy="294" r="16" fill="#5BD3F8" opacity="0.75"/>
-    </g>
-
-    <!-- =========== Shell prompt `>_` ============ -->
-    <g filter="url(#neon)">
-      <!-- Chevron `>` — two strokes meeting at a point -->
-      <path d="M 290 470
-               L 410 555
-               L 290 640"
-            fill="none"
-            stroke="url(#cyan)"
-            stroke-width="28"
-            stroke-linejoin="round"
-            stroke-linecap="round"/>
-      <!-- Cursor underscore `_` to the right of the chevron -->
-      <rect x="440" y="618" width="100" height="22" rx="6" fill="url(#cyan)"/>
-    </g>
-    <!-- Chevron inner highlight -->
-    <path d="M 290 470 L 410 555 L 290 640"
-          fill="none"
-          stroke="#F4FBFF"
-          stroke-width="6"
-          stroke-linejoin="round"
-          stroke-linecap="round"
-          opacity="0.85"/>
-    <rect x="440" y="618" width="100" height="22" rx="6" fill="#F4FBFF" opacity="0.45"/>
-
+    <ellipse cx="520" cy="520" rx="460" ry="380" fill="#0A1C35" opacity="0.35"/>
   </g>
 
-  <!-- ===== Squircle outer rim (subtle white ring for definition) ===== -->
-  <path d="M 512 16
-           C 880 16 1008 144 1008 512
-           C 1008 880 880 1008 512 1008
-           C 144 1008 16 880 16 512
-           C 16 144 144 16 512 16 Z"
-        fill="none"
-        stroke="#FFFFFF"
-        stroke-opacity="0.08"
-        stroke-width="2"/>
+  <!-- clean, fully in-bounds silver app border -->
+  <rect x="31" y="31" width="962" height="962" rx="198" stroke="url(#silver)" stroke-width="8" filter="url(#silverGlow)"/>
+  <rect x="43" y="43" width="938" height="938" rx="186" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="2"/>
+
+  <g clip-path="url(#appClip)">
+    <!-- Terminal window: all strokes use round joins and stay inside the app boundary -->
+    <g filter="url(#cyanGlow)" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M606 791H228C177.7 791 137 750.3 137 700V315C137 264.7 177.7 224 228 224H752L735 243H228C188.2 243 156 275.2 156 315V700C156 739.8 188.2 772 228 772H626L606 791Z" fill="url(#sonic)"/>
+      <path d="M156 345H729L712 364H156V345Z" fill="url(#sonic)"/>
+
+      <circle cx="229" cy="305" r="23" fill="url(#sonicSoft)" stroke="#F9FFFF" stroke-width="4"/>
+      <circle cx="304" cy="305" r="23" fill="url(#sonicSoft)" stroke="#F9FFFF" stroke-width="4"/>
+      <circle cx="379" cy="305" r="23" fill="url(#sonicSoft)" stroke="#F9FFFF" stroke-width="4"/>
+
+      <path d="M231 461L341 553L231 645V596L286 553L231 510V461Z" fill="url(#sonicSoft)" stroke="#F9FFFF" stroke-width="4"/>
+      <rect x="391" y="627" width="122" height="35" rx="9" fill="url(#sonicSoft)" stroke="#F9FFFF" stroke-width="3.5"/>
+
+      <!-- Speed streaks: trimmed so none touch the app border -->
+      <path d="M743 224H879L862 244H727L743 224Z" fill="url(#sonic)"/>
+      <path d="M650 275H948L931 295H633L650 275Z" fill="url(#sonic)"/>
+      <path d="M555 322H837L820 342H538L555 322Z" fill="url(#streak)"/>
+      <path d="M653 382H931L911 404H631L653 382Z" fill="url(#sonic)"/>
+      <path d="M541 427H772L754 447H522L541 427Z" fill="url(#streak)"/>
+      <path d="M676 475H955L936 497H656L676 475Z" fill="url(#sonic)"/>
+      <path d="M500 531H741L720 553H480L500 531Z" fill="url(#streak)"/>
+      <path d="M584 584H866L848 605H564L584 584Z" fill="url(#sonic)"/>
+      <path d="M621 641H940L920 663H600L621 641Z" fill="url(#sonic)"/>
+      <path d="M514 699H747L727 720H493L514 699Z" fill="url(#streak)"/>
+      <path d="M610 747H882L864 767H589L610 747Z" fill="url(#sonic)"/>
+      <path d="M690 802H808L791 821H672L690 802Z" fill="url(#sonic)"/>
+      <path d="M620 839H758L741 857H603L620 839Z" fill="url(#streak)"/>
+    </g>
+
+    <!-- thin silver highlight on terminal, aligned to the filled shape -->
+    <path d="M228 224H752L735 243H228C188.2 243 156 275.2 156 315V700C156 739.8 188.2 772 228 772H626L606 791H228C177.7 791 137 750.3 137 700V315C137 264.7 177.7 224 228 224Z" stroke="#FFFFFF" stroke-opacity="0.56" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M231 461L341 553L231 645" stroke="#FFFFFF" stroke-opacity="0.82" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>

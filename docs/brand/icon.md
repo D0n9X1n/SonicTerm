@@ -109,5 +109,6 @@ without the squircle frame.
 
 | Version | Date | Change |
 |---|---|---|
-| 2.0 | 2026-05-25 | Official mark — terminal window + shell prompt + cyan trails (this file's reference design) |
+| 2.1 | 2026-05-25 | User-provided final master (`sonic_terminal_icon_checked.svg`) — silver squircle border, radial navy bg, refined chevron + cursor, trimmed speed streaks |
+| 2.0 | 2026-05-25 | First terminal-window mark draft |
 | 1.0 | 2026-05-24 | Initial placeholder (stylized hedgehog) — superseded |
