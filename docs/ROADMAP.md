@@ -162,7 +162,7 @@ in their own window is the next slice.
 - **wgpu / glyphon / cosmic-text are coupled** — bumping one forces the
   others. Current pinned stack (#10): `wgpu 29` + `glyphon 0.11` +
   `cosmic-text 0.18` + `vte 0.15` + `winit 0.30` + `thiserror 2` +
-  `toml 1.1`. Coordinate the next upgrade across all three.
+  `toml 1`. Coordinate the next upgrade across all three.
 - **Release profile uses fat LTO + 1 codegen unit + strip + panic=abort.**
   Don't relax for "build is slow." Use `[profile.dev]` for fast iteration.
 - **Spec files live in `docs/specs/YYYY-MM-DD-<topic>-design.md`.**

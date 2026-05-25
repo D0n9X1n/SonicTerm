@@ -53,7 +53,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - Upgraded the entire stack to latest stable: wgpu 29, glyphon 0.11,
-  cosmic-text 0.18, vte 0.15, thiserror 2, toml 1.1. (#10)
+  cosmic-text 0.18, vte 0.15, thiserror 2, toml 1. (#10)
 - Flattened repo layout: crates moved from `crates/sonic-*` to top-level
   `sonic-*` (`9c46c39`).
 

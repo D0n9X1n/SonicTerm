@@ -11,7 +11,7 @@
 > - **§4 Tech Stack** — pinned versions are out of date. Current stack
 >   (after #10): `wgpu 29`, `glyphon 0.11`, `cosmic-text 0.18`,
 >   `vte 0.15`, `winit 0.30`, `portable-pty 0.9`, `thiserror 2`,
->   `toml 1.1`. See ROADMAP "Constraints" for the canonical pinned set.
+>   `toml 1`. See ROADMAP "Constraints" for the canonical pinned set.
 > - **§8 Icon Design** — the original "stylized lightning-fast hedgehog"
 >   was replaced by the terminal-window + cyan-speed-trails + `>_`
 >   mark in #18. See [`docs/brand/icon.md`](../brand/icon.md) for the
@@ -122,6 +122,7 @@ Ported to `assets/keymaps/wezterm.toml`. Highlights:
 
 ## 8. Icon Design
 Original SVG: stylized lightning-fast hedgehog silhouette in profile, blue→purple gradient (#3B82F6 → #8B5CF6), with three speed-trail lines behind. Squircle background for macOS, square for Windows. Master in `assets/icons/sonic.svg`; `bake-icons.sh` generates `.icns` (1024 down to 16) and `.ico` (256/128/64/48/32/16).
+**Superseded** by `docs/brand/icon.md`: the shipped mark is a terminal window with `>_` prompt and cyan speed trails on a navy squircle (user-supplied master at `assets/icons/source/sonic.svg`). The hedgehog draft was never released.
 
 ## 9. Must-Pass Tests
 ```
