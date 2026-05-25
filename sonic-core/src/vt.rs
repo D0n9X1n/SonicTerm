@@ -256,21 +256,27 @@ impl Perform for Performer {
         match action {
             'A' => {
                 let n = p0().max(1);
-                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(n);
+                let row = self.grid.cursor.row.saturating_sub(n);
+                let col = self.grid.cursor.col;
+                self.grid.goto(row, col);
             }
             'B' => {
                 let n = p0().max(1);
-                self.grid.cursor.row =
-                    (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
+                let row = (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
+                let col = self.grid.cursor.col;
+                self.grid.goto(row, col);
             }
             'C' => {
                 let n = p0().max(1);
-                self.grid.cursor.col =
-                    (self.grid.cursor.col + n).min(self.grid.cols.saturating_sub(1));
+                let row = self.grid.cursor.row;
+                let col = (self.grid.cursor.col + n).min(self.grid.cols.saturating_sub(1));
+                self.grid.goto(row, col);
             }
             'D' => {
                 let n = p0().max(1);
-                self.grid.cursor.col = self.grid.cursor.col.saturating_sub(n);
+                let row = self.grid.cursor.row;
+                let col = self.grid.cursor.col.saturating_sub(n);
+                self.grid.goto(row, col);
             }
             'H' | 'f' => {
                 let row = p0().saturating_sub(1);
