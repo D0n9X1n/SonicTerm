@@ -708,10 +708,17 @@ impl ApplicationHandler for App {
 
                 if let (Some(r), Some(pane)) = (self.renderer.as_mut(), self.panes.get(&active_id))
                 {
-                    // try_lock — never block the main thread on the VT thread.
-                    // If we miss the lock, the VT thread is mid-batch and will
-                    // request another redraw when it finishes (no throttle now).
-                    if let Some(mut grid) = pane.parser.try_lock() {
+                    // Block on the parser lock: the VT thread holds it only
+                    // for the duration of a single `Parser::advance` call,
+                    // which is sub-millisecond even on a `cat largefile`
+                    // burst. The old try_lock() path returned early on a
+                    // miss, which caused winit on macOS to immediately
+                    // re-fire RedrawRequested in a tight loop (silently
+                    // burning ~100% CPU as long as the VT thread had work
+                    // queued). Holding the lock briefly is strictly cheaper
+                    // than spinning the AppKit event loop.
+                    {
+                        let mut grid = pane.parser.lock();
                         // Mirror the latest OSC 0/2 title from the parser into
                         // the active tab so the tab bar reflects "vim foo" /
                         // "~/Code" / etc. Falls back to the prior title (e.g.
