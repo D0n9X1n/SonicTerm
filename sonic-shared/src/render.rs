@@ -68,6 +68,8 @@ pub struct GpuRenderer {
     tab_active_fg: GColor,
     tab_inactive_fg: GColor,
     tab_close_fg: [f32; 4],
+    hyperlink_underline: [f32; 4],
+    hyperlink_tint: [f32; 4],
 }
 
 impl GpuRenderer {
@@ -162,6 +164,15 @@ impl GpuRenderer {
         let tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
         let tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
         let tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
+        // Hyperlink visuals: theme-aware. Use the theme's cursor color as the
+        // accent (every bundled theme designates it). Underline reads as
+        // deliberate at high opacity; the tint behind the run is subtle.
+        let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        let tint_alpha = match theme.appearance {
+            sonic_core::theme::Appearance::Dark => 0.14,
+            sonic_core::theme::Appearance::Light => 0.10,
+        };
+        let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
 
         Ok(Self {
             instance,
@@ -193,6 +204,8 @@ impl GpuRenderer {
             tab_active_fg,
             tab_inactive_fg,
             tab_close_fg,
+            hyperlink_underline,
+            hyperlink_tint,
         })
     }
 
@@ -252,6 +265,7 @@ impl GpuRenderer {
         Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         grid: &Grid,
@@ -419,6 +433,25 @@ impl GpuRenderer {
             });
         }
 
+        // Hyperlink visuals: a translucent tint quad under the run plus an
+        // underline quad on top. Coalesce contiguous hyperlinked cells per
+        // row, mirroring the UNDERLINE pass below.
+        let hl_runs = collect_hyperlink_runs(grid);
+        let hl_thickness = (self.cell_h * 0.08).max(1.0);
+        for (row, col_a, col_b) in &hl_runs {
+            let x = self.padding + f32::from(*col_a) * self.cell_w;
+            let y = self.top_inset() + f32::from(*row) * self.cell_h;
+            let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                color: self.hyperlink_tint,
+            });
+            quads.push(QuadInstance {
+                rect: px_to_ndc(x, y + self.cell_h - hl_thickness, w, hl_thickness, sw, sh),
+                color: self.hyperlink_underline,
+            });
+        }
+
         // Underline quads — drawn last so they appear on top of the text.
         // Color: foreground default at full alpha.
         let underline_color = [
@@ -461,18 +494,12 @@ impl GpuRenderer {
                 let is_active = *id == active_pane;
                 let color = if is_active { focus_border } else { border };
                 let t = if is_active { 2.0_f32 } else { 1.0_f32 };
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
-                    color,
-                });
+                quads.push(QuadInstance { rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh), color });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y + r.h - t, r.w, t, sw, sh),
                     color,
                 });
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh),
-                    color,
-                });
+                quads.push(QuadInstance { rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh), color });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x + r.w - t, r.y, t, r.h, sw, sh),
                     color,
@@ -772,4 +799,100 @@ fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f
     let w =
         buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.w)).unwrap_or(size * 0.6);
     (w, line_h)
+}
+
+/// Walk the grid and collect runs of contiguous cells that share a hyperlink
+/// id, per row. Wide-cell continuations don't break a run (they inherit the
+/// lead cell's hyperlink). Returns `(row, col_start, col_end_inclusive)`.
+pub(crate) fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
+    let mut runs = Vec::new();
+    for r in 0..grid.rows {
+        let row = grid.row(r);
+        let mut start: Option<u16> = None;
+        let mut current: Option<sonic_core::hyperlink::HyperlinkId> = None;
+        let mut last_col: u16 = 0;
+        for (col, cell) in row.iter().enumerate() {
+            if cell.flags.contains(CellFlags::WIDE_CONT) {
+                if start.is_some() {
+                    last_col = col as u16;
+                }
+                continue;
+            }
+            match (cell.hyperlink, current) {
+                (Some(hid), Some(cur)) if hid == cur => {
+                    last_col = col as u16;
+                }
+                (Some(hid), _) => {
+                    if let (Some(s), Some(_)) = (start, current) {
+                        runs.push((r, s, last_col));
+                    }
+                    start = Some(col as u16);
+                    current = Some(hid);
+                    last_col = col as u16;
+                }
+                (None, Some(_)) => {
+                    if let Some(s) = start.take() {
+                        runs.push((r, s, last_col));
+                    }
+                    current = None;
+                }
+                (None, None) => {}
+            }
+        }
+        if let (Some(s), Some(_)) = (start, current) {
+            runs.push((r, s, last_col));
+        }
+    }
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use sonic_core::{
+        grid::{Cell, CellFlags, Color, Grid},
+        hyperlink::HyperlinkId,
+    };
+
+    use super::*;
+
+    #[test]
+    fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {
+        let mut g = Grid::new(8, 1);
+        let hid = HyperlinkId(42);
+        for c in 0..3u16 {
+            g.row_mut(0)[c as usize] = Cell {
+                ch: 'x',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: CellFlags::empty(),
+                hyperlink: Some(hid),
+            };
+        }
+        let runs = collect_hyperlink_runs(&g);
+        assert_eq!(runs, vec![(0u16, 0u16, 2u16)]);
+    }
+
+    #[test]
+    fn collect_hyperlink_runs_splits_on_different_id() {
+        let mut g = Grid::new(6, 1);
+        let a = HyperlinkId(1);
+        let b = HyperlinkId(2);
+        for (c, h) in [(0usize, a), (1, a), (3, b), (4, b)] {
+            g.row_mut(0)[c] = Cell {
+                ch: 'x',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: CellFlags::empty(),
+                hyperlink: Some(h),
+            };
+        }
+        let runs = collect_hyperlink_runs(&g);
+        assert_eq!(runs, vec![(0, 0, 1), (0, 3, 4)]);
+    }
+
+    #[test]
+    fn collect_hyperlink_runs_empty_when_no_links() {
+        let g = Grid::new(4, 2);
+        assert!(collect_hyperlink_runs(&g).is_empty());
+    }
 }
