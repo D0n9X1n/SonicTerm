@@ -14,6 +14,7 @@ pub mod quad;
 pub mod render;
 pub mod search;
 pub mod selection;
+pub mod swash_rasterizer;
 pub mod tabbar_view;
 pub mod tabs;
 pub mod text_pipeline;
