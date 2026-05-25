@@ -175,3 +175,8 @@ action = { scroll = "to_bottom" }
 [[binding]]
 keys = "super+shift+r"
 action = "reload_config"
+
+# --- Preferences ---
+[[binding]]
+keys = "super+comma"
+action = "open_preferences"

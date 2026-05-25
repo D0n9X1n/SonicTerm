@@ -62,6 +62,7 @@ pub enum Action {
     // Search / palette
     OpenSearch,
     OpenCommandPalette,
+    OpenPreferences,
 
     // Scroll
     Scroll(ScrollAction),

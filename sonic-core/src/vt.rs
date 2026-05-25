@@ -620,7 +620,7 @@ mod tests {
         // cursor now somewhere on row 1
         let primary_cursor = p.grid().cursor;
         p.advance(b"\x1b[?1049h"); // enter alt
-        // move cursor inside the alt screen
+                                   // move cursor inside the alt screen
         p.advance(b"\x1b[5;1H");
         // a stray re-entry that previously clobbered saved_cursor
         p.advance(b"\x1b[?1049h");

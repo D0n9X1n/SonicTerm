@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod pane;
+pub mod prefs;
 pub mod quad;
 pub mod render;
 pub mod search;
