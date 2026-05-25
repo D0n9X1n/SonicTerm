@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Build artifacts
+/dist
+/release
+*.dmg
+*.msi
+*.zip
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local config
+.env
+.env.local
+*.local.toml
+
+# Sonic runtime
+*.log
+crash-reports/

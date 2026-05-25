@@ -1,0 +1,7 @@
+# Default owners
+* @D0n9X1n
+
+# Platform-specific
+/crates/sonic-mac/      @D0n9X1n
+/crates/sonic-windows/  @D0n9X1n
+/.github/               @D0n9X1n

@@ -1,0 +1,30 @@
+[package]
+name = "sonic-windows"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — Windows app"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonic-core.workspace = true
+sonic-shared.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[[bin]]
+name = "sonic-windows"
+path = "src/main.rs"
+
+[package.metadata.wix]
+upgrade-guid = "B9F8C0F4-1F4F-4F2E-AE3C-7A9D7D6E3F11"
+path-guid    = "8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22"
+license      = false
+eula         = false

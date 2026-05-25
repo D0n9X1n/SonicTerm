@@ -1,0 +1,177 @@
+# WezTerm-compatible default keymap for Sonic Terminal.
+# On macOS, `cmd` is used; on Windows, `ctrl` is the equivalent — `super`
+# matches both. Keys not listed fall through to the terminal.
+
+[meta]
+name = "wezterm-default"
+version = "1.0"
+
+# --- Tabs ---
+[[binding]]
+keys = "super+t"
+action = "new_tab"
+
+[[binding]]
+keys = "super+w"
+action = "close_tab"
+
+[[binding]]
+keys = "super+shift+]"
+action = "next_tab"
+
+[[binding]]
+keys = "super+shift+["
+action = "prev_tab"
+
+[[binding]]
+keys = "super+1"
+action = { activate_tab = 0 }
+
+[[binding]]
+keys = "super+2"
+action = { activate_tab = 1 }
+
+[[binding]]
+keys = "super+3"
+action = { activate_tab = 2 }
+
+[[binding]]
+keys = "super+4"
+action = { activate_tab = 3 }
+
+[[binding]]
+keys = "super+5"
+action = { activate_tab = 4 }
+
+[[binding]]
+keys = "super+6"
+action = { activate_tab = 5 }
+
+[[binding]]
+keys = "super+7"
+action = { activate_tab = 6 }
+
+[[binding]]
+keys = "super+8"
+action = { activate_tab = 7 }
+
+[[binding]]
+keys = "super+9"
+action = { activate_last_tab = true }
+
+# --- Splits ---
+[[binding]]
+keys = "super+d"
+action = "split_right"
+
+[[binding]]
+keys = "super+shift+d"
+action = "split_down"
+
+[[binding]]
+keys = "super+shift+w"
+action = "close_pane"
+
+# --- Pane focus (vim-style) ---
+[[binding]]
+keys = "super+shift+h"
+action = { focus_pane = "left" }
+
+[[binding]]
+keys = "super+shift+j"
+action = { focus_pane = "down" }
+
+[[binding]]
+keys = "super+shift+k"
+action = { focus_pane = "up" }
+
+[[binding]]
+keys = "super+shift+l"
+action = { focus_pane = "right" }
+
+# --- Pane resize (with arrow keys, plus alt) ---
+[[binding]]
+keys = "super+alt+left"
+action = { resize_pane = { dir = "left",  amount = 5 } }
+
+[[binding]]
+keys = "super+alt+right"
+action = { resize_pane = { dir = "right", amount = 5 } }
+
+[[binding]]
+keys = "super+alt+up"
+action = { resize_pane = { dir = "up",    amount = 5 } }
+
+[[binding]]
+keys = "super+alt+down"
+action = { resize_pane = { dir = "down",  amount = 5 } }
+
+# --- Clipboard ---
+[[binding]]
+keys = "super+c"
+action = "copy_to_clipboard"
+
+[[binding]]
+keys = "super+v"
+action = "paste_from_clipboard"
+
+# --- Font size ---
+[[binding]]
+keys = "super+="
+action = "increase_font_size"
+
+[[binding]]
+keys = "super+-"
+action = "decrease_font_size"
+
+[[binding]]
+keys = "super+0"
+action = "reset_font_size"
+
+# --- Window ---
+[[binding]]
+keys = "super+n"
+action = "new_window"
+
+[[binding]]
+keys = "super+shift+f"
+action = "toggle_fullscreen"
+
+# --- Search / Palette ---
+[[binding]]
+keys = "super+f"
+action = "open_search"
+
+[[binding]]
+keys = "super+shift+p"
+action = "open_command_palette"
+
+# --- Scrolling ---
+[[binding]]
+keys = "super+up"
+action = { scroll = "line_up" }
+
+[[binding]]
+keys = "super+down"
+action = { scroll = "line_down" }
+
+[[binding]]
+keys = "super+pageup"
+action = { scroll = "page_up" }
+
+[[binding]]
+keys = "super+pagedown"
+action = { scroll = "page_down" }
+
+[[binding]]
+keys = "super+home"
+action = { scroll = "to_top" }
+
+[[binding]]
+keys = "super+end"
+action = { scroll = "to_bottom" }
+
+# --- Reload config ---
+[[binding]]
+keys = "super+shift+r"
+action = "reload_config"

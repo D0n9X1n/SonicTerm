@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sonic-core",
+    "crates/sonic-shared",
+    "crates/sonic-mac",
+    "crates/sonic-windows",
+]
+default-members = ["crates/sonic-core", "crates/sonic-shared"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+authors = ["Sonic Terminal contributors"]
+license = "MIT"
+repository = "https://github.com/D0n9X1n/sonic"
+homepage = "https://github.com/D0n9X1n/sonic"
+readme = "README.md"
+
+[workspace.dependencies]
+# Internal
+sonic-core = { path = "crates/sonic-core", version = "0.1.0" }
+sonic-shared = { path = "crates/sonic-shared", version = "0.1.0" }
+
+# Core terminal
+vte = "0.13"
+portable-pty = "0.8"
+unicode-width = "0.1"
+unicode-segmentation = "1.11"
+
+# Async / runtime
+tokio = { version = "1.38", features = ["full"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# Rendering
+wgpu = "0.20"
+bytemuck = { version = "1.16", features = ["derive"] }
+glyphon = "0.5"
+bitflags = { version = "2.5", features = ["serde"] }
+serde_plain = "1"
+
+# Config / serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+notify = "6"
+
+# Logging / errors
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windowing
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# Platform
+[workspace.dependencies.windows]
+version = "0.57"
+features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Direct3D12",
+]
+
+# Performance profile — extreme
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+debug = false
+incremental = false
+
+[profile.dev]
+opt-level = 1
+debug = "limited"
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 3   # speed up deps in dev builds
+
+# Tighter lints across the workspace
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

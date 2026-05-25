@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sonic Terminal — App Icon
+  Concept: A stylized blue→purple hedgehog silhouette in a speed-blur stance
+           inside an iOS-style squircle. Three motion trails imply velocity.
+  Colors:  Bg gradient #3B82F6 → #8B5CF6 (electric blue → violet)
+           Hedgehog: near-white with cool glow
+           Trails:   cyan accents
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Squircle background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#3B82F6"/>
+      <stop offset="55%"  stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="hog" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#CBD5E1"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="#22D3EE" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#22D3EE" stop-opacity="0.95"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- iOS-style squircle path (superellipse approximation) -->
+    <clipPath id="squircle">
+      <path d="M512,32
+               C 832,32 992,192 992,512
+               C 992,832 832,992 512,992
+               C 192,992 32,832 32,512
+               C 32,192 192,32 512,32 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <g clip-path="url(#squircle)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- Subtle diagonal sheen -->
+    <polygon points="0,0 1024,0 1024,260 0,720" fill="#ffffff" opacity="0.06"/>
+
+    <!-- Speed trails behind the hog -->
+    <g filter="url(#glow)">
+      <rect x="80"  y="430" width="520" height="24" rx="12" fill="url(#trail)"/>
+      <rect x="60"  y="500" width="640" height="32" rx="16" fill="url(#trail)"/>
+      <rect x="100" y="580" width="460" height="20" rx="10" fill="url(#trail)"/>
+    </g>
+
+    <!--
+      Stylized hedgehog: a single forward-leaning silhouette built from
+      angular "quills" radiating up-and-back, a sleek snout, and a confident eye.
+      Pose suggests forward motion (left→right reading).
+    -->
+    <g transform="translate(220,260)" filter="url(#glow)">
+      <!-- Body + quills as a single path -->
+      <path fill="url(#hog)" d="
+        M 80 360
+        L 140 240
+        L 170 290
+        L 230 180
+        L 260 250
+        L 320 150
+        L 350 230
+        L 410 130
+        L 430 220
+        L 490 140
+        L 500 230
+        L 560 170
+        L 555 260
+        L 600 240
+        L 580 320
+        L 620 330
+        L 560 380
+        L 600 410
+        L 520 420
+        L 540 470
+        L 460 450
+        L 470 510
+        L 380 470
+        L 360 520
+        L 280 470
+        L 240 510
+        L 180 460
+        L 120 480
+        L 100 430
+        L 60 420
+        Z"/>
+      <!-- Snout -->
+      <path fill="#0F172A" d="M 605 350 q 25 10 30 35 q -15 18 -38 5 z"/>
+      <!-- Eye -->
+      <circle cx="540" cy="320" r="14" fill="#0F172A"/>
+      <circle cx="544" cy="316" r="5"  fill="#F8FAFC"/>
+      <!-- Mouth highlight -->
+      <path d="M 600 388 q 12 4 22 -2" stroke="#0F172A" stroke-width="6" fill="none" stroke-linecap="round"/>
+    </g>
+
+    <!-- Bottom-right wordmark dot (subtle "S") -->
+    <g opacity="0.18" transform="translate(820,820)">
+      <circle r="80" fill="#ffffff"/>
+      <text x="0" y="28" font-family="-apple-system, system-ui, sans-serif"
+            font-size="110" font-weight="900" text-anchor="middle" fill="#1E293B">S</text>
+    </g>
+  </g>
+</svg>

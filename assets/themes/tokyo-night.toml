@@ -1,0 +1,40 @@
+# Tokyo Night — dark theme (default)
+name = "Tokyo Night"
+appearance = "dark"
+
+[colors]
+background    = "#1a1b26"
+foreground    = "#c0caf5"
+cursor        = "#c0caf5"
+cursor_text   = "#1a1b26"
+selection_bg  = "#283457"
+selection_fg  = "#c0caf5"
+
+[colors.ansi]
+black   = "#15161e"
+red     = "#f7768e"
+green   = "#9ece6a"
+yellow  = "#e0af68"
+blue    = "#7aa2f7"
+magenta = "#bb9af7"
+cyan    = "#7dcfff"
+white   = "#a9b1d6"
+
+[colors.bright]
+black   = "#414868"
+red     = "#ff7a93"
+green   = "#b9f27c"
+yellow  = "#ff9e64"
+blue    = "#7da6ff"
+magenta = "#bb9af7"
+cyan    = "#0db9d7"
+white   = "#c0caf5"
+
+[colors.tab]
+bar_bg          = "#16161e"
+active_bg       = "#1a1b26"
+active_fg       = "#c0caf5"
+inactive_bg     = "#16161e"
+inactive_fg     = "#565f89"
+hover_bg        = "#1f2335"
+close_button_fg = "#7a88cf"

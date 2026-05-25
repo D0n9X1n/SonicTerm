@@ -1,0 +1,21 @@
+[package]
+name = "sonic-mac"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — macOS app"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonic-core.workspace = true
+sonic-shared.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "sonic-mac"
+path = "src/main.rs"

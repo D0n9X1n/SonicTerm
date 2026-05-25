@@ -1,0 +1,267 @@
+//! Terminal screen grid: cells, attributes, scrollback.
+
+use std::collections::VecDeque;
+
+use serde::{Deserialize, Serialize};
+
+/// (row, col) position. (0, 0) is top-left of the visible region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Pos {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// 24-bit RGB color or an indexed palette slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Color {
+    Default,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Color::Default
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct CellFlags: u16 {
+        const BOLD          = 1 << 0;
+        const ITALIC        = 1 << 1;
+        const UNDERLINE     = 1 << 2;
+        const STRIKETHROUGH = 1 << 3;
+        const INVERSE       = 1 << 4;
+        const DIM           = 1 << 5;
+        const HIDDEN        = 1 << 6;
+        const BLINK         = 1 << 7;
+        /// Wide cell (occupies 2 columns)
+        const WIDE          = 1 << 8;
+        /// Continuation of a wide cell (right half)
+        const WIDE_CONT     = 1 << 9;
+    }
+}
+
+/// A single grid cell.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Cell {
+    pub ch: char,
+    pub fg: Color,
+    pub bg: Color,
+    pub flags: CellFlags,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell {
+            ch: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: CellFlags::empty(),
+        }
+    }
+}
+
+/// A row of cells.
+pub type Row = Vec<Cell>;
+
+/// Terminal grid with scrollback.
+#[derive(Debug)]
+pub struct Grid {
+    pub cols: u16,
+    pub rows: u16,
+    /// Visible region: `rows` rows of `cols` cells.
+    visible: Vec<Row>,
+    /// Scrollback buffer (oldest at front).
+    scrollback: VecDeque<Row>,
+    scrollback_limit: usize,
+    /// Cursor position within the visible region.
+    pub cursor: Pos,
+    /// Default attributes used for new cells.
+    pub default: Cell,
+}
+
+impl Grid {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        let visible = (0..rows).map(|_| make_row(cols)).collect();
+        Self {
+            cols,
+            rows,
+            visible,
+            scrollback: VecDeque::new(),
+            scrollback_limit: 10_000,
+            cursor: Pos::default(),
+            default: Cell::default(),
+        }
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        // Reflow: a very basic implementation — clip or pad.
+        for row in &mut self.visible {
+            row.resize(cols as usize, Cell::default());
+        }
+        if rows > self.rows {
+            for _ in self.rows..rows {
+                self.visible.push(make_row(cols));
+            }
+        } else {
+            self.visible.truncate(rows as usize);
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
+        self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
+    }
+
+    /// Borrow a visible row.
+    #[inline]
+    pub fn row(&self, r: u16) -> &Row {
+        &self.visible[r as usize]
+    }
+
+    /// Mutably borrow a visible row.
+    #[inline]
+    pub fn row_mut(&mut self, r: u16) -> &mut Row {
+        &mut self.visible[r as usize]
+    }
+
+    /// Iterate visible rows.
+    pub fn rows_iter(&self) -> impl Iterator<Item = &Row> {
+        self.visible.iter()
+    }
+
+    /// Put a character at cursor, advancing cursor by character width.
+    pub fn put_char(&mut self, ch: char, fg: Color, bg: Color, flags: CellFlags) {
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        if width == 0 {
+            return;
+        }
+        if self.cursor.col + width > self.cols {
+            self.linefeed();
+            self.cursor.col = 0;
+        }
+        let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
+        let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
+        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags };
+        if width == 2 && c + 1 < self.cols as usize {
+            self.visible[r][c + 1] = Cell {
+                ch: ' ',
+                fg,
+                bg,
+                flags: flags | CellFlags::WIDE_CONT,
+            };
+        }
+        self.cursor.col += width;
+    }
+
+    pub fn carriage_return(&mut self) {
+        self.cursor.col = 0;
+    }
+
+    pub fn linefeed(&mut self) {
+        if self.cursor.row + 1 >= self.rows {
+            self.scroll_up(1);
+        } else {
+            self.cursor.row += 1;
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        self.cursor.col = self.cursor.col.saturating_sub(1);
+    }
+
+    pub fn tab(&mut self) {
+        let next = ((self.cursor.col / 8) + 1) * 8;
+        self.cursor.col = next.min(self.cols.saturating_sub(1));
+    }
+
+    /// Scroll the visible region up by `n` lines, pushing the topmost rows
+    /// into scrollback.
+    pub fn scroll_up(&mut self, n: u16) {
+        for _ in 0..n {
+            let row = self.visible.remove(0);
+            if self.scrollback.len() == self.scrollback_limit {
+                self.scrollback.pop_front();
+            }
+            self.scrollback.push_back(row);
+            self.visible.push(make_row(self.cols));
+        }
+    }
+
+    /// Erase from cursor to end of line (CSI K).
+    pub fn erase_line_to_end(&mut self) {
+        let r = self.cursor.row as usize;
+        for c in self.cursor.col as usize..self.cols as usize {
+            self.visible[r][c] = Cell::default();
+        }
+    }
+
+    /// Erase the entire visible screen (CSI 2J).
+    pub fn erase_screen(&mut self) {
+        for row in &mut self.visible {
+            for cell in row.iter_mut() {
+                *cell = Cell::default();
+            }
+        }
+    }
+
+    /// Move cursor to (row, col), clamping to grid bounds.
+    pub fn goto(&mut self, row: u16, col: u16) {
+        self.cursor.row = row.min(self.rows.saturating_sub(1));
+        self.cursor.col = col.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+}
+
+fn make_row(cols: u16) -> Row {
+    vec![Cell::default(); cols as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_char_advances_cursor() {
+        let mut g = Grid::new(10, 3);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        g.put_char('B', Color::Default, Color::Default, CellFlags::empty());
+        assert_eq!(g.cursor, Pos { row: 0, col: 2 });
+        assert_eq!(g.row(0)[0].ch, 'A');
+        assert_eq!(g.row(0)[1].ch, 'B');
+    }
+
+    #[test]
+    fn linefeed_scrolls_when_at_bottom() {
+        let mut g = Grid::new(4, 2);
+        g.cursor = Pos { row: 1, col: 0 };
+        g.put_char('X', Color::Default, Color::Default, CellFlags::empty());
+        g.linefeed();
+        assert_eq!(g.cursor.row, 1);
+        assert_eq!(g.scrollback_len(), 1);
+    }
+
+    #[test]
+    fn wide_char_occupies_two_cells() {
+        let mut g = Grid::new(4, 1);
+        g.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+        assert!(g.row(0)[0].flags.contains(CellFlags::WIDE));
+        assert!(g.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
+        assert_eq!(g.cursor.col, 2);
+    }
+
+    #[test]
+    fn erase_screen_clears_all_cells() {
+        let mut g = Grid::new(2, 2);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        g.erase_screen();
+        assert_eq!(g.row(0)[0].ch, ' ');
+    }
+}

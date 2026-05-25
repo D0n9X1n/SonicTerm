@@ -1,0 +1,39 @@
+name = "Catppuccin Mocha"
+appearance = "dark"
+
+[colors]
+background   = "#1e1e2e"
+foreground   = "#cdd6f4"
+cursor       = "#f5e0dc"
+cursor_text  = "#1e1e2e"
+selection_bg = "#585b70"
+selection_fg = "#cdd6f4"
+
+[colors.ansi]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"
+
+[colors.bright]
+black   = "#585b70"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#a6adc8"
+
+[colors.tab]
+bar_bg          = "#11111b"
+active_bg       = "#1e1e2e"
+active_fg       = "#cdd6f4"
+inactive_bg     = "#11111b"
+inactive_fg     = "#6c7086"
+hover_bg        = "#313244"
+close_button_fg = "#cba6f7"

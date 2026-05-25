@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0-alpha.1)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-mac:
+    name: Build macOS universal .dmg
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-mac
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin -p sonic-mac
+
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin -p sonic-mac
+
+      - name: Make universal binary
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/sonic-mac \
+            target/aarch64-apple-darwin/release/sonic-mac \
+            -output dist/sonic
+          file dist/sonic
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Bake icon
+        run: bash assets/icons/bake-icons.sh
+
+      - name: Build .app + .dmg
+        run: bash packaging/mac/make-dmg.sh dist/sonic "${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonic-mac
+          path: dist/*.dmg
+
+  build-windows:
+    name: Build Windows .msi
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-win
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc -p sonic-windows
+
+      - name: Build .msi
+        shell: bash
+        run: |
+          cd crates/sonic-windows
+          cargo wix --no-build --nocapture --output ../../dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonic-windows
+          path: dist/*.msi
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV=$(git tag --sort=-creatordate | grep -v "^${{ github.ref_name }}$" | head -1 || true)
+          if [ -n "$PREV" ]; then
+            echo "## Changes since $PREV" > body.md
+            git log --pretty=format:"- %s (%h)" "${PREV}..${{ github.ref_name }}" >> body.md
+          else
+            echo "Initial Sonic Terminal release." > body.md
+          fi
+          cat body.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          name: Sonic ${{ github.ref_name || inputs.tag }}
+          body_path: body.md
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
