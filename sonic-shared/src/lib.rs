@@ -7,6 +7,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
+pub mod glyph_atlas;
 pub mod pane;
 pub mod prefs;
 pub mod quad;
@@ -15,6 +16,7 @@ pub mod search;
 pub mod selection;
 pub mod tabbar_view;
 pub mod tabs;
+pub mod text_pipeline;
 
 /// Re-exports for binary crates.
 pub use app::run;

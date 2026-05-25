@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sonic_core::{
+    glyph_key::GlyphKey,
     grid::{CellFlags, Color, Grid},
     pty::PtyHandle,
     vt::Parser,
@@ -47,6 +48,21 @@ struct Report {
     scroll_throughput_lines_per_sec: u64,
     scroll_bytes: usize,
     scroll_batches: usize,
+    /// B3: per-frame cost of the atlas-lookup hot path (key compute +
+    /// HashMap entry). This is what the GPU text pipeline pays in CPU
+    /// each frame; if the number is low and the hit-rate is high, the
+    /// real GPU path will be bottlenecked elsewhere (GPU draw, not CPU).
+    glyph_walk_us_per_frame: u128,
+    /// B3: unique GlyphKeys observed after a typical scroll workload.
+    /// Expected on the order of ~96 for ASCII and ~200 for unicode-heavy
+    /// prompts; a runaway number means the key is splitting on something
+    /// it shouldn't (color leak, hash bug, etc).
+    glyph_atlas_unique_keys: usize,
+    /// B3: percent of lookups during the steady-state scroll burst that
+    /// hit an already-populated map entry. Should be ≥ 99% after the
+    /// first few rows; near-zero means the workload is pathological or
+    /// the cache is being thrown away.
+    glyph_walk_hit_rate_pct: f64,
 }
 
 fn main() {
@@ -225,6 +241,25 @@ fn measure_scroll_and_parse(r: &mut Report) {
         g.clear_dirty();
     }
     r.grid_walk_us_per_frame = (total_walk.as_micros()) / FRAMES as u128;
+
+    // B3: glyph-atlas walk simulation. Mirrors what the GPU text
+    // pipeline will do every frame: derive a GlyphKey per cell, look it
+    // up in a HashMap, insert on miss. Pure CPU — no GPU dependency.
+    // First, warm the map by walking once so steady-state numbers are
+    // hits, not first-fill misses.
+    let mut glyph = GlyphWalker::default();
+    glyph.walk(g); // warm-up
+    let warm_unique = glyph.unique();
+    glyph.reset_counters();
+    let mut total_glyph = Duration::ZERO;
+    for _ in 0..FRAMES {
+        let t = Instant::now();
+        glyph.walk(g);
+        total_glyph += t.elapsed();
+    }
+    r.glyph_walk_us_per_frame = total_glyph.as_micros() / FRAMES as u128;
+    r.glyph_atlas_unique_keys = glyph.unique().max(warm_unique);
+    r.glyph_walk_hit_rate_pct = glyph.hit_rate_pct();
 }
 
 fn measure_idle(r: &mut Report) {
@@ -464,5 +499,69 @@ impl CachedWalker {
             text.push('\n');
         }
         (text, spans, underlines)
+    }
+}
+
+// ------- B3: glyph-atlas walker (pure CPU, no GPU) ----------------------
+//
+// Mirrors what `sonic_shared::glyph_atlas::GlyphAtlas` will do every
+// frame: derive a `GlyphKey` per non-WIDE_CONT cell and look it up in a
+// `HashMap`, populating on miss. The "fake GlyphInfo" stored is the
+// same shape as the real one (uv rect + advance) so the bench's
+// HashMap cache behavior matches production within a constant factor.
+
+#[derive(Clone, Copy, Default)]
+struct FakeGlyphInfo {
+    uv: [f32; 4],
+    advance: f32,
+}
+
+#[derive(Default)]
+struct GlyphWalker {
+    map: std::collections::HashMap<GlyphKey, FakeGlyphInfo>,
+    hits: u64,
+    misses: u64,
+    // Counter we return from walk() so the optimizer can't elide the
+    // hot loop. Not used for reporting.
+    sink: usize,
+}
+
+impl GlyphWalker {
+    fn walk(&mut self, grid: &Grid) -> usize {
+        let mut counter = 0usize;
+        for r in 0..grid.rows {
+            for cell in grid.row(r).iter() {
+                let Some(key) = GlyphKey::from_cell(cell) else { continue };
+                use std::collections::hash_map::Entry;
+                match self.map.entry(key) {
+                    Entry::Occupied(_) => self.hits += 1,
+                    Entry::Vacant(v) => {
+                        self.misses += 1;
+                        // Fake "rasterize": placeholder UV at origin, advance 1.
+                        v.insert(FakeGlyphInfo { uv: [0.0, 0.0, 0.05, 0.05], advance: 1.0 });
+                    }
+                }
+                counter += 1;
+            }
+        }
+        self.sink = self.sink.wrapping_add(counter);
+        counter
+    }
+
+    fn unique(&self) -> usize {
+        self.map.len()
+    }
+
+    fn reset_counters(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+    }
+
+    fn hit_rate_pct(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            return 0.0;
+        }
+        (self.hits as f64 / total as f64) * 100.0
     }
 }
