@@ -43,7 +43,7 @@ serde_plain = "1"
 
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 notify = "6"
 
 # Logging / errors
