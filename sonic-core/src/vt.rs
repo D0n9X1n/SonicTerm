@@ -80,6 +80,12 @@ impl Parser {
     pub fn mouse_sgr_enabled(&self) -> bool {
         self.performer.mouse_sgr
     }
+
+    /// Latest OSC 0/2 window title (sticky), or `None` if no title has been
+    /// set. Used by the tab bar to label tabs with the shell's reported title.
+    pub fn title(&self) -> Option<&str> {
+        self.performer.title.as_deref()
+    }
 }
 
 struct Performer {
@@ -94,6 +100,8 @@ struct Performer {
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
     mouse_sgr: bool,
+    /// Latest OSC 0/2 title (sticky — survives consumed events).
+    title: Option<String>,
 }
 
 impl Performer {
@@ -109,6 +117,7 @@ impl Performer {
             saved_cursor: None,
             bracketed_paste: false,
             mouse_sgr: false,
+            title: None,
         }
     }
 
@@ -293,6 +302,7 @@ impl Perform for Performer {
         match code {
             Some(0) | Some(2) => {
                 if let Some(text) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
+                    self.title = Some(text.to_string());
                     self.events.push(VtEvent::SetTitle(text.to_string()));
                 }
             }

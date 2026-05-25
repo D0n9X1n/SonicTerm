@@ -137,6 +137,10 @@ impl GpuRenderer {
         surface.configure(&device, &config);
 
         let mut font_system = FontSystem::new();
+        // Load bundled fonts from assets/fonts/ next to the executable (or
+        // workspace-root in dev) so the user gets Recursive Code without
+        // having to install it system-wide.
+        load_bundled_fonts(&mut font_system);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -939,4 +943,41 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
         }
     }
     runs
+}
+
+/// Load any TTF/OTF files we ship in `assets/fonts/` into the cosmic-text
+/// font database. Looks in two places, in this order:
+///   1. `<exe-dir>/assets/fonts/` — what the .app/.msi bundles ship
+///   2. `<workspace-root>/assets/fonts/` — dev (`cargo run`)
+fn load_bundled_fonts(fs: &mut FontSystem) {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            candidates.push(d.join("assets/fonts"));
+            // .app bundle: <exe-dir is MacOS>/.. /Resources/assets/fonts
+            if let Some(contents) = d.parent() {
+                candidates.push(contents.join("Resources/assets/fonts"));
+            }
+        }
+    }
+    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts"));
+
+    for dir in candidates {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut n = 0;
+        for e in entries.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    fs.db_mut().load_font_data(bytes);
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            tracing::info!("loaded {n} bundled font(s) from {dir:?}");
+            return; // first dir that produced fonts wins
+        }
+    }
 }

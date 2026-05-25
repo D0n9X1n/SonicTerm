@@ -1,0 +1,39 @@
+name = "Gruvbox Dark Hard"
+appearance = "dark"
+
+[colors]
+background    = "#1d2021"
+foreground    = "#ebdbb2"
+cursor        = "#ebdbb2"
+cursor_text   = "#1d2021"
+selection_bg  = "#3c3836"
+selection_fg  = "#ebdbb2"
+
+[colors.ansi]
+black   = "#282828"
+red     = "#cc241d"
+green   = "#98971a"
+yellow  = "#d79921"
+blue    = "#458588"
+magenta = "#b16286"
+cyan    = "#689d6a"
+white   = "#a89984"
+
+[colors.bright]
+black   = "#928374"
+red     = "#fb4934"
+green   = "#b8bb26"
+yellow  = "#fabd2f"
+blue    = "#83a598"
+magenta = "#d3869b"
+cyan    = "#8ec07c"
+white   = "#ebdbb2"
+
+[colors.tab]
+bar_bg          = "#1d2021"
+active_bg       = "#3c3836"
+active_fg       = "#ebdbb2"
+inactive_bg     = "#1d2021"
+inactive_fg     = "#928374"
+hover_bg        = "#32302f"
+close_button_fg = "#fb4934"

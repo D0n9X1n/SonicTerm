@@ -166,30 +166,70 @@ impl App {
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
                     .spawn(move || {
+                        // Coalesce redraw requests so a burst of pty output
+                        // (oh-my-zsh banners, `cat largefile`) doesn't pin
+                        // the main thread at 100% CPU re-rendering for every
+                        // byte. Drain at least min_interval between bursts,
+                        // but ALWAYS schedule a trailing redraw when the
+                        // channel briefly quiesces so the final batch lands
+                        // on screen (this is the "Enter needs 2 presses" bug
+                        // — without the trailing flush, the redraw request
+                        // after the prompt redraw was dropped silently).
                         let mut last_request = Instant::now() - Duration::from_secs(1);
-                        let min_interval = Duration::from_millis(16);
-                        while let Ok(bytes) = out_rx.recv() {
-                            let mut p = parser_clone.lock();
-                            for ev in p.advance(&bytes) {
-                                match ev {
-                                    VtEvent::SetTitle(t) => {
-                                        if let Some(w) = &window {
-                                            w.set_title(&format!("Sonic — {t}"));
+                        let mut pending = false;
+                        // 4ms is small enough to stay below one frame even
+                        // when a key triggers an echo immediately. Keeps the
+                        // CPU-spin guard for bursty output (cat largefile,
+                        // shell startup banner) while making typing feel
+                        // instant.
+                        let min_interval = Duration::from_millis(4);
+                        loop {
+                            // Try to drain quickly; if nothing comes for
+                            // ~min_interval and we have a pending redraw,
+                            // flush it before going back to blocking recv.
+                            match out_rx
+                                .recv_timeout(if pending { min_interval } else { Duration::from_secs(3600) })
+                            {
+                                Ok(bytes) => {
+                                    let mut p = parser_clone.lock();
+                                    for ev in p.advance(&bytes) {
+                                        match ev {
+                                            VtEvent::SetTitle(t) => {
+                                                if let Some(w) = &window {
+                                                    w.set_title(&format!("Sonic — {t}"));
+                                                }
+                                            }
+                                            VtEvent::CursorVisibility(v) => {
+                                                cursor_visible.store(
+                                                    v,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    VtEvent::CursorVisibility(v) => {
-                                        cursor_visible
-                                            .store(v, std::sync::atomic::Ordering::Relaxed);
+                                    drop(p);
+                                    if last_request.elapsed() >= min_interval {
+                                        if let Some(w) = &window {
+                                            w.request_redraw();
+                                        }
+                                        last_request = Instant::now();
+                                        pending = false;
+                                    } else {
+                                        pending = true;
                                     }
-                                    _ => {}
                                 }
-                            }
-                            drop(p);
-                            if last_request.elapsed() >= min_interval {
-                                if let Some(w) = &window {
-                                    w.request_redraw();
+                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                    // Quiescent: flush trailing redraw.
+                                    if pending {
+                                        if let Some(w) = &window {
+                                            w.request_redraw();
+                                        }
+                                        last_request = Instant::now();
+                                        pending = false;
+                                    }
                                 }
-                                last_request = Instant::now();
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                             }
                         }
                     })
@@ -668,7 +708,21 @@ impl ApplicationHandler for App {
 
                 if let (Some(r), Some(pane)) = (self.renderer.as_mut(), self.panes.get(&active_id))
                 {
+                    // try_lock — never block the main thread on the VT thread.
+                    // If we miss the lock, the VT thread is mid-batch and will
+                    // request another redraw when it finishes (no throttle now).
                     if let Some(grid) = pane.parser.try_lock() {
+                        // Mirror the latest OSC 0/2 title from the parser into
+                        // the active tab so the tab bar reflects "vim foo" /
+                        // "~/Code" / etc. Falls back to the prior title (e.g.
+                        // "shell") when the pty hasn't sent one yet.
+                        if let Some(t) = grid.title() {
+                            let pretty = render_tab_title(t);
+                            let cur = self.tabs.active().map(|tab| tab.title.clone());
+                            if cur.as_deref() != Some(pretty.as_str()) {
+                                self.tabs.set_active_title(pretty);
+                            }
+                        }
                         let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                         if let Err(e) = r.render(
                             grid.grid(),
@@ -974,4 +1028,54 @@ impl KeyName {
             Self::Owned(s) => s.as_str(),
         }
     }
+}
+
+/// Format an OSC 0/2 title for the tab bar with a Nerd Font icon prefix.
+///
+/// Heuristic: many shell prompts set the title to "user@host: cwd" or just
+/// the cwd ; some programs set it to the program name (vim, htop, ssh).
+/// We pick an icon based on the leading word, then keep the title compact.
+fn render_tab_title(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "\u{f489}  shell".to_string(); // nf-oct-terminal
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let icon = if lower.starts_with("vim") || lower.starts_with("nvim") {
+        "\u{e7c5}" // nf-dev-vim
+    } else if lower.starts_with("ssh") {
+        "\u{f817}" // nf-mdi-ssh
+    } else if lower.starts_with("git") {
+        "\u{f1d3}" // nf-fa-git
+    } else if lower.starts_with("docker") {
+        "\u{f308}" // nf-linux-docker
+    } else if lower.starts_with("python") || lower.starts_with("ipython") || lower.starts_with("python3") {
+        "\u{e73c}" // nf-dev-python
+    } else if lower.starts_with("node") || lower.starts_with("npm") || lower.starts_with("yarn") {
+        "\u{e718}" // nf-dev-nodejs_small
+    } else if lower.starts_with("cargo") || lower.starts_with("rustc") {
+        "\u{e7a8}" // nf-dev-rust
+    } else if lower.starts_with("htop") || lower.starts_with("top") || lower.starts_with("btm") {
+        "\u{f085}" // nf-fa-cogs
+    } else if lower.starts_with("less") || lower.starts_with("cat") || lower.starts_with("bat") {
+        "\u{f15c}" // nf-fa-file_text
+    } else if trimmed.contains('/') || trimmed.starts_with('~') {
+        "\u{f413}" // nf-oct-file_directory
+    } else {
+        "\u{f489}" // nf-oct-terminal
+    };
+
+    // Compact text: keep last path segment if it looks like a path, else
+    // first ~24 chars.
+    let body = if let Some(last) = trimmed.rsplit('/').next() {
+        if trimmed.contains('/') && !last.is_empty() {
+            last.to_string()
+        } else {
+            trimmed.chars().take(24).collect()
+        }
+    } else {
+        trimmed.chars().take(24).collect()
+    };
+
+    format!("{icon}  {body}")
 }

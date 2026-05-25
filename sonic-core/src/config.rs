@@ -48,7 +48,7 @@ impl Default for Config {
             font: FontConfig::default(),
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
-            theme: "tokyo-night".to_string(),
+            theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
         }
     }
@@ -56,7 +56,7 @@ impl Default for Config {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { family: "JetBrainsMono Nerd Font".to_string(), size: 14.0, line_height: 1.2 }
+        Self { family: "Rec Mono Casual".to_string(), size: 14.0, line_height: 1.2 }
     }
 }
 
