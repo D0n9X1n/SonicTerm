@@ -423,6 +423,9 @@ impl GpuRenderer {
         let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
+        // Missing-glyph "tofu" outlines collected during the cell walk.
+        // Drawn via the quad pipeline after the text instances.
+        let mut missing_tofu: Vec<(f32, f32, f32, f32, glyphon::Color)> = Vec::new();
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
         let top_inset = self.top_inset();
@@ -461,11 +464,30 @@ impl GpuRenderer {
                     let Some(key) = sonic_core::glyph_key::GlyphKey::from_cell(cell) else {
                         continue;
                     };
+                    let is_wide = cell.flags.contains(CellFlags::WIDE);
+                    let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
                     let Some(info) = self.glyph_atlas.get_or_insert(key, &mut rasterizer) else {
                         continue;
                     };
                     if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                        continue; // blank tile (space, missing glyph)
+                        // Blank tile: space or rasterizer miss. Spaces have
+                        // no character to draw. Missing glyphs get a tofu
+                        // outline so the user can SEE the gap rather than
+                        // a silently-missing char. Heuristic: if the char
+                        // is whitespace, skip; else queue a tofu quad.
+                        if !cell.ch.is_whitespace() {
+                            let cx = pad + f32::from(col as u16) * cell_w;
+                            let cy = top_inset + f32::from(r) * cell_h;
+                            let inset = (cell_h * 0.12).max(1.0);
+                            missing_tofu.push((
+                                cx + inset,
+                                cy + inset,
+                                cell_pixel_width - inset * 2.0,
+                                cell_h - inset * 2.0,
+                                cell_fg(cell, theme, fg_default),
+                            ));
+                        }
+                        continue;
                     }
                     let cx = pad + f32::from(col as u16) * cell_w;
                     let cy = top_inset + f32::from(r) * cell_h;
@@ -485,6 +507,12 @@ impl GpuRenderer {
                         uv: info.uv,
                         color: rgba,
                     });
+                    // For wide chars: the glyph itself was rasterized at
+                    // its natural width; we've laid it out in the lead
+                    // cell. WIDE_CONT cells are skipped above, so no
+                    // additional draw is needed — the wider cell footprint
+                    // is correctly reserved.
+                    let _ = cell_pixel_width;
                 }
                 if let Some(s) = ul_start.take() {
                     underlines.push((r, s, last_visible_col));
@@ -562,6 +590,34 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
+            });
+        }
+
+        // -------- Missing-glyph tofu fallback ------------------------------
+        // For cells whose rasterizer returned no tile (and char isn't
+        // whitespace), draw a thin outlined rectangle so the gap is
+        // visible. Helps catch font-fallback misses (emoji etc.).
+        for (x, y, w, h, col) in &missing_tofu {
+            let rgba = [
+                f32::from(col.r()) / 255.0,
+                f32::from(col.g()) / 255.0,
+                f32::from(col.b()) / 255.0,
+                0.55,
+            ];
+            let t = 1.0_f32; // border thickness
+                             // Top
+            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, *w, t, sw, sh), color: rgba });
+            // Bottom
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x, *y + *h - t, *w, t, sw, sh),
+                color: rgba,
+            });
+            // Left
+            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, t, *h, sw, sh), color: rgba });
+            // Right
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x + *w - t, *y, t, *h, sw, sh),
+                color: rgba,
             });
         }
 

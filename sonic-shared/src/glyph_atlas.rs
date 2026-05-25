@@ -270,7 +270,20 @@ impl GlyphAtlas {
             return Some(*info);
         }
         self.misses += 1;
-        let tile = rasterizer.rasterize(key)?;
+        // Rasterizer miss: cache a sentinel "blank" GlyphInfo so we don't
+        // retry the same failing key every frame. Renderer treats
+        // zero-area UV as "draw the tofu fallback box" (see Renderer's
+        // missing-glyph path).
+        let Some(tile) = rasterizer.rasterize(key) else {
+            let info = GlyphInfo {
+                uv: [0.0, 0.0, 0.0, 0.0],
+                px_size: [0, 0],
+                px_offset: [0, 0],
+                advance: 0.0,
+            };
+            self.map.insert(key, info);
+            return Some(info);
+        };
         // Empty tile (space, etc.) — stash a zero-area UV; no upload
         // needed. The renderer will skip the draw instance anyway.
         if tile.is_empty() {
