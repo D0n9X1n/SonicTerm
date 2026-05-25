@@ -16,6 +16,7 @@
 use vte::{Params, Perform};
 
 use crate::grid::{CellFlags, Color, Grid};
+use crate::hyperlink::{HyperlinkId, HyperlinkRegistry};
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -51,6 +52,16 @@ impl Parser {
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.performer.grid
     }
+
+    /// Borrow the hyperlink registry (OSC 8 interned uris).
+    pub fn hyperlinks(&self) -> &HyperlinkRegistry {
+        &self.performer.hyperlinks
+    }
+
+    /// Currently-active hyperlink id, if any.
+    pub fn current_hyperlink(&self) -> Option<HyperlinkId> {
+        self.performer.current_hyperlink
+    }
 }
 
 struct Performer {
@@ -59,6 +70,8 @@ struct Performer {
     bg: Color,
     flags: CellFlags,
     events: Vec<VtEvent>,
+    hyperlinks: HyperlinkRegistry,
+    current_hyperlink: Option<HyperlinkId>,
 }
 
 impl Performer {
@@ -69,6 +82,8 @@ impl Performer {
             bg: Color::Default,
             flags: CellFlags::empty(),
             events: Vec::new(),
+            hyperlinks: HyperlinkRegistry::new(),
+            current_hyperlink: None,
         }
     }
 
@@ -137,7 +152,7 @@ fn parse_ext_color(iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
 
 impl Perform for Performer {
     fn print(&mut self, c: char) {
-        self.grid.put_char(c, self.fg, self.bg, self.flags);
+        self.grid.put_char_linked(c, self.fg, self.bg, self.flags, self.current_hyperlink);
     }
 
     fn execute(&mut self, byte: u8) {
@@ -207,12 +222,19 @@ impl Perform for Performer {
                 }
             }
             Some(8) => {
-                // OSC 8;params;uri ST — minimal hyperlink support
+                // OSC 8;params;uri ST — hyperlink. Empty uri = end of link.
                 let id = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
                 let uri = params.get(2).and_then(|s| std::str::from_utf8(s).ok());
                 if let Some(uri) = uri {
+                    let id_norm = id.filter(|s| !s.is_empty());
+                    if uri.is_empty() {
+                        self.current_hyperlink = None;
+                    } else {
+                        let hid = self.hyperlinks.intern(id_norm, uri);
+                        self.current_hyperlink = Some(hid);
+                    }
                     self.events.push(VtEvent::Hyperlink {
-                        id: id.filter(|s| !s.is_empty()).map(String::from),
+                        id: id_norm.map(String::from),
                         uri: uri.to_string(),
                     });
                 }
@@ -395,6 +417,40 @@ mod tests {
         assert!(evs
             .iter()
             .any(|e| matches!(e, VtEvent::Hyperlink { uri, .. } if uri == "https://example.com")));
+    }
+
+    #[test]
+    fn osc8_tags_cells_then_untags() {
+        let mut p = Parser::new(Grid::new(10, 1));
+        p.advance(b"\x1b]8;;https://example.com\x07abc\x1b]8;;\x07de");
+        let row = p.grid().row(0);
+        assert!(row[0].hyperlink.is_some());
+        assert!(row[1].hyperlink.is_some());
+        assert!(row[2].hyperlink.is_some());
+        assert_eq!(row[0].hyperlink, row[2].hyperlink, "same link reuses id");
+        assert!(row[3].hyperlink.is_none());
+        assert!(row[4].hyperlink.is_none());
+        assert!(p.current_hyperlink().is_none());
+    }
+
+    #[test]
+    fn osc8_explicit_id_preserved_in_registry() {
+        let mut p = Parser::new(Grid::new(10, 1));
+        p.advance(b"\x1b]8;id=foo;https://example.com\x07x\x1b]8;;\x07");
+        let row = p.grid().row(0);
+        let hid = row[0].hyperlink.expect("hyperlink set");
+        let link = p.hyperlinks().lookup(hid).expect("present");
+        assert_eq!(link.id.as_deref(), Some("id=foo"));
+        assert_eq!(link.uri, "https://example.com");
+    }
+
+    #[test]
+    fn osc8_empty_uri_clears_current_hyperlink() {
+        let mut p = Parser::new(Grid::new(10, 1));
+        p.advance(b"\x1b]8;;https://example.com\x07");
+        assert!(p.current_hyperlink().is_some());
+        p.advance(b"\x1b]8;;\x07");
+        assert!(p.current_hyperlink().is_none());
     }
 
     #[test]

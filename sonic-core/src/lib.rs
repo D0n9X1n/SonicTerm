@@ -16,9 +16,11 @@
 
 pub mod config;
 pub mod grid;
+pub mod hyperlink;
 pub mod keymap;
 pub mod pty;
 pub mod theme;
+pub mod url_open;
 pub mod vt;
 
 /// Re-exports of the most commonly used items.
@@ -26,9 +28,11 @@ pub mod prelude {
     pub use crate::{
         config::Config,
         grid::{Cell, Grid, Pos},
+        hyperlink::{Hyperlink, HyperlinkId, HyperlinkRegistry},
         keymap::{Action, Keymap},
         pty::PtyHandle,
         theme::Theme,
+        url_open,
         vt::Parser,
     };
 }
