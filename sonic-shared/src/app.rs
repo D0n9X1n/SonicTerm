@@ -32,7 +32,7 @@ use winit::{
 
 use crate::{
     pane::PaneTree,
-    prefs::PrefsState,
+    prefs::{PrefsHit, PrefsState},
     render::GpuRenderer,
     search::SearchState,
     selection::Selection,
@@ -490,21 +490,86 @@ impl App {
             } => {
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                 let Some(s) = self.prefs_state.as_mut() else { return };
-                if s.hit_apply(x, y) {
-                    if let Err(e) = s.apply() {
-                        tracing::error!("prefs apply failed: {e}");
+                match s.classify_click(x, y) {
+                    Some(PrefsHit::Apply) => {
+                        if let Err(e) = s.apply() {
+                            tracing::error!("prefs apply failed: {e}");
+                        }
                     }
-                } else if s.hit_cancel(x, y) {
-                    s.cancel();
-                    self.prefs_window = None;
-                    self.prefs_state = None;
-                } else if let Some(cat) = s.hit_sidebar(x, y) {
-                    s.set_category(cat);
-                } else if let Some(id) = s.hit_test(x, y) {
-                    // Best-effort: toggles flip; dropdowns toggle open;
-                    // text fields focus. Sliders are picked up by drag.
-                    let _ = s.flip_toggle(id);
-                    let _ = s.toggle_dropdown(id);
+                    Some(PrefsHit::Cancel) => {
+                        s.cancel();
+                        self.prefs_window = None;
+                        self.prefs_state = None;
+                    }
+                    Some(PrefsHit::Sidebar(cat)) => {
+                        s.blur_text_fields();
+                        s.set_category(cat);
+                    }
+                    Some(PrefsHit::Toggle(id)) => {
+                        s.blur_text_fields();
+                        let _ = s.flip_toggle(id);
+                    }
+                    Some(PrefsHit::SliderTrack(id)) => {
+                        s.blur_text_fields();
+                        let _ = s.drag_slider(id, x);
+                    }
+                    Some(PrefsHit::DropdownHeader(id)) => {
+                        s.blur_text_fields();
+                        let _ = s.toggle_dropdown(id);
+                    }
+                    Some(PrefsHit::DropdownOption { id, index }) => {
+                        s.blur_text_fields();
+                        let _ = s.select_dropdown(id, index);
+                    }
+                    Some(PrefsHit::ColorCell { id, index }) => {
+                        s.blur_text_fields();
+                        let _ = s.pick_color(id, index);
+                    }
+                    Some(PrefsHit::TextField(id)) => {
+                        let _ = s.focus_text_field(id);
+                    }
+                    None => {
+                        s.blur_text_fields();
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let Some(s) = self.prefs_state.as_mut() else { return };
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        if let Some(id) = s.focused_field {
+                            let new_val = if let Some(crate::prefs::Control::TextField(tf)) =
+                                s.controls.iter_mut().find(|c| c.id() == id)
+                            {
+                                tf.pop_char();
+                                let v = tf.get().to_string();
+                                Some(if v.is_empty() { None } else { Some(v) })
+                            } else {
+                                None
+                            };
+                            // Best-effort: only the Shell text field exists
+                            // today; mirror its value into config.
+                            if let Some(v) = new_val {
+                                if s.config.terminal.shell != v {
+                                    s.config.terminal.shell = v;
+                                    s.dirty = true;
+                                }
+                            }
+                        }
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        s.cancel();
+                        self.prefs_window = None;
+                        self.prefs_state = None;
+                    }
+                    Key::Character(chs) => {
+                        for ch in chs.chars() {
+                            if !ch.is_control() {
+                                s.type_into_focused(ch);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

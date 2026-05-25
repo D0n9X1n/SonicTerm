@@ -14,6 +14,22 @@ use sonic_core::config::Config;
 use super::controls::{ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId};
 use super::layout::{Category, PrefsLayout};
 
+/// Classified result of a pointer click inside the preferences window.
+/// Returned by [`PrefsState::classify_click`] so the host (app.rs) can
+/// dispatch without re-implementing the priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefsHit {
+    Apply,
+    Cancel,
+    Sidebar(Category),
+    Toggle(WidgetId),
+    SliderTrack(WidgetId),
+    DropdownHeader(WidgetId),
+    DropdownOption { id: WidgetId, index: usize },
+    ColorCell { id: WidgetId, index: usize },
+    TextField(WidgetId),
+}
+
 /// Pre-canned theme list shown in the Appearance picker. Matches the
 /// themes bundled under `assets/themes/`.
 pub const KNOWN_THEMES: &[&str] = &["tokyo-night", "dracula", "solarized-dark", "solarized-light"];
@@ -42,6 +58,8 @@ pub struct PrefsState {
     pub controls: Vec<Control>,
     /// Cached layout for hit testing.
     pub layout: PrefsLayout,
+    /// Currently focused TextField (for keyboard typing), if any.
+    pub focused_field: Option<WidgetId>,
 }
 
 impl PrefsState {
@@ -56,6 +74,7 @@ impl PrefsState {
             config_path,
             controls: Vec::new(),
             layout,
+            focused_field: None,
         };
         s.rebuild_controls();
         s
@@ -265,32 +284,141 @@ impl PrefsState {
 
     /// Pick a palette cell on a color swatch.
     pub fn pick_color(&mut self, id: WidgetId, cell: usize) -> Option<bool> {
-        match self.find_mut(id)? {
+        let ok = match self.find_mut(id)? {
             Control::ColorSwatch(c) => Some(c.pick(cell)),
             _ => None,
+        }?;
+        if ok {
+            // Color swatches do not currently map to a Config field, but
+            // we still mark dirty to signal the user picked something.
+            // (Mapping lives in commit_widget_to_config's future expansion.)
+            self.dirty = true;
         }
+        Some(ok)
     }
 
-    /// Push a typed character into a focused text field.
-    pub fn type_into(&mut self, id: WidgetId, ch: char) -> Option<()> {
-        match self.find_mut(id)? {
-            Control::TextField(f) => {
-                f.push_char(ch);
-                Some(())
+    /// Set `id` as the keyboard-focused TextField; blurs all others.
+    /// Returns true if `id` resolved to a TextField.
+    pub fn focus_text_field(&mut self, id: WidgetId) -> bool {
+        let mut found = false;
+        for c in self.controls.iter_mut() {
+            if let Control::TextField(tf) = c {
+                if tf.id == id {
+                    tf.focus();
+                    found = true;
+                } else {
+                    tf.blur();
+                }
             }
-            _ => None,
-        }?;
-        self.commit_widget_to_config(id);
-        Some(())
+        }
+        if found {
+            self.focused_field = Some(id);
+        }
+        found
+    }
+
+    /// Drop keyboard focus from any TextField.
+    pub fn blur_text_fields(&mut self) {
+        for c in self.controls.iter_mut() {
+            if let Control::TextField(tf) = c {
+                tf.blur();
+            }
+        }
+        self.focused_field = None;
+    }
+
+    /// Type a character into the currently-focused TextField (if any).
+    /// No-op when nothing is focused or the field is at `max_len`.
+    /// Returns true if the character was appended.
+    pub fn type_into_focused(&mut self, ch: char) -> bool {
+        let Some(id) = self.focused_field else { return false };
+        let appended = match self.find_mut(id) {
+            Some(Control::TextField(tf)) => {
+                let before = tf.value.chars().count();
+                tf.push_char(ch);
+                tf.value.chars().count() != before
+            }
+            _ => false,
+        };
+        if appended {
+            self.commit_widget_to_config(id);
+        }
+        appended
+    }
+
+    /// Classify a pointer click into a [`PrefsHit`] using the same
+    /// priority order the host should honor: chrome → sidebar → open
+    /// dropdown options → widgets.
+    pub fn classify_click(&self, x: f32, y: f32) -> Option<PrefsHit> {
+        if self.hit_apply(x, y) {
+            return Some(PrefsHit::Apply);
+        }
+        if self.hit_cancel(x, y) {
+            return Some(PrefsHit::Cancel);
+        }
+        if let Some(cat) = self.hit_sidebar(x, y) {
+            return Some(PrefsHit::Sidebar(cat));
+        }
+        // Open-dropdown option rows take precedence — they may overlap
+        // controls drawn beneath them.
+        for c in &self.controls {
+            if let Control::Dropdown(d) = c {
+                if let Some(idx) = d.hit_option(x, y) {
+                    return Some(PrefsHit::DropdownOption { id: d.id, index: idx });
+                }
+            }
+        }
+        for c in &self.controls {
+            match c {
+                Control::Toggle(t) if t.hit_test(x, y) => return Some(PrefsHit::Toggle(t.id)),
+                Control::Slider(s) if s.hit_test(x, y) => return Some(PrefsHit::SliderTrack(s.id)),
+                Control::Dropdown(d) if d.rect.contains(x, y) => {
+                    return Some(PrefsHit::DropdownHeader(d.id))
+                }
+                Control::ColorSwatch(cs) => {
+                    if let Some(idx) = cs.hit_cell(x, y) {
+                        return Some(PrefsHit::ColorCell { id: cs.id, index: idx });
+                    }
+                    if cs.rect.contains(x, y) {
+                        return Some(PrefsHit::ColorCell { id: cs.id, index: 0 });
+                    }
+                }
+                Control::TextField(tf) if tf.hit_test(x, y) => {
+                    return Some(PrefsHit::TextField(tf.id))
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn find_mut(&mut self, id: WidgetId) -> Option<&mut Control> {
         self.controls.iter_mut().find(|c| c.id() == id)
     }
 
+    /// Push a typed character into the TextField identified by `id`.
+    /// No-op when the field is at `max_len`; only marks dirty when the
+    /// config actually changed.
+    pub fn type_into(&mut self, id: WidgetId, ch: char) -> Option<()> {
+        let appended = match self.find_mut(id)? {
+            Control::TextField(tf) => {
+                let before = tf.value.chars().count();
+                tf.push_char(ch);
+                tf.value.chars().count() != before
+            }
+            _ => return None,
+        };
+        if appended {
+            self.commit_widget_to_config(id);
+        }
+        Some(())
+    }
+
     /// Push the value of the widget identified by `id` back into the
-    /// [`Config`] and mark dirty.
+    /// [`Config`] and mark dirty *only if* the config actually changed.
     fn commit_widget_to_config(&mut self, id: WidgetId) {
+        // Capture a comparable snapshot of config BEFORE the write.
+        let before = self.config.to_toml().unwrap_or_default();
         let Some(ctrl) = self.controls.iter().find(|c| c.id() == id) else { return };
         // Map widget → field by (category, position). Index-based to
         // avoid carrying string keys around.
@@ -341,17 +469,35 @@ impl PrefsState {
             }
             _ => {}
         }
-        self.dirty = true;
+        let after = self.config.to_toml().unwrap_or_default();
+        if before != after {
+            self.dirty = true;
+        }
     }
 
-    /// Persist the edit buffer to disk. Resets dirty + snapshot.
+    /// Persist the edit buffer to disk. Atomic: writes to
+    /// `<path>.tmp` in the same directory then renames over the final
+    /// path, so a crash mid-write cannot corrupt the config file.
+    /// Resets dirty + snapshot on success.
     pub fn apply(&mut self) -> Result<()> {
         if let Some(parent) = self.config_path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+            }
         }
         let toml = self.config.to_toml()?;
-        std::fs::write(&self.config_path, toml)
-            .with_context(|| format!("write {:?}", self.config_path))?;
+        let mut tmp = self.config_path.clone();
+        let file_name = self
+            .config_path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("sonic.toml"));
+        let mut tmp_name = file_name;
+        tmp_name.push(".tmp");
+        tmp.set_file_name(tmp_name);
+        std::fs::write(&tmp, toml).with_context(|| format!("write {:?}", tmp))?;
+        std::fs::rename(&tmp, &self.config_path)
+            .with_context(|| format!("rename {:?} -> {:?}", tmp, self.config_path))?;
         self.original = self.config.clone();
         self.dirty = false;
         Ok(())
@@ -580,5 +726,197 @@ mod tests {
         s.type_into(id, 'h');
         assert_eq!(s.config.terminal.shell.as_deref(), Some("/bin/zsh"));
         assert!(s.is_dirty());
+    }
+
+    // ---- Bug 1: commit_widget_to_config should NOT dirty on no-op writes ----
+
+    #[test]
+    fn reselecting_current_dropdown_option_is_not_dirty() {
+        let (mut s, _d) = fresh();
+        s.set_category(Category::Appearance);
+        let (id, current) = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) => Some((d.id, d.selected)),
+                _ => None,
+            })
+            .unwrap();
+        // Selecting the already-selected option must be a no-op.
+        s.select_dropdown(id, current);
+        assert!(!s.is_dirty(), "no-op dropdown reselect must not dirty");
+    }
+
+    #[test]
+    fn dragging_slider_to_current_value_is_not_dirty() {
+        let (mut s, _d) = fresh();
+        // Find a slider and drag the thumb exactly to its current value
+        // in pixel space.
+        let (id, x_at_current) = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Slider(sl) => {
+                    let frac = sl.fraction();
+                    let x = sl.rect.x + frac * sl.rect.w;
+                    Some((sl.id, x))
+                }
+                _ => None,
+            })
+            .unwrap();
+        s.drag_slider(id, x_at_current);
+        assert!(!s.is_dirty(), "no-op slider drag must not dirty");
+    }
+
+    #[test]
+    fn typing_into_textfield_at_max_len_is_not_dirty() {
+        let (mut s, _d) = fresh();
+        // Force the shell text field to its maximum capacity.
+        let id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::TextField(tf) => Some(tf.id),
+                _ => None,
+            })
+            .unwrap();
+        let max_len = match s.controls.iter_mut().find(|c| c.id() == id).unwrap() {
+            Control::TextField(tf) => {
+                let m = tf.max_len;
+                tf.value = "x".repeat(m);
+                m
+            }
+            _ => unreachable!(),
+        };
+        // First commit to sync config and clear dirty.
+        s.dirty = false;
+        // Typing another char at max_len must be a true no-op.
+        s.type_into(id, 'y');
+        assert!(!s.is_dirty(), "type at max_len must not dirty");
+        // Sanity: the field's length did not grow past max_len.
+        if let Control::TextField(tf) = s.controls.iter().find(|c| c.id() == id).unwrap() {
+            assert_eq!(tf.value.chars().count(), max_len);
+        }
+    }
+
+    // ---- Bug 2: apply() must write atomically + create parent dirs ----
+
+    #[test]
+    fn apply_writes_atomically_to_nested_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("a/b/c/sonic.toml");
+        let mut s = PrefsState::new(Config::default(), nested.clone());
+        // Make sure dirty so apply has work to do.
+        let tid = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Toggle(t) => Some(t.id),
+                _ => None,
+            })
+            .unwrap();
+        s.flip_toggle(tid);
+        assert!(s.is_dirty());
+        s.apply().unwrap();
+        assert!(nested.exists(), "config file must exist after apply");
+        let text = std::fs::read_to_string(&nested).unwrap();
+        assert!(text.contains("[window]"));
+        // No leftover .tmp sibling.
+        let mut tmp = nested.clone();
+        tmp.set_file_name("sonic.toml.tmp");
+        assert!(!tmp.exists(), ".tmp sibling must be renamed away");
+    }
+
+    // ---- Bug 3: classify_click + focused-field typing ----
+
+    #[test]
+    fn classify_click_resolves_dropdown_option_when_open() {
+        let (mut s, _d) = fresh();
+        s.set_category(Category::Appearance);
+        let id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) => Some(d.id),
+                _ => None,
+            })
+            .unwrap();
+        s.toggle_dropdown(id);
+        // Pick a point that lands on the 2nd option row.
+        let (rx, ry, rw, rh) = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) if d.id == id => {
+                    Some((d.rect.x, d.rect.y, d.rect.w, d.rect.h))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let x = rx + rw / 2.0;
+        let y = ry + rh + rh + rh / 2.0; // 2nd row
+        let hit = s.classify_click(x, y);
+        assert!(matches!(hit, Some(PrefsHit::DropdownOption { .. })));
+        if let Some(PrefsHit::DropdownOption { id: hid, index }) = hit {
+            assert_eq!(hid, id);
+            s.select_dropdown(hid, index);
+            assert_eq!(s.config.theme, KNOWN_THEMES[index]);
+        }
+    }
+
+    #[test]
+    fn classify_click_resolves_color_swatch_cell() {
+        let (mut s, _d) = fresh();
+        s.set_category(Category::Appearance);
+        let (id, top, left) = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::ColorSwatch(cs) => Some((cs.id, cs.rect.y + cs.rect.h + 4.0, cs.rect.x)),
+                _ => None,
+            })
+            .unwrap();
+        // Click cell index 1 (col=1, row=0).
+        let x = left + ColorSwatch::CELL * 1.5;
+        let y = top + ColorSwatch::CELL * 0.5;
+        let hit = s.classify_click(x, y);
+        match hit {
+            Some(PrefsHit::ColorCell { id: hid, index }) => {
+                assert_eq!(hid, id);
+                assert_eq!(index, 1);
+                assert!(s.pick_color(hid, index).unwrap());
+                assert!(s.is_dirty());
+            }
+            other => panic!("expected ColorCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn focus_text_field_then_type_writes_through() {
+        let (mut s, _d) = fresh();
+        let id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::TextField(tf) => Some(tf.id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(s.focus_text_field(id));
+        assert_eq!(s.focused_field, Some(id));
+        // Verify the TextField reports focused.
+        let focused = matches!(
+            s.controls.iter().find(|c| c.id() == id).unwrap(),
+            Control::TextField(tf) if tf.focused
+        );
+        assert!(focused);
+        assert!(s.type_into_focused('z'));
+        assert!(s.type_into_focused('s'));
+        assert!(s.type_into_focused('h'));
+        assert!(s.config.terminal.shell.as_deref().unwrap().ends_with("zsh"));
+        assert!(s.is_dirty());
+        // type_into_focused with no focus is a no-op.
+        s.blur_text_fields();
+        assert!(!s.type_into_focused('x'));
     }
 }

@@ -18,7 +18,7 @@ pub mod state;
 
 pub use controls::{ColorSwatch, Control, Dropdown, Slider, TextField, Toggle, WidgetId};
 pub use layout::{Category, PrefsLayout, CATEGORIES};
-pub use state::PrefsState;
+pub use state::{PrefsHit, PrefsState};
 
 /// Logical (DPI-independent) size of the preferences window.
 pub const PREFS_WIN_W: f32 = 720.0;
