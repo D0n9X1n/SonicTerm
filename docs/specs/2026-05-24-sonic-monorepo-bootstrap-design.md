@@ -1,8 +1,31 @@
 # Sonic Terminal Bootstrap — Design Spec
 
+> **⚠️ Partially superseded (2026-05-25).** This is the original v0.1.0
+> bootstrap spec, preserved for historical context. Several sections no
+> longer reflect the shipped repo. The authoritative current state lives
+> in [`docs/ROADMAP.md`](../ROADMAP.md). Specifically superseded:
+>
+> - **§3 Repository Layout** — the `crates/` nesting was flattened in
+>   `9c46c39`; crates now live at the top level (`sonic-core/`,
+>   `sonic-shared/`, `sonic-mac/`, `sonic-windows/`).
+> - **§4 Tech Stack** — pinned versions are out of date. Current stack
+>   (after #10): `wgpu 29`, `glyphon 0.11`, `cosmic-text 0.18`,
+>   `vte 0.15`, `winit 0.30`, `portable-pty 0.9`, `thiserror 2`,
+>   `toml 1.1`. See ROADMAP "Constraints" for the canonical pinned set.
+> - **§8 Icon Design** — the original "stylized lightning-fast hedgehog"
+>   was replaced by the terminal-window + cyan-speed-trails + `>_`
+>   mark in #18. See [`docs/brand/icon.md`](../brand/icon.md) for the
+>   current brand guide.
+> - **§10 Acceptance** — all v0.1.0 acceptance criteria shipped; the
+>   project is now at **v0.6** with 171 tests. Subsequent acceptance
+>   criteria live in the ROADMAP per-version sections.
+>
+> Sections **§1, §2, §5, §6, §7, §9, §11, §12** remain broadly accurate
+> as historical record of the bootstrap intent.
+
 - **Doc**: `docs/specs/2026-05-24-sonic-monorepo-bootstrap-design.md`
 - **Track**: Complex (framework-cap-override: user explicitly removed 1000-word limit)
-- **Status**: Approved
+- **Status**: Approved (bootstrap shipped; later milestones tracked in ROADMAP)
 
 ## 1. Purpose
 Build the **Sonic Terminal** v0.1.0 — a cross-platform, GPU-accelerated terminal emulator targeting macOS and Windows, in a single monorepo. Goal: ship a usable terminal (PTY + VT parsing + GPU render + tabs + splits + WezTerm keymap + original icon) plus complete CI/release infrastructure.

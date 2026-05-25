@@ -19,29 +19,35 @@
 
 Sonic is a terminal emulator written in Rust that aims to be **fast first, beautiful second, and configurable third**. It runs on macOS and Windows, ships with WezTerm-compatible default keybindings, bundles a Nerd Font so prompts and icons "just work," and looks like a polished desktop app, not a port.
 
-## Status — `v0.2.0`
+## Status — `v0.6` (workspace `0.3.0`)
 
 Full feature matrix and roadmap: **[`docs/ROADMAP.md`](docs/ROADMAP.md)**.
 
 | Area | State |
 |---|---|
-| Cargo workspace + 4 crates | ✅ |
+| Cargo workspace + 4 crates (flat top-level layout) | ✅ |
 | GitHub Actions CI (fmt / clippy / test / deny) — macOS + Windows | ✅ |
 | Release pipeline → `.dmg` (universal) + `.msi` (x64) | ✅ |
 | Cross-platform PTY (`portable-pty`) | ✅ |
 | VT/ANSI parser (SGR, CUP, ED, EL, OSC 0/2/8/52) | ✅ |
 | Grid model w/ scrollback, unicode width, wide chars | ✅ |
-| WezTerm-compatible keymap | ✅ |
+| WezTerm-compatible keymap (incl. `super+comma` → preferences) | ✅ |
 | 4 bundled themes (Tokyo Night, Dracula, Nord, Catppuccin) | ✅ |
-| Original app icon | ✅ |
-| Tab bar + recursive split tree (model only) | ✅ |
-| **GPU character rendering (wgpu + glyphon)** | ✅ |
-| **Keyboard input → PTY** (arrows, ctrl-letter, F-keys, ...) | ✅ |
-| Per-cell color rendering | ⏳ v0.3 |
-| Cursor + tab bar UI | ⏳ v0.3 |
-| Tab drag out / cross-window merge | ⏳ v0.4 |
-| Sixel / Kitty graphics, SSH, mux, ligatures | ⏳ v0.5 |
-| Code signing / notarization, auto-update | ⏳ v1.0 |
+| Original app icon (terminal window + cyan speed trails + `>_`) | ✅ |
+| GPU character rendering (wgpu 29 + glyphon 0.11) | ✅ v0.2 |
+| Keyboard input → PTY (arrows, ctrl-letter, F-keys, …) | ✅ v0.2 |
+| Cursor + text selection + keymap dispatcher + clipboard | ✅ v0.3a |
+| Per-cell color + bold / italic / underline | ✅ v0.3b |
+| Browser-style tab bar UI | ✅ v0.3c |
+| Per-pane PTY + split / focus / resize | ✅ v0.3d |
+| OSC 8 hyperlinks (data + visual + Cmd-click) | ✅ v0.4 |
+| In-page search (`Cmd+F`) | ✅ v0.4 |
+| Alt-screen + DEC modes (`?1049` / `?47` / `?25` / `?2004` / `?1006`) | ✅ v0.5 |
+| Graphical preferences UI subsystem (state + super+comma binding) | ✅ v0.6 |
+| Tab tear-out / cross-window merge | ⏳ |
+| Code signing / notarization, auto-update, Linux, built-in SSH | ⏳ v1.0 |
+
+171 tests pass across the workspace (`cargo test --workspace`).
 
 ## Quick start
 
@@ -58,6 +64,14 @@ cargo run --release -p sonic-mac
 
 # run on Windows
 cargo run --release -p sonic-windows
+```
+
+End-to-end smoke checks (no GPU/window required):
+
+```bash
+cargo run --example pty_dump      -p sonic-core   --release   # prints "[e2e] OK"
+cargo run --example altscreen_smoke -p sonic-core
+cargo run --example pane_smoke    -p sonic-shared
 ```
 
 ## Configuration
@@ -88,19 +102,27 @@ scrollback   = 10000
 cursor_blink = true
 ```
 
+`Super+,` (Cmd+, on macOS) opens the in-app preferences subsystem.
+
 ## Project layout
+
+Crates live at the **top level** (the original `crates/` nesting was flattened
+in an early refactor):
 
 ```
 sonic/
-├── crates/
-│   ├── sonic-core/     VT parser, grid, PTY, config, keymap, theme
-│   ├── sonic-shared/   window, tab bar, pane tree, app loop
-│   ├── sonic-mac/      macOS entrypoint
-│   └── sonic-windows/  Windows entrypoint
-├── assets/             icon, themes, fonts, keymaps
-├── packaging/          .dmg + .msi build scripts
-└── .github/workflows/  CI + release pipelines
+├── sonic-core/        VT parser, grid, PTY, config, keymap, theme
+├── sonic-shared/      window, tab bar, pane tree, prefs, app loop
+├── sonic-mac/         macOS entrypoint
+├── sonic-windows/     Windows entrypoint
+├── assets/            icon, themes, fonts, keymaps
+├── packaging/         .dmg + .msi build scripts
+├── docs/              roadmap, specs, brand guide
+└── .github/workflows/ CI + release pipelines
 ```
+
+Each crate's tests live in its own `tests/` folder (integration-style), not
+inline `#[cfg(test)] mod tests` blocks.
 
 ## Contributing
 

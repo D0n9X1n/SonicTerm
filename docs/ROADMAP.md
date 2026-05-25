@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-25 (after `a11d9ef`, v0.2)
+Last updated: 2026-05-25 (after `7f8b83c`, v0.6 + per-crate `tests/` split)
 
 ---
 
@@ -25,7 +25,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 
 | Capability | Status | Where |
 |---|---|---|
-| Cargo workspace, 4 crates | ✅ | bootstrap |
+| Cargo workspace, 4 crates (flat top-level layout) | ✅ | bootstrap |
 | GitHub Actions CI (mac+win: fmt/clippy/test + deny) | ✅ | bootstrap |
 | Release pipeline (tag → universal .dmg + x64 .msi) | ✅ | bootstrap |
 | VT/ANSI parser (CSI cursor, ED, EL, SGR 256+truecolor, OSC 0/2/8/52) | ✅ | bootstrap |
@@ -34,21 +34,25 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | TabBar model (push/close/reorder/detach) | ✅ | bootstrap |
 | PaneTree model (recursive splits, collapse-on-close) | ✅ | bootstrap |
 | TOML config + 4 themes + WezTerm keymap | ✅ | bootstrap |
-| Original SVG icon + bake script | ✅ | bootstrap |
+| Original SVG icon (terminal window + cyan speed trails + `>_`) | ✅ v0.3 | `assets/icons/source/sonic.svg` |
 | **wgpu+glyphon character rendering** | ✅ v0.2 | `sonic-shared/src/render.rs` |
 | **Keyboard input → PTY** | ✅ v0.2 | `sonic-shared/src/app.rs::encode_logical` |
-| **Per-cell color rendering** | ⏳ v0.3 | scaffold in `render.rs` (`cell_fg`, `indexed`) marked `#[allow(dead_code)]` |
-| Cursor rendering | ⏳ v0.3 | — |
+| Cursor rendering + selection + keymap dispatcher + clipboard | ✅ v0.3a | `sonic-shared/src/app.rs` |
+| Per-cell color + bold / italic / underline | ✅ v0.3b | `sonic-shared/src/render.rs` |
 | Browser-style tab bar UI | ✅ v0.3c | `sonic-shared/src/tabbar_view.rs` + `render.rs` |
 | Bound keymap actions | ✅ v0.3d | `sonic-shared/src/app.rs::run_action` (Split/Close/Focus wired) |
-| Pane rendering (split layout in window) | ✅ v0.3d | `sonic-shared/src/pane.rs` + `render.rs` border pass |
-| Selection + clipboard copy | ⏳ v0.3 | — |
-| Tab tear-out + cross-window merge | ⏳ v0.4 | API hook in `TabBar::detach` |
-| Half-transparent / blur backgrounds | ⏳ v0.4 | — |
-| Ligatures, IME, link click | ⏳ v0.4 | — |
-| Profile-guided perf, alt-screen, DEC modes | ⏳ v0.5 | — |
-| **In-app graphical preferences UI** | ✅ v0.6 | `sonic-shared/src/prefs/` |
-| Code signing + auto-update | ⏳ v1.0 | — |
+| Pane rendering + per-pane PTY | ✅ v0.3d | `sonic-shared/src/pane.rs` + `render.rs` border pass |
+| OSC 8 hyperlinks (registry + URL opener) | ✅ v0.4 | `sonic-core::vt` + `sonic-shared` |
+| OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonic-shared/src/render.rs` + `app.rs` |
+| In-page search (`Cmd+F`) | ✅ v0.4 | `sonic-shared/src/search.rs` |
+| Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonic-core::vt` |
+| **In-app graphical preferences UI subsystem** | ✅ v0.6 | `sonic-shared/src/prefs/` (controls + state + `super+comma`; in-window rendering deferred) |
+| Tab tear-out + cross-window merge | ⏳ | API hook in `TabBar::detach` |
+| Half-transparent / blur backgrounds | ⏳ | — |
+| Ligatures, IME, command palette | ⏳ | — |
+| In-window preferences control rendering | ⏳ | follow-up to v0.6 |
+| Code signing + notarization + auto-update | ⏳ v1.0 | — |
+| Linux re-enable, built-in SSH, session restore | ⏳ v1.0 | — |
 
 ---
 
@@ -59,100 +63,53 @@ Workspace, CI, release, parser, grid, PTY, theme/keymap/config loaders,
 tab+pane models, icon, docs.
 
 ### ✅ v0.1.0-alpha.2 — Lint + bug fix (commit `3214d5c`)
-Local test gate passing, fixed PaneTree::close() nested-collapse bug,
+Local test gate passing, fixed `PaneTree::close()` nested-collapse bug,
 20→46 tests.
 
 ### ✅ v0.2.0 — Visible terminal (commit `a11d9ef`)
 GPU rendering wired up — characters actually appear on screen, typing
 into the window reaches the pty, basic event loop with resize.
 
-### ⏳ v0.3.0 — Color, cursor, and chrome
-Theme: **3 weeks** of focused work.
-1. **Per-cell color**: upgrade glyphon to 0.11 (brings cosmic-text 0.13 +
-   wgpu 0.20+); switch render path to `Buffer::set_rich_text(spans)`.
-   Re-enable `render::cell_fg`/`indexed`. **Acceptance: `ls --color` shows
-   colored output.**
-2. **Cursor**: render a single colored quad at `(grid.cursor.row, .col)`
-   using a tiny custom wgpu pipeline (vertex+frag, instanced rect). Blink
-   driven by a 500 ms timer when `cursor_blink = true`.
-3. **Bold / italic / underline**: map `CellFlags` into glyphon `Attrs`
-   (`weight`, `style`, `Stretch` not used). Underline is a second quad pass.
-4. **Tab bar UI**: draw a trapezoidal/rounded-rect bar at top of window
-   using the wgpu quad pipeline + glyphon for titles. Mouse-click → activate
-   tab; click `×` → close; click `+` → new tab. Hit-test via cell-space.
-5. **Pane layout renderer**: walk `PaneTree`, recursively divide the
-   content rect by `ratio` along `axis`. Each leaf gets its own grid +
-   parser + pty (one PTY per pane). Refactor `App` so it owns
-   `HashMap<paneId, PaneState>`.
-6. **Keymap dispatcher**: before `encode_logical`, look up
-   `keymap.lookup("super+t")` etc; if a binding matches, run the
-   `Action`; otherwise fall through to byte encoding.
-7. **Selection + copy**: mouse drag → grid coords → range; `Cmd+C` →
-   serialize selection from grid → arboard clipboard.
-8. Tests for everything new.
+### ✅ v0.3.x — Color, cursor, chrome, splits
+- **v0.3a** (`bcacfcd`): cursor rendering, mouse selection, keymap
+  dispatcher, clipboard.
+- **v0.3b** (#11): per-cell foreground color + bold / italic / underline
+  via glyphon `Attrs`. Verified by `ls --color`.
+- **v0.3c** (#19): browser-style tab bar UI — trapezoidal tabs,
+  click-to-activate, `×` to close, `+` to add.
+- **v0.3d** (#21): pane layout renderer + per-pane PTY. `PaneTree`
+  walked, content rect divided by `ratio`/`axis`, each leaf owns its
+  own grid + parser + PTY.
 
-**Definition of done**: open Sonic, see colored `ls`, `Cmd+T` opens a
-new tab, `Cmd+D` splits the pane, click a tab to switch, drag-select +
-`Cmd+C` copies text.
+### ✅ v0.4.0 — Hyperlinks + search
+- **OSC 8 hyperlinks** (#20, #22): data layer (registry + URL opener)
+  plus visual underline and Cmd-click activation.
+- **In-page search** (`Cmd+F`, #23): match against the visible grid +
+  scrollback; highlight hits with a quad pass.
 
-### ⏳ v0.4.0 — Drag and polish
-1. **Tab tear-out**: on macOS, hook NSDraggingSource on the tab bar; when
-   drag exits the bar, create a new window seeded by `TabBar::detach()`.
-   On Windows, use OLE drag + drop with custom CF format.
-2. **Cross-window merge**: NSDraggingDestination / IDropTarget on the tab
-   bar of every window. Dropping a tab inserts it into the target bar.
-3. **Background opacity + blur**: macOS NSVisualEffectView behind the
-   wgpu surface; Windows DwmExtendFrameIntoClientArea + Mica via
-   `windows-sys` `SetWindowCompositionAttribute`.
-4. **Ligatures**: enable in cosmic-text via `Shaping::Advanced` (already
-   on); add font fallback chain.
-5. **Link click**: OSC 8 hyperlinks are already parsed (`VtEvent::Hyperlink`);
-   render as underlined + clickable; open via `open` / `start`.
-6. **IME**: handle `WindowEvent::Ime` events; render pre-edit text inline.
-7. **Command palette**: `Cmd+Shift+P` opens a floating list of actions
-   pulled from the keymap.
-8. **In-page search** (`Cmd+F`): match against the visible grid +
-   scrollback; highlight hits with a quad pass.
+Tab tear-out, IME, command palette, background blur — **deferred** past
+v0.4; will be picked up in the chrome/polish slot after the v1.0
+production blockers are clear.
 
-(Graphical preferences UI moved to **v0.6** per user direction — it
-warrants its own milestone because dropdowns, color pickers, theme
-live-preview, and a separate settings window are a full subsystem.)
+### ✅ v0.5.0 — Alt-screen + DEC modes (#24)
+- Alt screen (`?1049h/l`, `?47h/l`) so vim / htop / less restore the
+  primary buffer cleanly.
+- Cursor visibility (`?25`), bracketed paste (`?2004`), SGR mouse
+  (`?1006`).
 
-### ✅ v0.6.0 — Graphical preferences UI
-Dedicated milestone. Spec (Tier 1 shipped; Tier 2 = keymap recorder,
-hot-reload, IME — deferred):
+### ✅ v0.6.0 — Graphical preferences UI subsystem (#26)
+Shipped:
+1. **Settings state**: typed `Prefs` model owning every config tunable.
+2. **Form controls** built on the existing quad + glyphon stack:
+   toggle / switch, slider, dropdown, color picker, text field, keymap
+   recorder.
+3. **Binding**: `super+comma` (Cmd+, on macOS) → `open_preferences`
+   action wired through `assets/keymaps/wezterm.toml`.
 
-1. **Settings window**: opened by `Cmd+,`. Separate winit `Window`,
-   rendered by a second `GpuRenderer` instance against the same
-   wgpu+glyphon stack + quad pipeline. Sized ~720×560 logical, resizable.
-2. **Layout**: a left-side category list (General / Appearance / Font /
-   Keymap / Behavior) + right-side form panel.
-3. **Form controls** (all built from quads + glyphon):
-   - Toggle / switch (bool)
-   - Slider (numeric range — opacity, font size, scrollback)
-   - **Dropdown** (theme picker, font family, shell)
-   - Color picker (hex input + 16-cell ANSI palette swatch grid)
-   - Text field (free-form strings)
-   - Keymap recorder (press key combo → captures)
-4. **Theme preview**: the Appearance tab shows a mini terminal pane
-   inside the settings window rendering a fixed sample (prompt + `ls`
-   output + a colored diff) using the currently-selected theme.
-   Switching the dropdown live-previews; "Apply" persists.
-5. **Persistence**: each control writes through to in-memory `Config`,
-   then on "Apply" serializes back to `~/.config/sonic/sonic.toml`.
-   TOML stays canonical; the GUI is a typed editor on top.
-6. **Hot reload**: existing terminal windows pick up the new config
-   without restart via the `notify` watcher already in `sonic-core`.
-
-### ⏳ v0.5.0 — Performance and completeness
-1. **Damage tracking**: only rebuild glyphon Buffer for changed rows.
-2. **Alt screen** (DEC `?1049h`/`l`) — required by vim, htop, less.
-3. **More DEC modes**: cursor visibility (`?25`), bracketed paste
-   (`?2004`), mouse SGR (`?1006`, `?1015`).
-4. **Profile-guided optimization** on release builds.
-5. **Sixel** + **Kitty graphics** support for image previews.
-6. **CSI u** modern keyboard reporting.
-7. **Bell**: visual flash + optional sound.
+Deferred to a follow-up: a dedicated settings window with in-window
+control rendering, theme live-preview, and config hot-reload through the
+`notify` watcher. The state and controls already land; surfacing them
+in their own window is the next slice.
 
 ### ⏳ v1.0.0 — Production
 1. **macOS signing + notarization** (requires Apple Developer Program $99/yr).
@@ -171,7 +128,9 @@ hot-reload, IME — deferred):
 2. **Check current state**: this file, `CHANGELOG.md`, `git log --oneline -20`.
 3. **Pick the highest-priority unchecked item from the next pending version.**
    If unsure, ask the user before starting.
-4. **Read the spec**: `docs/specs/2026-05-24-sonic-monorepo-bootstrap-design.md`.
+4. **Read the spec**: `docs/specs/2026-05-24-sonic-monorepo-bootstrap-design.md`
+   (parts of it are now superseded by this ROADMAP — header at the top of
+   the spec marks what still applies).
 5. **Follow `build-or-fix` skill**: usually one Standard or Complex PR per
    version-level item. Don't bundle unrelated work.
 6. **Branch naming**: `feat/<topic>`, `fix/<topic>`, etc.
@@ -181,8 +140,10 @@ hot-reload, IME — deferred):
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
-8. **Test bar**: every behavior change ships with a unit test. Workspace
-   target: **never let test count regress.** Current floor: **164** as of v0.6.
+8. **Test bar**: every behavior change ships with a unit/integration test
+   in the relevant crate's `tests/` folder. Workspace target: **never let
+   test count regress.** Current floor: **171** as of v0.6 + per-crate
+   `tests/` split (#27).
 
 ---
 
@@ -198,13 +159,19 @@ hot-reload, IME — deferred):
   groups — we tried, it drowned signal. Add selective allows if needed.
 - **Dependabot is patch-only.** Major bumps are done by hand in a feat PR
   with a passing CI run.
-- **wgpu / glyphon are coupled** — bumping one forces the other. As of
-  v0.2: `wgpu 0.19` + `glyphon 0.5` + `cosmic-text 0.10`. Next coherent
-  upgrade target: `wgpu 0.20+` + `glyphon 0.11+` + `cosmic-text 0.13+`.
+- **wgpu / glyphon / cosmic-text are coupled** — bumping one forces the
+  others. Current pinned stack (#10): `wgpu 29` + `glyphon 0.11` +
+  `cosmic-text 0.18` + `vte 0.15` + `winit 0.30` + `thiserror 2` +
+  `toml 1.1`. Coordinate the next upgrade across all three.
 - **Release profile uses fat LTO + 1 codegen unit + strip + panic=abort.**
   Don't relax for "build is slow." Use `[profile.dev]` for fast iteration.
 - **Spec files live in `docs/specs/YYYY-MM-DD-<topic>-design.md`.**
   Update this `ROADMAP.md` when shipping.
+- **Crates live at the top level** (`sonic-core/`, `sonic-shared/`,
+  `sonic-mac/`, `sonic-windows/`). The old `crates/` nesting was removed
+  in `9c46c39`. Don't reintroduce it.
+- **Tests go in each crate's `tests/` folder** (integration-style), not
+  inline `#[cfg(test)] mod tests` blocks (#27).
 - **Commit format**: Conventional Commits with scope =
   `core` / `shared` / `mac` / `windows` / `ci` / `assets` / `docs`.
 
@@ -233,16 +200,15 @@ config keys, and behaviors when in doubt. Notable items worth porting:
 - Memory at idle, 8 tabs: **< 200 MB RSS**
 
 Profile with `cargo flamegraph` and `cargo instruments` (mac) /
-`tracy` (cross-platform) once we hit v0.4.
+`tracy` (cross-platform).
 
 ---
 
 ## Open questions (decide before starting the relevant version)
 
-- v0.3: Tab bar should be drawn via wgpu quads (consistent with terminal)
-  or via native chrome (NSToolbar / WPF on win)? **Recommendation: wgpu
-  quads** — keeps look identical across platforms.
-- v0.4: Background blur — implement now or wait until we have a global
-  effect pipeline? Probably wait; one-off per-platform code is fine.
-- v0.5: Vendor `cosmic-text` fork or stay on upstream? Upstream until
-  blocked.
+- v1.0: Auto-update — Sparkle vs a Rust-native solution? Sparkle is the
+  proven path but adds an Obj-C dep.
+- v1.0: Built-in SSH — feature flag vs always-on? Lean feature flag so
+  default builds stay lean.
+- Post-v0.6: Vendor `cosmic-text` fork or stay on upstream? Upstream
+  until blocked.
