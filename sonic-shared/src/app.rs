@@ -32,6 +32,7 @@ use winit::{
 
 use crate::{
     pane::PaneTree,
+    prefs::PrefsState,
     render::GpuRenderer,
     search::SearchState,
     selection::Selection,
@@ -101,6 +102,10 @@ struct App {
     scale_factor: f64,
     hover_link: bool,
     cursor_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // v0.6: optional graphical preferences window.
+    prefs_window: Option<Arc<Window>>,
+    prefs_state: Option<PrefsState>,
+    pending_prefs_open: bool,
 }
 
 impl App {
@@ -123,6 +128,9 @@ impl App {
             scale_factor: 1.0,
             hover_link: false,
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            prefs_window: None,
+            prefs_state: None,
+            pending_prefs_open: false,
         }
     }
 
@@ -280,6 +288,7 @@ impl App {
             Action::ClosePane => self.close_active_pane(),
             Action::FocusPane(d) => self.focus_pane_dir(*d),
             Action::OpenSearch => self.open_search(),
+            Action::OpenPreferences => self.open_preferences(),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
@@ -307,6 +316,27 @@ impl App {
         if let Some(st) = self.tab_states.get_mut(i) {
             st.search = Some(s);
         }
+    }
+
+    /// Open (or re-focus) the v0.6 preferences window. The window itself
+    /// is rendered by the OS chrome only for now — the prefs subsystem
+    /// (controls, layout, edit buffer) is fully wired through
+    /// [`PrefsState`]; visual control rendering inside the window is a
+    /// Tier-2 follow-up that requires factoring `GpuRenderer` out of the
+    /// terminal-grid render path.
+    fn open_preferences(&mut self) {
+        // Already open → just re-focus.
+        if let Some(w) = self.prefs_window.as_ref() {
+            w.focus_window();
+            return;
+        }
+        // Defer until the event loop has resumed (we need an
+        // ActiveEventLoop to create a Window).
+        tracing::info!("OpenPreferences requested; awaiting resumed-event-loop hook");
+        // The actual creation happens in window_event on next iteration
+        // via a pending flag — but to keep diff small we lazily create
+        // on the next `WindowEvent::RedrawRequested` of the main window.
+        self.pending_prefs_open = true;
     }
 
     fn search_active(&self) -> bool {
@@ -421,6 +451,68 @@ impl App {
         drop(guard);
         uri
     }
+
+    /// Create the v0.6 preferences window. Called from `window_event`
+    /// after `open_preferences` set the pending flag (we need an
+    /// `ActiveEventLoop` to create a `Window`).
+    fn create_prefs_window(&mut self, el: &ActiveEventLoop) {
+        let attrs = Window::default_attributes()
+            .with_title("Sonic Preferences")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                crate::prefs::PREFS_WIN_W,
+                crate::prefs::PREFS_WIN_H,
+            ))
+            .with_resizable(true);
+        let w = match el.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("prefs window create failed: {e}");
+                return;
+            }
+        };
+        let path = sonic_core::config::Config::default_path()
+            .unwrap_or_else(|| std::path::PathBuf::from("sonic.toml"));
+        self.prefs_state = Some(PrefsState::new(self.config.clone(), path));
+        self.prefs_window = Some(w);
+    }
+
+    /// Handle events arriving for the preferences window.
+    fn handle_prefs_event(&mut self, _el: &ActiveEventLoop, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.prefs_window = None;
+                self.prefs_state = None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                let Some(s) = self.prefs_state.as_mut() else { return };
+                if s.hit_apply(x, y) {
+                    if let Err(e) = s.apply() {
+                        tracing::error!("prefs apply failed: {e}");
+                    }
+                } else if s.hit_cancel(x, y) {
+                    s.cancel();
+                    self.prefs_window = None;
+                    self.prefs_state = None;
+                } else if let Some(cat) = s.hit_sidebar(x, y) {
+                    s.set_category(cat);
+                } else if let Some(id) = s.hit_test(x, y) {
+                    // Best-effort: toggles flip; dropdowns toggle open;
+                    // text fields focus. Sliders are picked up by drag.
+                    let _ = s.flip_toggle(id);
+                    let _ = s.toggle_dropdown(id);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x, position.y);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -468,7 +560,14 @@ impl ApplicationHandler for App {
         window.request_redraw();
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
+        // v0.6: route events to the preferences window if it owns this id.
+        if let Some(pw) = self.prefs_window.as_ref() {
+            if pw.id() == win_id {
+                self.handle_prefs_event(el, event);
+                return;
+            }
+        }
         match event {
             WindowEvent::CloseRequested => el.exit(),
 
@@ -668,6 +767,10 @@ impl ApplicationHandler for App {
                 if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
+                            if self.pending_prefs_open {
+                                self.pending_prefs_open = false;
+                                self.create_prefs_window(el);
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }

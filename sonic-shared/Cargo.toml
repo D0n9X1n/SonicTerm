@@ -26,6 +26,9 @@ tracing-subscriber.workspace = true
 pollster.workspace = true
 arboard.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [[example]]
 name = "pane_smoke"
 path = "examples/pane_smoke.rs"

@@ -47,7 +47,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | Half-transparent / blur backgrounds | ⏳ v0.4 | — |
 | Ligatures, IME, link click | ⏳ v0.4 | — |
 | Profile-guided perf, alt-screen, DEC modes | ⏳ v0.5 | — |
-| **In-app graphical preferences UI** | ⏳ v0.4 | — |
+| **In-app graphical preferences UI** | ✅ v0.6 | `sonic-shared/src/prefs/` |
 | Code signing + auto-update | ⏳ v1.0 | — |
 
 ---
@@ -118,8 +118,9 @@ new tab, `Cmd+D` splits the pane, click a tab to switch, drag-select +
 warrants its own milestone because dropdowns, color pickers, theme
 live-preview, and a separate settings window are a full subsystem.)
 
-### ⏳ v0.6.0 — Graphical preferences UI
-Dedicated milestone. Spec:
+### ✅ v0.6.0 — Graphical preferences UI
+Dedicated milestone. Spec (Tier 1 shipped; Tier 2 = keymap recorder,
+hot-reload, IME — deferred):
 
 1. **Settings window**: opened by `Cmd+,`. Separate winit `Window`,
    rendered by a second `GpuRenderer` instance against the same
@@ -181,7 +182,7 @@ Dedicated milestone. Spec:
    cargo test --workspace
    ```
 8. **Test bar**: every behavior change ships with a unit test. Workspace
-   target: **never let test count regress.** Current floor: **85** as of v0.3d.
+   target: **never let test count regress.** Current floor: **164** as of v0.6.
 
 ---
 
