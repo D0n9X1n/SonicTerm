@@ -22,6 +22,8 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 use crate::{
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     selection::Selection,
+    tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
+    tabs::TabBar,
 };
 
 /// Internal: a contiguous run of cells that share text-attributes.
@@ -47,6 +49,7 @@ pub struct GpuRenderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+    tab_buffer: Buffer,
     quad: QuadPipeline,
 
     font_size: f32,
@@ -58,6 +61,12 @@ pub struct GpuRenderer {
     fg_default: GColor,
     cursor_color: [f32; 4],
     selection_color: [f32; 4],
+    tab_bar_bg: [f32; 4],
+    tab_active_bg: [f32; 4],
+    tab_inactive_bg: [f32; 4],
+    tab_active_fg: GColor,
+    tab_inactive_fg: GColor,
+    tab_close_fg: [f32; 4],
 }
 
 impl GpuRenderer {
@@ -133,12 +142,25 @@ impl GpuRenderer {
         let mut buffer = Buffer::new(&mut font_system, metrics);
         buffer.set_size(&mut font_system, Some(size.width as f32), Some(size.height as f32));
 
+        // A second buffer is used for the tab-bar titles. Tab titles use a
+        // tighter line height than the terminal grid; one buffer per bar
+        // means we only re-shape titles when the tab set changes.
+        let tab_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
+        let mut tab_buffer = Buffer::new(&mut font_system, tab_metrics);
+        tab_buffer.set_size(&mut font_system, Some(size.width as f32), Some(TAB_BAR_HEIGHT));
+
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
         let bg = hex_to_wgpu(theme.colors.background.0.as_str());
         let fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
         let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.6);
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+        let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
+        let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
+        let tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
+        let tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
+        let tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
+        let tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
 
         Ok(Self {
             instance,
@@ -153,6 +175,7 @@ impl GpuRenderer {
             atlas,
             text_renderer,
             buffer,
+            tab_buffer,
             quad,
             font_size,
             line_height,
@@ -163,6 +186,12 @@ impl GpuRenderer {
             fg_default,
             cursor_color,
             selection_color,
+            tab_bar_bg,
+            tab_active_bg,
+            tab_inactive_bg,
+            tab_active_fg,
+            tab_inactive_fg,
+            tab_close_fg,
         })
     }
 
@@ -175,11 +204,22 @@ impl GpuRenderer {
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
+        self.tab_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(TAB_BAR_HEIGHT),
+        );
+    }
+
+    /// Top inset reserved for the tab bar.
+    fn top_inset(&self) -> f32 {
+        TAB_BAR_HEIGHT + self.padding
     }
 
     pub fn cells(&self) -> (u16, u16) {
         let inner_w = (self.config.width as f32 - self.padding * 2.0).max(self.cell_w);
-        let inner_h = (self.config.height as f32 - self.padding * 2.0).max(self.cell_h);
+        let inner_h =
+            (self.config.height as f32 - self.top_inset() - self.padding).max(self.cell_h);
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
         (cols.max(1), rows.max(1))
@@ -187,7 +227,7 @@ impl GpuRenderer {
 
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         let x = px - self.padding;
-        let y = py - self.padding;
+        let y = py - self.top_inset();
         if x < 0.0 || y < 0.0 {
             return None;
         }
@@ -205,6 +245,7 @@ impl GpuRenderer {
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
+        tabs: &TabBar,
     ) -> Result<()> {
         // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
@@ -344,7 +385,7 @@ impl GpuRenderer {
                         continue;
                     }
                     let x = self.padding + f32::from(col_a) * self.cell_w;
-                    let y = self.padding + f32::from(r) * self.cell_h;
+                    let y = self.top_inset() + f32::from(r) * self.cell_h;
                     let w = f32::from(col_b - col_a + 1) * self.cell_w;
                     quads.push(QuadInstance {
                         rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
@@ -356,7 +397,7 @@ impl GpuRenderer {
 
         if cursor_visible {
             let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
-            let cy = self.padding + f32::from(grid.cursor.row) * self.cell_h;
+            let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
             quads.push(QuadInstance {
                 rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
                 color: self.cursor_color,
@@ -374,14 +415,135 @@ impl GpuRenderer {
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &underlines {
             let x = self.padding + f32::from(*col_a) * self.cell_w;
-            let y =
-                self.padding + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
+            let y = self.top_inset() + f32::from(*row) * self.cell_h + self.cell_h
+                - underline_thickness;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
             });
         }
+
+        // -------- Tab bar ---------------------------------------------------
+        let layout = TabBarLayout::compute(tabs, sw);
+        quads.push(QuadInstance {
+            rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
+            color: self.tab_bar_bg,
+        });
+        for t in &layout.tabs {
+            let is_active = layout.active == Some(t.index);
+            let bg_color = if is_active { self.tab_active_bg } else { self.tab_inactive_bg };
+            quads.push(QuadInstance {
+                rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                color: bg_color,
+            });
+            // Close button × drawn as two crossing thin quads.
+            let cx = t.close.x;
+            let cy = t.close.y;
+            let cs = t.close.w;
+            let thick = 1.5_f32;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(
+                    cx + cs * 0.25,
+                    cy + cs * 0.5 - thick / 2.0,
+                    cs * 0.5,
+                    thick,
+                    sw,
+                    sh,
+                ),
+                color: self.tab_close_fg,
+            });
+            quads.push(QuadInstance {
+                rect: px_to_ndc(
+                    cx + cs * 0.5 - thick / 2.0,
+                    cy + cs * 0.25,
+                    thick,
+                    cs * 0.5,
+                    sw,
+                    sh,
+                ),
+                color: self.tab_close_fg,
+            });
+        }
+        // `+` new-tab button
+        let nt = layout.new_tab;
+        let plus_thick = 2.0_f32;
+        let plus_len = nt.w.min(nt.h) * 0.4;
+        let pcx = nt.x + nt.w / 2.0;
+        let pcy = nt.y + nt.h / 2.0;
+        quads.push(QuadInstance {
+            rect: px_to_ndc(
+                pcx - plus_len / 2.0,
+                pcy - plus_thick / 2.0,
+                plus_len,
+                plus_thick,
+                sw,
+                sh,
+            ),
+            color: self.tab_close_fg,
+        });
+        quads.push(QuadInstance {
+            rect: px_to_ndc(
+                pcx - plus_thick / 2.0,
+                pcy - plus_len / 2.0,
+                plus_thick,
+                plus_len,
+                sw,
+                sh,
+            ),
+            color: self.tab_close_fg,
+        });
+
+        // Tab titles: render as a single rich-text line where each tab title
+        // is positioned by inserting padding spaces. This is approximate but
+        // readable; precise per-tab text layout is a v0.4 polish item.
+        let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
+        let mut title_text = String::new();
+        let mut tab_spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+        for t in &layout.tabs {
+            let tab = &tabs.tabs()[t.index];
+            let is_active = layout.active == Some(t.index);
+            let color = if is_active { self.tab_active_fg } else { self.tab_inactive_fg };
+            let max_chars = ((t.title.w / avg_glyph_w).floor() as usize).max(1);
+            let raw: String = tab.title.chars().take(max_chars).collect();
+            let target_col = (t.title.x / avg_glyph_w).floor() as usize;
+            while title_text.chars().count() < target_col {
+                title_text.push(' ');
+            }
+            let start = title_text.len();
+            title_text.push_str(&raw);
+            let end = title_text.len();
+            tab_spans.push((start..end, color));
+        }
+        let mut spans2: Vec<(&str, Attrs<'_>)> = Vec::new();
+        let mut tcur = 0usize;
+        for (range, color) in &tab_spans {
+            if range.start > tcur {
+                spans2.push((
+                    &title_text[tcur..range.start],
+                    Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                ));
+            }
+            spans2.push((
+                &title_text[range.start..range.end],
+                Attrs::new().family(Family::Monospace).color(*color),
+            ));
+            tcur = range.end;
+        }
+        if tcur < title_text.len() {
+            spans2.push((
+                &title_text[tcur..],
+                Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+            ));
+        }
+        self.tab_buffer.set_rich_text(
+            &mut self.font_system,
+            spans2,
+            &Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+            Shaping::Advanced,
+            None,
+        );
+        self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
 
         self.viewport.update(
             &self.queue,
@@ -391,15 +553,30 @@ impl GpuRenderer {
         let area = TextArea {
             buffer: &self.buffer,
             left: self.padding,
-            top: self.padding,
+            top: self.top_inset(),
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: TAB_BAR_HEIGHT as i32,
+                right: self.config.width as i32,
+                bottom: self.config.height as i32,
+            },
+            default_color: self.fg_default,
+            custom_glyphs: &[],
+        };
+        let title_top = ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
+        let tab_area = TextArea {
+            buffer: &self.tab_buffer,
+            left: 0.0,
+            top: title_top,
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
                 top: 0,
                 right: self.config.width as i32,
-                bottom: self.config.height as i32,
+                bottom: TAB_BAR_HEIGHT as i32,
             },
-            default_color: self.fg_default,
+            default_color: self.tab_inactive_fg,
             custom_glyphs: &[],
         };
 
@@ -409,7 +586,7 @@ impl GpuRenderer {
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [area],
+            [area, tab_area],
             &mut self.swash_cache,
         )?;
 

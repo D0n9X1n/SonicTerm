@@ -39,7 +39,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | **Keyboard input → PTY** | ✅ v0.2 | `sonic-shared/src/app.rs::encode_logical` |
 | **Per-cell color rendering** | ⏳ v0.3 | scaffold in `render.rs` (`cell_fg`, `indexed`) marked `#[allow(dead_code)]` |
 | Cursor rendering | ⏳ v0.3 | — |
-| Browser-style tab bar UI | ⏳ v0.3 | model in `tabs.rs`; no draw |
+| Browser-style tab bar UI | ✅ v0.3c | `sonic-shared/src/tabbar_view.rs` + `render.rs` |
 | Bound keymap actions | ⏳ v0.3 | model in `keymap.rs`; no dispatcher |
 | Pane rendering (split layout in window) | ⏳ v0.3 | model in `pane.rs`; no draw |
 | Selection + clipboard copy | ⏳ v0.3 | — |
@@ -181,7 +181,7 @@ Dedicated milestone. Spec:
    cargo test --workspace
    ```
 8. **Test bar**: every behavior change ships with a unit test. Workspace
-   target: **never let test count regress.** Current floor: **53** as of v0.2.
+   target: **never let test count regress.** Current floor: **75** as of v0.3c.
 
 ---
 
