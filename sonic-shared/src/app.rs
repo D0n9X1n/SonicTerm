@@ -100,6 +100,7 @@ struct App {
     clipboard: Option<Clipboard>,
     scale_factor: f64,
     hover_link: bool,
+    cursor_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl App {
@@ -121,6 +122,7 @@ impl App {
             clipboard: Clipboard::new().ok(),
             scale_factor: 1.0,
             hover_link: false,
+            cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -150,6 +152,7 @@ impl App {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
                 let window = self.window.clone();
+                let cursor_visible = self.cursor_visible.clone();
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
                     .spawn(move || {
@@ -158,10 +161,17 @@ impl App {
                         while let Ok(bytes) = out_rx.recv() {
                             let mut p = parser_clone.lock();
                             for ev in p.advance(&bytes) {
-                                if let VtEvent::SetTitle(t) = ev {
-                                    if let Some(w) = &window {
-                                        w.set_title(&format!("Sonic — {t}"));
+                                match ev {
+                                    VtEvent::SetTitle(t) => {
+                                        if let Some(w) = &window {
+                                            w.set_title(&format!("Sonic — {t}"));
+                                        }
                                     }
+                                    VtEvent::CursorVisibility(v) => {
+                                        cursor_visible
+                                            .store(v, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    _ => {}
                                 }
                             }
                             drop(p);
@@ -378,7 +388,20 @@ impl App {
     fn paste_clipboard(&mut self) {
         if let Some(cb) = self.clipboard.as_mut() {
             if let Ok(text) = cb.get_text() {
-                self.write_to_pty(text.into_bytes());
+                let bracketed = self
+                    .active_pane()
+                    .map(|p| p.parser.lock().bracketed_paste_enabled())
+                    .unwrap_or(false);
+                let bytes = if bracketed {
+                    let mut v = Vec::with_capacity(text.len() + 12);
+                    v.extend_from_slice(b"\x1b[200~");
+                    v.extend_from_slice(text.as_bytes());
+                    v.extend_from_slice(b"\x1b[201~");
+                    v
+                } else {
+                    text.into_bytes()
+                };
+                self.write_to_pty(bytes);
             }
         }
     }
@@ -484,7 +507,7 @@ impl ApplicationHandler for App {
                         if let Err(e) = r.render(
                             grid.grid(),
                             &self.theme,
-                            true,
+                            self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                             self.selection.as_ref(),
                             &self.tabs,
                             &pane_rects,
