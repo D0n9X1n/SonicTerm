@@ -97,6 +97,8 @@ struct FrameKey {
     search_hash: u64,
     width: u32,
     height: u32,
+    tab_hash: u64,
+    pane_rect_hash: u64,
 }
 
 impl GpuRenderer {
@@ -340,6 +342,32 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
+        // Hash the full tab list (titles + ids + order + active index) so
+        // closing/renaming/reordering an INACTIVE tab still invalidates the
+        // frame — without this, the tab bar would render stale.
+        let tab_hash: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            tabs.active_index().hash(&mut h);
+            for t in tabs.tabs() {
+                t.id.0.hash(&mut h);
+                t.title.hash(&mut h);
+            }
+            h.finish()
+        };
+        // Hash pane rects so split geometry changes invalidate the frame
+        // even when the active pane id is unchanged.
+        let pane_rect_hash: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            for (id, r) in pane_rects {
+                id.hash(&mut h);
+                (r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()).hash(&mut h);
+            }
+            h.finish()
+        };
         let key = FrameKey {
             grid_revision: grid.revision(),
             selection: selection.copied(),
@@ -349,13 +377,18 @@ impl GpuRenderer {
             search_hash,
             width: self.config.width,
             height: self.config.height,
+            tab_hash,
+            pane_rect_hash,
         };
         if Some(key) == self.last_frame_key {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             return Ok(());
         }
-        self.last_frame_key = Some(key);
+        // Note: do NOT cache key here. If prepare()/get_current_texture()
+        // fails on a transient surface state we'd cache a key for a frame
+        // that never actually got drawn, and the next redraw could
+        // early-exit silently. Cache only AFTER successful submit+present.
 
         // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
@@ -874,6 +907,11 @@ impl GpuRenderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
+        // Cache key only after a successful submit+present. Transient
+        // surface states (Outdated/Lost/Timeout) that returned early
+        // before this point will not cache, so the next redraw will
+        // re-attempt rendering.
+        self.last_frame_key = Some(key);
         Ok(())
     }
 }
