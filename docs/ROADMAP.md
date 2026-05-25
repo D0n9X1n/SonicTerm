@@ -113,16 +113,35 @@ new tab, `Cmd+D` splits the pane, click a tab to switch, drag-select +
    pulled from the keymap.
 8. **In-page search** (`Cmd+F`): match against the visible grid +
    scrollback; highlight hits with a quad pass.
-9. **Graphical preferences UI**: `Cmd+,` opens an in-app settings window
-   (separate winit window, rendered with the same wgpu+glyphon stack +
-   quad pipeline). Tabs: General / Appearance / Font / Keymap / Behavior.
-   Form controls (toggle, slider, color picker, font picker, dropdown,
-   text field, keymap recorder) built from quads + text. Each control
-   writes through to `Config` and persists by serializing back to
-   `~/.config/sonic/sonic.toml`. The TOML file stays the source of
-   truth; the GUI is just a convenience editor on top of it. Live-
-   preview changes in the terminal window before "Apply" commits to
-   disk.
+
+(Graphical preferences UI moved to **v0.6** per user direction — it
+warrants its own milestone because dropdowns, color pickers, theme
+live-preview, and a separate settings window are a full subsystem.)
+
+### ⏳ v0.6.0 — Graphical preferences UI
+Dedicated milestone. Spec:
+
+1. **Settings window**: opened by `Cmd+,`. Separate winit `Window`,
+   rendered by a second `GpuRenderer` instance against the same
+   wgpu+glyphon stack + quad pipeline. Sized ~720×560 logical, resizable.
+2. **Layout**: a left-side category list (General / Appearance / Font /
+   Keymap / Behavior) + right-side form panel.
+3. **Form controls** (all built from quads + glyphon):
+   - Toggle / switch (bool)
+   - Slider (numeric range — opacity, font size, scrollback)
+   - **Dropdown** (theme picker, font family, shell)
+   - Color picker (hex input + 16-cell ANSI palette swatch grid)
+   - Text field (free-form strings)
+   - Keymap recorder (press key combo → captures)
+4. **Theme preview**: the Appearance tab shows a mini terminal pane
+   inside the settings window rendering a fixed sample (prompt + `ls`
+   output + a colored diff) using the currently-selected theme.
+   Switching the dropdown live-previews; "Apply" persists.
+5. **Persistence**: each control writes through to in-memory `Config`,
+   then on "Apply" serializes back to `~/.config/sonic/sonic.toml`.
+   TOML stays canonical; the GUI is a typed editor on top.
+6. **Hot reload**: existing terminal windows pick up the new config
+   without restart via the `notify` watcher already in `sonic-core`.
 
 ### ⏳ v0.5.0 — Performance and completeness
 1. **Damage tracking**: only rebuild glyphon Buffer for changed rows.

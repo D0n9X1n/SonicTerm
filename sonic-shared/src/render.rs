@@ -24,6 +24,14 @@ use crate::{
     selection::Selection,
 };
 
+/// Internal: a contiguous run of cells that share text-attributes.
+struct SpanDesc {
+    range: std::ops::Range<usize>,
+    fg: GColor,
+    weight: glyphon::Weight,
+    italic: bool,
+}
+
 #[allow(dead_code)]
 pub struct GpuRenderer {
     instance: wgpu::Instance,
@@ -194,25 +202,126 @@ impl GpuRenderer {
     pub fn render(
         &mut self,
         grid: &Grid,
-        _theme: &Theme,
+        theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
     ) -> Result<()> {
+        // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
+        // span_descriptors records (byte_range, fg, bg, weight, italic) so we
+        // can build &str + Attrs pairs for set_rich_text after the String is
+        // fully materialised (so &str borrows are stable).
+        let mut span_descriptors: Vec<SpanDesc> = Vec::new();
+        // Underline cells in (row, col_start, col_end_inclusive) form so we
+        // can draw a quad pass beneath them after the text is laid out.
+        let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
+
+        let fg_default = self.fg_default;
         for r in 0..grid.rows {
-            for cell in grid.row(r).iter() {
+            let row = grid.row(r);
+            // Open run state — flushed whenever a cell with different attrs
+            // appears (or at end of row).
+            let mut run_start_byte = text.len();
+            let mut run_fg = fg_default;
+            let mut run_weight = glyphon::Weight::NORMAL;
+            let mut run_italic = false;
+            let mut run_has_chars = false;
+            // Underline run for this row.
+            let mut ul_start: Option<u16> = None;
+            let mut last_visible_col: u16 = 0;
+
+            for (col, cell) in row.iter().enumerate() {
                 if cell.flags.contains(CellFlags::WIDE_CONT) {
                     continue;
                 }
+                let cell_fg = cell_fg(cell, theme, fg_default);
+                let cell_weight = if cell.flags.contains(CellFlags::BOLD) {
+                    glyphon::Weight::BOLD
+                } else {
+                    glyphon::Weight::NORMAL
+                };
+                let cell_italic = cell.flags.contains(CellFlags::ITALIC);
+
+                if run_has_chars
+                    && (cell_fg != run_fg || cell_weight != run_weight || cell_italic != run_italic)
+                {
+                    span_descriptors.push(SpanDesc {
+                        range: run_start_byte..text.len(),
+                        fg: run_fg,
+                        weight: run_weight,
+                        italic: run_italic,
+                    });
+                    run_start_byte = text.len();
+                    run_fg = cell_fg;
+                    run_weight = cell_weight;
+                    run_italic = cell_italic;
+                    run_has_chars = false;
+                }
+                if !run_has_chars {
+                    run_fg = cell_fg;
+                    run_weight = cell_weight;
+                    run_italic = cell_italic;
+                }
                 text.push(cell.ch);
+                run_has_chars = true;
+                last_visible_col = col as u16;
+
+                // Underline tracking — coalesce contiguous underlined cells
+                if cell.flags.contains(CellFlags::UNDERLINE) {
+                    if ul_start.is_none() {
+                        ul_start = Some(col as u16);
+                    }
+                } else if let Some(s) = ul_start.take() {
+                    underlines.push((r, s, last_visible_col.saturating_sub(1)));
+                }
+            }
+            // Flush trailing underline run on this row
+            if let Some(s) = ul_start.take() {
+                underlines.push((r, s, last_visible_col));
+            }
+            // Flush the row's last attr run before pushing \n
+            if run_has_chars {
+                span_descriptors.push(SpanDesc {
+                    range: run_start_byte..text.len(),
+                    fg: run_fg,
+                    weight: run_weight,
+                    italic: run_italic,
+                });
             }
             text.push('\n');
         }
 
-        self.buffer.set_text(
+        // Now that `text` is stable, build the spans iterator. The newlines
+        // between rows get a default-attrs single-char span so byte indices
+        // stay aligned.
+        let mut spans: Vec<(&str, Attrs<'_>)> = Vec::new();
+        let mut cursor_byte: usize = 0;
+        for d in &span_descriptors {
+            // Emit any newlines between previous and this span's start
+            if d.range.start > cursor_byte {
+                spans.push((
+                    &text[cursor_byte..d.range.start],
+                    Attrs::new().family(Family::Monospace).color(fg_default),
+                ));
+            }
+            let mut a = Attrs::new().family(Family::Monospace).color(d.fg).weight(d.weight);
+            if d.italic {
+                a = a.style(glyphon::Style::Italic);
+            }
+            spans.push((&text[d.range.start..d.range.end], a));
+            cursor_byte = d.range.end;
+        }
+        if cursor_byte < text.len() {
+            spans.push((
+                &text[cursor_byte..],
+                Attrs::new().family(Family::Monospace).color(fg_default),
+            ));
+        }
+
+        self.buffer.set_rich_text(
             &mut self.font_system,
-            &text,
-            &Attrs::new().family(Family::Monospace).color(self.fg_default),
+            spans,
+            &Attrs::new().family(Family::Monospace).color(fg_default),
             Shaping::Advanced,
             None,
         );
@@ -251,6 +360,26 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
                 color: self.cursor_color,
+            });
+        }
+
+        // Underline quads — drawn last so they appear on top of the text.
+        // Color: foreground default at full alpha.
+        let underline_color = [
+            f32::from(self.fg_default.r()) / 255.0,
+            f32::from(self.fg_default.g()) / 255.0,
+            f32::from(self.fg_default.b()) / 255.0,
+            1.0,
+        ];
+        let underline_thickness = (self.cell_h * 0.08).max(1.0);
+        for (row, col_a, col_b) in &underlines {
+            let x = self.padding + f32::from(*col_a) * self.cell_w;
+            let y =
+                self.padding + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
+            let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
+                color: underline_color,
             });
         }
 
@@ -340,7 +469,6 @@ impl GpuRenderer {
     }
 }
 
-#[allow(dead_code)]
 fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
     match cell.fg {
         Color::Default => default,
@@ -349,7 +477,6 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
     }
 }
 
-#[allow(dead_code)]
 fn indexed(i: u8, theme: &Theme) -> Option<GColor> {
     let p = &theme.colors;
     let pick = |h: &str| hex_to_glyphon(h);
