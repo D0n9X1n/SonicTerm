@@ -333,3 +333,219 @@ fn revision_survives_resize() {
     assert!(g.revision() > mid);
     assert_ne!(g.revision(), 0);
 }
+
+// ============================================================================
+// Epic B2: dirty-row tracking tests
+//
+// Every grid mutator must mark the rows it touches so the renderer can
+// skip re-shaping rows whose cells haven't changed. Tests below pin
+// down the exact set of rows each mutator marks.
+// ============================================================================
+
+#[test]
+fn dirty_fresh_grid_is_fully_dirty() {
+    // A fresh grid has never been rendered, so every row counts as
+    // dirty until the renderer walks it and calls clear_dirty().
+    let g = Grid::new(8, 4);
+    assert_eq!(g.dirty_count(), 4);
+    for r in 0..4 {
+        assert!(g.is_row_dirty(r), "row {r} should be dirty on fresh grid");
+    }
+}
+
+#[test]
+fn dirty_clear_empties_and_does_not_bump_revision() {
+    let mut g = Grid::new(8, 4);
+    g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+    let rev_before = g.revision();
+    g.clear_dirty();
+    assert_eq!(g.dirty_count(), 0);
+    for r in 0..4 {
+        assert!(!g.is_row_dirty(r));
+    }
+    // clear_dirty is NOT a mutator — it must not bump revision.
+    assert_eq!(g.revision(), rev_before);
+}
+
+#[test]
+fn dirty_put_char_marks_cursor_row_only() {
+    let mut g = Grid::new(8, 4);
+    g.goto(2, 0);
+    g.clear_dirty();
+    g.put_char('X', Color::Default, Color::Default, CellFlags::empty());
+    assert!(g.is_row_dirty(2));
+    assert!(!g.is_row_dirty(0));
+    assert!(!g.is_row_dirty(1));
+    assert!(!g.is_row_dirty(3));
+    assert_eq!(g.dirty_count(), 1);
+}
+
+#[test]
+fn dirty_carriage_return_marks_cursor_row() {
+    let mut g = Grid::new(8, 4);
+    g.goto(1, 5);
+    g.clear_dirty();
+    g.carriage_return();
+    assert!(g.is_row_dirty(1));
+    assert_eq!(g.dirty_count(), 1);
+}
+
+#[test]
+fn dirty_linefeed_marks_old_and_new_rows() {
+    let mut g = Grid::new(8, 4);
+    g.goto(1, 0);
+    g.clear_dirty();
+    g.linefeed();
+    // moved from row 1 -> row 2: both should be dirty.
+    assert!(g.is_row_dirty(1));
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 2);
+}
+
+#[test]
+fn dirty_linefeed_at_bottom_scrolls_marks_all() {
+    let mut g = Grid::new(8, 4);
+    g.goto(3, 0); // bottom row
+    g.clear_dirty();
+    g.linefeed(); // forces scroll_up(1)
+                  // scroll_up marks every row dirty.
+    assert_eq!(g.dirty_count(), 4);
+}
+
+#[test]
+fn dirty_backspace_and_tab_mark_cursor_row() {
+    let mut g = Grid::new(40, 4);
+    g.goto(2, 10);
+    g.clear_dirty();
+    g.backspace();
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 1);
+
+    g.clear_dirty();
+    g.tab();
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 1);
+}
+
+#[test]
+fn dirty_goto_marks_both_old_and_new_rows() {
+    let mut g = Grid::new(8, 5);
+    g.goto(1, 0);
+    g.clear_dirty();
+    g.goto(3, 4);
+    assert!(g.is_row_dirty(1), "old cursor row must be dirty");
+    assert!(g.is_row_dirty(3), "new cursor row must be dirty");
+    assert!(!g.is_row_dirty(0));
+    assert!(!g.is_row_dirty(2));
+    assert!(!g.is_row_dirty(4));
+    assert_eq!(g.dirty_count(), 2);
+}
+
+#[test]
+fn dirty_scroll_up_marks_all_rows() {
+    let mut g = Grid::new(8, 4);
+    g.clear_dirty();
+    g.scroll_up(1);
+    assert_eq!(g.dirty_count(), 4);
+}
+
+#[test]
+fn dirty_erase_line_variants_mark_cursor_row_only() {
+    let mut g = Grid::new(8, 4);
+    g.goto(2, 4);
+    g.clear_dirty();
+    g.erase_line_to_end();
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 1);
+
+    g.clear_dirty();
+    g.erase_line_to_start();
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 1);
+
+    g.clear_dirty();
+    g.erase_line();
+    assert!(g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 1);
+}
+
+#[test]
+fn dirty_erase_below_marks_cursor_to_end() {
+    let mut g = Grid::new(8, 5);
+    g.goto(2, 0);
+    g.clear_dirty();
+    g.erase_below();
+    assert!(!g.is_row_dirty(0));
+    assert!(!g.is_row_dirty(1));
+    assert!(g.is_row_dirty(2));
+    assert!(g.is_row_dirty(3));
+    assert!(g.is_row_dirty(4));
+    assert_eq!(g.dirty_count(), 3);
+}
+
+#[test]
+fn dirty_erase_above_marks_0_through_cursor() {
+    let mut g = Grid::new(8, 5);
+    g.goto(2, 0);
+    g.clear_dirty();
+    g.erase_above();
+    assert!(g.is_row_dirty(0));
+    assert!(g.is_row_dirty(1));
+    assert!(g.is_row_dirty(2));
+    assert!(!g.is_row_dirty(3));
+    assert!(!g.is_row_dirty(4));
+    assert_eq!(g.dirty_count(), 3);
+}
+
+#[test]
+fn dirty_erase_screen_marks_all() {
+    let mut g = Grid::new(8, 5);
+    g.clear_dirty();
+    g.erase_screen();
+    assert_eq!(g.dirty_count(), 5);
+}
+
+#[test]
+fn dirty_resize_reallocates_bitset_and_marks_all() {
+    let mut g = Grid::new(8, 4);
+    g.clear_dirty();
+    g.resize(10, 6);
+    // bitset must be resized to the new row count
+    assert_eq!(g.dirty_count(), 6);
+    for r in 0..6 {
+        assert!(g.is_row_dirty(r), "row {r} should be dirty after resize");
+    }
+    // Shrink also re-allocates and marks all.
+    g.clear_dirty();
+    g.resize(10, 3);
+    assert_eq!(g.dirty_count(), 3);
+}
+
+#[test]
+fn dirty_alt_screen_transitions_mark_all() {
+    let mut g = Grid::new(8, 4);
+    g.clear_dirty();
+    g.enter_alt_screen();
+    assert_eq!(g.dirty_count(), 4);
+    g.clear_dirty();
+    g.leave_alt_screen();
+    assert_eq!(g.dirty_count(), 4);
+}
+
+#[test]
+fn dirty_count_after_specific_sequence() {
+    // Write "ABC" across two rows, then erase the second row, then
+    // move cursor away — exact dirty set is well-defined.
+    let mut g = Grid::new(4, 3);
+    g.clear_dirty();
+    g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+    g.put_char('B', Color::Default, Color::Default, CellFlags::empty());
+    g.put_char('C', Color::Default, Color::Default, CellFlags::empty());
+    g.linefeed();
+    g.put_char('D', Color::Default, Color::Default, CellFlags::empty());
+    // Touched rows: 0 (the three puts), 1 (linefeed arrival + put).
+    assert!(g.is_row_dirty(0));
+    assert!(g.is_row_dirty(1));
+    assert!(!g.is_row_dirty(2));
+    assert_eq!(g.dirty_count(), 2);
+}

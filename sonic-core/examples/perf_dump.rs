@@ -4,6 +4,8 @@
 //!
 //! Run with: `cargo run --example perf_dump -p sonic-core --release`
 
+#![allow(dead_code)]
+
 use std::time::Instant;
 
 use sonic_core::{

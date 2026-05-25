@@ -337,3 +337,27 @@ fn unknown_dec_modes_are_ignored() {
     assert!(!evs.iter().any(|e| matches!(e, VtEvent::CursorVisibility(_))));
     assert_eq!(p.grid().row(0)[0].ch, 'X');
 }
+
+#[test]
+fn csi_cursor_motion_bumps_revision_and_marks_dirty() {
+    // Regression for B2 review: CSI A/B/C/D used to write self.grid.cursor
+    // directly, bypassing the dirty/revision tracking. The cursor row would
+    // not be marked dirty, so the renderer's per-row cache returned the
+    // stale row (cursor trail / stuck cursor). Now they go through goto().
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b[3;3H"); // park cursor mid-screen first
+    let r0 = p.grid().revision();
+    // Render-side would have called clear_dirty() between frames.
+    p.grid_mut().clear_dirty();
+    p.advance(b"\x1b[A"); // cursor up
+    assert!(p.grid().revision() > r0, "CSI A must bump revision");
+    // Old row (3-indexed-from-1 = grid row 2) AND new row (1) should be dirty.
+    assert!(p.grid().is_row_dirty(1), "new cursor row must be dirty");
+    assert!(p.grid().is_row_dirty(2), "old cursor row must be dirty");
+
+    p.grid_mut().clear_dirty();
+    let r1 = p.grid().revision();
+    p.advance(b"\x1b[2C"); // cursor right 2 (same row, dirty just current)
+    assert!(p.grid().revision() > r1);
+    assert!(p.grid().is_row_dirty(1));
+}

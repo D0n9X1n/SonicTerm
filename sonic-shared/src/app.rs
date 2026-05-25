@@ -187,9 +187,11 @@ impl App {
                             // Try to drain quickly; if nothing comes for
                             // ~min_interval and we have a pending redraw,
                             // flush it before going back to blocking recv.
-                            match out_rx
-                                .recv_timeout(if pending { min_interval } else { Duration::from_secs(3600) })
-                            {
+                            match out_rx.recv_timeout(if pending {
+                                min_interval
+                            } else {
+                                Duration::from_secs(3600)
+                            }) {
                                 Ok(bytes) => {
                                     let mut p = parser_clone.lock();
                                     for ev in p.advance(&bytes) {
@@ -200,10 +202,8 @@ impl App {
                                                 }
                                             }
                                             VtEvent::CursorVisibility(v) => {
-                                                cursor_visible.store(
-                                                    v,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
+                                                cursor_visible
+                                                    .store(v, std::sync::atomic::Ordering::Relaxed);
                                             }
                                             _ => {}
                                         }
@@ -711,7 +711,7 @@ impl ApplicationHandler for App {
                     // try_lock — never block the main thread on the VT thread.
                     // If we miss the lock, the VT thread is mid-batch and will
                     // request another redraw when it finishes (no throttle now).
-                    if let Some(grid) = pane.parser.try_lock() {
+                    if let Some(mut grid) = pane.parser.try_lock() {
                         // Mirror the latest OSC 0/2 title from the parser into
                         // the active tab so the tab bar reflects "vim foo" /
                         // "~/Code" / etc. Falls back to the prior title (e.g.
@@ -725,7 +725,7 @@ impl ApplicationHandler for App {
                         }
                         let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                         if let Err(e) = r.render(
-                            grid.grid(),
+                            grid.grid_mut(),
                             &self.theme,
                             self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                             self.selection.as_ref(),
@@ -1049,7 +1049,10 @@ fn render_tab_title(raw: &str) -> String {
         "\u{f1d3}" // nf-fa-git
     } else if lower.starts_with("docker") {
         "\u{f308}" // nf-linux-docker
-    } else if lower.starts_with("python") || lower.starts_with("ipython") || lower.starts_with("python3") {
+    } else if lower.starts_with("python")
+        || lower.starts_with("ipython")
+        || lower.starts_with("python3")
+    {
         "\u{e73c}" // nf-dev-python
     } else if lower.starts_with("node") || lower.starts_with("npm") || lower.starts_with("yarn") {
         "\u{e718}" // nf-dev-nodejs_small
