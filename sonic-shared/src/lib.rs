@@ -10,6 +10,7 @@ pub mod app;
 pub mod pane;
 pub mod quad;
 pub mod render;
+pub mod search;
 pub mod selection;
 pub mod tabbar_view;
 pub mod tabs;

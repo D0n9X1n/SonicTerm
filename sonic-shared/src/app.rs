@@ -33,6 +33,7 @@ use winit::{
 use crate::{
     pane::PaneTree,
     render::GpuRenderer,
+    search::SearchState,
     selection::Selection,
     tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
@@ -78,6 +79,7 @@ impl PaneState {
 pub struct TabState {
     pub tree: PaneTree,
     pub active_pane: u64,
+    pub search: Option<SearchState>,
 }
 
 struct App {
@@ -187,7 +189,11 @@ impl App {
         let pane = self.spawn_pane();
         self.panes.insert(pane_id, pane);
         self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState { tree: PaneTree::leaf(pane_id), active_pane: pane_id });
+        self.tab_states.push(TabState {
+            tree: PaneTree::leaf(pane_id),
+            active_pane: pane_id,
+            search: None,
+        });
     }
 
     fn close_tab_at(&mut self, index: usize) {
@@ -263,6 +269,7 @@ impl App {
             Action::SplitDown => self.split_active(Direction::Down),
             Action::ClosePane => self.close_active_pane(),
             Action::FocusPane(d) => self.focus_pane_dir(*d),
+            Action::OpenSearch => self.open_search(),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
@@ -270,12 +277,81 @@ impl App {
             | Action::ToggleFullscreen
             | Action::ResizePane { .. }
             | Action::NewWindow
-            | Action::OpenSearch
             | Action::OpenCommandPalette => {
                 tracing::info!("action {action:?} accepted but not yet wired up");
             }
         }
         true
+    }
+
+    fn open_search(&mut self) {
+        let i = self.tabs.active_index();
+        let pane_id = match self.tab_states.get(i) {
+            Some(t) => t.active_pane,
+            None => return,
+        };
+        let mut s = SearchState::new();
+        if let Some(pane) = self.panes.get(&pane_id) {
+            s.refresh(pane.parser.lock().grid());
+        }
+        if let Some(st) = self.tab_states.get_mut(i) {
+            st.search = Some(s);
+        }
+    }
+
+    fn search_active(&self) -> bool {
+        let i = self.tabs.active_index();
+        self.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+    }
+
+    /// Route a key event into the active search state. Returns true if the
+    /// event was consumed (Esc closes, Enter/Shift+Enter cycle, printable
+    /// chars extend the query, Backspace trims).
+    fn search_handle_key(&mut self, event: &KeyEvent, mods: ModifiersState) -> bool {
+        let i = self.tabs.active_index();
+        let pane_id = match self.tab_states.get(i) {
+            Some(t) if t.search.is_some() => t.active_pane,
+            _ => return false,
+        };
+        let pane = match self.panes.get(&pane_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let grid_guard = pane.parser.lock();
+        let grid = grid_guard.grid();
+
+        let Some(st) = self.tab_states.get_mut(i) else { return false };
+        let Some(search) = st.search.as_mut() else { return false };
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                st.search = None;
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                if mods.shift_key() {
+                    search.prev();
+                } else {
+                    search.next();
+                }
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                search.backspace(grid);
+                true
+            }
+            Key::Named(NamedKey::Space) => {
+                search.input_char(' ', grid);
+                true
+            }
+            Key::Character(s) => {
+                for ch in s.chars() {
+                    search.input_char(ch, grid);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn copy_selection(&mut self) {
@@ -404,6 +480,7 @@ impl ApplicationHandler for App {
                 if let (Some(r), Some(pane)) = (self.renderer.as_mut(), self.panes.get(&active_id))
                 {
                     if let Some(grid) = pane.parser.try_lock() {
+                        let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                         if let Err(e) = r.render(
                             grid.grid(),
                             &self.theme,
@@ -412,6 +489,7 @@ impl ApplicationHandler for App {
                             &self.tabs,
                             &pane_rects,
                             active_id,
+                            search,
                         ) {
                             tracing::warn!("render error: {e}");
                         }
@@ -546,6 +624,24 @@ impl ApplicationHandler for App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.search_active() {
+                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if !matches!(action, Action::OpenSearch) {
+                                self.run_action(&action);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.search_handle_key(&event, self.modifiers);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
