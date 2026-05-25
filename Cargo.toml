@@ -25,7 +25,7 @@ sonic-shared = { path = "crates/sonic-shared", version = "0.1.0" }
 
 # Core terminal
 vte = "0.13"
-portable-pty = "0.8"
+portable-pty = "0.9"
 unicode-width = "0.1"
 unicode-segmentation = "1.11"
 
