@@ -21,11 +21,38 @@ type Outgoing = Vec<u8>;
 type Incoming = Vec<u8>;
 
 /// Handle to a running pty process.
+///
+/// On drop, the child process is explicitly killed and the master writer is
+/// dropped, which closes the pty fd and triggers EOF on the reader thread
+/// so it exits cleanly. Without the explicit kill, dropping a `PtyHandle`
+/// (e.g. on `Action::ClosePane`) would leave the shell as an orphan
+/// connected to a closed pty until the OS reaps it.
 pub struct PtyHandle {
     pub out_rx: Receiver<Incoming>,
     pub in_tx: Sender<Outgoing>,
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
-    _child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+}
+
+impl PtyHandle {
+    /// Explicitly terminate the child shell. Idempotent — second call is a
+    /// no-op because the underlying handle will report it's already gone.
+    /// Called automatically on Drop, but exposed for callers that want
+    /// deterministic shutdown earlier.
+    pub fn kill(&self) {
+        let _ = self.child.lock().kill();
+    }
+}
+
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        // Only kill when this is the last live reference. Holding both halves
+        // of `Arc` (e.g. for resize) is fine — the resize closure doesn't
+        // outlive the handle in practice, but be defensive.
+        if Arc::strong_count(&self.child) == 1 {
+            self.kill();
+        }
+    }
 }
 
 impl PtyHandle {
@@ -74,7 +101,7 @@ impl PtyHandle {
             });
         });
 
-        Ok(Self { out_rx, in_tx, resize, _child: Arc::new(Mutex::new(child)) })
+        Ok(Self { out_rx, in_tx, resize, child: Arc::new(Mutex::new(child)) })
     }
 }
 
