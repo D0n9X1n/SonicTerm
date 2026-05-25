@@ -1,11 +1,15 @@
 <div align="center">
 
+<img src="assets/icons/exports/png/sonic-256.png" alt="Sonic Terminal" width="160" height="160"/>
+
 # Sonic Terminal
 
 **A GPU-accelerated, cross-platform terminal for people who treat the prompt like home.**
 
 [![CI](https://github.com/D0n9X1n/sonic/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/sonic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Roadmap](https://img.shields.io/badge/roadmap-docs%2FROADMAP.md-blue.svg)](docs/ROADMAP.md)
+[![Brand](https://img.shields.io/badge/brand-docs%2Fbrand%2Ficon.md-purple.svg)](docs/brand/icon.md)
 
 </div>
 
