@@ -58,7 +58,7 @@ raw-window-handle = "0.6"
 
 # Platform
 [workspace.dependencies.windows]
-version = "0.57"
+version = "0.62"
 features = [
     "Win32_System_Console",
     "Win32_Foundation",
