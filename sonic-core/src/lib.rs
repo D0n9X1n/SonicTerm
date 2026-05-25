@@ -15,6 +15,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod config;
+pub mod glyph_key;
 pub mod grid;
 pub mod hyperlink;
 pub mod keymap;
@@ -27,6 +28,7 @@ pub mod vt;
 pub mod prelude {
     pub use crate::{
         config::Config,
+        glyph_key::GlyphKey,
         grid::{Cell, Grid, Pos},
         hyperlink::{Hyperlink, HyperlinkId, HyperlinkRegistry},
         keymap::{Action, Keymap},
