@@ -15,7 +15,7 @@
 
 use vte::{Params, Perform};
 
-use crate::grid::{CellFlags, Color, Grid};
+use crate::grid::{CellFlags, Color, Grid, Pos};
 use crate::hyperlink::{HyperlinkId, HyperlinkRegistry};
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
@@ -23,8 +23,16 @@ use crate::hyperlink::{HyperlinkId, HyperlinkRegistry};
 pub enum VtEvent {
     SetTitle(String),
     Bell,
-    Hyperlink { id: Option<String>, uri: String },
-    Clipboard { selection: char, data: String },
+    Hyperlink {
+        id: Option<String>,
+        uri: String,
+    },
+    Clipboard {
+        selection: char,
+        data: String,
+    },
+    /// DEC private mode ?25 — host should show/hide the cursor.
+    CursorVisibility(bool),
 }
 
 /// Streaming parser wrapping `vte::Parser` and a [`Performer`] that owns the
@@ -62,6 +70,16 @@ impl Parser {
     pub fn current_hyperlink(&self) -> Option<HyperlinkId> {
         self.performer.current_hyperlink
     }
+
+    /// Whether DECSET ?2004 (bracketed paste) is currently enabled.
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.performer.bracketed_paste
+    }
+
+    /// Whether DECSET ?1006 (SGR mouse reporting) is currently enabled.
+    pub fn mouse_sgr_enabled(&self) -> bool {
+        self.performer.mouse_sgr
+    }
 }
 
 struct Performer {
@@ -72,6 +90,10 @@ struct Performer {
     events: Vec<VtEvent>,
     hyperlinks: HyperlinkRegistry,
     current_hyperlink: Option<HyperlinkId>,
+    /// Cursor saved by DECSET ?1049 when entering the alt screen.
+    saved_cursor: Option<Pos>,
+    bracketed_paste: bool,
+    mouse_sgr: bool,
 }
 
 impl Performer {
@@ -84,6 +106,9 @@ impl Performer {
             events: Vec::new(),
             hyperlinks: HyperlinkRegistry::new(),
             current_hyperlink: None,
+            saved_cursor: None,
+            bracketed_paste: false,
+            mouse_sgr: false,
         }
     }
 
@@ -134,6 +159,43 @@ impl Performer {
             }
         }
     }
+
+    /// Handle a CSI sequence with `?` intermediate (DEC private modes).
+    fn handle_dec_private_mode(&mut self, params: &Params, set: bool) {
+        for slice in params.iter() {
+            let code = slice.first().copied().unwrap_or(0);
+            match code {
+                25 => self.events.push(VtEvent::CursorVisibility(set)),
+                47 => {
+                    if set {
+                        self.grid.enter_alt_screen();
+                    } else {
+                        self.grid.leave_alt_screen();
+                    }
+                }
+                1049 => {
+                    if set {
+                        // Guard against repeated ?1049h while already in alt
+                        // screen — must not clobber the previously saved
+                        // primary-screen cursor. xterm behaviour: second
+                        // ?1049h is a no-op.
+                        if !self.grid.is_alt() {
+                            self.saved_cursor = Some(self.grid.cursor);
+                            self.grid.enter_alt_screen();
+                        }
+                    } else {
+                        self.grid.leave_alt_screen();
+                        if let Some(c) = self.saved_cursor.take() {
+                            self.grid.goto(c.row, c.col);
+                        }
+                    }
+                }
+                2004 => self.bracketed_paste = set,
+                1006 => self.mouse_sgr = set,
+                _ => {}
+            }
+        }
+    }
 }
 
 fn parse_ext_color(iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
@@ -166,7 +228,20 @@ impl Perform for Performer {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _inter: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
+        if inter.first() == Some(&b'?') {
+            match action {
+                'h' => {
+                    self.handle_dec_private_mode(params, true);
+                    return;
+                }
+                'l' => {
+                    self.handle_dec_private_mode(params, false);
+                    return;
+                }
+                _ => return,
+            }
+        }
         let p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
         let p1 = || params.iter().nth(1).and_then(|s| s.first().copied()).unwrap_or(0);
         match action {
@@ -483,5 +558,112 @@ mod tests {
         assert_eq!(p.grid().row(0)[0].ch, 'h');
         assert_eq!(p.grid().row(0)[1].ch, 'é');
         assert_eq!(p.grid().row(0)[5].ch, '→');
+    }
+    #[test]
+    fn dec_1049h_enters_alt_screen_empty() {
+        let mut p = Parser::new(Grid::new(10, 2));
+        p.advance(b"hello");
+        p.advance(b"\x1b[?1049h");
+        assert!(p.grid().is_alt());
+        for c in p.grid().row(0) {
+            assert_eq!(c.ch, ' ');
+        }
+    }
+
+    #[test]
+    fn dec_1049l_restores_primary_and_cursor() {
+        let mut p = Parser::new(Grid::new(10, 2));
+        p.advance(b"hello");
+        let saved = p.grid().cursor;
+        p.advance(b"\x1b[?1049h");
+        p.advance(b"ALT");
+        p.advance(b"\x1b[?1049l");
+        assert!(!p.grid().is_alt());
+        assert_eq!(p.grid().row(0)[0].ch, 'h');
+        assert_eq!(p.grid().cursor, saved);
+    }
+
+    #[test]
+    fn dec_47_vs_1049_cursor_save_semantics() {
+        // ?1049 explicitly stashes the pre-alt cursor and restores it on leave,
+        // independent of any cursor moves the app made on the alt screen.
+        let mut p = Parser::new(Grid::new(10, 2));
+        p.advance(b"hello");
+        let pre = p.grid().cursor;
+        p.advance(b"\x1b[?1049h");
+        // Move around on the alt screen, then leave.
+        p.advance(b"\x1b[5;5H");
+        p.advance(b"\x1b[?1049l");
+        assert_eq!(p.grid().cursor, pre, "?1049l restores explicit pre-alt cursor");
+
+        // ?47 has no explicit DEC saved_cursor side-channel (DECSC/DECRC do).
+        // It must NOT seed the performer's saved_cursor — i.e., a later
+        // ?1049l should be a no-op for cursor when no ?1049h preceded it.
+        let mut p2 = Parser::new(Grid::new(10, 2));
+        p2.advance(b"hi");
+        p2.advance(b"\x1b[?47h");
+        p2.advance(b"\x1b[?47l");
+        // Subsequent stray ?1049l with no saved cursor must not panic / move.
+        let before = p2.grid().cursor;
+        p2.advance(b"\x1b[?1049l");
+        assert_eq!(p2.grid().cursor, before);
+    }
+
+    #[test]
+    fn dec_1049h_repeated_does_not_clobber_saved_cursor() {
+        // Real-world cause: vim / fzf preview pane re-enters alt screen
+        // while already in alt. The second ?1049h must NOT save the alt-
+        // screen cursor over the original primary cursor — leaving alt
+        // afterwards must still land back at the original primary cursor.
+        let mut p = Parser::new(Grid::new(10, 3));
+        p.advance(b"abc\r\ndef");
+        // cursor now somewhere on row 1
+        let primary_cursor = p.grid().cursor;
+        p.advance(b"\x1b[?1049h"); // enter alt
+        // move cursor inside the alt screen
+        p.advance(b"\x1b[5;1H");
+        // a stray re-entry that previously clobbered saved_cursor
+        p.advance(b"\x1b[?1049h");
+        // move again
+        p.advance(b"\x1b[8;5H");
+        p.advance(b"\x1b[?1049l"); // leave alt
+        assert_eq!(p.grid().cursor, primary_cursor);
+    }
+
+    #[test]
+    fn dec_25_emits_cursor_visibility() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        let evs = p.advance(b"\x1b[?25l");
+        assert!(matches!(evs.last(), Some(VtEvent::CursorVisibility(false))));
+        let evs = p.advance(b"\x1b[?25h");
+        assert!(matches!(evs.last(), Some(VtEvent::CursorVisibility(true))));
+    }
+
+    #[test]
+    fn dec_2004_toggles_bracketed_paste() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        assert!(!p.bracketed_paste_enabled());
+        p.advance(b"\x1b[?2004h");
+        assert!(p.bracketed_paste_enabled());
+        p.advance(b"\x1b[?2004l");
+        assert!(!p.bracketed_paste_enabled());
+    }
+
+    #[test]
+    fn dec_1006_toggles_mouse_sgr() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        assert!(!p.mouse_sgr_enabled());
+        p.advance(b"\x1b[?1006h");
+        assert!(p.mouse_sgr_enabled());
+        p.advance(b"\x1b[?1006l");
+        assert!(!p.mouse_sgr_enabled());
+    }
+
+    #[test]
+    fn unknown_dec_modes_are_ignored() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        let evs = p.advance(b"\x1b[?9999h\x1b[?12345lX");
+        assert!(!evs.iter().any(|e| matches!(e, VtEvent::CursorVisibility(_))));
+        assert_eq!(p.grid().row(0)[0].ch, 'X');
     }
 }

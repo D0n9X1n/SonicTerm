@@ -79,6 +79,8 @@ pub struct Grid {
     pub cursor: Pos,
     /// Default attributes used for new cells.
     pub default: Cell,
+    /// Saved primary screen when the alt screen is active.
+    alt_screen: Option<Box<Grid>>,
 }
 
 impl Grid {
@@ -92,6 +94,66 @@ impl Grid {
             scrollback_limit: 10_000,
             cursor: Pos::default(),
             default: Cell::default(),
+            alt_screen: None,
+        }
+    }
+
+    /// True if the alt screen is currently active (primary is saved).
+    pub fn is_alt(&self) -> bool {
+        self.alt_screen.is_some()
+    }
+
+    /// Switch to the alt screen, saving the current visible+scrollback.
+    /// No-op if already on the alt screen.
+    pub fn enter_alt_screen(&mut self) {
+        if self.alt_screen.is_some() {
+            return;
+        }
+        let cols = self.cols;
+        let rows = self.rows;
+        let saved_visible =
+            std::mem::replace(&mut self.visible, (0..rows).map(|_| make_row(cols)).collect());
+        let saved_scrollback = std::mem::take(&mut self.scrollback);
+        let saved_cursor = self.cursor;
+        self.cursor = Pos::default();
+        let saved = Grid {
+            cols,
+            rows,
+            visible: saved_visible,
+            scrollback: saved_scrollback,
+            scrollback_limit: self.scrollback_limit,
+            cursor: saved_cursor,
+            default: self.default.clone(),
+            alt_screen: None,
+        };
+        self.alt_screen = Some(Box::new(saved));
+    }
+
+    /// Leave the alt screen, restoring the saved primary screen. No-op if
+    /// not on the alt screen.
+    pub fn leave_alt_screen(&mut self) {
+        let Some(saved) = self.alt_screen.take() else {
+            return;
+        };
+        let saved = *saved;
+        self.visible = saved.visible;
+        self.scrollback = saved.scrollback;
+        self.cursor = saved.cursor;
+        if saved.cols != self.cols || saved.rows != self.rows {
+            let cols = self.cols;
+            let rows = self.rows;
+            for row in &mut self.visible {
+                row.resize(cols as usize, Cell::default());
+            }
+            if (rows as usize) > self.visible.len() {
+                while self.visible.len() < rows as usize {
+                    self.visible.push(make_row(cols));
+                }
+            } else {
+                self.visible.truncate(rows as usize);
+            }
+            self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
+            self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
     }
 
@@ -114,6 +176,9 @@ impl Grid {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
+        if let Some(alt) = self.alt_screen.as_mut() {
+            alt.resize(cols, rows);
+        }
     }
 
     /// Borrow a visible row.
@@ -396,5 +461,53 @@ mod tests {
     fn cell_default_hyperlink_is_none() {
         let c = Cell::default();
         assert!(c.hyperlink.is_none());
+    }
+
+    #[test]
+    fn enter_alt_screen_blanks_visible_and_saves_primary() {
+        let mut g = Grid::new(4, 2);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        assert!(!g.is_alt());
+        g.enter_alt_screen();
+        assert!(g.is_alt());
+        assert_eq!(g.row(0)[0].ch, ' ');
+        assert_eq!(g.cursor, Pos::default());
+    }
+
+    #[test]
+    fn leave_alt_screen_restores_primary() {
+        let mut g = Grid::new(4, 2);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        let saved_cursor = g.cursor;
+        g.enter_alt_screen();
+        g.put_char('Z', Color::Default, Color::Default, CellFlags::empty());
+        g.leave_alt_screen();
+        assert!(!g.is_alt());
+        assert_eq!(g.row(0)[0].ch, 'A');
+        assert_eq!(g.cursor, saved_cursor);
+    }
+
+    #[test]
+    fn enter_alt_twice_is_noop() {
+        let mut g = Grid::new(3, 2);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        g.enter_alt_screen();
+        g.put_char('B', Color::Default, Color::Default, CellFlags::empty());
+        g.enter_alt_screen();
+        assert_eq!(g.row(0)[0].ch, 'B');
+        g.leave_alt_screen();
+        assert_eq!(g.row(0)[0].ch, 'A');
+    }
+
+    #[test]
+    fn alt_screen_survives_resize() {
+        let mut g = Grid::new(4, 2);
+        g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+        g.enter_alt_screen();
+        g.resize(6, 3);
+        g.leave_alt_screen();
+        assert_eq!(g.cols, 6);
+        assert_eq!(g.rows, 3);
+        assert_eq!(g.row(0)[0].ch, 'A');
     }
 }
