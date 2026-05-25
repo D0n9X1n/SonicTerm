@@ -40,8 +40,8 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | **Per-cell color rendering** | ⏳ v0.3 | scaffold in `render.rs` (`cell_fg`, `indexed`) marked `#[allow(dead_code)]` |
 | Cursor rendering | ⏳ v0.3 | — |
 | Browser-style tab bar UI | ✅ v0.3c | `sonic-shared/src/tabbar_view.rs` + `render.rs` |
-| Bound keymap actions | ⏳ v0.3 | model in `keymap.rs`; no dispatcher |
-| Pane rendering (split layout in window) | ⏳ v0.3 | model in `pane.rs`; no draw |
+| Bound keymap actions | ✅ v0.3d | `sonic-shared/src/app.rs::run_action` (Split/Close/Focus wired) |
+| Pane rendering (split layout in window) | ✅ v0.3d | `sonic-shared/src/pane.rs` + `render.rs` border pass |
 | Selection + clipboard copy | ⏳ v0.3 | — |
 | Tab tear-out + cross-window merge | ⏳ v0.4 | API hook in `TabBar::detach` |
 | Half-transparent / blur backgrounds | ⏳ v0.4 | — |
@@ -181,7 +181,7 @@ Dedicated milestone. Spec:
    cargo test --workspace
    ```
 8. **Test bar**: every behavior change ships with a unit test. Workspace
-   target: **never let test count regress.** Current floor: **75** as of v0.3c.
+   target: **never let test count regress.** Current floor: **85** as of v0.3d.
 
 ---
 
