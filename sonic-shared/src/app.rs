@@ -27,6 +27,7 @@ use winit::{
 use crate::{
     render::GpuRenderer,
     selection::Selection,
+    tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
 
@@ -97,17 +98,27 @@ impl App {
             Action::CopyToClipboard => self.copy_selection(),
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => tracing::info!("reload_config: not yet implemented"),
+            Action::NewTab => {
+                let n = self.tabs.len() + 1;
+                self.tabs.push(Tab::new(format!("shell {n}")));
+            }
+            Action::CloseTab => {
+                if let Some(active) = self.tabs.active().map(|t| t.id) {
+                    self.tabs.close(active);
+                }
+            }
+            Action::NextTab => self.tabs.next(),
+            Action::PrevTab => self.tabs.prev(),
+            Action::ActivateTab(i) => self.tabs.activate(*i),
+            Action::ActivateLastTab => {
+                let last = self.tabs.len().saturating_sub(1);
+                self.tabs.activate(last);
+            }
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
             | Action::ResetFontSize
             | Action::ToggleFullscreen
-            | Action::NewTab
-            | Action::CloseTab
-            | Action::NextTab
-            | Action::PrevTab
-            | Action::ActivateTab(_)
-            | Action::ActivateLastTab
             | Action::SplitRight
             | Action::SplitDown
             | Action::ClosePane
@@ -240,9 +251,13 @@ impl ApplicationHandler for App {
                     // a later redraw (the VT thread requests one after each
                     // batch) will pick up the latest grid.
                     if let Some(grid) = p.try_lock() {
-                        if let Err(e) =
-                            r.render(grid.grid(), &self.theme, true, self.selection.as_ref())
-                        {
+                        if let Err(e) = r.render(
+                            grid.grid(),
+                            &self.theme,
+                            true,
+                            self.selection.as_ref(),
+                            &self.tabs,
+                        ) {
                             tracing::warn!("render error: {e}");
                         }
                         self.last_render = Instant::now();
@@ -297,10 +312,39 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
+                    // First, try the tab bar.
+                    let px = self.cursor_pos.0 as f32;
+                    let py = self.cursor_pos.1 as f32;
+                    let win_w = self.renderer.as_ref().map(|r| r.cells()).map(|_| ()).map(|_| 0.0);
+                    let _ = win_w;
+                    let window_width =
+                        self.window.as_ref().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
+                    let layout = TabBarLayout::compute(&self.tabs, window_width);
+                    if let Some(hit) = layout.hit(px, py) {
+                        match hit {
+                            TabHit::Activate(i) => self.tabs.activate(i),
+                            TabHit::Close(i) => {
+                                if let Some(id) = self.tabs.tabs().get(i).map(|t| t.id) {
+                                    self.tabs.close(id);
+                                    if self.tabs.is_empty() {
+                                        el.exit();
+                                    }
+                                }
+                            }
+                            TabHit::NewTab => {
+                                let n = self.tabs.len() + 1;
+                                self.tabs.push(Tab::new(format!("shell {n}")));
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        // Don't start a selection when the click was on the bar.
+                        self.mouse_down = false;
+                        return;
+                    }
                     if let Some(r) = self.renderer.as_ref() {
-                        if let Some((row, col)) =
-                            r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                        {
+                        if let Some((row, col)) = r.pixel_to_cell(px, py) {
                             self.selection = Some(Selection::new(row, col));
                         }
                     }
