@@ -59,6 +59,20 @@ impl TabBar {
         self.tabs.get(self.active)
     }
 
+    /// Replace the title of the tab with `id`. No-op if not found.
+    pub fn set_title(&mut self, id: TabId, title: impl Into<String>) {
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+            t.title = title.into();
+        }
+    }
+
+    /// Replace the title of the currently-active tab. No-op if empty.
+    pub fn set_active_title(&mut self, title: impl Into<String>) {
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.title = title.into();
+        }
+    }
+
     pub fn push(&mut self, tab: Tab) -> TabId {
         let id = tab.id;
         self.tabs.push(tab);
