@@ -6,8 +6,9 @@ themes) work out of the box.
 
 ## Provisioning
 
-This directory is empty in source control. The font is downloaded at
-build time by `build.rs` in `sonic-core` (planned) or via a manual one-shot:
+This directory is empty in source control. The font is fetched manually
+(an automated `build.rs` provisioner is on the roadmap but not yet wired);
+one-shot:
 
 ```bash
 curl -L -o JetBrainsMono.zip \
