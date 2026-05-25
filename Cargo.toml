@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sonic-core",
-    "crates/sonic-shared",
-    "crates/sonic-mac",
-    "crates/sonic-windows",
+    "sonic-core",
+    "sonic-shared",
+    "sonic-mac",
+    "sonic-windows",
 ]
-default-members = ["crates/sonic-core", "crates/sonic-shared"]
+default-members = ["sonic-core", "sonic-shared"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,8 +20,8 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Internal
-sonic-core = { path = "crates/sonic-core", version = "0.1.0" }
-sonic-shared = { path = "crates/sonic-shared", version = "0.1.0" }
+sonic-core = { path = "sonic-core", version = "0.1.0" }
+sonic-shared = { path = "sonic-shared", version = "0.1.0" }
 
 # Core terminal
 vte = "0.13"

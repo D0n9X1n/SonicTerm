@@ -30,3 +30,7 @@ serde_plain.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+[[example]]
+name = "pty_dump"
+path = "examples/pty_dump.rs"

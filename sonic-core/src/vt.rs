@@ -180,13 +180,18 @@ impl Perform for Performer {
                 let col = p1().saturating_sub(1);
                 self.grid.goto(row, col);
             }
-            'J' => {
-                self.grid.erase_screen();
-                if p0() == 2 {
-                    self.grid.goto(0, 0);
-                }
-            }
-            'K' => self.grid.erase_line_to_end(),
+            'J' => match p0() {
+                0 => self.grid.erase_below(),
+                1 => self.grid.erase_above(),
+                2 | 3 => self.grid.erase_screen(),
+                _ => {}
+            },
+            'K' => match p0() {
+                0 => self.grid.erase_line_to_end(),
+                1 => self.grid.erase_line_to_start(),
+                2 => self.grid.erase_line(),
+                _ => {}
+            },
             'm' => self.apply_sgr(params),
             _ => {}
         }
@@ -279,7 +284,57 @@ mod tests {
         let mut p = Parser::new(Grid::new(5, 2));
         p.advance(b"abc\x1b[2J");
         assert_eq!(p.grid().row(0)[0].ch, ' ');
-        assert_eq!(p.grid().cursor, crate::grid::Pos::default());
+        // ED 2 erases but does NOT move the cursor (per xterm).
+    }
+
+    #[test]
+    fn ed0_only_erases_below_cursor() {
+        let mut p = Parser::new(Grid::new(5, 3));
+        p.advance(b"aaa\r\nbbb\r\nccc");
+        p.advance(b"\x1b[1;2H"); // row 1 col 2 (1-indexed)
+        p.advance(b"\x1b[0J");
+        assert_eq!(p.grid().row(0)[0].ch, 'a');
+        assert_eq!(p.grid().row(0)[1].ch, ' ');
+        assert_eq!(p.grid().row(1)[0].ch, ' ');
+        assert_eq!(p.grid().row(2)[0].ch, ' ');
+    }
+
+    #[test]
+    fn ed1_erases_above_cursor() {
+        let mut p = Parser::new(Grid::new(3, 3));
+        p.advance(b"aaa\r\nbbb\r\nccc");
+        p.advance(b"\x1b[2;2H");
+        p.advance(b"\x1b[1J");
+        assert_eq!(p.grid().row(0)[0].ch, ' ');
+        assert_eq!(p.grid().row(1)[1].ch, ' ');
+        assert_eq!(p.grid().row(2)[0].ch, 'c');
+    }
+
+    #[test]
+    fn el_modes_distinct() {
+        let mut p = Parser::new(Grid::new(5, 2));
+        p.advance(b"abcde\r\nfghij");
+        p.advance(b"\x1b[1;3H");
+        p.advance(b"\x1b[0K"); // erase to end
+        assert_eq!(p.grid().row(0)[1].ch, 'b');
+        assert_eq!(p.grid().row(0)[2].ch, ' ');
+        p.advance(b"\x1b[2;3H");
+        p.advance(b"\x1b[1K"); // erase to start
+        assert_eq!(p.grid().row(1)[0].ch, ' ');
+        assert_eq!(p.grid().row(1)[3].ch, 'i');
+    }
+
+    #[test]
+    fn shell_prompt_redraw_preserves_above_cursor() {
+        // The real-world bug the e2e test caught: a shell that runs `ls`,
+        // sees the output, then redraws its prompt via ED 0 should NOT
+        // wipe prior output.
+        let mut p = Parser::new(Grid::new(20, 4));
+        p.advance(b"prompt$ ls\r\nfile1 file2\r\nprompt$ ");
+        p.advance(b"\x1b[0J");
+        assert_eq!(p.grid().row(0)[0].ch, 'p');
+        assert_eq!(p.grid().row(1)[0].ch, 'f');
+        assert_eq!(p.grid().row(2)[0].ch, 'p');
     }
 
     #[test]

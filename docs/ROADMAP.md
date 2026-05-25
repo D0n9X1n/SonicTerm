@@ -35,8 +35,8 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | PaneTree model (recursive splits, collapse-on-close) | ✅ | bootstrap |
 | TOML config + 4 themes + WezTerm keymap | ✅ | bootstrap |
 | Original SVG icon + bake script | ✅ | bootstrap |
-| **wgpu+glyphon character rendering** | ✅ v0.2 | `crates/sonic-shared/src/render.rs` |
-| **Keyboard input → PTY** | ✅ v0.2 | `crates/sonic-shared/src/app.rs::encode_logical` |
+| **wgpu+glyphon character rendering** | ✅ v0.2 | `sonic-shared/src/render.rs` |
+| **Keyboard input → PTY** | ✅ v0.2 | `sonic-shared/src/app.rs::encode_logical` |
 | **Per-cell color rendering** | ⏳ v0.3 | scaffold in `render.rs` (`cell_fg`, `indexed`) marked `#[allow(dead_code)]` |
 | Cursor rendering | ⏳ v0.3 | — |
 | Browser-style tab bar UI | ⏳ v0.3 | model in `tabs.rs`; no draw |

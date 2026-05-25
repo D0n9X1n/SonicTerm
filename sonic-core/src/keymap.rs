@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn parses_bundled_wezterm_map() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/keymaps/wezterm.toml");
+            .join("../assets/keymaps/wezterm.toml");
         let km = Keymap::load(&path).expect("load");
         assert_eq!(km.meta.name, "wezterm-default");
         assert!(matches!(km.lookup("super+t"), Some(Action::NewTab)));

@@ -177,7 +177,7 @@ impl Grid {
         }
     }
 
-    /// Erase from cursor to end of line (CSI K).
+    /// Erase from cursor to end of line (CSI 0 K).
     pub fn erase_line_to_end(&mut self) {
         let r = self.cursor.row as usize;
         for c in self.cursor.col as usize..self.cols as usize {
@@ -185,7 +185,45 @@ impl Grid {
         }
     }
 
-    /// Erase the entire visible screen (CSI 2J).
+    /// Erase from beginning of line to cursor inclusive (CSI 1 K).
+    pub fn erase_line_to_start(&mut self) {
+        let r = self.cursor.row as usize;
+        for c in 0..=(self.cursor.col as usize).min(self.cols as usize - 1) {
+            self.visible[r][c] = Cell::default();
+        }
+    }
+
+    /// Erase the entire current line (CSI 2 K).
+    pub fn erase_line(&mut self) {
+        let r = self.cursor.row as usize;
+        for cell in &mut self.visible[r] {
+            *cell = Cell::default();
+        }
+    }
+
+    /// Erase from cursor to end of screen (CSI 0 J). This is what shells
+    /// use to redraw a prompt — they jump to a row, erase below, and
+    /// reprint. It must NOT touch rows above the cursor.
+    pub fn erase_below(&mut self) {
+        self.erase_line_to_end();
+        for r in (self.cursor.row as usize + 1)..self.rows as usize {
+            for cell in &mut self.visible[r] {
+                *cell = Cell::default();
+            }
+        }
+    }
+
+    /// Erase from start of screen to cursor (CSI 1 J).
+    pub fn erase_above(&mut self) {
+        for r in 0..self.cursor.row as usize {
+            for cell in &mut self.visible[r] {
+                *cell = Cell::default();
+            }
+        }
+        self.erase_line_to_start();
+    }
+
+    /// Erase the entire visible screen (CSI 2 J).
     pub fn erase_screen(&mut self) {
         for row in &mut self.visible {
             for cell in row.iter_mut() {

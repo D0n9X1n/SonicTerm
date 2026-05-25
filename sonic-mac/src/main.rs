@@ -44,5 +44,5 @@ fn asset_dir() -> PathBuf {
         }
     }
     // dev fallback
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets")
 }

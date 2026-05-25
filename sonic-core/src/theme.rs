@@ -86,7 +86,7 @@ mod tests {
     use super::*;
 
     fn bundled(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes").join(name)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/themes").join(name)
     }
 
     #[test]
