@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hyperlink::HyperlinkId;
+
 /// (row, col) position. (0, 0) is top-left of the visible region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pos {
@@ -45,11 +47,18 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: CellFlags,
+    pub hyperlink: Option<HyperlinkId>,
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ', fg: Color::Default, bg: Color::Default, flags: CellFlags::empty() }
+        Cell {
+            ch: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: CellFlags::empty(),
+            hyperlink: None,
+        }
     }
 }
 
@@ -126,6 +135,19 @@ impl Grid {
 
     /// Put a character at cursor, advancing cursor by character width.
     pub fn put_char(&mut self, ch: char, fg: Color, bg: Color, flags: CellFlags) {
+        self.put_char_linked(ch, fg, bg, flags, None);
+    }
+
+    /// Put a character at cursor, also tagging the cell(s) with an optional
+    /// hyperlink id.
+    pub fn put_char_linked(
+        &mut self,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        hyperlink: Option<HyperlinkId>,
+    ) {
         let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
         if width == 0 {
             return;
@@ -136,9 +158,10 @@ impl Grid {
         }
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
         let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
-        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags };
+        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags, hyperlink };
         if width == 2 && c + 1 < self.cols as usize {
-            self.visible[r][c + 1] = Cell { ch: ' ', fg, bg, flags: flags | CellFlags::WIDE_CONT };
+            self.visible[r][c + 1] =
+                Cell { ch: ' ', fg, bg, flags: flags | CellFlags::WIDE_CONT, hyperlink };
         }
         self.cursor.col += width;
     }
@@ -367,5 +390,11 @@ mod tests {
         let mut g = Grid::new(5, 3);
         g.goto(100, 100);
         assert_eq!(g.cursor, Pos { row: 2, col: 4 });
+    }
+
+    #[test]
+    fn cell_default_hyperlink_is_none() {
+        let c = Cell::default();
+        assert!(c.hyperlink.is_none());
     }
 }
