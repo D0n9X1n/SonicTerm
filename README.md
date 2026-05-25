@@ -15,7 +15,9 @@
 
 Sonic is a terminal emulator written in Rust that aims to be **fast first, beautiful second, and configurable third**. It runs on macOS and Windows, ships with WezTerm-compatible default keybindings, bundles a Nerd Font so prompts and icons "just work," and looks like a polished desktop app, not a port.
 
-## Status — `v0.1.0-alpha`
+## Status — `v0.2.0`
+
+Full feature matrix and roadmap: **[`docs/ROADMAP.md`](docs/ROADMAP.md)**.
 
 | Area | State |
 |---|---|
@@ -29,10 +31,13 @@ Sonic is a terminal emulator written in Rust that aims to be **fast first, beaut
 | 4 bundled themes (Tokyo Night, Dracula, Nord, Catppuccin) | ✅ |
 | Original app icon | ✅ |
 | Tab bar + recursive split tree (model only) | ✅ |
-| GPU character rendering (wgpu + glyphon) | ⚠️ scaffold; next PR |
-| Tab drag out / cross-window merge | ⚠️ API reserved; next PR |
-| Sixel / Kitty graphics, SSH, mux, ligatures | ❌ not planned for v0.1 |
-| Code signing / notarization | ❌ |
+| **GPU character rendering (wgpu + glyphon)** | ✅ |
+| **Keyboard input → PTY** (arrows, ctrl-letter, F-keys, ...) | ✅ |
+| Per-cell color rendering | ⏳ v0.3 |
+| Cursor + tab bar UI | ⏳ v0.3 |
+| Tab drag out / cross-window merge | ⏳ v0.4 |
+| Sixel / Kitty graphics, SSH, mux, ligatures | ⏳ v0.5 |
+| Code signing / notarization, auto-update | ⏳ v1.0 |
 
 ## Quick start
 
