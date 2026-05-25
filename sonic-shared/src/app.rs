@@ -173,7 +173,8 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f32::from(cols) * 9.0 + self.config.window.padding * 2.0,
                 f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                    + self.config.window.padding * 2.0,
+                    + self.config.window.padding * 2.0
+                    + crate::tabbar_view::TAB_BAR_HEIGHT,
             ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         self.scale_factor = window.scale_factor();
