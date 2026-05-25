@@ -121,7 +121,7 @@ cargo build --release -p sonic-mac                     # confirms fat-LTO build 
 
 ## 5. Coding conventions
 
-- **Tests go in per-crate `tests/` folder**, one `.rs` per source module. **Do not** add `#[cfg(test)] mod tests {}` inside source files. (PR #27 deliberately moved them out.)
+- **Prefer per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files. **New tests should follow this pattern.** The `sonic-shared/src/prefs/` subsystem (layout.rs, controls.rs, state.rs) still has inline `#[cfg(test)] mod tests {}` blocks from v0.6 and is the known exception — feel free to migrate them when you next touch that area, but it's not blocking.
 - **Test-only items that must remain accessible to integration tests stay `pub` with `#[doc(hidden)]`.** No `__test_support` shim modules — that pattern was explicitly removed.
 - **Public API for actions**: adding a new bindable user action means adding a variant to `sonic_core::keymap::Action` AND a match arm in `sonic_shared::app::App::run_action`.
 - **Conventional Commits** with scope: `feat(v0.3d): ...`, `fix(vt): ...`, `chore(deps): ...`, `docs: ...`.
