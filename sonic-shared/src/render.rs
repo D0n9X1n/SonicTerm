@@ -36,6 +36,23 @@ struct SpanDesc {
     italic: bool,
 }
 
+/// Per-row cache populated on first walk of each row and reused on
+/// subsequent frames as long as `Grid::is_row_dirty` says the row is
+/// clean. The win is avoiding the per-cell attribute walk for rows that
+/// haven't changed — concatenation of the cached `text` into the
+/// frame-wide buffer is cheap by comparison.
+struct RowCache {
+    /// Row text WITHOUT the trailing newline.
+    text: String,
+    /// Span descriptors with byte ranges local to `text` (no newline
+    /// offset). The renderer rebases these into the frame-wide buffer
+    /// when assembling the rich-text spans.
+    spans: Vec<SpanDesc>,
+    /// Underline runs for this row, columns only — the renderer wraps
+    /// them into `(row, col_a, col_b)` triples per frame.
+    underlines: Vec<(u16, u16)>,
+}
+
 #[allow(dead_code)]
 pub struct GpuRenderer {
     instance: wgpu::Instance,
@@ -81,6 +98,13 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Per-row span/text cache. One entry per visible grid row. The
+    /// cache is populated lazily during render() — entries for clean
+    /// rows are reused, dirty rows are rebuilt and replace the cache.
+    /// `cache_cols` records the column count the cache was built for;
+    /// any width change invalidates every entry.
+    row_cache: Vec<Option<RowCache>>,
+    cache_cols: u16,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -255,6 +279,8 @@ impl GpuRenderer {
             search_buffer,
             last_frame_key: None,
             skipped_frames: 0,
+            row_cache: Vec::new(),
+            cache_cols: 0,
         })
     }
 
@@ -264,6 +290,11 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
+        // Window resize doesn't directly mean the grid cols changed,
+        // but the cached row text was sized for the old viewport — be
+        // safe and flush.
+        self.row_cache.clear();
+        self.cache_cols = 0;
         self.buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
@@ -324,7 +355,7 @@ impl GpuRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
-        grid: &Grid,
+        grid: &mut Grid,
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
@@ -395,6 +426,19 @@ impl GpuRenderer {
         // early-exit silently. Cache only AFTER successful submit+present.
 
         // Walk the grid building (text, spans, underline cells) together.
+        // Per-row cache: if a row is not in the dirty set AND its cache
+        // entry exists AND grid.cols matches the cached width, reuse the
+        // cached text/spans/underlines instead of re-scanning the cells.
+        // This is the headline B2 win: a screen full of scrollback that
+        // didn't move costs us one Vec walk per frame, not 40 * 120 cell
+        // attribute comparisons.
+        if self.cache_cols != grid.cols || self.row_cache.len() != grid.rows as usize {
+            // Geometry change — every existing entry is stale.
+            self.row_cache.clear();
+            self.row_cache.resize_with(grid.rows as usize, || None);
+            self.cache_cols = grid.cols;
+        }
+
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
         // span_descriptors records (byte_range, fg, bg, weight, italic) so we
         // can build &str + Attrs pairs for set_rich_text after the String is
@@ -406,76 +450,134 @@ impl GpuRenderer {
 
         let fg_default = self.fg_default;
         for r in 0..grid.rows {
-            let row = grid.row(r);
-            // Open run state — flushed whenever a cell with different attrs
-            // appears (or at end of row).
-            let mut run_start_byte = text.len();
-            let mut run_fg = fg_default;
-            let mut run_weight = glyphon::Weight::NORMAL;
-            let mut run_italic = false;
-            let mut run_has_chars = false;
-            // Underline run for this row.
-            let mut ul_start: Option<u16> = None;
-            let mut last_visible_col: u16 = 0;
+            let row_dirty = grid.is_row_dirty(r);
+            let row_byte_base = text.len();
 
-            for (col, cell) in row.iter().enumerate() {
-                if cell.flags.contains(CellFlags::WIDE_CONT) {
-                    continue;
-                }
-                let cell_fg = cell_fg(cell, theme, fg_default);
-                let cell_weight = if cell.flags.contains(CellFlags::BOLD) {
-                    glyphon::Weight::BOLD
-                } else {
-                    glyphon::Weight::NORMAL
-                };
-                let cell_italic = cell.flags.contains(CellFlags::ITALIC);
+            let reuse =
+                !row_dirty && self.row_cache.get(r as usize).map(|c| c.is_some()).unwrap_or(false);
 
-                if run_has_chars
-                    && (cell_fg != run_fg || cell_weight != run_weight || cell_italic != run_italic)
-                {
+            if reuse {
+                // Cached fast-path: splice the row's text and rebase
+                // span byte ranges into the frame-wide text buffer.
+                let cached = self.row_cache[r as usize].as_ref().unwrap();
+                text.push_str(&cached.text);
+                for sd in &cached.spans {
                     span_descriptors.push(SpanDesc {
-                        range: run_start_byte..text.len(),
+                        range: (row_byte_base + sd.range.start)..(row_byte_base + sd.range.end),
+                        fg: sd.fg,
+                        weight: sd.weight,
+                        italic: sd.italic,
+                    });
+                }
+                for (a, b) in &cached.underlines {
+                    underlines.push((r, *a, *b));
+                }
+            } else {
+                // Dirty (or never-cached) row: walk cells, then snapshot
+                // the result into the cache for the next frame.
+                let row_text_start = text.len();
+                let row = grid.row(r);
+                // Open run state — flushed whenever a cell with different attrs
+                // appears (or at end of row).
+                let mut run_start_byte = text.len();
+                let mut run_fg = fg_default;
+                let mut run_weight = glyphon::Weight::NORMAL;
+                let mut run_italic = false;
+                let mut run_has_chars = false;
+                // Local copy of spans for THIS row only (so we can stash
+                // them in the cache with row-local byte ranges).
+                let mut row_spans: Vec<SpanDesc> = Vec::new();
+                // Underline run for this row.
+                let mut ul_start: Option<u16> = None;
+                let mut last_visible_col: u16 = 0;
+                let mut row_underlines: Vec<(u16, u16)> = Vec::new();
+
+                for (col, cell) in row.iter().enumerate() {
+                    if cell.flags.contains(CellFlags::WIDE_CONT) {
+                        continue;
+                    }
+                    let cell_fg = cell_fg(cell, theme, fg_default);
+                    let cell_weight = if cell.flags.contains(CellFlags::BOLD) {
+                        glyphon::Weight::BOLD
+                    } else {
+                        glyphon::Weight::NORMAL
+                    };
+                    let cell_italic = cell.flags.contains(CellFlags::ITALIC);
+
+                    if run_has_chars
+                        && (cell_fg != run_fg
+                            || cell_weight != run_weight
+                            || cell_italic != run_italic)
+                    {
+                        let frame_range = run_start_byte..text.len();
+                        row_spans.push(SpanDesc {
+                            range: (frame_range.start - row_text_start)
+                                ..(frame_range.end - row_text_start),
+                            fg: run_fg,
+                            weight: run_weight,
+                            italic: run_italic,
+                        });
+                        span_descriptors.push(SpanDesc {
+                            range: frame_range,
+                            fg: run_fg,
+                            weight: run_weight,
+                            italic: run_italic,
+                        });
+                        run_start_byte = text.len();
+                        run_fg = cell_fg;
+                        run_weight = cell_weight;
+                        run_italic = cell_italic;
+                        run_has_chars = false;
+                    }
+                    if !run_has_chars {
+                        run_fg = cell_fg;
+                        run_weight = cell_weight;
+                        run_italic = cell_italic;
+                    }
+                    text.push(cell.ch);
+                    run_has_chars = true;
+                    last_visible_col = col as u16;
+
+                    // Underline tracking — coalesce contiguous underlined cells
+                    if cell.flags.contains(CellFlags::UNDERLINE) {
+                        if ul_start.is_none() {
+                            ul_start = Some(col as u16);
+                        }
+                    } else if let Some(s) = ul_start.take() {
+                        let end = last_visible_col.saturating_sub(1);
+                        underlines.push((r, s, end));
+                        row_underlines.push((s, end));
+                    }
+                }
+                // Flush trailing underline run on this row
+                if let Some(s) = ul_start.take() {
+                    underlines.push((r, s, last_visible_col));
+                    row_underlines.push((s, last_visible_col));
+                }
+                // Flush the row's last attr run before pushing \n
+                if run_has_chars {
+                    let frame_range = run_start_byte..text.len();
+                    row_spans.push(SpanDesc {
+                        range: (frame_range.start - row_text_start)
+                            ..(frame_range.end - row_text_start),
                         fg: run_fg,
                         weight: run_weight,
                         italic: run_italic,
                     });
-                    run_start_byte = text.len();
-                    run_fg = cell_fg;
-                    run_weight = cell_weight;
-                    run_italic = cell_italic;
-                    run_has_chars = false;
+                    span_descriptors.push(SpanDesc {
+                        range: frame_range,
+                        fg: run_fg,
+                        weight: run_weight,
+                        italic: run_italic,
+                    });
                 }
-                if !run_has_chars {
-                    run_fg = cell_fg;
-                    run_weight = cell_weight;
-                    run_italic = cell_italic;
-                }
-                text.push(cell.ch);
-                run_has_chars = true;
-                last_visible_col = col as u16;
 
-                // Underline tracking — coalesce contiguous underlined cells
-                if cell.flags.contains(CellFlags::UNDERLINE) {
-                    if ul_start.is_none() {
-                        ul_start = Some(col as u16);
-                    }
-                } else if let Some(s) = ul_start.take() {
-                    underlines.push((r, s, last_visible_col.saturating_sub(1)));
-                }
+                // Snapshot into cache for next frame.
+                let row_text = text[row_text_start..].to_string();
+                self.row_cache[r as usize] =
+                    Some(RowCache { text: row_text, spans: row_spans, underlines: row_underlines });
             }
-            // Flush trailing underline run on this row
-            if let Some(s) = ul_start.take() {
-                underlines.push((r, s, last_visible_col));
-            }
-            // Flush the row's last attr run before pushing \n
-            if run_has_chars {
-                span_descriptors.push(SpanDesc {
-                    range: run_start_byte..text.len(),
-                    fg: run_fg,
-                    weight: run_weight,
-                    italic: run_italic,
-                });
-            }
+
             text.push('\n');
         }
 
@@ -916,6 +1018,13 @@ impl GpuRenderer {
         // before this point will not cache, so the next redraw will
         // re-attempt rendering.
         self.last_frame_key = Some(key);
+        // B2: the renderer has now consumed every dirty row's contents
+        // into either the GPU pipeline or the row_cache. Clear the
+        // bitset so the next frame can re-use cached spans for the
+        // (likely many) rows that didn't change. clear_dirty does NOT
+        // bump grid.revision, so the FrameKey fast-path above still
+        // works for truly unchanged frames.
+        grid.clear_dirty();
         Ok(())
     }
 }

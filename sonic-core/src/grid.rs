@@ -85,6 +85,12 @@ pub struct Grid {
     /// can compare the current revision with their last-observed value to
     /// skip work when nothing has changed.
     revision: u64,
+    /// Per-row dirty bitset. `true` means the row has been mutated since
+    /// the last `clear_dirty()` and the renderer must re-shape it; `false`
+    /// means the renderer may reuse its cached span data for that row.
+    /// `Vec<bool>` is fine at terminal row counts (~40 typical, ~200 max)
+    /// — a BitSet has worse cache behavior at this scale.
+    dirty_rows: Vec<bool>,
 }
 
 impl Grid {
@@ -100,6 +106,63 @@ impl Grid {
             default: Cell::default(),
             alt_screen: None,
             revision: 0,
+            // A freshly created grid is fully dirty: the renderer has
+            // never seen it. Once it does its first walk and calls
+            // clear_dirty(), the flags drop to all-false.
+            dirty_rows: vec![true; rows as usize],
+        }
+    }
+
+    /// True if row `r` has been mutated since the last `clear_dirty()`.
+    /// Out-of-range rows return `false` (the caller's bounds check has
+    /// already failed; nothing for the renderer to do).
+    #[inline]
+    pub fn is_row_dirty(&self, r: u16) -> bool {
+        self.dirty_rows.get(r as usize).copied().unwrap_or(false)
+    }
+
+    /// Clear the dirty bitset. Called by the renderer after a successful
+    /// frame so the next frame only re-shapes rows that have actually
+    /// changed. This is NOT a mutator — it does not bump the revision
+    /// counter (an unchanged grid post-clear is still semantically
+    /// unchanged from the renderer's point of view).
+    #[inline]
+    pub fn clear_dirty(&mut self) {
+        for d in &mut self.dirty_rows {
+            *d = false;
+        }
+    }
+
+    /// Number of rows currently marked dirty. Useful for tests and for
+    /// tracing/diagnostic output.
+    #[inline]
+    pub fn dirty_count(&self) -> usize {
+        self.dirty_rows.iter().filter(|d| **d).count()
+    }
+
+    #[inline]
+    fn mark_row(&mut self, r: u16) {
+        if let Some(slot) = self.dirty_rows.get_mut(r as usize) {
+            *slot = true;
+        }
+    }
+
+    #[inline]
+    fn mark_all(&mut self) {
+        for d in &mut self.dirty_rows {
+            *d = true;
+        }
+    }
+
+    #[inline]
+    fn mark_range(&mut self, lo: u16, hi_inclusive: u16) {
+        let lo = lo as usize;
+        let hi = (hi_inclusive as usize).min(self.dirty_rows.len().saturating_sub(1));
+        if lo >= self.dirty_rows.len() {
+            return;
+        }
+        for slot in &mut self.dirty_rows[lo..=hi] {
+            *slot = true;
         }
     }
 
@@ -145,8 +208,10 @@ impl Grid {
             default: self.default.clone(),
             alt_screen: None,
             revision: 0,
+            dirty_rows: vec![true; rows as usize],
         };
         self.alt_screen = Some(Box::new(saved));
+        self.mark_all();
         self.bump();
     }
 
@@ -176,6 +241,7 @@ impl Grid {
             self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
+        self.mark_all();
         self.bump();
     }
 
@@ -198,6 +264,10 @@ impl Grid {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
+        // Re-size the dirty bitset to the new row count, then mark
+        // everything — any geometry change forces a full re-render.
+        self.dirty_rows.resize(rows as usize, true);
+        self.mark_all();
         if let Some(alt) = self.alt_screen.as_mut() {
             alt.resize(cols, rows);
         }
@@ -252,31 +322,45 @@ impl Grid {
                 Cell { ch: ' ', fg, bg, flags: flags | CellFlags::WIDE_CONT, hyperlink };
         }
         self.cursor.col += width;
+        self.mark_row(r as u16);
         self.bump();
     }
 
     pub fn carriage_return(&mut self) {
         self.cursor.col = 0;
+        let r = self.cursor.row;
+        self.mark_row(r);
         self.bump();
     }
 
     pub fn linefeed(&mut self) {
+        let old = self.cursor.row;
         if self.cursor.row + 1 >= self.rows {
+            // scroll_up already marks every row dirty.
             self.scroll_up(1);
         } else {
             self.cursor.row += 1;
         }
+        // Both leaving and arriving rows count as touched (cursor moved
+        // through them, even if the cells themselves are unchanged — the
+        // renderer may need to redraw the cursor on either).
+        self.mark_row(old);
+        self.mark_row(self.cursor.row);
         self.bump();
     }
 
     pub fn backspace(&mut self) {
         self.cursor.col = self.cursor.col.saturating_sub(1);
+        let r = self.cursor.row;
+        self.mark_row(r);
         self.bump();
     }
 
     pub fn tab(&mut self) {
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
+        let r = self.cursor.row;
+        self.mark_row(r);
         self.bump();
     }
 
@@ -291,6 +375,9 @@ impl Grid {
             self.scrollback.push_back(row);
             self.visible.push(make_row(self.cols));
         }
+        // Every row's content shifted up — the entire visible region
+        // changed identity, so every cached span set is stale.
+        self.mark_all();
         self.bump();
     }
 
@@ -300,6 +387,7 @@ impl Grid {
         for c in self.cursor.col as usize..self.cols as usize {
             self.visible[r][c] = Cell::default();
         }
+        self.mark_row(r as u16);
         self.bump();
     }
 
@@ -309,6 +397,7 @@ impl Grid {
         for c in 0..=(self.cursor.col as usize).min(self.cols as usize - 1) {
             self.visible[r][c] = Cell::default();
         }
+        self.mark_row(r as u16);
         self.bump();
     }
 
@@ -318,6 +407,7 @@ impl Grid {
         for cell in &mut self.visible[r] {
             *cell = Cell::default();
         }
+        self.mark_row(r as u16);
         self.bump();
     }
 
@@ -331,6 +421,10 @@ impl Grid {
                 *cell = Cell::default();
             }
         }
+        // Mark cursor.row..rows
+        let lo = self.cursor.row;
+        let hi = self.rows.saturating_sub(1);
+        self.mark_range(lo, hi);
         self.bump();
     }
 
@@ -342,6 +436,9 @@ impl Grid {
             }
         }
         self.erase_line_to_start();
+        // erase_line_to_start already marked cursor.row; mark 0..cursor.row too.
+        let hi = self.cursor.row;
+        self.mark_range(0, hi);
         self.bump();
     }
 
@@ -352,13 +449,19 @@ impl Grid {
                 *cell = Cell::default();
             }
         }
+        self.mark_all();
         self.bump();
     }
 
     /// Move cursor to (row, col), clamping to grid bounds.
     pub fn goto(&mut self, row: u16, col: u16) {
+        let old_row = self.cursor.row;
         self.cursor.row = row.min(self.rows.saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
+        // Both leaving and arriving rows need re-render so the cursor
+        // quad doesn't lag behind.
+        self.mark_row(old_row);
+        self.mark_row(self.cursor.row);
         self.bump();
     }
 

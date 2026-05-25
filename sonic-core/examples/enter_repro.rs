@@ -39,8 +39,7 @@ fn main() {
             if shutdown_clone.load(Ordering::Relaxed) {
                 break;
             }
-            let timeout =
-                if pending { min_interval } else { Duration::from_millis(200) };
+            let timeout = if pending { min_interval } else { Duration::from_millis(200) };
             match out_rx.recv_timeout(timeout) {
                 Ok(bytes) => {
                     *last_batch_clone.lock() = Instant::now();
@@ -110,7 +109,7 @@ fn main() {
     // Lag must be <= min_interval + slack (32ms). If lag > 200ms the trailing
     // redraw was lost.
     if lag > Duration::from_millis(100) {
-        eprintln!("FAIL: last redraw {} after last batch — Enter bug present", format!("{lag:?}"));
+        eprintln!("FAIL: last redraw {lag:?} after last batch — Enter bug present");
         std::process::exit(1);
     }
     println!("[enter_repro] OK");
