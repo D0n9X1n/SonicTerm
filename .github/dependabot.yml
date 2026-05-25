@@ -4,8 +4,14 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "rust"]
+    # Only patch bumps and security advisories — major / minor cascades
+    # cause flood-of-PRs noise on an early-stage repo. Manual bumps still
+    # happen via PR when we actually want them.
+    allow:
+      - dependency-type: "all"
+        update-type: "version-update:semver-patch"
     groups:
       patch-updates:
         update-types: ["patch"]
@@ -14,4 +20,8 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    open-pull-requests-limit: 2
     labels: ["dependencies", "ci"]
+    allow:
+      - dependency-type: "all"
+        update-type: "version-update:semver-patch"

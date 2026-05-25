@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod pane;
+pub mod render;
 pub mod tabs;
 
 /// Re-exports for binary crates.

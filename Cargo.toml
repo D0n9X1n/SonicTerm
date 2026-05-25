@@ -35,11 +35,12 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 
 # Rendering
-wgpu = "0.20"
+wgpu = "0.19"
 bytemuck = { version = "1.16", features = ["derive"] }
 glyphon = "0.5"
 bitflags = { version = "2.5", features = ["serde"] }
 serde_plain = "1"
+pollster = "0.3"
 
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
