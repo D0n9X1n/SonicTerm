@@ -118,7 +118,7 @@ jobs:
           fi
           cat body.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name || inputs.tag }}
           name: Sonic ${{ github.ref_name || inputs.tag }}
