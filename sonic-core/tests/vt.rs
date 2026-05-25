@@ -5,8 +5,7 @@
 //! tests introduced in v0.5.
 
 use sonic_core::grid;
-use sonic_core::grid::{CellFlags, Color, Grid, Pos};
-use sonic_core::hyperlink::HyperlinkRegistry;
+use sonic_core::grid::{CellFlags, Color, Grid};
 use sonic_core::vt::VtEvent;
 use sonic_core::vt::*;
 
@@ -116,7 +115,7 @@ fn cursor_motion_clamps() {
     let mut p = Parser::new(Grid::new(5, 3));
     p.advance(b"\x1b[100;100H");
     // CUP clamps to (rows-1, cols-1)
-    assert_eq!(p.grid().cursor, crate::grid::Pos { row: 2, col: 4 });
+    assert_eq!(p.grid().cursor, grid::Pos { row: 2, col: 4 });
 }
 
 #[test]
