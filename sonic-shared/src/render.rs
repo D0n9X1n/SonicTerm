@@ -172,12 +172,23 @@ impl GpuRenderer {
             adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
 
         let format = TextureFormat::Bgra8UnormSrgb;
+        // Prefer Mailbox when the backend exposes it: Mailbox drops in-flight
+        // superseded frames so a fast-typing user always sees the newest
+        // keystroke without waiting a full vblank. Fall back to Fifo on
+        // backends that don't advertise Mailbox (Fifo is universally supported
+        // and remains the spec-mandated default).
+        let surface_caps = surface.get_capabilities(&adapter);
+        let present_mode = if surface_caps.present_modes.contains(&PresentMode::Mailbox) {
+            PresentMode::Mailbox
+        } else {
+            PresentMode::Fifo
+        };
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: PresentMode::Fifo,
+            present_mode,
             alpha_mode: CompositeAlphaMode::Opaque,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
