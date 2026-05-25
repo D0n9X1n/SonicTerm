@@ -47,6 +47,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | Half-transparent / blur backgrounds | ⏳ v0.4 | — |
 | Ligatures, IME, link click | ⏳ v0.4 | — |
 | Profile-guided perf, alt-screen, DEC modes | ⏳ v0.5 | — |
+| **In-app graphical preferences UI** | ⏳ v0.4 | — |
 | Code signing + auto-update | ⏳ v1.0 | — |
 
 ---
@@ -112,6 +113,16 @@ new tab, `Cmd+D` splits the pane, click a tab to switch, drag-select +
    pulled from the keymap.
 8. **In-page search** (`Cmd+F`): match against the visible grid +
    scrollback; highlight hits with a quad pass.
+9. **Graphical preferences UI**: `Cmd+,` opens an in-app settings window
+   (separate winit window, rendered with the same wgpu+glyphon stack +
+   quad pipeline). Tabs: General / Appearance / Font / Keymap / Behavior.
+   Form controls (toggle, slider, color picker, font picker, dropdown,
+   text field, keymap recorder) built from quads + text. Each control
+   writes through to `Config` and persists by serializing back to
+   `~/.config/sonic/sonic.toml`. The TOML file stays the source of
+   truth; the GUI is just a convenience editor on top of it. Live-
+   preview changes in the terminal window before "Apply" commits to
+   disk.
 
 ### ⏳ v0.5.0 — Performance and completeness
 1. **Damage tracking**: only rebuild glyphon Buffer for changed rows.
