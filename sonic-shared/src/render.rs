@@ -20,6 +20,7 @@ use wgpu::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
+    pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     selection::Selection,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
@@ -212,8 +213,20 @@ impl GpuRenderer {
     }
 
     /// Top inset reserved for the tab bar.
-    fn top_inset(&self) -> f32 {
+    pub fn top_inset(&self) -> f32 {
         TAB_BAR_HEIGHT + self.padding
+    }
+
+    pub fn width(&self) -> u32 {
+        self.config.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.config.height
+    }
+
+    pub fn padding(&self) -> f32 {
+        self.padding
     }
 
     pub fn cells(&self) -> (u16, u16) {
@@ -246,6 +259,8 @@ impl GpuRenderer {
         cursor_visible: bool,
         selection: Option<&Selection>,
         tabs: &TabBar,
+        pane_rects: &[(u64, PaneRect)],
+        active_pane: u64,
     ) -> Result<()> {
         // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
@@ -422,6 +437,47 @@ impl GpuRenderer {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
             });
+        }
+
+        // -------- Pane split borders ---------------------------------------
+        // Each pane in the tab gets a thin border outlining its rectangle so
+        // splits are visible; the focused pane gets a brighter, thicker one.
+        // v0.3d only renders the active pane's grid (above) inside the full
+        // content rect — per-pane glyphon Buffer rendering is v0.4 work.
+        if pane_rects.len() > 1 {
+            let border = [
+                f32::from(self.fg_default.r()) / 255.0 * 0.5,
+                f32::from(self.fg_default.g()) / 255.0 * 0.5,
+                f32::from(self.fg_default.b()) / 255.0 * 0.5,
+                1.0,
+            ];
+            let focus_border = [
+                f32::from(self.fg_default.r()) / 255.0,
+                f32::from(self.fg_default.g()) / 255.0,
+                f32::from(self.fg_default.b()) / 255.0,
+                1.0,
+            ];
+            for (id, r) in pane_rects {
+                let is_active = *id == active_pane;
+                let color = if is_active { focus_border } else { border };
+                let t = if is_active { 2.0_f32 } else { 1.0_f32 };
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
+                    color,
+                });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x, r.y + r.h - t, r.w, t, sw, sh),
+                    color,
+                });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh),
+                    color,
+                });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x + r.w - t, r.y, t, r.h, sw, sh),
+                    color,
+                });
+            }
         }
 
         // -------- Tab bar ---------------------------------------------------

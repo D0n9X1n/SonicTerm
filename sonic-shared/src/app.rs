@@ -1,8 +1,13 @@
-//! App loop. Owns the window, the GPU renderer, the PTY, parser, tabs,
-//! selection state, and clipboard. Drives keymap dispatch.
+//! App loop. Owns the window, the GPU renderer, all tab/pane state, the
+//! per-pane PTYs and parsers, selection state, and clipboard. Drives keymap
+//! dispatch.
 
 use std::{
-    sync::Arc,
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -11,7 +16,8 @@ use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonic_core::{
     config::Config,
-    keymap::{Action, Keymap, ScrollAction},
+    grid::Grid,
+    keymap::{Action, Direction, Keymap, ScrollAction},
     pty::PtyHandle,
     theme::Theme,
     vt::{Parser, VtEvent},
@@ -25,11 +31,18 @@ use winit::{
 };
 
 use crate::{
+    pane::PaneTree,
     render::GpuRenderer,
     selection::Selection,
     tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
+
+static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_pane_id() -> u64 {
+    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
@@ -47,15 +60,36 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
+/// Per-pane runtime state. The parser is shared with a per-pane VT thread
+/// that drains the pty out-channel; the pty handle owns the writer side.
+pub struct PaneState {
+    pub parser: Arc<Mutex<Parser>>,
+    pub pty: Option<PtyHandle>,
+}
+
+impl PaneState {
+    fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
+        Self { parser, pty }
+    }
+}
+
+/// Per-tab state. The `TabBar` keeps title/order; this struct tracks the
+/// pane tree and the focused leaf inside the tab.
+pub struct TabState {
+    pub tree: PaneTree,
+    pub active_pane: u64,
+}
+
 struct App {
     theme: Theme,
     config: Config,
     keymap: Keymap,
     window: Option<Arc<Window>>,
     renderer: Option<GpuRenderer>,
-    parser: Option<Arc<Mutex<Parser>>>,
-    pty: Option<PtyHandle>,
     tabs: TabBar,
+    /// Parallel to `tabs.tabs()` — same length, same order.
+    tab_states: Vec<TabState>,
+    panes: HashMap<u64, PaneState>,
     modifiers: ModifiersState,
     last_render: Instant,
     cursor_pos: (f64, f64),
@@ -73,9 +107,9 @@ impl App {
             keymap,
             window: None,
             renderer: None,
-            parser: None,
-            pty: None,
             tabs: TabBar::new(),
+            tab_states: Vec::new(),
+            panes: HashMap::new(),
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
             cursor_pos: (0.0, 0.0),
@@ -86,9 +120,120 @@ impl App {
         }
     }
 
+    fn active_pane_id(&self) -> Option<u64> {
+        let i = self.tabs.active_index();
+        self.tab_states.get(i).map(|t| t.active_pane)
+    }
+
+    fn active_pane(&self) -> Option<&PaneState> {
+        self.active_pane_id().and_then(|id| self.panes.get(&id))
+    }
+
     fn write_to_pty(&self, bytes: Vec<u8>) {
-        if let Some(pty) = self.pty.as_ref() {
-            let _ = pty.in_tx.send(bytes);
+        if let Some(p) = self.active_pane() {
+            if let Some(pty) = p.pty.as_ref() {
+                let _ = pty.in_tx.send(bytes);
+            }
+        }
+    }
+
+    /// Spawn a fresh PTY + parser pair sized to the current renderer.
+    fn spawn_pane(&self) -> PaneState {
+        let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
+        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
+        let pty = match PtyHandle::spawn_default_shell(cols, rows) {
+            Ok(pty) => {
+                let parser_clone = parser.clone();
+                let out_rx = pty.out_rx.clone();
+                let window = self.window.clone();
+                std::thread::Builder::new()
+                    .name("sonic-vt-loop".into())
+                    .spawn(move || {
+                        let mut last_request = Instant::now() - Duration::from_secs(1);
+                        let min_interval = Duration::from_millis(16);
+                        while let Ok(bytes) = out_rx.recv() {
+                            let mut p = parser_clone.lock();
+                            for ev in p.advance(&bytes) {
+                                if let VtEvent::SetTitle(t) = ev {
+                                    if let Some(w) = &window {
+                                        w.set_title(&format!("Sonic — {t}"));
+                                    }
+                                }
+                            }
+                            drop(p);
+                            if last_request.elapsed() >= min_interval {
+                                if let Some(w) = &window {
+                                    w.request_redraw();
+                                }
+                                last_request = Instant::now();
+                            }
+                        }
+                    })
+                    .expect("spawn vt loop");
+                Some(pty)
+            }
+            Err(e) => {
+                tracing::error!("failed to spawn pty: {e}");
+                None
+            }
+        };
+        PaneState::new(parser, pty)
+    }
+
+    fn new_tab(&mut self, title: impl Into<String>) {
+        let pane_id = next_pane_id();
+        let pane = self.spawn_pane();
+        self.panes.insert(pane_id, pane);
+        self.tabs.push(Tab::new(title));
+        self.tab_states.push(TabState { tree: PaneTree::leaf(pane_id), active_pane: pane_id });
+    }
+
+    fn close_tab_at(&mut self, index: usize) {
+        if index >= self.tab_states.len() {
+            return;
+        }
+        let st = self.tab_states.remove(index);
+        for id in st.tree.leaves() {
+            self.panes.remove(&id);
+        }
+        if let Some(id) = self.tabs.tabs().get(index).map(|t| t.id) {
+            self.tabs.close(id);
+        }
+    }
+
+    fn split_active(&mut self, dir: Direction) {
+        let new_id = next_pane_id();
+        let new_pane = self.spawn_pane();
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get_mut(i) else { return };
+        let focus = st.active_pane;
+        if st.tree.split(focus, dir, new_id) {
+            st.active_pane = new_id;
+            self.panes.insert(new_id, new_pane);
+        }
+    }
+
+    fn close_active_pane(&mut self) {
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get_mut(i) else { return };
+        let focus = st.active_pane;
+        if matches!(st.tree, PaneTree::Leaf { id } if id == focus) {
+            self.close_tab_at(i);
+            return;
+        }
+        let new_focus =
+            st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
+        if st.tree.close(focus) {
+            st.active_pane = new_focus;
+            self.panes.remove(&focus);
+        }
+    }
+
+    fn focus_pane_dir(&mut self, dir: Direction) {
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get_mut(i) else { return };
+        if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
+            st.active_pane = next;
         }
     }
 
@@ -100,12 +245,11 @@ impl App {
             Action::ReloadConfig => tracing::info!("reload_config: not yet implemented"),
             Action::NewTab => {
                 let n = self.tabs.len() + 1;
-                self.tabs.push(Tab::new(format!("shell {n}")));
+                self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
-                if let Some(active) = self.tabs.active().map(|t| t.id) {
-                    self.tabs.close(active);
-                }
+                let i = self.tabs.active_index();
+                self.close_tab_at(i);
             }
             Action::NextTab => self.tabs.next(),
             Action::PrevTab => self.tabs.prev(),
@@ -114,15 +258,15 @@ impl App {
                 let last = self.tabs.len().saturating_sub(1);
                 self.tabs.activate(last);
             }
+            Action::SplitRight => self.split_active(Direction::Right),
+            Action::SplitDown => self.split_active(Direction::Down),
+            Action::ClosePane => self.close_active_pane(),
+            Action::FocusPane(d) => self.focus_pane_dir(*d),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
             | Action::ResetFontSize
             | Action::ToggleFullscreen
-            | Action::SplitRight
-            | Action::SplitDown
-            | Action::ClosePane
-            | Action::FocusPane(_)
             | Action::ResizePane { .. }
             | Action::NewWindow
             | Action::OpenSearch
@@ -140,8 +284,8 @@ impl App {
         if sel.is_empty() {
             return;
         }
-        let Some(parser) = self.parser.as_ref() else { return };
-        let text = sel.as_text(parser.lock().grid());
+        let Some(pane) = self.active_pane() else { return };
+        let text = sel.as_text(pane.parser.lock().grid());
         if text.is_empty() {
             return;
         }
@@ -190,53 +334,20 @@ impl ApplicationHandler for App {
         )
         .expect("init renderer");
 
-        let (real_cols, real_rows) = renderer.cells();
-        let grid = sonic_core::grid::Grid::new(real_cols, real_rows);
-        let parser = Arc::new(Mutex::new(Parser::new(grid)));
-
-        match PtyHandle::spawn_default_shell(real_cols, real_rows) {
-            Ok(pty) => {
-                let parser_clone = parser.clone();
-                let out_rx = pty.out_rx.clone();
-                let window_clone = window.clone();
-                std::thread::Builder::new()
-                    .name("sonic-vt-loop".into())
-                    .spawn(move || {
-                        // Coalesce redraw requests so a burst of pty output
-                        // doesn't drown the main thread in redraw events.
-                        let mut last_request = Instant::now() - Duration::from_secs(1);
-                        let min_interval = Duration::from_millis(16);
-                        while let Ok(bytes) = out_rx.recv() {
-                            let mut p = parser_clone.lock();
-                            for ev in p.advance(&bytes) {
-                                if let VtEvent::SetTitle(t) = ev {
-                                    window_clone.set_title(&format!("Sonic — {t}"));
-                                }
-                            }
-                            drop(p);
-                            if last_request.elapsed() >= min_interval {
-                                window_clone.request_redraw();
-                                last_request = Instant::now();
-                            }
-                        }
-                    })
-                    .expect("spawn vt loop");
-                self.pty = Some(pty);
-            }
-            Err(e) => tracing::error!("failed to spawn pty: {e}"),
-        }
-
-        self.tabs.push(Tab::new("shell"));
         self.window = Some(window.clone());
         self.renderer = Some(renderer);
-        self.parser = Some(parser);
+
+        // Seed the first tab + pane now that the window + renderer exist.
+        self.new_tab("shell");
+
+        let (rc, rr) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(
             "Sonic ready. theme={} keymap={} bindings={} grid={}x{}",
             self.theme.name,
             self.keymap.meta.name,
             self.keymap.bindings.len(),
-            real_cols,
-            real_rows,
+            rc,
+            rr,
         );
         window.request_redraw();
     }
@@ -246,18 +357,46 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => el.exit(),
 
             WindowEvent::RedrawRequested => {
-                if let (Some(r), Some(p)) = (self.renderer.as_mut(), self.parser.as_ref()) {
-                    // try_lock so the render thread never blocks behind the VT
-                    // thread on a burst of pty output. If we can't get it now,
-                    // a later redraw (the VT thread requests one after each
-                    // batch) will pick up the latest grid.
-                    if let Some(grid) = p.try_lock() {
+                // Compute per-pane rects in window pixels so the renderer can
+                // draw a border around each one (and a brighter one around
+                // the focused pane). The active pane's grid is rendered into
+                // the full content area; per-pane Buffer rendering is v0.4.
+                let tab_idx = self.tabs.active_index();
+                let pane_rects: Vec<(u64, crate::pane::Rect)> = self
+                    .tab_states
+                    .get(tab_idx)
+                    .map(|st| {
+                        if let Some(r) = self.renderer.as_ref() {
+                            let (w, h) = (r.width() as f32, r.height() as f32);
+                            let top = r.top_inset();
+                            let pad = r.padding();
+                            let outer = crate::pane::Rect::new(
+                                pad,
+                                top,
+                                (w - pad * 2.0).max(0.0),
+                                (h - top - pad).max(0.0),
+                            );
+                            st.tree.layout(outer)
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default();
+                let active_id =
+                    self.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+
+                if let (Some(r), Some(pane)) =
+                    (self.renderer.as_mut(), self.panes.get(&active_id))
+                {
+                    if let Some(grid) = pane.parser.try_lock() {
                         if let Err(e) = r.render(
                             grid.grid(),
                             &self.theme,
                             true,
                             self.selection.as_ref(),
                             &self.tabs,
+                            &pane_rects,
+                            active_id,
                         ) {
                             tracing::warn!("render error: {e}");
                         }
@@ -270,11 +409,11 @@ impl ApplicationHandler for App {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
                     let (cols, rows) = r.cells();
-                    if let Some(p) = self.parser.as_ref() {
-                        p.lock().grid_mut().resize(cols, rows);
-                    }
-                    if let Some(pty) = self.pty.as_ref() {
-                        (pty.resize)(cols, rows);
+                    for pane in self.panes.values() {
+                        pane.parser.lock().grid_mut().resize(cols, rows);
+                        if let Some(pty) = pane.pty.as_ref() {
+                            (pty.resize)(cols, rows);
+                        }
                     }
                 }
                 if let Some(w) = &self.window {
@@ -295,7 +434,6 @@ impl ApplicationHandler for App {
                 self.cursor_pos = (position.x, position.y);
                 if self.mouse_down {
                     if let Some(r) = self.renderer.as_ref() {
-                        // winit gives physical pixels; renderer thinks in physical too
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
@@ -313,34 +451,26 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
-                    // First, try the tab bar.
                     let px = self.cursor_pos.0 as f32;
                     let py = self.cursor_pos.1 as f32;
-                    let win_w = self.renderer.as_ref().map(|r| r.cells()).map(|_| ()).map(|_| 0.0);
-                    let _ = win_w;
                     let window_width =
                         self.window.as_ref().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
                     let layout = TabBarLayout::compute(&self.tabs, window_width);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => self.tabs.activate(i),
-                            TabHit::Close(i) => {
-                                if let Some(id) = self.tabs.tabs().get(i).map(|t| t.id) {
-                                    self.tabs.close(id);
-                                    if self.tabs.is_empty() {
-                                        el.exit();
-                                    }
-                                }
-                            }
+                            TabHit::Close(i) => self.close_tab_at(i),
                             TabHit::NewTab => {
                                 let n = self.tabs.len() + 1;
-                                self.tabs.push(Tab::new(format!("shell {n}")));
+                                self.new_tab(format!("shell {n}"));
                             }
+                        }
+                        if self.tabs.is_empty() {
+                            el.exit();
                         }
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
-                        // Don't start a selection when the click was on the bar.
                         self.mouse_down = false;
                         return;
                     }
@@ -355,7 +485,6 @@ impl ApplicationHandler for App {
                 }
                 ElementState::Released => {
                     self.mouse_down = false;
-                    // If a click landed without drag, clear the selection.
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;
@@ -369,7 +498,6 @@ impl ApplicationHandler for App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // 1) Try a keymap binding first.
                 if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
@@ -380,10 +508,8 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                // 2) Fall back to byte encoding for the pty.
                 if let Some(bytes) = encode_key(&event, self.modifiers) {
                     self.write_to_pty(bytes);
-                    // Typing should clear any active selection.
                     if self.selection.is_some() {
                         self.selection = None;
                         if let Some(w) = &self.window {
@@ -395,26 +521,16 @@ impl ApplicationHandler for App {
 
             _ => {}
         }
-        // No heartbeat redraw here. Redraws are explicitly requested by:
-        //   - the VT thread when pty bytes arrive
-        //   - mouse drag (selection changed)
-        //   - keyboard input that clears selection
-        //   - WM resize / scale change
-        // Spinning a redraw at the end of every window_event tick produced
-        // a feedback loop that pinned the main thread on macOS.
     }
 }
 
-// Suppress the dead-code warning while wider Action variants aren't wired yet.
 #[allow(dead_code)]
 fn _scroll_used(_a: ScrollAction) {}
 
-/// Translate a winit key event into raw bytes to send to the pty.
 fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
     encode_logical(&event.logical_key, mods)
 }
 
-/// Pure function — easy to test without constructing a platform `KeyEvent`.
 fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
@@ -459,13 +575,6 @@ fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
     }
 }
 
-/// Render a key event into the canonical keymap string, e.g. `"super+t"`,
-/// `"ctrl+shift+h"`, `"super+1"`. Returns None if the key has no
-/// representable name in the keymap.
-///
-/// We map `super` to the platform "command" key: ⌘ on macOS, Ctrl on Windows.
-/// For now we treat any of {super, ctrl} as `super` so WezTerm bindings just
-/// work on both platforms.
 fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if mods.super_key() || mods.control_key() {
@@ -591,8 +700,6 @@ mod tests {
         assert!(encode_logical(&Key::Named(NamedKey::Insert), ModifiersState::empty()).is_none());
     }
 
-    // ---- key_name covers the keymap string builder ----
-
     #[test]
     fn key_name_for_letter() {
         assert_eq!(key_name(&Key::Character(SmolStr::new("t"))).unwrap().as_str(), "t");
@@ -607,5 +714,12 @@ mod tests {
     #[test]
     fn key_name_for_unsupported_named_is_none() {
         assert!(key_name(&Key::Named(NamedKey::Insert)).is_none());
+    }
+
+    #[test]
+    fn next_pane_id_is_monotonic() {
+        let a = next_pane_id();
+        let b = next_pane_id();
+        assert!(b > a);
     }
 }
