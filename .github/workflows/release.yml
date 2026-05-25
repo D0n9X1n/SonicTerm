@@ -53,7 +53,7 @@ jobs:
       - name: Build .app + .dmg
         run: bash packaging/mac/make-dmg.sh dist/sonic "${{ github.ref_name }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sonic-mac
           path: dist/*.dmg
@@ -85,7 +85,7 @@ jobs:
           cd crates/sonic-windows
           cargo wix --no-build --nocapture --output ../../dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sonic-windows
           path: dist/*.msi
