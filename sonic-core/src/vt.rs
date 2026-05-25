@@ -175,8 +175,14 @@ impl Performer {
                 }
                 1049 => {
                     if set {
-                        self.saved_cursor = Some(self.grid.cursor);
-                        self.grid.enter_alt_screen();
+                        // Guard against repeated ?1049h while already in alt
+                        // screen — must not clobber the previously saved
+                        // primary-screen cursor. xterm behaviour: second
+                        // ?1049h is a no-op.
+                        if !self.grid.is_alt() {
+                            self.saved_cursor = Some(self.grid.cursor);
+                            self.grid.enter_alt_screen();
+                        }
                     } else {
                         self.grid.leave_alt_screen();
                         if let Some(c) = self.saved_cursor.take() {
@@ -601,6 +607,27 @@ mod tests {
         let before = p2.grid().cursor;
         p2.advance(b"\x1b[?1049l");
         assert_eq!(p2.grid().cursor, before);
+    }
+
+    #[test]
+    fn dec_1049h_repeated_does_not_clobber_saved_cursor() {
+        // Real-world cause: vim / fzf preview pane re-enters alt screen
+        // while already in alt. The second ?1049h must NOT save the alt-
+        // screen cursor over the original primary cursor — leaving alt
+        // afterwards must still land back at the original primary cursor.
+        let mut p = Parser::new(Grid::new(10, 3));
+        p.advance(b"abc\r\ndef");
+        // cursor now somewhere on row 1
+        let primary_cursor = p.grid().cursor;
+        p.advance(b"\x1b[?1049h"); // enter alt
+        // move cursor inside the alt screen
+        p.advance(b"\x1b[5;1H");
+        // a stray re-entry that previously clobbered saved_cursor
+        p.advance(b"\x1b[?1049h");
+        // move again
+        p.advance(b"\x1b[8;5H");
+        p.advance(b"\x1b[?1049l"); // leave alt
+        assert_eq!(p.grid().cursor, primary_cursor);
     }
 
     #[test]
