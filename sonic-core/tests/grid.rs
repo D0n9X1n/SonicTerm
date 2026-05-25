@@ -171,3 +171,165 @@ fn alt_screen_survives_resize() {
     assert_eq!(g.rows, 3);
     assert_eq!(g.row(0)[0].ch, 'A');
 }
+
+// -- Revision counter (Epic B1) -----------------------------------------
+
+#[test]
+fn revision_fresh_grid_is_zero() {
+    let g = Grid::new(8, 4);
+    assert_eq!(g.revision(), 0);
+}
+
+#[test]
+fn revision_increments_after_put_char() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.put_char('X', Color::Default, Color::Default, CellFlags::empty());
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_linefeed() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.linefeed();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_carriage_return() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.carriage_return();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_backspace() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.backspace();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_tab() {
+    let mut g = Grid::new(16, 4);
+    let before = g.revision();
+    g.tab();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_goto() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.goto(1, 1);
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_scroll_up() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.scroll_up(1);
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_screen() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.erase_screen();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_line() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.erase_line();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_line_to_end() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.erase_line_to_end();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_line_to_start() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.erase_line_to_start();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_below() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.erase_below();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_erase_above() {
+    let mut g = Grid::new(8, 4);
+    g.goto(2, 0);
+    let before = g.revision();
+    g.erase_above();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_resize() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.resize(10, 5);
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_enter_alt_screen() {
+    let mut g = Grid::new(8, 4);
+    let before = g.revision();
+    g.enter_alt_screen();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_increments_after_leave_alt_screen() {
+    let mut g = Grid::new(8, 4);
+    g.enter_alt_screen();
+    let before = g.revision();
+    g.leave_alt_screen();
+    assert!(g.revision() > before);
+}
+
+#[test]
+fn revision_not_changed_by_read_only_ops() {
+    let mut g = Grid::new(8, 4);
+    g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+    let before = g.revision();
+    let _ = g.row(0);
+    let _ = g.rows_iter().count();
+    let _ = g.scrollback_len();
+    let _ = g.revision();
+    assert_eq!(g.revision(), before);
+}
+
+#[test]
+fn revision_survives_resize() {
+    let mut g = Grid::new(8, 4);
+    g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+    let mid = g.revision();
+    assert!(mid > 0);
+    g.resize(10, 5);
+    // resize bumps (doesn't reset)
+    assert!(g.revision() > mid);
+    assert_ne!(g.revision(), 0);
+}

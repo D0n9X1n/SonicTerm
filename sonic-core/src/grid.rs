@@ -81,6 +81,10 @@ pub struct Grid {
     pub default: Cell,
     /// Saved primary screen when the alt screen is active.
     alt_screen: Option<Box<Grid>>,
+    /// Monotonically increasing counter bumped by every mutator. Renderers
+    /// can compare the current revision with their last-observed value to
+    /// skip work when nothing has changed.
+    revision: u64,
 }
 
 impl Grid {
@@ -95,7 +99,22 @@ impl Grid {
             cursor: Pos::default(),
             default: Cell::default(),
             alt_screen: None,
+            revision: 0,
         }
+    }
+
+    /// Monotonic revision counter, bumped by every mutator. A fresh grid
+    /// is at revision 0; the first content change yields a value > 0.
+    /// Renderers can compare this against their last-observed revision to
+    /// skip rebuilding text/quads when nothing has changed.
+    #[inline]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[inline]
+    fn bump(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// True if the alt screen is currently active (primary is saved).
@@ -125,8 +144,10 @@ impl Grid {
             cursor: saved_cursor,
             default: self.default.clone(),
             alt_screen: None,
+            revision: 0,
         };
         self.alt_screen = Some(Box::new(saved));
+        self.bump();
     }
 
     /// Leave the alt screen, restoring the saved primary screen. No-op if
@@ -155,6 +176,7 @@ impl Grid {
             self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
+        self.bump();
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -179,6 +201,7 @@ impl Grid {
         if let Some(alt) = self.alt_screen.as_mut() {
             alt.resize(cols, rows);
         }
+        self.bump();
     }
 
     /// Borrow a visible row.
@@ -229,10 +252,12 @@ impl Grid {
                 Cell { ch: ' ', fg, bg, flags: flags | CellFlags::WIDE_CONT, hyperlink };
         }
         self.cursor.col += width;
+        self.bump();
     }
 
     pub fn carriage_return(&mut self) {
         self.cursor.col = 0;
+        self.bump();
     }
 
     pub fn linefeed(&mut self) {
@@ -241,15 +266,18 @@ impl Grid {
         } else {
             self.cursor.row += 1;
         }
+        self.bump();
     }
 
     pub fn backspace(&mut self) {
         self.cursor.col = self.cursor.col.saturating_sub(1);
+        self.bump();
     }
 
     pub fn tab(&mut self) {
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
+        self.bump();
     }
 
     /// Scroll the visible region up by `n` lines, pushing the topmost rows
@@ -263,6 +291,7 @@ impl Grid {
             self.scrollback.push_back(row);
             self.visible.push(make_row(self.cols));
         }
+        self.bump();
     }
 
     /// Erase from cursor to end of line (CSI 0 K).
@@ -271,6 +300,7 @@ impl Grid {
         for c in self.cursor.col as usize..self.cols as usize {
             self.visible[r][c] = Cell::default();
         }
+        self.bump();
     }
 
     /// Erase from beginning of line to cursor inclusive (CSI 1 K).
@@ -279,6 +309,7 @@ impl Grid {
         for c in 0..=(self.cursor.col as usize).min(self.cols as usize - 1) {
             self.visible[r][c] = Cell::default();
         }
+        self.bump();
     }
 
     /// Erase the entire current line (CSI 2 K).
@@ -287,6 +318,7 @@ impl Grid {
         for cell in &mut self.visible[r] {
             *cell = Cell::default();
         }
+        self.bump();
     }
 
     /// Erase from cursor to end of screen (CSI 0 J). This is what shells
@@ -299,6 +331,7 @@ impl Grid {
                 *cell = Cell::default();
             }
         }
+        self.bump();
     }
 
     /// Erase from start of screen to cursor (CSI 1 J).
@@ -309,6 +342,7 @@ impl Grid {
             }
         }
         self.erase_line_to_start();
+        self.bump();
     }
 
     /// Erase the entire visible screen (CSI 2 J).
@@ -318,12 +352,14 @@ impl Grid {
                 *cell = Cell::default();
             }
         }
+        self.bump();
     }
 
     /// Move cursor to (row, col), clamping to grid bounds.
     pub fn goto(&mut self, row: u16, col: u16) {
         self.cursor.row = row.min(self.rows.saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
+        self.bump();
     }
 
     pub fn scrollback_len(&self) -> usize {

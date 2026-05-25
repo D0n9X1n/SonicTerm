@@ -75,6 +75,28 @@ pub struct GpuRenderer {
     search_fg: GColor,
     search_bg: [f32; 4],
     search_buffer: Buffer,
+    /// Last rendered frame key — when the next frame would produce an
+    /// identical key, render() short-circuits before any GPU work.
+    last_frame_key: Option<FrameKey>,
+    /// Cumulative count of frames skipped via the FrameKey fast-path.
+    /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
+    skipped_frames: u64,
+}
+
+/// A compact fingerprint of every input that can affect the rendered
+/// frame. If two consecutive frames produce an equal key the second one
+/// is a no-op for the user, so the renderer skips text shaping, quad
+/// rebuild and GPU submission entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameKey {
+    grid_revision: u64,
+    selection: Option<Selection>,
+    cursor_visible: bool,
+    tab: u64,
+    pane: u64,
+    search_hash: u64,
+    width: u32,
+    height: u32,
 }
 
 impl GpuRenderer {
@@ -225,6 +247,8 @@ impl GpuRenderer {
             search_fg,
             search_bg,
             search_buffer,
+            last_frame_key: None,
+            skipped_frames: 0,
         })
     }
 
@@ -232,6 +256,8 @@ impl GpuRenderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        // Geometry change → force the next frame to actually render.
+        self.last_frame_key = None;
         self.buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
@@ -301,6 +327,36 @@ impl GpuRenderer {
         active_pane: u64,
         search: Option<&SearchState>,
     ) -> Result<()> {
+        // Build a fingerprint of every input that can affect the rendered
+        // pixels. If it matches the last frame, nothing on screen would
+        // change — skip text shaping, quad rebuild and GPU submit.
+        let search_hash = search
+            .map(|s| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                s.query.hash(&mut h);
+                s.matches.len().hash(&mut h);
+                s.current.hash(&mut h);
+                h.finish()
+            })
+            .unwrap_or(0);
+        let key = FrameKey {
+            grid_revision: grid.revision(),
+            selection: selection.copied(),
+            cursor_visible,
+            tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
+            pane: active_pane,
+            search_hash,
+            width: self.config.width,
+            height: self.config.height,
+        };
+        if Some(key) == self.last_frame_key {
+            self.skipped_frames = self.skipped_frames.wrapping_add(1);
+            tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
+            return Ok(());
+        }
+        self.last_frame_key = Some(key);
+
         // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
         // span_descriptors records (byte_range, fg, bg, weight, italic) so we
