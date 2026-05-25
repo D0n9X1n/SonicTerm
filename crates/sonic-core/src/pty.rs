@@ -13,7 +13,7 @@ use std::{
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
 /// Outgoing message: bytes to write to the pty master (typed by user).
 type Outgoing = Vec<u8>;
@@ -39,12 +39,7 @@ impl PtyHandle {
     /// upstream — we expect a single program path here for simplicity).
     pub fn spawn(cmd: &str, cols: u16, rows: u16) -> Result<Self> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
         let mut builder = CommandBuilder::new(cmd);
         if let Ok(home) = std::env::var("HOME") {
@@ -79,12 +74,7 @@ impl PtyHandle {
             });
         });
 
-        Ok(Self {
-            out_rx,
-            in_tx,
-            resize,
-            _child: Arc::new(Mutex::new(child)),
-        })
+        Ok(Self { out_rx, in_tx, resize, _child: Arc::new(Mutex::new(child)) })
     }
 }
 

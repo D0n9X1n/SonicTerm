@@ -36,7 +36,13 @@ impl PaneTree {
         self.split_recursive(focus, axis, put_new_first, new_id)
     }
 
-    fn split_recursive(&mut self, focus: u64, axis: SplitAxis, new_first: bool, new_id: u64) -> bool {
+    fn split_recursive(
+        &mut self,
+        focus: u64,
+        axis: SplitAxis,
+        new_first: bool,
+        new_id: u64,
+    ) -> bool {
         match self {
             PaneTree::Leaf { id } if *id == focus => {
                 let existing = PaneTree::leaf(*id);
@@ -83,21 +89,23 @@ impl PaneTree {
         if let PaneTree::Leaf { id: leaf } = self {
             return *leaf == id; // signal "I am that leaf"
         }
-        let mut taken: Option<PaneTree> = None;
+        // Direct-child removal collapses the split; deeper removal recurses
+        // and leaves the surrounding structure intact.
+        let mut surviving: Option<PaneTree> = None;
         if let PaneTree::Split { first, second, .. } = self {
             let first_is = matches!(first.as_ref(), PaneTree::Leaf { id: l } if *l == id);
             let second_is = matches!(second.as_ref(), PaneTree::Leaf { id: l } if *l == id);
             if first_is {
-                taken = Some(std::mem::replace(second.as_mut(), PaneTree::leaf(0)));
+                surviving = Some(std::mem::replace(second.as_mut(), PaneTree::leaf(0)));
             } else if second_is {
-                taken = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
-            } else if first.close(id) {
-                taken = Some(std::mem::replace(second.as_mut(), PaneTree::leaf(0)));
-            } else if second.close(id) {
-                taken = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
+                surviving = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
+            } else if first.close(id) || second.close(id) {
+                // Recursive call already mutated the inner subtree — do not
+                // collapse the outer split here.
+                return true;
             }
         }
-        if let Some(t) = taken {
+        if let Some(t) = surviving {
             *self = t;
             true
         } else {
@@ -125,5 +133,41 @@ mod tests {
         t.close(2);
         assert_eq!(t.leaves(), vec![1]);
         assert!(matches!(t, PaneTree::Leaf { id: 1 }));
+    }
+
+    #[test]
+    fn split_left_inserts_new_pane_first() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Left, 2);
+        // New pane (id=2) goes to the left, existing (id=1) to the right
+        assert_eq!(t.leaves(), vec![2, 1]);
+    }
+
+    #[test]
+    fn split_up_uses_horizontal_axis() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Up, 2);
+        if let PaneTree::Split { axis, .. } = &t {
+            assert_eq!(*axis, SplitAxis::Horizontal);
+        } else {
+            panic!("expected split");
+        }
+    }
+
+    #[test]
+    fn split_nonexistent_focus_is_noop() {
+        let mut t = PaneTree::leaf(1);
+        assert!(!t.split(999, Direction::Right, 2));
+        assert_eq!(t.leaves(), vec![1]);
+    }
+
+    #[test]
+    fn close_nested_pane_preserves_siblings() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        t.split(2, Direction::Down, 3);
+        // Tree: Split(1, Split(2, 3))
+        t.close(3);
+        assert_eq!(t.leaves(), vec![1, 2]);
     }
 }

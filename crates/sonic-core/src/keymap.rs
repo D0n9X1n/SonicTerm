@@ -123,10 +123,7 @@ impl Keymap {
     /// `None` if no binding matches.
     pub fn lookup(&self, keys: &str) -> Option<&Action> {
         let needle = keys.to_ascii_lowercase();
-        self.bindings
-            .iter()
-            .find(|b| b.keys.to_ascii_lowercase() == needle)
-            .map(|b| &b.action.0)
+        self.bindings.iter().find(|b| b.keys.to_ascii_lowercase() == needle).map(|b| &b.action.0)
     }
 }
 
@@ -142,9 +139,6 @@ mod tests {
         assert_eq!(km.meta.name, "wezterm-default");
         assert!(matches!(km.lookup("super+t"), Some(Action::NewTab)));
         assert!(matches!(km.lookup("super+1"), Some(Action::ActivateTab(0))));
-        assert!(matches!(
-            km.lookup("super+shift+h"),
-            Some(Action::FocusPane(Direction::Left))
-        ));
+        assert!(matches!(km.lookup("super+shift+h"), Some(Action::FocusPane(Direction::Left))));
     }
 }

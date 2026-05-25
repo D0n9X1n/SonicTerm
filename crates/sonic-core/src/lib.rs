@@ -2,7 +2,7 @@
 //!
 //! Modules:
 //! - [`vt`]      — VT/ANSI parser built on top of the `vte` crate, with a
-//!                 semantic [`vt::Performer`] that mutates a [`grid::Grid`].
+//!   semantic [`vt::Performer`] that mutates a [`grid::Grid`].
 //! - [`grid`]    — terminal screen model: cells, attributes, scrollback.
 //! - [`pty`]     — cross-platform pty spawning and IO.
 //! - [`config`]  — TOML configuration with hot-reload.

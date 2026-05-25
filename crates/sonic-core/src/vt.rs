@@ -15,7 +15,7 @@
 
 use vte::{Params, Perform};
 
-use crate::grid::{Cell, CellFlags, Color, Grid};
+use crate::grid::{CellFlags, Color, Grid};
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -35,10 +35,7 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(grid: Grid) -> Self {
-        Self {
-            inner: vte::Parser::new(),
-            performer: Performer::new(grid),
-        }
+        Self { inner: vte::Parser::new(), performer: Performer::new(grid) }
     }
 
     /// Feed raw bytes from the pty. Drains any queued events for the caller.
@@ -150,52 +147,43 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A | 0x0B | 0x0C => self.grid.linefeed(),
+            0x0A..=0x0C => self.grid.linefeed(),
             0x0D => self.grid.carriage_return(),
             _ => {}
         }
     }
 
     fn csi_dispatch(&mut self, params: &Params, _inter: &[u8], _ignore: bool, action: char) {
-        let mut p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
-        let mut p1 = || {
-            params
-                .iter()
-                .nth(1)
-                .and_then(|s| s.first().copied())
-                .unwrap_or(0)
-        };
+        let p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
+        let p1 = || params.iter().nth(1).and_then(|s| s.first().copied()).unwrap_or(0);
         match action {
             'A' => {
-                let n = p0().max(1) as u16;
+                let n = p0().max(1);
                 self.grid.cursor.row = self.grid.cursor.row.saturating_sub(n);
             }
             'B' => {
-                let n = p0().max(1) as u16;
+                let n = p0().max(1);
                 self.grid.cursor.row =
                     (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
             }
             'C' => {
-                let n = p0().max(1) as u16;
+                let n = p0().max(1);
                 self.grid.cursor.col =
                     (self.grid.cursor.col + n).min(self.grid.cols.saturating_sub(1));
             }
             'D' => {
-                let n = p0().max(1) as u16;
+                let n = p0().max(1);
                 self.grid.cursor.col = self.grid.cursor.col.saturating_sub(n);
             }
             'H' | 'f' => {
-                let row = p0().saturating_sub(1) as u16;
-                let col = p1().saturating_sub(1) as u16;
+                let row = p0().saturating_sub(1);
+                let col = p1().saturating_sub(1);
                 self.grid.goto(row, col);
             }
             'J' => {
-                // 2 = entire screen; other modes treated as "to end" for now
+                self.grid.erase_screen();
                 if p0() == 2 {
-                    self.grid.erase_screen();
                     self.grid.goto(0, 0);
-                } else {
-                    self.grid.erase_screen();
                 }
             }
             'K' => self.grid.erase_line_to_end(),
@@ -299,5 +287,92 @@ mod tests {
         let mut p = Parser::new(Grid::new(5, 1));
         let evs = p.advance(b"\x1b]0;My Title\x07");
         assert!(matches!(evs.first(), Some(VtEvent::SetTitle(t)) if t == "My Title"));
+    }
+
+    #[test]
+    fn cursor_motion_clamps() {
+        let mut p = Parser::new(Grid::new(5, 3));
+        p.advance(b"\x1b[100;100H");
+        // CUP clamps to (rows-1, cols-1)
+        assert_eq!(p.grid().cursor, crate::grid::Pos { row: 2, col: 4 });
+    }
+
+    #[test]
+    fn cuu_cud_cuf_cub() {
+        let mut p = Parser::new(Grid::new(10, 5));
+        p.advance(b"\x1b[3;3H");
+        p.advance(b"\x1b[2A"); // up 2
+        assert_eq!(p.grid().cursor.row, 0);
+        p.advance(b"\x1b[3B"); // down 3
+        assert_eq!(p.grid().cursor.row, 3);
+        p.advance(b"\x1b[4C"); // right 4
+        assert_eq!(p.grid().cursor.col, 6);
+        p.advance(b"\x1b[5D"); // left 5
+        assert_eq!(p.grid().cursor.col, 1);
+    }
+
+    #[test]
+    fn sgr_bold_italic_underline_compose() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        p.advance(b"\x1b[1;3;4mX");
+        let cell = &p.grid().row(0)[0];
+        assert!(cell.flags.contains(CellFlags::BOLD));
+        assert!(cell.flags.contains(CellFlags::ITALIC));
+        assert!(cell.flags.contains(CellFlags::UNDERLINE));
+    }
+
+    #[test]
+    fn sgr_bright_fg() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        p.advance(b"\x1b[93mY"); // bright yellow
+        assert_eq!(p.grid().row(0)[0].fg, Color::Indexed(11));
+    }
+
+    #[test]
+    fn sgr_256_color_bg() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        p.advance(b"\x1b[48;5;42mZ");
+        assert_eq!(p.grid().row(0)[0].bg, Color::Indexed(42));
+    }
+
+    #[test]
+    fn osc8_hyperlink_event() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        let evs = p.advance(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07");
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, VtEvent::Hyperlink { uri, .. } if uri == "https://example.com")));
+    }
+
+    #[test]
+    fn bell_emits_event() {
+        let mut p = Parser::new(Grid::new(5, 1));
+        let evs = p.advance(b"\x07");
+        assert!(matches!(evs.first(), Some(VtEvent::Bell)));
+    }
+
+    #[test]
+    fn cr_lf_resets_column_and_advances_row() {
+        let mut p = Parser::new(Grid::new(5, 3));
+        p.advance(b"ab\r\ncd");
+        assert_eq!(p.grid().row(0)[0].ch, 'a');
+        assert_eq!(p.grid().row(1)[0].ch, 'c');
+    }
+
+    #[test]
+    fn malformed_csi_does_not_panic() {
+        let mut p = Parser::new(Grid::new(5, 2));
+        // Junk sequences should be tolerated.
+        p.advance(b"\x1b[\x1b[;;;m\x1b[?25hX");
+        assert_eq!(p.grid().row(0)[0].ch, 'X');
+    }
+
+    #[test]
+    fn utf8_multibyte_decoded() {
+        let mut p = Parser::new(Grid::new(10, 1));
+        p.advance("héllo→".as_bytes());
+        assert_eq!(p.grid().row(0)[0].ch, 'h');
+        assert_eq!(p.grid().row(0)[1].ch, 'é');
+        assert_eq!(p.grid().row(0)[5].ch, '→');
     }
 }

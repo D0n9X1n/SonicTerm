@@ -56,34 +56,19 @@ impl Default for Config {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self {
-            family: "JetBrainsMono Nerd Font".to_string(),
-            size: 14.0,
-            line_height: 1.2,
-        }
+        Self { family: "JetBrainsMono Nerd Font".to_string(), size: 14.0, line_height: 1.2 }
     }
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self {
-            cols: 100,
-            rows: 30,
-            padding: 8.0,
-            decorations: true,
-            opacity: 1.0,
-            blur: false,
-        }
+        Self { cols: 100, rows: 30, padding: 8.0, decorations: true, opacity: 1.0, blur: false }
     }
 }
 
 impl Default for TerminalConfig {
     fn default() -> Self {
-        Self {
-            shell: None,
-            scrollback: 10_000,
-            cursor_blink: true,
-        }
+        Self { shell: None, scrollback: 10_000, cursor_blink: true }
     }
 }
 

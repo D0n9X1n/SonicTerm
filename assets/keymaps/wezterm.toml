@@ -57,7 +57,7 @@ action = { activate_tab = 7 }
 
 [[binding]]
 keys = "super+9"
-action = { activate_last_tab = true }
+action = "activate_last_tab"
 
 # --- Splits ---
 [[binding]]

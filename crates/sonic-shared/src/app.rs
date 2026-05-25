@@ -27,7 +27,7 @@ pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
 }
 
 fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("sonic=info"));
     let _ = fmt().with_env_filter(filter).try_init();
 }
@@ -44,15 +44,7 @@ struct App {
 
 impl App {
     fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
-        Self {
-            theme,
-            config,
-            keymap,
-            window: None,
-            parser: None,
-            pty: None,
-            tabs: TabBar::new(),
-        }
+        Self { theme, config, keymap, window: None, parser: None, pty: None, tabs: TabBar::new() }
     }
 }
 

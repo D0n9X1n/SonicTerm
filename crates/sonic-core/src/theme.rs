@@ -12,7 +12,7 @@ pub enum Appearance {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Hex(pub String);
 
@@ -86,9 +86,7 @@ mod tests {
     use super::*;
 
     fn bundled(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/themes")
-            .join(name)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes").join(name)
     }
 
     #[test]
