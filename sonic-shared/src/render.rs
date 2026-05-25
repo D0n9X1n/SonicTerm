@@ -940,12 +940,3 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     }
     runs
 }
-
-/// Internal helpers exposed only for this crate's integration tests.
-///
-/// **Not part of the public API.** Items here may change or disappear in
-/// any release without notice; downstream users must not depend on them.
-#[doc(hidden)]
-pub mod __test_support {
-    pub use super::collect_hyperlink_runs;
-}

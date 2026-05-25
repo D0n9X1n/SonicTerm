@@ -39,20 +39,3 @@ pub mod prelude {
 
 /// Crate version, baked at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Internal helpers exposed only for the crate's own integration tests.
-///
-/// **Not part of the public API.** Items here may change or disappear in
-/// any release without notice; downstream users must not depend on them.
-/// Internal helpers exposed only for the crate's own integration tests.
-///
-/// **Not part of the public API.** Items here may change or disappear in
-/// any release without notice; downstream users must not depend on them.
-#[doc(hidden)]
-pub mod __test_support {
-    pub use crate::url_open::build_command;
-    /// Set the scrollback limit on a [`crate::grid::Grid`]. Test-only.
-    pub fn set_scrollback_limit(grid: &mut crate::grid::Grid, limit: usize) {
-        grid.set_scrollback_limit(limit);
-    }
-}

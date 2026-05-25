@@ -3,7 +3,7 @@ use sonic_core::{
     hyperlink::HyperlinkId,
 };
 
-use sonic_shared::render::__test_support::*;
+use sonic_shared::render::collect_hyperlink_runs;
 
 #[test]
 fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {

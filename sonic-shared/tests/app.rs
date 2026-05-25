@@ -1,6 +1,7 @@
 use winit::keyboard::SmolStr;
 
-use sonic_shared::app::__test_support::*;
+use sonic_shared::app::{encode_logical, key_name, next_pane_id, KeyName};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[test]
 fn arrow_keys_emit_csi() {

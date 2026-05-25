@@ -104,7 +104,7 @@ fn auto_wrap_at_end_of_row() {
 #[test]
 fn scrollback_caps_at_limit() {
     let mut g = Grid::new(2, 1);
-    sonic_core::__test_support::set_scrollback_limit(&mut g, 3);
+    g.set_scrollback_limit(3);
     for _ in 0..10 {
         g.scroll_up(1);
     }
