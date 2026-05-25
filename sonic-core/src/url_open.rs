@@ -60,6 +60,7 @@ pub fn validate(url: &str) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("open");
     c.arg(url);
@@ -68,6 +69,7 @@ pub fn build_command(url: &str) -> Command {
 
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("cmd");
     c.args(["/C", "start", "", url]);
@@ -75,6 +77,7 @@ pub fn build_command(url: &str) -> Command {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
+#[doc(hidden)]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("xdg-open");

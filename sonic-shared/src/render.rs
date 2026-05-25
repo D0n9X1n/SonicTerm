@@ -898,6 +898,7 @@ fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f
 /// id, per row. Wide-cell continuations don't break a run (they inherit the
 /// lead cell's hyperlink). Returns `(row, col_start, col_end_inclusive)`.
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     let mut runs = Vec::new();
     for r in 0..grid.rows {

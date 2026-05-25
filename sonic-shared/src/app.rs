@@ -43,6 +43,7 @@ use crate::{
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn next_pane_id() -> u64 {
     NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -868,6 +869,7 @@ fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
 }
 
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
@@ -929,6 +931,7 @@ fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String>
 }
 
 #[doc(hidden)]
+#[doc(hidden)]
 pub fn key_name(key: &Key) -> Option<KeyName> {
     Some(match key {
         Key::Named(n) => KeyName::Static(match n {
@@ -957,6 +960,7 @@ pub fn key_name(key: &Key) -> Option<KeyName> {
     })
 }
 
+#[doc(hidden)]
 #[doc(hidden)]
 pub enum KeyName {
     Static(&'static str),
