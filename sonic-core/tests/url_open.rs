@@ -1,6 +1,7 @@
 use std::process::Command;
 
-use sonic_core::url_open::{build_command, validate};
+use sonic_core::__test_support::build_command;
+use sonic_core::url_open::validate;
 
 fn program_of(cmd: &Command) -> String {
     cmd.get_program().to_string_lossy().into_owned()

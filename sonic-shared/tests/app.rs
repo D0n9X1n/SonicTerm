@@ -1,7 +1,6 @@
 use winit::keyboard::SmolStr;
 
-use sonic_shared::app::test_reexports::{Key, ModifiersState, NamedKey};
-use sonic_shared::app::*;
+use sonic_shared::app::__test_support::*;
 
 #[test]
 fn arrow_keys_emit_csi() {

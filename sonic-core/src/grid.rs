@@ -331,6 +331,7 @@ impl Grid {
     }
 
     /// Set the maximum number of scrollback rows retained.
+    #[doc(hidden)]
     pub fn set_scrollback_limit(&mut self, limit: usize) {
         self.scrollback_limit = limit;
     }
