@@ -8,7 +8,7 @@ pub enum SplitAxis {
     Vertical,   // children stacked left↔right
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PaneTree {
     Leaf {
         id: u64,
@@ -19,6 +19,25 @@ pub enum PaneTree {
         first: Box<PaneTree>,
         second: Box<PaneTree>,
     },
+}
+
+/// A rectangle in arbitrary units. Used by `PaneTree::layout` and the
+/// renderer to position each leaf inside the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+    pub fn center(&self) -> (f32, f32) {
+        (self.x + self.w * 0.5, self.y + self.h * 0.5)
+    }
 }
 
 impl PaneTree {
@@ -85,12 +104,9 @@ impl PaneTree {
     /// Remove the leaf with `id`. If a Split ends up with one child, it
     /// collapses to that child. Returns true if anything was removed.
     pub fn close(&mut self, id: u64) -> bool {
-        // Top-level leaf cannot be removed without leaving an empty tree.
         if let PaneTree::Leaf { id: leaf } = self {
-            return *leaf == id; // signal "I am that leaf"
+            return *leaf == id;
         }
-        // Direct-child removal collapses the split; deeper removal recurses
-        // and leaves the surrounding structure intact.
         let mut surviving: Option<PaneTree> = None;
         if let PaneTree::Split { first, second, .. } = self {
             let first_is = matches!(first.as_ref(), PaneTree::Leaf { id: l } if *l == id);
@@ -100,8 +116,6 @@ impl PaneTree {
             } else if second_is {
                 surviving = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
             } else if first.close(id) || second.close(id) {
-                // Recursive call already mutated the inner subtree — do not
-                // collapse the outer split here.
                 return true;
             }
         }
@@ -111,6 +125,73 @@ impl PaneTree {
         } else {
             false
         }
+    }
+
+    /// Recursively compute each leaf's rectangle inside `outer`.
+    pub fn layout(&self, outer: Rect) -> Vec<(u64, Rect)> {
+        let mut out = Vec::new();
+        self.layout_into(outer, &mut out);
+        out
+    }
+
+    fn layout_into(&self, outer: Rect, out: &mut Vec<(u64, Rect)>) {
+        match self {
+            PaneTree::Leaf { id } => out.push((*id, outer)),
+            PaneTree::Split { axis, ratio, first, second } => match axis {
+                SplitAxis::Vertical => {
+                    let w1 = outer.w * ratio;
+                    let r1 = Rect::new(outer.x, outer.y, w1, outer.h);
+                    let r2 = Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h);
+                    first.layout_into(r1, out);
+                    second.layout_into(r2, out);
+                }
+                SplitAxis::Horizontal => {
+                    let h1 = outer.h * ratio;
+                    let r1 = Rect::new(outer.x, outer.y, outer.w, h1);
+                    let r2 = Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1);
+                    first.layout_into(r1, out);
+                    second.layout_into(r2, out);
+                }
+            },
+        }
+    }
+
+    /// Find the leaf whose rectangle is the closest spatial neighbour of
+    /// `focus` in direction `dir`. Returns `None` when nothing lies in that
+    /// direction (focus is on the edge).
+    pub fn focus_neighbor(&self, focus: u64, dir: Direction) -> Option<u64> {
+        // Unit reference frame — direction-independent of window size.
+        let panes = self.layout(Rect::new(0.0, 0.0, 1.0, 1.0));
+        let me = panes.iter().find(|(id, _)| *id == focus)?.1;
+        let (mx, my) = me.center();
+
+        let mut best: Option<(f32, u64)> = None;
+        for (id, r) in &panes {
+            if *id == focus {
+                continue;
+            }
+            let (cx, cy) = r.center();
+            let candidate = match dir {
+                Direction::Left => cx < mx - 1e-6 && r.y < me.y + me.h && r.y + r.h > me.y,
+                Direction::Right => cx > mx + 1e-6 && r.y < me.y + me.h && r.y + r.h > me.y,
+                Direction::Up => cy < my - 1e-6 && r.x < me.x + me.w && r.x + r.w > me.x,
+                Direction::Down => cy > my + 1e-6 && r.x < me.x + me.w && r.x + r.w > me.x,
+            };
+            if !candidate {
+                continue;
+            }
+            let dist = match dir {
+                Direction::Left => (mx - cx).abs() + (my - cy).abs() * 0.01,
+                Direction::Right => (cx - mx).abs() + (my - cy).abs() * 0.01,
+                Direction::Up => (my - cy).abs() + (mx - cx).abs() * 0.01,
+                Direction::Down => (cy - my).abs() + (mx - cx).abs() * 0.01,
+            };
+            match best {
+                Some((d, _)) if d <= dist => {}
+                _ => best = Some((dist, *id)),
+            }
+        }
+        best.map(|(_, id)| id)
     }
 }
 
@@ -139,7 +220,6 @@ mod tests {
     fn split_left_inserts_new_pane_first() {
         let mut t = PaneTree::leaf(1);
         t.split(1, Direction::Left, 2);
-        // New pane (id=2) goes to the left, existing (id=1) to the right
         assert_eq!(t.leaves(), vec![2, 1]);
     }
 
@@ -166,8 +246,84 @@ mod tests {
         let mut t = PaneTree::leaf(1);
         t.split(1, Direction::Right, 2);
         t.split(2, Direction::Down, 3);
-        // Tree: Split(1, Split(2, 3))
         t.close(3);
         assert_eq!(t.leaves(), vec![1, 2]);
+    }
+
+    // ---------- layout ----------
+
+    #[test]
+    fn layout_single_leaf_fills_outer() {
+        let t = PaneTree::leaf(7);
+        let panes = t.layout(Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].0, 7);
+        assert_eq!(panes[0].1.w, 100.0);
+        assert_eq!(panes[0].1.h, 50.0);
+    }
+
+    #[test]
+    fn layout_vertical_split_divides_width() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        let panes = t.layout(Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert_eq!(panes.len(), 2);
+        let p1 = panes.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let p2 = panes.iter().find(|(id, _)| *id == 2).unwrap().1;
+        assert!((p1.w - 50.0).abs() < 0.01);
+        assert!((p2.w - 50.0).abs() < 0.01);
+        assert!((p1.h - 50.0).abs() < 0.01);
+        assert!((p1.x - 0.0).abs() < 0.01);
+        assert!((p2.x - 50.0).abs() < 0.01);
+    }
+
+    // ---------- focus_walk_* ----------
+
+    #[test]
+    fn focus_walk_right_finds_sibling() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        assert_eq!(t.focus_neighbor(1, Direction::Right), Some(2));
+        assert_eq!(t.focus_neighbor(2, Direction::Left), Some(1));
+    }
+
+    #[test]
+    fn focus_walk_down_finds_sibling() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Down, 2);
+        assert_eq!(t.focus_neighbor(1, Direction::Down), Some(2));
+        assert_eq!(t.focus_neighbor(2, Direction::Up), Some(1));
+    }
+
+    #[test]
+    fn focus_walk_off_edge_returns_none() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        assert_eq!(t.focus_neighbor(1, Direction::Left), None);
+        assert_eq!(t.focus_neighbor(2, Direction::Right), None);
+        assert_eq!(t.focus_neighbor(1, Direction::Up), None);
+    }
+
+    #[test]
+    fn focus_walk_nested_picks_nearest() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        t.split(2, Direction::Down, 3);
+        let neighbour = t.focus_neighbor(1, Direction::Right).expect("neighbour");
+        assert!(neighbour == 2 || neighbour == 3);
+        assert_eq!(t.focus_neighbor(3, Direction::Up), Some(2));
+        assert_eq!(t.focus_neighbor(2, Direction::Left), Some(1));
+        assert_eq!(t.focus_neighbor(3, Direction::Left), Some(1));
+    }
+
+    #[test]
+    fn focus_walk_three_column_layout() {
+        let mut t = PaneTree::leaf(1);
+        t.split(1, Direction::Right, 2);
+        t.split(2, Direction::Right, 3);
+        assert_eq!(t.focus_neighbor(1, Direction::Right), Some(2));
+        assert_eq!(t.focus_neighbor(2, Direction::Right), Some(3));
+        assert_eq!(t.focus_neighbor(3, Direction::Left), Some(2));
+        assert_eq!(t.focus_neighbor(2, Direction::Left), Some(1));
     }
 }

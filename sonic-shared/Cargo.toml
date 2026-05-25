@@ -25,3 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 pollster.workspace = true
 arboard.workspace = true
+
+[[example]]
+name = "pane_smoke"
+path = "examples/pane_smoke.rs"
