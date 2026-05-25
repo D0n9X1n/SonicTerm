@@ -22,6 +22,7 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 use crate::{
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
+    search::SearchState,
     selection::Selection,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
@@ -70,6 +71,10 @@ pub struct GpuRenderer {
     tab_close_fg: [f32; 4],
     hyperlink_underline: [f32; 4],
     hyperlink_tint: [f32; 4],
+    search_highlight: [f32; 4],
+    search_fg: GColor,
+    search_bg: [f32; 4],
+    search_buffer: Buffer,
 }
 
 impl GpuRenderer {
@@ -173,6 +178,16 @@ impl GpuRenderer {
             sonic_core::theme::Appearance::Light => 0.10,
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
+        let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
+        let search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        let search_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
+        let mut search_buffer = Buffer::new(&mut font_system, search_metrics);
+        search_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(font_size * 0.85 * 1.2),
+        );
 
         Ok(Self {
             instance,
@@ -206,6 +221,10 @@ impl GpuRenderer {
             tab_close_fg,
             hyperlink_underline,
             hyperlink_tint,
+            search_highlight,
+            search_fg,
+            search_bg,
+            search_buffer,
         })
     }
 
@@ -222,6 +241,11 @@ impl GpuRenderer {
             &mut self.font_system,
             Some(self.config.width as f32),
             Some(TAB_BAR_HEIGHT),
+        );
+        self.search_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.font_size * 0.85 * 1.2),
         );
     }
 
@@ -275,6 +299,7 @@ impl GpuRenderer {
         tabs: &TabBar,
         pane_rects: &[(u64, PaneRect)],
         active_pane: u64,
+        search: Option<&SearchState>,
     ) -> Result<()> {
         // Walk the grid building (text, spans, underline cells) together.
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
@@ -628,6 +653,50 @@ impl GpuRenderer {
         );
         self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
 
+        // -------- Search highlights + status bar ---------------------------
+        // When search is active: paint a translucent yellow quad over every
+        // match in the grid, then draw a single-line status bar pinned to
+        // the bottom edge styled like the tab bar.
+        let search_bar_h = self.font_size * 0.85 * 1.2;
+        let mut search_bar_top = 0.0_f32;
+        let mut have_search_bar = false;
+        if let Some(s) = search {
+            for m in &s.matches {
+                if m.row >= grid.rows || m.col_end <= m.col_start {
+                    continue;
+                }
+                let x = self.padding + f32::from(m.col_start) * self.cell_w;
+                let y = self.top_inset() + f32::from(m.row) * self.cell_h;
+                let w = f32::from(m.col_end - m.col_start) * self.cell_w;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                    color: self.search_highlight,
+                });
+            }
+            // Status bar background pinned to bottom edge.
+            search_bar_top = sh - search_bar_h;
+            have_search_bar = true;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(0.0, search_bar_top, sw, search_bar_h, sw, sh),
+                color: self.search_bg,
+            });
+            let n = s.matches.len();
+            let cur = s.current.map(|i| i + 1).unwrap_or(0);
+            let label = if n == 0 {
+                format!("/ {} — no matches", s.query)
+            } else {
+                format!("/ {} — {}/{} matches", s.query, cur, n)
+            };
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution { width: self.config.width, height: self.config.height },
@@ -663,13 +732,37 @@ impl GpuRenderer {
             custom_glyphs: &[],
         };
 
+        let search_area = if have_search_bar {
+            Some(TextArea {
+                buffer: &self.search_buffer,
+                left: self.padding,
+                top: search_bar_top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: search_bar_top as i32,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: self.search_fg,
+                custom_glyphs: &[],
+            })
+        } else {
+            None
+        };
+
+        let mut areas: Vec<TextArea> = vec![area, tab_area];
+        if let Some(a) = search_area {
+            areas.push(a);
+        }
+
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [area, tab_area],
+            areas,
             &mut self.swash_cache,
         )?;
 
