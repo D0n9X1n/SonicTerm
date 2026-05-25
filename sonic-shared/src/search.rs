@@ -93,36 +93,68 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
 
     for r in 0..grid.rows {
         let row = grid.row(r);
-        let visible: Vec<(u16, char)> = row
+        // Collect (display_col, normalized_chars) per non-WIDE_CONT cell.
+        // For case-insensitive search, expand to lowercase (possibly
+        // multi-char per cell so ß -> "ss" / İ -> "i\u{0307}" work).
+        // For wide chars, the matched range must extend to the WIDE_CONT
+        // cell on the right.
+        struct Visible {
+            col: u16,
+            is_wide: bool,
+            chars: Vec<char>,
+        }
+        let visible: Vec<Visible> = row
             .iter()
             .enumerate()
             .filter(|(_, c)| !c.flags.contains(CellFlags::WIDE_CONT))
             .map(|(i, c)| {
-                let ch =
-                    if case_sensitive { c.ch } else { c.ch.to_lowercase().next().unwrap_or(c.ch) };
-                (i as u16, ch)
+                let chars: Vec<char> =
+                    if case_sensitive { vec![c.ch] } else { c.ch.to_lowercase().collect() };
+                Visible { col: i as u16, is_wide: c.flags.contains(CellFlags::WIDE), chars }
             })
             .collect();
 
-        if visible.len() < needle.len() {
+        // Build a flat char stream that maps each char index back to its
+        // owning visible-cell index, so we can recover (start, end) cells
+        // after matching.
+        let mut flat: Vec<char> = Vec::with_capacity(visible.len());
+        let mut owner: Vec<usize> = Vec::with_capacity(visible.len());
+        for (vi, v) in visible.iter().enumerate() {
+            for ch in &v.chars {
+                flat.push(*ch);
+                owner.push(vi);
+            }
+        }
+
+        if flat.len() < needle.len() {
             continue;
         }
 
         let mut i = 0usize;
-        while i + needle.len() <= visible.len() {
+        while i + needle.len() <= flat.len() {
             let mut matched = true;
             for (k, nc) in needle.iter().enumerate() {
-                if visible[i + k].1 != *nc {
+                if flat[i + k] != *nc {
                     matched = false;
                     break;
                 }
             }
             if matched {
-                let col_start = visible[i].0;
-                let last_visible_col = visible[i + needle.len() - 1].0;
-                let col_end = last_visible_col + 1;
+                let start_cell = owner[i];
+                let end_cell = owner[i + needle.len() - 1];
+                let col_start = visible[start_cell].col;
+                let last_visible_col = visible[end_cell].col;
+                let extra = if visible[end_cell].is_wide { 1 } else { 0 };
+                let col_end = last_visible_col + 1 + extra;
                 out.push(MatchRange { row: r, col_start, col_end });
-                i += needle.len();
+                // Advance past the entire matched cell range so we don't
+                // double-match the same cells when a fold expanded chars.
+                let next_cell = end_cell + 1;
+                i = if next_cell < visible.len() {
+                    owner.iter().position(|o| *o == next_cell).unwrap_or(flat.len())
+                } else {
+                    flat.len()
+                };
             } else {
                 i += 1;
             }
@@ -266,5 +298,32 @@ mod tests {
         assert!(s.matches.is_empty());
         s.backspace(&g);
         assert_eq!(s.matches.len(), 1);
+    }
+
+    // --- Haiku review fixes ---
+
+    #[test]
+    fn case_insensitive_handles_multichar_fold() {
+        // Turkish dotted-İ lowercases to "i\u{0307}" (two chars). A
+        // case-insensitive search for "i\u{0307}" should match a cell
+        // containing İ.
+        let g = grid_with("aİb", 16);
+        let m = find_in_grid(&g, "i\u{0307}", false);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].col_start, 1);
+        assert_eq!(m[0].col_end, 2);
+    }
+
+    #[test]
+    fn wide_cell_match_extends_col_end_over_continuation() {
+        // A wide CJK char occupies two cells (WIDE + WIDE_CONT). A match
+        // ending on it must report col_end past the continuation cell so
+        // the highlight covers the full glyph.
+        let g = grid_with("中文", 16);
+        let m = find_in_grid(&g, "中", true);
+        assert_eq!(m.len(), 1);
+        // wide '中' is at col 0; WIDE_CONT at col 1; col_end should be 2.
+        assert_eq!(m[0].col_start, 0);
+        assert_eq!(m[0].col_end, 2);
     }
 }
