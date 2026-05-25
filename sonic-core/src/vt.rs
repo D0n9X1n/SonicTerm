@@ -40,9 +40,7 @@ impl Parser {
 
     /// Feed raw bytes from the pty. Drains any queued events for the caller.
     pub fn advance(&mut self, bytes: &[u8]) -> Vec<VtEvent> {
-        for &b in bytes {
-            self.inner.advance(&mut self.performer, b);
-        }
+        self.inner.advance(&mut self.performer, bytes);
         std::mem::take(&mut self.performer.events)
     }
 

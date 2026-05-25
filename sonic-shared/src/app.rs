@@ -169,6 +169,7 @@ impl ApplicationHandler for App {
 
         let renderer = GpuRenderer::new(
             window.clone(),
+            el,
             &self.theme,
             &self.config.font.family,
             self.config.font.size,

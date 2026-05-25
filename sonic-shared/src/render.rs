@@ -1,45 +1,41 @@
-//! GPU renderer for the terminal grid using wgpu + glyphon.
-//!
-//! Each frame we:
-//! 1. Walk the [`Grid`] producing the text buffer.
-//! 2. Clear the surface with the theme background.
-//! 3. Draw selection highlight + cursor as quads.
-//! 4. Draw the buffer via `glyphon::TextRenderer`.
+//! GPU renderer for the terminal grid using wgpu 29 + glyphon 0.11.
 
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use glyphon::{
-    Attrs, Buffer, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer,
+    Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use sonic_core::{
     grid::{Cell, CellFlags, Color, Grid},
     theme::Theme,
 };
 use wgpu::{
-    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Features, Instance,
-    InstanceDescriptor, Limits, LoadOp, MultisampleState, Operations, PresentMode,
-    RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration,
-    TextureFormat, TextureUsages, TextureViewDescriptor,
+    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
+    LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
+    RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration, TextureFormat,
+    TextureUsages, TextureViewDescriptor,
 };
-use winit::window::Window;
+use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     selection::Selection,
 };
 
-/// Owns every GPU resource. Built once per window.
-#[allow(dead_code)] // cell_fg/indexed used when per-cell color spans land (v0.3b)
+#[allow(dead_code)]
 pub struct GpuRenderer {
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: SurfaceConfiguration,
+    window: Arc<Window>,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
+    viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
@@ -59,6 +55,7 @@ pub struct GpuRenderer {
 impl GpuRenderer {
     pub fn new(
         window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
         theme: &Theme,
         font_family: &str,
         font_size: f32,
@@ -67,6 +64,7 @@ impl GpuRenderer {
     ) -> Result<Self> {
         pollster::block_on(Self::new_async(
             window,
+            event_loop,
             theme,
             font_family,
             font_size,
@@ -77,6 +75,7 @@ impl GpuRenderer {
 
     async fn new_async(
         window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
         theme: &Theme,
         font_family: &str,
         font_size: f32,
@@ -84,7 +83,9 @@ impl GpuRenderer {
         padding: f32,
     ) -> Result<Self> {
         let size = window.inner_size();
-        let instance = Instance::new(InstanceDescriptor::default());
+        let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+            event_loop.owned_display_handle(),
+        )));
         let surface = instance.create_surface(window.clone()).context("create surface")?;
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
@@ -93,18 +94,9 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| anyhow!("no suitable GPU adapter"))?;
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: Some("sonic-device"),
-                    required_features: Features::empty(),
-                    required_limits: Limits::downlevel_defaults(),
-                },
-                None,
-            )
-            .await
-            .context("request device")?;
+            .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
+        let (device, queue) =
+            adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
 
         let format = TextureFormat::Bgra8UnormSrgb;
         let config = SurfaceConfiguration {
@@ -121,7 +113,9 @@ impl GpuRenderer {
 
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
-        let mut atlas = TextAtlas::new(&device, &queue, format);
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad = QuadPipeline::new(&device, format);
@@ -129,7 +123,7 @@ impl GpuRenderer {
         let line_height = font_size * line_height_mult;
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut font_system, metrics);
-        buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
+        buffer.set_size(&mut font_system, Some(size.width as f32), Some(size.height as f32));
 
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
@@ -139,12 +133,15 @@ impl GpuRenderer {
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
 
         Ok(Self {
+            instance,
             device,
             queue,
             surface,
             config,
+            window,
             font_system,
             swash_cache,
+            viewport,
             atlas,
             text_renderer,
             buffer,
@@ -167,12 +164,11 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         self.buffer.set_size(
             &mut self.font_system,
-            self.config.width as f32,
-            self.config.height as f32,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
         );
     }
 
-    /// How many (cols, rows) of cells fit in the current surface.
     pub fn cells(&self) -> (u16, u16) {
         let inner_w = (self.config.width as f32 - self.padding * 2.0).max(self.cell_w);
         let inner_h = (self.config.height as f32 - self.padding * 2.0).max(self.cell_h);
@@ -181,8 +177,6 @@ impl GpuRenderer {
         (cols.max(1), rows.max(1))
     }
 
-    /// Convert pixel coordinates relative to the window to a grid cell.
-    /// Returns `None` if the point is outside the text area.
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         let x = px - self.padding;
         let y = py - self.padding;
@@ -197,7 +191,6 @@ impl GpuRenderer {
         Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
     }
 
-    /// Draw one frame: text + cursor + optional selection highlight.
     pub fn render(
         &mut self,
         grid: &Grid,
@@ -205,7 +198,6 @@ impl GpuRenderer {
         cursor_visible: bool,
         selection: Option<&Selection>,
     ) -> Result<()> {
-        // ---- text buffer ----
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
         for r in 0..grid.rows {
             for cell in grid.row(r).iter() {
@@ -220,12 +212,12 @@ impl GpuRenderer {
         self.buffer.set_text(
             &mut self.font_system,
             &text,
-            Attrs::new().family(Family::Monospace).color(self.fg_default),
+            &Attrs::new().family(Family::Monospace).color(self.fg_default),
             Shaping::Advanced,
+            None,
         );
-        self.buffer.shape_until_scroll(&mut self.font_system);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
 
-        // ---- quads (selection then cursor) ----
         let mut quads: Vec<QuadInstance> = Vec::new();
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
@@ -262,7 +254,11 @@ impl GpuRenderer {
             });
         }
 
-        // ---- prepare text ----
+        self.viewport.update(
+            &self.queue,
+            Resolution { width: self.config.width, height: self.config.height },
+        );
+
         let area = TextArea {
             buffer: &self.buffer,
             left: self.padding,
@@ -275,19 +271,48 @@ impl GpuRenderer {
                 bottom: self.config.height as i32,
             },
             default_color: self.fg_default,
+            custom_glyphs: &[],
         };
+
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
-            Resolution { width: self.config.width, height: self.config.height },
+            &self.viewport,
             [area],
             &mut self.swash_cache,
         )?;
 
-        // ---- submit ----
-        let frame = self.surface.get_current_texture()?;
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) => f,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.window.request_redraw();
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // wgpu 29: Surface::configure panics if a SurfaceTexture is
+                // still alive. Drop the frame BEFORE reconfiguring.
+                drop(frame);
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self.instance.create_surface(self.window.clone())?;
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(anyhow!("surface validation error"));
+            }
+        };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
@@ -296,15 +321,17 @@ impl GpuRenderer {
                 label: Some("sonic-pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations { load: LoadOp::Clear(self.bg), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             self.quad.draw(&self.device, &self.queue, &mut pass, &quads);
-            self.text_renderer.render(&self.atlas, &mut pass)?;
+            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -343,7 +370,7 @@ fn indexed(i: u8, theme: &Theme) -> Option<GColor> {
         13 => Some(pick(p.bright.magenta.0.as_str())),
         14 => Some(pick(p.bright.cyan.0.as_str())),
         15 => Some(pick(p.bright.white.0.as_str())),
-        _ => None, // 16..=255 palette deferred
+        _ => None,
     }
 }
 
@@ -379,9 +406,9 @@ fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
 
 fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f32, f32) {
     let mut buf = Buffer::new(fs, Metrics::new(size, line_h));
-    buf.set_size(fs, 1000.0, 1000.0);
-    buf.set_text(fs, "M", Attrs::new().family(Family::Name(family)), Shaping::Advanced);
-    buf.shape_until_scroll(fs);
+    buf.set_size(fs, Some(1000.0), Some(1000.0));
+    buf.set_text(fs, "M", &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+    buf.shape_until_scroll(fs, false);
     let w =
         buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.w)).unwrap_or(size * 0.6);
     (w, line_h)

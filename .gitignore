@@ -26,3 +26,4 @@ Thumbs.db
 # Sonic runtime
 *.log
 crash-reports/
+/rust_out

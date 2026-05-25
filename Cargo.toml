@@ -1,17 +1,12 @@
 [workspace]
 resolver = "2"
-members = [
-    "sonic-core",
-    "sonic-shared",
-    "sonic-mac",
-    "sonic-windows",
-]
+members = ["sonic-core", "sonic-shared", "sonic-mac", "sonic-windows"]
 default-members = ["sonic-core", "sonic-shared"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.80"
 authors = ["Sonic Terminal contributors"]
 license = "MIT"
 repository = "https://github.com/D0n9X1n/sonic"
@@ -20,37 +15,34 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Internal
-sonic-core = { path = "sonic-core", version = "0.1.0" }
-sonic-shared = { path = "sonic-shared", version = "0.1.0" }
+sonic-core = { path = "sonic-core", version = "0.3.0" }
+sonic-shared = { path = "sonic-shared", version = "0.3.0" }
 
 # Core terminal
-vte = "0.13"
-portable-pty = "0.8"
-unicode-width = "0.1"
-unicode-segmentation = "1.11"
+vte = "0.15"
+portable-pty = "0.9"
+unicode-width = "0.2"
+unicode-segmentation = "1.13"
 
 # Async / runtime
-tokio = { version = "1.38", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 
-# Rendering
-wgpu = "0.19"
-bytemuck = { version = "1.16", features = ["derive"] }
-glyphon = "0.5"
-bitflags = { version = "2.5", features = ["serde"] }
-serde_plain = "1"
-pollster = "0.3"
-arboard = "3"
+# Rendering — these three move as a coherent triple
+wgpu = "29"
+glyphon = "0.11"
+cosmic-text = "0.18"
+bytemuck = { version = "1.25", features = ["derive"] }
 
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-notify = "6"
+toml = "1"
+notify = "8"
 
 # Logging / errors
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -58,9 +50,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 winit = "0.30"
 raw-window-handle = "0.6"
 
+bitflags = { version = "2", features = ["serde"] }
+serde_plain = "1"
+pollster = "0.4"
+arboard = "3"
+
 # Platform
 [workspace.dependencies.windows]
-version = "0.57"
+version = "0.62"
 features = [
     "Win32_System_Console",
     "Win32_Foundation",
@@ -85,14 +82,11 @@ split-debuginfo = "unpacked"
 incremental = true
 
 [profile.dev.package."*"]
-opt-level = 3   # speed up deps in dev builds
+opt-level = 3
 
-# Tighter lints across the workspace
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]
-# Standard lints only — pedantic/nursery generate too much noise for an
-# early-stage codebase. Re-enable selectively as the code matures.
 all = { level = "warn", priority = -1 }
