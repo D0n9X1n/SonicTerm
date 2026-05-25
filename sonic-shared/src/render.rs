@@ -897,7 +897,8 @@ fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink
 /// id, per row. Wide-cell continuations don't break a run (they inherit the
 /// lead cell's hyperlink). Returns `(row, col_start, col_end_inclusive)`.
-pub(crate) fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
+#[doc(hidden)]
+pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     let mut runs = Vec::new();
     for r in 0..grid.rows {
         let row = grid.row(r);
@@ -937,55 +938,4 @@ pub(crate) fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
         }
     }
     runs
-}
-
-#[cfg(test)]
-mod tests {
-    use sonic_core::{
-        grid::{Cell, CellFlags, Color, Grid},
-        hyperlink::HyperlinkId,
-    };
-
-    use super::*;
-
-    #[test]
-    fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {
-        let mut g = Grid::new(8, 1);
-        let hid = HyperlinkId(42);
-        for c in 0..3u16 {
-            g.row_mut(0)[c as usize] = Cell {
-                ch: 'x',
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: CellFlags::empty(),
-                hyperlink: Some(hid),
-            };
-        }
-        let runs = collect_hyperlink_runs(&g);
-        assert_eq!(runs, vec![(0u16, 0u16, 2u16)]);
-    }
-
-    #[test]
-    fn collect_hyperlink_runs_splits_on_different_id() {
-        let mut g = Grid::new(6, 1);
-        let a = HyperlinkId(1);
-        let b = HyperlinkId(2);
-        for (c, h) in [(0usize, a), (1, a), (3, b), (4, b)] {
-            g.row_mut(0)[c] = Cell {
-                ch: 'x',
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: CellFlags::empty(),
-                hyperlink: Some(h),
-            };
-        }
-        let runs = collect_hyperlink_runs(&g);
-        assert_eq!(runs, vec![(0, 0, 1), (0, 3, 4)]);
-    }
-
-    #[test]
-    fn collect_hyperlink_runs_empty_when_no_links() {
-        let g = Grid::new(4, 2);
-        assert!(collect_hyperlink_runs(&g).is_empty());
-    }
 }
