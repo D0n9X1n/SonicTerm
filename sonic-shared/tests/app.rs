@@ -1,6 +1,6 @@
 use winit::keyboard::SmolStr;
 
-use sonic_shared::app::{encode_logical, key_name, next_pane_id, KeyName};
+use sonic_shared::app::{encode_logical, key_name, next_pane_id};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[test]
