@@ -1,6 +1,5 @@
-//! App loop. Owns the window, the GPU renderer, the PTY, and the parser.
-//!
-//! The render path now actually draws characters to the screen.
+//! App loop. Owns the window, the GPU renderer, the PTY, parser, tabs,
+//! selection state, and clipboard. Drives keymap dispatch.
 
 use std::{
     sync::Arc,
@@ -8,17 +7,18 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonic_core::{
     config::Config,
-    keymap::Keymap,
+    keymap::{Action, Keymap, ScrollAction},
     pty::PtyHandle,
     theme::Theme,
     vt::{Parser, VtEvent},
 };
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
@@ -26,6 +26,7 @@ use winit::{
 
 use crate::{
     render::GpuRenderer,
+    selection::Selection,
     tabs::{Tab, TabBar},
 };
 
@@ -56,6 +57,11 @@ struct App {
     tabs: TabBar,
     modifiers: ModifiersState,
     last_render: Instant,
+    cursor_pos: (f64, f64),
+    mouse_down: bool,
+    selection: Option<Selection>,
+    clipboard: Option<Clipboard>,
+    scale_factor: f64,
 }
 
 impl App {
@@ -71,6 +77,77 @@ impl App {
             tabs: TabBar::new(),
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            selection: None,
+            clipboard: Clipboard::new().ok(),
+            scale_factor: 1.0,
+        }
+    }
+
+    fn write_to_pty(&self, bytes: Vec<u8>) {
+        if let Some(pty) = self.pty.as_ref() {
+            let _ = pty.in_tx.send(bytes);
+        }
+    }
+
+    /// Run a keymap-bound action. Returns true if handled (= consume the key).
+    fn run_action(&mut self, action: &Action) -> bool {
+        match action {
+            Action::CopyToClipboard => self.copy_selection(),
+            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::ReloadConfig => tracing::info!("reload_config: not yet implemented"),
+            Action::Scroll(_)
+            | Action::IncreaseFontSize
+            | Action::DecreaseFontSize
+            | Action::ResetFontSize
+            | Action::ToggleFullscreen
+            | Action::NewTab
+            | Action::CloseTab
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::ActivateTab(_)
+            | Action::ActivateLastTab
+            | Action::SplitRight
+            | Action::SplitDown
+            | Action::ClosePane
+            | Action::FocusPane(_)
+            | Action::ResizePane { .. }
+            | Action::NewWindow
+            | Action::OpenSearch
+            | Action::OpenCommandPalette => {
+                tracing::info!("action {action:?} accepted but not yet wired up");
+            }
+        }
+        true
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection.as_ref() else {
+            return;
+        };
+        if sel.is_empty() {
+            return;
+        }
+        let Some(parser) = self.parser.as_ref() else { return };
+        let text = sel.as_text(parser.lock().grid());
+        if text.is_empty() {
+            return;
+        }
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Err(e) = cb.set_text(text.clone()) {
+                tracing::warn!("clipboard set failed: {e}");
+            } else {
+                tracing::info!("copied {} bytes", text.len());
+            }
+        }
+    }
+
+    fn paste_clipboard(&mut self) {
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Ok(text) = cb.get_text() {
+                self.write_to_pty(text.into_bytes());
+            }
         }
     }
 }
@@ -88,6 +165,7 @@ impl ApplicationHandler for App {
                     + self.config.window.padding * 2.0,
             ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
+        self.scale_factor = window.scale_factor();
 
         let renderer = GpuRenderer::new(
             window.clone(),
@@ -99,7 +177,6 @@ impl ApplicationHandler for App {
         )
         .expect("init renderer");
 
-        // Recompute cell counts now that we have real font metrics.
         let (real_cols, real_rows) = renderer.cells();
         let grid = sonic_core::grid::Grid::new(real_cols, real_rows);
         let parser = Arc::new(Mutex::new(Parser::new(grid)));
@@ -151,7 +228,9 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let (Some(r), Some(p)) = (self.renderer.as_mut(), self.parser.as_ref()) {
                     let grid = p.lock();
-                    if let Err(e) = r.render(grid.grid(), &self.theme) {
+                    if let Err(e) =
+                        r.render(grid.grid(), &self.theme, true, self.selection.as_ref())
+                    {
                         tracing::warn!("render error: {e}");
                     }
                     self.last_render = Instant::now();
@@ -174,14 +253,84 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale_factor = scale_factor;
+            }
+
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
 
+            // -- Mouse --
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x, position.y);
+                if self.mouse_down {
+                    if let Some(r) = self.renderer.as_ref() {
+                        // winit gives physical pixels; renderer thinks in physical too
+                        if let Some((row, col)) =
+                            r.pixel_to_cell(position.x as f32, position.y as f32)
+                        {
+                            if let Some(sel) = self.selection.as_mut() {
+                                sel.extend(row, col);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => {
+                    self.mouse_down = true;
+                    if let Some(r) = self.renderer.as_ref() {
+                        if let Some((row, col)) =
+                            r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                        {
+                            self.selection = Some(Selection::new(row, col));
+                        }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                ElementState::Released => {
+                    self.mouse_down = false;
+                    // If a click landed without drag, clear the selection.
+                    if let Some(sel) = self.selection.as_ref() {
+                        if sel.is_empty() {
+                            self.selection = None;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                }
+            },
+
+            // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // 1) Try a keymap binding first.
+                if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                        if self.run_action(&action) {
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                    }
+                }
+                // 2) Fall back to byte encoding for the pty.
                 if let Some(bytes) = encode_key(&event, self.modifiers) {
-                    if let Some(pty) = self.pty.as_ref() {
-                        let _ = pty.in_tx.send(bytes);
+                    self.write_to_pty(bytes);
+                    // Typing should clear any active selection.
+                    if self.selection.is_some() {
+                        self.selection = None;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }
@@ -189,8 +338,6 @@ impl ApplicationHandler for App {
             _ => {}
         }
 
-        // Heartbeat redraw at most ~60 FPS so cursor and output stay live even
-        // when the VT thread is bursty.
         if let Some(w) = &self.window {
             if self.last_render.elapsed() > Duration::from_millis(16) {
                 w.request_redraw();
@@ -198,6 +345,10 @@ impl ApplicationHandler for App {
         }
     }
 }
+
+// Suppress the dead-code warning while wider Action variants aren't wired yet.
+#[allow(dead_code)]
+fn _scroll_used(_a: ScrollAction) {}
 
 /// Translate a winit key event into raw bytes to send to the pty.
 fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
@@ -246,6 +397,71 @@ fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
             }
         }
         _ => None,
+    }
+}
+
+/// Render a key event into the canonical keymap string, e.g. `"super+t"`,
+/// `"ctrl+shift+h"`, `"super+1"`. Returns None if the key has no
+/// representable name in the keymap.
+///
+/// We map `super` to the platform "command" key: ⌘ on macOS, Ctrl on Windows.
+/// For now we treat any of {super, ctrl} as `super` so WezTerm bindings just
+/// work on both platforms.
+fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if mods.super_key() || mods.control_key() {
+        parts.push("super".into());
+    }
+    if mods.alt_key() {
+        parts.push("alt".into());
+    }
+    if mods.shift_key() {
+        parts.push("shift".into());
+    }
+    let name = key_name(&event.logical_key)?;
+    parts.push(name.as_str().to_string());
+    Some(parts.join("+").to_ascii_lowercase())
+}
+
+fn key_name(key: &Key) -> Option<KeyName> {
+    Some(match key {
+        Key::Named(n) => KeyName::Static(match n {
+            NamedKey::Enter => "enter",
+            NamedKey::Backspace => "backspace",
+            NamedKey::Tab => "tab",
+            NamedKey::Escape => "escape",
+            NamedKey::Space => "space",
+            NamedKey::ArrowUp => "up",
+            NamedKey::ArrowDown => "down",
+            NamedKey::ArrowRight => "right",
+            NamedKey::ArrowLeft => "left",
+            NamedKey::Home => "home",
+            NamedKey::End => "end",
+            NamedKey::PageUp => "pageup",
+            NamedKey::PageDown => "pagedown",
+            NamedKey::Delete => "delete",
+            NamedKey::F1 => "f1",
+            NamedKey::F2 => "f2",
+            NamedKey::F3 => "f3",
+            NamedKey::F4 => "f4",
+            _ => return None,
+        }),
+        Key::Character(s) => KeyName::Owned(s.to_string()),
+        _ => return None,
+    })
+}
+
+enum KeyName {
+    Static(&'static str),
+    Owned(String),
+}
+
+impl KeyName {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Static(s) => s,
+            Self::Owned(s) => s.as_str(),
+        }
     }
 }
 
@@ -314,5 +530,23 @@ mod tests {
     #[test]
     fn unknown_named_returns_none() {
         assert!(encode_logical(&Key::Named(NamedKey::Insert), ModifiersState::empty()).is_none());
+    }
+
+    // ---- key_name covers the keymap string builder ----
+
+    #[test]
+    fn key_name_for_letter() {
+        assert_eq!(key_name(&Key::Character(SmolStr::new("t"))).unwrap().as_str(), "t");
+    }
+
+    #[test]
+    fn key_name_for_named() {
+        assert_eq!(key_name(&Key::Named(NamedKey::Enter)).unwrap().as_str(), "enter");
+        assert_eq!(key_name(&Key::Named(NamedKey::PageDown)).unwrap().as_str(), "pagedown");
+    }
+
+    #[test]
+    fn key_name_for_unsupported_named_is_none() {
+        assert!(key_name(&Key::Named(NamedKey::Insert)).is_none());
     }
 }

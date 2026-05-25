@@ -1,14 +1,10 @@
 //! GPU renderer for the terminal grid using wgpu + glyphon.
 //!
 //! Each frame we:
-//! 1. Walk the [`Grid`] producing a single styled text buffer.
+//! 1. Walk the [`Grid`] producing the text buffer.
 //! 2. Clear the surface with the theme background.
-//! 3. Draw the buffer via `glyphon::TextRenderer`.
-//!
-//! This is intentionally simple. Future PRs will:
-//! - Batch by attribute runs to use fewer glyphon Attrs
-//! - Render cursor + selection as separate quads
-//! - Cache the buffer when the grid hasn't changed
+//! 3. Draw selection highlight + cursor as quads.
+//! 4. Draw the buffer via `glyphon::TextRenderer`.
 
 use std::sync::Arc;
 
@@ -29,8 +25,13 @@ use wgpu::{
 };
 use winit::window::Window;
 
+use crate::{
+    quad::{px_to_ndc, QuadInstance, QuadPipeline},
+    selection::Selection,
+};
+
 /// Owns every GPU resource. Built once per window.
-#[allow(dead_code)] // font_size/line_height kept for resize-time recalc (v0.3); cell_fg/indexed used when color spans land (v0.3)
+#[allow(dead_code)] // cell_fg/indexed used when per-cell color spans land (v0.3b)
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -42,6 +43,7 @@ pub struct GpuRenderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+    quad: QuadPipeline,
 
     font_size: f32,
     line_height: f32,
@@ -50,6 +52,8 @@ pub struct GpuRenderer {
     padding: f32,
     bg: wgpu::Color,
     fg_default: GColor,
+    cursor_color: [f32; 4],
+    selection_color: [f32; 4],
 }
 
 impl GpuRenderer {
@@ -120,17 +124,19 @@ impl GpuRenderer {
         let mut atlas = TextAtlas::new(&device, &queue, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let quad = QuadPipeline::new(&device, format);
 
         let line_height = font_size * line_height_mult;
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut font_system, metrics);
         buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
 
-        // Measure one monospace cell using "M".
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
         let bg = hex_to_wgpu(theme.colors.background.0.as_str());
         let fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.6);
+        let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
 
         Ok(Self {
             device,
@@ -142,6 +148,7 @@ impl GpuRenderer {
             atlas,
             text_renderer,
             buffer,
+            quad,
             font_size,
             line_height,
             cell_w,
@@ -149,6 +156,8 @@ impl GpuRenderer {
             padding,
             bg,
             fg_default,
+            cursor_color,
+            selection_color,
         })
     }
 
@@ -172,11 +181,31 @@ impl GpuRenderer {
         (cols.max(1), rows.max(1))
     }
 
-    /// Draw one frame. Walks the grid; builds a single shaped buffer; renders.
-    pub fn render(&mut self, grid: &Grid, _theme: &Theme) -> Result<()> {
-        // Build plain-text snapshot. Per-cell colors land in a follow-up PR
-        // (cosmic-text 0.10's BufferLine attribute API is different from
-        // 0.11's set_rich_text; we keep this PR small).
+    /// Convert pixel coordinates relative to the window to a grid cell.
+    /// Returns `None` if the point is outside the text area.
+    pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
+        let x = px - self.padding;
+        let y = py - self.padding;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let col = (x / self.cell_w).floor() as i32;
+        let row = (y / self.cell_h).floor() as i32;
+        if col < 0 || row < 0 {
+            return None;
+        }
+        Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
+    }
+
+    /// Draw one frame: text + cursor + optional selection highlight.
+    pub fn render(
+        &mut self,
+        grid: &Grid,
+        _theme: &Theme,
+        cursor_visible: bool,
+        selection: Option<&Selection>,
+    ) -> Result<()> {
+        // ---- text buffer ----
         let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
         for r in 0..grid.rows {
             for cell in grid.row(r).iter() {
@@ -196,6 +225,44 @@ impl GpuRenderer {
         );
         self.buffer.shape_until_scroll(&mut self.font_system);
 
+        // ---- quads (selection then cursor) ----
+        let mut quads: Vec<QuadInstance> = Vec::new();
+        let sw = self.config.width as f32;
+        let sh = self.config.height as f32;
+
+        if let Some(sel) = selection {
+            if !sel.is_empty() {
+                let (a, b) = sel.normalized();
+                for r in a.0..=b.0 {
+                    if r >= grid.rows {
+                        break;
+                    }
+                    let col_a = if r == a.0 { a.1 } else { 0 };
+                    let col_b = if r == b.0 { b.1 } else { grid.cols.saturating_sub(1) };
+                    if col_b < col_a {
+                        continue;
+                    }
+                    let x = self.padding + f32::from(col_a) * self.cell_w;
+                    let y = self.padding + f32::from(r) * self.cell_h;
+                    let w = f32::from(col_b - col_a + 1) * self.cell_w;
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                        color: self.selection_color,
+                    });
+                }
+            }
+        }
+
+        if cursor_visible {
+            let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
+            let cy = self.padding + f32::from(grid.cursor.row) * self.cell_h;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
+                color: self.cursor_color,
+            });
+        }
+
+        // ---- prepare text ----
         let area = TextArea {
             buffer: &self.buffer,
             left: self.padding,
@@ -209,7 +276,6 @@ impl GpuRenderer {
             },
             default_color: self.fg_default,
         };
-
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
@@ -220,6 +286,7 @@ impl GpuRenderer {
             &mut self.swash_cache,
         )?;
 
+        // ---- submit ----
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
@@ -236,6 +303,7 @@ impl GpuRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            self.quad.draw(&self.device, &self.queue, &mut pass, &quads);
             self.text_renderer.render(&self.atlas, &mut pass)?;
         }
         self.queue.submit(Some(encoder.finish()));
@@ -296,6 +364,16 @@ fn hex_to_wgpu(h: &str) -> wgpu::Color {
         wgpu::Color { r: parse(0), g: parse(2), b: parse(4), a: 1.0 }
     } else {
         wgpu::Color::BLACK
+    }
+}
+
+fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
+    let h = h.trim_start_matches('#');
+    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
+    if h.len() == 6 {
+        [parse(0), parse(2), parse(4), alpha]
+    } else {
+        [0.0, 0.0, 0.0, alpha]
     }
 }
 

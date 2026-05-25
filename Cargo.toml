@@ -41,6 +41,7 @@ glyphon = "0.5"
 bitflags = { version = "2.5", features = ["serde"] }
 serde_plain = "1"
 pollster = "0.3"
+arboard = "3"
 
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
