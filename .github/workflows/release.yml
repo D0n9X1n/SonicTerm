@@ -44,8 +44,8 @@ jobs:
             -output dist/sonic
           file dist/sonic
 
-      - name: Install create-dmg
-        run: brew install create-dmg
+      - name: Install create-dmg + librsvg
+        run: brew install create-dmg librsvg imagemagick
 
       - name: Bake icon
         run: bash assets/icons/bake-icons.sh

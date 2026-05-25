@@ -16,7 +16,7 @@ mkdir -p "$APP/Contents/"{MacOS,Resources}
 cp "$BIN" "$APP/Contents/MacOS/sonic"
 chmod +x "$APP/Contents/MacOS/sonic"
 
-cp "$ROOT/assets/icons/out/sonic.icns" "$APP/Contents/Resources/" 2>/dev/null || \
+cp "$ROOT/assets/icons/exports/sonic.icns" "$APP/Contents/Resources/" 2>/dev/null || \
     echo "warning: icon not baked, continuing"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
