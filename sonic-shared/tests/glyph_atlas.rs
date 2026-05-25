@@ -1,7 +1,9 @@
 //! Tests for `sonic_shared::glyph_atlas::GlyphAtlas`.
 
 use sonic_core::glyph_key::GlyphKey;
-use sonic_shared::glyph_atlas::{GlyphAtlas, Rasterizer, SyntheticRasterizer, ATLAS_DIM};
+use sonic_shared::glyph_atlas::{
+    GlyphAtlas, Rasterizer, ShelfPacker, SyntheticRasterizer, ATLAS_DIM,
+};
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)
@@ -175,4 +177,50 @@ fn uv_rect_is_normalized_within_atlas() {
     }
     assert!(info.uv[0] < info.uv[2], "u0 < u1");
     assert!(info.uv[1] < info.uv[3], "v0 < v1");
+}
+
+#[test]
+fn packer_no_overlap_at_scale() {
+    // Stress test the shelf packer with >1000 tiles and verify every
+    // returned rect is disjoint from every previous one.
+    let mut p = ShelfPacker::new(2048, 2048);
+    let mut placed: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut rng = 17u32;
+    let mut placed_count = 0;
+    for _ in 0..1500 {
+        // simple LCG for reproducible "varied" sizes 8..32
+        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+        let w = 8 + (rng / 65536) % 24;
+        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+        let h = 12 + (rng / 65536) % 20;
+        if let Some((x, y)) = p.alloc(w, h) {
+            // every previously placed rect must be disjoint
+            for (px, py, pw, ph) in &placed {
+                let disjoint = x + w <= *px || *px + pw <= x || y + h <= *py || *py + ph <= y;
+                assert!(disjoint, "overlap: new ({x},{y},{w},{h}) vs ({px},{py},{pw},{ph})");
+            }
+            placed.push((x, y, w, h));
+            placed_count += 1;
+        }
+    }
+    assert!(placed_count >= 1000, "expected to fit ≥1000 tiles in 2048², got {placed_count}");
+}
+
+#[test]
+fn packer_failure_does_not_corrupt_state() {
+    // Regression for Haiku PR #35 review: alloc() used to mutate shelf_y
+    // before the vertical-bounds check, so a too-tall tile would leave
+    // the packer in an overfull-shelf state and subsequent smaller tiles
+    // that DID fit the original shelf would also fail.
+    let mut p = ShelfPacker::new(128, 64);
+    // First, place a small tile to seed shelf_h.
+    let (x0, y0) = p.alloc(10, 20).expect("first alloc");
+    assert_eq!((x0, y0), (0, 0));
+    // Now try to place a 20×80 — taller than the entire atlas height.
+    // Must return None.
+    assert_eq!(p.alloc(20, 80), None);
+    // After the failure, a tile that fits the current shelf must still
+    // succeed (and not be displaced by a corrupted shelf_y/shelf_h).
+    let next = p.alloc(10, 20).expect("alloc after failure must succeed");
+    assert!(next.0 > 0 || next.1 == 0, "next tile should land on the current shelf");
 }

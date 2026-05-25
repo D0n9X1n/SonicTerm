@@ -11,7 +11,6 @@
 //! cutover happens behind a follow-up PR that needs the GUI bench
 //! loop to verify pixel parity — that loop is not available headlessly.
 
-use wgpu::util::DeviceExt;
 use wgpu::{
     BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
     BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
@@ -197,16 +196,23 @@ impl TextPipeline {
         }
         let needed = instances.len() as u64;
         if needed > self.capacity {
-            // Power-of-two grow.
+            // Power-of-two grow. Allocate the FULL capacity, not just the
+            // live prefix — otherwise a subsequent draw with
+            // needed <= self.capacity but > instances.len() would slip
+            // past the actual buffer end on write_buffer and trip wgpu
+            // validation.
             let mut cap = self.capacity.max(1);
             while cap < needed {
                 cap *= 2;
             }
-            self.instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let stride = std::mem::size_of::<GlyphInstance>() as u64;
+            self.instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sonic-text-instances"),
-                contents: bytemuck::cast_slice(instances),
+                size: cap * stride,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
             self.capacity = cap;
         } else {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));

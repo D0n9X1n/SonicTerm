@@ -101,7 +101,8 @@ pub trait Rasterizer {
 /// simplicity makes the code easier to audit; we can swap algorithms
 /// later without touching the public API.
 #[derive(Debug)]
-struct ShelfPacker {
+#[doc(hidden)]
+pub struct ShelfPacker {
     width: u32,
     height: u32,
     /// X cursor on the current shelf.
@@ -113,38 +114,51 @@ struct ShelfPacker {
 }
 
 impl ShelfPacker {
-    fn new(width: u32, height: u32) -> Self {
+    #[doc(hidden)]
+    pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, cursor_x: 0, shelf_y: 0, shelf_h: 0 }
     }
 
     /// Allocate a `(w, h)` rect on the atlas. Returns `(x, y)` of the
-    /// top-left or `None` if the atlas is full.
-    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+    /// top-left or `None` if the atlas is full. On failure the packer
+    /// state is unchanged so subsequent smaller allocations that DO fit
+    /// the current shelf still succeed.
+    #[doc(hidden)]
+    pub fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         if w > self.width || h > self.height {
             return None; // tile bigger than entire atlas
         }
-        // Open a new shelf when this tile won't fit horizontally OR when
-        // it's the very first tile (shelf_h == 0).
-        if self.shelf_h == 0 {
-            self.shelf_h = h;
+        // Compute a candidate (cursor_x, shelf_y, shelf_h) without
+        // mutating self until the candidate is proven valid.
+        let mut cand_cursor_x = self.cursor_x;
+        let mut cand_shelf_y = self.shelf_y;
+        let mut cand_shelf_h = self.shelf_h;
+
+        // First-tile-ever — bootstrap the shelf height.
+        if cand_shelf_h == 0 {
+            cand_shelf_h = h;
         }
-        if self.cursor_x + w > self.width {
-            // Advance to a fresh shelf.
-            self.shelf_y = self.shelf_y.saturating_add(self.shelf_h);
-            self.cursor_x = 0;
-            self.shelf_h = h;
+        // Doesn't fit horizontally → advance to a fresh shelf.
+        if cand_cursor_x + w > self.width {
+            cand_shelf_y = cand_shelf_y.saturating_add(cand_shelf_h);
+            cand_cursor_x = 0;
+            cand_shelf_h = h;
         }
-        // Grow shelf height if the new tile is taller than what's
-        // already on this shelf.
-        if h > self.shelf_h {
-            self.shelf_h = h;
+        // Grow shelf height if this tile is taller than what's there.
+        if h > cand_shelf_h {
+            cand_shelf_h = h;
         }
-        if self.shelf_y + self.shelf_h > self.height {
-            return None; // atlas full vertically
+        // Bounds check BEFORE committing — if vertical capacity is
+        // exhausted, return None and leave packer untouched.
+        if cand_shelf_y + cand_shelf_h > self.height {
+            return None;
         }
-        let x = self.cursor_x;
-        let y = self.shelf_y;
-        self.cursor_x += w;
+        // Commit.
+        let x = cand_cursor_x;
+        let y = cand_shelf_y;
+        self.cursor_x = cand_cursor_x + w;
+        self.shelf_y = cand_shelf_y;
+        self.shelf_h = cand_shelf_h;
         Some((x, y))
     }
 }
