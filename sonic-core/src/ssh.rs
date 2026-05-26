@@ -178,6 +178,17 @@ mod live {
             cols: u16,
             rows: u16,
         ) -> Result<Self, SshError> {
+            // Defense in depth: `SshTarget` exposes public fields, so a
+            // direct caller can bypass `parse_target` and stuff arbitrary
+            // bytes into `host` / `user`. Re-run the same validators here
+            // — the network MUST NOT be touched on a malformed target.
+            // See the Security section in the module docstring.
+            super::validate_host(&target.host)?;
+            super::validate_user(&target.user)?;
+            if target.port == 0 {
+                return Err(SshError::ParseTarget("port 0".into()));
+            }
+
             let (out_tx, out_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
             let (in_tx, in_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
             let (resize_tx, resize_rx) = crossbeam_channel::unbounded::<(u16, u16)>();

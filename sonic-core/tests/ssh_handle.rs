@@ -150,3 +150,90 @@ fn handle_drop_signals_shutdown() {
     // failed) — both must drop cleanly without hanging the test.
     drop(res);
 }
+
+// ----------------------------------------------------------------------
+// Bypass regression: `SshTarget` exposes public fields, so a direct
+// caller can sidestep `parse_target`. `SshHandle::connect` MUST
+// re-validate before touching the network.
+// ----------------------------------------------------------------------
+
+#[cfg(feature = "ssh")]
+#[test]
+fn connect_rejects_bypass_attempts_in_host() {
+    use sonic_core::ssh::SshHandle;
+    let bad_hosts = [
+        "host with space",
+        "host;rm",
+        "host|nc",
+        "host\nrm",
+        "host\0null",
+        "ho`x`",
+        "ho$x",
+        "ho&x",
+        "ho<x",
+        "ho>x",
+        "ho\"x",
+    ];
+    for h in bad_hosts {
+        let target = SshTarget { user: "alice".into(), host: h.into(), port: 22 };
+        let r = SshHandle::connect(target, None, 80, 24);
+        assert!(
+            matches!(r, Err(SshError::ParseTarget(_))),
+            "connect should reject malformed host {h:?}, got {:?}",
+            r.as_ref().err()
+        );
+    }
+}
+
+#[cfg(feature = "ssh")]
+#[test]
+fn connect_rejects_dotdot_is_allowed_but_overlong_is_not() {
+    // `..` happens to be inside the host charset (dot is allowed) —
+    // it's not a path traversal risk because the host is never used
+    // as a filesystem path. But a wildly oversized host MUST be
+    // rejected before reaching russh.
+    use sonic_core::ssh::SshHandle;
+    let target = SshTarget { user: "alice".into(), host: "a".repeat(300), port: 22 };
+    let r = SshHandle::connect(target, None, 80, 24);
+    assert!(matches!(r, Err(SshError::ParseTarget(_))), "overlong host must be rejected");
+}
+
+#[cfg(feature = "ssh")]
+#[test]
+fn connect_rejects_bypass_attempts_in_user() {
+    use sonic_core::ssh::SshHandle;
+    let bad_users = ["al ice", "al;ice", "al|x", "al`x`", "al\nice", "al\0x", "al$x"];
+    for u in bad_users {
+        let target = SshTarget { user: u.into(), host: "example.com".into(), port: 22 };
+        let r = SshHandle::connect(target, None, 80, 24);
+        assert!(
+            matches!(r, Err(SshError::ParseTarget(_))),
+            "connect should reject malformed user {u:?}, got {:?}",
+            r.as_ref().err()
+        );
+    }
+}
+
+#[cfg(feature = "ssh")]
+#[test]
+fn connect_rejects_port_zero_bypass() {
+    use sonic_core::ssh::SshHandle;
+    let target = SshTarget { user: "alice".into(), host: "example.com".into(), port: 0 };
+    let r = SshHandle::connect(target, None, 80, 24);
+    assert!(matches!(r, Err(SshError::ParseTarget(_))), "port 0 must be rejected");
+}
+
+#[cfg(feature = "ssh")]
+#[test]
+fn connect_accepts_valid_hosts() {
+    // Smoke: each of these passes validation. The background tokio
+    // thread will fail to actually connect (unroutable / no shell), but
+    // `connect` itself must return Ok with the validators happy.
+    use sonic_core::ssh::SshHandle;
+    for h in ["example.com", "192.168.1.1", "::1", "host.sub.example.com"] {
+        let target = SshTarget { user: "alice".into(), host: h.into(), port: 22 };
+        let r = SshHandle::connect(target, None, 80, 24);
+        assert!(r.is_ok(), "valid host {h:?} should pass validation, got {:?}", r.as_ref().err());
+        drop(r);
+    }
+}
