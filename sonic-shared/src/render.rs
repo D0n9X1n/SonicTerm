@@ -283,7 +283,11 @@ impl GpuRenderer {
         // means we only re-shape titles when the tab set changes.
         let tab_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
         let mut tab_buffer = Buffer::new(&mut font_system, tab_metrics);
-        tab_buffer.set_size(&mut font_system, Some(size.width as f32), Some(TAB_BAR_HEIGHT));
+        tab_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32 / scale_factor),
+            Some(TAB_BAR_HEIGHT),
+        );
 
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
@@ -401,29 +405,26 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
-        self.tab_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(TAB_BAR_HEIGHT),
-        );
+        // Text buffers are laid out in LOGICAL pixels (their font_size
+        // is logical); pass logical widths so wrapping/clipping doesn't
+        // give them 2× the room on Retina.
+        let logical_w = self.config.width as f32 / self.scale_factor;
+        let logical_h = self.config.height as f32 / self.scale_factor;
+        self.tab_buffer.set_size(&mut self.font_system, Some(logical_w), Some(TAB_BAR_HEIGHT));
         self.search_buffer.set_size(
             &mut self.font_system,
-            Some(self.config.width as f32),
+            Some(logical_w),
             Some(self.font_size * 0.85 * 1.2),
         );
         self.palette_query_buffer.set_size(
             &mut self.font_system,
-            Some(self.config.width as f32),
+            Some(logical_w),
             Some(self.font_size * 1.25),
         );
-        self.palette_rows_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
+        self.palette_rows_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
         self.ime_buffer.set_size(
             &mut self.font_system,
-            Some(self.config.width as f32),
+            Some(logical_w),
             Some(self.font_size * 1.5),
         );
     }
@@ -479,9 +480,14 @@ impl GpuRenderer {
     }
 
     pub fn cells(&self) -> (u16, u16) {
-        let inner_w = (self.config.width as f32 - self.padding * 2.0).max(self.cell_w);
-        let inner_h =
-            (self.config.height as f32 - self.top_inset() - self.padding).max(self.cell_h);
+        // Convert physical surface dims back to LOGICAL before dividing
+        // by logical cell metrics; otherwise a 2× display would report
+        // 2× the columns/rows the user actually sees (and the renderer
+        // would happily address rows past the visible viewport).
+        let logical_w = self.config.width as f32 / self.scale_factor;
+        let logical_h = self.config.height as f32 / self.scale_factor;
+        let inner_w = (logical_w - self.padding * 2.0).max(self.cell_w);
+        let inner_h = (logical_h - self.top_inset() - self.padding).max(self.cell_h);
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
         (cols.max(1), rows.max(1))
@@ -624,6 +630,11 @@ impl GpuRenderer {
     }
 
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
+        // Winit reports cursor positions in PHYSICAL pixels; our cell
+        // grid is in LOGICAL pixels. Normalize at the boundary so click
+        // targeting lands on the cell the user actually sees on Retina.
+        let px = px / self.scale_factor;
+        let py = py / self.scale_factor;
         let x = px - self.padding;
         let y = py - self.top_inset();
         if x < 0.0 || y < 0.0 {
@@ -761,8 +772,20 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
-        let sw = self.config.width as f32;
-        let sh = self.config.height as f32;
+        // `config.width/height` are PHYSICAL pixels (winit 0.30
+        // `WindowEvent::Resized` reports PhysicalSize, which we forward
+        // straight into wgpu surface configure). All layout math in
+        // this function — cell_w/cell_h, padding, top_inset, font_size
+        // — is in LOGICAL pixels. NDC is a unit-agnostic ratio, so we
+        // MUST hand `px_to_ndc` a surface size that's in the *same*
+        // unit as the rect we're converting. Pre-PR #63 the renderer
+        // was monolithically logical and got away with it; #63 made
+        // the atlas physical-correct, but left this mismatch which
+        // halves every rect on a 2× display — the grid renders in a
+        // tiny corner with sub-pixel glyphs. Regression target:
+        // `sonic-shared/tests/hidpi2.rs::glyph_rect_scales_with_dpi`.
+        let sw = self.config.width as f32 / self.scale_factor;
+        let sh = self.config.height as f32 / self.scale_factor;
         let top_inset = self.top_inset();
         let pad = self.padding;
         let cell_w = self.cell_w;
@@ -1414,9 +1437,17 @@ impl GpuRenderer {
             let _ = chip.title;
         }
 
+        // Glyphon converts TextArea pixel positions to NDC using the
+        // Resolution we hand it. Our positions (left/top/bounds) are in
+        // LOGICAL pixels (they're computed from padding/cell_w/etc),
+        // so the Resolution must match — feeding physical surface dims
+        // here would shrink every text area 2× on Retina.
         self.viewport.update(
             &self.queue,
-            Resolution { width: self.config.width, height: self.config.height },
+            Resolution {
+                width: (self.config.width as f32 / self.scale_factor) as u32,
+                height: (self.config.height as f32 / self.scale_factor) as u32,
+            },
         );
 
         let title_top = ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
