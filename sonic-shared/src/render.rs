@@ -93,6 +93,7 @@ pub struct GpuRenderer {
     hyperlink_underline: [f32; 4],
     hyperlink_tint: [f32; 4],
     search_highlight: [f32; 4],
+    search_highlight_current: [f32; 4],
     search_fg: GColor,
     search_bg: [f32; 4],
     search_buffer: Buffer,
@@ -262,6 +263,9 @@ impl GpuRenderer {
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
+        // Current (selected) match draws in orange so it's distinguishable
+        // from the other yellow matches at a glance.
+        let search_highlight_current = [1.0, 0.5, 0.0, 0.55];
         let search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
         let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         let search_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
@@ -330,6 +334,7 @@ impl GpuRenderer {
             hyperlink_underline,
             hyperlink_tint,
             search_highlight,
+            search_highlight_current,
             search_fg,
             search_bg,
             search_buffer,
@@ -931,17 +936,22 @@ impl GpuRenderer {
         let mut search_bar_top = 0.0_f32;
         let mut have_search_bar = false;
         if let Some(s) = search {
-            for m in &s.matches {
-                if m.row >= grid.rows || m.col_end <= m.col_start {
+            let cur_idx = s.current;
+            for (i, m) in s.matches.iter().enumerate() {
+                // Skip matches that aren't on screen (scrollback / off-viewport).
+                let Some(visible_row) = s.match_visible_row(m) else { continue };
+                if visible_row >= grid.rows || m.col_end <= m.col_start {
                     continue;
                 }
                 let x = self.padding + f32::from(m.col_start) * self.cell_w;
-                let y = self.top_inset() + f32::from(m.row) * self.cell_h;
+                let y = self.top_inset() + f32::from(visible_row) * self.cell_h;
                 let w = f32::from(m.col_end - m.col_start) * self.cell_w;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
-                    color: self.search_highlight,
-                });
+                let color = if Some(i) == cur_idx {
+                    self.search_highlight_current
+                } else {
+                    self.search_highlight
+                };
+                quads.push(QuadInstance { rect: px_to_ndc(x, y, w, self.cell_h, sw, sh), color });
             }
             // Status bar background pinned to bottom edge.
             search_bar_top = sh - search_bar_h;

@@ -291,6 +291,18 @@ impl Grid {
         self.visible.iter()
     }
 
+    /// Borrow a scrollback row by index (0 = oldest). Returns `None` if out
+    /// of range.
+    #[inline]
+    pub fn scrollback_row(&self, r: usize) -> Option<&Row> {
+        self.scrollback.get(r)
+    }
+
+    /// Iterate scrollback rows from oldest to newest.
+    pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
+        self.scrollback.iter()
+    }
+
     /// Put a character at cursor, advancing cursor by character width.
     pub fn put_char(&mut self, ch: char, fg: Color, bg: Color, flags: CellFlags) {
         self.put_char_linked(ch, fg, bg, flags, None);
