@@ -63,9 +63,58 @@ fn defaults_match_wezterm_visual_parity() {
         "wezterm parity: line_height must be 1.1, got {}",
         font.line_height
     );
-    assert!(
-        (window.padding - 8.0).abs() < f32::EPSILON,
-        "wezterm parity: window padding must be 8.0, got {}",
-        window.padding
-    );
+    for (name, got) in [
+        ("padding_left", window.padding_left),
+        ("padding_right", window.padding_right),
+        ("padding_top", window.padding_top),
+        ("padding_bottom", window.padding_bottom),
+    ] {
+        assert!(
+            (got - 8.0).abs() < f32::EPSILON,
+            "wezterm parity: window {name} must be 8.0, got {got}"
+        );
+    }
+}
+
+/// Legacy `padding = N` in `sonic.toml` (single value) must splat onto
+/// all four per-side fields after load — users who configured the old
+/// shorthand should not have to migrate their config to keep the same
+/// visual.
+#[test]
+fn legacy_padding_scalar_splats_to_all_sides() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sonic.toml");
+    std::fs::write(&path, "[window]\npadding = 12.0\n").unwrap();
+    let cfg = Config::load_or_default(&path).unwrap();
+    assert!((cfg.window.padding_left - 12.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_right - 12.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_top - 12.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_bottom - 12.0).abs() < f32::EPSILON);
+    // The legacy convenience field is consumed during normalize so a
+    // subsequent save writes only the canonical per-side fields.
+    assert!(cfg.window.padding.is_none());
+}
+
+/// Per-side padding values from `sonic.toml` reach `WindowConfig`
+/// untouched (no shadowing by the legacy field, no clobbering by
+/// `normalize_padding`).
+#[test]
+fn per_side_padding_values_round_trip() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sonic.toml");
+    std::fs::write(
+        &path,
+        "[window]\npadding_left = 1.0\npadding_right = 2.0\n\
+         padding_top = 3.0\npadding_bottom = 4.0\n",
+    )
+    .unwrap();
+    let cfg = Config::load_or_default(&path).unwrap();
+    assert!((cfg.window.padding_left - 1.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_right - 2.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_top - 3.0).abs() < f32::EPSILON);
+    assert!((cfg.window.padding_bottom - 4.0).abs() < f32::EPSILON);
 }

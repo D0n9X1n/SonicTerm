@@ -38,10 +38,38 @@ pub struct FontConfig {
 pub struct WindowConfig {
     pub cols: u16,
     pub rows: u16,
-    pub padding: f32,
+    /// Legacy single-value padding (logical px). When non-`None` on load,
+    /// it is splatted onto all four per-side fields below as a backward-
+    /// compatibility shim so existing `sonic.toml` files keep working.
+    /// Always serialized as `None` on save; the per-side fields are the
+    /// canonical surface.
+    #[serde(default, skip_serializing)]
+    pub padding: Option<f32>,
+    /// Per-side window padding (logical px), matching WezTerm's
+    /// `window_padding = { left, right, top, bottom }` knob. Defaults are
+    /// cribbed from the user's `wezterm.lua` (8 px on every side).
+    pub padding_left: f32,
+    pub padding_right: f32,
+    pub padding_top: f32,
+    pub padding_bottom: f32,
     pub decorations: bool,
     pub opacity: f32,
     pub blur: bool,
+}
+
+impl WindowConfig {
+    /// Apply the legacy `padding` convenience field (if set) to all four
+    /// per-side padding fields, then clear it. Call this after
+    /// deserialization so the rest of the engine only ever has to look
+    /// at `padding_left / right / top / bottom`.
+    pub fn normalize_padding(&mut self) {
+        if let Some(p) = self.padding.take() {
+            self.padding_left = p;
+            self.padding_right = p;
+            self.padding_top = p;
+            self.padding_bottom = p;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -108,7 +136,18 @@ impl Default for FontConfig {
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { cols: 100, rows: 30, padding: 8.0, decorations: true, opacity: 1.0, blur: false }
+        Self {
+            cols: 100,
+            rows: 30,
+            padding: None,
+            padding_left: 8.0,
+            padding_right: 8.0,
+            padding_top: 8.0,
+            padding_bottom: 8.0,
+            decorations: true,
+            opacity: 1.0,
+            blur: false,
+        }
     }
 }
 
@@ -142,7 +181,8 @@ impl Config {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-        let cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
+        let mut cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
+        cfg.window.normalize_padding();
         Ok(cfg)
     }
 

@@ -46,9 +46,9 @@ fn top_inset_helper_adds_titlebar_band() {
     let with = tab_bar_top_inset_with_titlebar(true, 4.0, 28.0);
     let without = tab_bar_top_inset_with_titlebar(true, 4.0, 0.0);
     assert!((with - without - 28.0).abs() < f32::EPSILON);
-    // Tab bar hidden: titlebar inset still reserved.
+    // Tab bar hidden: titlebar inset + top padding still reserved.
     let hidden = tab_bar_top_inset_with_titlebar(false, 4.0, 28.0);
-    assert!((hidden - 28.0).abs() < f32::EPSILON);
+    assert!((hidden - 32.0).abs() < f32::EPSILON);
 }
 
 #[cfg(target_os = "macos")]

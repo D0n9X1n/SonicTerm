@@ -1261,7 +1261,12 @@ impl App {
             &self.config.font.family,
             self.config.font.size,
             self.config.font.line_height,
-            self.config.window.padding,
+            [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1353,12 +1358,14 @@ impl App {
                     .map(|st| {
                         let (w, h) = child.renderer.logical_size();
                         let top = child.renderer.top_inset();
-                        let pad = child.renderer.padding();
+                        let pl = child.renderer.padding_left();
+                        let pr = child.renderer.padding_right();
+                        let pb = child.renderer.padding_bottom();
                         let outer = crate::pane::Rect::new(
-                            pad,
+                            pl,
                             top,
-                            (w - pad * 2.0).max(0.0),
-                            (h - top - pad).max(0.0),
+                            (w - pl - pr).max(0.0),
+                            (h - top - pb).max(0.0),
                         );
                         st.tree.layout(outer)
                     })
@@ -1772,6 +1779,46 @@ impl App {
         for child in self.child_windows.values_mut() {
             child.renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
             child.renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
+        }
+
+        // Padding (per-side). A change to any of the four window-padding
+        // values shrinks/grows the inner cell area, so after pushing the
+        // new padding into each live renderer we must resize every pane's
+        // grid + PTY to match the renderer's new (cols, rows). Without the
+        // resize the shell keeps reporting stale `stty size` and the grid
+        // draws clipped against the old inner rect until a manual window
+        // resize. Mirrors the font-live-reload path above (PR #53).
+        let padding_changed = (new_cfg.window.padding_left - self.config.window.padding_left).abs()
+            > f32::EPSILON
+            || (new_cfg.window.padding_right - self.config.window.padding_right).abs()
+                > f32::EPSILON
+            || (new_cfg.window.padding_top - self.config.window.padding_top).abs() > f32::EPSILON
+            || (new_cfg.window.padding_bottom - self.config.window.padding_bottom).abs()
+                > f32::EPSILON;
+        if padding_changed {
+            let pad = [
+                new_cfg.window.padding_left,
+                new_cfg.window.padding_right,
+                new_cfg.window.padding_top,
+                new_cfg.window.padding_bottom,
+            ];
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_padding(pad);
+                let (cols, rows) = r.cells();
+                resize_all_panes(&self.panes, cols, rows);
+            }
+            for child in self.child_windows.values_mut() {
+                child.renderer.set_padding(pad);
+                let (cols, rows) = child.renderer.cells();
+                resize_all_panes(&child.panes, cols, rows);
+            }
+            tracing::info!(
+                "live-reload: padding -> l={} r={} t={} b={}",
+                pad[0],
+                pad[1],
+                pad[2],
+                pad[3],
+            );
         }
 
         // Keymap
@@ -2472,9 +2519,12 @@ impl ApplicationHandler<UserEvent> for App {
             Window::default_attributes()
                 .with_title(format!("Sonic Terminal — {}", self.theme.name))
                 .with_inner_size(winit::dpi::LogicalSize::new(
-                    f32::from(cols) * 9.0 + self.config.window.padding * 2.0,
+                    f32::from(cols) * 9.0
+                        + self.config.window.padding_left
+                        + self.config.window.padding_right,
                     f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                        + self.config.window.padding * 2.0
+                        + self.config.window.padding_top
+                        + self.config.window.padding_bottom
                         + crate::tabbar_view::TAB_BAR_HEIGHT,
                 )),
         );
@@ -2491,7 +2541,12 @@ impl ApplicationHandler<UserEvent> for App {
             &self.config.font.family,
             self.config.font.size,
             self.config.font.line_height,
-            self.config.window.padding,
+            [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
         )
         .expect("init renderer");
         // Seed cursor visuals from config so the very first frame draws
@@ -2605,12 +2660,14 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(r) = self.renderer.as_ref() {
                             let (w, h) = r.logical_size();
                             let top = r.top_inset();
-                            let pad = r.padding();
+                            let pl = r.padding_left();
+                            let pr = r.padding_right();
+                            let pb = r.padding_bottom();
                             let outer = crate::pane::Rect::new(
-                                pad,
+                                pl,
                                 top,
-                                (w - pad * 2.0).max(0.0),
-                                (h - top - pad).max(0.0),
+                                (w - pl - pr).max(0.0),
+                                (h - top - pb).max(0.0),
                             );
                             st.tree.layout(outer)
                         } else {

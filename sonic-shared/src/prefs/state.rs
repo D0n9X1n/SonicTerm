@@ -255,7 +255,7 @@ impl PrefsState {
                         l.control_slot(1),
                         0.0,
                         32.0,
-                        self.config.window.padding,
+                        self.config.window.padding_left,
                     );
                     s = s.with_step(1.0);
                     s
@@ -539,7 +539,14 @@ impl PrefsState {
                 self.config.terminal.cursor_blink = t.get();
             }
             (Category::Behavior, 1, Control::Slider(s)) => {
-                self.config.window.padding = s.get();
+                // Single "Padding" slider in the prefs UI drives all four
+                // per-side values (matching how WezTerm's prefs surface
+                // exposes one knob with sensible symmetric defaults).
+                let v = s.get();
+                self.config.window.padding_left = v;
+                self.config.window.padding_right = v;
+                self.config.window.padding_top = v;
+                self.config.window.padding_bottom = v;
             }
             (Category::Behavior, 2, Control::Dropdown(d)) => {
                 if let Some(v) = d.value() {

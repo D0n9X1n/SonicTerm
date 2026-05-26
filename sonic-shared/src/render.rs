@@ -58,7 +58,7 @@ pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
 /// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
 /// our content below its chrome.
 pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
-    let bar = if visible { TAB_BAR_HEIGHT + padding } else { 0.0 };
+    let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
     titlebar_inset + bar
 }
 
@@ -119,7 +119,10 @@ pub struct GpuRenderer {
     scale_factor: f32,
     pub cell_w: f32,
     pub cell_h: f32,
-    padding: f32,
+    padding_left: f32,
+    padding_right: f32,
+    padding_top: f32,
+    padding_bottom: f32,
     bg: wgpu::Color,
     fg_default: GColor,
     cursor_color: [f32; 4],
@@ -258,7 +261,7 @@ impl GpuRenderer {
         font_family: &str,
         font_size: f32,
         line_height_mult: f32,
-        padding: f32,
+        padding: [f32; 4],
     ) -> Result<Self> {
         pollster::block_on(Self::new_async(
             window,
@@ -278,8 +281,9 @@ impl GpuRenderer {
         font_family: &str,
         font_size: f32,
         line_height_mult: f32,
-        padding: f32,
+        padding: [f32; 4],
     ) -> Result<Self> {
+        let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
         let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
@@ -445,7 +449,10 @@ impl GpuRenderer {
             scale_factor,
             cell_w,
             cell_h,
-            padding,
+            padding_left,
+            padding_right,
+            padding_top,
+            padding_bottom,
             bg,
             fg_default,
             cursor_color,
@@ -517,8 +524,11 @@ impl GpuRenderer {
     /// Top inset reserved above the grid: OS titlebar band (when active)
     /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]).
     pub fn top_inset(&self) -> f32 {
-        let bar =
-            if self.tab_bar_visible { self.tab_bar_logical_height() + self.padding } else { 0.0 };
+        let bar = if self.tab_bar_visible {
+            self.tab_bar_logical_height() + self.padding_top
+        } else {
+            self.padding_top
+        };
         self.titlebar_inset + bar
     }
 
@@ -666,8 +676,43 @@ impl GpuRenderer {
         self.config.height
     }
 
+    /// Left padding (logical px). Kept for backward compatibility with
+    /// callers that pre-date per-side padding; new code should prefer
+    /// the per-side accessors below.
     pub fn padding(&self) -> f32 {
-        self.padding
+        self.padding_left
+    }
+
+    pub fn padding_left(&self) -> f32 {
+        self.padding_left
+    }
+    pub fn padding_right(&self) -> f32 {
+        self.padding_right
+    }
+    pub fn padding_top(&self) -> f32 {
+        self.padding_top
+    }
+    pub fn padding_bottom(&self) -> f32 {
+        self.padding_bottom
+    }
+
+    /// Update all four padding values at once (used by the live config
+    /// reload path so editing `sonic.toml` takes effect without restart).
+    /// Invalidates the cached frame so the next render relays out.
+    pub fn set_padding(&mut self, padding: [f32; 4]) {
+        let [l, r, t, b] = padding;
+        if (self.padding_left - l).abs() < f32::EPSILON
+            && (self.padding_right - r).abs() < f32::EPSILON
+            && (self.padding_top - t).abs() < f32::EPSILON
+            && (self.padding_bottom - b).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.padding_left = l;
+        self.padding_right = r;
+        self.padding_top = t;
+        self.padding_bottom = b;
+        self.last_frame_key = None;
     }
 
     /// Logical (DPI-independent) size of the render surface in CSS pixels.
@@ -705,8 +750,8 @@ impl GpuRenderer {
         // would happily address rows past the visible viewport).
         let logical_w = self.config.width as f32 / self.scale_factor;
         let logical_h = self.config.height as f32 / self.scale_factor;
-        let inner_w = (logical_w - self.padding * 2.0).max(self.cell_w);
-        let inner_h = (logical_h - self.top_inset() - self.padding).max(self.cell_h);
+        let inner_w = (logical_w - self.padding_left - self.padding_right).max(self.cell_w);
+        let inner_h = (logical_h - self.top_inset() - self.padding_bottom).max(self.cell_h);
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
         (cols.max(1), rows.max(1))
@@ -856,7 +901,7 @@ impl GpuRenderer {
         // targeting lands on the cell the user actually sees on Retina.
         let px = px / self.scale_factor;
         let py = py / self.scale_factor;
-        let x = px - self.padding;
+        let x = px - self.padding_left;
         let y = py - self.top_inset();
         if x < 0.0 || y < 0.0 {
             return None;
@@ -1022,7 +1067,7 @@ impl GpuRenderer {
         let sw = self.config.width as f32 / self.scale_factor;
         let sh = self.config.height as f32 / self.scale_factor;
         let top_inset = self.top_inset();
-        let pad = self.padding;
+        let pad = self.padding_left;
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         // Baseline offset inside the cell box. swash returns
@@ -1177,7 +1222,7 @@ impl GpuRenderer {
                     if col_b < col_a {
                         continue;
                     }
-                    let x = self.padding + f32::from(col_a) * self.cell_w;
+                    let x = self.padding_left + f32::from(col_a) * self.cell_w;
                     let y = self.top_inset() + f32::from(r) * self.cell_h;
                     let w = f32::from(col_b - col_a + 1) * self.cell_w;
                     quads.push(QuadInstance {
@@ -1195,7 +1240,7 @@ impl GpuRenderer {
             let live_top = grid.scrollback_len() as u64;
             let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
             if view_top == live_top {
-                let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
+                let cx = self.padding_left + f32::from(grid.cursor.col) * self.cell_w;
                 let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
                 // Modulate the cursor accent with the current blink alpha.
                 // The base color is opaque (set at theme load) so we can
@@ -1330,7 +1375,7 @@ impl GpuRenderer {
         // marker is rendered inside the left padding so it never overlaps
         // text. Color matches the cursor accent at half alpha — distinctive
         // but not noisy.
-        let marker_w = (self.padding * 0.35).max(2.0).min(self.cell_w * 0.25);
+        let marker_w = (self.padding_left * 0.35).max(2.0).min(self.cell_w * 0.25);
         let marker_h = self.cell_h * 0.6;
         let mut marker_color = self.cursor_color;
         marker_color[3] = (marker_color[3] * 0.55).clamp(0.0, 1.0);
@@ -1349,7 +1394,7 @@ impl GpuRenderer {
                 .collect()
         };
         for row in prompt_rows {
-            let mx = (self.padding - marker_w - 1.0).max(0.0);
+            let mx = (self.padding_left - marker_w - 1.0).max(0.0);
             let my =
                 self.top_inset() + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
             quads.push(QuadInstance {
@@ -1364,7 +1409,7 @@ impl GpuRenderer {
         let hl_runs = collect_hyperlink_runs(grid);
         let hl_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &hl_runs {
-            let x = self.padding + f32::from(*col_a) * self.cell_w;
+            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
             let y = self.top_inset() + f32::from(*row) * self.cell_h;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
@@ -1383,7 +1428,7 @@ impl GpuRenderer {
         let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &underlines {
-            let x = self.padding + f32::from(*col_a) * self.cell_w;
+            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
             let y = self.top_inset() + f32::from(*row) * self.cell_h + self.cell_h
                 - underline_thickness;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
@@ -1608,7 +1653,7 @@ impl GpuRenderer {
                 if visible_row >= grid.rows || m.col_end <= m.col_start {
                     continue;
                 }
-                let x = self.padding + f32::from(m.col_start) * self.cell_w;
+                let x = self.padding_left + f32::from(m.col_start) * self.cell_w;
                 let y = self.top_inset() + f32::from(visible_row) * self.cell_h;
                 let w = f32::from(m.col_end - m.col_start) * self.cell_w;
                 let color = if Some(i) == cur_idx {
@@ -1742,7 +1787,7 @@ impl GpuRenderer {
 
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
-            let cursor_x = self.padding + f32::from(grid.cursor.col) * self.cell_w;
+            let cursor_x = self.padding_left + f32::from(grid.cursor.col) * self.cell_w;
             let cursor_y = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
             ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
         });
@@ -1842,7 +1887,7 @@ impl GpuRenderer {
         let search_area = if have_search_bar {
             Some(TextArea {
                 buffer: &self.search_buffer,
-                left: self.padding,
+                left: self.padding_left,
                 top: search_bar_top,
                 scale: 1.0,
                 bounds: TextBounds {
