@@ -179,6 +179,12 @@ pub struct App {
     /// decide between "tear out into new window" (None) and "merge into
     /// destination window at slot" (Some).
     drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    /// True when the main window has been drained (its last tab moved
+    /// out via cross-window merge) or its close button was clicked
+    /// while child windows still owned tabs. In that state the main
+    /// window is hidden but the event loop keeps spinning so live
+    /// child windows continue to run.
+    main_hidden: bool,
 }
 
 impl App {
@@ -210,7 +216,44 @@ impl App {
             pressed_tab: None,
             child_windows: HashMap::new(),
             drag_target: None,
+            main_hidden: false,
         }
+    }
+
+    /// Decide whether the event loop should exit. The app should keep
+    /// running as long as ANY window owns at least one tab — that is,
+    /// the main window has tabs AND is visible, OR any child window is
+    /// still alive. This is shared by both the main-window
+    /// `CloseRequested` handler and the post-merge drain check so a
+    /// drained-but-still-visible main with live children doesn't kill
+    /// the app.
+    #[doc(hidden)]
+    pub fn should_exit(&self) -> bool {
+        let main_alive = !self.main_hidden && !self.tabs.is_empty();
+        !main_alive && self.child_windows.is_empty()
+    }
+
+    /// Test-only: pure policy fn mirroring `should_exit` so integration
+    /// tests can exercise the rule without constructing a real
+    /// `ChildWindow` (which requires a live winit Window + GpuRenderer).
+    #[doc(hidden)]
+    pub fn should_exit_pure(main_tabs: usize, main_hidden: bool, child_count: usize) -> bool {
+        let main_alive = !main_hidden && main_tabs > 0;
+        !main_alive && child_count == 0
+    }
+
+    /// Test-only: read the `main_hidden` latch.
+    #[doc(hidden)]
+    pub fn __test_main_hidden(&self) -> bool {
+        self.main_hidden
+    }
+
+    /// Test-only: force-set the `main_hidden` latch so post-merge
+    /// drain-policy tests can simulate the "main already retired" state
+    /// without driving a real winit close event.
+    #[doc(hidden)]
+    pub fn __test_set_main_hidden(&mut self, v: bool) {
+        self.main_hidden = v;
     }
 
     fn active_pane_id(&self) -> Option<u64> {
@@ -564,10 +607,6 @@ impl App {
         src_idx: usize,
         target: crate::tab_drag::DropTarget<WindowId>,
     ) {
-        if self.tabs.len() <= 1 {
-            // Same refusal as tear-out: don't drain the last tab.
-            return;
-        }
         let Some((tab, state, panes)) = self.detach_tab_state(src_idx) else { return };
         if !self.attach_to_child(target.window, target.slot, tab, state, panes) {
             tracing::warn!(
@@ -575,9 +614,36 @@ impl App {
                 target.window
             );
         }
+        // If main has been drained but child windows are still alive,
+        // hide the main window without exiting the app.
+        if self.tabs.is_empty() && !self.child_windows.is_empty() {
+            self.hide_main_window();
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// Hide the main window and latch `main_hidden = true`. Used when
+    /// the main window has been drained of its last tab via a
+    /// cross-window merge, or when the user clicks the close button
+    /// while child windows are still alive. Both paths keep the event
+    /// loop running so the surviving children continue to function.
+    fn hide_main_window(&mut self) {
+        if let Some(w) = &self.window {
+            w.set_visible(false);
+        }
+        self.main_hidden = true;
+        tracing::info!("main window hidden (drained); child_windows={}", self.child_windows.len());
+    }
+
+    /// Reveal the main window again, e.g. when a tab is merged back
+    /// into it from a child. Clears the `main_hidden` latch.
+    fn show_main_window(&mut self) {
+        if let Some(w) = &self.window {
+            w.set_visible(true);
+        }
+        self.main_hidden = false;
     }
 
     /// Move the source child window's tab at `src_idx` into `target`.
@@ -593,6 +659,11 @@ impl App {
         let main_id = self.window.as_ref().map(|w| w.id());
         let attached = if Some(target.window) == main_id {
             self.attach_tab_state(target.slot, tab, state, panes);
+            // Receiving a tab back into main un-hides the window if it
+            // had been drained.
+            if self.main_hidden {
+                self.show_main_window();
+            }
             true
         } else {
             self.attach_to_child(target.window, target.slot, tab, state, panes)
@@ -699,7 +770,7 @@ impl App {
     /// single-tab/single-pane in v2 — splits/new-tabs are deferred.
     fn handle_child_window_event(
         &mut self,
-        _el: &ActiveEventLoop,
+        el: &ActiveEventLoop,
         win_id: WindowId,
         event: WindowEvent,
     ) {
@@ -717,6 +788,12 @@ impl App {
                         *pane.redraw_target.lock() = None;
                     }
                     drop(removed);
+                }
+                // If this was the last child AND the main window had
+                // been previously drained/hidden, nothing is alive
+                // anymore — exit the loop.
+                if self.should_exit() {
+                    el.exit();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -1404,7 +1481,17 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                // If child windows still own tabs, hide the main
+                // window instead of exiting the app — the children
+                // are independent live terminals and must keep
+                // running. Only exit when nothing else is alive.
+                if self.child_windows.is_empty() {
+                    el.exit();
+                } else {
+                    self.hide_main_window();
+                }
+            }
 
             WindowEvent::RedrawRequested => {
                 // Compute per-pane rects in window pixels so the renderer can
@@ -1597,7 +1684,11 @@ impl ApplicationHandler for App {
                             }
                         }
                         if self.tabs.is_empty() {
-                            el.exit();
+                            if self.child_windows.is_empty() {
+                                el.exit();
+                            } else {
+                                self.hide_main_window();
+                            }
                         }
                         if let Some(w) = &self.window {
                             w.request_redraw();

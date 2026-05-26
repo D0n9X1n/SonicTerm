@@ -220,3 +220,102 @@ fn make_phantom_window_id() -> winit::window::WindowId {
     // Use winit's public dummy id constructor (added in 0.30).
     winit::window::WindowId::dummy()
 }
+
+// ---- last-tab drain / exit policy (PR #48 review fix) ----------------------
+
+#[test]
+fn should_exit_pure_keeps_alive_when_main_drained_but_children_remain() {
+    // The blocker from haiku review: dragging the LAST main tab into a
+    // child should NOT exit the app. The pure policy fn must agree:
+    // main empty + hidden, but ≥1 child alive → keep running.
+    assert!(!App::should_exit_pure(0, true, 1));
+    assert!(!App::should_exit_pure(0, true, 3));
+}
+
+#[test]
+fn should_exit_pure_exits_when_all_windows_gone() {
+    // No main tabs, main hidden, zero children → nothing left to draw.
+    assert!(App::should_exit_pure(0, true, 0));
+}
+
+#[test]
+fn should_exit_pure_stays_alive_while_main_has_tabs() {
+    // Visible main with at least one tab → never exit, regardless of
+    // child count.
+    assert!(!App::should_exit_pure(1, false, 0));
+    assert!(!App::should_exit_pure(5, false, 2));
+}
+
+#[test]
+fn merging_last_main_tab_drains_main_without_panicking() {
+    // Simulate: main has exactly one tab, a child window is alive.
+    // Detach the last main tab (this is what merge_main_into_child
+    // does after the PR #48 guard was removed). Main bar is empty.
+    // The should_exit policy with main_hidden=true and 1 phantom child
+    // must NOT request exit.
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    assert_eq!(app.__test_tab_count(), 1);
+
+    let (_tab, _state, _panes) = app.detach_tab_state(0).expect("detach last main tab");
+    assert_eq!(app.__test_tab_count(), 0, "main bar must drain");
+    // Simulate the hide_main_window() side-effect that
+    // merge_main_into_child performs when ≥1 child is alive.
+    app.__test_set_main_hidden(true);
+    assert!(app.__test_main_hidden());
+    // Policy check with 1 phantom child: app stays alive.
+    assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 1));
+}
+
+#[test]
+fn merging_last_child_tab_into_main_keeps_main_alive() {
+    // Simulate the reverse direction: child window had one tab, it's
+    // merged into main. After detach_from_child + attach_tab_state +
+    // reap_empty_child, main has the tab + zero children. The policy
+    // must keep running (and `should_exit` should be false).
+    let mut app = synth_app();
+    // Pre-existing tab in main + a phantom-style detached bundle that
+    // we re-attach to mimic "child→main merge result".
+    let _ = app.__test_seed_tab("main-a");
+    let _ = app.__test_seed_tab("from-child");
+    let (tab, state, panes) = app.detach_tab_state(1).expect("pluck the 'from-child' bundle");
+    // ...and re-attach at end of main bar (mirrors what
+    // merge_child_into_target's main-path branch does).
+    app.attach_tab_state(99, tab, state, panes);
+    assert_eq!(app.__test_tab_count(), 2);
+    assert!(!app.__test_main_hidden());
+    assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 0));
+    // And reaping a phantom child should be a no-op since no child
+    // windows exist — that path is exercised by the live app on drop.
+    assert_eq!(app.child_window_count(), 0);
+    let fake = make_phantom_window_id();
+    assert!(app.__test_child_tab_count(fake).is_none());
+}
+
+#[test]
+fn merge_with_multiple_tabs_reindexes_remaining_tabs() {
+    // Merging one of N>1 tabs out of main must leave the OTHER N-1
+    // tabs in place and renumber the bar so subsequent ops still
+    // address valid indices. (Regression guard for the post-drain
+    // reindex path that the PR #48 fix introduces.)
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("alpha");
+    let _ = app.__test_seed_tab("bravo");
+    let _ = app.__test_seed_tab("charlie");
+    assert_eq!(app.__test_tab_count(), 3);
+
+    // Pluck the middle tab out (as if dropped onto a child window).
+    let (_tab, _state, _panes) = app.detach_tab_state(1).expect("detach bravo");
+    assert_eq!(app.__test_tab_count(), 2);
+    // Remaining tabs must still be reachable by their NEW indices
+    // (0 and 1). Attempt a no-op detach+reattach at index 1 to prove
+    // the bar is internally consistent.
+    let (tab, state, panes) = app.detach_tab_state(1).expect("index 1 still valid");
+    app.attach_tab_state(1, tab, state, panes);
+    assert_eq!(app.__test_tab_count(), 2);
+    // Main was not drained — policy must not request exit, regardless
+    // of phantom child count.
+    assert!(!app.__test_main_hidden());
+    assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 0));
+    assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 1));
+}
