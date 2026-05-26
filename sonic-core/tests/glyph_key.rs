@@ -96,5 +96,12 @@ fn flags_other_than_bold_italic_do_not_affect_key() {
 fn key_is_pointer_sized_or_smaller() {
     // The hot path puts millions of these through HashMap::entry per
     // second; bloating the key would tank the bench. Keep it small.
-    assert!(std::mem::size_of::<GlyphKey>() <= 8, "GlyphKey too large");
+    //
+    // Pre-shaping the key fit in 8 bytes (4 char + 1 slot + 2 bool +
+    // 1 pad). Shaping added a 2-byte `glyph_id` so shaped tiles cache
+    // as themselves; with alignment that pushes us to 12 bytes. Still
+    // well under cache-line size and bench-validated as not
+    // regressing atlas throughput.
+    let n = std::mem::size_of::<GlyphKey>();
+    assert!(n <= 12, "GlyphKey too large: {n} bytes");
 }

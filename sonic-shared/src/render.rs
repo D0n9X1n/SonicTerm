@@ -28,6 +28,7 @@ use crate::{
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
+    shape::{shape_run, RunStyle},
     swash_rasterizer::SwashRasterizer,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
@@ -671,12 +672,14 @@ impl GpuRenderer {
                 };
                 let mut ul_start: Option<u16> = None;
                 let mut last_visible_col: u16 = 0;
+                // First pass: per-cell underline coalescing (unchanged
+                // — underlines are a cell-level decoration, independent
+                // of shaping).
                 for (col, cell) in row.iter().enumerate() {
                     if cell.flags.contains(CellFlags::WIDE_CONT) {
                         continue;
                     }
                     last_visible_col = col as u16;
-                    // Underline tracking — coalesce contiguous underlined cells.
                     if cell.flags.contains(CellFlags::UNDERLINE) {
                         if ul_start.is_none() {
                             ul_start = Some(col as u16);
@@ -685,76 +688,86 @@ impl GpuRenderer {
                         let end = (col as u16).saturating_sub(1);
                         underlines.push((r, s, end));
                     }
-                    let Some(mut key) = sonic_core::glyph_key::GlyphKey::from_cell(cell) else {
-                        continue;
-                    };
-                    // Resolve the font slot for this codepoint via the
-                    // rasterizer's fallback chain BEFORE looking it up
-                    // in the atlas. Without this step, CJK/emoji/etc.
-                    // characters all key as slot=0 (primary font, which
-                    // lacks them), collide on one tofu-tile entry, and
-                    // never get a chance to be rasterized from a
-                    // fallback face. The cache inside the rasterizer
-                    // makes the second '中' free.
-                    if let Some(slot) =
-                        rasterizer.resolve_slot(cell.ch, key.weight_bold, key.italic)
-                    {
-                        key.font_slot = slot;
-                    }
-                    let is_wide = cell.flags.contains(CellFlags::WIDE);
-                    let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
-                    let Some(info) = self.glyph_atlas.get_or_insert(key, &mut rasterizer) else {
-                        continue;
-                    };
-                    if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                        // Blank tile: space or rasterizer miss. Spaces have
-                        // no character to draw. Missing glyphs get a tofu
-                        // outline so the user can SEE the gap rather than
-                        // a silently-missing char. Heuristic: if the char
-                        // is whitespace, skip; else queue a tofu quad.
-                        if !cell.ch.is_whitespace() {
-                            let cx = pad + f32::from(col as u16) * cell_w;
-                            let cy = top_inset + f32::from(r) * cell_h;
-                            let inset = (cell_h * 0.12).max(1.0);
-                            missing_tofu.push((
-                                cx + inset,
-                                cy + inset,
-                                cell_pixel_width - inset * 2.0,
-                                cell_h - inset * 2.0,
-                                cell_fg(cell, theme, fg_default),
-                            ));
-                            missing_chars_this_frame.push(cell.ch);
-                        }
-                        continue;
-                    }
-                    let cx = pad + f32::from(col as u16) * cell_w;
-                    let cy = top_inset + f32::from(r) * cell_h;
-                    let gx = cx + info.px_offset[0] as f32;
-                    let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
-                    let gw = info.px_size[0] as f32;
-                    let gh = info.px_size[1] as f32;
-                    let color = cell_fg(cell, theme, fg_default);
-                    let rgba = [
-                        f32::from(color.r()) / 255.0,
-                        f32::from(color.g()) / 255.0,
-                        f32::from(color.b()) / 255.0,
-                        1.0,
-                    ];
-                    glyph_instances.push(GlyphInstance {
-                        rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
-                        uv: info.uv,
-                        color: rgba,
-                        flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-                    });
-                    // For wide chars: the glyph itself was rasterized at
-                    // its natural width; we've laid it out in the lead
-                    // cell. WIDE_CONT cells are skipped above, so no
-                    // additional draw is needed — the wider cell footprint
-                    // is correctly reserved.
-                    let _ = cell_pixel_width;
                 }
                 if let Some(s) = ul_start.take() {
                     underlines.push((r, s, last_visible_col));
+                }
+
+                // Second pass: group cells into style runs and shape
+                // each run through cosmic-text. The shaper composes
+                // ZWJ sequences and ligatures into single glyphs when
+                // the font supports them; otherwise it produces 1:1
+                // output identical to the old char-based path.
+                let mut run_cells: Vec<(u16, Cell)> = Vec::new();
+                let mut run_style: Option<RunStyle> = None;
+                let mut run_first_col: u16 = 0;
+                for (col, cell) in row.iter().enumerate() {
+                    if cell.flags.contains(CellFlags::WIDE_CONT) {
+                        continue;
+                    }
+                    let style = RunStyle::from_cell(cell);
+                    match run_style {
+                        None => {
+                            run_style = Some(style);
+                            run_first_col = col as u16;
+                            run_cells.push((col as u16, cell.clone()));
+                        }
+                        Some(s) if s == style => {
+                            run_cells.push((col as u16, cell.clone()));
+                        }
+                        Some(s) => {
+                            Self::flush_shape_run(
+                                &mut self.glyph_atlas,
+                                &self.font_family,
+                                self.font_size,
+                                &mut rasterizer,
+                                &mut glyph_instances,
+                                &mut missing_tofu,
+                                &mut missing_chars_this_frame,
+                                r,
+                                run_first_col,
+                                s,
+                                &run_cells,
+                                theme,
+                                fg_default,
+                                cell_w,
+                                cell_h,
+                                top_inset,
+                                pad,
+                                sw,
+                                sh,
+                                baseline_y_in_cell,
+                            );
+                            run_cells.clear();
+                            run_style = Some(style);
+                            run_first_col = col as u16;
+                            run_cells.push((col as u16, cell.clone()));
+                        }
+                    }
+                }
+                if let Some(s) = run_style {
+                    Self::flush_shape_run(
+                        &mut self.glyph_atlas,
+                        &self.font_family,
+                        self.font_size,
+                        &mut rasterizer,
+                        &mut glyph_instances,
+                        &mut missing_tofu,
+                        &mut missing_chars_this_frame,
+                        r,
+                        run_first_col,
+                        s,
+                        &run_cells,
+                        theme,
+                        fg_default,
+                        cell_w,
+                        cell_h,
+                        top_inset,
+                        pad,
+                        sw,
+                        sh,
+                        baseline_y_in_cell,
+                    );
                 }
             }
         }
@@ -1482,6 +1495,109 @@ impl GpuRenderer {
         // works for truly unchanged frames.
         grid.clear_dirty();
         Ok(())
+    }
+
+    /// Shape a single style-run worth of cells and append the
+    /// resulting glyph instances + missing-glyph tofus to the frame's
+    /// queues. Factored out of the per-row loop so the loop body stays
+    /// readable; otherwise it would inline ~80 lines of placement +
+    /// fallback handling four times (run start, mid-row flush, end of
+    /// row, etc.).
+    #[allow(clippy::too_many_arguments)]
+    fn flush_shape_run(
+        glyph_atlas: &mut GlyphAtlas,
+        font_family: &str,
+        font_size: f32,
+        rasterizer: &mut SwashRasterizer,
+        glyph_instances: &mut Vec<GlyphInstance>,
+        missing_tofu: &mut Vec<(f32, f32, f32, f32, GColor)>,
+        missing_chars_this_frame: &mut Vec<char>,
+        row: u16,
+        _run_first_col: u16,
+        style: RunStyle,
+        cells: &[(u16, Cell)],
+        theme: &Theme,
+        fg_default: GColor,
+        cell_w: f32,
+        cell_h: f32,
+        top_inset: f32,
+        pad: f32,
+        sw: f32,
+        sh: f32,
+        baseline_y_in_cell: f32,
+    ) {
+        if cells.is_empty() {
+            return;
+        }
+        let shaped = shape_run(rasterizer, font_family, font_size, style, cells);
+
+        // Build a lookup from col → cell so we can recover per-cell
+        // attributes (color, WIDE flag, the actual codepoint for tofu
+        // diagnostics) from the shaped output's `lead_col`.
+        let mut cell_by_col: std::collections::HashMap<u16, Cell> =
+            std::collections::HashMap::with_capacity(cells.len());
+        for (col, c) in cells {
+            cell_by_col.insert(*col, c.clone());
+        }
+
+        for g in shaped {
+            let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
+            let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
+            let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
+
+            // Notdef from the shaper: cosmic-text couldn't resolve the
+            // glyph even through its own fallback. Draw a tofu and
+            // move on.
+            if g.glyph_id == 0 {
+                if !lead_cell.ch.is_whitespace() && lead_cell.ch != '\0' {
+                    let cx = pad + f32::from(g.lead_col) * cell_w;
+                    let cy = top_inset + f32::from(row) * cell_h;
+                    let inset = (cell_h * 0.12).max(1.0);
+                    missing_tofu.push((
+                        cx + inset,
+                        cy + inset,
+                        cell_pixel_width - inset * 2.0,
+                        cell_h - inset * 2.0,
+                        cell_fg(&lead_cell, theme, fg_default),
+                    ));
+                    missing_chars_this_frame.push(lead_cell.ch);
+                }
+                continue;
+            }
+
+            let key = sonic_core::glyph_key::GlyphKey::shaped(
+                g.ch,
+                g.font_slot,
+                g.glyph_id,
+                style.bold,
+                style.italic,
+            );
+            let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                continue;
+            };
+            if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                continue;
+            }
+            let cx = pad + f32::from(g.lead_col) * cell_w;
+            let cy = top_inset + f32::from(row) * cell_h;
+            let gx = cx + info.px_offset[0] as f32;
+            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
+            let gw = info.px_size[0] as f32;
+            let gh = info.px_size[1] as f32;
+            let color = cell_fg(&lead_cell, theme, fg_default);
+            let rgba = [
+                f32::from(color.r()) / 255.0,
+                f32::from(color.g()) / 255.0,
+                f32::from(color.b()) / 255.0,
+                1.0,
+            ];
+            glyph_instances.push(GlyphInstance {
+                rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
+                uv: info.uv,
+                color: rgba,
+                flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            });
+        }
     }
 }
 

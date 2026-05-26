@@ -20,6 +20,7 @@ pub mod quad;
 pub mod render;
 pub mod search;
 pub mod selection;
+pub mod shape;
 pub mod swash_rasterizer;
 pub mod tab_drag;
 pub mod tabbar_view;
