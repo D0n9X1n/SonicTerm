@@ -205,6 +205,34 @@ impl TabPayload {
     }
 }
 
+/// Outcome of a single OS-drag handoff attempt.
+///
+/// This is the load-bearing contract for the data-loss fix landed in
+/// the (review) follow-up to PR #59: the source tab is *only*
+/// detached/killed when the sink reports [`Accepted`](Self::Accepted).
+/// Anything else — including "we wrote the payload to a pasteboard
+/// but have not heard back from a receiver" — leaves the source tab
+/// alive, because v1 has no cross-process consumption-ack channel
+/// yet and the alternative (kill-on-write-success) destroys user
+/// sessions when no second Sonic.app is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragAck {
+    /// A destination has positively acknowledged the handoff and is
+    /// now the owner of the tab's intent (cwd/cmd/env/scrollback).
+    /// Source MUST kill its local copy to maintain at-most-one-live
+    /// semantics. v1 has no transport that yields this on the macOS
+    /// or Windows path; reserved for v2 once we add a heartbeat /
+    /// reply-pasteboard-key protocol.
+    Accepted,
+    /// The sink published the payload (e.g. pasteboard write returned
+    /// YES) OR it failed outright. In either case no receiver has
+    /// confirmed adoption, so the source MUST NOT detach its local
+    /// tab — that's the data-loss path Haiku flagged on PR #59.
+    /// Callers should log/observe but otherwise behave as if the OS
+    /// handoff did not happen.
+    NotAcknowledged,
+}
+
 /// Trait implemented by platform-specific OS-drag senders.
 ///
 /// `sonic-shared` knows when a tab has been dragged outside every
@@ -214,16 +242,21 @@ impl TabPayload {
 /// `sonic-windows` respectively. The platform binary installs an
 /// `OsDragSink` impl at startup; the app dispatches into it.
 ///
-/// The sink is fire-and-forget: success / failure is logged inside
-/// the impl; the caller treats both as "tab is gone now" (the source
-/// side has already serialized + killed its local copy).
+/// The return value gates whether the source tab dies — see
+/// [`DragAck`]. Until v2 wires a cross-process consumption ack, real
+/// platform sinks should return [`DragAck::NotAcknowledged`] so the
+/// user's live session is preserved if the drop falls on the floor.
 pub trait OsDragSink: Send + Sync {
     /// Hand the payload off to the OS. On macOS this writes it to
-    /// the general `NSPasteboard` under [`PASTEBOARD_TYPE`] and
-    /// starts a drag session. On Windows it builds an `IDataObject`
-    /// and calls `DoDragDrop`. On unsupported platforms it logs a
-    /// warning and returns.
-    fn begin_drag(&self, payload: &TabPayload);
+    /// the general `NSPasteboard` under [`PASTEBOARD_TYPE`]. On
+    /// Windows v1 this is a no-op stub. On unsupported platforms it
+    /// logs a warning.
+    ///
+    /// Returns [`DragAck::Accepted`] *only* when the sink is certain
+    /// a destination has taken ownership; otherwise
+    /// [`DragAck::NotAcknowledged`] so the caller keeps the source
+    /// tab alive.
+    fn begin_drag(&self, payload: &TabPayload) -> DragAck;
 }
 
 #[cfg(test)]

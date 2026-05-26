@@ -207,6 +207,25 @@ pub fn run_with_os_drag(
     theme_loader: Option<ThemeLoader>,
     keymap_loader: Option<KeymapLoader>,
 ) -> Result<()> {
+    run_with_os_drag_and_pending(theme, config, keymap, sink, theme_loader, keymap_loader, None)
+}
+
+/// Like [`run_with_os_drag`] but also seeds an already-received
+/// [`crate::os_drag::TabPayload`] (e.g. one the platform shim found on
+/// the pasteboard at startup). The payload becomes a real tab via
+/// [`App::new_tab_from_payload`] before the event loop starts — this
+/// is the receiver half of the (review) data-loss fix for PR #59:
+/// without it the payload was only logged and the user's torn tab
+/// vanished.
+pub fn run_with_os_drag_and_pending(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    sink: Arc<dyn crate::os_drag::OsDragSink>,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+    pending: Option<crate::os_drag::TabPayload>,
+) -> Result<()> {
     init_tracing();
     let event_loop =
         EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
@@ -216,6 +235,9 @@ pub fn run_with_os_drag(
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
     app.os_drag_sink = Some(sink);
+    if let Some(p) = pending {
+        let _ = app.new_tab_from_payload(&p);
+    }
     event_loop.run_app(&mut app).context("run event loop")?;
     Ok(())
 }
@@ -842,13 +864,51 @@ impl App {
             return false;
         }
         let Some(payload) = self.build_payload_for_tab(index) else { return false };
-        sink.begin_drag(&payload);
-        let _ = self.detach_tab_state(index);
+        let ack = sink.begin_drag(&payload);
+        match ack {
+            crate::os_drag::DragAck::Accepted => {
+                let _ = self.detach_tab_state(index);
+                tracing::info!(
+                    tab = %payload.tab_title,
+                    "OS drag: destination acknowledged; local tab dropped"
+                );
+                true
+            }
+            crate::os_drag::DragAck::NotAcknowledged => {
+                // DATA-LOSS FIX (PR #59 review): no destination
+                // confirmed adoption. Leave the source tab alive
+                // and fall back to the in-process tear-out path so
+                // the user does not lose a live shell.
+                tracing::warn!(
+                    tab = %payload.tab_title,
+                    "OS drag: sink NotAcknowledged; keeping source tab, falling back to in-process tear-out"
+                );
+                false
+            }
+        }
+    }
+
+    /// Spawn a brand-new tab seeded from a [`crate::os_drag::TabPayload`]
+    /// arriving from another Sonic process.
+    ///
+    /// v1 honors `tab_title` only — full cwd/cmd/env adoption needs
+    /// the validation pass flagged in the PR #59 review (untrusted
+    /// cross-process input). What the (review) fix guarantees is that
+    /// the call path *exists*: the macOS receiver no longer just logs
+    /// the payload, it materializes a tab via this method. Returns
+    /// the 0-based index of the inserted tab.
+    pub fn new_tab_from_payload(&mut self, payload: &crate::os_drag::TabPayload) -> usize {
+        let title = if payload.tab_title.is_empty() {
+            "received tab".to_string()
+        } else {
+            payload.tab_title.clone()
+        };
+        self.new_tab(title);
         tracing::info!(
             tab = %payload.tab_title,
-            "OS drag: payload posted to pasteboard, local tab dropped"
+            "os_drag: received payload; spawned destination tab"
         );
-        true
+        self.tabs.len().saturating_sub(1)
     }
 
     /// Move the main window's tab at `src_idx` into the destination
@@ -1255,6 +1315,23 @@ impl App {
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Test-only: install an `OsDragSink` so [`Self::try_os_drag_handoff`]
+    /// can be exercised without going through the platform entry point.
+    #[doc(hidden)]
+    pub fn __test_set_os_drag_sink(&mut self, sink: Arc<dyn crate::os_drag::OsDragSink>) {
+        self.os_drag_sink = Some(sink);
+    }
+
+    /// Test-only: drive the OS-drag handoff path with a forced "cursor
+    /// is outside any window" precondition (trivially true in tests
+    /// since no winit window is created). Returns the same bool as the
+    /// internal implementation: `true` = source-tab was detached,
+    /// `false` = source tab preserved.
+    #[doc(hidden)]
+    pub fn __test_try_os_drag_handoff(&mut self, index: usize) -> bool {
+        self.try_os_drag_handoff(index)
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,

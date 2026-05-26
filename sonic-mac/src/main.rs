@@ -16,16 +16,18 @@ fn main() -> Result<()> {
     let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "macos")]
     {
-        if let Some(p) = os_drag_mac::take_pending_payload() {
-            tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup");
+        let pending = os_drag_mac::take_pending_payload();
+        if let Some(p) = &pending {
+            tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        sonic_shared::app::run_with_os_drag(
+        sonic_shared::app::run_with_os_drag_and_pending(
             theme,
             config,
             keymap,
             os_drag_mac::MacOsDragSink::arc(),
             Some(theme_loader),
             Some(keymap_loader),
+            pending,
         )
     }
     #[cfg(not(target_os = "macos"))]

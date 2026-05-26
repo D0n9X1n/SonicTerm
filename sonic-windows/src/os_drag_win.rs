@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use sonic_shared::os_drag::{OsDragSink, TabPayload};
+use sonic_shared::os_drag::{DragAck, OsDragSink, TabPayload};
 
 pub struct WinOsDragSink;
 
@@ -40,11 +40,17 @@ impl WinOsDragSink {
 }
 
 impl OsDragSink for WinOsDragSink {
-    fn begin_drag(&self, payload: &TabPayload) {
+    fn begin_drag(&self, payload: &TabPayload) -> DragAck {
+        // DATA-LOSS FIX (PR #59 review): a stub that "drops" the
+        // payload but lets the caller kill the source tab destroys
+        // the user's live shell. Return NotAcknowledged so
+        // `try_os_drag_handoff` falls back to the in-process
+        // tear-out path (child window) instead.
         tracing::warn!(
             tab = %payload.tab_title,
-            "OS drag not yet implemented on Windows — payload dropped"
+            "OS drag not yet implemented on Windows — falling back to in-process tear-out (source tab preserved)"
         );
+        DragAck::NotAcknowledged
     }
 }
 

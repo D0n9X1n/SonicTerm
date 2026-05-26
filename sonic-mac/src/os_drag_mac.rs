@@ -42,7 +42,7 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSArray, NSString};
-use sonic_shared::os_drag::{OsDragSink, TabPayload, PASTEBOARD_TYPE};
+use sonic_shared::os_drag::{DragAck, OsDragSink, TabPayload, PASTEBOARD_TYPE};
 
 /// Sink that posts dragged-tab payloads to the macOS general
 /// pasteboard under [`PASTEBOARD_TYPE`].
@@ -57,12 +57,12 @@ impl MacOsDragSink {
 }
 
 impl OsDragSink for MacOsDragSink {
-    fn begin_drag(&self, payload: &TabPayload) {
+    fn begin_drag(&self, payload: &TabPayload) -> DragAck {
         let json = match payload.to_json() {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(?e, "os_drag_mac: payload serialization failed");
-                return;
+                return DragAck::NotAcknowledged;
             }
         };
         // FFI to AppKit. The general pasteboard is documented
@@ -84,24 +84,40 @@ impl OsDragSink for MacOsDragSink {
         } else {
             tracing::warn!("os_drag_mac: NSPasteboard.setString_forType returned NO");
         }
+        // DATA-LOSS FIX (PR #59 review): even a successful
+        // pasteboard write is NOT a consumption ack — no receiver
+        // may ever pick it up. Until v2 adds a reply-key heartbeat
+        // we always tell the caller to keep the source tab alive.
+        DragAck::NotAcknowledged
     }
 }
 
 /// Read any pending payload off the general pasteboard, returning it
-/// and clearing the slot. Returns `None` when no Sonic payload is
-/// present (the common case — most pasteboard writes are unrelated
-/// text). Called by the destination process on application
-/// activation.
+/// and clearing the slot only after a valid Sonic payload is
+/// observed. Returns `None` when no Sonic payload is present (the
+/// common case — most pasteboard writes are unrelated text). Called
+/// by the destination process on application activation.
+///
+/// DATA-LOSS FIX (PR #59 review): we previously called
+/// `clearContents()` *before* validating the JSON, which would wipe
+/// arbitrary unrelated clipboard contents from other apps whenever
+/// any string happened to be tagged with our type. Now we validate
+/// first and only clear on a successful round-trip.
 pub fn take_pending_payload() -> Option<TabPayload> {
     let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
     let type_str: Retained<NSString> = NSString::from_str(PASTEBOARD_TYPE);
     let value = pasteboard.stringForType(&type_str)?;
     let s = value.to_string();
-    let _ = pasteboard.clearContents();
     match TabPayload::from_json(&s) {
-        Ok(p) => Some(p),
+        Ok(p) => {
+            let _ = pasteboard.clearContents();
+            Some(p)
+        }
         Err(e) => {
-            tracing::warn!(?e, "os_drag_mac: pasteboard JSON malformed; ignoring");
+            tracing::warn!(
+                ?e,
+                "os_drag_mac: pasteboard JSON malformed; ignoring (and NOT clearing)"
+            );
             None
         }
     }
