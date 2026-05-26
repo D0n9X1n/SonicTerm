@@ -1,0 +1,15 @@
+menu-file-new-tab = 新しいタブ
+menu-edit-copy = コピー
+menu-edit-paste = 貼り付け
+prefs-title = 環境設定
+prefs-theme = テーマ
+prefs-font-family = フォント
+prefs-font-size = フォントサイズ
+prefs-cursor-blink = カーソル点滅
+prefs-language = 言語
+prefs-language-auto = 自動
+palette-placeholder = コマンドを入力…
+search-placeholder = ターミナル内を検索…
+tab-new = 新しいタブ
+tab-close = タブを閉じる
+ime-composing = 入力中: { $text }

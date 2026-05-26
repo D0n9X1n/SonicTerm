@@ -394,7 +394,7 @@ dependencies = [
  "log",
  "rangemap",
  "rustc-hash 2.1.2",
- "self_cell",
+ "self_cell 1.2.2",
  "skrifa",
  "smol_str 0.3.6",
  "swash",
@@ -461,6 +461,17 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.11.1",
  "objc2 0.6.4",
+]
+
+[[package]]
+name = "displaydoc"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -579,6 +590,40 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "fluent-bundle"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fe0a21ee80050c678013f82edf4b705fe2f26f1f9877593d13198612503f493"
+dependencies = [
+ "fluent-langneg",
+ "fluent-syntax",
+ "intl-memoizer",
+ "intl_pluralrules",
+ "rustc-hash 1.1.0",
+ "self_cell 0.10.3",
+ "smallvec",
+ "unic-langid",
+]
+
+[[package]]
+name = "fluent-langneg"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eebbe59450baee8282d71676f3bfed5689aeab00b27545e83e5f14b1195e8b0"
+dependencies = [
+ "unic-langid",
+]
+
+[[package]]
+name = "fluent-syntax"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a530c4694a6a8d528794ee9bbd8ba0122e779629ac908d15ad5a7ae7763a33d"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -891,6 +936,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "intl-memoizer"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "310da2e345f5eb861e7a07ee182262e94975051db9e4223e909ba90f392f163f"
+dependencies = [
+ "type-map",
+ "unic-langid",
+]
+
+[[package]]
+name = "intl_pluralrules"
+version = "7.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "078ea7b7c29a2b4df841a7f6ac8775ff6074020c6776d48491ce2268e068f972"
+dependencies = [
+ "unic-langid",
 ]
 
 [[package]]
@@ -1784,6 +1848,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-hack"
+version = "0.5.20+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc375e1527247fe1a97d8b7156678dfe7c1af2fc075c9a4db3690ecd2a148068"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,6 +2098,15 @@ dependencies = [
  "memmap2",
  "smithay-client-toolkit",
  "tiny-skia",
+]
+
+[[package]]
+name = "self_cell"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14e4d63b804dc0c7ec4a1e52bcb63f02c7ac94476755aa579edac21e01f915d"
+dependencies = [
+ "self_cell 1.2.2",
 ]
 
 [[package]]
@@ -2281,19 +2360,27 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "crossbeam-channel",
+ "fluent-bundle",
+ "fluent-langneg",
  "fontdb",
  "glyphon",
+<<<<<<< HEAD
  "notify",
+=======
+ "intl-memoizer",
+>>>>>>> e696e55 (feat: i18n via fluent (en, zh-CN, ja))
  "parking_lot",
  "pollster",
  "raw-window-handle",
  "regex",
  "sonic-core",
  "swash",
+ "sys-locale",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "unic-langid",
  "wgpu",
  "winit",
 ]
@@ -2472,6 +2559,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystr"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
+dependencies = [
+ "displaydoc",
+ "serde_core",
+ "zerovec",
+]
+
+[[package]]
 name = "tinyvec"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2605,6 +2703,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "type-map"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
+dependencies = [
+ "rustc-hash 2.1.2",
+]
+
+[[package]]
+name = "unic-langid"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ba52c9b05311f4f6e62d5d9d46f094bd6e84cb8df7b3ef952748d752a7d05"
+dependencies = [
+ "unic-langid-impl",
+ "unic-langid-macros",
+]
+
+[[package]]
+name = "unic-langid-impl"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce1bf08044d4b7a94028c93786f8566047edc11110595914de93362559bc658"
+dependencies = [
+ "tinystr",
+]
+
+[[package]]
+name = "unic-langid-macros"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5957eb82e346d7add14182a3315a7e298f04e1ba4baac36f7f0dbfedba5fc25"
+dependencies = [
+ "proc-macro-hack",
+ "tinystr",
+ "unic-langid-impl",
+ "unic-langid-macros-impl",
+]
+
+[[package]]
+name = "unic-langid-macros-impl"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1249a628de3ad34b821ecb1001355bca3940bcb2f88558f1a8bd82e977f75b5"
+dependencies = [
+ "proc-macro-hack",
+ "quote",
+ "syn",
+ "unic-langid-impl",
 ]
 
 [[package]]
@@ -3529,6 +3679,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zerofrom"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
+
+[[package]]
+name = "zerovec"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
+dependencies = [
+ "serde",
+ "zerofrom",
 ]
 
 [[package]]
