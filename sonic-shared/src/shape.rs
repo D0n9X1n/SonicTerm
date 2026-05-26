@@ -56,6 +56,28 @@ use sonic_core::grid::{Cell, CellFlags};
 
 use crate::swash_rasterizer::SwashRasterizer;
 
+/// True when every cell in `cells` is a plain printable-ASCII codepoint
+/// (0x20..=0x7E) with no `extras` cluster. The renderer can then bypass
+/// cosmic-text entirely and emit one `GlyphKey` per cell via the
+/// pre-shaping char→glyph lookup path. ASCII shells (the steady-state
+/// for almost every interactive session) hit this hundreds of times
+/// per frame; shaping was previously running unconditionally.
+#[inline]
+pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
+    cells.iter().all(|(_, c)| {
+        c.extras.is_none()
+            && {
+                let n = c.ch as u32;
+                (0x20..=0x7E).contains(&n)
+            }
+            // Reject anything carrying cluster intent through a flag
+            // we don't model in the fast path. WIDE_CONT shouldn't
+            // reach a run at all (caller filters), but be defensive.
+            && !c.flags.contains(CellFlags::WIDE_CONT)
+            && !c.flags.contains(CellFlags::WIDE)
+    })
+}
+
 /// One glyph the shaper produced for a style run.
 #[derive(Debug, Clone, Copy)]
 pub struct ShapedGlyph {
@@ -126,6 +148,15 @@ pub fn shape_run(
     for (col, cell) in cells {
         let start_len = text.len();
         text.push(cell.ch);
+        // Cluster extras (ZWJ U+200D, combining marks). These are
+        // zero-width per Unicode width but MUST be in the shaped string
+        // so the font's GSUB sees the full cluster — that's the whole
+        // point of preserving them through the grid.
+        if let Some(extras) = &cell.extras {
+            for ch in extras.chars() {
+                text.push(ch);
+            }
+        }
         let appended = text.len() - start_len;
         for _ in 0..appended {
             byte_to_col.push(*col);
@@ -210,6 +241,93 @@ pub fn shape_run(
         });
     }
     out
+}
+
+/// Cached shape() output keyed by (text, style, font_family, px).
+/// The renderer holds one of these across frames and reuses the glyph
+/// list when a row's content+style hasn't changed since the last frame.
+///
+/// Cache invalidation is implicit: an unchanged row produces the same
+/// `(text, style, font_family, px)` and therefore the same key.
+#[derive(Default)]
+pub struct ShapeCache {
+    map: std::collections::HashMap<ShapeCacheKey, Vec<ShapedGlyph>>,
+    hits: u64,
+    misses: u64,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct ShapeCacheKey {
+    text: String,
+    bold: bool,
+    italic: bool,
+    family: String,
+    px: u32,
+}
+
+impl ShapeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Lookup-or-shape. Bounded at 512 entries; on overflow the
+    /// cache is cleared (LRU is overkill at this scale).
+    pub fn get_or_shape(
+        &mut self,
+        rasterizer: &mut SwashRasterizer,
+        family: &str,
+        font_size: f32,
+        style: RunStyle,
+        cells: &[(u16, Cell)],
+    ) -> Vec<ShapedGlyph> {
+        let mut text = String::with_capacity(cells.len() * 2);
+        for (_, c) in cells {
+            text.push(c.ch);
+            if let Some(ex) = &c.extras {
+                for ch in ex.chars() {
+                    text.push(ch);
+                }
+            }
+        }
+        let key = ShapeCacheKey {
+            text,
+            bold: style.bold,
+            italic: style.italic,
+            family: family.to_string(),
+            px: (font_size * 100.0).round() as u32,
+        };
+        if let Some(v) = self.map.get(&key) {
+            self.hits += 1;
+            return v.clone();
+        }
+        self.misses += 1;
+        if self.map.len() >= 512 {
+            self.map.clear();
+        }
+        let shaped = shape_run(rasterizer, family, font_size, style, cells);
+        self.map.insert(key, shaped.clone());
+        shaped
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 #[cfg(test)]

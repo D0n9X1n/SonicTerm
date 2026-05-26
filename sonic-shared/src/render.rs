@@ -28,7 +28,7 @@ use crate::{
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
-    shape::{shape_run, RunStyle},
+    shape::{run_is_ascii_fast, RunStyle, ShapeCache},
     swash_rasterizer::SwashRasterizer,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
@@ -113,6 +113,10 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
+    /// Per-row shaped-glyph cache. Keyed by (text, style, family,
+    /// px); a row whose content + style hasn't changed since the
+    /// last frame hits the cache and skips cosmic-text entirely.
+    shape_cache: ShapeCache,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -346,6 +350,7 @@ impl GpuRenderer {
             last_frame_key: None,
             skipped_frames: 0,
             last_missing_chars: Vec::new(),
+            shape_cache: ShapeCache::new(),
         })
     }
 
@@ -721,6 +726,7 @@ impl GpuRenderer {
                                 &self.font_family,
                                 self.font_size,
                                 &mut rasterizer,
+                                &mut self.shape_cache,
                                 &mut glyph_instances,
                                 &mut missing_tofu,
                                 &mut missing_chars_this_frame,
@@ -751,6 +757,7 @@ impl GpuRenderer {
                         &self.font_family,
                         self.font_size,
                         &mut rasterizer,
+                        &mut self.shape_cache,
                         &mut glyph_instances,
                         &mut missing_tofu,
                         &mut missing_chars_this_frame,
@@ -1509,6 +1516,7 @@ impl GpuRenderer {
         font_family: &str,
         font_size: f32,
         rasterizer: &mut SwashRasterizer,
+        shape_cache: &mut ShapeCache,
         glyph_instances: &mut Vec<GlyphInstance>,
         missing_tofu: &mut Vec<(f32, f32, f32, f32, GColor)>,
         missing_chars_this_frame: &mut Vec<char>,
@@ -1529,7 +1537,53 @@ impl GpuRenderer {
         if cells.is_empty() {
             return;
         }
-        let shaped = shape_run(rasterizer, font_family, font_size, style, cells);
+
+        // ASCII fast path: every cell is printable-ASCII with no
+        // cluster extras, so the shaper would emit a 1:1 mapping
+        // anyway. Skip cosmic-text entirely and drive the glyph atlas
+        // straight from each cell's GlyphKey.
+        if run_is_ascii_fast(cells) {
+            for (col, cell) in cells {
+                let key = sonic_core::glyph_key::GlyphKey {
+                    ch: cell.ch,
+                    font_slot: 0,
+                    weight_bold: style.bold,
+                    italic: style.italic,
+                    glyph_id: 0,
+                };
+                let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                    if !cell.ch.is_whitespace() {
+                        missing_chars_this_frame.push(cell.ch);
+                    }
+                    continue;
+                };
+                if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    continue;
+                }
+                let cx = pad + f32::from(*col) * cell_w;
+                let cy = top_inset + f32::from(row) * cell_h;
+                let gx = cx + info.px_offset[0] as f32;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
+                let gw = info.px_size[0] as f32;
+                let gh = info.px_size[1] as f32;
+                let color = cell_fg(cell, theme, fg_default);
+                let rgba = [
+                    f32::from(color.r()) / 255.0,
+                    f32::from(color.g()) / 255.0,
+                    f32::from(color.b()) / 255.0,
+                    1.0,
+                ];
+                glyph_instances.push(GlyphInstance {
+                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
+                    uv: info.uv,
+                    color: rgba,
+                    flags: [0.0, 0.0, 0.0, 0.0],
+                });
+            }
+            return;
+        }
+
+        let shaped = shape_cache.get_or_shape(rasterizer, font_family, font_size, style, cells);
 
         // Build a lookup from col → cell so we can recover per-cell
         // attributes (color, WIDE flag, the actual codepoint for tofu

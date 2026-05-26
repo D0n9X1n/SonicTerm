@@ -41,6 +41,17 @@ bitflags::bitflags! {
 }
 
 /// A single grid cell.
+///
+/// `extras` stores trailing zero-width codepoints (zero-width joiners
+/// U+200D and combining marks) that follow the lead `ch` and must be
+/// shaped together with it as part of the same cluster. ZWJ sequences
+/// like 👨‍👩‍👧 (MAN + ZWJ + WOMAN + ZWJ + GIRL) reach the grid as
+/// five separate `put_char` calls; the four zero-width codepoints
+/// (ZWJs + each subsequent emoji's invisible joiners are zero-width
+/// per `unicode-width`) get appended to the lead cell's `extras` so
+/// the shaper sees the full cluster on a single shape pass. Boxed so
+/// the common case (no extras) costs one machine word per cell, not
+/// the 24-byte footprint of an inline `Vec<char>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub ch: char,
@@ -48,6 +59,13 @@ pub struct Cell {
     pub bg: Color,
     pub flags: CellFlags,
     pub hyperlink: Option<HyperlinkId>,
+    /// Trailing zero-width codepoints (ZWJ, combining marks) that
+    /// belong to this cluster, encoded as UTF-8. `None` for the
+    /// overwhelming majority of cells (plain ASCII, single emoji,
+    /// single CJK glyph). `Box<str>` (rather than `String`) keeps the
+    /// footprint at two machine words when present and zero
+    /// allocations beyond the boxed slice itself.
+    pub extras: Option<Box<str>>,
 }
 
 impl Default for Cell {
@@ -58,6 +76,7 @@ impl Default for Cell {
             bg: Color::Default,
             flags: CellFlags::empty(),
             hyperlink: None,
+            extras: None,
         }
     }
 }
@@ -363,6 +382,37 @@ impl Grid {
     ) {
         let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
         if width == 0 {
+            // Zero-width codepoint (ZWJ U+200D, combining marks, etc.).
+            // It must NOT advance the cursor, but it IS part of the
+            // current cluster — the shaper needs to see it together
+            // with the lead char so ZWJ sequences like 👨‍👩‍👧 actually
+            // compose. Attach it to the previous lead cell on this row.
+            // If the cursor is at column 0 (no prior cell on this row)
+            // there is no cluster to attach to and the codepoint is
+            // dropped — matches every other terminal's behavior.
+            if self.cursor.col == 0 {
+                return;
+            }
+            let r = self.cursor.row as usize;
+            // Walk back past any WIDE_CONT cells to find the lead.
+            let mut c = self.cursor.col as usize - 1;
+            while c > 0 && self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
+                c -= 1;
+            }
+            if self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
+                // Reached col 0 still on a continuation — nothing to
+                // attach to safely.
+                return;
+            }
+            let lead = &mut self.visible[r][c];
+            let mut s = match lead.extras.take() {
+                Some(boxed) => String::from(boxed),
+                None => String::new(),
+            };
+            s.push(ch);
+            lead.extras = Some(s.into_boxed_str());
+            self.mark_row(self.cursor.row);
+            self.bump();
             return;
         }
         if self.cursor.col + width > self.cols {
@@ -371,10 +421,16 @@ impl Grid {
         }
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
         let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
-        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags, hyperlink };
+        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags, hyperlink, extras: None };
         if width == 2 && c + 1 < self.cols as usize {
-            self.visible[r][c + 1] =
-                Cell { ch: ' ', fg, bg, flags: flags | CellFlags::WIDE_CONT, hyperlink };
+            self.visible[r][c + 1] = Cell {
+                ch: ' ',
+                fg,
+                bg,
+                flags: flags | CellFlags::WIDE_CONT,
+                hyperlink,
+                extras: None,
+            };
         }
         self.cursor.col += width;
         self.mark_row(r as u16);

@@ -7,7 +7,7 @@ use sonic_core::grid::{Cell, CellFlags, Color};
 use sonic_core::hyperlink::HyperlinkId;
 
 fn cell(ch: char, flags: CellFlags) -> Cell {
-    Cell { ch, fg: Color::Default, bg: Color::Default, flags, hyperlink: None }
+    Cell { ch, fg: Color::Default, bg: Color::Default, flags, hyperlink: None, extras: None }
 }
 
 #[test]

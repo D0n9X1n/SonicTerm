@@ -164,3 +164,61 @@ fn ligature_lead_col_stays_at_first_source_cell() {
     // claim cells outside [1, 2].
     assert!(g.cluster_cells <= 2);
 }
+
+#[test]
+fn ascii_fast_path_detects_pure_ascii_runs() {
+    // "hello world" is the prototypical shell text — every cell is
+    // printable ASCII with no cluster extras. The fast path must
+    // recognize it so the renderer bypasses cosmic-text shaping.
+    let cells = cells_for("hello world");
+    assert!(
+        sonic_shared::shape::run_is_ascii_fast(&cells),
+        "pure printable-ASCII run must take the fast path (no shaping)"
+    );
+
+    // A run containing a non-ASCII codepoint must NOT take the fast
+    // path — the shaper has to see it to resolve fallback fonts.
+    let cells = cells_for("héllo");
+    assert!(
+        !sonic_shared::shape::run_is_ascii_fast(&cells),
+        "non-ASCII codepoint must force the shaping path"
+    );
+
+    // A run whose lead cell carries cluster extras (e.g. a combining
+    // mark or ZWJ retained by Grid) must also force shaping — the
+    // extras can only be composed by cosmic-text.
+    let mut cells = cells_for("a");
+    cells[0].1.extras = Some("\u{200D}".to_string().into_boxed_str());
+    assert!(
+        !sonic_shared::shape::run_is_ascii_fast(&cells),
+        "cluster extras must force the shaping path"
+    );
+}
+
+#[test]
+fn shape_cache_hits_on_repeat_calls() {
+    // Same row content + style on two successive frames must hit the
+    // cache on the second call — that's the whole point of the cache.
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut cache = sonic_shared::shape::ShapeCache::new();
+
+    let cells = cells_for("$ git status");
+    let style = RunStyle { bold: false, italic: false };
+
+    let first = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+    assert_eq!(cache.hits(), 0);
+    assert_eq!(cache.misses(), 1);
+    assert!(!first.is_empty());
+
+    let second = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+    assert_eq!(cache.hits(), 1, "second call with identical inputs must hit the cache");
+    assert_eq!(cache.misses(), 1, "miss count must not advance on a cache hit");
+    assert_eq!(first.len(), second.len(), "cached glyph list must match the shaped list");
+
+    // Different style (italic) must miss again — the cache key
+    // includes (bold, italic).
+    let italic = RunStyle { bold: false, italic: true };
+    let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, italic, &cells);
+    assert_eq!(cache.misses(), 2, "different style must miss the cache");
+}

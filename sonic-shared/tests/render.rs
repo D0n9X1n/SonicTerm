@@ -16,6 +16,7 @@ fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {
             bg: Color::Default,
             flags: CellFlags::empty(),
             hyperlink: Some(hid),
+            extras: None,
         };
     }
     let runs = collect_hyperlink_runs(&g);
@@ -34,6 +35,7 @@ fn collect_hyperlink_runs_splits_on_different_id() {
             bg: Color::Default,
             flags: CellFlags::empty(),
             hyperlink: Some(h),
+            extras: None,
         };
     }
     let runs = collect_hyperlink_runs(&g);
