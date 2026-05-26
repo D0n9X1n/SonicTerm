@@ -32,7 +32,7 @@ use crate::{
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
     swash_rasterizer::SwashRasterizer,
-    tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
+    tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
 };
@@ -360,11 +360,8 @@ impl GpuRenderer {
         // means we only re-shape titles when the tab set changes.
         let tab_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
         let mut tab_buffer = Buffer::new(&mut font_system, tab_metrics);
-        tab_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32 / scale_factor),
-            Some(TAB_BAR_HEIGHT),
-        );
+        let bar_h = tab_bar_height(font_size);
+        tab_buffer.set_size(&mut font_system, Some(size.width as f32 / scale_factor), Some(bar_h));
 
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
@@ -497,7 +494,8 @@ impl GpuRenderer {
         // give them 2× the room on Retina.
         let logical_w = self.config.width as f32 / self.scale_factor;
         let logical_h = self.config.height as f32 / self.scale_factor;
-        self.tab_buffer.set_size(&mut self.font_system, Some(logical_w), Some(TAB_BAR_HEIGHT));
+        let bar_h = self.tab_bar_logical_height();
+        self.tab_buffer.set_size(&mut self.font_system, Some(logical_w), Some(bar_h));
         self.search_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
@@ -519,7 +517,16 @@ impl GpuRenderer {
     /// Top inset reserved above the grid: OS titlebar band (when active)
     /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]).
     pub fn top_inset(&self) -> f32 {
-        tab_bar_top_inset_with_titlebar(self.tab_bar_visible, self.padding, self.titlebar_inset)
+        let bar =
+            if self.tab_bar_visible { self.tab_bar_logical_height() + self.padding } else { 0.0 };
+        self.titlebar_inset + bar
+    }
+
+    /// Logical-pixel height of the tab bar for the renderer's current font
+    /// size. Derived from [`tab_bar_height`] so the bar tracks
+    /// `window_frame.font_size × 2` like WezTerm fancy-mode.
+    pub fn tab_bar_logical_height(&self) -> f32 {
+        tab_bar_height(self.font_size)
     }
 
     /// The titlebar inset alone (logical px) — the y-offset at which the
@@ -1455,7 +1462,8 @@ impl GpuRenderer {
 
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            let layout = TabBarLayout::compute(tabs, sw).with_top_offset(self.titlebar_inset);
+            let layout = TabBarLayout::compute_with_height(tabs, sw, self.tab_bar_logical_height())
+                .with_top_offset(self.titlebar_inset);
             quads.push(QuadInstance {
                 rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
                 color: self.tab_bar_bg,
@@ -1834,8 +1842,9 @@ impl GpuRenderer {
             },
         );
 
+        let bar_h = self.tab_bar_logical_height();
         let title_top =
-            self.titlebar_inset + ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
+            self.titlebar_inset + ((bar_h - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
         let tab_area = if self.tab_bar_visible {
             Some(TextArea {
                 buffer: &self.tab_buffer,
@@ -1846,7 +1855,7 @@ impl GpuRenderer {
                     left: 0,
                     top: self.titlebar_inset as i32,
                     right: self.config.width as i32,
-                    bottom: (self.titlebar_inset + TAB_BAR_HEIGHT) as i32,
+                    bottom: (self.titlebar_inset + bar_h) as i32,
                 },
                 default_color: self.tab_inactive_fg,
                 custom_glyphs: &[],

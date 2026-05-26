@@ -6,10 +6,24 @@
 
 use crate::tabs::TabBar;
 
-/// Height of the tab bar strip, in physical pixels. Wezterm's fancy mode
-/// uses a slightly taller bar than the chrome-style 32px default — gives
-/// the per-tab Nerd Font icons room to breathe at typical font sizes.
+/// Default height of the tab bar strip, in logical pixels. This is the
+/// historical hard-coded value used when no font_size is plumbed in (tests,
+/// pure-layout call sites). Renderer-driven layouts should prefer
+/// [`tab_bar_height`] so the bar height scales with the user's configured
+/// font size — matching WezTerm fancy-mode's `window_frame.font_size × 2`
+/// rhythm.
 pub const TAB_BAR_HEIGHT: f32 = 34.0;
+
+/// Compute the tab bar height for a given terminal font size, mirroring
+/// WezTerm fancy-mode (`window_frame.font_size × 2` + a couple of pixels
+/// of vertical breathing room above/below the glyph cap).
+///
+/// At `font_size = 14` this returns `32.0`, matching the WezTerm chrome-style
+/// default. At `font_size = 15` it returns `34.0`, the historical Sonic
+/// constant. A small floor of `24.0` keeps the bar usable at tiny font sizes.
+pub fn tab_bar_height(font_size: f32) -> f32 {
+    (font_size * 2.0 + 4.0).max(24.0)
+}
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
 pub const TAB_MAX_WIDTH: f32 = 220.0;
@@ -30,8 +44,10 @@ pub const TAB_GAP: f32 = 2.0;
 pub const BAR_LEFT_PAD: f32 = 4.0;
 
 /// Internal horizontal padding inside each tab, between the edge of the tab
-/// rect and the start of the title / the close button.
-pub const TAB_INNER_PAD: f32 = 8.0;
+/// rect and the start of the title / the close button. WezTerm fancy-mode
+/// uses roughly 6px around the icon + title block; matching that here keeps
+/// the visual rhythm consistent.
+pub const TAB_INNER_PAD: f32 = 6.0;
 
 /// Rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,15 +130,23 @@ pub struct TabBarLayout {
 
 impl TabBarLayout {
     /// Compute the layout for the bar at the top of a window `window_width`
-    /// pixels wide.
+    /// pixels wide, using the historical [`TAB_BAR_HEIGHT`] constant.
     pub fn compute(bar: &TabBar, window_width: f32) -> Self {
-        let bar_rect = Rect { x: 0.0, y: 0.0, w: window_width.max(0.0), h: TAB_BAR_HEIGHT };
+        Self::compute_with_height(bar, window_width, TAB_BAR_HEIGHT)
+    }
+
+    /// Like [`Self::compute`] but with an explicit bar height — used by the
+    /// renderer so the painted bar and the hit-tested bar always agree on
+    /// height when the user's font size differs from the default.
+    pub fn compute_with_height(bar: &TabBar, window_width: f32, bar_height: f32) -> Self {
+        let bar_h = bar_height.max(1.0);
+        let bar_rect = Rect { x: 0.0, y: 0.0, w: window_width.max(0.0), h: bar_h };
 
         let new_tab = Rect {
             x: (window_width - NEW_TAB_BUTTON_WIDTH).max(0.0),
             y: 0.0,
             w: NEW_TAB_BUTTON_WIDTH.min(window_width),
-            h: TAB_BAR_HEIGHT,
+            h: bar_h,
         };
 
         let n = bar.len();
@@ -141,7 +165,7 @@ impl TabBarLayout {
 
         let mut x = BAR_LEFT_PAD;
         for index in 0..n {
-            let bg = Rect { x, y: 2.0, w: per_tab, h: TAB_BAR_HEIGHT - 4.0 };
+            let bg = Rect { x, y: 2.0, w: per_tab, h: bar_h - 4.0 };
             let close = Rect {
                 x: bg.x + bg.w - TAB_INNER_PAD - CLOSE_BUTTON_SIZE,
                 y: bg.y + (bg.h - CLOSE_BUTTON_SIZE) / 2.0,
