@@ -361,3 +361,61 @@ fn csi_cursor_motion_bumps_revision_and_marks_dirty() {
     assert!(p.grid().revision() > r1);
     assert!(p.grid().is_row_dirty(1));
 }
+
+#[test]
+fn osc_133_a_records_prompt_start() {
+    let mut p = Parser::new(Grid::new(10, 5));
+    assert_eq!(p.grid().prompts_len(), 0);
+    p.advance(b"\x1b]133;A\x07");
+    assert_eq!(p.grid().prompts_len(), 1);
+    let pr = p.grid().prompts().next().unwrap();
+    assert_eq!(pr.start_row, 0);
+    assert!(pr.end_row.is_none());
+    assert!(pr.exit_code.is_none());
+}
+
+#[test]
+fn osc_133_d_records_exit_code_on_last_prompt() {
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b]133;A\x07$ run\n");
+    p.advance(b"\x1b]133;D;42\x07");
+    let pr = p.grid().prompts().last().unwrap();
+    assert_eq!(pr.exit_code, Some(42));
+    assert!(pr.end_row.is_some());
+}
+
+#[test]
+fn osc_133_d_without_exit_code_is_none() {
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b]133;A\x07");
+    p.advance(b"\x1b]133;D\x07");
+    let pr = p.grid().prompts().last().unwrap();
+    assert_eq!(pr.exit_code, None);
+    assert!(pr.end_row.is_some());
+}
+
+#[test]
+fn osc_133_a_coalesces_on_same_row() {
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b]133;A\x07\x1b]133;A\x07\x1b]133;A\x07");
+    assert_eq!(p.grid().prompts_len(), 1);
+}
+
+#[test]
+fn osc_133_b_and_c_are_accepted_without_panic() {
+    // B / C are no-ops in the current implementation but must not break
+    // parsing of surrounding sequences.
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b]133;A\x07\x1b]133;B\x07X\x1b]133;C\x07Y");
+    assert_eq!(p.grid().row(0)[0].ch, 'X');
+    assert_eq!(p.grid().row(0)[1].ch, 'Y');
+    assert_eq!(p.grid().prompts_len(), 1);
+}
+
+#[test]
+fn osc_133_unknown_kind_is_ignored() {
+    let mut p = Parser::new(Grid::new(10, 5));
+    p.advance(b"\x1b]133;Z\x07X");
+    assert_eq!(p.grid().prompts_len(), 0);
+    assert_eq!(p.grid().row(0)[0].ch, 'X');
+}

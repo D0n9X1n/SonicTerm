@@ -97,6 +97,37 @@ pub fn next_pane_id() -> u64 {
     NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Wrap clipboard text for paste, applying DECSET 2004 bracketed-paste
+/// guards (`ESC [ 200 ~` / `ESC [ 201 ~`) when the active pane has
+/// requested bracketed paste. Pure function, exported for unit tests.
+pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut v = Vec::with_capacity(text.len() + 12);
+        v.extend_from_slice(b"\x1b[200~");
+        v.extend_from_slice(text.as_bytes());
+        v.extend_from_slice(b"\x1b[201~");
+        v
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+/// Compute the absolute viewport-top row for "scroll to previous / next
+/// prompt". Returns `None` if there is no prompt in the requested
+/// direction. Pure function so tests can drive it without a window.
+pub fn pick_prompt_target(
+    grid: &sonic_core::grid::Grid,
+    current_top_abs: u64,
+    forward: bool,
+) -> Option<u64> {
+    let pick = if forward {
+        grid.prompt_after(current_top_abs)
+    } else {
+        grid.prompt_before(current_top_abs)
+    };
+    pick.map(|p| p.start_row)
+}
+
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
@@ -145,11 +176,17 @@ pub struct PaneState {
     pub parser: Arc<Mutex<Parser>>,
     pub pty: Option<PtyHandle>,
     pub redraw_target: Arc<Mutex<Option<Arc<Window>>>>,
+    /// Absolute row (scrollback-relative) that should appear at the top of
+    /// the visible viewport. `None` = "follow the live tail" (default).
+    /// Currently set by the OSC 133 prompt-navigation actions. The render
+    /// layer treats this as a hint — the grid itself always exposes the
+    /// live visible window.
+    pub viewport_top_abs: Option<u64>,
 }
 
 impl PaneState {
     fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
-        Self { parser, pty, redraw_target: Arc::new(Mutex::new(None)) }
+        Self { parser, pty, redraw_target: Arc::new(Mutex::new(None)), viewport_top_abs: None }
     }
 }
 
@@ -1088,6 +1125,8 @@ impl App {
             Action::OpenSearch => self.open_search(),
             Action::OpenPreferences => self.open_preferences(),
             Action::OpenCommandPalette => self.toggle_command_palette(),
+            Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
+            Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
@@ -1315,17 +1354,30 @@ impl App {
                     .active_pane()
                     .map(|p| p.parser.lock().bracketed_paste_enabled())
                     .unwrap_or(false);
-                let bytes = if bracketed {
-                    let mut v = Vec::with_capacity(text.len() + 12);
-                    v.extend_from_slice(b"\x1b[200~");
-                    v.extend_from_slice(text.as_bytes());
-                    v.extend_from_slice(b"\x1b[201~");
-                    v
-                } else {
-                    text.into_bytes()
-                };
+                let bytes = wrap_paste(&text, bracketed);
                 self.write_to_pty(bytes);
             }
+        }
+    }
+
+    /// Compute the new viewport-top row for a "scroll to previous/next
+    /// prompt" action, mutate the active pane's `viewport_top_abs`, and
+    /// request a redraw. Pure logic (the row selection) is delegated to
+    /// [`pick_prompt_target`] so it is unit-testable without a window.
+    fn scroll_to_prompt(&mut self, forward: bool) {
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get(i) else { return };
+        let pane_id = st.active_pane;
+        let Some(pane) = self.panes.get_mut(&pane_id) else { return };
+        let new_top = {
+            let guard = pane.parser.lock();
+            let grid = guard.grid();
+            let cur = pane.viewport_top_abs.unwrap_or_else(|| grid.scrollback_len() as u64);
+            pick_prompt_target(grid, cur, forward)
+        };
+        if let Some(top) = new_top {
+            pane.viewport_top_abs = Some(top);
+            tracing::info!(target = top, "scrolled to prompt row");
         }
     }
 

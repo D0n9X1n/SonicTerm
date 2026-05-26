@@ -549,3 +549,55 @@ fn dirty_count_after_specific_sequence() {
     assert!(!g.is_row_dirty(2));
     assert_eq!(g.dirty_count(), 2);
 }
+
+#[test]
+fn prompt_before_and_after_navigate() {
+    let mut g = Grid::new(10, 5);
+    g.record_prompt_start(); // row 0
+    g.goto(2, 0);
+    g.record_prompt_start(); // row 2
+    g.goto(4, 0);
+    g.record_prompt_start(); // row 4
+    assert_eq!(g.prompts_len(), 3);
+
+    // From row 3, previous = 2, next = 4.
+    assert_eq!(g.prompt_before(3).map(|p| p.start_row), Some(2));
+    assert_eq!(g.prompt_after(3).map(|p| p.start_row), Some(4));
+
+    // From row 4, next is None (no prompt strictly greater).
+    assert!(g.prompt_after(4).is_none());
+    // From row 0, prev is None.
+    assert!(g.prompt_before(0).is_none());
+}
+
+#[test]
+fn prompt_visible_row_tracks_scrollback() {
+    let mut g = Grid::new(4, 3);
+    // Generate scrollback so prompt_visible_row exercise the offset math.
+    g.record_prompt_start(); // absolute row 0
+                             // Scroll three lines — that pushes the prompt row off-screen.
+    g.scroll_up(3);
+    let p = *g.prompts().next().unwrap();
+    assert_eq!(p.start_row, 0);
+    assert_eq!(g.prompt_visible_row(&p), None);
+
+    // Record a new prompt while the cursor is at visible row 1, with
+    // 3 lines of scrollback → absolute row 4.
+    g.goto(1, 0);
+    g.record_prompt_start();
+    let p2 = *g.prompts().last().unwrap();
+    assert_eq!(p2.start_row, 4);
+    assert_eq!(g.prompt_visible_row(&p2), Some(1));
+}
+
+#[test]
+fn prompt_region_limit_evicts_oldest() {
+    let mut g = Grid::new(10, 2);
+    for _ in 0..(PROMPT_REGION_LIMIT + 5) {
+        // Force unique absolute rows by scrolling between markers so the
+        // coalescing guard doesn't drop them.
+        g.record_prompt_start();
+        g.scroll_up(1);
+    }
+    assert_eq!(g.prompts_len(), PROMPT_REGION_LIMIT);
+}

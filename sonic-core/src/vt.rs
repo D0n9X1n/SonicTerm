@@ -339,6 +339,28 @@ impl Perform for Performer {
                     .to_string();
                 self.events.push(VtEvent::Clipboard { selection: sel, data });
             }
+            Some(133) => {
+                // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
+                // integration. Kinds:
+                //   A → prompt start
+                //   B → prompt end (= command-line edit start)
+                //   C → command output start
+                //   D [; exit_code] → command finished
+                let kind = params.get(1).and_then(|s| s.first().copied());
+                match kind {
+                    Some(b'A') => self.grid.record_prompt_start(),
+                    Some(b'D') => {
+                        let exit = params
+                            .get(2)
+                            .and_then(|s| std::str::from_utf8(s).ok())
+                            .and_then(|s| s.parse::<i32>().ok());
+                        self.grid.record_prompt_end(exit);
+                    }
+                    // B / C are tracked implicitly via cursor position at the
+                    // time A and D fire; no extra state needed for now.
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }

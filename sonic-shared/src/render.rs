@@ -705,6 +705,27 @@ impl GpuRenderer {
             });
         }
 
+        // OSC 133 shell-integration: draw a small left-edge marker on every
+        // row whose absolute position matches a recorded prompt-start. The
+        // marker is rendered inside the left padding so it never overlaps
+        // text. Color matches the cursor accent at half alpha — distinctive
+        // but not noisy.
+        let marker_w = (self.padding * 0.35).max(2.0).min(self.cell_w * 0.25);
+        let marker_h = self.cell_h * 0.6;
+        let mut marker_color = self.cursor_color;
+        marker_color[3] = (marker_color[3] * 0.55).clamp(0.0, 1.0);
+        let prompt_rows: Vec<u16> =
+            grid.prompts().filter_map(|p| grid.prompt_visible_row(p)).collect();
+        for row in prompt_rows {
+            let mx = (self.padding - marker_w - 1.0).max(0.0);
+            let my =
+                self.top_inset() + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(mx, my, marker_w, marker_h, sw, sh),
+                color: marker_color,
+            });
+        }
+
         // Hyperlink visuals: a translucent tint quad under the run plus an
         // underline quad on top. Coalesce contiguous hyperlinked cells per
         // row, mirroring the UNDERLINE pass below.

@@ -99,3 +99,36 @@ fn modifier_aware_click_only_opens_with_super() {
     assert!(sonic_core::url_open::validate("https://example.com/path").is_ok());
     assert!(sonic_core::url_open::validate("javascript:alert(1)").is_err());
 }
+
+#[test]
+fn wrap_paste_raw_when_not_bracketed() {
+    let out = sonic_shared::app::wrap_paste("hello\nworld", false);
+    assert_eq!(out, b"hello\nworld");
+}
+
+#[test]
+fn wrap_paste_brackets_when_enabled() {
+    let out = sonic_shared::app::wrap_paste("rm -rf /", true);
+    assert_eq!(out, b"\x1b[200~rm -rf /\x1b[201~");
+}
+
+#[test]
+fn wrap_paste_empty_text_still_emits_brackets() {
+    let out = sonic_shared::app::wrap_paste("", true);
+    assert_eq!(out, b"\x1b[200~\x1b[201~");
+}
+
+#[test]
+fn pick_prompt_target_forward_and_back() {
+    use sonic_core::grid::Grid;
+    let mut g = Grid::new(10, 6);
+    g.record_prompt_start();
+    g.goto(2, 0);
+    g.record_prompt_start();
+    g.goto(5, 0);
+    g.record_prompt_start();
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, true), Some(2));
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, false), Some(2));
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, true), None);
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, false), None);
+}
