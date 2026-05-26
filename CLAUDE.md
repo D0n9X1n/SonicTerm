@@ -257,3 +257,23 @@ cargo run --example pty_dump_unicode -p sonic-core --release
 The matrix exists because **the existing pty_dump e2e cannot catch this class of bug** — its shell payload is pure ASCII. Do NOT delete or weaken the matrix; if a class is intentionally dropped from scope, mark the corresponding test `#[ignore]` with a comment naming the deciding PR, never `#[cfg(skip)]` or deletion.
 
 Ignored tests in the matrix document capability gaps awaiting a fix (e.g. `fix/atlas-font-fallback`). Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.
+
+---
+
+## 12. Disk hygiene — scratch clones (MANDATORY)
+
+Every multi-agent PR cycle creates `/tmp/<scratch>` clones (~1.8 GB each: full repo + `target/`). With ~10 PRs in flight in parallel, this trivially fills a 460 GB SSD to 99 % — at which point even `df` and `echo` fail with ENOSPC and the harness silently corrupts in-flight agents.
+
+**Rule for every agent prompt:** the FINAL step of every dispatch MUST be `cd / && rm -rf /tmp/<scratch>`. No exceptions. Include it as an explicit numbered step in the prompt and require the agent to confirm it ran in the reply.
+
+**Rule for the PM (you):** after every merge or every "task-notification" arrival, sweep stragglers:
+
+```bash
+du -sh /tmp/* 2>/dev/null | sort -h | tail
+# anything >100 MB that's not currently in-flight: rm -rf
+```
+
+Acceptable in-flight footprint: one scratch per active agent. After all agents return, `/tmp` should be back near 0 B of sonic clones.
+
+Local `target/` is a separate ~5 GB cost (debug + release + deps + incremental). Run `cargo clean` periodically when not actively building. The shipped `.dmg` is **~22 MB**; the 5 GB is purely build-time intermediates.
+
