@@ -42,16 +42,24 @@ use crate::{
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
 // millisecond on the renderer thread.)
 
-/// Pure helper computing the top inset reserved for the tab bar.
-/// Returns 0 when the bar is hidden so the grid recovers the row.
-/// Exposed so tests can validate visibility wiring without needing
-/// a live GPU context.
+/// Pure helper computing the top inset reserved above the grid for both
+/// the OS titlebar band (when an integrated titlebar pushes the content
+/// view under the native chrome) and the tab bar. Returns the titlebar
+/// inset alone when the tab bar is hidden, so the grid recovers the row
+/// the bar used to take. Exposed so tests can validate visibility wiring
+/// without needing a live GPU context.
 pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
-    if visible {
-        TAB_BAR_HEIGHT + padding
-    } else {
-        0.0
-    }
+    tab_bar_top_inset_with_titlebar(visible, padding, 0.0)
+}
+
+/// Same as [`tab_bar_top_inset`] but adds a reserved titlebar band on top.
+/// `titlebar_inset` is the height in logical pixels the OS reserves at the
+/// top of the content view (e.g. macOS traffic-lights strip when
+/// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
+/// our content below its chrome.
+pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
+    let bar = if visible { TAB_BAR_HEIGHT + padding } else { 0.0 };
+    titlebar_inset + bar
 }
 
 /// One inactive pane's cursor: the cell coordinates inside that pane
@@ -175,6 +183,12 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
+    /// Reserved height (logical px) above the tab bar for the OS native
+    /// titlebar. Non-zero on macOS when the window uses
+    /// `with_fullsize_content_view(true)` — without this the tab bar
+    /// would paint under the traffic lights + window title. See
+    /// [`crate::app::integrated_titlebar_inset`].
+    titlebar_inset: f32,
     /// Characters from the most recent `render()` call that the
     /// rasterizer could not produce a tile for (i.e. would draw as a
     /// tofu outline). Whitespace is excluded. Test-only diagnostic
@@ -465,6 +479,7 @@ impl GpuRenderer {
             last_frame_key: None,
             skipped_frames: 0,
             tab_bar_visible: true,
+            titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
             drag_chip: None,
@@ -501,10 +516,32 @@ impl GpuRenderer {
         );
     }
 
-    /// Top inset reserved for the tab bar. Returns 0 when the tab bar is
-    /// hidden via [`Self::set_tab_bar_visible`].
+    /// Top inset reserved above the grid: OS titlebar band (when active)
+    /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]).
     pub fn top_inset(&self) -> f32 {
-        tab_bar_top_inset(self.tab_bar_visible, self.padding)
+        tab_bar_top_inset_with_titlebar(self.tab_bar_visible, self.padding, self.titlebar_inset)
+    }
+
+    /// The titlebar inset alone (logical px) — the y-offset at which the
+    /// tab bar strip itself begins, regardless of whether the bar is
+    /// visible. Used by hit-testing / tab-bar layout to shift their
+    /// rectangles down so clicks under the OS titlebar are not consumed
+    /// as tab activations.
+    pub fn titlebar_inset(&self) -> f32 {
+        self.titlebar_inset
+    }
+
+    /// Set the reserved OS titlebar band height (logical px). Called once
+    /// from `app.rs` after creating each window so the renderer knows
+    /// whether the macOS integrated-titlebar style is in effect.
+    /// Invalidates the cached frame key so the next render() relays out.
+    pub fn set_titlebar_inset(&mut self, inset: f32) {
+        let clamped = inset.max(0.0);
+        if (self.titlebar_inset - clamped).abs() < f32::EPSILON {
+            return;
+        }
+        self.titlebar_inset = clamped;
+        self.last_frame_key = None;
     }
 
     /// Show or hide the tab bar. Returns `true` if the visibility actually
@@ -1418,7 +1455,7 @@ impl GpuRenderer {
 
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            let layout = TabBarLayout::compute(tabs, sw);
+            let layout = TabBarLayout::compute(tabs, sw).with_top_offset(self.titlebar_inset);
             quads.push(QuadInstance {
                 rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
                 color: self.tab_bar_bg,
@@ -1797,7 +1834,8 @@ impl GpuRenderer {
             },
         );
 
-        let title_top = ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
+        let title_top =
+            self.titlebar_inset + ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
         let tab_area = if self.tab_bar_visible {
             Some(TextArea {
                 buffer: &self.tab_buffer,
@@ -1806,9 +1844,9 @@ impl GpuRenderer {
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
-                    top: 0,
+                    top: self.titlebar_inset as i32,
                     right: self.config.width as i32,
-                    bottom: TAB_BAR_HEIGHT as i32,
+                    bottom: (self.titlebar_inset + TAB_BAR_HEIGHT) as i32,
                 },
                 default_color: self.tab_inactive_fg,
                 custom_glyphs: &[],

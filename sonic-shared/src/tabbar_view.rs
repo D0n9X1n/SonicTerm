@@ -168,6 +168,31 @@ impl TabBarLayout {
         self
     }
 
+    /// Shift every rectangle in the layout down by `dy` logical/physical
+    /// pixels. Used to push the tab bar below the macOS native titlebar
+    /// when `with_fullsize_content_view(true)` extends our content under
+    /// the traffic lights — otherwise both hit-testing and the painted
+    /// chrome would overlap the OS titlebar.
+    ///
+    /// `dy` of 0 is a no-op (non-macOS / non-integrated styles).
+    /// Negative values are clamped to 0 so callers can pass raw deltas
+    /// without worrying about sign.
+    #[must_use]
+    pub fn with_top_offset(mut self, dy: f32) -> Self {
+        let dy = dy.max(0.0);
+        if dy == 0.0 {
+            return self;
+        }
+        self.bar.y += dy;
+        self.new_tab.y += dy;
+        for t in &mut self.tabs {
+            t.bg.y += dy;
+            t.close.y += dy;
+            t.title.y += dy;
+        }
+        self
+    }
+
     /// Map a pixel position to a tab-bar action. Returns `None` when the
     /// click is outside the bar entirely (caller should treat it as a
     /// terminal-area click in that case).

@@ -54,6 +54,35 @@ pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
     }
 }
 
+/// Reserved height (in **logical pixels**) under the macOS native titlebar
+/// when [`with_integrated_titlebar`] is active. The content view extends
+/// under the titlebar (fullsize_content_view), so we must shift our tab
+/// bar and grid down by this amount or they paint underneath the traffic
+/// lights and window title.
+///
+/// 28pt matches AppKit's standard titlebar height (the value
+/// `NSWindow.titlebarHeight` returns for a window with the standard
+/// `NSWindowStyleMask::Titled`). Querying it from objc2 at runtime would
+/// give us the live value but adds a heavyweight dependency to
+/// `sonic-shared` for a number that is stable across every macOS release
+/// since 10.10. If Apple ever changes the default, bump this constant.
+pub const MACOS_INTEGRATED_TITLEBAR_INSET: f32 = 28.0;
+
+/// Returns the titlebar inset (logical px) the renderer should reserve
+/// above the tab bar / grid for the current platform + window-style
+/// combination. Returns 0 on platforms that don't extend content under
+/// the titlebar (Windows, Linux), so non-macOS layout is unchanged.
+pub fn integrated_titlebar_inset() -> f32 {
+    #[cfg(target_os = "macos")]
+    {
+        MACOS_INTEGRATED_TITLEBAR_INSET
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0.0
+    }
+}
+
 use crate::{
     command_palette::CommandPalette,
     config_watch::ConfigWatcher,
@@ -863,6 +892,7 @@ impl App {
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
             let layout = TabBarLayout::compute(&c.tabs, bar_width)
+                .with_top_offset(c.renderer.titlebar_inset())
                 .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
@@ -886,10 +916,13 @@ impl App {
             let geom = window_geom(main);
             let width =
                 self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
+            let inset = self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0);
             candidates.push((
                 main.id(),
                 geom,
-                TabBarLayout::compute(&self.tabs, width).with_visible(self.tab_bar_visible),
+                TabBarLayout::compute(&self.tabs, width)
+                    .with_top_offset(inset)
+                    .with_visible(self.tab_bar_visible),
             ));
         }
         for (id, c) in &self.child_windows {
@@ -899,6 +932,7 @@ impl App {
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
             let layout = TabBarLayout::compute(&c.tabs, bar_width)
+                .with_top_offset(c.renderer.titlebar_inset())
                 .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
@@ -1226,6 +1260,7 @@ impl App {
         // window doesn't suddenly revert to default block/blink.
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_titlebar_inset(integrated_titlebar_inset());
 
         let (cols, rows) = renderer.cells();
         // Resize the migrated panes to the child window's grid and
@@ -1414,6 +1449,7 @@ impl App {
                     let (px, py) = to_logical_pos(child.cursor_pos.0, child.cursor_pos.1, sf);
                     let bar_width = child.renderer.width() as f32 / sf;
                     let layout = TabBarLayout::compute(&child.tabs, bar_width)
+                        .with_top_offset(child.renderer.titlebar_inset())
                         .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
@@ -1458,7 +1494,8 @@ impl App {
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
                         let sf = child.renderer.scale_factor();
                         let bar_width = child.renderer.width() as f32 / sf;
-                        let layout = TabBarLayout::compute(&child.tabs, bar_width);
+                        let layout = TabBarLayout::compute(&child.tabs, bar_width)
+                            .with_top_offset(child.renderer.titlebar_inset());
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
                         // &mut self via the merge / tear path.
@@ -2445,6 +2482,9 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.window = Some(window.clone());
         self.renderer = Some(renderer);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_titlebar_inset(integrated_titlebar_inset());
+        }
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
@@ -2830,6 +2870,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
                     let layout = TabBarLayout::compute(&self.tabs, window_width)
+                        .with_top_offset(
+                            self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                        )
                         .with_visible(self.tab_bar_visible);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
@@ -2909,7 +2952,10 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                             .unwrap_or(0.0);
-                        let layout = TabBarLayout::compute(&self.tabs, window_width);
+                        let layout = TabBarLayout::compute(&self.tabs, window_width)
+                            .with_top_offset(
+                                self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                            );
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         match action {
                             crate::tab_drag::DragAction::ReturnToOriginalBar => {

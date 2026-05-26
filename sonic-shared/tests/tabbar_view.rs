@@ -111,3 +111,39 @@ fn visible_bar_still_captures_clicks() {
     assert!(matches!(layout.hit(10.0, 5.0), Some(TabHit::Activate(0))));
     assert!(layout.point_over_bar(10.0, 5.0));
 }
+
+#[test]
+fn with_top_offset_shifts_every_rect() {
+    let bar = bar_with(2);
+    let base = TabBarLayout::compute(&bar, 800.0);
+    let shifted = TabBarLayout::compute(&bar, 800.0).with_top_offset(28.0);
+    assert_eq!(shifted.bar.y, base.bar.y + 28.0);
+    assert_eq!(shifted.new_tab.y, base.new_tab.y + 28.0);
+    for (a, b) in shifted.tabs.iter().zip(base.tabs.iter()) {
+        assert_eq!(a.bg.y, b.bg.y + 28.0);
+        assert_eq!(a.close.y, b.close.y + 28.0);
+        assert_eq!(a.title.y, b.title.y + 28.0);
+    }
+}
+
+#[test]
+fn with_top_offset_creates_dead_zone_above_bar() {
+    // Regression for the macOS integrated-titlebar overlap: a click at
+    // y=5 (under the OS traffic lights) must NOT activate a tab because
+    // the layout has been shifted down by the titlebar inset.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute(&bar, 800.0).with_top_offset(28.0);
+    assert!(layout.hit(50.0, 5.0).is_none(), "click in titlebar dead-zone must not hit tab");
+    // A click ~just below the titlebar should still activate the first tab.
+    let inside_y = 28.0 + (TAB_BAR_HEIGHT / 2.0);
+    assert!(matches!(layout.hit(50.0, inside_y), Some(TabHit::Activate(0))));
+}
+
+#[test]
+fn with_top_offset_zero_is_noop() {
+    let bar = bar_with(2);
+    let base = TabBarLayout::compute(&bar, 800.0);
+    let same = TabBarLayout::compute(&bar, 800.0).with_top_offset(0.0);
+    assert_eq!(same.bar.y, base.bar.y);
+    assert_eq!(same.tabs[0].bg.y, base.tabs[0].bg.y);
+}
