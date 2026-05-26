@@ -152,7 +152,6 @@ fn rasterizes_box_drawing() {
 }
 
 #[test]
-#[ignore = "Requires font fallback (fix/atlas-font-fallback). Remove #[ignore] in that PR's rebase."]
 fn rasterizes_powerline_pua() {
     // Canonical Nerd Font set used by most shell prompts.
     assert_all_rasterize("powerline_pua", "\u{e0b0}\u{e0b2}\u{e0a0}\u{f015}");
@@ -189,19 +188,16 @@ fn rasterizes_katakana() {
 }
 
 #[test]
-#[ignore = "Requires font fallback (fix/atlas-font-fallback). Remove #[ignore] in that PR's rebase."]
 fn rasterizes_hangul() {
     assert_all_rasterize("hangul", "한국어");
 }
 
 #[test]
-#[ignore = "Requires emoji-font fallback (fix/atlas-font-fallback). Remove #[ignore] in that PR's rebase."]
 fn rasterizes_emoji_single_codepoint() {
     assert_all_rasterize("emoji_single_codepoint", "🎉🚀");
 }
 
 #[test]
-#[ignore = "Requires emoji-font fallback (fix/atlas-font-fallback) AND shaping for ZWJ sequences. The ZWJ scalar itself is zero-width so we only assert the base emoji rasterize."]
 fn rasterizes_emoji_zwj_components() {
     // We don't (yet) draw the family as one cluster; what must work is
     // every base emoji rasterizes to a non-blank tile so the user sees

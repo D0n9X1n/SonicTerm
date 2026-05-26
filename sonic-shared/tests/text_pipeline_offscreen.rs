@@ -91,6 +91,7 @@ fn atlas_text_pipeline_writes_visible_pixels_offscreen() {
         rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
         uv: info.uv,
         color: [1.0, 1.0, 1.0, 1.0],
+        flags: [0.0, 0.0, 0.0, 0.0],
     }];
 
     // ----- offscreen color attachment ----------------------------------

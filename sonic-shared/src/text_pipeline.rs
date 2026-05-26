@@ -28,7 +28,16 @@ pub struct GlyphInstance {
     /// `GlyphInfo::uv`.
     pub uv: [f32; 4],
     /// `[r, g, b, a]` foreground color the alpha is modulated by.
+    /// For color glyphs (`flags.x >= 0.5`) this is ignored — the
+    /// fragment shader returns the premultiplied texture sample
+    /// directly so the emoji's own colors come through.
     pub color: [f32; 4],
+    /// Per-instance flags packed into a vec4 to keep WGSL vertex
+    /// attribute slots simple. `flags.x` is the is-color toggle
+    /// (>= 0.5 → color glyph). The remaining components are reserved
+    /// for future use (e.g. signed-distance-field weight, oblique
+    /// shear) and currently always zero.
+    pub flags: [f32; 4],
 }
 
 /// WGSL for the text pass. The vertex shader builds a quad from a
@@ -42,17 +51,18 @@ struct InstanceIn {
     @location(0) rect:  vec4<f32>,
     @location(1) uv:    vec4<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) flags: vec4<f32>,
 };
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv:    vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) flags: vec4<f32>,
 };
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
-    // Corner indices: 0=TL, 1=TR, 2=BL, 3=BR (triangle-strip order).
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(1.0, 0.0),
@@ -63,19 +73,12 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
     let x = inst.rect.x + c.x * inst.rect.z;
     let y = inst.rect.y + c.y * inst.rect.w;
     let u = mix(inst.uv.x, inst.uv.z, c.x);
-    // Vertical flip: the quad's c.y=0 corner lands at NDC-y bottom
-    // (px_to_ndc gives rect.y = bottom-edge NDC value, h>0 grows
-    // upward). The glyph tile's v=0 row is the *top* of the rasterized
-    // bitmap, so c.y=0 must sample v=v1 (bottom of the tile) and c.y=1
-    // must sample v=v0 (top of the tile). Without this swap, glyphs
-    // render mirrored vertically and — combined with the baseline
-    // offset placing them inside the cell's empty padding — appear
-    // completely blank on most fonts.
     let v = mix(inst.uv.w, inst.uv.y, c.y);
     var out: VsOut;
     out.pos = vec4<f32>(x, y, 0.0, 1.0);
     out.uv = vec2<f32>(u, v);
     out.color = inst.color;
+    out.flags = inst.flags;
     return out;
 }
 
@@ -84,7 +87,18 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let cov = textureSample(atlas_tex, atlas_smp, in.uv).r;
+    let sample = textureSample(atlas_tex, atlas_smp, in.uv);
+    if (in.flags.x >= 0.5) {
+        // Color glyph: atlas already holds premultiplied BGRA from the
+        // emoji strike (Bgra8Unorm). wgpu's Bgra8Unorm format swizzles
+        // BGRA → RGBA at sample time, so `sample` is already
+        // (r, g, b, a) premultiplied. Return as-is.
+        return sample;
+    }
+    // Monochrome glyph: atlas stores replicated coverage in all four
+    // channels. Modulate by the per-instance foreground color and
+    // emit premultiplied (color.rgb * cov, color.a * cov).
+    let cov = sample.a;
     return vec4<f32>(in.color.rgb * cov, in.color.a * cov);
 }
 "#;
@@ -235,8 +249,9 @@ impl TextPipeline {
     }
 }
 
-const INSTANCE_ATTRS: [VertexAttribute; 3] = [
+const INSTANCE_ATTRS: [VertexAttribute; 4] = [
     VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 0 },
     VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 1 },
     VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 2 },
+    VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 3 },
 ];

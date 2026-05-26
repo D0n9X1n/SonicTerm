@@ -151,6 +151,7 @@ fn atlas_full_returns_none_gracefully() {
                 offset_y: 0,
                 advance: 12.0,
                 coverage: vec![255; 144],
+                is_color: false,
             })
         }
     }

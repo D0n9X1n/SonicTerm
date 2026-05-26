@@ -65,13 +65,24 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 /// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
 /// but the chain shouldn't be empty.
 #[cfg(target_os = "macos")]
-const PLATFORM_FALLBACK_CHAIN: &[&str] = &["PingFang SC", "Hiragino Sans GB", "Apple Color Emoji"];
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Apple SD Gothic Neo",
+    "Symbols Nerd Font Mono",
+    "Apple Color Emoji",
+];
 #[cfg(target_os = "windows")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] =
-    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Segoe UI Emoji"];
+    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Symbols Nerd Font Mono", "Segoe UI Emoji"];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const PLATFORM_FALLBACK_CHAIN: &[&str] =
-    &["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Color Emoji"];
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "Symbols Nerd Font Mono",
+    "Noto Color Emoji",
+];
 
 /// Maximum number of families in the fallback chain. One byte in the
 /// `GlyphKey` is plenty; we also keep an end-of-chain sentinel below
@@ -203,6 +214,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 offset_y: 0,
                 advance: self.px * 0.6,
                 coverage: Vec::new(),
+                is_color: false,
             });
         }
 
@@ -238,6 +250,49 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
 
         let mut scaler = self.scale_ctx.builder(swash_font).size(self.px).hint(true).build();
 
+        // Two-phase render: try color sources first (Subpixel format
+        // preserves the BGRA bitmap from sbix/CBDT/COLR strikes). If swash
+        // returns Color content, the tile is BGRA premultiplied and the
+        // atlas stores it as-is (`is_color = true`). Otherwise re-render
+        // with Alpha format from the outline/mono-bitmap sources so we
+        // get a proper coverage mask rather than the all-zero alpha
+        // channel a color strike emits under Format::Alpha.
+        let color_attempt =
+            Render::new(&[Source::ColorBitmap(StrikeWith::BestFit), Source::ColorOutline(0)])
+                .format(Format::Subpixel)
+                .render(&mut scaler, glyph_id);
+
+        if let Some(image) = color_attempt {
+            if image.content == swash::scale::image::Content::Color {
+                let p = image.placement;
+                if p.width == 0 || p.height == 0 {
+                    return Some(RasterTile {
+                        width: 0,
+                        height: 0,
+                        offset_x: p.left,
+                        offset_y: -p.top,
+                        advance: self.px * 0.6,
+                        coverage: Vec::new(),
+                        is_color: true,
+                    });
+                }
+                let expected = (p.width as usize) * (p.height as usize) * 4;
+                let mut data = image.data;
+                if data.len() != expected {
+                    data.resize(expected, 0);
+                }
+                return Some(RasterTile {
+                    width: p.width,
+                    height: p.height,
+                    offset_x: p.left,
+                    offset_y: -p.top,
+                    advance: self.px * 0.6,
+                    coverage: data,
+                    is_color: true,
+                });
+            }
+        }
+
         let image = Render::new(&[Source::Outline, Source::Bitmap(StrikeWith::BestFit)])
             .format(Format::Alpha)
             .render(&mut scaler, glyph_id)?;
@@ -251,6 +306,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 offset_y: -p.top,
                 advance: self.px * 0.6,
                 coverage: Vec::new(),
+                is_color: false,
             });
         }
 
@@ -267,6 +323,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             offset_y: -p.top,
             advance: self.px * 0.6,
             coverage,
+            is_color: false,
         })
     }
 }

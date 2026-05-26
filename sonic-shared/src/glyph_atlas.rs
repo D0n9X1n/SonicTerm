@@ -32,7 +32,11 @@ use std::collections::HashMap;
 
 use sonic_core::glyph_key::GlyphKey;
 
-/// Default atlas dimensions. R8Unorm, so 4 MiB on the GPU.
+/// Default atlas dimensions. BGRA8Unorm, so 16 MiB on the GPU. The
+/// BGRA channel layout lets one texture serve both monochrome glyphs
+/// (coverage replicated into all four channels) and color emoji
+/// (premultiplied BGRA from sbix/COLR strikes). The per-tile
+/// [`GlyphInfo::is_color`] flag tells the shader which branch to take.
 pub const ATLAS_DIM: u32 = 2048;
 
 /// Information about a glyph the renderer needs each frame: where its
@@ -55,6 +59,11 @@ pub struct GlyphInfo {
     /// positioning so this is informational for proportional fallback,
     /// not for the main grid path.
     pub advance: f32,
+    /// True when this tile holds premultiplied BGRA color pixels
+    /// (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji). The
+    /// shader treats color tiles as pre-shaded and skips the
+    /// `cov * fg_color` modulation.
+    pub is_color: bool,
 }
 
 /// A single rasterized glyph: alpha coverage mask + the metrics needed
@@ -67,8 +76,14 @@ pub struct RasterTile {
     pub offset_x: i32,
     pub offset_y: i32,
     pub advance: f32,
-    /// `width * height` bytes of 8-bit coverage, row-major.
+    /// When `is_color == false`: `width * height` bytes of 8-bit
+    /// coverage, row-major (the legacy alpha-mask format).
+    /// When `is_color == true`: `width * height * 4` bytes of
+    /// premultiplied BGRA pixels, row-major.
     pub coverage: Vec<u8>,
+    /// True when `coverage` is BGRA (color emoji); false for the
+    /// monochrome coverage-mask case.
+    pub is_color: bool,
 }
 
 impl RasterTile {
@@ -194,13 +209,19 @@ pub struct DirtyRect {
     pub h: u32,
 }
 
+/// Bytes per atlas pixel — BGRA8 = 4. The CPU buffer is `width *
+/// height * BYTES_PER_PIXEL` bytes; monochrome tiles replicate their
+/// coverage into all four channels at upload time so a single shader
+/// path can sample either flavor.
+pub const BYTES_PER_PIXEL: u32 = 4;
+
 impl GlyphAtlas {
-    /// New empty atlas backed by a `width × height` R8 buffer.
+    /// New empty atlas backed by a `width × height` BGRA8 buffer.
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
-            pixels: vec![0; (width * height) as usize],
+            pixels: vec![0; (width * height * BYTES_PER_PIXEL) as usize],
             map: HashMap::new(),
             packer: ShelfPacker::new(width, height),
             dirty: Vec::new(),
@@ -280,6 +301,7 @@ impl GlyphAtlas {
                 px_size: [0, 0],
                 px_offset: [0, 0],
                 advance: 0.0,
+                is_color: false,
             };
             self.map.insert(key, info);
             return Some(info);
@@ -292,18 +314,40 @@ impl GlyphAtlas {
                 px_size: [0, 0],
                 px_offset: [tile.offset_x, tile.offset_y],
                 advance: tile.advance,
+                is_color: tile.is_color,
             };
             self.map.insert(key, info);
             return Some(info);
         }
         let (x, y) = self.packer.alloc(tile.width, tile.height)?;
-        // Blit coverage rows into the CPU buffer.
+        // Blit rows into the CPU BGRA buffer. Monochrome tiles arrive
+        // as `width*height` alpha bytes — replicate each into the four
+        // BGRA channels so the shader can sample a single uniform
+        // texture format. Color tiles arrive as `width*height*4` BGRA
+        // bytes already premultiplied; copy them through verbatim.
+        let bpp = BYTES_PER_PIXEL as usize;
         for row in 0..tile.height {
-            let src_off = (row * tile.width) as usize;
-            let dst_off = ((y + row) * self.width + x) as usize;
-            let len = tile.width as usize;
-            self.pixels[dst_off..dst_off + len]
-                .copy_from_slice(&tile.coverage[src_off..src_off + len]);
+            let dst_off = ((y + row) * self.width + x) as usize * bpp;
+            if tile.is_color {
+                let src_off = (row * tile.width) as usize * bpp;
+                let len = tile.width as usize * bpp;
+                self.pixels[dst_off..dst_off + len]
+                    .copy_from_slice(&tile.coverage[src_off..src_off + len]);
+            } else {
+                let src_off = (row * tile.width) as usize;
+                for col in 0..tile.width as usize {
+                    let a = tile.coverage[src_off + col];
+                    let p = dst_off + col * bpp;
+                    // Premultiplied "white" alpha: BGRA = (a, a, a, a).
+                    // The shader multiplies by the per-instance color
+                    // for monochrome glyphs, so storing white here lets
+                    // a single texture sample serve both flavors.
+                    self.pixels[p] = a;
+                    self.pixels[p + 1] = a;
+                    self.pixels[p + 2] = a;
+                    self.pixels[p + 3] = a;
+                }
+            }
         }
         self.dirty.push(DirtyRect { x, y, w: tile.width, h: tile.height });
         let info = GlyphInfo {
@@ -316,6 +360,7 @@ impl GlyphAtlas {
             px_size: [tile.width, tile.height],
             px_offset: [tile.offset_x, tile.offset_y],
             advance: tile.advance,
+            is_color: tile.is_color,
         };
         self.map.insert(key, info);
         Some(info)
@@ -338,11 +383,17 @@ impl GlyphAtlas {
         (self.hits as f64 / total as f64) * 100.0
     }
 
-    /// Sample a single coverage byte from the CPU buffer. Used in
-    /// tests to assert that rasterized pixels actually landed where
-    /// the GlyphInfo's UV says they should.
+    /// Sample the alpha (BGRA[3]) channel of a single atlas pixel.
+    /// Used in tests to assert that rasterized pixels actually landed
+    /// where the GlyphInfo's UV says they should. We return the alpha
+    /// channel specifically because (a) for monochrome glyphs all four
+    /// channels equal the original coverage, and (b) for color emoji
+    /// the alpha channel is the meaningful "is this pixel painted"
+    /// signal even when an RGB component happens to be zero.
     pub fn sample(&self, x: u32, y: u32) -> u8 {
-        self.pixels[(y * self.width + x) as usize]
+        let bpp = BYTES_PER_PIXEL as usize;
+        let off = (y * self.width + x) as usize * bpp;
+        self.pixels[off + 3]
     }
 }
 
@@ -388,11 +439,11 @@ impl AtlasUpload {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Bgra8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        // Seed-write the whole texture once. Cheap (4 MiB) and means
+        // Seed-write the whole texture once. Cheap (16 MiB) and means
         // the first frame can render against a black atlas if nothing
         // has been requested yet, rather than tripping a "texture is
         // in undefined state" validation error on some backends.
@@ -406,7 +457,7 @@ impl AtlasUpload {
             atlas.pixels(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(atlas.width()),
+                bytes_per_row: Some(atlas.width() * BYTES_PER_PIXEL),
                 rows_per_image: Some(atlas.height()),
             },
             wgpu::Extent3d {
@@ -456,13 +507,14 @@ impl AtlasUpload {
         }
         let atlas_w = atlas.width();
         let pixels = atlas.pixels();
+        let bpp = BYTES_PER_PIXEL as usize;
         for r in rects {
             // Copy out the subrect into a tightly-packed buffer so
-            // bytes_per_row == r.w. write_texture requires that.
-            let mut sub = Vec::with_capacity((r.w * r.h) as usize);
+            // bytes_per_row == r.w * bpp. write_texture requires that.
+            let mut sub = Vec::with_capacity((r.w * r.h) as usize * bpp);
             for row in 0..r.h {
-                let off = ((r.y + row) * atlas_w + r.x) as usize;
-                sub.extend_from_slice(&pixels[off..off + r.w as usize]);
+                let off = ((r.y + row) * atlas_w + r.x) as usize * bpp;
+                sub.extend_from_slice(&pixels[off..off + r.w as usize * bpp]);
             }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -474,7 +526,7 @@ impl AtlasUpload {
                 &sub,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(r.w),
+                    bytes_per_row: Some(r.w * BYTES_PER_PIXEL),
                     rows_per_image: Some(r.h),
                 },
                 wgpu::Extent3d { width: r.w, height: r.h, depth_or_array_layers: 1 },
@@ -517,6 +569,7 @@ impl Rasterizer for SyntheticRasterizer {
                 offset_y: 0,
                 advance: 8.0,
                 coverage: Vec::new(),
+                is_color: false,
             });
         }
         let side = 8 + (key.ch as u32 % 8);
@@ -536,6 +589,7 @@ impl Rasterizer for SyntheticRasterizer {
             offset_y: 0,
             advance: side as f32,
             coverage,
+            is_color: false,
         })
     }
 }
