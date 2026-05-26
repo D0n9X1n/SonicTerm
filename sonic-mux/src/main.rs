@@ -86,6 +86,17 @@ fn cmd_daemon(socket: &str) -> Result<()> {
     let _ = std::fs::remove_file(socket);
     let name = make_socket_name(socket)?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
+    // Lock the socket down to the current user. World-accessible (0755)
+    // sockets would let any local user attach to our PTYs. On Windows the
+    // named-pipe namespace already gives per-session isolation via the
+    // default DACL; tightening that further would require raw Win32 SDDL
+    // plumbing (TODO before multi-user Windows support).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(socket, perms).with_context(|| format!("chmod 600 {socket}"))?;
+    }
     let state = ServerState::new();
     tracing::info!(socket, "sonic-mux daemon listening");
     for conn in listener.incoming() {

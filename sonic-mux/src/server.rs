@@ -25,7 +25,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
@@ -33,6 +33,43 @@ use crate::proto::{ClientMsg, PaneId, PaneInfo, ServerMsg, SessionId, SessionInf
 
 /// Replay buffer cap per pane.
 pub const REPLAY_CAP: usize = 256 * 1024;
+
+/// Per-client subscriber channel capacity. Bounded so a runaway or
+/// malicious PTY cannot OOM the server by outpacing a slow / wedged
+/// consumer. When the channel is full we drop the OLDEST queued message
+/// so the freshest output still reaches the client. 4096 frames @ ~8 KiB
+/// each is a soft ceiling of ~32 MiB per attached pane.
+pub const CHANNEL_CAP: usize = 4096;
+
+/// One subscriber's mailbox: a bounded sender plus a clone of its receiver
+/// so the producer can drop the oldest queued message itself when the
+/// mailbox is full. crossbeam-channel is MPMC, so the extra receiver
+/// shares the same queue.
+#[derive(Clone)]
+pub struct SubscriberSink {
+    tx: Sender<ServerMsg>,
+    rx: Receiver<ServerMsg>,
+}
+
+impl SubscriberSink {
+    pub fn new(tx: Sender<ServerMsg>, rx: Receiver<ServerMsg>) -> Self {
+        Self { tx, rx }
+    }
+
+    /// Try to enqueue `msg`. If the mailbox is full, drop the oldest
+    /// pending message and retry once. Returns `Err` only if the
+    /// receiver side has been dropped entirely.
+    pub fn send_drop_oldest(&self, msg: ServerMsg) -> Result<()> {
+        match self.tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(msg)) => {
+                let _ = self.rx.try_recv();
+                self.tx.try_send(msg).map_err(|e| anyhow!("subscriber closed: {e}"))
+            }
+            Err(TrySendError::Disconnected(_)) => Err(anyhow!("subscriber disconnected")),
+        }
+    }
+}
 
 struct Pane {
     id: PaneId,
@@ -47,7 +84,7 @@ struct Pane {
     replay: Arc<Mutex<VecDeque<u8>>>,
     /// Live subscriber (the attached client). When None, output is only
     /// appended to the replay buffer.
-    subscriber: Arc<Mutex<Option<Sender<ServerMsg>>>>,
+    subscriber: Arc<Mutex<Option<SubscriberSink>>>,
     /// Signals the reader/writer threads to wind down on pane kill.
     alive: Arc<AtomicBool>,
     _reader: JoinHandle<()>,
@@ -117,7 +154,7 @@ impl ServerState {
     /// Subscribe `tx` as the new live consumer for every pane in
     /// `session_id`. Returns the pane info list to send in AttachOk.
     /// Also drains each pane's replay buffer to the new subscriber.
-    pub fn attach(&self, session_id: SessionId, tx: Sender<ServerMsg>) -> Result<Vec<PaneInfo>> {
+    pub fn attach(&self, session_id: SessionId, sink: SubscriberSink) -> Result<Vec<PaneInfo>> {
         let sessions = self.sessions.lock();
         let session =
             sessions.get(&session_id).ok_or_else(|| anyhow!("unknown session {session_id}"))?;
@@ -128,9 +165,10 @@ impl ServerState {
             // sees replay-then-live in order.
             let replay_bytes: Vec<u8> = pane.replay.lock().iter().copied().collect();
             if !replay_bytes.is_empty() {
-                let _ = tx.send(ServerMsg::Output { pane_id: pane.id, bytes: replay_bytes });
+                let _ = sink
+                    .send_drop_oldest(ServerMsg::Output { pane_id: pane.id, bytes: replay_bytes });
             }
-            *pane.subscriber.lock() = Some(tx.clone());
+            *pane.subscriber.lock() = Some(sink.clone());
         }
         *self.attached.lock() = Some(session_id);
         Ok(infos)
@@ -151,14 +189,14 @@ impl ServerState {
     /// no client is currently attached. Used by the auto-subscribe-on-Spawn
     /// convenience path so a freshly-spawned pane streams its output back
     /// to the spawner without requiring an explicit Attach.
-    pub fn subscribe_if_unattached(&self, session_id: SessionId, tx: Sender<ServerMsg>) {
+    pub fn subscribe_if_unattached(&self, session_id: SessionId, sink: SubscriberSink) {
         let mut attached = self.attached.lock();
         if attached.is_some() {
             return;
         }
         if let Some(session) = self.sessions.lock().get(&session_id) {
             for pane in session.panes.values() {
-                *pane.subscriber.lock() = Some(tx.clone());
+                *pane.subscriber.lock() = Some(sink.clone());
             }
             *attached = Some(session_id);
         }
@@ -219,7 +257,7 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
     let master = Arc::new(Mutex::new(master));
 
     let replay = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(REPLAY_CAP)));
-    let subscriber: Arc<Mutex<Option<Sender<ServerMsg>>>> = Arc::new(Mutex::new(None));
+    let subscriber: Arc<Mutex<Option<SubscriberSink>>> = Arc::new(Mutex::new(None));
     let alive = Arc::new(AtomicBool::new(true));
 
     let (in_tx, in_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
@@ -248,8 +286,9 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
                         }
                     }
                     let sub = r_sub.lock().clone();
-                    if let Some(tx) = sub {
-                        let _ = tx.send(ServerMsg::Output { pane_id, bytes: slice.to_vec() });
+                    if let Some(sink) = sub {
+                        let _ = sink
+                            .send_drop_oldest(ServerMsg::Output { pane_id, bytes: slice.to_vec() });
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -257,8 +296,8 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
             }
         }
         let sub = r_sub.lock().clone();
-        if let Some(tx) = sub {
-            let _ = tx.send(ServerMsg::Exit { pane_id });
+        if let Some(sink) = sub {
+            let _ = sink.send_drop_oldest(ServerMsg::Exit { pane_id });
         }
     });
 
@@ -308,12 +347,15 @@ pub fn handle_connection<S>(state: Arc<ServerState>, mut read_half: S, write_hal
 where
     S: Read + Write + Send + 'static,
 {
-    let (tx, rx): (Sender<ServerMsg>, Receiver<ServerMsg>) = crossbeam_channel::unbounded();
+    let (tx, rx): (Sender<ServerMsg>, Receiver<ServerMsg>) =
+        crossbeam_channel::bounded(CHANNEL_CAP);
+    let sink = SubscriberSink::new(tx.clone(), rx.clone());
 
     // Writer thread: drains rx -> stream.
     let mut write_half = write_half;
+    let rx_writer = rx.clone();
     let writer_thread = thread::spawn(move || {
-        while let Ok(msg) = rx.recv() {
+        while let Ok(msg) = rx_writer.recv() {
             if crate::frame::write_frame(&mut write_half, &msg).is_err() {
                 break;
             }
@@ -326,7 +368,7 @@ where
             ClientMsg::ListSessions => {
                 let _ = tx.send(ServerMsg::Sessions(state.list_sessions()));
             }
-            ClientMsg::Attach(sid) => match state.attach(sid, tx.clone()) {
+            ClientMsg::Attach(sid) => match state.attach(sid, sink.clone()) {
                 Ok(panes) => {
                     let _ = tx.send(ServerMsg::AttachOk { session_id: sid, panes });
                 }
@@ -343,7 +385,7 @@ where
                     // session, auto-subscribe them to the freshly spawned
                     // one. Matches the natural "I spawned it, I want its
                     // output" flow without forcing a separate Attach.
-                    state.subscribe_if_unattached(sid, tx.clone());
+                    state.subscribe_if_unattached(sid, sink.clone());
                     let _ = tx.send(ServerMsg::Spawned { session_id: sid, pane_id: pid });
                 }
                 Err(e) => {

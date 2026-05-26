@@ -18,7 +18,7 @@ use sonic_mux::{
     frame::{read_frame, write_frame},
     handle_connection,
     proto::{ClientMsg, ServerMsg},
-    ServerState,
+    ServerState, SubscriberSink, CHANNEL_CAP,
 };
 
 fn spawn_daemon() -> (String, Arc<ServerState>) {
@@ -252,4 +252,92 @@ fn framing_round_trip_in_memory() {
     }
     let mut leftover = [0u8; 1];
     assert_eq!(cur.read(&mut leftover).unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_socket_is_user_only_0600() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::fs::PermissionsExt,
+        process::{Command, Stdio},
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("perm.sock");
+    let bin = env!("CARGO_BIN_EXE_sonic-mux");
+    let mut child = Command::new(bin)
+        .args(["daemon", "--socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sonic-mux daemon");
+
+    // Wait until the socket file appears (daemon has bound + chmod'd it).
+    // Read stderr in the background so the child doesn't block on a full
+    // pipe; we want the "listening" log line as confirmation too.
+    if let Some(err) = child.stderr.take() {
+        thread::spawn(move || {
+            let mut buf = BufReader::new(err);
+            let mut line = String::new();
+            while buf.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                line.clear();
+            }
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(socket.exists(), "daemon never bound the socket");
+
+    let meta = std::fs::metadata(&socket).expect("stat socket");
+    let mode = meta.permissions().mode() & 0o777;
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        mode, 0o600,
+        "socket must be owner-only (0600); world-accessible socket is a security hole. got {mode:o}"
+    );
+}
+
+#[test]
+fn subscriber_channel_is_bounded_and_drops_oldest() {
+    // Build a sink with a small capacity and shove far more messages in
+    // than fit. The channel must never exceed CHANNEL_CAP and the newest
+    // messages must be the ones that survive (drop-OLDEST policy keeps
+    // the freshest output flowing to the client).
+    use crossbeam_channel::bounded;
+    let (tx, rx) = bounded::<ServerMsg>(CHANNEL_CAP);
+    let sink = SubscriberSink::new(tx, rx.clone());
+
+    // Track peak depth as a memory-bound proxy. Without backpressure
+    // (unbounded channel) this would grow without limit.
+    let mut peak = 0usize;
+    let total = CHANNEL_CAP * 4;
+    for i in 0..total {
+        sink.send_drop_oldest(ServerMsg::Output {
+            pane_id: 1,
+            bytes: (i as u64).to_le_bytes().to_vec(),
+        })
+        .expect("sink open");
+        peak = peak.max(rx.len());
+    }
+
+    assert!(peak <= CHANNEL_CAP, "channel grew past cap: peak={peak} cap={CHANNEL_CAP}");
+    assert_eq!(rx.len(), CHANNEL_CAP, "channel should be at cap after flood");
+
+    // The last value pushed must be retained (drop-OLDEST, not newest).
+    let mut last_seen: Option<u64> = None;
+    while let Ok(ServerMsg::Output { bytes, .. }) = rx.try_recv() {
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&bytes);
+        last_seen = Some(u64::from_le_bytes(arr));
+    }
+    assert_eq!(
+        last_seen,
+        Some((total - 1) as u64),
+        "newest message must survive; drop-OLDEST policy violated"
+    );
 }

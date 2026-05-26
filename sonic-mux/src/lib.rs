@@ -14,4 +14,4 @@ pub mod proto;
 pub mod server;
 
 pub use proto::{ClientMsg, PaneId, PaneInfo, ServerMsg, SessionId, SessionInfo};
-pub use server::{handle_connection, ServerState, REPLAY_CAP};
+pub use server::{handle_connection, ServerState, SubscriberSink, CHANNEL_CAP, REPLAY_CAP};
