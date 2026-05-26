@@ -92,41 +92,52 @@ Common upstream causes:
 ## 3. v0.8.0 release run — cost estimate
 
 The release workflow (`.github/workflows/release.yml`) is triggered by pushing
-a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. It runs **two jobs** in parallel:
+a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. It runs **two jobs** in parallel
+(plus a small Linux `ci.yml` lint/test on the tag push).
 
-| Job          | Runner          | Multiplier | Est. wall time | Weighted minutes    |
-| ------------ | --------------- | ---------- | -------------- | ------------------- |
-| `build-mac`  | `macos-14`      | **10×**    | ~15 min        | ~150                |
-| `build-win`  | `windows-latest`| **2×**     | ~10 min        | ~20                 |
-| **Total**    |                 |            |                | **~170 weighted**   |
+### Per-minute pricing (personal private repo, metered)
 
-Plus per-push `ci.yml` runs (Linux 1× multiplier, ~10 min each = ~10 weighted
-min/push) which are essentially free against the generous Linux quota.
+Per GitHub's published rates ([About billing for GitHub Actions](https://docs.github.com/en/billing/managing-billing-for-github-actions/about-billing-for-github-actions)),
+the **dollar** price per metered minute is:
 
-(GitHub's [per-minute multipliers](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions#minute-multipliers):
-Linux 1×, Windows 2×, macOS 10×. macOS dominates the cost.)
+| Runner OS       | $/min      |
+| --------------- | ---------- |
+| Linux 2-core    | **$0.008** |
+| Windows 2-core  | **$0.016** |
+| macOS 3-core    | **$0.08**  |
 
-### Personal-account free-tier quotas (this repo)
+The published **multipliers** (Linux 1×, Windows 2×, macOS 10×) apply *only*
+to **free-tier quota accounting** — i.e. how fast a minute drains the monthly
+free allotment. They do **not** stack on top of the dollar rates above; the
+$0.08/min macOS price is the all-in metered cost per wall-clock minute.
 
-For a personal (User-owned) **private** repo on the Free plan, GitHub grants:
+### Per-release dollar cost (wall-clock × $/min)
 
-- **2,000 macOS-weighted minutes / month** free, then **$0.08/min** metered.
-- **3,000 Windows-weighted minutes / month** free, then $0.016/min metered.
-- **50,000 Linux-weighted minutes / month** free, then $0.008/min metered.
+| Job          | Runner            | Wall time  | Dollar cost                |
+| ------------ | ----------------- | ---------- | -------------------------- |
+| `build-mac`  | `macos-14`        | ~15 min    | 15 × $0.08 = **$1.20**     |
+| `build-win`  | `windows-latest`  | ~10 min    | 10 × $0.016 = **$0.16**    |
+| `ci` (lint)  | `ubuntu-latest`   | ~5 min     | 5 × $0.008 = **$0.04**     |
+| **Total**    |                   |            | **~$1.40 per release**     |
 
-(Pro plan ups these to 3,000 / unlimited free Linux etc.; check
-<https://github.com/settings/billing> for the exact current allowance.)
+### Free-tier quota accounting (weighted minutes)
 
-### Cost on the current (private) repo
+Personal accounts get **2,000 free weighted minutes / month** on the Free
+plan. Weighted minutes apply the multipliers above:
 
-A single v0.8.0 release burns **~150 of the 2,000 free macOS-weighted
-minutes** (~7.5% of monthly quota) and **~20 of 3,000 Windows-weighted
-minutes**. As long as the monthly quota isn't already depleted by per-push
-`ci.yml` mac runs, the release itself is **$0 out of pocket**.
+| Job          | Wall time | Multiplier | Weighted min/release |
+| ------------ | --------- | ---------- | -------------------- |
+| `build-mac`  | ~15 min   | 10×        | 150                  |
+| `build-win`  | ~10 min   | 2×         | 20                   |
+| `ci` (lint)  | ~5 min    | 1×         | 5                    |
+| **Total**    |           |            | **~175 / release**   |
 
-If the macOS quota *is* depleted, the release costs ~150 min × $0.08 =
-**~$12** at metered rates. Windows overage adds ~$0.32. Linux runs are
-effectively free.
+A representative month — **4 releases + ~10 PR-CI runs / week** — burns
+roughly 4 × 175 = 700 weighted min on releases, plus ~40 × 5 ≈ 200 weighted
+min on Linux PR CI (if the PR matrix is Linux-only). That's **~900 weighted
+min / month, well under the 2,000 free-tier ceiling** → $0 out of pocket. A
+full macOS+Windows PR matrix would push past the ceiling, but the bounded
+metered cost is still single-digit dollars at this cadence.
 
 ### Recommendation — switch repo to public
 
@@ -142,18 +153,6 @@ Making `D0n9X1n/sonic` **public** would:
 Worth doing at release time if the user is comfortable with the repo going
 public; until then, raise the spending limit to ~$15/month to absorb worst
 case.
-
-### Cost on the current (private) repo — quick reference
-
-At GitHub's published metered rates ($0.08/min macOS, $0.016/min Windows,
-$0.008/min Linux for personal private repos beyond the free quota):
-
-- macOS: ~15 min × $0.08 = **$1.20** per release (after quota).
-- Windows: ~10 min × $0.016 = **$0.16** per release (after quota).
-- **Total: ~$1.36 per release once quotas are exceeded.**
-
-Even fully metered, a full v0.8.0 release fits inside a $5/mo spend
-trivially.
 
 ### Why the release won't fire today
 
@@ -192,8 +191,8 @@ block, not to paper over it by removing coverage.
   metered against the personal account's free-tier quota. Fix is account-level
   billing (payment method + spending limit at
   <https://github.com/settings/billing>).
-- ✅ v0.8.0 release costs **~150 macOS-weighted + ~20 Windows-weighted
-  minutes** (~$0 within free quota, ~$1.36 fully metered).
+- ✅ v0.8.0 release costs **~175 weighted minutes (~$1.40 fully metered:
+  $1.20 mac + $0.16 win + $0.04 linux)**, $0 within the 2,000-min free quota.
 - 💡 Optional: making the repo **public** drops standard-runner billed minutes
   to $0 and removes the billing-block failure mode entirely. Consider at
   release time.
