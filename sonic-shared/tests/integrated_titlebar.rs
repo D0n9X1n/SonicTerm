@@ -38,3 +38,35 @@ fn integrated_titlebar_is_noop_off_macos() {
     // Just confirm the helper is callable and returns without panic.
     let _ = sonic_shared::app::with_integrated_titlebar(Window::default_attributes());
 }
+
+#[test]
+fn top_inset_helper_adds_titlebar_band() {
+    use sonic_shared::render::tab_bar_top_inset_with_titlebar;
+    // Tab bar visible: titlebar inset stacks above the bar.
+    let with = tab_bar_top_inset_with_titlebar(true, 4.0, 28.0);
+    let without = tab_bar_top_inset_with_titlebar(true, 4.0, 0.0);
+    assert!((with - without - 28.0).abs() < f32::EPSILON);
+    // Tab bar hidden: titlebar inset still reserved.
+    let hidden = tab_bar_top_inset_with_titlebar(false, 4.0, 28.0);
+    assert!((hidden - 28.0).abs() < f32::EPSILON);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn integrated_titlebar_inset_macos_reserves_at_least_22_logical_px() {
+    // Regression for the PR-#83 overlap bug: the macOS integrated
+    // titlebar style extends our content under the traffic lights, so
+    // we must reserve a band ≥ 22pt (the minimum a standard NSWindow
+    // titlebar consumes; AppKit's default is 28pt).
+    let inset = sonic_shared::app::integrated_titlebar_inset();
+    assert!(
+        inset >= 22.0,
+        "macOS integrated titlebar inset must reserve >=22 logical px (got {inset})"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn integrated_titlebar_inset_is_zero_off_macos() {
+    assert_eq!(sonic_shared::app::integrated_titlebar_inset(), 0.0);
+}
