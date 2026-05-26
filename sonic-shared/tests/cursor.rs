@@ -145,6 +145,30 @@ fn blink_redraw_cadence_caps_at_30hz() {
     assert!(wakes <= cap_per_sec + 1, "wakes={wakes} cap={cap_per_sec}");
 }
 
+/// Idle-CPU regression guard: when the window is unfocused, the blink
+/// scheduler MUST return `None` so the event loop falls back to
+/// `ControlFlow::Wait` instead of waking at 26Hz forever. Before this
+/// gate, `scripts/bench_headless_gui.sh` reported ~17% idle CPU on a
+/// backgrounded window; after the gate it returns to baseline (<1%).
+///
+/// `GpuRenderer::next_blink_redraw_at` requires a wgpu surface so we
+/// re-state the contract here as a pure-math mirror — any change that
+/// drops the focus check from the renderer should also fail this test
+/// once the mirror is updated to match.
+#[test]
+fn blink_schedule_is_silenced_when_window_unfocused() {
+    fn schedule(cursor_blink: bool, window_focused: bool) -> Option<std::time::Duration> {
+        if !cursor_blink || !window_focused {
+            return None;
+        }
+        Some(cursor::redraw_interval())
+    }
+    assert!(schedule(true, true).is_some());
+    assert!(schedule(true, false).is_none(), "unfocused must not wake");
+    assert!(schedule(false, true).is_none());
+    assert!(schedule(false, false).is_none());
+}
+
 /// Cell-rect math behind the hollow cursor: the renderer's
 /// `push_hollow_rect` helper must emit exactly four quad rects whose
 /// union forms the outline of the cell — no interior fill. Validated

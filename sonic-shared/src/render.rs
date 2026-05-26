@@ -648,20 +648,21 @@ impl GpuRenderer {
     /// at bucket boundaries instead of busy-looping `request_redraw()`
     /// after every frame (the project landmine flagged on PR #81).
     pub fn next_blink_redraw_at(&self) -> Option<Instant> {
-        if !self.cursor_blink {
-            return None;
-        }
-        let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.blink_epoch);
-        let iv = cursor::redraw_interval();
-        let iv_ms = iv.as_millis().max(1) as u64;
-        let elapsed_ms = elapsed.as_millis() as u64;
-        // Snap up to the next bucket boundary so two ticks landing in
-        // the same bucket don't collapse into a 0ms re-arm (which is
-        // exactly what produced the redraw loop).
-        let next_ms = ((elapsed_ms / iv_ms) + 1) * iv_ms;
-        let remaining = std::time::Duration::from_millis(next_ms - elapsed_ms);
-        Some(now + remaining)
+        // Blink-driven redraws are intentionally disabled in the idle
+        // path. Re-shaping the grid 26×/sec just to fade the cursor
+        // alpha melted the headless CPU bench at 17% — see the
+        // `cursor_phase: 0` comment where `FrameKey` is built. The
+        // cursor still re-evaluates its alpha on every real redraw
+        // (PTY bytes, keys, mouse, resize, focus), which keeps it
+        // visibly pulsing whenever the user is doing anything. Pure
+        // idle leaves the cursor frozen at a fixed (always-visible)
+        // alpha — strictly better than burning CPU on a backgrounded
+        // window. The remaining fields (`cursor_blink`,
+        // `window_focused`, `blink_epoch`) are kept so a future
+        // event-driven re-enable (e.g. only blink for the first 5s
+        // after a keypress) can pick the right starting bucket.
+        let _ = (&self.cursor_blink, &self.window_focused, &self.blink_epoch);
+        None
     }
 
     /// Update the cached "is the OS window focused" flag. Drives the
@@ -1082,7 +1083,11 @@ impl GpuRenderer {
         };
         let blink_elapsed = self.blink_epoch.elapsed();
         let blink_alpha = cursor::blink_alpha(blink_elapsed, self.cursor_blink);
-        let blink_phase = cursor::phase_bucket(blink_elapsed, self.cursor_blink);
+        // `phase_bucket` is intentionally NOT folded into the FrameKey
+        // (see the `cursor_phase: 0` comment below). The alpha is
+        // still computed every render so a real redraw event picks up
+        // the current blink pulse.
+        let _ = cursor::phase_bucket(blink_elapsed, self.cursor_blink);
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
         // moves between tabs / on and off the × glyph.
@@ -1127,7 +1132,16 @@ impl GpuRenderer {
             viewport_top_abs,
             cursor_shape: self.cursor_shape as u8,
             cursor_blink: self.cursor_blink,
-            cursor_phase: blink_phase,
+            // NOTE: `cursor_phase` is deliberately NOT folded into the
+            // FrameKey. Including it cracked the cache on every blink
+            // bucket boundary, forcing a full grid re-shape ~26×/sec
+            // and wedging the headless bench at 17% idle CPU. The
+            // cursor still re-evaluates its alpha on every real
+            // render; between real renders the cursor sits at
+            // whatever alpha it last drew at — a frozen but
+            // always-visible cursor is better than a CPU-melting
+            // blinking one (regression: `scripts/bench_headless_gui.sh`).
+            cursor_phase: 0,
             window_focused: self.window_focused,
             inactive_cursor_count: self.inactive_pane_cursors.len() as u32,
             hover_tab: hover_tab_idx,

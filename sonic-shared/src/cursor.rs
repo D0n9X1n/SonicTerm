@@ -13,15 +13,16 @@ pub use sonic_core::config::CursorShape;
 
 /// One full blink cycle (off → on → off) in milliseconds. Matches the
 /// 600ms cadence specified for v0.6 (close enough to wezterm's default
-/// to feel familiar without driving the redraw loop above ~30 Hz when
-/// quantised into [`PHASE_BUCKETS`]).
+/// to feel familiar). The blink no longer drives the redraw schedule —
+/// see `GpuRenderer::next_blink_redraw_at` — so this period only
+/// affects the alpha computed on real redraws.
 pub const BLINK_PERIOD_MS: u64 = 600;
 
-/// Number of distinct alpha steps per cycle. The renderer requests a
-/// redraw whenever the bucket changes, so this caps the blink-only
-/// redraw rate at `PHASE_BUCKETS / (BLINK_PERIOD_MS / 1000)` Hz
-/// (currently ≈26 Hz). Plenty smooth, well under one redraw per
-/// frame at 60 Hz.
+/// Historical knob: number of distinct alpha steps per cycle. Since
+/// the blink no longer drives the redraw schedule (the renderer skips
+/// blink-only frames — see `GpuRenderer::next_blink_redraw_at`), this
+/// only quantises the alpha computed on real redraws. Kept for the
+/// public `phase_bucket` helper and existing tests.
 pub const PHASE_BUCKETS: u8 = 16;
 
 /// Minimum alpha during the trough of the blink. A non-zero floor keeps
@@ -142,7 +143,8 @@ mod tests {
     fn redraw_interval_matches_constants() {
         let iv = redraw_interval();
         assert_eq!(iv, Duration::from_millis(BLINK_PERIOD_MS / PHASE_BUCKETS as u64));
-        // Stays comfortably under one display frame at 60Hz.
+        // Stays under one display frame at 60Hz at the default 16
+        // buckets.
         assert!(iv <= Duration::from_millis(40));
     }
 

@@ -348,12 +348,26 @@ pub struct PaneState {
     /// layer treats this as a hint — the grid itself always exposes the
     /// live visible window.
     pub viewport_top_abs: Option<u64>,
+    /// Cached foreground-process name + the wall-clock instant we last
+    /// probed. The probe walks the whole macOS process table (~600 procs)
+    /// so we MUST NOT re-run it on every render — when the cursor blinks,
+    /// the render path fires ~26×/sec and an uncached probe burned ~17%
+    /// CPU on an idle window (regression caught by
+    /// `scripts/bench_headless_gui.sh`). TTL is short enough that
+    /// `nvim foo` still flips the tab title quickly.
+    pub fg_proc_cache: Option<(std::time::Instant, Option<String>)>,
 }
 
 impl PaneState {
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
-        Self { parser, pty, redraw_target: Arc::new(Mutex::new(None)), viewport_top_abs: None }
+        Self {
+            parser,
+            pty,
+            redraw_target: Arc::new(Mutex::new(None)),
+            viewport_top_abs: None,
+            fg_proc_cache: None,
+        }
     }
 }
 
@@ -2736,7 +2750,8 @@ impl ApplicationHandler<UserEvent> for App {
                     r.set_inactive_pane_cursors(inactive_cursors);
                 }
 
-                if let (Some(r), Some(pane)) = (self.renderer.as_mut(), self.panes.get(&active_id))
+                if let (Some(r), Some(pane)) =
+                    (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
                     // Block on the parser lock: the VT thread holds it only
                     // for the duration of a single `Parser::advance` call,
@@ -2756,11 +2771,31 @@ impl ApplicationHandler<UserEvent> for App {
                         // user@host` still labels itself).
                         let cwd = grid.cwd().map(str::to_string);
                         let raw_title = grid.title().map(str::to_string);
-                        let proc_name = pane
-                            .pty
-                            .as_ref()
-                            .and_then(|p| p.pid())
-                            .and_then(sonic_core::proc_info::foreground_process);
+                        let proc_name = {
+                            // TTL-cache the foreground-process probe: it
+                            // walks the entire macOS process table (~600
+                            // procs, ~6ms) and the render path now ticks
+                            // ~26×/sec while the cursor blinks. Without
+                            // this cache an idle window pegs ~17% CPU
+                            // (regression: `scripts/bench_headless_gui.sh`).
+                            // 500ms is short enough that `nvim foo` still
+                            // flips the icon promptly.
+                            const TTL: std::time::Duration = std::time::Duration::from_millis(500);
+                            let now = Instant::now();
+                            let fresh = pane
+                                .fg_proc_cache
+                                .as_ref()
+                                .is_some_and(|(t, _)| now.duration_since(*t) < TTL);
+                            if !fresh {
+                                let probed = pane
+                                    .pty
+                                    .as_ref()
+                                    .and_then(|p| p.pid())
+                                    .and_then(sonic_core::proc_info::foreground_process);
+                                pane.fg_proc_cache = Some((now, probed));
+                            }
+                            pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone())
+                        };
                         let pretty = crate::tab_title::format_tab_title(
                             tab_idx,
                             cwd.as_deref(),
@@ -3260,16 +3295,23 @@ impl ApplicationHandler<UserEvent> for App {
         // rather than `request_redraw()` from inside the render path
         // (which produced the tight redraw loop flagged on PR #81).
         // The renderer hands us the exact instant of the next phase
-        // bucket boundary; we leave the default `Wait` in place when
-        // blinking is off or no renderer exists.
+        // bucket boundary; fall back to `Wait` when blinking is off,
+        // the window is unfocused, or no renderer exists. Explicitly
+        // resetting to `Wait` (rather than leaving the previous
+        // `WaitUntil` in place) is what keeps idle headless CPU at
+        // ~0% — otherwise an unfocused window would keep waking at
+        // 26Hz forever (regression: `scripts/bench_headless_gui.sh`
+        // reported 17% idle CPU before this gate).
+        let mut next: Option<std::time::Instant> = None;
         if let Some(r) = self.renderer.as_ref() {
             if self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Some(at) = r.next_blink_redraw_at() {
-                    el.set_control_flow(ControlFlow::WaitUntil(at));
-                }
+                next = r.next_blink_redraw_at();
             }
         }
-        // No blink work pending; let the existing default (`Wait`) sit.
+        match next {
+            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
     }
 }
 
