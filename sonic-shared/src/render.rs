@@ -1697,21 +1697,63 @@ fn hex_to_glyphon(h: &str) -> GColor {
     }
 }
 
-fn hex_to_wgpu(h: &str) -> wgpu::Color {
+/// Convert one sRGB-encoded channel (0..=1) to linear-light space.
+///
+/// Standard sRGB EOTF (IEC 61966-2-1). Used because our wgpu surface is
+/// `Bgra8UnormSrgb`, which performs linear→sRGB encoding on write — colors
+/// the shader / clear-color sees must therefore be in linear space, or the
+/// gamma is applied twice and the result looks washed out (e.g. Gruvbox Dark
+/// Hard `#1d2021` rendering as mid-gray `~#6e6e6e`).
+#[doc(hidden)]
+pub fn srgb_channel_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Parse a `#rrggbb` hex string into a `wgpu::Color` in **linear** space,
+/// suitable for use as a render-pass clear color on an sRGB surface format.
+///
+/// Alpha is left straight (no gamma curve applies to alpha).
+#[doc(hidden)]
+pub fn hex_to_wgpu(h: &str) -> wgpu::Color {
     let h = h.trim_start_matches('#');
     let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
     if h.len() == 6 {
-        wgpu::Color { r: parse(0), g: parse(2), b: parse(4), a: 1.0 }
+        wgpu::Color {
+            r: srgb_channel_to_linear(parse(0)),
+            g: srgb_channel_to_linear(parse(2)),
+            b: srgb_channel_to_linear(parse(4)),
+            a: 1.0,
+        }
     } else {
         wgpu::Color::BLACK
     }
 }
 
-fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
+/// Parse a `#rrggbb` hex string + alpha into a `[r, g, b, a]` array in
+/// **linear** RGB space, suitable for the quad pipeline which writes into
+/// the same `Bgra8UnormSrgb` surface as the clear color above.
+///
+/// Alpha is passed through unchanged.
+///
+/// Note: glyphon's text path uses a separate `hex_to_glyphon` helper that
+/// returns sRGB-encoded bytes, because glyphon / cosmic-text's atlas
+/// expects sRGB input — the wgpu surface format performs the sRGB→linear
+/// decode on sample, so glyph colors must NOT be pre-linearized.
+#[doc(hidden)]
+pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
     let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
+    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
     if h.len() == 6 {
-        [parse(0), parse(2), parse(4), alpha]
+        [
+            srgb_channel_to_linear(parse(0)) as f32,
+            srgb_channel_to_linear(parse(2)) as f32,
+            srgb_channel_to_linear(parse(4)) as f32,
+            alpha,
+        ]
     } else {
         [0.0, 0.0, 0.0, alpha]
     }
