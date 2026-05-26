@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sonic-core", "sonic-shared", "sonic-mac", "sonic-windows"]
+members = ["sonic-core", "sonic-shared", "sonic-mac", "sonic-windows", "sonic-mux"]
 default-members = ["sonic-core", "sonic-shared"]
 
 [workspace.package]
