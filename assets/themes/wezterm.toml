@@ -9,25 +9,35 @@ cursor_text   = "#141617"
 selection_bg  = "#27414d"
 selection_fg  = "#d5c4a1"
 
+# ANSI palette mirrors WezTerm's built-in "Gruvbox dark, hard (base16)"
+# color scheme, which is what the user selects via
+#   config.color_scheme = "Gruvbox dark, hard (base16)"
+# in their wezterm.lua. Values pinned for exact parity.
+#
+# Sourced from the canonical tinted-theming/schemes base16 definition for
+# "Gruvbox dark, hard" (palette.base00..base0F) and passed through WezTerm's
+# base16 → ANSI mapping in lua-api-crates/color-funcs/src/schemes/base16.rs:
+#   ansi    = [base00, base08, base0B, base0A, base0D, base0E, base0C, base05]
+#   brights = [base03, base08, base0B, base0A, base0D, base0E, base0C, base07]
 [colors.ansi]
-black   = "#000000"
-red     = "#cc5555"
-green   = "#55cc55"
-yellow  = "#cdcd55"
-blue    = "#5555cc"
-magenta = "#cc55cc"
-cyan    = "#7acaca"
-white   = "#cccccc"
+black   = "#1d2021"  # base00
+red     = "#fb4934"  # base08
+green   = "#b8bb26"  # base0B
+yellow  = "#fabd2f"  # base0A
+blue    = "#83a598"  # base0D
+magenta = "#d3869b"  # base0E
+cyan    = "#8ec07c"  # base0C
+white   = "#d5c4a1"  # base05
 
 [colors.bright]
-black   = "#555555"
-red     = "#ff5555"
-green   = "#55ff55"
-yellow  = "#ffff55"
-blue    = "#5555ff"
-magenta = "#ff55ff"
-cyan    = "#55ffff"
-white   = "#ffffff"
+black   = "#665c54"  # base03
+red     = "#fb4934"  # base08
+green   = "#b8bb26"  # base0B
+yellow  = "#fabd2f"  # base0A
+blue    = "#83a598"  # base0D
+magenta = "#d3869b"  # base0E
+cyan    = "#8ec07c"  # base0C
+white   = "#fbf1c7"  # base07
 
 [colors.tab]
 bar_bg          = "#141617"
