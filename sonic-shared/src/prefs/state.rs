@@ -476,6 +476,7 @@ impl PrefsState {
         // Map widget → field by (category, position). Index-based to
         // avoid carrying string keys around.
         let pos = self.controls.iter().position(|c| c.id() == id).unwrap_or(0);
+        let mut relocalize = false;
         match (self.active_category, pos, ctrl) {
             (Category::General, 0, Control::TextField(t)) => {
                 let v = t.get().to_string();
@@ -512,6 +513,9 @@ impl PrefsState {
                         } else {
                             Some(new_tag.as_str())
                         });
+                        // Defer the rebuild until after the match arm
+                        // releases its borrow of `self.controls`.
+                        relocalize = true;
                     }
                 }
             }
@@ -545,6 +549,13 @@ impl PrefsState {
                 }
             }
             _ => {}
+        }
+        if relocalize {
+            // Rebuild the control list now so the prefs UI re-reads
+            // every label through the new i18n bundle on the very next
+            // frame, instead of waiting until the user closes and
+            // re-opens prefs.
+            self.rebuild_controls();
         }
         let after = self.config.to_toml().unwrap_or_default();
         if before != after {

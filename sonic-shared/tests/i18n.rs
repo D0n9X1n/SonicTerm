@@ -92,3 +92,54 @@ fn region_subtag_negotiates_to_base_locale() {
     let i = I18n::new(Some("ja-JP"));
     assert_eq!(i.t("prefs-theme"), "テーマ");
 }
+
+#[test]
+fn live_language_switch_rebuilds_prefs_controls() {
+    // Regression for the PR #55 review blocker: selecting a new
+    // language in the Appearance > Language dropdown must rebuild the
+    // prefs control list immediately, so labels re-render through the
+    // new i18n bundle on the very next frame rather than waiting for
+    // close+reopen of the prefs window.
+    use sonic_core::config::Config;
+    use sonic_shared::prefs::{Category, Control, PrefsState};
+    use tempfile::TempDir;
+
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("SONIC_LOCALE");
+
+    let dir = TempDir::new().unwrap();
+    let config = Config { locale: "en".to_string(), ..Config::default() };
+    let mut state = PrefsState::new(config, dir.path().join("sonic.toml"));
+    state.set_category(Category::Appearance);
+
+    // Snapshot the language dropdown label in English.
+    let lang_ctrl_en = match &state.controls[4] {
+        Control::Dropdown(d) => d.clone(),
+        other => panic!("expected Appearance[4] to be the language dropdown, got {other:?}"),
+    };
+    assert_eq!(lang_ctrl_en.label, "Language");
+
+    // Find the zh-CN index in the dropdown options and select it via
+    // the same public entry point the UI uses.
+    let zh_idx = lang_ctrl_en
+        .options
+        .iter()
+        .position(|o| o == "中文")
+        .expect("zh-CN option missing from language dropdown");
+    let changed = state.select_dropdown(lang_ctrl_en.id, zh_idx).expect("dropdown id valid");
+    assert!(changed, "select_dropdown reported no change for new locale");
+
+    // After live-apply, the control list must have been rebuilt with
+    // the new i18n bundle — the same dropdown's label is now zh-CN.
+    let lang_ctrl_zh = match &state.controls[4] {
+        Control::Dropdown(d) => d,
+        other => {
+            panic!("expected Appearance[4] to be the language dropdown post-switch, got {other:?}")
+        }
+    };
+    assert_eq!(
+        lang_ctrl_zh.label, "语言",
+        "prefs layout was not rebuilt after live language switch — label still {:?}",
+        lang_ctrl_zh.label,
+    );
+}
