@@ -1,0 +1,39 @@
+name = "WezTerm Default"
+appearance = "dark"
+
+[colors]
+background    = "#0c0c0c"
+foreground    = "#b3b3b3"
+cursor        = "#52ad70"
+cursor_text   = "#0c0c0c"
+selection_bg  = "#27414d"
+selection_fg  = "#b3b3b3"
+
+[colors.ansi]
+black   = "#000000"
+red     = "#cc5555"
+green   = "#55cc55"
+yellow  = "#cdcd55"
+blue    = "#5555cc"
+magenta = "#cc55cc"
+cyan    = "#7acaca"
+white   = "#cccccc"
+
+[colors.bright]
+black   = "#555555"
+red     = "#ff5555"
+green   = "#55ff55"
+yellow  = "#ffff55"
+blue    = "#5555ff"
+magenta = "#ff55ff"
+cyan    = "#55ffff"
+white   = "#ffffff"
+
+[colors.tab]
+bar_bg          = "#0c0c0c"
+active_bg       = "#1c1c1c"
+active_fg       = "#b3b3b3"
+inactive_bg     = "#0c0c0c"
+inactive_fg     = "#808080"
+hover_bg        = "#1c1c1c"
+close_button_fg = "#ff5555"
