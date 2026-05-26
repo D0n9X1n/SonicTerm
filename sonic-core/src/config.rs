@@ -13,6 +13,10 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub theme: String,
     pub keymap: String,
+    /// User-selected UI locale (e.g. `"en"`, `"zh-CN"`, `"ja"`). Empty
+    /// string (the default) means "negotiate from OS locale".
+    #[serde(default)]
+    pub locale: String,
     /// Unknown top-level keys captured verbatim so that newer config keys
     /// (or user/plugin extensions) survive a load/save round-trip. Not
     /// considered when comparing two `Config`s for behavioural equality;
@@ -89,6 +93,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
+            locale: String::new(),
             extra: toml::Table::new(),
         }
     }
@@ -194,6 +199,7 @@ mod tests {
                 cursor_shape: CursorShape::Bar,
             },
             extra: toml::Table::new(),
+            locale: String::new(),
         };
         cfg.save(&path).unwrap();
         let reloaded = Config::load_or_default(&path).unwrap();

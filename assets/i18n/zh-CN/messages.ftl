@@ -1,0 +1,15 @@
+menu-file-new-tab = 新建标签页
+menu-edit-copy = 复制
+menu-edit-paste = 粘贴
+prefs-title = 偏好设置
+prefs-theme = 主题
+prefs-font-family = 字体
+prefs-font-size = 字号
+prefs-cursor-blink = 光标闪烁
+prefs-language = 语言
+prefs-language-auto = 自动
+palette-placeholder = 输入命令…
+search-placeholder = 在终端中查找…
+tab-new = 新建标签页
+tab-close = 关闭标签页
+ime-composing = 输入中：{ $text }

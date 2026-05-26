@@ -147,7 +147,6 @@ pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     }
 }
 
-
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
@@ -292,6 +291,9 @@ pub struct App {
     /// on `sonic.toml` changes. `None` in tests that construct `App`
     /// directly via [`App::new`] without a real event loop.
     event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    /// Translation bundle. Rebuilt when the user picks a new locale in
+    /// the preferences "Language" dropdown.
+    i18n: crate::i18n::I18n,
 }
 
 impl App {
@@ -307,6 +309,11 @@ impl App {
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     ) -> Self {
+        let i18n = crate::i18n::I18n::new(if config.locale.is_empty() {
+            None
+        } else {
+            Some(config.locale.as_str())
+        });
         Self {
             theme,
             config,
@@ -338,7 +345,35 @@ impl App {
             keymap_loader: None,
             config_watcher: None,
             event_loop_proxy,
+            i18n,
         }
+    }
+
+    /// Translate a UI message id. See [`crate::i18n::I18n::t`]. Returns
+    /// the key itself if no bundle (active or English fallback) has it,
+    /// so the UI never renders an empty label.
+    pub fn t(&self, key: &str) -> String {
+        self.i18n.t(key)
+    }
+
+    /// Translate with `{ $name }` arguments. See
+    /// [`crate::i18n::I18n::t_args`].
+    pub fn t_args(&self, key: &str, args: &[(&str, &str)]) -> String {
+        self.i18n.t_args(key, Some(args))
+    }
+
+    /// Currently active locale tag (e.g. `"en"`, `"zh-CN"`).
+    pub fn locale(&self) -> String {
+        self.i18n.locale()
+    }
+
+    /// Live-apply a new locale. Persists the choice to `self.config.locale`
+    /// so a subsequent prefs save writes it to disk. Pass `""` to mean
+    /// "auto-detect from OS locale".
+    pub fn set_locale(&mut self, requested: &str) {
+        self.config.locale = requested.to_string();
+        self.i18n =
+            crate::i18n::I18n::new(if requested.is_empty() { None } else { Some(requested) });
     }
 
     /// Decide whether the event loop should exit. The app should keep

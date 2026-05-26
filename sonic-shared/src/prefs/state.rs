@@ -46,6 +46,13 @@ pub const KNOWN_CURSOR_SHAPES: &[&str] = &["block", "bar", "underline"];
 pub const KNOWN_FONTS: &[&str] =
     &["JetBrainsMono Nerd Font", "Fira Code", "Menlo", "Cascadia Code", "Source Code Pro"];
 
+/// (tag, native display label) pairs for the Language dropdown. The empty
+/// tag means "auto-detect from OS locale". The native script for the
+/// non-default rows is chosen so the user can identify the option without
+/// already speaking the current UI language.
+pub const LANGUAGE_OPTIONS: &[(&str, &str)] =
+    &[("", "Auto"), ("en", "English"), ("zh-CN", "中文"), ("ja", "日本語")];
+
 /// In-memory edit state for the preferences window.
 pub struct PrefsState {
     /// Live mutable copy of the config.
@@ -64,12 +71,20 @@ pub struct PrefsState {
     pub layout: PrefsLayout,
     /// Currently focused TextField (for keyboard typing), if any.
     pub focused_field: Option<WidgetId>,
+    /// Translation bundle used to localize widget labels. Rebuilt
+    /// whenever the user picks a new locale in the Appearance category.
+    pub i18n: crate::i18n::I18n,
 }
 
 impl PrefsState {
     /// Build a fresh edit buffer over `config` saving to `config_path`.
     pub fn new(config: Config, config_path: PathBuf) -> Self {
         let layout = PrefsLayout::default_size();
+        let i18n = crate::i18n::I18n::new(if config.locale.is_empty() {
+            None
+        } else {
+            Some(config.locale.as_str())
+        });
         let mut s = Self {
             original: config.clone(),
             config,
@@ -79,6 +94,7 @@ impl PrefsState {
             controls: Vec::new(),
             layout,
             focused_field: None,
+            i18n,
         };
         s.rebuild_controls();
         s
@@ -126,7 +142,7 @@ impl PrefsState {
                 let sel = KNOWN_THEMES.iter().position(|t| *t == self.config.theme).unwrap_or(0);
                 out.push(Control::Dropdown(Dropdown::new(
                     next_id(),
-                    "Theme",
+                    self.i18n.t("prefs-theme"),
                     l.control_slot(0),
                     KNOWN_THEMES.iter().map(|s| (*s).to_string()).collect(),
                     sel,
@@ -155,13 +171,37 @@ impl PrefsState {
                     l.control_slot(3),
                     [0x7a, 0xa2, 0xf7, 0xff],
                 )));
+                // Language picker: "" = auto, then the three shipped
+                // locales in their native script. Order matches
+                // `LANGUAGE_OPTIONS` so a dropdown selection maps back
+                // by index in `commit_widget_to_config`.
+                let lang_sel = LANGUAGE_OPTIONS
+                    .iter()
+                    .position(|(tag, _)| *tag == self.config.locale.as_str())
+                    .unwrap_or(0);
+                out.push(Control::Dropdown(Dropdown::new(
+                    next_id(),
+                    self.i18n.t("prefs-language"),
+                    l.control_slot(4),
+                    LANGUAGE_OPTIONS
+                        .iter()
+                        .map(|(tag, label)| {
+                            if tag.is_empty() {
+                                self.i18n.t("prefs-language-auto")
+                            } else {
+                                (*label).to_string()
+                            }
+                        })
+                        .collect(),
+                    lang_sel,
+                )));
             }
             Category::Font => {
                 let sel =
                     KNOWN_FONTS.iter().position(|f| *f == self.config.font.family).unwrap_or(0);
                 out.push(Control::Dropdown(Dropdown::new(
                     next_id(),
-                    "Family",
+                    self.i18n.t("prefs-font-family"),
                     l.control_slot(0),
                     KNOWN_FONTS.iter().map(|s| (*s).to_string()).collect(),
                     sel,
@@ -169,7 +209,7 @@ impl PrefsState {
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
-                        "Size",
+                        self.i18n.t("prefs-font-size"),
                         l.control_slot(1),
                         8.0,
                         32.0,
@@ -204,7 +244,7 @@ impl PrefsState {
             Category::Behavior => {
                 out.push(Control::Toggle(Toggle::new(
                     next_id(),
-                    "Cursor blink",
+                    self.i18n.t("prefs-cursor-blink"),
                     l.control_slot(0),
                     self.config.terminal.cursor_blink,
                 )));
@@ -436,6 +476,7 @@ impl PrefsState {
         // Map widget → field by (category, position). Index-based to
         // avoid carrying string keys around.
         let pos = self.controls.iter().position(|c| c.id() == id).unwrap_or(0);
+        let mut relocalize = false;
         match (self.active_category, pos, ctrl) {
             (Category::General, 0, Control::TextField(t)) => {
                 let v = t.get().to_string();
@@ -457,6 +498,26 @@ impl PrefsState {
             }
             (Category::Appearance, 2, Control::Toggle(t)) => {
                 self.config.window.blur = t.get();
+            }
+            (Category::Appearance, 4, Control::Dropdown(d)) => {
+                let idx = d.get();
+                if let Some((tag, _)) = LANGUAGE_OPTIONS.get(idx) {
+                    let new_tag = (*tag).to_string();
+                    if new_tag != self.config.locale {
+                        self.config.locale = new_tag.clone();
+                        // Live-apply: rebuild the bundle so the very
+                        // next rebuild_controls() renders labels in
+                        // the new language.
+                        self.i18n = crate::i18n::I18n::new(if new_tag.is_empty() {
+                            None
+                        } else {
+                            Some(new_tag.as_str())
+                        });
+                        // Defer the rebuild until after the match arm
+                        // releases its borrow of `self.controls`.
+                        relocalize = true;
+                    }
+                }
             }
             (Category::Font, 0, Control::Dropdown(d)) => {
                 if let Some(v) = d.value() {
@@ -488,6 +549,13 @@ impl PrefsState {
                 }
             }
             _ => {}
+        }
+        if relocalize {
+            // Rebuild the control list now so the prefs UI re-reads
+            // every label through the new i18n bundle on the very next
+            // frame, instead of waiting until the user closes and
+            // re-opens prefs.
+            self.rebuild_controls();
         }
         let after = self.config.to_toml().unwrap_or_default();
         if before != after {
@@ -565,12 +633,12 @@ mod tests {
         let (mut s, _d) = fresh();
         let n0 = s.controls.len();
         s.set_category(Category::Appearance);
-        // Appearance has 4 controls (theme, opacity, blur, accent).
-        assert_eq!(s.controls.len(), 4);
+        // Appearance has 5 controls (theme, opacity, blur, accent, language).
+        assert_eq!(s.controls.len(), 5);
         assert_ne!(s.controls.len(), n0 + 99); // sanity
                                                // Setting the same category again is a no-op.
         s.set_category(Category::Appearance);
-        assert_eq!(s.controls.len(), 4);
+        assert_eq!(s.controls.len(), 5);
     }
 
     #[test]

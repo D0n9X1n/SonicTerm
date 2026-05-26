@@ -1,0 +1,15 @@
+menu-file-new-tab = New Tab
+menu-edit-copy = Copy
+menu-edit-paste = Paste
+prefs-title = Preferences
+prefs-theme = Theme
+prefs-font-family = Font Family
+prefs-font-size = Font Size
+prefs-cursor-blink = Blink Cursor
+prefs-language = Language
+prefs-language-auto = Auto
+palette-placeholder = Type a command…
+search-placeholder = Find in terminal…
+tab-new = New Tab
+tab-close = Close Tab
+ime-composing = Composing: { $text }
