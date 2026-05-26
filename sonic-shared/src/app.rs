@@ -1275,6 +1275,10 @@ impl App {
                 }
                 child.window.request_redraw();
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                child.renderer.set_scale_factor(scale_factor as f32);
+                child.window.request_redraw();
+            }
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();
             }
@@ -2407,6 +2411,12 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_scale_factor(scale_factor as f32);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
 
             WindowEvent::ModifiersChanged(m) => {
