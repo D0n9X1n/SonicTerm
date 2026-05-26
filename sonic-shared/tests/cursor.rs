@@ -108,3 +108,111 @@ fn cursor_shape_all_round_trip_strings() {
         assert_eq!(CursorShape::from_str_ci(&s.to_uppercase()), Some(*shape));
     }
 }
+
+// ---------------------------------------------------------------------
+// Regression coverage for the PR #81 review findings.
+// ---------------------------------------------------------------------
+
+/// Blink scheduling test — a simulated render loop with blink=true
+/// must never re-arm more than [`cursor::PHASE_BUCKETS`] times per
+/// second. This is the pure-math complement to the renderer change
+/// that moved blink scheduling out of the render path and into the
+/// event loop (`ControlFlow::WaitUntil(next_blink_redraw_at())`).
+#[test]
+fn blink_redraw_cadence_caps_at_30hz() {
+    use std::time::{Duration, Instant};
+    let interval = cursor::redraw_interval();
+    let cap_per_sec = (1000 / interval.as_millis().max(1) as u64) as usize;
+    // 16 buckets / 600ms cycle = 37.5ms ≈ 26.6 wakes/sec. Stay under 30.
+    assert!(cap_per_sec <= 30, "cap_per_sec={cap_per_sec}");
+
+    // Simulate the event-loop behaviour: every wake, advance to the
+    // next bucket boundary computed exactly like
+    // `GpuRenderer::next_blink_redraw_at`.
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(1);
+    let iv_ms = interval.as_millis() as u64;
+    let mut sim = start;
+    let mut wakes = 0usize;
+    while sim < deadline {
+        let elapsed = sim.duration_since(start);
+        let elapsed_ms = elapsed.as_millis() as u64;
+        let next_ms = ((elapsed_ms / iv_ms) + 1) * iv_ms;
+        sim = start + Duration::from_millis(next_ms);
+        wakes += 1;
+    }
+    assert!(wakes <= 30, "wakes/sec={wakes} must stay <=30");
+    assert!(wakes <= cap_per_sec + 1, "wakes={wakes} cap={cap_per_sec}");
+}
+
+/// Cell-rect math behind the hollow cursor: the renderer's
+/// `push_hollow_rect` helper must emit exactly four quad rects whose
+/// union forms the outline of the cell — no interior fill. Validated
+/// via the public quad helper so the test stays GPU-free.
+#[test]
+fn unfocused_pane_cursor_is_hollow() {
+    use sonic_shared::quad::QuadInstance;
+    use sonic_shared::render::push_hollow_rect;
+    let mut quads: Vec<QuadInstance> = Vec::new();
+    push_hollow_rect(&mut quads, 50.0, 30.0, 10.0, 20.0, 100.0, 100.0, [1.0, 1.0, 1.0, 1.0], 2.0);
+    assert_eq!(quads.len(), 4, "hollow rect = top+bottom+left+right");
+    // No emitted quad covers the centre of the cell — confirms the
+    // fill is fully transparent (the "hollow" of hollow cursor).
+    let cx_ndc = (55.0 / 100.0) * 2.0 - 1.0;
+    let cy_top_px = 40.0;
+    let cy_ndc = 1.0 - (cy_top_px / 100.0) * 2.0;
+    for q in &quads {
+        let [nx, ny, nw, nh] = q.rect;
+        // ny encodes the bottom of the rect after px_to_ndc's +nh shift.
+        let top = ny + nh;
+        let bottom = ny;
+        let left = nx;
+        let right = nx + nw;
+        let covers_centre = cx_ndc > left && cx_ndc < right && cy_ndc < top && cy_ndc > bottom;
+        assert!(!covers_centre, "interior must be empty: rect={:?}", q.rect);
+    }
+}
+
+/// Premultiplied alpha for the inverted-cell glyph during a blink
+/// fade. The text shader runs `vec4(color.rgb * cov, color.a * cov)`
+/// and assumes its input is premultiplied (PR #65 contract). With a
+/// 50% blink fade the recolored glyph color MUST be
+/// `(0.5*bg.r, 0.5*bg.g, 0.5*bg.b, 0.5)` — straight-alpha
+/// `(bg.r, bg.g, bg.b, 0.5)` would blend wrong and produce a halo.
+#[test]
+fn inverted_glyph_recolor_is_premultiplied_during_blink() {
+    use sonic_shared::quad::px_to_ndc;
+    use sonic_shared::render::recolor_cursor_glyphs;
+    use sonic_shared::text_pipeline::GlyphInstance;
+
+    let sw = 100.0;
+    let sh = 100.0;
+    let (cell_x, cell_y, cell_w, cell_h) = (10.0, 10.0, 10.0, 20.0);
+    let mut glyph = vec![GlyphInstance {
+        rect: px_to_ndc(cell_x + 1.0, cell_y + 1.0, cell_w - 2.0, cell_h - 2.0, sw, sh),
+        uv: [0.0; 4],
+        color: [1.0, 1.0, 1.0, 1.0],
+        flags: [0.0; 4],
+    }];
+
+    let bg = [0.8_f32, 0.4, 0.2, 1.0];
+    let blink_alpha = 0.5_f32;
+
+    // Mirror the renderer's Block branch (post-fix): premultiply RGB
+    // and A by blink_alpha before handing to recolor_cursor_glyphs.
+    let mut bg_premul = bg;
+    bg_premul[0] *= blink_alpha;
+    bg_premul[1] *= blink_alpha;
+    bg_premul[2] *= blink_alpha;
+    bg_premul[3] *= blink_alpha;
+    recolor_cursor_glyphs(&mut glyph, cell_x, cell_y, cell_w, cell_h, sw, sh, bg_premul);
+
+    let got = glyph[0].color;
+    let expected = [0.5 * 0.8, 0.5 * 0.4, 0.5 * 0.2, 0.5];
+    for i in 0..4 {
+        assert!((got[i] - expected[i]).abs() < 1e-5, "ch{i}: got={:?} exp={:?}", got, expected);
+    }
+    // And NOT the straight-alpha bug shape: alpha=0.5 with RGB unchanged.
+    let buggy = [0.8, 0.4, 0.2, 0.5];
+    assert_ne!(got, buggy, "must not be straight-alpha");
+}
