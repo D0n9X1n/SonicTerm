@@ -31,6 +31,7 @@ use winit::{
 };
 
 use crate::{
+    command_palette::CommandPalette,
     ime::ImeState,
     pane::PaneTree,
     prefs::{PrefsHit, PrefsState},
@@ -111,6 +112,7 @@ struct App {
     pending_prefs_open: bool,
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
+    command_palette: CommandPalette,
 }
 
 impl App {
@@ -137,6 +139,7 @@ impl App {
             prefs_state: None,
             pending_prefs_open: false,
             ime: ImeState::new(),
+            command_palette: CommandPalette::new(),
         }
     }
 
@@ -335,14 +338,14 @@ impl App {
             Action::FocusPane(d) => self.focus_pane_dir(*d),
             Action::OpenSearch => self.open_search(),
             Action::OpenPreferences => self.open_preferences(),
+            Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
             | Action::ResetFontSize
             | Action::ToggleFullscreen
             | Action::ResizePane { .. }
-            | Action::NewWindow
-            | Action::OpenCommandPalette => {
+            | Action::NewWindow => {
                 tracing::info!("action {action:?} accepted but not yet wired up");
             }
         }
@@ -388,6 +391,78 @@ impl App {
     fn search_active(&self) -> bool {
         let i = self.tabs.active_index();
         self.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+    }
+
+    /// Toggle the command palette open/closed.
+    fn toggle_command_palette(&mut self) {
+        let now_open = self.command_palette.toggle();
+        tracing::info!(open = now_open, "command palette toggled");
+        self.draw_command_palette_overlay();
+    }
+
+    /// Visual overlay rendering for the command palette is intentionally
+    /// deferred to a follow-up PR (see ROADMAP). For now this just logs
+    /// the visible state so the wiring can be exercised end-to-end while
+    /// the GPU overlay is being designed.
+    ///
+    /// TODO(palette-overlay): draw a centered floating panel via the
+    /// existing `quad::QuadPipeline` + glyphon spans, mirroring the
+    /// tab-bar's chrome helpers. Must NOT live inside `render.rs`; add a
+    /// sibling module so the GPU renderer stays focused on grid cells.
+    pub(crate) fn draw_command_palette_overlay(&self) {
+        if !self.command_palette.is_open() {
+            return;
+        }
+        tracing::info!(
+            query = %self.command_palette.query(),
+            selected = self.command_palette.selected(),
+            visible_count = self.command_palette.len(),
+            "command palette overlay (visual TODO)"
+        );
+    }
+
+    /// Route a key event into the open command palette. Returns true if
+    /// the event was consumed.
+    fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        if !self.command_palette.is_open() {
+            return false;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.command_palette.close();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                let action = self.command_palette.current().cloned();
+                self.command_palette.close();
+                if let Some(a) = action {
+                    self.run_action(&a);
+                }
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.command_palette.move_selection_down();
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.command_palette.move_selection_up();
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.command_palette.backspace();
+                true
+            }
+            Key::Character(s) => {
+                for ch in s.chars() {
+                    if !ch.is_control() {
+                        self.command_palette.input_char(ch);
+                    }
+                }
+                true
+            }
+            _ => true, // swallow other keys while palette is open
+        }
     }
 
     /// Route a key event into the active search state. Returns true if the
@@ -902,6 +977,27 @@ impl ApplicationHandler for App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.command_palette.is_open() {
+                    // Let the toggle binding (super+shift+P) still close
+                    // the palette; everything else routes into palette
+                    // state and is NOT forwarded to the pty.
+                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if matches!(action, Action::OpenCommandPalette) {
+                                self.run_action(&action);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.command_palette_handle_key(&event);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // While an IME composition is in flight, the OS owns the
                 // keystrokes — they will be delivered to us as Ime events
                 // instead. Forwarding them here would double-type. Escape
