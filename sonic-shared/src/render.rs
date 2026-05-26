@@ -109,6 +109,11 @@ pub struct GpuRenderer {
     tab_active_fg: GColor,
     tab_inactive_fg: GColor,
     tab_close_fg: [f32; 4],
+    /// Color for the wezterm-style vertical bar drawn between adjacent
+    /// inactive tabs. A dim variant of the inactive-fg works in every
+    /// theme; we precompute it here so the per-frame render path stays
+    /// allocation-free.
+    tab_separator: [f32; 4],
     hyperlink_underline: [f32; 4],
     hyperlink_tint: [f32; 4],
     search_highlight: [f32; 4],
@@ -297,6 +302,7 @@ impl GpuRenderer {
         let tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
         let tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
         let tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
+        let tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         // Hyperlink visuals: theme-aware. Use the theme's cursor color as the
         // accent (every bundled theme designates it). Underline reads as
         // deliberate at high opacity; the tint behind the run is subtle.
@@ -376,6 +382,7 @@ impl GpuRenderer {
             tab_active_fg,
             tab_inactive_fg,
             tab_close_fg,
+            tab_separator,
             hyperlink_underline,
             hyperlink_tint,
             search_highlight,
@@ -610,6 +617,7 @@ impl GpuRenderer {
         self.tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
         self.tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
         self.tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
+        self.tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         let tint_alpha = match theme.appearance {
             sonic_core::theme::Appearance::Dark => 0.14,
@@ -1095,6 +1103,28 @@ impl GpuRenderer {
                     rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
                     color: bg_color,
                 });
+                // Wezterm-style vertical separator: a 1px dim-gray bar
+                // sitting in the gap to the right of each tab except the
+                // last one. Skipped when either side is the active tab so
+                // the active highlight stays clean.
+                if t.index + 1 < tabs.tabs().len() {
+                    let next_is_active = layout.active == Some(t.index + 1);
+                    if !is_active && !next_is_active {
+                        let sep_w = 1.0_f32;
+                        let sep_pad_y = 6.0_f32;
+                        quads.push(QuadInstance {
+                            rect: px_to_ndc(
+                                t.bg.x + t.bg.w + 0.5,
+                                t.bg.y + sep_pad_y,
+                                sep_w,
+                                (t.bg.h - sep_pad_y * 2.0).max(1.0),
+                                sw,
+                                sh,
+                            ),
+                            color: self.tab_separator,
+                        });
+                    }
+                }
                 // Close button × drawn as two crossing thin quads.
                 let cx = t.close.x;
                 let cy = t.close.y;

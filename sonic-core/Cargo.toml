@@ -46,3 +46,9 @@ tempfile = "3"
 [[example]]
 name = "pty_dump"
 path = "examples/pty_dump.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Used by `proc_info` to map a pty's shell pid to the foreground process
+# (so the tab title can show e.g. `nvim` instead of `zsh` when the user
+# is editing a file). macOS-only; Linux/Windows ship stubs for v1.
+libproc = "0.14"

@@ -2481,16 +2481,27 @@ impl ApplicationHandler<UserEvent> for App {
                     // than spinning the AppKit event loop.
                     let cursor_rc = {
                         let mut grid = pane.parser.lock();
-                        // Mirror the latest OSC 0/2 title from the parser into
-                        // the active tab so the tab bar reflects "vim foo" /
-                        // "~/Code" / etc. Falls back to the prior title (e.g.
-                        // "shell") when the pty hasn't sent one yet.
-                        if let Some(t) = grid.title() {
-                            let pretty = render_tab_title(t);
-                            let cur = self.tabs.active().map(|tab| tab.title.clone());
-                            if cur.as_deref() != Some(pretty.as_str()) {
-                                self.tabs.set_active_title(pretty);
-                            }
+                        // Wezterm-style tab title: `#N icon parent/leaf`.
+                        // Pull cwd from OSC 7, the foreground process from
+                        // the pid probe (macOS only for now), and the OSC
+                        // 0/2 title as the last-resort body (so `ssh
+                        // user@host` still labels itself).
+                        let cwd = grid.cwd().map(str::to_string);
+                        let raw_title = grid.title().map(str::to_string);
+                        let proc_name = pane
+                            .pty
+                            .as_ref()
+                            .and_then(|p| p.pid())
+                            .and_then(sonic_core::proc_info::foreground_process);
+                        let pretty = crate::tab_title::format_tab_title(
+                            tab_idx,
+                            cwd.as_deref(),
+                            proc_name.as_deref(),
+                            raw_title.as_deref(),
+                        );
+                        let cur = self.tabs.active().map(|tab| tab.title.clone());
+                        if cur.as_deref() != Some(pretty.as_str()) {
+                            self.tabs.set_active_title(pretty);
                         }
                         if let Some(search) =
                             self.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -3064,57 +3075,4 @@ pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
     app.command_palette.close();
     app.run_action(&action);
     app.pending_prefs_open
-}
-
-/// Format an OSC 0/2 title for the tab bar with a Nerd Font icon prefix.
-///
-/// Heuristic: many shell prompts set the title to "user@host: cwd" or just
-/// the cwd ; some programs set it to the program name (vim, htop, ssh).
-/// We pick an icon based on the leading word, then keep the title compact.
-fn render_tab_title(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "\u{f489}  shell".to_string(); // nf-oct-terminal
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    let icon = if lower.starts_with("vim") || lower.starts_with("nvim") {
-        "\u{e7c5}" // nf-dev-vim
-    } else if lower.starts_with("ssh") {
-        "\u{f817}" // nf-mdi-ssh
-    } else if lower.starts_with("git") {
-        "\u{f1d3}" // nf-fa-git
-    } else if lower.starts_with("docker") {
-        "\u{f308}" // nf-linux-docker
-    } else if lower.starts_with("python")
-        || lower.starts_with("ipython")
-        || lower.starts_with("python3")
-    {
-        "\u{e73c}" // nf-dev-python
-    } else if lower.starts_with("node") || lower.starts_with("npm") || lower.starts_with("yarn") {
-        "\u{e718}" // nf-dev-nodejs_small
-    } else if lower.starts_with("cargo") || lower.starts_with("rustc") {
-        "\u{e7a8}" // nf-dev-rust
-    } else if lower.starts_with("htop") || lower.starts_with("top") || lower.starts_with("btm") {
-        "\u{f085}" // nf-fa-cogs
-    } else if lower.starts_with("less") || lower.starts_with("cat") || lower.starts_with("bat") {
-        "\u{f15c}" // nf-fa-file_text
-    } else if trimmed.contains('/') || trimmed.starts_with('~') {
-        "\u{f413}" // nf-oct-file_directory
-    } else {
-        "\u{f489}" // nf-oct-terminal
-    };
-
-    // Compact text: keep last path segment if it looks like a path, else
-    // first ~24 chars.
-    let body = if let Some(last) = trimmed.rsplit('/').next() {
-        if trimmed.contains('/') && !last.is_empty() {
-            last.to_string()
-        } else {
-            trimmed.chars().take(24).collect()
-        }
-    } else {
-        trimmed.chars().take(24).collect()
-    };
-
-    format!("{icon}  {body}")
 }

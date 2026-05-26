@@ -102,6 +102,14 @@ impl Parser {
     pub fn title(&self) -> Option<&str> {
         self.performer.title.as_deref()
     }
+
+    /// Latest OSC 7 working directory (sticky), or `None` if the shell hasn't
+    /// reported one. Stored as a filesystem path (the `file://host/` prefix
+    /// is stripped at parse time); used by the tab-title renderer to show
+    /// `parent/leaf` of the current cwd.
+    pub fn cwd(&self) -> Option<&str> {
+        self.performer.cwd.as_deref()
+    }
 }
 
 struct Performer {
@@ -119,6 +127,10 @@ struct Performer {
     focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
+    /// Latest OSC 7 working directory (sticky), filesystem path with the
+    /// `file://host/` prefix already stripped. `None` until the shell sends
+    /// one — modern zsh/bash/fish ship with cwd-reporting prompts.
+    cwd: Option<String>,
     reply_tx: Option<Sender<Vec<u8>>>,
 }
 
@@ -137,6 +149,7 @@ impl Performer {
             mouse_sgr: false,
             focus_reporting: false,
             title: None,
+            cwd: None,
             reply_tx,
         }
     }
@@ -231,6 +244,48 @@ impl Performer {
                 _ => {}
             }
         }
+    }
+}
+
+/// Parse an OSC 7 payload (typically `file://host/path`) into a filesystem
+/// path. Strips the scheme + host, and percent-decodes `%XX` escapes so
+/// names with spaces / unicode round-trip correctly. Empty / malformed
+/// inputs return an empty string.
+pub fn parse_osc7_cwd(raw: &str) -> String {
+    let stripped = raw.strip_prefix("file://").unwrap_or(raw);
+    // After `file://` the next `/` starts the absolute path; anything
+    // before it is the (often empty) hostname which we discard.
+    let path_part = match stripped.find('/') {
+        Some(i) => &stripped[i..],
+        None => stripped,
+    };
+    percent_decode(path_part)
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + b - b'a'),
+        b'A'..=b'F' => Some(10 + b - b'A'),
+        _ => None,
     }
 }
 
@@ -372,6 +427,20 @@ impl Perform for Performer {
                 if let Some(text) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
                     self.title = Some(text.to_string());
                     self.events.push(VtEvent::SetTitle(text.to_string()));
+                }
+            }
+            Some(7) => {
+                // OSC 7 ; file://<host>/<path> ST — shell-reported cwd.
+                // Used by the tab-title renderer to show `parent/leaf`.
+                // We are permissive: accept the raw payload even when it
+                // doesn't start with `file://` (some shells skip the
+                // scheme), strip the host component when present, and
+                // percent-decode the path so spaces/unicode survive.
+                if let Some(raw) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
+                    let path = parse_osc7_cwd(raw);
+                    if !path.is_empty() {
+                        self.cwd = Some(path);
+                    }
                 }
             }
             Some(8) => {

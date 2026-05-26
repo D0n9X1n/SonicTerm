@@ -32,7 +32,7 @@ white   = "#ebdbb2"
 [colors.tab]
 bar_bg          = "#1d2021"
 active_bg       = "#3c3836"
-active_fg       = "#ebdbb2"
+active_fg       = "#fabd2f"
 inactive_bg     = "#1d2021"
 inactive_fg     = "#928374"
 hover_bg        = "#32302f"

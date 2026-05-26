@@ -6,8 +6,10 @@
 
 use crate::tabs::TabBar;
 
-/// Height of the tab bar strip, in physical pixels.
-pub const TAB_BAR_HEIGHT: f32 = 32.0;
+/// Height of the tab bar strip, in physical pixels. Wezterm's fancy mode
+/// uses a slightly taller bar than the chrome-style 32px default — gives
+/// the per-tab Nerd Font icons room to breathe at typical font sizes.
+pub const TAB_BAR_HEIGHT: f32 = 34.0;
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
 pub const TAB_MAX_WIDTH: f32 = 220.0;
