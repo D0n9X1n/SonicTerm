@@ -10,6 +10,55 @@
 //! overlay. Today the consumer is just `app::App`, which feeds the
 //! drained commits straight into the active pane's PTY.
 
+/// Throttle for `Window::set_ime_cursor_area` calls.
+///
+/// macOS' InputMethodKit logs `error messaging the mach port for
+/// IMKCFRunLoopWakeUpReliable` whenever the host hammers the IME cursor
+/// area faster than the IMK runloop can drain its wake messages. The
+/// terminal renders every frame the cursor blinks or new bytes arrive,
+/// but the IME candidate window only needs to know the cell position
+/// when it actually changes. Track the last reported (row, col) and
+/// gate the winit call on a real move.
+///
+/// Render-agnostic — used by `app::App` to decide whether to call
+/// `set_ime_cursor_area`. Kept here (next to the rest of the IME state)
+/// so the unit test lives beside the state machine without dragging in
+/// a winit dependency.
+#[derive(Debug, Default, Clone)]
+pub struct ImeCursorThrottle {
+    last: Option<(u16, u16)>,
+}
+
+impl ImeCursorThrottle {
+    /// Construct a throttle with no recorded position. The first call to
+    /// [`Self::should_update`] always returns `true` so the IME learns
+    /// the initial cursor location.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Returns `true` if the (row, col) differs from the last accepted
+    /// position. Records the new position on `true`. Callers must only
+    /// invoke the underlying winit `set_ime_cursor_area` when this
+    /// returns `true`.
+    pub fn should_update(&mut self, row: u16, col: u16) -> bool {
+        if self.last == Some((row, col)) {
+            return false;
+        }
+        self.last = Some((row, col));
+        true
+    }
+
+    /// Clear the recorded position so the next call always fires. Used
+    /// when the surface geometry changes (resize / DPI / font size) and
+    /// the IME needs to re-learn the cell position even though the
+    /// (row, col) integer pair is unchanged.
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+}
+
 /// Pure state machine driven by `winit::event::Ime` events.
 #[derive(Debug, Default, Clone)]
 pub struct ImeState {

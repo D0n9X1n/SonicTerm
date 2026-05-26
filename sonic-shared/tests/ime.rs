@@ -80,3 +80,60 @@ fn disabled_clears_preedit_but_preserves_pending_commit() {
     // forward them on its next drain.
     assert_eq!(s.take_commits(), "A");
 }
+
+// ---------------------------------------------------------------------
+// ImeCursorThrottle — regression: macOS IMK runloop wake spam.
+// ---------------------------------------------------------------------
+//
+// Background: every render frame the App previously called
+// `Window::set_ime_cursor_area(...)`, which on macOS posts a message
+// to the InputMethodKit runloop. Under 60 FPS render plus cursor
+// blink the IMK mach port can't drain fast enough and stderr fills
+// with `IMKCFRunLoopWakeUpReliable` errors. We now gate the winit
+// call behind a (row, col) change.
+
+use sonic_shared::ime::ImeCursorThrottle;
+
+#[test]
+fn throttle_fires_once_for_initial_position() {
+    let mut t = ImeCursorThrottle::new();
+    assert!(t.should_update(0, 0), "first call must fire so IME learns the position");
+    assert!(!t.should_update(0, 0), "same cell must not re-fire");
+}
+
+#[test]
+fn throttle_collapses_ten_frames_at_same_cell_to_one_call() {
+    let mut t = ImeCursorThrottle::new();
+    let mut calls = 0;
+    for _ in 0..10 {
+        if t.should_update(5, 12) {
+            calls += 1;
+        }
+    }
+    assert_eq!(
+        calls, 1,
+        "10 frames at cell (5,12) must collapse to a single set_ime_cursor_area call"
+    );
+}
+
+#[test]
+fn throttle_fires_again_after_move() {
+    let mut t = ImeCursorThrottle::new();
+    assert!(t.should_update(3, 4));
+    assert!(!t.should_update(3, 4));
+    assert!(t.should_update(3, 5), "column change must fire");
+    assert!(t.should_update(4, 5), "row change must fire");
+    assert!(!t.should_update(4, 5));
+}
+
+#[test]
+fn throttle_reset_forces_next_call_to_fire() {
+    let mut t = ImeCursorThrottle::new();
+    assert!(t.should_update(7, 7));
+    assert!(!t.should_update(7, 7));
+    t.reset();
+    assert!(
+        t.should_update(7, 7),
+        "after reset (e.g. resize) the next call must fire even at unchanged cell"
+    );
+}
