@@ -1781,6 +1781,46 @@ impl App {
             child.renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
 
+        // Padding (per-side). A change to any of the four window-padding
+        // values shrinks/grows the inner cell area, so after pushing the
+        // new padding into each live renderer we must resize every pane's
+        // grid + PTY to match the renderer's new (cols, rows). Without the
+        // resize the shell keeps reporting stale `stty size` and the grid
+        // draws clipped against the old inner rect until a manual window
+        // resize. Mirrors the font-live-reload path above (PR #53).
+        let padding_changed = (new_cfg.window.padding_left - self.config.window.padding_left).abs()
+            > f32::EPSILON
+            || (new_cfg.window.padding_right - self.config.window.padding_right).abs()
+                > f32::EPSILON
+            || (new_cfg.window.padding_top - self.config.window.padding_top).abs() > f32::EPSILON
+            || (new_cfg.window.padding_bottom - self.config.window.padding_bottom).abs()
+                > f32::EPSILON;
+        if padding_changed {
+            let pad = [
+                new_cfg.window.padding_left,
+                new_cfg.window.padding_right,
+                new_cfg.window.padding_top,
+                new_cfg.window.padding_bottom,
+            ];
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_padding(pad);
+                let (cols, rows) = r.cells();
+                resize_all_panes(&self.panes, cols, rows);
+            }
+            for child in self.child_windows.values_mut() {
+                child.renderer.set_padding(pad);
+                let (cols, rows) = child.renderer.cells();
+                resize_all_panes(&child.panes, cols, rows);
+            }
+            tracing::info!(
+                "live-reload: padding -> l={} r={} t={} b={}",
+                pad[0],
+                pad[1],
+                pad[2],
+                pad[3],
+            );
+        }
+
         // Keymap
         if new_cfg.keymap != self.config.keymap {
             let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
