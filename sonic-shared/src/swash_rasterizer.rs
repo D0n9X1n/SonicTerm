@@ -78,6 +78,19 @@ impl<'a> SwashRasterizer<'a> {
         Self { font_system, scale_ctx: ScaleContext::new(), family: family.to_string(), px }
     }
 
+    /// Em-size (px) the rasterizer was constructed with. Exposed for
+    /// tests that verify the renderer threads `config.font_size`
+    /// through instead of the legacy hardcoded `DEFAULT_RASTER_PX`.
+    pub fn px(&self) -> f32 {
+        self.px
+    }
+
+    /// Font family the rasterizer was constructed with. Companion to
+    /// [`Self::px`] for the same renderer-config-honored test.
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
     /// Convenience: build at [`DEFAULT_RASTER_PX`] with the bundled
     /// "Rec Mono Casual" family. Used by the test harness.
     pub fn with_default_family(font_system: &'a mut FontSystem) -> Self {

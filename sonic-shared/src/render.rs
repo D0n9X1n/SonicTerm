@@ -25,7 +25,7 @@ use crate::{
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
-    swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
+    swash_rasterizer::SwashRasterizer,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
@@ -58,6 +58,7 @@ pub struct GpuRenderer {
     glyph_upload: AtlasUpload,
     text_pipeline: TextPipeline,
 
+    font_family: String,
     font_size: f32,
     line_height: f32,
     pub cell_w: f32,
@@ -258,6 +259,7 @@ impl GpuRenderer {
             glyph_atlas,
             glyph_upload,
             text_pipeline,
+            font_family: font_family.to_string(),
             font_size,
             line_height,
             cell_w,
@@ -442,7 +444,7 @@ impl GpuRenderer {
 
         {
             let mut rasterizer =
-                SwashRasterizer::new(&mut self.font_system, "Rec Mono Casual", DEFAULT_RASTER_PX);
+                SwashRasterizer::new(&mut self.font_system, &self.font_family, self.font_size);
             for r in 0..grid.rows {
                 let row = grid.row(r);
                 let mut ul_start: Option<u16> = None;

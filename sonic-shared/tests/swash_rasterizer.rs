@@ -99,3 +99,22 @@ fn missing_family_returns_none() {
     let res = r.rasterize(GlyphKey::new('A', false, false));
     assert!(res.is_none(), "unknown family must produce None, got {res:?}");
 }
+
+#[test]
+fn px_and_family_reflect_constructor_args() {
+    // Regression for PR #42 review: render.rs used to hardcode
+    // "Rec Mono Casual" / DEFAULT_RASTER_PX (14.0) when building the
+    // atlas rasterizer, ignoring user `config.font_family` /
+    // `config.font_size`. The renderer now threads those values
+    // through SwashRasterizer::new; this test pins the contract that
+    // the rasterizer actually retains whatever the caller asked for
+    // (so config-honoring at the call site is observable).
+    let mut fs = font_system_with_bundled();
+    let r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", 20.0);
+    assert_eq!(r.px(), 20.0, "raster px must equal the configured font_size");
+    assert_eq!(r.family(), "Rec Mono Casual", "family must equal the configured font_family");
+    assert!(
+        (r.px() - DEFAULT_RASTER_PX).abs() > f32::EPSILON,
+        "test must use a non-default size to be meaningful"
+    );
+}
