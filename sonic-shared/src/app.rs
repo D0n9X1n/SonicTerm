@@ -25,7 +25,7 @@ use sonic_core::{
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowId},
 };
@@ -129,6 +129,25 @@ pub fn pick_prompt_target(
     pick.map(|p| p.start_row)
 }
 
+/// Resize every pane in `panes` to `(cols, rows)`: both the parser's
+/// grid and (if the pane owns one) the PTY child. Used by the window
+/// resize handler and by the font live-reload path, where changing
+/// cell metrics shifts how many cells fit inside the current window.
+///
+/// `pub` + `#[doc(hidden)]` so integration tests can exercise the
+/// invariant on a synthetic pane map without needing a live wgpu
+/// surface or a real shell.
+#[doc(hidden)]
+pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
+    for pane in panes.values() {
+        pane.parser.lock().grid_mut().resize(cols, rows);
+        if let Some(pty) = pane.pty.as_ref() {
+            (pty.resize)(cols, rows);
+        }
+    }
+}
+
+
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
@@ -150,13 +169,29 @@ pub fn run_with(
     keymap_loader: Option<KeymapLoader>,
 ) -> Result<()> {
     init_tracing();
-    let event_loop = EventLoop::new().context("create event loop")?;
+    let event_loop =
+        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(theme, config, keymap);
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
     event_loop.run_app(&mut app).context("run event loop")?;
     Ok(())
+}
+
+/// Custom user events delivered through [`EventLoopProxy`].
+///
+/// Currently the only variant is [`UserEvent::ConfigChanged`], sent by
+/// the [`ConfigWatcher`] thread whenever a fresh `sonic.toml` parse is
+/// available. The handler wakes the loop, drains the watcher channel,
+/// and applies the new config (theme/font/keymap). Without this the
+/// channel-based delivery would sit queued under `ControlFlow::Wait`
+/// until an unrelated event arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEvent {
+    /// A new `sonic.toml` parse is ready on the watcher channel.
+    ConfigChanged,
 }
 
 fn init_tracing() {
@@ -186,7 +221,8 @@ pub struct PaneState {
 }
 
 impl PaneState {
-    fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
+    #[doc(hidden)]
+    pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
         Self { parser, pty, redraw_target: Arc::new(Mutex::new(None)), viewport_top_abs: None }
     }
 }
@@ -252,11 +288,25 @@ pub struct App {
     /// `resumed`; `None` if the config path could not be resolved or
     /// the watcher failed to start (e.g. parent dir unwritable).
     config_watcher: Option<ConfigWatcher>,
+    /// Proxy used by the watcher thread to wake the idle event loop
+    /// on `sonic.toml` changes. `None` in tests that construct `App`
+    /// directly via [`App::new`] without a real event loop.
+    event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
 }
 
 impl App {
     #[doc(hidden)]
     pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self::new_with_proxy(theme, config, keymap, None)
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_proxy(
+        theme: Theme,
+        config: Config,
+        keymap: Keymap,
+        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    ) -> Self {
         Self {
             theme,
             config,
@@ -287,6 +337,7 @@ impl App {
             theme_loader: None,
             keymap_loader: None,
             config_watcher: None,
+            event_loop_proxy,
         }
     }
 
@@ -1154,6 +1205,28 @@ impl App {
         if font_changed {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                // Cell metrics changed → the renderer now fits a
+                // different (cols, rows) inside the same window
+                // pixels. Resize every pane's grid + PTY so the shell
+                // and parser agree with what we'll actually draw.
+                // Without this, the grid keeps drawing at the old
+                // dimensions and `stty size` inside the shell reports
+                // stale values until the user drags the window edge.
+                let (cols, rows) = r.cells();
+                resize_all_panes(&self.panes, cols, rows);
+            }
+            // Apply the same swap to every torn-out child window. Each
+            // child owns its own GpuRenderer, so it needs the font
+            // change AND the matching pane resize against its own cell
+            // metrics (its window can be a different size from main).
+            for child in self.child_windows.values_mut() {
+                child.renderer.set_font(
+                    &new_cfg.font.family,
+                    new_cfg.font.size,
+                    new_cfg.font.line_height,
+                );
+                let (cols, rows) = child.renderer.cells();
+                resize_all_panes(&child.panes, cols, rows);
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -1182,6 +1255,9 @@ impl App {
         self.config = new_cfg;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+        for child in self.child_windows.values() {
+            child.window.request_redraw();
         }
     }
 
@@ -1671,7 +1747,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
@@ -1723,7 +1799,20 @@ impl ApplicationHandler for App {
         // app still runs — just without live reload).
         if self.config_watcher.is_none() {
             if let Some(path) = sonic_core::config::Config::default_path() {
-                match ConfigWatcher::spawn(path.clone()) {
+                let proxy = self.event_loop_proxy.clone();
+                let spawn_result = if let Some(p) = proxy {
+                    ConfigWatcher::spawn_with_wake(path.clone(), move || {
+                        // Failure here means the event loop has shut
+                        // down — nothing to wake, safe to ignore.
+                        let _ = p.send_event(UserEvent::ConfigChanged);
+                    })
+                } else {
+                    // No proxy (test harness) — fall back to the
+                    // poll-only behavior; the watcher still delivers,
+                    // it just won't wake an idle loop.
+                    ConfigWatcher::spawn(path.clone())
+                };
+                match spawn_result {
                     Ok(w) => {
                         tracing::info!("config watcher: watching {path:?}");
                         self.config_watcher = Some(w);
@@ -1731,6 +1820,16 @@ impl ApplicationHandler for App {
                     Err(e) => tracing::warn!("config watcher disabled: {e:#}"),
                 }
             }
+        }
+    }
+
+    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+        // Watcher-thread wake. Drain the channel and apply any new
+        // config immediately so the reload doesn't sit queued until
+        // the next OS event arrives. apply_new_config already
+        // request_redraw()s every live window.
+        match event {
+            UserEvent::ConfigChanged => self.poll_config_reload(),
         }
     }
 

@@ -37,8 +37,28 @@ impl ConfigWatcher {
     /// basename.  Returns `Err` if the parent directory cannot be
     /// observed (e.g. it does not exist yet).
     pub fn spawn(path: PathBuf) -> Result<Self> {
+        Self::spawn_with_wake(path, || {})
+    }
+
+    /// Same as [`spawn`], but invokes `wake` on the watcher thread
+    /// every time a new [`Config`] is delivered down the channel.
+    ///
+    /// The wake callback is the channel-vs-event-loop bridge: winit's
+    /// main loop sits in `ControlFlow::Wait` between events, so a
+    /// `try_latest()` call only runs on the next OS-driven event
+    /// (key, mouse, pty bytes, resize). If the terminal is idle when
+    /// `sonic.toml` changes, the reload would sit queued indefinitely
+    /// without an external nudge. `wake` is how the App wires its
+    /// [`winit::event_loop::EventLoopProxy`] in so the loop is woken
+    /// immediately on every delivery. Passing a no-op closure (as
+    /// `spawn` does) keeps the watcher usable in tests/tools that
+    /// have no event loop.
+    pub fn spawn_with_wake<F>(path: PathBuf, wake: F) -> Result<Self>
+    where
+        F: Fn() + Send + 'static,
+    {
         let (tx, rx) = unbounded::<Config>();
-        let watcher = spawn_inner(path, tx)?;
+        let watcher = spawn_inner(path, tx, Box::new(wake))?;
         Ok(Self { rx, _watcher: watcher })
     }
 
@@ -59,7 +79,11 @@ impl ConfigWatcher {
     }
 }
 
-fn spawn_inner(path: PathBuf, tx: Sender<Config>) -> Result<RecommendedWatcher> {
+fn spawn_inner(
+    path: PathBuf,
+    tx: Sender<Config>,
+    wake: Box<dyn Fn() + Send + 'static>,
+) -> Result<RecommendedWatcher> {
     let parent: PathBuf = path
         .parent()
         .map(Path::to_path_buf)
@@ -129,6 +153,12 @@ fn spawn_inner(path: PathBuf, tx: Sender<Config>) -> Result<RecommendedWatcher> 
                         // Receiver dropped — app is shutting down.
                         return;
                     }
+                    // Wake the main event loop so the queued config
+                    // is consumed promptly even when the terminal is
+                    // otherwise idle (winit's ControlFlow::Wait would
+                    // otherwise hold the main thread until the next
+                    // OS event).
+                    wake();
                     last_sent_toml = Some(toml);
                 }
                 Err(e) => {
