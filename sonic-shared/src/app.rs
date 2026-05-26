@@ -362,6 +362,12 @@ pub struct App {
     pending_prefs_open: bool,
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
+    /// Throttle for `Window::set_ime_cursor_area`. Without this every
+    /// render frame posts a message to macOS' InputMethodKit runloop and
+    /// stderr fills with `IMKCFRunLoopWakeUpReliable` errors that users
+    /// see as "Sonic is hanging". Only fire the winit call when the
+    /// terminal cursor moves to a different cell.
+    ime_cursor_throttle: crate::ime::ImeCursorThrottle,
     command_palette: CommandPalette,
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
@@ -456,6 +462,7 @@ impl App {
             prefs_state: None,
             pending_prefs_open: false,
             ime: ImeState::new(),
+            ime_cursor_throttle: crate::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
             pressed_tab: None,
             drag_session: None,
@@ -2643,14 +2650,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = &self.window {
-                        let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
-                        let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
-                        let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
-                        let size = winit::dpi::PhysicalSize::new(
-                            r.cell_w.ceil() as u32,
-                            r.cell_h.ceil() as u32,
-                        );
-                        w.set_ime_cursor_area(pos, size);
+                        if self.ime_cursor_throttle.should_update(cursor_rc.0, cursor_rc.1) {
+                            let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
+                            let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
+                            let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
+                            let size = winit::dpi::PhysicalSize::new(
+                                r.cell_w.ceil() as u32,
+                                r.cell_h.ceil() as u32,
+                            );
+                            w.set_ime_cursor_area(pos, size);
+                        }
                     }
                 }
             }
@@ -2682,9 +2691,21 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if let Some(w) = &self.window {
-                    w.set_ime_allowed(focused);
+                    // Intentionally do NOT toggle `set_ime_allowed` on
+                    // focus transitions. macOS' IMK posts a runloop
+                    // wake message on every toggle; doing it on every
+                    // focus in/out (which Sonic also receives when the
+                    // OS shows a notification, switches Spaces, etc.)
+                    // floods stderr with
+                    // `IMKCFRunLoopWakeUpReliable` errors and is a
+                    // suspected cause of long-session hangs. IME is
+                    // already enabled once at window creation; winit
+                    // suspends delivery on focus-out automatically.
+                    // Also invalidate the cursor-area throttle so the
+                    // first redraw after refocus re-teaches the OS the
+                    // current cell position.
                     if focused {
-                        w.set_ime_allowed(true);
+                        self.ime_cursor_throttle.reset();
                     }
                     w.request_redraw();
                 }
@@ -2701,6 +2722,11 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
+                // Cell geometry changed — force the next render to
+                // re-publish the IME cursor area even if (row, col) is
+                // unchanged, otherwise the OS candidate window stays
+                // pinned to the pre-resize pixel location.
+                self.ime_cursor_throttle.reset();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
