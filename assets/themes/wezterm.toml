@@ -2,12 +2,12 @@ name = "WezTerm Default"
 appearance = "dark"
 
 [colors]
-background    = "#0c0c0c"
-foreground    = "#b3b3b3"
+background    = "#141617"
+foreground    = "#cfbc97"
 cursor        = "#52ad70"
-cursor_text   = "#0c0c0c"
+cursor_text   = "#141617"
 selection_bg  = "#27414d"
-selection_fg  = "#b3b3b3"
+selection_fg  = "#cfbc97"
 
 [colors.ansi]
 black   = "#000000"
@@ -30,10 +30,10 @@ cyan    = "#55ffff"
 white   = "#ffffff"
 
 [colors.tab]
-bar_bg          = "#0c0c0c"
-active_bg       = "#1c1c1c"
-active_fg       = "#b3b3b3"
-inactive_bg     = "#0c0c0c"
+bar_bg          = "#141617"
+active_bg       = "#1c1f20"
+active_fg       = "#cfbc97"
+inactive_bg     = "#141617"
 inactive_fg     = "#808080"
-hover_bg        = "#1c1c1c"
+hover_bg        = "#1c1f20"
 close_button_fg = "#ff5555"
