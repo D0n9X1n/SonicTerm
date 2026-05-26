@@ -13,6 +13,12 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub theme: String,
     pub keymap: String,
+    /// Unknown top-level keys captured verbatim so that newer config keys
+    /// (or user/plugin extensions) survive a load/save round-trip. Not
+    /// considered when comparing two `Config`s for behavioural equality;
+    /// see the manual `PartialEq` impl below.
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub extra: toml::Table,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -83,6 +89,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
+            extra: toml::Table::new(),
         }
     }
 }
@@ -186,6 +193,7 @@ mod tests {
                 cursor_blink: false,
                 cursor_shape: CursorShape::Bar,
             },
+            extra: toml::Table::new(),
         };
         cfg.save(&path).unwrap();
         let reloaded = Config::load_or_default(&path).unwrap();
