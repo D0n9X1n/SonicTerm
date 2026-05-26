@@ -10,6 +10,7 @@ pub mod app;
 pub mod command_palette;
 pub mod glyph_atlas;
 pub mod ime;
+pub mod overlays;
 pub mod pane;
 pub mod prefs;
 pub mod quad;
