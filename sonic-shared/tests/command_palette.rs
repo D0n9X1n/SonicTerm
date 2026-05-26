@@ -143,3 +143,11 @@ fn all_actions_covers_every_variant_kind() {
     assert!(all.contains(&Action::Scroll(ScrollAction::ToTop)));
     assert!(all.contains(&Action::FocusPane(Direction::Left)));
 }
+
+#[test]
+fn palette_dispatch_of_open_preferences_sets_pending_flag() {
+    // Regression for PR #41 review: palette-dispatched OpenPreferences
+    // must set the same `pending_prefs_open` flag that the keyboard path
+    // sets, so the next event-loop tick can create the prefs window.
+    assert!(sonic_shared::app::__test_palette_dispatch_open_preferences_sets_pending());
+}

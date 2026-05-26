@@ -993,6 +993,10 @@ impl ApplicationHandler for App {
                         }
                     }
                     self.command_palette_handle_key(&event);
+                    if self.pending_prefs_open {
+                        self.pending_prefs_open = false;
+                        self.create_prefs_window(el);
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -1168,6 +1172,71 @@ impl KeyName {
             Self::Owned(s) => s.as_str(),
         }
     }
+}
+
+/// Test-only helper: simulate the command-palette path dispatching the
+/// `OpenPreferences` action, and return whether the App's
+/// `pending_prefs_open` flag was set as a result.
+///
+/// This is the cheapest possible regression for the palette → preferences
+/// wiring (PR #41 review). The real prefs window can only be created from
+/// a live winit `ActiveEventLoop`, but the flag-set is the necessary
+/// pre-condition that the palette path was incorrectly skipping.
+#[doc(hidden)]
+pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
+    use sonic_core::keymap::{Keymap, Meta};
+    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    let hex = || Hex("#000000".to_string());
+    let ansi = || AnsiColors {
+        black: hex(),
+        red: hex(),
+        green: hex(),
+        yellow: hex(),
+        blue: hex(),
+        magenta: hex(),
+        cyan: hex(),
+        white: hex(),
+    };
+    let theme = Theme {
+        name: "test".into(),
+        appearance: Appearance::Dark,
+        colors: Palette {
+            background: hex(),
+            foreground: hex(),
+            cursor: hex(),
+            cursor_text: hex(),
+            selection_bg: hex(),
+            selection_fg: hex(),
+            ansi: ansi(),
+            bright: ansi(),
+            tab: TabColors {
+                bar_bg: hex(),
+                active_bg: hex(),
+                active_fg: hex(),
+                inactive_bg: hex(),
+                inactive_fg: hex(),
+                hover_bg: hex(),
+                close_button_fg: hex(),
+            },
+        },
+    };
+    let config = Config::default();
+    let keymap =
+        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
+    let mut app = App::new(theme, config, keymap);
+    // Simulate what the palette Enter branch does: pick the selected
+    // action and dispatch via run_action — exactly the sequence run by
+    // `command_palette_handle_key` on Enter.
+    app.command_palette.open();
+    // Filter so OpenPreferences becomes the current item; it's the only
+    // action whose name contains "openpre".
+    app.command_palette.set_query("openpre");
+    let action =
+        app.command_palette.current().cloned().expect("OpenPreferences should be filtered in");
+    assert!(matches!(action, sonic_core::keymap::Action::OpenPreferences));
+    app.command_palette.close();
+    app.run_action(&action);
+    app.pending_prefs_open
 }
 
 /// Format an OSC 0/2 title for the tab bar with a Nerd Font icon prefix.
