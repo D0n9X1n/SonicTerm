@@ -180,3 +180,12 @@ action = "reload_config"
 [[binding]]
 keys = "super+comma"
 action = "open_preferences"
+
+# --- Shell integration (OSC 133) ---
+[[binding]]
+keys = "super+shift+up"
+action = "scroll_to_prev_prompt"
+
+[[binding]]
+keys = "super+shift+down"
+action = "scroll_to_next_prompt"

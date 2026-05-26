@@ -99,3 +99,66 @@ fn modifier_aware_click_only_opens_with_super() {
     assert!(sonic_core::url_open::validate("https://example.com/path").is_ok());
     assert!(sonic_core::url_open::validate("javascript:alert(1)").is_err());
 }
+
+#[test]
+fn wrap_paste_raw_when_not_bracketed() {
+    let out = sonic_shared::app::wrap_paste("hello\nworld", false);
+    assert_eq!(out, b"hello\nworld");
+}
+
+#[test]
+fn wrap_paste_brackets_when_enabled() {
+    let out = sonic_shared::app::wrap_paste("rm -rf /", true);
+    assert_eq!(out, b"\x1b[200~rm -rf /\x1b[201~");
+}
+
+#[test]
+fn wrap_paste_empty_text_still_emits_brackets() {
+    let out = sonic_shared::app::wrap_paste("", true);
+    assert_eq!(out, b"\x1b[200~\x1b[201~");
+}
+
+#[test]
+fn pick_prompt_target_forward_and_back() {
+    use sonic_core::grid::Grid;
+    let mut g = Grid::new(10, 6);
+    g.record_prompt_start();
+    g.goto(2, 0);
+    g.record_prompt_start();
+    g.goto(5, 0);
+    g.record_prompt_start();
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, true), Some(2));
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, false), Some(2));
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, true), None);
+    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, false), None);
+}
+
+#[test]
+fn scroll_to_prev_prompt_view_top_matches_prompt_row() {
+    // After ScrollToPrevPrompt the renderer reads rows via
+    // Grid::row_at_abs(viewport_top_abs + r). This test verifies the
+    // logic end-to-end: a prompt recorded mid-scrollback, when used as
+    // the viewport top, must resolve to the very row that was current
+    // when record_prompt_start() ran.
+    use sonic_core::grid::{CellFlags, Color, Grid};
+    let mut g = Grid::new(4, 3);
+    // Row content "A" at scrollback origin; record a prompt there.
+    g.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+    g.record_prompt_start();
+    // Push that row into scrollback by scrolling up 3 times so the row
+    // marked with 'A' ends up at scrollback index 0.
+    g.scroll_up(3);
+    // Sanity: the prompt's start_row should now lie in scrollback.
+    let prompt = g.prompts().next().expect("prompt recorded");
+    assert!(prompt.start_row < g.scrollback_len() as u64);
+    // pick_prompt_target from the live bottom should hop back to the
+    // recorded prompt row.
+    let cur = g.scrollback_len() as u64;
+    let target = sonic_shared::app::pick_prompt_target(&g, cur, false).expect("prev prompt");
+    assert_eq!(target, prompt.start_row);
+    // Now the renderer would view from `target`. The first visible row
+    // returned by row_at_abs must be the prompt's start row, and it
+    // must still contain the 'A' character.
+    let row = g.row_at_abs(target).expect("row in scrollback");
+    assert_eq!(row[0].ch, 'A', "viewport top row should be the prompt-start row");
+}

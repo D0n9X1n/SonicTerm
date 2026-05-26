@@ -196,6 +196,8 @@ pub fn action_display_name(a: &Action) -> String {
         Action::OpenCommandPalette => "OpenCommandPalette".into(),
         Action::OpenPreferences => "OpenPreferences".into(),
         Action::Scroll(s) => format!("Scroll({})", scroll_name(*s)),
+        Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
+        Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
     }
 }
@@ -260,6 +262,9 @@ pub fn all_actions() -> Vec<Action> {
         Action::Scroll(ScrollAction::PageDown),
         Action::Scroll(ScrollAction::ToTop),
         Action::Scroll(ScrollAction::ToBottom),
+        // Shell integration
+        Action::ScrollToPrevPrompt,
+        Action::ScrollToNextPrompt,
         // Config
         Action::ReloadConfig,
     ]

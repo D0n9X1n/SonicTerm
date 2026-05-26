@@ -67,6 +67,10 @@ pub enum Action {
     // Scroll
     Scroll(ScrollAction),
 
+    // Shell integration (OSC 133)
+    ScrollToPrevPrompt,
+    ScrollToNextPrompt,
+
     // Config
     ReloadConfig,
 }

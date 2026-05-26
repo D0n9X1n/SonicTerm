@@ -65,6 +65,26 @@ impl Default for Cell {
 /// A row of cells.
 pub type Row = Vec<Cell>;
 
+/// A single shell prompt region recorded from OSC 133 markers. Rows are
+/// expressed in **scrollback-absolute coordinates** — `scrollback_len() +
+/// visible_row` at the time the marker was emitted — so the region remains
+/// addressable after content scrolls into history. Callers convert back to
+/// a visible row by subtracting the current `scrollback_len()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptRegion {
+    /// Absolute row of the prompt start (OSC 133 ; A).
+    pub start_row: u64,
+    /// Absolute row where the command output ended (OSC 133 ; D), if any.
+    pub end_row: Option<u64>,
+    /// Exit code reported by OSC 133 ; D ; <code>, if any.
+    pub exit_code: Option<i32>,
+}
+
+/// Maximum number of prompt regions retained per grid. Older ones are
+/// discarded FIFO — terminals only need scroll-by-prompt access to the
+/// recent past.
+pub const PROMPT_REGION_LIMIT: usize = 256;
+
 /// Terminal grid with scrollback.
 #[derive(Debug)]
 pub struct Grid {
@@ -91,6 +111,8 @@ pub struct Grid {
     /// `Vec<bool>` is fine at terminal row counts (~40 typical, ~200 max)
     /// — a BitSet has worse cache behavior at this scale.
     dirty_rows: Vec<bool>,
+    /// Prompt regions recorded from OSC 133. Oldest first.
+    prompts: VecDeque<PromptRegion>,
 }
 
 impl Grid {
@@ -110,6 +132,7 @@ impl Grid {
             // never seen it. Once it does its first walk and calls
             // clear_dirty(), the flags drop to all-false.
             dirty_rows: vec![true; rows as usize],
+            prompts: VecDeque::new(),
         }
     }
 
@@ -209,6 +232,7 @@ impl Grid {
             alt_screen: None,
             revision: 0,
             dirty_rows: vec![true; rows as usize],
+            prompts: VecDeque::new(),
         };
         self.alt_screen = Some(Box::new(saved));
         self.mark_all();
@@ -301,6 +325,25 @@ impl Grid {
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
         self.scrollback.iter()
+    }
+
+    /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
+    /// if `abs` lies past the bottom of the visible region. Rows inside
+    /// scrollback come from the saved backing store; rows ≥ `scrollback_len`
+    /// come from the live visible buffer.
+    ///
+    /// Used by the renderer when the viewport is scrolled away from the
+    /// live bottom (e.g. after `ScrollToPrevPrompt`) so the displayed
+    /// rows come from history rather than the live shell output.
+    #[inline]
+    pub fn row_at_abs(&self, abs: u64) -> Option<&Row> {
+        let sb = self.scrollback.len() as u64;
+        if abs < sb {
+            self.scrollback.get(abs as usize)
+        } else {
+            let r = (abs - sb) as usize;
+            self.visible.get(r)
+        }
     }
 
     /// Put a character at cursor, advancing cursor by character width.
@@ -479,6 +522,73 @@ impl Grid {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    /// Absolute row of the cursor (= `scrollback_len() + cursor.row`). Used
+    /// by OSC 133 marker recording so prompt regions survive scrolling.
+    #[inline]
+    pub fn cursor_absolute_row(&self) -> u64 {
+        self.scrollback.len() as u64 + self.cursor.row as u64
+    }
+
+    /// Record an OSC 133 `A` (prompt-start) marker at the cursor row.
+    /// Coalesces consecutive markers on the same row so a shell that emits
+    /// the marker more than once per prompt doesn't bloat the buffer.
+    pub fn record_prompt_start(&mut self) {
+        let row = self.cursor_absolute_row();
+        if matches!(self.prompts.back(), Some(p) if p.start_row == row && p.end_row.is_none()) {
+            return;
+        }
+        if self.prompts.len() >= PROMPT_REGION_LIMIT {
+            self.prompts.pop_front();
+        }
+        self.prompts.push_back(PromptRegion { start_row: row, end_row: None, exit_code: None });
+    }
+
+    /// Record an OSC 133 `D` (command-end) marker. Updates the most recent
+    /// prompt region in place; a stray `D` without a prior `A` is ignored.
+    pub fn record_prompt_end(&mut self, exit_code: Option<i32>) {
+        let row = self.cursor_absolute_row();
+        if let Some(last) = self.prompts.back_mut() {
+            last.end_row = Some(row);
+            last.exit_code = exit_code;
+        }
+    }
+
+    /// All recorded prompt regions in chronological order.
+    pub fn prompts(&self) -> impl Iterator<Item = &PromptRegion> {
+        self.prompts.iter()
+    }
+
+    /// Number of recorded prompt regions.
+    pub fn prompts_len(&self) -> usize {
+        self.prompts.len()
+    }
+
+    /// Visible-region row of a prompt region, if it currently lies inside
+    /// the visible window. Used by the renderer to draw the gutter caret.
+    pub fn prompt_visible_row(&self, p: &PromptRegion) -> Option<u16> {
+        let scrollback = self.scrollback.len() as u64;
+        let rel = p.start_row.checked_sub(scrollback)?;
+        if rel < self.rows as u64 {
+            Some(rel as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Find the prompt whose absolute start row is the largest one strictly
+    /// less than `from_absolute_row`. Used by the "scroll to previous
+    /// prompt" action.
+    pub fn prompt_before(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
+        self.prompts.iter().rev().find(|p| p.start_row < from_absolute_row)
+    }
+
+    /// Find the prompt whose absolute start row is the smallest one strictly
+    /// greater than `from_absolute_row`. Used by the "scroll to next
+    /// prompt" action.
+    pub fn prompt_after(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
+        self.prompts.iter().find(|p| p.start_row > from_absolute_row)
     }
 
     /// Set the maximum number of scrollback rows retained.
