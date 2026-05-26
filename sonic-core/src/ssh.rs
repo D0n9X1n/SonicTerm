@@ -271,6 +271,7 @@ mod live_impl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // internal session runner — splitting into a struct here would just rename the bag of args
     pub async fn run_session(
         target: SshTarget,
         key_path: Option<PathBuf>,
