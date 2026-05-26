@@ -646,6 +646,7 @@ impl GpuRenderer {
                         rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                         uv: info.uv,
                         color: rgba,
+                        flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                     });
                     // For wide chars: the glyph itself was rasterized at
                     // its natural width; we've laid it out in the lead

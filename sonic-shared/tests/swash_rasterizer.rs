@@ -118,3 +118,42 @@ fn px_and_family_reflect_constructor_args() {
         "test must use a non-default size to be meaningful"
     );
 }
+
+/// Color emoji bitmaps come out of swash as straight-alpha RGBA, but our
+/// atlas texture is BGRA8Unorm + our blend state is premultiplied. The
+/// helper does both transforms (channel swap and RGB *= A) in one pass.
+/// This regression test asserts both legs separately on synthetic input
+/// so a future "let's just upload the pixels" change can't silently
+/// reintroduce either the channel swap bug or the alpha-fringe bug.
+#[test]
+fn rgba_straight_to_bgra_premul_opaque_red() {
+    // Opaque red in RGBA straight → opaque red in BGRA premul.
+    // (No premultiply effect because alpha == 255.)
+    let mut px = [255u8, 0, 0, 255];
+    sonic_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    assert_eq!(px, [0, 0, 255, 255], "expected BGRA = (0,0,255,255)");
+}
+
+#[test]
+fn rgba_straight_to_bgra_premul_translucent_gray() {
+    // 50% alpha gray in RGBA straight: (100,100,100,128).
+    // After premul: each channel ≈ 100 * 128 / 255 ≈ 50.
+    // After BGR swap: B,G,R order — but values are identical here so
+    // the channel swap is invisible. We still assert all four bytes.
+    let mut px = [100u8, 100, 100, 128];
+    sonic_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    // (100 * 128 + 127) / 255 = 12927 / 255 = 50.69 → 50 with truncating div.
+    assert_eq!(px, [50, 50, 50, 128], "expected BGRA premul = (50,50,50,128)");
+}
+
+#[test]
+fn rgba_straight_to_bgra_premul_translucent_blue_swaps_channels() {
+    // Pure blue at 50% alpha exercises both legs: the channel swap (B
+    // ends up in the first byte) AND premultiplication scaling the
+    // single non-zero channel.
+    let mut px = [0u8, 0, 200, 128];
+    sonic_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    // B = 200 * 128 / 255 ≈ 100, G = 0, R = 0, A = 128.
+    let expected_b = ((200u16 * 128 + 127) / 255) as u8;
+    assert_eq!(px, [expected_b, 0, 0, 128]);
+}

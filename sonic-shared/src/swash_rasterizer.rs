@@ -44,6 +44,35 @@ use swash::zeno::Format;
 
 use crate::glyph_atlas::{RasterTile, Rasterizer};
 
+/// In-place convert a buffer of straight-alpha RGBA pixels (the format
+/// swash returns for `Content::Color` strikes) into premultiplied BGRA
+/// (the format our atlas texture + alpha-blend state expect).
+///
+/// Both transformations happen in a single pass:
+///   - channel swap: `R` and `B` are exchanged
+///   - premultiply:  `R`, `G`, `B` are each scaled by `A / 255`
+///
+/// Without this, color emoji would render with red and blue swapped and
+/// with bright edge fringes when composited over a non-black background
+/// (the classic straight-alpha-into-premultiplied-blend artifact).
+#[doc(hidden)]
+pub fn rgba_straight_to_bgra_premul(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
+        let r = px[0];
+        let g = px[1];
+        let b = px[2];
+        let a = px[3];
+        // Standard "round to nearest" 8-bit premultiply: (c * a + 127) / 255.
+        // The +127 makes the truncating divide round-half-up without a
+        // float conversion.
+        let pm = |c: u8| -> u8 { ((c as u16 * a as u16 + 127) / 255) as u8 };
+        px[0] = pm(b);
+        px[1] = pm(g);
+        px[2] = pm(r);
+        px[3] = a;
+    }
+}
+
 /// Default rasterization size in pixels. We bake at this fixed em-size
 /// so a single tile per `GlyphKey` is enough — the renderer never
 /// resizes the grid font at runtime (that would invalidate the entire
@@ -65,13 +94,24 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 /// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
 /// but the chain shouldn't be empty.
 #[cfg(target_os = "macos")]
-const PLATFORM_FALLBACK_CHAIN: &[&str] = &["PingFang SC", "Hiragino Sans GB", "Apple Color Emoji"];
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Apple SD Gothic Neo",
+    "Symbols Nerd Font Mono",
+    "Apple Color Emoji",
+];
 #[cfg(target_os = "windows")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] =
-    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Segoe UI Emoji"];
+    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Symbols Nerd Font Mono", "Segoe UI Emoji"];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const PLATFORM_FALLBACK_CHAIN: &[&str] =
-    &["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Color Emoji"];
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "Symbols Nerd Font Mono",
+    "Noto Color Emoji",
+];
 
 /// Maximum number of families in the fallback chain. One byte in the
 /// `GlyphKey` is plenty; we also keep an end-of-chain sentinel below
@@ -203,6 +243,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 offset_y: 0,
                 advance: self.px * 0.6,
                 coverage: Vec::new(),
+                is_color: false,
             });
         }
 
@@ -238,6 +279,54 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
 
         let mut scaler = self.scale_ctx.builder(swash_font).size(self.px).hint(true).build();
 
+        // Two-phase render: try color sources first (Subpixel format
+        // preserves the BGRA bitmap from sbix/CBDT/COLR strikes). If swash
+        // returns Color content, the tile is BGRA premultiplied and the
+        // atlas stores it as-is (`is_color = true`). Otherwise re-render
+        // with Alpha format from the outline/mono-bitmap sources so we
+        // get a proper coverage mask rather than the all-zero alpha
+        // channel a color strike emits under Format::Alpha.
+        let color_attempt =
+            Render::new(&[Source::ColorBitmap(StrikeWith::BestFit), Source::ColorOutline(0)])
+                .format(Format::Subpixel)
+                .render(&mut scaler, glyph_id);
+
+        if let Some(image) = color_attempt {
+            if image.content == swash::scale::image::Content::Color {
+                let p = image.placement;
+                if p.width == 0 || p.height == 0 {
+                    return Some(RasterTile {
+                        width: 0,
+                        height: 0,
+                        offset_x: p.left,
+                        offset_y: -p.top,
+                        advance: self.px * 0.6,
+                        coverage: Vec::new(),
+                        is_color: true,
+                    });
+                }
+                let expected = (p.width as usize) * (p.height as usize) * 4;
+                let mut data = image.data;
+                if data.len() != expected {
+                    data.resize(expected, 0);
+                }
+                // swash emits color bitmaps as straight-alpha RGBA; the
+                // atlas contract (and our wgpu blend state) is
+                // premultiplied BGRA. Swap R↔B and multiply RGB by A in
+                // a single pass so the upload is a memcpy.
+                rgba_straight_to_bgra_premul(&mut data);
+                return Some(RasterTile {
+                    width: p.width,
+                    height: p.height,
+                    offset_x: p.left,
+                    offset_y: -p.top,
+                    advance: self.px * 0.6,
+                    coverage: data,
+                    is_color: true,
+                });
+            }
+        }
+
         let image = Render::new(&[Source::Outline, Source::Bitmap(StrikeWith::BestFit)])
             .format(Format::Alpha)
             .render(&mut scaler, glyph_id)?;
@@ -251,6 +340,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 offset_y: -p.top,
                 advance: self.px * 0.6,
                 coverage: Vec::new(),
+                is_color: false,
             });
         }
 
@@ -267,6 +357,7 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             offset_y: -p.top,
             advance: self.px * 0.6,
             coverage,
+            is_color: false,
         })
     }
 }
