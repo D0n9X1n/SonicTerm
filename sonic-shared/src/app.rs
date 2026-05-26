@@ -31,6 +31,7 @@ use winit::{
 };
 
 use crate::{
+    command_palette::CommandPalette,
     ime::ImeState,
     pane::PaneTree,
     prefs::{PrefsHit, PrefsState},
@@ -111,6 +112,7 @@ struct App {
     pending_prefs_open: bool,
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
+    command_palette: CommandPalette,
 }
 
 impl App {
@@ -137,6 +139,7 @@ impl App {
             prefs_state: None,
             pending_prefs_open: false,
             ime: ImeState::new(),
+            command_palette: CommandPalette::new(),
         }
     }
 
@@ -335,14 +338,14 @@ impl App {
             Action::FocusPane(d) => self.focus_pane_dir(*d),
             Action::OpenSearch => self.open_search(),
             Action::OpenPreferences => self.open_preferences(),
+            Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
             | Action::ResetFontSize
             | Action::ToggleFullscreen
             | Action::ResizePane { .. }
-            | Action::NewWindow
-            | Action::OpenCommandPalette => {
+            | Action::NewWindow => {
                 tracing::info!("action {action:?} accepted but not yet wired up");
             }
         }
@@ -388,6 +391,78 @@ impl App {
     fn search_active(&self) -> bool {
         let i = self.tabs.active_index();
         self.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+    }
+
+    /// Toggle the command palette open/closed.
+    fn toggle_command_palette(&mut self) {
+        let now_open = self.command_palette.toggle();
+        tracing::info!(open = now_open, "command palette toggled");
+        self.draw_command_palette_overlay();
+    }
+
+    /// Visual overlay rendering for the command palette is intentionally
+    /// deferred to a follow-up PR (see ROADMAP). For now this just logs
+    /// the visible state so the wiring can be exercised end-to-end while
+    /// the GPU overlay is being designed.
+    ///
+    /// TODO(palette-overlay): draw a centered floating panel via the
+    /// existing `quad::QuadPipeline` + glyphon spans, mirroring the
+    /// tab-bar's chrome helpers. Must NOT live inside `render.rs`; add a
+    /// sibling module so the GPU renderer stays focused on grid cells.
+    pub(crate) fn draw_command_palette_overlay(&self) {
+        if !self.command_palette.is_open() {
+            return;
+        }
+        tracing::info!(
+            query = %self.command_palette.query(),
+            selected = self.command_palette.selected(),
+            visible_count = self.command_palette.len(),
+            "command palette overlay (visual TODO)"
+        );
+    }
+
+    /// Route a key event into the open command palette. Returns true if
+    /// the event was consumed.
+    fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        if !self.command_palette.is_open() {
+            return false;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.command_palette.close();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                let action = self.command_palette.current().cloned();
+                self.command_palette.close();
+                if let Some(a) = action {
+                    self.run_action(&a);
+                }
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.command_palette.move_selection_down();
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.command_palette.move_selection_up();
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.command_palette.backspace();
+                true
+            }
+            Key::Character(s) => {
+                for ch in s.chars() {
+                    if !ch.is_control() {
+                        self.command_palette.input_char(ch);
+                    }
+                }
+                true
+            }
+            _ => true, // swallow other keys while palette is open
+        }
     }
 
     /// Route a key event into the active search state. Returns true if the
@@ -902,6 +977,31 @@ impl ApplicationHandler for App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.command_palette.is_open() {
+                    // Let the toggle binding (super+shift+P) still close
+                    // the palette; everything else routes into palette
+                    // state and is NOT forwarded to the pty.
+                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if matches!(action, Action::OpenCommandPalette) {
+                                self.run_action(&action);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.command_palette_handle_key(&event);
+                    if self.pending_prefs_open {
+                        self.pending_prefs_open = false;
+                        self.create_prefs_window(el);
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // While an IME composition is in flight, the OS owns the
                 // keystrokes — they will be delivered to us as Ime events
                 // instead. Forwarding them here would double-type. Escape
@@ -1072,6 +1172,71 @@ impl KeyName {
             Self::Owned(s) => s.as_str(),
         }
     }
+}
+
+/// Test-only helper: simulate the command-palette path dispatching the
+/// `OpenPreferences` action, and return whether the App's
+/// `pending_prefs_open` flag was set as a result.
+///
+/// This is the cheapest possible regression for the palette → preferences
+/// wiring (PR #41 review). The real prefs window can only be created from
+/// a live winit `ActiveEventLoop`, but the flag-set is the necessary
+/// pre-condition that the palette path was incorrectly skipping.
+#[doc(hidden)]
+pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
+    use sonic_core::keymap::{Keymap, Meta};
+    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    let hex = || Hex("#000000".to_string());
+    let ansi = || AnsiColors {
+        black: hex(),
+        red: hex(),
+        green: hex(),
+        yellow: hex(),
+        blue: hex(),
+        magenta: hex(),
+        cyan: hex(),
+        white: hex(),
+    };
+    let theme = Theme {
+        name: "test".into(),
+        appearance: Appearance::Dark,
+        colors: Palette {
+            background: hex(),
+            foreground: hex(),
+            cursor: hex(),
+            cursor_text: hex(),
+            selection_bg: hex(),
+            selection_fg: hex(),
+            ansi: ansi(),
+            bright: ansi(),
+            tab: TabColors {
+                bar_bg: hex(),
+                active_bg: hex(),
+                active_fg: hex(),
+                inactive_bg: hex(),
+                inactive_fg: hex(),
+                hover_bg: hex(),
+                close_button_fg: hex(),
+            },
+        },
+    };
+    let config = Config::default();
+    let keymap =
+        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
+    let mut app = App::new(theme, config, keymap);
+    // Simulate what the palette Enter branch does: pick the selected
+    // action and dispatch via run_action — exactly the sequence run by
+    // `command_palette_handle_key` on Enter.
+    app.command_palette.open();
+    // Filter so OpenPreferences becomes the current item; it's the only
+    // action whose name contains "openpre".
+    app.command_palette.set_query("openpre");
+    let action =
+        app.command_palette.current().cloned().expect("OpenPreferences should be filtered in");
+    assert!(matches!(action, sonic_core::keymap::Action::OpenPreferences));
+    app.command_palette.close();
+    app.run_action(&action);
+    app.pending_prefs_open
 }
 
 /// Format an OSC 0/2 title for the tab bar with a Nerd Font icon prefix.

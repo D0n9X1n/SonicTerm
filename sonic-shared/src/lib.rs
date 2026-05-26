@@ -7,6 +7,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
+pub mod command_palette;
 pub mod glyph_atlas;
 pub mod ime;
 pub mod pane;
