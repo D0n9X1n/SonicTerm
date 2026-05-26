@@ -25,6 +25,16 @@
 //! If no wgpu adapter is available (CI without GPU, etc.) the test
 //! prints "no adapter, skipping" and passes — strictly better than a
 //! gated `#[ignore]` because the suite still runs end-to-end.
+//!
+//! The test is **macOS-only** (`#[cfg(target_os = "macos")]`). The
+//! committed baselines were generated on macOS Metal against the
+//! platform's CoreText fallback chain (PingFang SC, Apple Color
+//! Emoji). Running them on Windows DX12 against Segoe UI Emoji /
+//! Microsoft YaHei would diff a different font face for the same
+//! codepoint and cannot land within an 8-bit hamming distance.
+//! When we ship a Windows CI runner we'll add per-platform baselines.
+
+#![cfg(target_os = "macos")]
 
 use cosmic_text::FontSystem;
 use image::{ImageBuffer, Rgba};
@@ -85,7 +95,9 @@ fn snapshots_dir() -> std::path::PathBuf {
 
 /// Render one payload into a `W×H` RGBA8 buffer (sRGB-encoded).
 /// Returns `None` if no wgpu adapter is available — caller should skip.
-fn render_payload(text: &str) -> Option<Vec<u8>> {
+/// The boolean is `true` if at least one glyph in the payload reported
+/// `info.is_color`, i.e. the color BGRA shader branch was exercised.
+fn render_payload(text: &str) -> Option<(Vec<u8>, bool)> {
     let instance = wgpu::Instance::new(InstanceDescriptor::new_without_display_handle());
     let adapter = instance
         .request_adapter(&RequestAdapterOptions {
@@ -112,6 +124,7 @@ fn render_payload(text: &str) -> Option<Vec<u8>> {
     let advance: f32 = RASTER_PX * 0.62;
     let baseline_y: f32 = (H as f32) * 0.78;
     let mut instances: Vec<GlyphInstance> = Vec::new();
+    let mut saw_color = false;
     let mut pen_x: f32 = 4.0;
     let sw = W as f32;
     let sh = H as f32;
@@ -138,11 +151,14 @@ fn render_payload(text: &str) -> Option<Vec<u8>> {
         }
         let gx = pen_x;
         let gy = baseline_y - gh;
+        if info.is_color {
+            saw_color = true;
+        }
         instances.push(GlyphInstance {
             rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
             uv: info.uv,
             color: [1.0, 1.0, 1.0, 1.0],
-            flags: [0.0, 0.0, 0.0, 0.0],
+            flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         });
         pen_x += advance;
         if pen_x > sw - advance {
@@ -216,7 +232,15 @@ fn render_payload(text: &str) -> Option<Vec<u8>> {
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
     let data = slice.get_mapped_range().to_vec();
-    Some(data)
+    Some((data, saw_color))
+}
+
+/// Returns `true` if the buffer contains a pixel whose R, G, B channels
+/// are not all equal — proof the color BGRA shader branch produced a
+/// non-monochrome tile, not the coverage path which only ever emits
+/// shades of the source color (here, white → grey).
+fn has_chromatic_pixel(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|px| px[0] != px[1] || px[1] != px[2])
 }
 
 fn dhash_hex(rgba: &[u8]) -> String {
@@ -266,16 +290,45 @@ fn visual_snapshot_regression_dhash() {
     let mut failures: Vec<String> = Vec::new();
 
     for p in PAYLOADS {
-        let Some(rgba) = render_payload(p.text) else {
+        let Some((rgba, saw_color)) = render_payload(p.text) else {
             eprintln!("[visual_snapshot] adapter went away for {}; skipping", p.name);
             return;
         };
+
+        // The emoji payload exists specifically to exercise the
+        // is_color BGRA shader branch added in PR #49. If swash didn't
+        // route any glyph through the color path, the snapshot would
+        // silently pass through the monochrome coverage path — defeating
+        // the purpose of the test. Assert structurally before hashing.
+        if p.name == "emoji" {
+            assert!(
+                saw_color,
+                "emoji payload did not exercise the color glyph path \
+                 (no glyph reported info.is_color); the BGRA branch \
+                 added in PR #49 is not under test"
+            );
+            assert!(
+                has_chromatic_pixel(&rgba),
+                "emoji payload rendered no chromatic pixels; the color \
+                 BGRA shader branch produced only greyscale output"
+            );
+        }
+
         let actual_hex = dhash_hex(&rgba);
         let baseline_path = dir.join(format!("{}.hash", p.name));
 
-        if update || !baseline_path.exists() {
+        if update {
             std::fs::write(&baseline_path, &actual_hex).expect("write baseline");
             eprintln!("[visual_snapshot] wrote baseline {} = {}", p.name, actual_hex);
+            continue;
+        }
+
+        if !baseline_path.exists() {
+            failures.push(format!(
+                "{}: baseline missing at {} (rerun with UPDATE_SNAPSHOTS=1)",
+                p.name,
+                baseline_path.display()
+            ));
             continue;
         }
 
