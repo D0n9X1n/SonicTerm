@@ -11,6 +11,12 @@ version = "1.0"
 keys = "super+t"
 action = "new_tab"
 
+# WezTerm's Windows/Linux SpawnTab chord — also bound on macOS so the
+# same muscle memory works whichever OS the keyboard came from.
+[[binding]]
+keys = "super+shift+t"
+action = "new_tab"
+
 [[binding]]
 keys = "super+w"
 action = "close_tab"
@@ -22,6 +28,16 @@ action = "next_tab"
 [[binding]]
 keys = "super+shift+["
 action = "prev_tab"
+
+# Cmd+Left / Cmd+Right — common user override (matches the user's
+# personal wezterm.lua and macOS document-tab convention).
+[[binding]]
+keys = "super+left"
+action = "prev_tab"
+
+[[binding]]
+keys = "super+right"
+action = "next_tab"
 
 [[binding]]
 keys = "super+1"
@@ -89,6 +105,21 @@ action = { focus_pane = "up" }
 keys = "super+shift+l"
 action = { focus_pane = "right" }
 
+# Arrow-key pane focus (the user's wezterm.lua and WezTerm's documented
+# default both use Ctrl+Shift+Arrows; on macOS our dispatcher folds
+# Ctrl into `super`, so super+shift+<arrow> is the canonical chord).
+[[binding]]
+keys = "super+shift+left"
+action = { focus_pane = "left" }
+
+[[binding]]
+keys = "super+shift+right"
+action = { focus_pane = "right" }
+
+# NB: super+shift+up / super+shift+down are claimed by OSC 133
+# prompt navigation below, which is the WezTerm-standard binding for
+# those arrows. Use super+shift+k / super+shift+j for vertical focus.
+
 # --- Pane resize (with arrow keys, plus alt) ---
 [[binding]]
 keys = "super+alt+left"
@@ -120,6 +151,16 @@ action = "paste_from_clipboard"
 keys = "super+="
 action = "increase_font_size"
 
+# Some keyboards/layouts deliver `+` as the character on Shift+= — bind
+# both so font-zoom-in works regardless of which the OS surfaces.
+[[binding]]
+keys = "super+shift+="
+action = "increase_font_size"
+
+[[binding]]
+keys = "super++"
+action = "increase_font_size"
+
 [[binding]]
 keys = "super+-"
 action = "decrease_font_size"
@@ -137,6 +178,12 @@ action = "new_window"
 keys = "super+shift+f"
 action = "toggle_fullscreen"
 
+# WezTerm's macOS default for full-screen toggle (mirrors the system
+# View → Enter Full Screen shortcut).
+[[binding]]
+keys = "super+enter"
+action = "toggle_fullscreen"
+
 # --- Search / Palette ---
 [[binding]]
 keys = "super+f"
@@ -144,6 +191,11 @@ action = "open_search"
 
 [[binding]]
 keys = "super+shift+p"
+action = "open_command_palette"
+
+# WezTerm's other common palette chord — Cmd+Shift+Space.
+[[binding]]
+keys = "super+shift+space"
 action = "open_command_palette"
 
 # --- Scrolling ---
@@ -176,9 +228,22 @@ action = { scroll = "to_bottom" }
 keys = "super+shift+r"
 action = "reload_config"
 
+# Bare super+r is the spec'd WezTerm chord — added as an alias so users
+# coming from WezTerm don't need to remember the Shift modifier.
+[[binding]]
+keys = "super+r"
+action = "reload_config"
+
 # --- Preferences ---
 [[binding]]
 keys = "super+comma"
+action = "open_preferences"
+
+# The dispatcher emits "super+," (Character key), not "super+comma".
+# Keep both: "super+comma" for forward-compat if a future keyboard
+# delivers it as a named key, "super+," for the actual current path.
+[[binding]]
+keys = "super+,"
 action = "open_preferences"
 
 # --- Shell integration (OSC 133) ---
