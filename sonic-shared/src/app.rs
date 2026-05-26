@@ -44,20 +44,31 @@ use crate::{
 
 /// A child terminal window spawned by tearing a tab off the bar.
 ///
-/// v1 keeps this lightweight: it owns the OS window (so winit holds a
-/// reference and routes events to it) plus the pane state that used to
-/// live in the parent's tab. We deliberately do NOT spin up a second
-/// `GpuRenderer` here — the parallel render.rs PR is in flight, so the
-/// child window currently displays an empty native frame. The crucial
-/// invariant the v1 tests pin down is that the **PTY threads and grids
-/// migrate intact** (no orphan shells, no dropped output): the user can
-/// still keep typing into the original session, and a v2 follow-up will
-/// wire a renderer onto the child window.
+/// v2 (review fix): each child window now owns its own `GpuRenderer`
+/// bound to the new wgpu surface, plus the per-window interaction
+/// state (cursor pos, mouse-down flag, selection) needed to render
+/// the grid and route input back to the contained PTY. Single tab,
+/// single pane in v2 — tab-bar interactions inside a child (open new
+/// tab, close, drag) are intentionally deferred; the child is a
+/// "follow-on session window," not a full second App.
+///
+/// The PTY threads that were spawned for the detached pane keep
+/// running across the tear-out; their `redraw_target` Arc is swapped
+/// to point at this child's window so output from the shell triggers
+/// redraws on the correct surface (otherwise typing in the child
+/// would render onto the parent's window, which was the v1 bug).
 pub struct ChildWindow {
     pub window: Arc<Window>,
+    pub renderer: GpuRenderer,
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
     pub panes: HashMap<u64, PaneState>,
+    pub cursor_pos: (f64, f64),
+    pub mouse_down: bool,
+    pub selection: Option<Selection>,
+    pub modifiers: ModifiersState,
+    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    pub last_render: Instant,
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
@@ -86,14 +97,21 @@ fn init_tracing() {
 
 /// Per-pane runtime state. The parser is shared with a per-pane VT thread
 /// that drains the pty out-channel; the pty handle owns the writer side.
+///
+/// `redraw_target` is the window the pane's VT thread should request a
+/// redraw on. Wrapped in `Arc<Mutex<Option<Arc<Window>>>>` so the main
+/// thread can atomically swap it when the pane migrates to a torn-out
+/// child window — the VT thread reads the current target on each batch
+/// and notifies whichever window currently owns the pane.
 pub struct PaneState {
     pub parser: Arc<Mutex<Parser>>,
     pub pty: Option<PtyHandle>,
+    pub redraw_target: Arc<Mutex<Option<Arc<Window>>>>,
 }
 
 impl PaneState {
     fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
-        Self { parser, pty }
+        Self { parser, pty, redraw_target: Arc::new(Mutex::new(None)) }
     }
 }
 
@@ -192,11 +210,17 @@ impl App {
     fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
+        // Pre-create the redraw target Arc bound to the current parent
+        // window. If the pane later tears out, `tear_out_tab` swaps the
+        // inner Option to the child window's Arc<Window> so the VT
+        // thread re-targets without restarting.
+        let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
+            Arc::new(Mutex::new(self.window.clone()));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
-                let window = self.window.clone();
+                let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = self.cursor_visible.clone();
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
@@ -232,7 +256,9 @@ impl App {
                                     for ev in p.advance(&bytes) {
                                         match ev {
                                             VtEvent::SetTitle(t) => {
-                                                if let Some(w) = &window {
+                                                if let Some(w) =
+                                                    redraw_target_thread.lock().as_ref()
+                                                {
                                                     w.set_title(&format!("Sonic — {t}"));
                                                 }
                                             }
@@ -245,7 +271,7 @@ impl App {
                                     }
                                     drop(p);
                                     if last_request.elapsed() >= min_interval {
-                                        if let Some(w) = &window {
+                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
                                         last_request = Instant::now();
@@ -257,7 +283,7 @@ impl App {
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                                     // Quiescent: flush trailing redraw.
                                     if pending {
-                                        if let Some(w) = &window {
+                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
                                         last_request = Instant::now();
@@ -276,7 +302,9 @@ impl App {
                 None
             }
         };
-        PaneState::new(parser, pty)
+        let mut state = PaneState::new(parser, pty);
+        state.redraw_target = redraw_target;
+        state
     }
 
     fn new_tab(&mut self, title: impl Into<String>) {
@@ -335,11 +363,12 @@ impl App {
     }
 
     /// Tear the tab at `index` out of this App and spawn it as a new
-    /// native window. Uses the supplied `ActiveEventLoop` to create the
-    /// child winit Window; the result is stored in `child_windows` so
-    /// events route back to it. If the index is invalid OR the
-    /// remaining bar would be empty (so tearing out is a no-op), this
-    /// is silently skipped.
+    /// native window. Creates a winit Window AND a `GpuRenderer`
+    /// bound to that window's surface, transfers the dragged tab's
+    /// panes, and swaps each pane's redraw target so the VT thread
+    /// notifies the child window from now on. If the index is
+    /// invalid OR the remaining bar would be empty (so tearing out
+    /// is a no-op), this is silently skipped.
     fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) {
         // Don't tear the only tab — that's a no-op (the new window
         // would be identical to the old one, minus its renderer).
@@ -360,18 +389,192 @@ impl App {
                 return;
             }
         };
+        window.set_ime_allowed(true);
+
+        // Build the renderer for the new surface. If GPU init fails
+        // we drop the panes (kills shells) and bail — the child
+        // window would otherwise be invisible/unusable.
+        let renderer = match GpuRenderer::new(
+            window.clone(),
+            el,
+            &self.theme,
+            &self.config.font.family,
+            self.config.font.size,
+            self.config.font.line_height,
+            self.config.window.padding,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
+                return;
+            }
+        };
+
+        let (cols, rows) = renderer.cells();
+        // Resize the migrated panes to the child window's grid and
+        // swap each pane's VT-thread redraw target so further pty
+        // output triggers the CHILD window's redraw, not the parent.
+        for pane in panes.values() {
+            pane.parser.lock().grid_mut().resize(cols, rows);
+            if let Some(pty) = pane.pty.as_ref() {
+                (pty.resize)(cols, rows);
+            }
+            *pane.redraw_target.lock() = Some(window.clone());
+        }
+
         let win_id = window.id();
         let mut child_tabs = TabBar::new();
         let active_pane = state.active_pane;
         child_tabs.push(tab);
         let child = ChildWindow {
-            window,
+            window: window.clone(),
+            renderer,
             tabs: child_tabs,
             tab_states: vec![TabState { tree: state.tree, active_pane, search: state.search }],
             panes,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            selection: None,
+            modifiers: ModifiersState::empty(),
+            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_render: Instant::now(),
         };
         self.child_windows.insert(win_id, child);
+        window.request_redraw();
         tracing::info!("tab torn out as new window; child_windows={}", self.child_windows.len());
+    }
+
+    /// Handle a winit event addressed to a torn-out child window.
+    /// Mirrors the main window event dispatcher but operates against
+    /// the per-child renderer, tabs, and pane state. The child is
+    /// single-tab/single-pane in v2 — splits/new-tabs are deferred.
+    fn handle_child_window_event(
+        &mut self,
+        _el: &ActiveEventLoop,
+        win_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let theme = self.theme.clone();
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return };
+        match event {
+            WindowEvent::CloseRequested => {
+                // Clear redraw targets so the VT thread stops trying
+                // to redraw a dropped window (it will then notice the
+                // pty channel close on Drop and exit). Dropping the
+                // ChildWindow drops PaneState → PtyHandle → kills the
+                // child shells.
+                if let Some(removed) = self.child_windows.remove(&win_id) {
+                    for pane in removed.panes.values() {
+                        *pane.redraw_target.lock() = None;
+                    }
+                    drop(removed);
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let tab_idx = child.tabs.active_index();
+                let pane_rects: Vec<(u64, crate::pane::Rect)> = child
+                    .tab_states
+                    .get(tab_idx)
+                    .map(|st| {
+                        let (w, h) =
+                            (child.renderer.width() as f32, child.renderer.height() as f32);
+                        let top = child.renderer.top_inset();
+                        let pad = child.renderer.padding();
+                        let outer = crate::pane::Rect::new(
+                            pad,
+                            top,
+                            (w - pad * 2.0).max(0.0),
+                            (h - top - pad).max(0.0),
+                        );
+                        st.tree.layout(outer)
+                    })
+                    .unwrap_or_default();
+                let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                if let Some(pane) = child.panes.get(&active_id) {
+                    let mut grid = pane.parser.lock();
+                    let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                    if let Err(e) = child.renderer.render(
+                        grid.grid_mut(),
+                        &theme,
+                        child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
+                        child.selection.as_ref(),
+                        &child.tabs,
+                        &pane_rects,
+                        active_id,
+                        search,
+                    ) {
+                        tracing::warn!("child render error: {e}");
+                    }
+                    child.last_render = Instant::now();
+                }
+            }
+            WindowEvent::Resized(size) => {
+                child.renderer.resize(size.width, size.height);
+                let (cols, rows) = child.renderer.cells();
+                for pane in child.panes.values() {
+                    pane.parser.lock().grid_mut().resize(cols, rows);
+                    if let Some(pty) = pane.pty.as_ref() {
+                        (pty.resize)(cols, rows);
+                    }
+                }
+                child.window.request_redraw();
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                child.modifiers = m.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                child.cursor_pos = (position.x, position.y);
+                if child.mouse_down {
+                    if let Some((row, col)) =
+                        child.renderer.pixel_to_cell(position.x as f32, position.y as f32)
+                    {
+                        if let Some(sel) = child.selection.as_mut() {
+                            sel.extend(row, col);
+                            child.window.request_redraw();
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => {
+                    child.mouse_down = true;
+                    let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                    if let Some((row, col)) = child.renderer.pixel_to_cell(px, py) {
+                        child.selection = Some(Selection::new(row, col));
+                    }
+                    child.window.request_redraw();
+                }
+                ElementState::Released => {
+                    child.mouse_down = false;
+                    if let Some(sel) = child.selection.as_ref() {
+                        if sel.is_empty() {
+                            child.selection = None;
+                            child.window.request_redraw();
+                        }
+                    }
+                }
+            },
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let mods = child.modifiers;
+                let tab_idx = child.tabs.active_index();
+                let active_id = match child.tab_states.get(tab_idx) {
+                    Some(st) => st.active_pane,
+                    None => return,
+                };
+                if let Some(bytes) = encode_key(&event, mods) {
+                    if let Some(pane) = child.panes.get(&active_id) {
+                        if let Some(pty) = pane.pty.as_ref() {
+                            let _ = pty.in_tx.send(bytes);
+                        }
+                    }
+                    if child.selection.is_some() {
+                        child.selection = None;
+                        child.window.request_redraw();
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     #[doc(hidden)]
@@ -407,6 +610,14 @@ impl App {
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Test-only: borrow the redraw target Arc for a given pane id,
+    /// so a test can assert the per-pane redraw indirection survives
+    /// state transfers.
+    #[doc(hidden)]
+    pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<Arc<Window>>>>> {
+        self.panes.get(&id).map(|p| p.redraw_target.clone())
     }
 
     fn split_active(&mut self, dir: Direction) {
@@ -890,14 +1101,10 @@ impl ApplicationHandler for App {
                 return;
             }
         }
-        // Tear-out child windows: handle close, otherwise swallow.
+        // Tear-out child windows: route to the dedicated handler so
+        // each child renders/handles input on its own surface.
         if self.child_windows.contains_key(&win_id) {
-            if matches!(event, WindowEvent::CloseRequested) {
-                // Dropping the ChildWindow drops PaneState → PtyHandle
-                // → kills the child shells. Matches the parent window
-                // close path.
-                self.child_windows.remove(&win_id);
-            }
+            self.handle_child_window_event(el, win_id, event);
             return;
         }
         match event {

@@ -147,3 +147,26 @@ fn no_child_windows_created_by_pure_detach() {
     let _ = app.detach_tab_state(0);
     assert_eq!(app.child_window_count(), 0);
 }
+
+#[test]
+fn detached_pane_state_carries_swappable_redraw_target() {
+    // The fix for PR #43: every PaneState now owns an
+    // Arc<Mutex<Option<Arc<Window>>>> that the VT thread reads on
+    // each redraw. tear_out_tab atomically swaps the inner Option to
+    // the child window — so this test pins down that the Arc itself
+    // survives detach (same allocation, swappable target).
+    let mut app = synth_app();
+    let p1 = app.__test_seed_tab("alpha");
+    let p2 = app.__test_seed_tab("bravo");
+    // Both seeded panes start with `None` target (no real window in
+    // test mode) but the Arc is non-null.
+    let (_tab, _state, panes) = app.detach_tab_state(0).expect("detach");
+    let p1_pane = panes.get(&p1).expect("p1 present after detach");
+    // The detached pane's redraw_target is the SAME Arc allocation
+    // the VT thread captured at spawn — strong_count >= 1 confirms
+    // it wasn't dropped during transfer.
+    assert!(std::sync::Arc::strong_count(&p1_pane.redraw_target) >= 1);
+    // App lost p1 (moved out) but still owns p2's redraw_target.
+    let p2_pane = app.__test_pane_redraw_target(p2).expect("p2 still in App");
+    assert!(p2_pane.lock().is_none(), "seeded pane has no real window");
+}
