@@ -92,3 +92,18 @@ fn hex_parser() {
     assert_eq!(Hex("#1a2b3c".to_string()).rgb(), Some((0x1a, 0x2b, 0x3c)));
     assert_eq!(Hex("bogus".to_string()).rgb(), None);
 }
+
+/// WezTerm selection-style parity: the selection background is gruvbox bg2
+/// (#3c3836) — a subtle grey-brown overlay that matches WezTerm's default
+/// behavior for the Gruvbox dark hard scheme. The renderer draws this as a
+/// translucent quad so text underneath keeps its original color (selection_fg
+/// is not applied to glyphs), mirroring WezTerm's fallthrough.
+#[test]
+fn wezterm_theme_selection_matches_gruvbox_bg2() {
+    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    assert_eq!(
+        t.colors.selection_bg.rgb(),
+        Some((0x3c, 0x38, 0x36)),
+        "selection_bg must be gruvbox bg2 for WezTerm parity",
+    );
+}

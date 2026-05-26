@@ -6,7 +6,11 @@ background    = "#141617"
 foreground    = "#d5c4a1"
 cursor        = "#52ad70"
 cursor_text   = "#141617"
-selection_bg  = "#27414d"
+# Selection: gruvbox bg2 (#3c3836) — matches WezTerm's subtle grey-brown
+# overlay for the Gruvbox dark hard scheme. The renderer paints this as a
+# translucent quad so text underneath keeps its original color (no fg
+# override applied), mirroring WezTerm's default selection behavior.
+selection_bg  = "#3c3836"
 selection_fg  = "#d5c4a1"
 
 # ANSI palette mirrors WezTerm's built-in "Gruvbox dark, hard (base16)"
