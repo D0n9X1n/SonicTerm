@@ -78,6 +78,12 @@ pub struct GpuRenderer {
     font_family: String,
     font_size: f32,
     line_height: f32,
+    /// DPI scale factor (e.g. 2.0 on Retina). Atlas tiles are rasterized at
+    /// `font_size * scale_factor` (physical pixels) so the GPU has crisp
+    /// source pixels; cell metrics (`cell_w`/`cell_h`) stay in *logical*
+    /// pixels so grid layout doesn't reflow when the user drags the window
+    /// between displays of different DPIs.
+    scale_factor: f32,
     pub cell_w: f32,
     pub cell_h: f32,
     padding: f32,
@@ -171,6 +177,7 @@ impl GpuRenderer {
         padding: f32,
     ) -> Result<Self> {
         let size = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
         let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
             event_loop.owned_display_handle(),
         )));
@@ -228,7 +235,10 @@ impl GpuRenderer {
 
         // B3 GPU text path. Allocate the CPU + GPU side of the glyph
         // atlas up front so the first frame can stream tiles into it.
-        let glyph_atlas = GlyphAtlas::default_size();
+        // On HiDPI displays we bump the atlas so a 2× tile set fits
+        // without thrashing the shelf-packer.
+        let glyph_atlas =
+            GlyphAtlas::new(atlas_dim_for_scale(scale_factor), atlas_dim_for_scale(scale_factor));
         let text_pipeline = TextPipeline::new(&device, format, 4096);
         let glyph_upload =
             AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
@@ -324,6 +334,7 @@ impl GpuRenderer {
             font_family: font_family.to_string(),
             font_size,
             line_height,
+            scale_factor,
             cell_w,
             cell_h,
             padding,
@@ -477,6 +488,41 @@ impl GpuRenderer {
         tracing::info!(
             "renderer.set_font: family={family} size={size} line_h={} cell={cw:.2}x{ch:.2}",
             self.line_height
+        );
+    }
+
+    /// Current DPI scale factor in effect (1.0 on standard displays, 2.0
+    /// on Retina, etc.).
+    #[doc(hidden)]
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    /// Apply a new DPI scale factor without reconstructing the renderer.
+    ///
+    /// The atlas is cleared (and possibly re-sized) because existing tiles
+    /// were rasterized at the old physical-px em-size — sampling them at the
+    /// new scale would produce the same blurry result we're fixing. The
+    /// frame-key cache is invalidated so the next `render()` re-rasterizes.
+    ///
+    /// Cell metrics are intentionally NOT recomputed: they stay in logical
+    /// pixels so columns/rows in a fixed-size window are stable when the
+    /// user drags between displays of different DPIs.
+    pub fn set_scale_factor(&mut self, scale_factor: f32) {
+        let sf = scale_factor.max(0.1);
+        if (self.scale_factor - sf).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale_factor = sf;
+        let dim = atlas_dim_for_scale(sf);
+        self.glyph_atlas = GlyphAtlas::new(dim, dim);
+        self.last_frame_key = None;
+        if let Some(w) = Some(&self.window) {
+            w.request_redraw();
+        }
+        tracing::info!(
+            "renderer.set_scale_factor: scale={sf} atlas={dim}x{dim} raster_px={}",
+            self.font_size * sf
         );
     }
 
@@ -660,8 +706,11 @@ impl GpuRenderer {
         let baseline_y_in_cell = cell_h * 0.8;
 
         {
-            let mut rasterizer =
-                SwashRasterizer::new(&mut self.font_system, &self.font_family, self.font_size);
+            let mut rasterizer = SwashRasterizer::new(
+                &mut self.font_system,
+                &self.font_family,
+                self.font_size * self.scale_factor,
+            );
             // Resolve which absolute row sits at the top of the rendered
             // viewport. When the user hasn't scrolled (or hasn't scrolled
             // past the visible bottom), this is the live-buffer top, i.e.
@@ -724,7 +773,8 @@ impl GpuRenderer {
                             Self::flush_shape_run(
                                 &mut self.glyph_atlas,
                                 &self.font_family,
-                                self.font_size,
+                                self.font_size * self.scale_factor,
+                                self.scale_factor,
                                 &mut rasterizer,
                                 &mut self.shape_cache,
                                 &mut glyph_instances,
@@ -755,7 +805,8 @@ impl GpuRenderer {
                     Self::flush_shape_run(
                         &mut self.glyph_atlas,
                         &self.font_family,
-                        self.font_size,
+                        self.font_size * self.scale_factor,
+                        self.scale_factor,
                         &mut rasterizer,
                         &mut self.shape_cache,
                         &mut glyph_instances,
@@ -1515,6 +1566,7 @@ impl GpuRenderer {
         glyph_atlas: &mut GlyphAtlas,
         font_family: &str,
         font_size: f32,
+        scale_factor: f32,
         rasterizer: &mut SwashRasterizer,
         shape_cache: &mut ShapeCache,
         glyph_instances: &mut Vec<GlyphInstance>,
@@ -1562,10 +1614,11 @@ impl GpuRenderer {
                 }
                 let cx = pad + f32::from(*col) * cell_w;
                 let cy = top_inset + f32::from(row) * cell_h;
-                let gx = cx + info.px_offset[0] as f32;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
-                let gw = info.px_size[0] as f32;
-                let gh = info.px_size[1] as f32;
+                let inv_s = 1.0 / scale_factor;
+                let gx = cx + info.px_offset[0] as f32 * inv_s;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let gw = info.px_size[0] as f32 * inv_s;
+                let gh = info.px_size[1] as f32 * inv_s;
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba = [
                     f32::from(color.r()) / 255.0,
@@ -1634,10 +1687,11 @@ impl GpuRenderer {
             }
             let cx = pad + f32::from(g.lead_col) * cell_w;
             let cy = top_inset + f32::from(row) * cell_h;
-            let gx = cx + info.px_offset[0] as f32;
-            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
-            let gw = info.px_size[0] as f32;
-            let gh = info.px_size[1] as f32;
+            let inv_s = 1.0 / scale_factor;
+            let gx = cx + info.px_offset[0] as f32 * inv_s;
+            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+            let gw = info.px_size[0] as f32 * inv_s;
+            let gh = info.px_size[1] as f32 * inv_s;
             let color = cell_fg(&lead_cell, theme, fg_default);
             let rgba = [
                 f32::from(color.r()) / 255.0,
@@ -1715,6 +1769,16 @@ fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
     } else {
         [0.0, 0.0, 0.0, alpha]
     }
+}
+
+/// Atlas dimension to allocate for a given DPI scale. On 2× screens we
+/// roughly double-stack tiles, so a base 2048² atlas isn't enough room
+/// for the same working set. We use `max(2048, base * ceil(scale))` to
+/// keep the 1× footprint unchanged while reserving headroom on Retina.
+pub fn atlas_dim_for_scale(scale_factor: f32) -> u32 {
+    let base = crate::glyph_atlas::ATLAS_DIM;
+    let s = scale_factor.max(1.0).ceil() as u32;
+    base.saturating_mul(s).max(base)
 }
 
 fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f32, f32) {
