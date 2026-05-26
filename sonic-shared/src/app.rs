@@ -891,9 +891,13 @@ impl App {
         let candidates = self.child_windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
-            let layout = TabBarLayout::compute(&c.tabs, bar_width)
-                .with_top_offset(c.renderer.titlebar_inset())
-                .with_visible(c.renderer.tab_bar_visible());
+            let layout = TabBarLayout::compute_with_height(
+                &c.tabs,
+                bar_width,
+                c.renderer.tab_bar_logical_height(),
+            )
+            .with_top_offset(c.renderer.titlebar_inset())
+            .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
         crate::tab_drag::find_drop_target(global, candidates)
@@ -917,10 +921,15 @@ impl App {
             let width =
                 self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
             let inset = self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0);
+            let bar_h = self
+                .renderer
+                .as_ref()
+                .map(|r| r.tab_bar_logical_height())
+                .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT);
             candidates.push((
                 main.id(),
                 geom,
-                TabBarLayout::compute(&self.tabs, width)
+                TabBarLayout::compute_with_height(&self.tabs, width, bar_h)
                     .with_top_offset(inset)
                     .with_visible(self.tab_bar_visible),
             ));
@@ -931,9 +940,13 @@ impl App {
             }
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
-            let layout = TabBarLayout::compute(&c.tabs, bar_width)
-                .with_top_offset(c.renderer.titlebar_inset())
-                .with_visible(c.renderer.tab_bar_visible());
+            let layout = TabBarLayout::compute_with_height(
+                &c.tabs,
+                bar_width,
+                c.renderer.tab_bar_logical_height(),
+            )
+            .with_top_offset(c.renderer.titlebar_inset())
+            .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
         crate::tab_drag::find_drop_target(global, candidates)
@@ -1448,9 +1461,13 @@ impl App {
                     let sf = child.renderer.scale_factor();
                     let (px, py) = to_logical_pos(child.cursor_pos.0, child.cursor_pos.1, sf);
                     let bar_width = child.renderer.width() as f32 / sf;
-                    let layout = TabBarLayout::compute(&child.tabs, bar_width)
-                        .with_top_offset(child.renderer.titlebar_inset())
-                        .with_visible(child.renderer.tab_bar_visible());
+                    let layout = TabBarLayout::compute_with_height(
+                        &child.tabs,
+                        bar_width,
+                        child.renderer.tab_bar_logical_height(),
+                    )
+                    .with_top_offset(child.renderer.titlebar_inset())
+                    .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
@@ -1494,8 +1511,12 @@ impl App {
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
                         let sf = child.renderer.scale_factor();
                         let bar_width = child.renderer.width() as f32 / sf;
-                        let layout = TabBarLayout::compute(&child.tabs, bar_width)
-                            .with_top_offset(child.renderer.titlebar_inset());
+                        let layout = TabBarLayout::compute_with_height(
+                            &child.tabs,
+                            bar_width,
+                            child.renderer.tab_bar_logical_height(),
+                        )
+                        .with_top_offset(child.renderer.titlebar_inset());
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
                         // &mut self via the merge / tear path.
@@ -2869,11 +2890,18 @@ impl ApplicationHandler<UserEvent> for App {
                         .as_ref()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
-                    let layout = TabBarLayout::compute(&self.tabs, window_width)
-                        .with_top_offset(
-                            self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
-                        )
-                        .with_visible(self.tab_bar_visible);
+                    let layout = TabBarLayout::compute_with_height(
+                        &self.tabs,
+                        window_width,
+                        self.renderer
+                            .as_ref()
+                            .map(|r| r.tab_bar_logical_height())
+                            .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT),
+                    )
+                    .with_top_offset(
+                        self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                    )
+                    .with_visible(self.tab_bar_visible);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
@@ -2952,10 +2980,17 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                             .unwrap_or(0.0);
-                        let layout = TabBarLayout::compute(&self.tabs, window_width)
-                            .with_top_offset(
-                                self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
-                            );
+                        let layout = TabBarLayout::compute_with_height(
+                            &self.tabs,
+                            window_width,
+                            self.renderer
+                                .as_ref()
+                                .map(|r| r.tab_bar_logical_height())
+                                .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT),
+                        )
+                        .with_top_offset(
+                            self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                        );
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         match action {
                             crate::tab_drag::DragAction::ReturnToOriginalBar => {
