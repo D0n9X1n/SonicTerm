@@ -818,6 +818,11 @@ impl App {
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
                 if let Some(pane) = child.panes.get(&active_id) {
                     let mut grid = pane.parser.lock();
+                    if let Some(search) =
+                        child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
+                    {
+                        search.maybe_refresh_for_revision(grid.grid_mut());
+                    }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                     if let Err(e) = child.renderer.render(
                         grid.grid_mut(),
@@ -1567,6 +1572,11 @@ impl ApplicationHandler for App {
                             if cur.as_deref() != Some(pretty.as_str()) {
                                 self.tabs.set_active_title(pretty);
                             }
+                        }
+                        if let Some(search) =
+                            self.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
+                        {
+                            search.maybe_refresh_for_revision(grid.grid_mut());
                         }
                         let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                         if let Err(e) = r.render(

@@ -263,3 +263,38 @@ fn match_range_equality() {
     assert_eq!(m.row, 7);
     assert_eq!(m.col_end - m.col_start, 3);
 }
+
+// Regression: SearchState must rescan matches when grid.revision() advances
+// (e.g. new pty output landed). Otherwise the active search shows stale
+// matches against the previous frame's grid contents.
+#[test]
+fn maybe_refresh_picks_up_new_matches_on_revision_bump() {
+    let mut g = fill(20, 12, &["", "", "", "", "", "foo here", "", "", "", "", "", ""]);
+    let mut s = SearchState::new();
+    s.input_char('f', &g);
+    s.input_char('o', &g);
+    s.input_char('o', &g);
+    assert_eq!(s.matches.len(), 1, "baseline: 1 match before grid mutation");
+    let baseline_rev = s.last_revision;
+    let baseline_current = s.current_match().expect("should have a current match");
+
+    // Mutate the grid so a new "foo" exists on a later row. Use put_char
+    // (the public write path used by the Performer) so revision() ticks.
+    g.cursor.row = 10;
+    g.cursor.col = 0;
+    put(&mut g, "foo again");
+    assert!(g.revision() != baseline_rev, "grid revision must advance after writes");
+
+    let changed = s.maybe_refresh_for_revision(&g);
+    assert!(changed, "rescan should happen when revision changed");
+    assert_eq!(s.matches.len(), 2, "rescan should find both matches");
+    assert_eq!(s.last_revision, g.revision());
+    // Current must still be valid and (since the original match still
+    // exists) should anchor back on it.
+    let cur = s.current_match().expect("current must still be set");
+    assert_eq!(cur.row, baseline_current.row);
+    assert_eq!(cur.col_start, baseline_current.col_start);
+
+    // No-op on a second call (revision unchanged).
+    assert!(!s.maybe_refresh_for_revision(&g));
+}

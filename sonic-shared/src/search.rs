@@ -91,6 +91,53 @@ impl SearchState {
         self.refresh(grid);
     }
 
+    /// Re-scan matches only if `grid.revision()` differs from the last
+    /// scan. Preserves the user's "current" match across rescans: tries to
+    /// re-find the same (row, col_start) entry; if it's gone, snaps to the
+    /// nearest preceding match (or the first one when nothing precedes).
+    /// Returns `true` if a rescan happened.
+    pub fn maybe_refresh_for_revision(&mut self, grid: &Grid) -> bool {
+        if grid.revision() == self.last_revision {
+            return false;
+        }
+        let anchor = self.current_match();
+        self.scrollback_len = grid.scrollback_len() as u32;
+        self.visible_rows = grid.rows;
+        self.last_revision = grid.revision();
+        self.regex_error = None;
+        self.matches = match self.mode {
+            SearchMode::Substring => find_in_grid(grid, &self.query, self.case_sensitive),
+            SearchMode::Regex => match find_regex_in_grid(grid, &self.query, self.case_sensitive) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.regex_error = Some(e);
+                    Vec::new()
+                }
+            },
+        };
+        self.current = if self.matches.is_empty() {
+            None
+        } else if let Some(a) = anchor {
+            if let Some(i) =
+                self.matches.iter().position(|m| m.row == a.row && m.col_start == a.col_start)
+            {
+                Some(i)
+            } else {
+                let preceding = self
+                    .matches
+                    .iter()
+                    .enumerate()
+                    .rfind(|(_, m)| (m.row, m.col_start) <= (a.row, a.col_start))
+                    .map(|(i, _)| i);
+                Some(preceding.unwrap_or(0))
+            }
+        } else {
+            Some(0)
+        };
+        self.update_scroll_request();
+        true
+    }
+
     pub fn refresh(&mut self, grid: &Grid) {
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;
