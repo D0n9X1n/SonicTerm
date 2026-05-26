@@ -789,7 +789,8 @@ impl App {
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
         let candidates = self.child_windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+                .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
         crate::tab_drag::find_drop_target(global, candidates)
@@ -811,14 +812,19 @@ impl App {
         if let Some(main) = self.window.as_ref() {
             let geom = window_geom(main);
             let width = self.renderer.as_ref().map(|r| r.width()).unwrap_or(0) as f32;
-            candidates.push((main.id(), geom, TabBarLayout::compute(&self.tabs, width)));
+            candidates.push((
+                main.id(),
+                geom,
+                TabBarLayout::compute(&self.tabs, width).with_visible(self.tab_bar_visible),
+            ));
         }
         for (id, c) in &self.child_windows {
             if *id == src_id {
                 continue;
             }
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+                .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
         crate::tab_drag::find_drop_target(global, candidates)
@@ -1233,7 +1239,8 @@ impl App {
                 ElementState::Pressed => {
                     let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
                     let bar_width = child.renderer.width() as f32;
-                    let layout = TabBarLayout::compute(&child.tabs, bar_width);
+                    let layout = TabBarLayout::compute(&child.tabs, bar_width)
+                        .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
@@ -2493,7 +2500,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let py = self.cursor_pos.1 as f32;
                     let window_width =
                         self.window.as_ref().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
-                    let layout = TabBarLayout::compute(&self.tabs, window_width);
+                    let layout = TabBarLayout::compute(&self.tabs, window_width)
+                        .with_visible(self.tab_bar_visible);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
