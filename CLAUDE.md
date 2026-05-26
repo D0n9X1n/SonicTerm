@@ -52,8 +52,9 @@ The authoritative running-status doc is **`docs/ROADMAP.md`**. Read it first. Up
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run --example pty_dump -p sonic-core --release   # must print [e2e] OK
-cargo build --release -p sonic-mac                     # confirms fat-LTO build works
+cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
+cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK
+cargo build --release -p sonic-mac                             # confirms fat-LTO build works
 ```
 
 `cargo-deny` runs in CI on Ubuntu (`cargo install cargo-deny --locked` + `cargo deny check` locally if you touched any dep). CI matrix is `macos-14` + `windows-latest` only.
@@ -63,6 +64,7 @@ cargo build --release -p sonic-mac                     # confirms fat-LTO build 
 ### E2E binaries (use these to verify, not just unit tests)
 
 - `cargo run --example pty_dump -p sonic-core --release` — spawns the user shell, runs `ls --color=always /` + a bold/italic/underline `printf`. **Exits non-zero if grid lacks colored/styled cells.** This is the canonical end-to-end gate; any VT/grid/PTY change must keep this green.
+- `cargo run --example pty_dump_unicode -p sonic-core --release` — sibling that feeds one shibboleth char from every Unicode class we promise to support (CJK, Hiragana, Katakana, Hangul, emoji, box-drawing, Powerline PUA, fullwidth, Latin-1) and **exits non-zero if any are missing from the resulting grid**. This is the canonical Unicode-end-to-end gate — added to catch the PR-#42-class regression where every existing test used ASCII only.
 - `cargo run --example altscreen_smoke -p sonic-core --release`
 - `cargo run --example pane_smoke -p sonic-shared --release`
 
@@ -237,3 +239,21 @@ triggers `.github/workflows/release.yml` → produces a universal macOS `.dmg` +
 - Default to consulting the user, not guessing — the project has a real human PM driving direction.
 - Real correctness bugs go in a fresh fix-up commit on the PR branch (don't squash silently).
 - If you find yourself fighting `git branch --show-current` reporting one thing while you're really on another, you're probably in the wrong working directory. Always use a fresh `/tmp/` clone for each PR's work.
+
+---
+
+## 11. Renderer regressions (the rule that didn't exist before PR #42)
+
+PR #42 cut the terminal grid over to a swash-rasterized atlas (`sonic-shared/src/render.rs` + `swash_rasterizer.rs` + `glyph_atlas.rs`). It passed the local gate, Haiku review, AND the canonical `pty_dump` e2e — yet shipped a regression that drew every non-ASCII character as a tofu box. Cause: every test, every example, every benchmark used only ASCII, and the rasterizer's "primary family only, no fallback" code path was never exercised on a CJK glyph in CI.
+
+**Rule:** any change to `sonic-shared/src/render.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`, `text_pipeline.rs`, or any file under `sonic-shared/src/*atlas*` / `*pipeline*` MUST be gated on the capability matrix passing:
+
+```bash
+cargo test -p sonic-core --test vt_capability_matrix
+cargo test -p sonic-shared --test render_capability_matrix
+cargo run --example pty_dump_unicode -p sonic-core --release
+```
+
+The matrix exists because **the existing pty_dump e2e cannot catch this class of bug** — its shell payload is pure ASCII. Do NOT delete or weaken the matrix; if a class is intentionally dropped from scope, mark the corresponding test `#[ignore]` with a comment naming the deciding PR, never `#[cfg(skip)]` or deletion.
+
+Ignored tests in the matrix document capability gaps awaiting a fix (e.g. `fix/atlas-font-fallback`). Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.

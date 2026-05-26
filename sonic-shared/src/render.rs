@@ -86,6 +86,12 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Characters from the most recent `render()` call that the
+    /// rasterizer could not produce a tile for (i.e. would draw as a
+    /// tofu outline). Whitespace is excluded. Test-only diagnostic
+    /// surfaced through [`Self::last_missing_tofu`]; production code
+    /// must not depend on it.
+    last_missing_chars: Vec<char>,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -283,6 +289,7 @@ impl GpuRenderer {
             search_buffer,
             last_frame_key: None,
             skipped_frames: 0,
+            last_missing_chars: Vec::new(),
         })
     }
 
@@ -319,6 +326,21 @@ impl GpuRenderer {
 
     pub fn padding(&self) -> f32 {
         self.padding
+    }
+
+    /// Snapshot of every codepoint the previous `render()` call could
+    /// not produce a glyph tile for (i.e. that drew a tofu outline).
+    /// Whitespace is filtered out — those are intentionally blank.
+    ///
+    /// Test-only diagnostic. Production code MUST NOT depend on this
+    /// surface — it exists so the renderer-capability matrix can
+    /// assert "no character class regressed" without sniffing pixels
+    /// off the swapchain. Doc-hidden to keep it out of the public
+    /// rustdoc; still `pub` so integration tests under `tests/` can
+    /// reach it.
+    #[doc(hidden)]
+    pub fn last_missing_tofu(&self) -> &[char] {
+        &self.last_missing_chars
     }
 
     pub fn cells(&self) -> (u16, u16) {
@@ -428,6 +450,11 @@ impl GpuRenderer {
         // Missing-glyph "tofu" outlines collected during the cell walk.
         // Drawn via the quad pipeline after the text instances.
         let mut missing_tofu: Vec<(f32, f32, f32, f32, glyphon::Color)> = Vec::new();
+        // Mirror of missing_tofu, recording just the codepoint so tests
+        // can assert "no class regressed" without depending on pixel
+        // layout. Cleared every frame; published into `self.last_missing_chars`
+        // before render() returns.
+        let mut missing_chars_this_frame: Vec<char> = Vec::new();
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
         let top_inset = self.top_inset();
@@ -488,6 +515,7 @@ impl GpuRenderer {
                                 cell_h - inset * 2.0,
                                 cell_fg(cell, theme, fg_default),
                             ));
+                            missing_chars_this_frame.push(cell.ch);
                         }
                         continue;
                     }
@@ -945,6 +973,10 @@ impl GpuRenderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
+        // Publish the per-frame missing-glyph list for tests / diagnostics.
+        // Done after submit so the value reflects what the user actually
+        // saw on screen (not a partial work-in-progress list).
+        self.last_missing_chars = missing_chars_this_frame;
         // Cache key only after a successful submit+present. Transient
         // surface states (Outdated/Lost/Timeout) that returned early
         // before this point will not cache, so the next redraw will
