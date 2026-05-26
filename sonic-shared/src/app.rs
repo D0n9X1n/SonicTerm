@@ -1266,8 +1266,7 @@ impl App {
                     .tab_states
                     .get(tab_idx)
                     .map(|st| {
-                        let (w, h) =
-                            (child.renderer.width() as f32, child.renderer.height() as f32);
+                        let (w, h) = child.renderer.logical_size();
                         let top = child.renderer.top_inset();
                         let pad = child.renderer.padding();
                         let outer = crate::pane::Rect::new(
@@ -2484,7 +2483,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .get(tab_idx)
                     .map(|st| {
                         if let Some(r) = self.renderer.as_ref() {
-                            let (w, h) = (r.width() as f32, r.height() as f32);
+                            let (w, h) = r.logical_size();
                             let top = r.top_inset();
                             let pad = r.padding();
                             let outer = crate::pane::Rect::new(

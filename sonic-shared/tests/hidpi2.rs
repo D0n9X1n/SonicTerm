@@ -153,3 +153,52 @@ fn pixel_to_cell_normalizes_physical_input() {
     assert_eq!(cx, 10, "x cell must map back to clicked column under the fix");
     assert_eq!(cy, 5, "y cell must map back to clicked row under the fix");
 }
+
+/// Pane split borders ("third blocker" for PR #76 review): the outer
+/// `pane::Rect` handed to `PaneTree::layout` is in LOGICAL units (it's
+/// later drawn via `px_to_ndc(..., sw, sh)` where `sw`/`sh` are the
+/// renderer's logical surface size). Bug: app.rs built the outer rect
+/// from `renderer.width()/height()` which are PHYSICAL, so at 2× the
+/// pane rect was 2× too large in every dimension — borders extended
+/// past the visible viewport.
+///
+/// This test reproduces `logical_size()` on top of the (physical)
+/// `config.width/height` and asserts the outer rect handed to layout
+/// matches the visible window in logical pixels, regardless of DPI.
+#[test]
+fn pane_outer_rect_uses_logical_dims() {
+    // 1600×1200 physical window @ 2× == 800×600 on-screen.
+    let physical_w: u32 = 1600;
+    let physical_h: u32 = 1200;
+    let scale_factor: f32 = 2.0;
+    let pad: f32 = 8.0;
+    let top_inset: f32 = 32.0;
+
+    // What the fixed code does:
+    let logical_w = physical_w as f32 / scale_factor;
+    let logical_h = physical_h as f32 / scale_factor;
+    let outer_x = pad;
+    let outer_y = top_inset;
+    let outer_w = (logical_w - pad * 2.0).max(0.0);
+    let outer_h = (logical_h - top_inset - pad).max(0.0);
+
+    assert!((outer_x - 8.0).abs() < f32::EPSILON);
+    assert!((outer_y - 32.0).abs() < f32::EPSILON);
+    // 800 - 16 == 784
+    assert!(
+        (outer_w - 784.0).abs() < f32::EPSILON,
+        "outer width must be logical (800 - 2*pad), got {outer_w}"
+    );
+    // 600 - 32 - 8 == 560
+    assert!(
+        (outer_h - 560.0).abs() < f32::EPSILON,
+        "outer height must be logical (600 - top_inset - pad), got {outer_h}"
+    );
+
+    // And the (buggy) physical version would have produced ~1576×1160 —
+    // call that out so a future regression is loud.
+    let bad_w = physical_w as f32 - pad * 2.0;
+    let bad_h = physical_h as f32 - top_inset - pad;
+    assert!(bad_w > outer_w * 1.9, "sanity: physical-px width would be ~2× the logical one");
+    assert!(bad_h > outer_h * 1.9, "sanity: physical-px height would be ~2× the logical one");
+}

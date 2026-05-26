@@ -464,6 +464,19 @@ impl GpuRenderer {
         self.padding
     }
 
+    /// Logical (DPI-independent) size of the render surface in CSS pixels.
+    ///
+    /// The pane layout, padding, top inset and cell metrics are all expressed
+    /// in logical units; mixing in physical `width()`/`height()` (which are
+    /// scaled by `scale_factor`) produced over-sized pane borders at 2×
+    /// displays. Call this when computing the outer rect for `PaneTree::layout`.
+    pub fn logical_size(&self) -> (f32, f32) {
+        (
+            self.config.width as f32 / self.scale_factor,
+            self.config.height as f32 / self.scale_factor,
+        )
+    }
+
     /// Snapshot of every codepoint the previous `render()` call could
     /// not produce a glyph tile for (i.e. that drew a tofu outline).
     /// Whitespace is filtered out — those are intentionally blank.
