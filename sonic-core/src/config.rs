@@ -91,7 +91,7 @@ impl Default for Config {
             font: FontConfig::default(),
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
-            theme: "gruvbox-dark-hard".to_string(),
+            theme: "wezterm".to_string(),
             keymap: "wezterm".to_string(),
             locale: String::new(),
             extra: toml::Table::new(),
