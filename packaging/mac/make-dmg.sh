@@ -39,6 +39,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+if [ -n "${MACOS_SIGNING_IDENTITY:-}" ] && [ "${SONIC_SIGN_READY:-}" = "1" ]; then
+    echo "==> Codesigning $APP with identity: $MACOS_SIGNING_IDENTITY"
+    codesign --deep --force --options runtime --timestamp \
+        --sign "$MACOS_SIGNING_IDENTITY" "$APP"
+    codesign --verify --deep --strict --verbose=2 "$APP"
+else
+    if [ -n "${MACOS_SIGNING_IDENTITY:-}" ] && [ "${SONIC_SIGN_READY:-}" != "1" ]; then
+        echo "==> MACOS_SIGNING_IDENTITY set but SONIC_SIGN_READY!=1 (cert not imported); producing unsigned .app"
+    else
+        echo "==> MACOS_SIGNING_IDENTITY unset, producing unsigned .app"
+    fi
+fi
+
 echo "==> Creating .dmg"
 DMG="$DIST/Sonic-${VERSION}-mac-universal.dmg"
 rm -f "$DMG"
