@@ -502,6 +502,8 @@ impl App {
                         &pane_rects,
                         active_id,
                         search,
+                        None, // command palette: not exposed in child window yet
+                        None, // ime preedit: not exposed in child window yet
                     ) {
                         tracing::warn!("child render error: {e}");
                     }
