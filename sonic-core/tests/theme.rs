@@ -67,24 +67,24 @@ fn wezterm_theme_pins_accent_colors() {
 #[test]
 fn wezterm_theme_pins_gruvbox_hard_base16_ansi_palette() {
     let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
-    // Normal
-    assert_eq!(t.colors.ansi.black.rgb(), Some((0x1d, 0x20, 0x21)), "ansi.black");
-    assert_eq!(t.colors.ansi.red.rgb(), Some((0xcc, 0x24, 0x1d)), "ansi.red");
-    assert_eq!(t.colors.ansi.green.rgb(), Some((0x98, 0x97, 0x1a)), "ansi.green");
-    assert_eq!(t.colors.ansi.yellow.rgb(), Some((0xd7, 0x99, 0x21)), "ansi.yellow");
-    assert_eq!(t.colors.ansi.blue.rgb(), Some((0x45, 0x85, 0x88)), "ansi.blue");
-    assert_eq!(t.colors.ansi.magenta.rgb(), Some((0xb1, 0x62, 0x86)), "ansi.magenta");
-    assert_eq!(t.colors.ansi.cyan.rgb(), Some((0x68, 0x9d, 0x6a)), "ansi.cyan");
-    assert_eq!(t.colors.ansi.white.rgb(), Some((0xa8, 0x99, 0x84)), "ansi.white");
-    // Bright
-    assert_eq!(t.colors.bright.black.rgb(), Some((0x92, 0x83, 0x74)), "bright.black");
-    assert_eq!(t.colors.bright.red.rgb(), Some((0xfb, 0x49, 0x34)), "bright.red");
-    assert_eq!(t.colors.bright.green.rgb(), Some((0xb8, 0xbb, 0x26)), "bright.green");
-    assert_eq!(t.colors.bright.yellow.rgb(), Some((0xfa, 0xbd, 0x2f)), "bright.yellow");
-    assert_eq!(t.colors.bright.blue.rgb(), Some((0x83, 0xa5, 0x98)), "bright.blue");
-    assert_eq!(t.colors.bright.magenta.rgb(), Some((0xd3, 0x86, 0x9b)), "bright.magenta");
-    assert_eq!(t.colors.bright.cyan.rgb(), Some((0x8e, 0xc0, 0x7c)), "bright.cyan");
-    assert_eq!(t.colors.bright.white.rgb(), Some((0xeb, 0xdb, 0xb2)), "bright.white");
+    // Normal: ansi = [base00, base08, base0B, base0A, base0D, base0E, base0C, base05]
+    assert_eq!(t.colors.ansi.black.rgb(), Some((0x1d, 0x20, 0x21)), "ansi.black base00");
+    assert_eq!(t.colors.ansi.red.rgb(), Some((0xfb, 0x49, 0x34)), "ansi.red base08");
+    assert_eq!(t.colors.ansi.green.rgb(), Some((0xb8, 0xbb, 0x26)), "ansi.green base0B");
+    assert_eq!(t.colors.ansi.yellow.rgb(), Some((0xfa, 0xbd, 0x2f)), "ansi.yellow base0A");
+    assert_eq!(t.colors.ansi.blue.rgb(), Some((0x83, 0xa5, 0x98)), "ansi.blue base0D");
+    assert_eq!(t.colors.ansi.magenta.rgb(), Some((0xd3, 0x86, 0x9b)), "ansi.magenta base0E");
+    assert_eq!(t.colors.ansi.cyan.rgb(), Some((0x8e, 0xc0, 0x7c)), "ansi.cyan base0C");
+    assert_eq!(t.colors.ansi.white.rgb(), Some((0xd5, 0xc4, 0xa1)), "ansi.white base05");
+    // Bright: brights = [base03, base08, base0B, base0A, base0D, base0E, base0C, base07]
+    assert_eq!(t.colors.bright.black.rgb(), Some((0x66, 0x5c, 0x54)), "bright.black base03");
+    assert_eq!(t.colors.bright.red.rgb(), Some((0xfb, 0x49, 0x34)), "bright.red base08");
+    assert_eq!(t.colors.bright.green.rgb(), Some((0xb8, 0xbb, 0x26)), "bright.green base0B");
+    assert_eq!(t.colors.bright.yellow.rgb(), Some((0xfa, 0xbd, 0x2f)), "bright.yellow base0A");
+    assert_eq!(t.colors.bright.blue.rgb(), Some((0x83, 0xa5, 0x98)), "bright.blue base0D");
+    assert_eq!(t.colors.bright.magenta.rgb(), Some((0xd3, 0x86, 0x9b)), "bright.magenta base0E");
+    assert_eq!(t.colors.bright.cyan.rgb(), Some((0x8e, 0xc0, 0x7c)), "bright.cyan base0C");
+    assert_eq!(t.colors.bright.white.rgb(), Some((0xfb, 0xf1, 0xc7)), "bright.white base07");
 }
 
 #[test]
