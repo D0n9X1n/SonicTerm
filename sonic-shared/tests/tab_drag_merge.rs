@@ -126,6 +126,39 @@ fn drop_target_skips_source_window() {
     assert!(find_drop_target((100, 10), vec![("dest", geom, layout)]).is_some());
 }
 
+#[test]
+fn child_to_child_drag_honors_titlebar_inset_on_destination() {
+    // Regression: when a child window's tab bar is shifted down by the
+    // integrated-titlebar inset (e.g. 22 logical px on macOS fullsize),
+    // the cross-window hit-test for a child-to-child drag must apply
+    // `.with_top_offset(inset)` to the destination layout — otherwise a
+    // cursor over the visible tab bar at y=30 lands above the un-shifted
+    // layout's bar (which sits at y=0..28) and the drop slot is wrong.
+    let bar = synth_bar(3);
+    let inset = 22.0;
+    let layout_shifted = TabBarLayout::compute(&bar, 800.0).with_top_offset(inset);
+    let layout_unshifted = TabBarLayout::compute(&bar, 800.0);
+    let geom = WindowGeom::new((1000, 0), (800, 600));
+
+    // Cursor over the *shifted* tab bar (below the inset, inside the bar).
+    // Shifted bar rect spans y ∈ [22, 22+34) = [22, 56); pick y=40, which
+    // is inside the shifted bar but BELOW the un-shifted bar (y ∈ [0, 34)).
+    let global = (1010, 40);
+
+    // With the fix (offset applied): we hit the bar and get a real slot.
+    let t = find_drop_target(global, vec![("dest", geom, layout_shifted)])
+        .expect("shifted layout: cursor lands on tab bar");
+    assert_eq!(t.window, "dest");
+    assert_eq!(t.slot, 0);
+
+    // Without the offset (old buggy behavior): cursor is below the bar
+    // (which sits at y=0..28) → miss. Locks in the regression direction.
+    assert!(
+        find_drop_target(global, vec![("dest", geom, layout_unshifted)]).is_none(),
+        "un-shifted layout must miss — confirms the inset is what makes the fix work"
+    );
+}
+
 // ---- state transfer between containers -------------------------------------
 
 #[test]

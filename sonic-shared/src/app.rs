@@ -925,6 +925,7 @@ impl App {
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
             let layout = TabBarLayout::compute(&c.tabs, bar_width)
+                .with_top_offset(c.renderer.titlebar_inset())
                 .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
