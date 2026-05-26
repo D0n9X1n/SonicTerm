@@ -39,6 +39,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+if [ -n "${MACOS_SIGNING_IDENTITY:-}" ]; then
+    echo "==> Codesigning $APP with identity: $MACOS_SIGNING_IDENTITY"
+    codesign --deep --force --options runtime --timestamp \
+        --sign "$MACOS_SIGNING_IDENTITY" "$APP"
+    codesign --verify --deep --strict --verbose=2 "$APP"
+else
+    echo "==> MACOS_SIGNING_IDENTITY unset, producing unsigned .app"
+fi
+
 echo "==> Creating .dmg"
 DMG="$DIST/Sonic-${VERSION}-mac-universal.dmg"
 rm -f "$DMG"

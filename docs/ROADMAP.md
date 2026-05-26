@@ -112,8 +112,8 @@ control rendering, theme live-preview, and config hot-reload through the
 in their own window is the next slice.
 
 ### ⏳ v1.0.0 — Production
-1. **macOS signing + notarization** (requires Apple Developer Program $99/yr).
-2. **Windows signing** (requires EV cert, $200-400/yr).
+1. **macOS signing + notarization** (requires Apple Developer Program $99/yr). Workflow infra prepped — see [`docs/release/signing.md`](release/signing.md); just add the secrets.
+2. **Windows signing** (requires EV cert, $200-400/yr). Workflow infra prepped — see [`docs/release/signing.md`](release/signing.md).
 3. **Auto-update**: macOS uses Sparkle; Windows uses Squirrel or WinSparkle.
 4. **Built-in SSH** (via `russh`) — optional, behind a feature flag.
 5. **Session mux + restore**: persist tabs/panes to disk; restore on next launch.
