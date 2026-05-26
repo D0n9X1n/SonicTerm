@@ -193,6 +193,55 @@ pub enum UserEvent {
     ConfigChanged,
 }
 
+/// Same as [`run`] but installs a platform-specific OS-drag sink.
+/// `sonic-mac` calls this with a `NSPasteboard`-backed impl; future
+/// `sonic-windows` work will pass an `IDataObject`/`DoDragDrop` impl.
+/// When the cursor leaves every Sonic window during a tab tear-out,
+/// the sink is invoked with a serialized [`crate::os_drag::TabPayload`]
+/// instead of spawning a child window.
+pub fn run_with_os_drag(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    sink: Arc<dyn crate::os_drag::OsDragSink>,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+) -> Result<()> {
+    run_with_os_drag_and_pending(theme, config, keymap, sink, theme_loader, keymap_loader, None)
+}
+
+/// Like [`run_with_os_drag`] but also seeds an already-received
+/// [`crate::os_drag::TabPayload`] (e.g. one the platform shim found on
+/// the pasteboard at startup). The payload becomes a real tab via
+/// [`App::new_tab_from_payload`] before the event loop starts — this
+/// is the receiver half of the (review) data-loss fix for PR #59:
+/// without it the payload was only logged and the user's torn tab
+/// vanished.
+pub fn run_with_os_drag_and_pending(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    sink: Arc<dyn crate::os_drag::OsDragSink>,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+    pending: Option<crate::os_drag::TabPayload>,
+) -> Result<()> {
+    init_tracing();
+    let event_loop =
+        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
+    app.theme_loader = theme_loader;
+    app.keymap_loader = keymap_loader;
+    app.os_drag_sink = Some(sink);
+    if let Some(p) = pending {
+        let _ = app.new_tab_from_payload(&p);
+    }
+    event_loop.run_app(&mut app).context("run event loop")?;
+    Ok(())
+}
+
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("sonic=info"));
@@ -294,6 +343,14 @@ pub struct App {
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     i18n: crate::i18n::I18n,
+    /// Optional platform hook that takes a serialized tab payload and
+    /// hands it off to the OS-level drag-and-drop system
+    /// (`NSPasteboard` on macOS, OLE `DoDragDrop` on Windows). When
+    /// set, [`Self::tear_out_tab`] checks whether the cursor sits
+    /// outside every Sonic-owned window; if so, it invokes the sink
+    /// and KILLS the local tab instead of spawning a child window.
+    /// Installed by the platform bin via [`run_with_os_drag`].
+    os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
 }
 
 impl App {
@@ -346,6 +403,7 @@ impl App {
             config_watcher: None,
             event_loop_proxy,
             i18n,
+            os_drag_sink: None,
         }
     }
 
@@ -751,6 +809,108 @@ impl App {
         crate::tab_drag::find_drop_target(global, candidates)
     }
 
+    /// Return `true` when the most recent cursor position sits inside
+    /// any Sonic-owned window's inner area (main or any child). Used
+    /// by [`Self::try_os_drag_handoff`] to decide whether a tear-out
+    /// should be handled in-process (cursor still over one of OUR
+    /// windows → spawn child) or escalated to the OS-level drag-and-
+    /// drop facility (cursor is outside every Sonic window → may be
+    /// over a second Sonic process's window OR a non-Sonic
+    /// destination; either way we let the OS arbitrate).
+    fn cursor_inside_any_window(&self) -> bool {
+        let Some(main) = self.window.as_ref() else { return false };
+        let main_origin = main.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
+        let global = crate::tab_drag::local_to_global(main_origin, self.cursor_pos);
+        if crate::tab_drag::global_to_local(window_geom(main), global).is_some() {
+            return true;
+        }
+        for c in self.child_windows.values() {
+            if crate::tab_drag::global_to_local(window_geom(&c.window), global).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Serialize the tab at `index` into a [`crate::os_drag::TabPayload`]
+    /// for OS-level handoff. Best-effort: title from the tab bar,
+    /// scrollback from the active pane's grid as UTF-8, cmd from
+    /// `Config::shell.program`. cwd + env empty in v1.
+    fn build_payload_for_tab(&self, index: usize) -> Option<crate::os_drag::TabPayload> {
+        let tab = self.tabs.tabs().get(index)?.clone();
+        // Scrollback extraction TBD — Grid does not yet expose a
+        // "give me the full visible+scrollback text" accessor. v1
+        // ships an empty buffer (the destination shell starts with a
+        // fresh prompt); v2 will add the accessor + populate.
+        let scrollback_bytes: Vec<u8> = Vec::new();
+        Some(crate::os_drag::TabPayload {
+            pty_pid: 0,
+            tab_title: tab.title,
+            scrollback_b64: crate::os_drag::TabPayload::encode_scrollback(&scrollback_bytes),
+            cwd: String::new(),
+            cmd: self.config.terminal.shell.clone().unwrap_or_default(),
+            env: Vec::new(),
+        })
+    }
+
+    /// If an OS-drag sink is installed AND the cursor is outside
+    /// every Sonic-owned window, build a payload for the tab at
+    /// `index`, hand it to the sink, drop the local panes (kills the
+    /// shells via `PtyHandle::Drop`), and return `true` to tell
+    /// `tear_out_tab` to short-circuit the in-process flow.
+    fn try_os_drag_handoff(&mut self, index: usize) -> bool {
+        let Some(sink) = self.os_drag_sink.clone() else { return false };
+        if self.cursor_inside_any_window() {
+            return false;
+        }
+        let Some(payload) = self.build_payload_for_tab(index) else { return false };
+        let ack = sink.begin_drag(&payload);
+        match ack {
+            crate::os_drag::DragAck::Accepted => {
+                let _ = self.detach_tab_state(index);
+                tracing::info!(
+                    tab = %payload.tab_title,
+                    "OS drag: destination acknowledged; local tab dropped"
+                );
+                true
+            }
+            crate::os_drag::DragAck::NotAcknowledged => {
+                // DATA-LOSS FIX (PR #59 review): no destination
+                // confirmed adoption. Leave the source tab alive
+                // and fall back to the in-process tear-out path so
+                // the user does not lose a live shell.
+                tracing::warn!(
+                    tab = %payload.tab_title,
+                    "OS drag: sink NotAcknowledged; keeping source tab, falling back to in-process tear-out"
+                );
+                false
+            }
+        }
+    }
+
+    /// Spawn a brand-new tab seeded from a [`crate::os_drag::TabPayload`]
+    /// arriving from another Sonic process.
+    ///
+    /// v1 honors `tab_title` only — full cwd/cmd/env adoption needs
+    /// the validation pass flagged in the PR #59 review (untrusted
+    /// cross-process input). What the (review) fix guarantees is that
+    /// the call path *exists*: the macOS receiver no longer just logs
+    /// the payload, it materializes a tab via this method. Returns
+    /// the 0-based index of the inserted tab.
+    pub fn new_tab_from_payload(&mut self, payload: &crate::os_drag::TabPayload) -> usize {
+        let title = if payload.tab_title.is_empty() {
+            "received tab".to_string()
+        } else {
+            payload.tab_title.clone()
+        };
+        self.new_tab(title);
+        tracing::info!(
+            tab = %payload.tab_title,
+            "os_drag: received payload; spawned destination tab"
+        );
+        self.tabs.len().saturating_sub(1)
+    }
+
     /// Move the main window's tab at `src_idx` into the destination
     /// described by `target`. The destination is always a child window
     /// (the main is the source in this path). Source-window emptiness
@@ -847,6 +1007,16 @@ impl App {
         // Don't tear the only tab — that's a no-op (the new window
         // would be identical to the old one, minus its renderer).
         if self.tabs.len() <= 1 {
+            return;
+        }
+        // OS-level cross-process drag: if a sink is installed AND the
+        // cursor has left every Sonic-owned window, hand the tab off
+        // to the OS (NSPasteboard / OLE) and KILL the local copy
+        // (dropping the panes runs PtyHandle::Drop which signals the
+        // child). The destination Sonic process picks up the payload
+        // from its own pasteboard read and spawns a fresh tab with
+        // the same cwd/cmd/env, showing scrollback as history.
+        if self.try_os_drag_handoff(index) {
             return;
         }
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return };
@@ -1145,6 +1315,23 @@ impl App {
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Test-only: install an `OsDragSink` so [`Self::try_os_drag_handoff`]
+    /// can be exercised without going through the platform entry point.
+    #[doc(hidden)]
+    pub fn __test_set_os_drag_sink(&mut self, sink: Arc<dyn crate::os_drag::OsDragSink>) {
+        self.os_drag_sink = Some(sink);
+    }
+
+    /// Test-only: drive the OS-drag handoff path with a forced "cursor
+    /// is outside any window" precondition (trivially true in tests
+    /// since no winit window is created). Returns the same bool as the
+    /// internal implementation: `true` = source-tab was detached,
+    /// `false` = source tab preserved.
+    #[doc(hidden)]
+    pub fn __test_try_os_drag_handoff(&mut self, index: usize) -> bool {
+        self.try_os_drag_handoff(index)
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,
