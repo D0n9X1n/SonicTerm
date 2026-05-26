@@ -822,22 +822,57 @@ impl GpuRenderer {
     /// hover behaviour — when the cursor is over a tab, the dim × is
     /// shown; when it's over the × itself the glyph brightens to
     /// `tab_active_fg`. Pass `None` when the cursor leaves the window.
-    pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>) {
-        if self.hover_cursor != pos {
-            self.hover_cursor = pos;
-            self.last_frame_key = None;
+    ///
+    /// Returns `true` when the change could affect tab-bar rendering
+    /// (the previous or new cursor position falls inside the tab-bar
+    /// row, or the cursor left while previously over the bar). The
+    /// app uses this signal to request a redraw — without it a bare
+    /// hover-only move never triggers `render()` and the muted ×
+    /// stays stale until the next event nudges the loop.
+    pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>) -> bool {
+        if self.hover_cursor == pos {
+            return false;
         }
+        let prev = self.hover_cursor;
+        self.hover_cursor = pos;
+        self.last_frame_key = None;
+        self.hover_change_touches_tab_bar(prev, pos)
+    }
+
+    /// True when either the old or new logical cursor position falls
+    /// inside the tab-bar band. Used by `set_hover_cursor` to decide
+    /// whether a pure mouse-move warrants a redraw request.
+    fn hover_change_touches_tab_bar(
+        &self,
+        prev: Option<(f32, f32)>,
+        next: Option<(f32, f32)>,
+    ) -> bool {
+        if !self.tab_bar_visible {
+            return false;
+        }
+        let inset = self.titlebar_inset;
+        let bar_h = self.tab_bar_logical_height();
+        let in_bar = |p: Option<(f32, f32)>| -> bool {
+            match p {
+                Some((_, y)) => y >= inset && y <= inset + bar_h,
+                None => false,
+            }
+        };
+        in_bar(prev) || in_bar(next)
     }
 
     /// Optional override for the close-button color. When `Some`, the ×
     /// is drawn in this color and is always visible (matching WezTerm's
     /// `tab_close_button_color` config). Accepts a `#rrggbb` string;
     /// invalid strings are ignored.
-    pub fn set_tab_close_override(&mut self, color: Option<&str>) {
+    pub fn set_tab_close_override(&mut self, color: Option<&str>) -> bool {
         let parsed = color.map(|c| hex_to_rgba(c, 1.0));
         if self.tab_close_override != parsed {
             self.tab_close_override = parsed;
             self.last_frame_key = None;
+            true
+        } else {
+            false
         }
     }
 
