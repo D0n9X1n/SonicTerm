@@ -13,10 +13,14 @@
 //! Out of scope: DEC private modes (most), Sixel, Kitty graphics, mouse
 //! tracking. These will be added in follow-up PRs.
 
+use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
 use crate::grid::{CellFlags, Color, Grid, Pos};
 use crate::hyperlink::{HyperlinkId, HyperlinkRegistry};
+
+/// Version string reported in answer to CSI > q (XTVERSION).
+pub const SONIC_VERSION: &str = "Sonic 0.7";
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -44,7 +48,19 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(grid: Grid) -> Self {
-        Self { inner: vte::Parser::new(), performer: Performer::new(grid) }
+        Self { inner: vte::Parser::new(), performer: Performer::new(grid, None) }
+    }
+
+    /// Construct a parser that can send replies (DSR, DA, XTVERSION, focus
+    /// reporting) back to the pty via the given channel.
+    pub fn new_with_reply(grid: Grid, reply_tx: Sender<Vec<u8>>) -> Self {
+        Self { inner: vte::Parser::new(), performer: Performer::new(grid, Some(reply_tx)) }
+    }
+
+    /// Whether DECSET ?1004 (focus reporting) is currently enabled. App should
+    /// send `\e[I` / `\e[O` on focus in/out when this is true.
+    pub fn focus_reporting_enabled(&self) -> bool {
+        self.performer.focus_reporting
     }
 
     /// Feed raw bytes from the pty. Drains any queued events for the caller.
@@ -100,12 +116,14 @@ struct Performer {
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
     mouse_sgr: bool,
+    focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
+    reply_tx: Option<Sender<Vec<u8>>>,
 }
 
 impl Performer {
-    fn new(grid: Grid) -> Self {
+    fn new(grid: Grid, reply_tx: Option<Sender<Vec<u8>>>) -> Self {
         Self {
             grid,
             fg: Color::Default,
@@ -117,7 +135,15 @@ impl Performer {
             saved_cursor: None,
             bracketed_paste: false,
             mouse_sgr: false,
+            focus_reporting: false,
             title: None,
+            reply_tx,
+        }
+    }
+
+    fn reply(&self, bytes: &[u8]) {
+        if let Some(tx) = &self.reply_tx {
+            let _ = tx.send(bytes.to_vec());
         }
     }
 
@@ -201,6 +227,7 @@ impl Performer {
                 }
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
+                1004 => self.focus_reporting = set,
                 _ => {}
             }
         }
@@ -253,6 +280,25 @@ impl Perform for Performer {
         }
         let p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
         let p1 = || params.iter().nth(1).and_then(|s| s.first().copied()).unwrap_or(0);
+        // CSI with `>` intermediate — secondary DA / XTVERSION.
+        if inter.first() == Some(&b'>') {
+            match action {
+                'c' => {
+                    // Secondary DA: VT220 (1), firmware version 0, ROM 0.
+                    self.reply(b"\x1b[>1;0;0c");
+                }
+                'q' => {
+                    // XTVERSION: DCS > | <name> ST
+                    let mut buf = Vec::with_capacity(SONIC_VERSION.len() + 5);
+                    buf.extend_from_slice(b"\x1bP>|");
+                    buf.extend_from_slice(SONIC_VERSION.as_bytes());
+                    buf.extend_from_slice(b"\x1b\\");
+                    self.reply(&buf);
+                }
+                _ => {}
+            }
+            return;
+        }
         match action {
             'A' => {
                 let n = p0().max(1);
@@ -296,6 +342,22 @@ impl Perform for Performer {
                 _ => {}
             },
             'm' => self.apply_sgr(params),
+            'n' => match p0() {
+                5 => self.reply(b"\x1b[0n"),
+                6 => {
+                    let row = self.grid.cursor.row.saturating_add(1);
+                    let col = self.grid.cursor.col.saturating_add(1);
+                    self.reply(format!("\x1b[{row};{col}R").as_bytes());
+                }
+                _ => {}
+            },
+            'c' => {
+                // Primary DA — VT220 with 132-columns (62) + printer port (c).
+                let p = p0();
+                if p == 0 {
+                    self.reply(b"\x1b[?62;c");
+                }
+            }
             _ => {}
         }
     }

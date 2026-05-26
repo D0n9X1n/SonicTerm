@@ -490,7 +490,8 @@ impl App {
     /// Spawn a fresh PTY + parser pair sized to the current renderer.
     fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
-        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
+        let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
         // Pre-create the redraw target Arc bound to the current parent
         // window. If the pane later tears out, `tear_out_tab` swaps the
         // inner Option to the child window's Arc<Window> so the VT
@@ -501,8 +502,22 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
+                let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = self.cursor_visible.clone();
+                // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
+                // master. Kept on its own thread so the VT loop never blocks
+                // pushing replies, and so a slow pty doesn't stall parsing.
+                std::thread::Builder::new()
+                    .name("sonic-vt-reply".into())
+                    .spawn(move || {
+                        while let Ok(bytes) = reply_rx.recv() {
+                            if in_tx_reply.send(bytes).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn vt reply forwarder");
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
                     .spawn(move || {
@@ -2218,6 +2233,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // `set_ime_allowed` nudges the OS to re-attach the input
                 // context cleanly on macOS / Windows.
                 self.ime.cancel();
+                // Forward focus in/out to the active pane if it asked for
+                // focus reporting via DECSET ?1004 (CSI ?1004h).
+                if let Some(pane) = self.active_pane() {
+                    let enabled = pane.parser.lock().focus_reporting_enabled();
+                    if enabled {
+                        if let Some(pty) = pane.pty.as_ref() {
+                            let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                            let _ = pty.in_tx.send(seq.to_vec());
+                        }
+                    }
+                }
                 if let Some(w) = &self.window {
                     w.set_ime_allowed(focused);
                     if focused {
