@@ -1,6 +1,7 @@
 //! GPU renderer for the terminal grid using wgpu 29 + glyphon 0.11.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use glyphon::{
@@ -21,6 +22,7 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
     command_palette::CommandPalette,
+    cursor::{self, CursorShape},
     glyph_atlas::{AtlasUpload, GlyphAtlas},
     ime::ImeState,
     overlays::{search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout},
@@ -102,6 +104,22 @@ pub struct GpuRenderer {
     bg: wgpu::Color,
     fg_default: GColor,
     cursor_color: [f32; 4],
+    /// Theme background as straight RGBA. Used to recolor the glyph
+    /// under a block cursor so the foreground inverts to bg (wezterm
+    /// parity). Pre-converted once per theme change to avoid the
+    /// wgpu::Color → [f32;4] round-trip on every frame.
+    bg_rgba: [f32; 4],
+    /// Visual style of the text cursor (block / bar / underline).
+    /// Live-updated from config; see [`Self::set_cursor_shape`].
+    cursor_shape: CursorShape,
+    /// Whether the text cursor blinks. When `false` the cursor renders
+    /// at solid alpha and the FrameKey ignores the phase bucket.
+    cursor_blink: bool,
+    /// Anchor for the blink phase. Reset on every config change so the
+    /// user sees the cursor at full brightness immediately after they
+    /// toggle the setting (rather than wherever the cycle happened to
+    /// be at the time).
+    blink_epoch: Instant,
     selection_color: [f32; 4],
     tab_bar_bg: [f32; 4],
     tab_active_bg: [f32; 4],
@@ -177,6 +195,16 @@ struct FrameKey {
     tab_hash: u64,
     pane_rect_hash: u64,
     viewport_top_abs: Option<u64>,
+    /// Cursor shape variant index — different shapes paint different
+    /// pixels even for the same grid + same blink phase, so this MUST
+    /// participate in the key.
+    cursor_shape: u8,
+    /// Whether the cursor is blinking. Folded into the key so flipping
+    /// the setting invalidates the cached frame immediately.
+    cursor_blink: bool,
+    /// Quantised blink phase. `0` when blinking is disabled (see
+    /// [`crate::cursor::phase_bucket`]).
+    cursor_phase: u8,
 }
 
 impl GpuRenderer {
@@ -293,8 +321,9 @@ impl GpuRenderer {
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
         let bg = hex_to_wgpu(theme.colors.background.0.as_str());
+        let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         let fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
-        let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.6);
+        let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
@@ -375,6 +404,10 @@ impl GpuRenderer {
             bg,
             fg_default,
             cursor_color,
+            bg_rgba,
+            cursor_shape: CursorShape::default(),
+            cursor_blink: true,
+            blink_epoch: Instant::now(),
             selection_color,
             tab_bar_bg,
             tab_active_bg,
@@ -456,6 +489,46 @@ impl GpuRenderer {
     /// Whether the tab bar is currently shown.
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
+    }
+
+    /// Update the cursor shape. Invalidates the cached frame so the
+    /// next render redraws with the new geometry.
+    pub fn set_cursor_shape(&mut self, shape: CursorShape) {
+        if self.cursor_shape == shape {
+            return;
+        }
+        self.cursor_shape = shape;
+        self.last_frame_key = None;
+    }
+
+    /// Current cursor shape.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor_shape
+    }
+
+    /// Enable or disable the cursor blink. Resets the blink phase so
+    /// the user always sees a full-brightness cursor immediately after
+    /// flipping the setting (no random mid-cycle pop).
+    pub fn set_cursor_blink(&mut self, blink: bool) {
+        if self.cursor_blink == blink {
+            return;
+        }
+        self.cursor_blink = blink;
+        self.blink_epoch = Instant::now();
+        self.last_frame_key = None;
+    }
+
+    /// Whether the cursor is currently configured to blink.
+    pub fn cursor_blink(&self) -> bool {
+        self.cursor_blink
+    }
+
+    /// Suggested wall-clock interval between blink-only redraws. The
+    /// app loop schedules a redraw at this cadence whenever the cursor
+    /// is visible AND [`Self::cursor_blink`] is true; otherwise nothing
+    /// new would render and the request would be wasted.
+    pub fn blink_redraw_interval(&self) -> std::time::Duration {
+        cursor::redraw_interval()
     }
 
     pub fn width(&self) -> u32 {
@@ -609,7 +682,8 @@ impl GpuRenderer {
     pub fn set_theme(&mut self, theme: &Theme) {
         self.bg = hex_to_wgpu(theme.colors.background.0.as_str());
         self.fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
-        self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.6);
+        self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
+        self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         self.tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
@@ -728,6 +802,9 @@ impl GpuRenderer {
             }
             h.finish()
         };
+        let blink_elapsed = self.blink_epoch.elapsed();
+        let blink_alpha = cursor::blink_alpha(blink_elapsed, self.cursor_blink);
+        let blink_phase = cursor::phase_bucket(blink_elapsed, self.cursor_blink);
         let key = FrameKey {
             grid_revision: grid.revision(),
             selection: selection.copied(),
@@ -742,10 +819,21 @@ impl GpuRenderer {
             tab_hash,
             pane_rect_hash,
             viewport_top_abs,
+            cursor_shape: self.cursor_shape as u8,
+            cursor_blink: self.cursor_blink,
+            cursor_phase: blink_phase,
         };
         if Some(key) == self.last_frame_key {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
+            // Even on a cached frame we must keep the blink heartbeat
+            // going — otherwise the moment two consecutive ticks land
+            // inside the same phase bucket the redraw chain stalls and
+            // the cursor freezes mid-blink. Cheap: request_redraw just
+            // posts an event; the OS coalesces.
+            if cursor_visible && self.cursor_blink {
+                self.window.request_redraw();
+            }
             return Ok(());
         }
         // Note: do NOT cache key here. If prepare()/get_current_texture()
@@ -947,10 +1035,71 @@ impl GpuRenderer {
             if view_top == live_top {
                 let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
                 let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
-                    color: self.cursor_color,
-                });
+                // Modulate the cursor accent with the current blink alpha.
+                // The base color is opaque (set at theme load) so we can
+                // dim through the full range without losing chroma — that
+                // was the bug in the pre-v0.6 hard-coded 0.6 alpha cursor
+                // (couldn't drive it brighter to express focus).
+                let mut color = self.cursor_color;
+                color[3] *= blink_alpha;
+                // Wezterm cursor shapes:
+                //   Block     → full-cell quad, glyph re-rendered in bg
+                //   Bar       → 2px vertical bar pinned to the left edge
+                //   Underline → 2px horizontal bar pinned to the bottom
+                // We pick a 2px sub-cell thickness rather than something
+                // proportional to cell_h so the bar stays crisp on both
+                // small and large font sizes (no half-pixel sub-stem).
+                const SUBSHAPE_PX: f32 = 2.0;
+                match self.cursor_shape {
+                    CursorShape::Block => {
+                        quads.push(QuadInstance {
+                            rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
+                            color,
+                        });
+                        // Recolor every glyph instance that sits in the
+                        // cursor cell from fg → theme.bg, producing the
+                        // classic "inverted cell" look. We walk the
+                        // already-emitted list rather than threading the
+                        // cursor through flush_shape_run — keeps the
+                        // shaper path uncluttered, and a single cell's
+                        // glyphs are a handful of instances at most.
+                        // The bg alpha tracks the blink alpha so the
+                        // glyph fades in lockstep with the cursor block
+                        // (otherwise the glyph would appear to "pop"
+                        // as the cursor faded around it).
+                        let mut bg = self.bg_rgba;
+                        bg[3] *= blink_alpha;
+                        recolor_cursor_glyphs(
+                            &mut glyph_instances,
+                            cx,
+                            cy,
+                            self.cell_w,
+                            self.cell_h,
+                            sw,
+                            sh,
+                            bg,
+                        );
+                    }
+                    CursorShape::Bar => {
+                        quads.push(QuadInstance {
+                            rect: px_to_ndc(cx, cy, SUBSHAPE_PX, self.cell_h, sw, sh),
+                            color,
+                        });
+                    }
+                    CursorShape::Underline => {
+                        quads.push(QuadInstance {
+                            rect: px_to_ndc(
+                                cx,
+                                cy + self.cell_h - SUBSHAPE_PX,
+                                self.cell_w,
+                                SUBSHAPE_PX,
+                                sw,
+                                sh,
+                            ),
+                            color,
+                        });
+                    }
+                }
             }
         }
 
@@ -1685,6 +1834,14 @@ impl GpuRenderer {
         // before this point will not cache, so the next redraw will
         // re-attempt rendering.
         self.last_frame_key = Some(key);
+        // Keep the blink animation alive: when the cursor is visible and
+        // blinking is enabled, schedule another redraw so the next
+        // phase bucket actually gets a frame. Skips the redraw when
+        // blinking is off (steady cursor → no work) or when the user
+        // has hidden the cursor via DECSET ?25l (nothing to blink).
+        if cursor_visible && self.cursor_blink {
+            self.window.request_redraw();
+        }
         // B2: the renderer has now consumed every dirty row's contents
         // into either the GPU pipeline or the row_cache. Clear the
         // bitset so the next frame can re-use cached spans for the
@@ -2066,10 +2223,59 @@ fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f
     (w, line_h)
 }
 
+/// Recolor every glyph instance whose center falls inside the cursor
+/// cell to `bg_rgba`. Used to produce the wezterm-style "inverted"
+/// block cursor: the foreground glyph is painted in the theme
+/// background colour so it stays readable on top of the solid
+/// cursor accent quad.
+///
+/// Walks the already-emitted instance list and rewrites their `color`
+/// in place. Glyph rectangles are stored in NDC; we invert the
+/// [`crate::quad::px_to_ndc`] mapping to test cell containment in
+/// pixel space (cleaner than reasoning about NDC sign conventions).
+///
+/// O(N) over visible glyphs, with N being one frame's instance count.
+/// In practice the cursor cell holds one glyph, so this is effectively
+/// a single rewrite per frame.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn recolor_cursor_glyphs(
+    glyphs: &mut [crate::text_pipeline::GlyphInstance],
+    cell_x: f32,
+    cell_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    bg_rgba: [f32; 4],
+) {
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+    let x_min = cell_x;
+    let x_max = cell_x + cell_w;
+    let y_min = cell_y;
+    let y_max = cell_y + cell_h;
+    for g in glyphs.iter_mut() {
+        let [gx, gy, gw, gh] = g.rect;
+        // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
+        // ny encodes the BOTTOM of the rect (after the +nh shift), so
+        // y_top_px = (1 - gy - gh) * sh / 2.
+        let px = (gx + 1.0) * sw * 0.5;
+        let pw = gw * sw * 0.5;
+        let py = (1.0 - gy - gh) * sh * 0.5;
+        let ph = gh * sh * 0.5;
+        let cx = px + pw * 0.5;
+        let cy = py + ph * 0.5;
+        if cx >= x_min && cx < x_max && cy >= y_min && cy < y_max {
+            g.color = bg_rgba;
+        }
+    }
+}
+
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink
 /// id, per row. Wide-cell continuations don't break a run (they inherit the
 /// lead cell's hyperlink). Returns `(row, col_start, col_end_inclusive)`.
-#[doc(hidden)]
 #[doc(hidden)]
 pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     let mut runs = Vec::new();
