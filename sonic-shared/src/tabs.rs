@@ -93,7 +93,7 @@ impl TabBar {
             // Only rewrite tabs that already carry a `#N ` prefix —
             // leave raw user/system titles ("A", "Welcome", …) alone.
             let Some(body) = strip_index_prefix(&tab.title) else { continue };
-            let new_prefix = format!("#{} ", i + 1);
+            let new_prefix = format!("#{}", i + 1);
             let mut s = String::with_capacity(new_prefix.len() + body.len());
             s.push_str(&new_prefix);
             s.push_str(body);
@@ -168,15 +168,18 @@ impl TabBar {
     }
 }
 
-/// Strip a leading `#<digits> ` index prefix (if any) from a tab title,
+/// Strip a leading `#<digits>` index prefix (if any) from a tab title,
 /// returning the remaining body. Used by `recompute_all_titles` so a tab
 /// can be re-prefixed with its current position without doubling up the
-/// `#N`.
+/// `#N`. The new wezterm-parity format places the icon directly after
+/// the digits with no space (`#1{icon} body`), so we strip only the
+/// `#<digits>` portion; any space (legacy bare-title fallback) is left
+/// in the body verbatim.
 fn strip_index_prefix(title: &str) -> Option<&str> {
     let rest = title.strip_prefix('#')?;
     let digits_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
     if digits_end == 0 {
         return None;
     }
-    rest[digits_end..].strip_prefix(' ')
+    Some(&rest[digits_end..])
 }
