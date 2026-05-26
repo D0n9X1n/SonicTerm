@@ -25,3 +25,4 @@ pub mod text_pipeline;
 
 /// Re-exports for binary crates.
 pub use app::run;
+pub use app::{run_with, KeymapLoader, ThemeLoader};

@@ -99,10 +99,30 @@ pub fn next_pane_id() -> u64 {
 
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
+    run_with(theme, config, keymap, None, None)
+}
+
+/// Loader callback type used by `run_with` to reload a theme by name
+/// when the user picks a new one in the preferences window.
+pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
+/// Loader callback type used by `run_with` to reload a keymap by name.
+pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
+
+/// Entry point that additionally accepts asset loaders so the prefs
+/// window can apply theme + keymap changes live (no restart).
+pub fn run_with(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+) -> Result<()> {
     init_tracing();
     let event_loop = EventLoop::new().context("create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(theme, config, keymap);
+    app.theme_loader = theme_loader;
+    app.keymap_loader = keymap_loader;
     event_loop.run_app(&mut app).context("run event loop")?;
     Ok(())
 }
@@ -185,6 +205,11 @@ pub struct App {
     /// window is hidden but the event loop keeps spinning so live
     /// child windows continue to run.
     main_hidden: bool,
+    /// Optional theme loader, set by `run_with`. Used by the prefs
+    /// window's apply/close path to reload a theme by name live.
+    theme_loader: Option<ThemeLoader>,
+    /// Optional keymap loader, set by `run_with`.
+    keymap_loader: Option<KeymapLoader>,
 }
 
 impl App {
@@ -217,6 +242,8 @@ impl App {
             child_windows: HashMap::new(),
             drag_target: None,
             main_hidden: false,
+            theme_loader: None,
+            keymap_loader: None,
         }
     }
 
@@ -1342,10 +1369,59 @@ impl App {
         self.prefs_window = Some(w);
     }
 
+    /// Persist current prefs edit buffer to disk and live-apply
+    /// theme/keymap changes if loaders are available. Idempotent and
+    /// safe to call when nothing is dirty. Called on Apply-button click
+    /// AND on prefs-window close (we treat close as save).
+    fn commit_prefs_and_apply_live(&mut self) {
+        let Some(s) = self.prefs_state.as_mut() else { return };
+        if !s.is_dirty() {
+            return;
+        }
+        // Snapshot fields that drive live-apply BEFORE apply() resets
+        // the original snapshot (which is what we'd otherwise diff).
+        let new_theme_name = s.config.theme.clone();
+        let new_keymap_name = s.config.keymap.clone();
+        let old_theme_name = self.config.theme.clone();
+        let old_keymap_name = self.config.keymap.clone();
+        if let Err(e) = s.apply() {
+            tracing::error!("prefs apply failed: {e}");
+            return;
+        }
+        // Mirror the saved config into the live App config so any new
+        // panes / windows pick up the change.
+        self.config = s.config.clone();
+        // Live theme apply.
+        if new_theme_name != old_theme_name {
+            if let Some(loader) = self.theme_loader.as_ref() {
+                match loader(&new_theme_name) {
+                    Ok(t) => {
+                        self.theme = t;
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Err(e) => tracing::warn!("live theme reload '{new_theme_name}' failed: {e}"),
+                }
+            }
+        }
+        // Live keymap apply.
+        if new_keymap_name != old_keymap_name {
+            if let Some(loader) = self.keymap_loader.as_ref() {
+                match loader(&new_keymap_name) {
+                    Ok(k) => self.keymap = k,
+                    Err(e) => tracing::warn!("live keymap reload '{new_keymap_name}' failed: {e}"),
+                }
+            }
+        }
+    }
+
     /// Handle events arriving for the preferences window.
     fn handle_prefs_event(&mut self, _el: &ActiveEventLoop, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                // Persist edits on close (per spec: "persist on close").
+                self.commit_prefs_and_apply_live();
                 self.prefs_window = None;
                 self.prefs_state = None;
             }
@@ -1355,47 +1431,53 @@ impl App {
                 ..
             } => {
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
-                let Some(s) = self.prefs_state.as_mut() else { return };
-                match s.classify_click(x, y) {
+                let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
+                match hit {
                     Some(PrefsHit::Apply) => {
-                        if let Err(e) = s.apply() {
-                            tracing::error!("prefs apply failed: {e}");
-                        }
+                        self.commit_prefs_and_apply_live();
                     }
                     Some(PrefsHit::Cancel) => {
-                        s.cancel();
+                        if let Some(s) = self.prefs_state.as_mut() {
+                            s.cancel();
+                        }
                         self.prefs_window = None;
                         self.prefs_state = None;
                     }
-                    Some(PrefsHit::Sidebar(cat)) => {
-                        s.blur_text_fields();
-                        s.set_category(cat);
-                    }
-                    Some(PrefsHit::Toggle(id)) => {
-                        s.blur_text_fields();
-                        let _ = s.flip_toggle(id);
-                    }
-                    Some(PrefsHit::SliderTrack(id)) => {
-                        s.blur_text_fields();
-                        let _ = s.drag_slider(id, x);
-                    }
-                    Some(PrefsHit::DropdownHeader(id)) => {
-                        s.blur_text_fields();
-                        let _ = s.toggle_dropdown(id);
-                    }
-                    Some(PrefsHit::DropdownOption { id, index }) => {
-                        s.blur_text_fields();
-                        let _ = s.select_dropdown(id, index);
-                    }
-                    Some(PrefsHit::ColorCell { id, index }) => {
-                        s.blur_text_fields();
-                        let _ = s.pick_color(id, index);
-                    }
-                    Some(PrefsHit::TextField(id)) => {
-                        let _ = s.focus_text_field(id);
-                    }
-                    None => {
-                        s.blur_text_fields();
+                    other => {
+                        let Some(s) = self.prefs_state.as_mut() else { return };
+                        match other {
+                            Some(PrefsHit::Sidebar(cat)) => {
+                                s.blur_text_fields();
+                                s.set_category(cat);
+                            }
+                            Some(PrefsHit::Toggle(id)) => {
+                                s.blur_text_fields();
+                                let _ = s.flip_toggle(id);
+                            }
+                            Some(PrefsHit::SliderTrack(id)) => {
+                                s.blur_text_fields();
+                                let _ = s.drag_slider(id, x);
+                            }
+                            Some(PrefsHit::DropdownHeader(id)) => {
+                                s.blur_text_fields();
+                                let _ = s.toggle_dropdown(id);
+                            }
+                            Some(PrefsHit::DropdownOption { id, index }) => {
+                                s.blur_text_fields();
+                                let _ = s.select_dropdown(id, index);
+                            }
+                            Some(PrefsHit::ColorCell { id, index }) => {
+                                s.blur_text_fields();
+                                let _ = s.pick_color(id, index);
+                            }
+                            Some(PrefsHit::TextField(id)) => {
+                                let _ = s.focus_text_field(id);
+                            }
+                            Some(PrefsHit::Apply) | Some(PrefsHit::Cancel) => unreachable!(),
+                            None => {
+                                s.blur_text_fields();
+                            }
+                        }
                     }
                 }
             }

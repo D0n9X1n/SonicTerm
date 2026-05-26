@@ -13,7 +13,9 @@ fn main() -> Result<()> {
     let config = load_config()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
-    sonic_shared::run(theme, config, keymap)
+    let theme_loader: sonic_shared::ThemeLoader = Box::new(|name: &str| load_theme(name));
+    let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
+    sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
 }
 
 fn load_config() -> Result<Config> {

@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use sonic_core::config::Config;
+use anyhow::Result;
+use sonic_core::config::{Config, CursorShape};
 
 use super::controls::{ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId};
 use super::layout::{Category, PrefsLayout};
@@ -37,6 +37,9 @@ pub const KNOWN_THEMES: &[&str] =
 
 /// Pre-canned keymaps shown in the Keymap picker.
 pub const KNOWN_KEYMAPS: &[&str] = &["wezterm"];
+
+/// Cursor shape options shown in the Behavior picker.
+pub const KNOWN_CURSOR_SHAPES: &[&str] = &["block", "bar", "underline"];
 
 /// Pre-canned monospace families. Free-form text still wins for advanced
 /// users; this is just a quick picker.
@@ -217,6 +220,15 @@ impl PrefsState {
                     s = s.with_step(1.0);
                     s
                 }));
+                let cur_shape = self.config.terminal.cursor_shape.as_str();
+                let sel = KNOWN_CURSOR_SHAPES.iter().position(|s| *s == cur_shape).unwrap_or(0);
+                out.push(Control::Dropdown(Dropdown::new(
+                    next_id(),
+                    "Cursor shape",
+                    l.control_slot(2),
+                    KNOWN_CURSOR_SHAPES.iter().map(|s| (*s).to_string()).collect(),
+                    sel,
+                )));
             }
         }
         self.controls = out;
@@ -468,6 +480,13 @@ impl PrefsState {
             (Category::Behavior, 1, Control::Slider(s)) => {
                 self.config.window.padding = s.get();
             }
+            (Category::Behavior, 2, Control::Dropdown(d)) => {
+                if let Some(v) = d.value() {
+                    if let Some(shape) = CursorShape::from_str_ci(v) {
+                        self.config.terminal.cursor_shape = shape;
+                    }
+                }
+            }
             _ => {}
         }
         let after = self.config.to_toml().unwrap_or_default();
@@ -476,29 +495,10 @@ impl PrefsState {
         }
     }
 
-    /// Persist the edit buffer to disk. Atomic: writes to
-    /// `<path>.tmp` in the same directory then renames over the final
-    /// path, so a crash mid-write cannot corrupt the config file.
+    /// Persist the edit buffer to disk. Atomic via [`Config::save`].
     /// Resets dirty + snapshot on success.
     pub fn apply(&mut self) -> Result<()> {
-        if let Some(parent) = self.config_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
-            }
-        }
-        let toml = self.config.to_toml()?;
-        let mut tmp = self.config_path.clone();
-        let file_name = self
-            .config_path
-            .file_name()
-            .map(|s| s.to_os_string())
-            .unwrap_or_else(|| std::ffi::OsString::from("sonic.toml"));
-        let mut tmp_name = file_name;
-        tmp_name.push(".tmp");
-        tmp.set_file_name(tmp_name);
-        std::fs::write(&tmp, toml).with_context(|| format!("write {:?}", tmp))?;
-        std::fs::rename(&tmp, &self.config_path)
-            .with_context(|| format!("rename {:?} -> {:?}", tmp, self.config_path))?;
+        self.config.save(&self.config_path)?;
         self.original = self.config.clone();
         self.dirty = false;
         Ok(())
@@ -919,5 +919,122 @@ mod tests {
         // type_into_focused with no focus is a no-op.
         s.blur_text_fields();
         assert!(!s.type_into_focused('x'));
+    }
+
+    // ---- Persistence wiring: every visible control reaches disk ----
+
+    #[test]
+    fn toggle_blink_then_apply_writes_blink_false_to_disk() {
+        let (mut s, _d) = fresh();
+        s.set_category(Category::Behavior);
+        // First control in Behavior is the cursor-blink toggle.
+        let id = match &s.controls[0] {
+            Control::Toggle(t) => t.id,
+            other => panic!("expected Toggle as first Behavior control, got {other:?}"),
+        };
+        assert!(s.config.terminal.cursor_blink);
+        s.flip_toggle(id);
+        assert!(!s.config.terminal.cursor_blink);
+        s.apply().unwrap();
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(text.contains("cursor_blink = false"), "missing blink=false in {text}");
+    }
+
+    #[test]
+    fn select_cursor_shape_then_apply_writes_to_disk() {
+        let (mut s, _d) = fresh();
+        s.set_category(Category::Behavior);
+        let id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) => Some(d.id),
+                _ => None,
+            })
+            .expect("Behavior must expose a cursor-shape dropdown");
+        // Select "bar".
+        let bar_idx = KNOWN_CURSOR_SHAPES.iter().position(|s| *s == "bar").unwrap();
+        s.select_dropdown(id, bar_idx);
+        assert_eq!(s.config.terminal.cursor_shape, CursorShape::Bar);
+        s.apply().unwrap();
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(text.contains("cursor_shape = \"bar\""), "missing bar in {text}");
+    }
+
+    #[test]
+    fn theme_keymap_font_opacity_scrollback_all_reach_disk() {
+        let (mut s, _d) = fresh();
+        // Theme
+        s.set_category(Category::Appearance);
+        let id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) => Some(d.id),
+                _ => None,
+            })
+            .unwrap();
+        let tn = KNOWN_THEMES.iter().position(|t| *t == "tokyo-night").unwrap();
+        s.select_dropdown(id, tn);
+        // Opacity slider — slot 1.
+        let op_id = match &s.controls[1] {
+            Control::Slider(sl) => sl.id,
+            other => panic!("expected slider, got {other:?}"),
+        };
+        // Drag to min so we get a deterministic value below default 1.0.
+        let (rect_x, _rect_w) = match &s.controls[1] {
+            Control::Slider(sl) => (sl.rect.x, sl.rect.w),
+            _ => unreachable!(),
+        };
+        s.drag_slider(op_id, rect_x); // min => 0.3
+        assert!((s.config.window.opacity - 0.3).abs() < 1e-3);
+        // Font family + size.
+        s.set_category(Category::Font);
+        let font_id = s
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Dropdown(d) => Some(d.id),
+                _ => None,
+            })
+            .unwrap();
+        s.select_dropdown(font_id, 1); // "Fira Code"
+        let size_id = match &s.controls[1] {
+            Control::Slider(sl) => sl.id,
+            _ => unreachable!(),
+        };
+        let (rx, rw) = match &s.controls[1] {
+            Control::Slider(sl) => (sl.rect.x, sl.rect.w),
+            _ => unreachable!(),
+        };
+        s.drag_slider(size_id, rx + rw); // max => 32.0
+                                         // Scrollback via General slot 1.
+        s.set_category(Category::General);
+        let (sb_id, sx, sw) = match &s.controls[1] {
+            Control::Slider(sl) => (sl.id, sl.rect.x, sl.rect.w),
+            _ => unreachable!(),
+        };
+        s.drag_slider(sb_id, sx + sw); // max => 100_000
+                                       // Keymap (only one option today, so just verify it round-trips).
+        s.set_category(Category::Keymap);
+        s.apply().unwrap();
+        let cfg = Config::load_or_default(&s.config_path).unwrap();
+        assert_eq!(cfg.theme, "tokyo-night");
+        assert_eq!(cfg.keymap, "wezterm");
+        assert_eq!(cfg.font.family, KNOWN_FONTS[1]);
+        assert!((cfg.font.size - 32.0).abs() < 1e-3);
+        assert!((cfg.window.opacity - 0.3).abs() < 1e-3);
+        assert_eq!(cfg.terminal.scrollback, 100_000);
+    }
+
+    #[test]
+    fn apply_uses_config_save_atomic_no_tmp_left_behind() {
+        let (mut s, _d) = fresh();
+        s.dirty = true;
+        s.apply().unwrap();
+        let mut tmp = s.config_path.clone();
+        tmp.set_file_name("sonic.toml.tmp");
+        assert!(!tmp.exists());
+        assert!(s.config_path.exists());
     }
 }
