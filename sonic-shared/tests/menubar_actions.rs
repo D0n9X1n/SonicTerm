@@ -141,13 +141,15 @@ fn toggle_tab_bar_flips_visibility_flag() {
 /// any production change that severs the wiring will also have to
 /// rewrite this assertion.
 #[test]
-fn tab_bar_top_inset_zeroes_when_hidden() {
+fn tab_bar_top_inset_drops_bar_band_when_hidden() {
     use sonic_shared::render::tab_bar_top_inset;
     use sonic_shared::tabbar_view::TAB_BAR_HEIGHT;
     let pad = 4.0_f32;
     let shown = tab_bar_top_inset(true, pad);
     let hidden = tab_bar_top_inset(false, pad);
-    assert!(shown > 0.0);
     assert_eq!(shown, TAB_BAR_HEIGHT + pad);
-    assert_eq!(hidden, 0.0);
+    // Per-side padding parity (PR feat/per-side-padding-parity): top
+    // padding is reserved above the grid even when the tab bar is
+    // hidden, matching `window_padding.top` in WezTerm.
+    assert_eq!(hidden, pad);
 }

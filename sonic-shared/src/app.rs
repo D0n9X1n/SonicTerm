@@ -1261,7 +1261,12 @@ impl App {
             &self.config.font.family,
             self.config.font.size,
             self.config.font.line_height,
-            self.config.window.padding,
+            [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1353,12 +1358,14 @@ impl App {
                     .map(|st| {
                         let (w, h) = child.renderer.logical_size();
                         let top = child.renderer.top_inset();
-                        let pad = child.renderer.padding();
+                        let pl = child.renderer.padding_left();
+                        let pr = child.renderer.padding_right();
+                        let pb = child.renderer.padding_bottom();
                         let outer = crate::pane::Rect::new(
-                            pad,
+                            pl,
                             top,
-                            (w - pad * 2.0).max(0.0),
-                            (h - top - pad).max(0.0),
+                            (w - pl - pr).max(0.0),
+                            (h - top - pb).max(0.0),
                         );
                         st.tree.layout(outer)
                     })
@@ -2472,9 +2479,12 @@ impl ApplicationHandler<UserEvent> for App {
             Window::default_attributes()
                 .with_title(format!("Sonic Terminal — {}", self.theme.name))
                 .with_inner_size(winit::dpi::LogicalSize::new(
-                    f32::from(cols) * 9.0 + self.config.window.padding * 2.0,
+                    f32::from(cols) * 9.0
+                        + self.config.window.padding_left
+                        + self.config.window.padding_right,
                     f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                        + self.config.window.padding * 2.0
+                        + self.config.window.padding_top
+                        + self.config.window.padding_bottom
                         + crate::tabbar_view::TAB_BAR_HEIGHT,
                 )),
         );
@@ -2491,7 +2501,12 @@ impl ApplicationHandler<UserEvent> for App {
             &self.config.font.family,
             self.config.font.size,
             self.config.font.line_height,
-            self.config.window.padding,
+            [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
         )
         .expect("init renderer");
         // Seed cursor visuals from config so the very first frame draws
@@ -2605,12 +2620,14 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(r) = self.renderer.as_ref() {
                             let (w, h) = r.logical_size();
                             let top = r.top_inset();
-                            let pad = r.padding();
+                            let pl = r.padding_left();
+                            let pr = r.padding_right();
+                            let pb = r.padding_bottom();
                             let outer = crate::pane::Rect::new(
-                                pad,
+                                pl,
                                 top,
-                                (w - pad * 2.0).max(0.0),
-                                (h - top - pad).max(0.0),
+                                (w - pl - pr).max(0.0),
+                                (h - top - pb).max(0.0),
                             );
                             st.tree.layout(outer)
                         } else {
