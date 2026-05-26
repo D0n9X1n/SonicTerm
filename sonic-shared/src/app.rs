@@ -1844,9 +1844,7 @@ impl App {
                 r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             for child in self.child_windows.values_mut() {
-                child
-                    .renderer
-                    .set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
+                child.renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             tracing::info!(
                 "live-reload: tab_close_button_color -> {:?}",

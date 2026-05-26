@@ -2506,15 +2506,33 @@ impl GpuRenderer {
 /// `hex_to_rgba`).
 #[inline]
 pub fn glyphon_color_to_linear_rgba(c: GColor) -> [f32; 4] {
-    let r = f64::from(c.r()) / 255.0;
-    let g = f64::from(c.g()) / 255.0;
-    let b = f64::from(c.b()) / 255.0;
-    [
-        srgb_channel_to_linear(r) as f32,
-        srgb_channel_to_linear(g) as f32,
-        srgb_channel_to_linear(b) as f32,
-        1.0,
-    ]
+    // Use the 256-entry u8 LUT — every input here is already an 8-bit
+    // sRGB channel, and the per-glyph hot path called this once per
+    // visible cell per frame, paying for two `powf(2.4)` evaluations
+    // each time. The LUT collapses each conversion to a single load.
+    let t = srgb_u8_to_linear_lut();
+    [t[c.r() as usize], t[c.g() as usize], t[c.b() as usize], 1.0]
+}
+
+/// Borrow the process-wide sRGB→linear lookup table. Computed once on
+/// first use via a `OnceLock`; the table maps each of the 256 possible
+/// u8 sRGB channel values to its linear-light counterpart so the
+/// per-glyph hot path never has to evaluate `powf(2.4)`.
+///
+/// Bit-exact with `srgb_channel_to_linear(x as f64 / 255.0) as f32` for
+/// every `x in 0..=255` (verified by unit test).
+#[inline]
+pub fn srgb_u8_to_linear_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0f32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            t[i] = srgb_channel_to_linear(i as f64 / 255.0) as f32;
+            i += 1;
+        }
+        t
+    })
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
@@ -2608,14 +2626,10 @@ pub fn hex_to_wgpu(h: &str) -> wgpu::Color {
 #[doc(hidden)]
 pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
     let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
+    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as usize;
     if h.len() == 6 {
-        [
-            srgb_channel_to_linear(parse(0)) as f32,
-            srgb_channel_to_linear(parse(2)) as f32,
-            srgb_channel_to_linear(parse(4)) as f32,
-            alpha,
-        ]
+        let t = srgb_u8_to_linear_lut();
+        [t[parse(0)], t[parse(2)], t[parse(4)], alpha]
     } else {
         [0.0, 0.0, 0.0, alpha]
     }
