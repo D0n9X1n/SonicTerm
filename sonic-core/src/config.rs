@@ -17,6 +17,14 @@ pub struct Config {
     /// string (the default) means "negotiate from OS locale".
     #[serde(default)]
     pub locale: String,
+    /// Optional override for the tab close `×` button color. When set
+    /// (e.g. `"#ff5555"`), the close button is always visible in this
+    /// color, matching WezTerm's `tab_close_button_color` setting.
+    /// When `None` (the default), the close button follows WezTerm
+    /// fancy-mode parity: hidden until the user hovers the tab, then
+    /// drawn dim, brightening on hover of the × glyph itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_close_button_color: Option<String>,
     /// Unknown top-level keys captured verbatim so that newer config keys
     /// (or user/plugin extensions) survive a load/save round-trip. Not
     /// considered when comparing two `Config`s for behavioural equality;
@@ -122,6 +130,7 @@ impl Default for Config {
             theme: "wezterm".to_string(),
             keymap: "wezterm".to_string(),
             locale: String::new(),
+            tab_close_button_color: None,
             extra: toml::Table::new(),
         }
     }
@@ -241,6 +250,7 @@ mod tests {
             },
             extra: toml::Table::new(),
             locale: String::new(),
+            tab_close_button_color: Some("#ff5555".to_string()),
         };
         cfg.save(&path).unwrap();
         let reloaded = Config::load_or_default(&path).unwrap();

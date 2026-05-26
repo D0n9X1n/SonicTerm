@@ -1279,6 +1279,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
         let (cols, rows) = renderer.cells();
         // Resize the migrated panes to the child window's grid and
@@ -1415,10 +1416,23 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();
             }
+            WindowEvent::CursorLeft { .. } => {
+                let changed = child.renderer.set_hover_cursor(None);
+                if changed {
+                    child.window.request_redraw();
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
                 let sf = child.renderer.scale_factor();
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                // Child window also drives the close-button hover dance
+                // through its OWN renderer — without this push the dim
+                // × stays the wrong brightness when the cursor crosses
+                // the glyph in a torn-out window.
+                if child.renderer.set_hover_cursor(Some((lx, ly))) {
+                    child.window.request_redraw();
+                }
                 if let Some(s) = child.drag_session.as_mut() {
                     s.current_pos = (lx, ly);
                     let title = child
@@ -1818,6 +1832,25 @@ impl App {
                 pad[1],
                 pad[2],
                 pad[3],
+            );
+        }
+
+        // Tab close-button override (wezterm `tab_close_button_color`).
+        // Diff against the live config so an edit that adds, changes,
+        // or clears the value propagates to the main + every child
+        // renderer without a restart.
+        if new_cfg.tab_close_button_color != self.config.tab_close_button_color {
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
+            }
+            for child in self.child_windows.values_mut() {
+                child
+                    .renderer
+                    .set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
+            }
+            tracing::info!(
+                "live-reload: tab_close_button_color -> {:?}",
+                new_cfg.tab_close_button_color
             );
         }
 
@@ -2560,6 +2593,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         if let Some(r) = self.renderer.as_mut() {
             r.set_titlebar_inset(integrated_titlebar_inset());
+            // Apply the user's `tab_close_button_color` from sonic.toml
+            // BEFORE the first frame so a custom always-visible × shows
+            // up on the very first paint, not after a config edit.
+            r.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         }
 
         // Seed the first tab + pane now that the window + renderer exist.
@@ -2865,10 +2902,33 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             // -- Mouse --
+            WindowEvent::CursorLeft { .. } => {
+                let mut redraw = false;
+                if let Some(r) = self.renderer.as_mut() {
+                    redraw = r.set_hover_cursor(None);
+                }
+                if redraw {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
                 let sf = self.scale_factor as f32;
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                let mut hover_redraw = false;
+                if let Some(r) = self.renderer.as_mut() {
+                    hover_redraw = r.set_hover_cursor(Some((lx, ly)));
+                }
+                if hover_redraw {
+                    // A bare hover-move over the tab bar must repaint —
+                    // otherwise the muted × → bright × transition lags
+                    // until the next unrelated event.
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 if let Some(s) = self.drag_session.as_mut() {
