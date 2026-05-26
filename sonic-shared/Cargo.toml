@@ -46,6 +46,8 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+image_hasher = "3"
 
 [[example]]
 name = "pane_smoke"
