@@ -24,6 +24,7 @@ pub mod selection;
 pub mod shape;
 pub mod swash_rasterizer;
 pub mod tab_drag;
+pub mod tab_title;
 pub mod tabbar_view;
 pub mod tabs;
 pub mod text_pipeline;

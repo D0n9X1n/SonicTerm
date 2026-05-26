@@ -42,6 +42,15 @@ impl PtyHandle {
     pub fn kill(&self) {
         let _ = self.child.lock().kill();
     }
+
+    /// Process id of the underlying shell, if the platform reports it. Used
+    /// by the tab-title renderer to probe the foreground process running in
+    /// this pane's pty (e.g. "zsh" vs "nvim" vs "ssh"). Returns `None` if
+    /// the OS layer doesn't expose a pid (rare) or if the child has already
+    /// exited.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().process_id()
+    }
 }
 
 impl Drop for PtyHandle {

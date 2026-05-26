@@ -19,6 +19,7 @@ pub mod glyph_key;
 pub mod grid;
 pub mod hyperlink;
 pub mod keymap;
+pub mod proc_info;
 pub mod pty;
 pub mod ssh;
 pub mod theme;
