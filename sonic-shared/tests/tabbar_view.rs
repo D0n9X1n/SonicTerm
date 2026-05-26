@@ -86,3 +86,28 @@ fn bar_background_click_between_tabs_swallows_to_active() {
     let hit = layout.hit(gap_x, 1.0);
     assert_eq!(hit, Some(TabHit::Activate(1)));
 }
+
+#[test]
+fn hidden_bar_does_not_capture_clicks() {
+    // Regression: when the tab bar is toggled off, the visual is gone
+    // but earlier code still routed clicks in that pixel region to the
+    // tab bar — an invisible UI silently swallowing input. A hidden
+    // layout must report no hits anywhere.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute(&bar, 800.0).with_visible(false);
+    // (10, 5) would normally land squarely inside tab 0.
+    assert_eq!(layout.hit(10.0, 5.0), None);
+    // The new-tab button region is also dead.
+    assert_eq!(layout.hit(790.0, 10.0), None);
+    // And `point_over_bar` agrees.
+    assert!(!layout.point_over_bar(10.0, 5.0));
+}
+
+#[test]
+fn visible_bar_still_captures_clicks() {
+    // Sanity: with_visible(true) is the default and preserves behavior.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute(&bar, 800.0).with_visible(true);
+    assert!(matches!(layout.hit(10.0, 5.0), Some(TabHit::Activate(0))));
+    assert!(layout.point_over_bar(10.0, 5.0));
+}

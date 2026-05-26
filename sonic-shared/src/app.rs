@@ -189,10 +189,15 @@ pub fn run_with(
 /// and applies the new config (theme/font/keymap). Without this the
 /// channel-based delivery would sit queued under `ControlFlow::Wait`
 /// until an unrelated event arrived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     /// A new `sonic.toml` parse is ready on the watcher channel.
     ConfigChanged,
+    /// A pending action arrived from the macOS native menubar. The
+    /// payload itself is queued in the static
+    /// [`crate::menubar_bridge`] buffer; this variant is just the
+    /// wake-up signal so the loop drains it.
+    MenuAction,
 }
 
 /// Same as [`run`] but installs a platform-specific OS-drag sink.
@@ -233,6 +238,10 @@ pub fn run_with_os_drag_and_pending(
         EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    // Install the same proxy for the macOS native menubar bridge so
+    // NSMenu selectors can wake the event loop and dispatch through
+    // `run_action`. Safe + cheap on platforms without a menubar.
+    crate::menubar_bridge::install_proxy(proxy.clone());
     let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
@@ -358,6 +367,11 @@ pub struct App {
     /// and KILLS the local tab instead of spawning a child window.
     /// Installed by the platform bin via [`run_with_os_drag`].
     os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
+    /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
+    /// Tab Bar action has hidden the tab bar chrome. Defaults to
+    /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
+    /// + hit-test code can read it on each frame.
+    tab_bar_visible: bool,
 }
 
 impl App {
@@ -412,6 +426,7 @@ impl App {
             event_loop_proxy,
             i18n,
             os_drag_sink: None,
+            tab_bar_visible: true,
         }
     }
 
@@ -797,7 +812,8 @@ impl App {
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
         let candidates = self.child_windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+                .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
         crate::tab_drag::find_drop_target(global, candidates)
@@ -819,14 +835,19 @@ impl App {
         if let Some(main) = self.window.as_ref() {
             let geom = window_geom(main);
             let width = self.renderer.as_ref().map(|r| r.width()).unwrap_or(0) as f32;
-            candidates.push((main.id(), geom, TabBarLayout::compute(&self.tabs, width)));
+            candidates.push((
+                main.id(),
+                geom,
+                TabBarLayout::compute(&self.tabs, width).with_visible(self.tab_bar_visible),
+            ));
         }
         for (id, c) in &self.child_windows {
             if *id == src_id {
                 continue;
             }
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+                .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
         crate::tab_drag::find_drop_target(global, candidates)
@@ -1329,7 +1350,8 @@ impl App {
                 ElementState::Pressed => {
                     let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
                     let bar_width = child.renderer.width() as f32;
-                    let layout = TabBarLayout::compute(&child.tabs, bar_width);
+                    let layout = TabBarLayout::compute(&child.tabs, bar_width)
+                        .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
@@ -1639,7 +1661,8 @@ impl App {
     }
 
     /// Run a keymap-bound action. Returns true if handled (= consume the key).
-    fn run_action(&mut self, action: &Action) -> bool {
+    #[doc(hidden)]
+    pub fn run_action(&mut self, action: &Action) -> bool {
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::PasteFromClipboard => self.paste_clipboard(),
@@ -1669,10 +1692,12 @@ impl App {
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
             Action::OpenSshPane(target) => self.open_ssh_pane(target),
+            Action::IncreaseFontSize => self.change_font_size(1.0),
+            Action::DecreaseFontSize => self.change_font_size(-1.0),
+            Action::ResetFontSize => self.reset_font_size(),
+            Action::ApplyTheme(name) => self.apply_theme_by_name(name),
+            Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::Scroll(_)
-            | Action::IncreaseFontSize
-            | Action::DecreaseFontSize
-            | Action::ResetFontSize
             | Action::ToggleFullscreen
             | Action::ResizePane { .. }
             | Action::NewWindow => {
@@ -1680,6 +1705,151 @@ impl App {
             }
         }
         true
+    }
+
+    /// Live-adjust the terminal font size by `delta` points, clamped
+    /// to `[8.0, 48.0]`. Mirrors the existing live-reload path used
+    /// by the prefs window + sonic.toml watcher.
+    fn change_font_size(&mut self, delta: f32) {
+        let cur = self.config.font.size;
+        let next = (cur + delta).clamp(8.0, 48.0);
+        if (next - cur).abs() < f32::EPSILON {
+            return;
+        }
+        self.set_font_size(next);
+    }
+
+    /// Reset terminal font size to [`sonic_core::config::FontConfig::default()`].
+    fn reset_font_size(&mut self) {
+        let default = sonic_core::config::FontConfig::default().size;
+        if (self.config.font.size - default).abs() < f32::EPSILON {
+            return;
+        }
+        self.set_font_size(default);
+    }
+
+    fn set_font_size(&mut self, size: f32) {
+        self.config.font.size = size;
+        let family = self.config.font.family.clone();
+        let line_h = self.config.font.line_height;
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_font(&family, size, line_h);
+            let (cols, rows) = r.cells();
+            resize_all_panes(&self.panes, cols, rows);
+        }
+        for child in self.child_windows.values_mut() {
+            child.renderer.set_font(&family, size, line_h);
+            let (cols, rows) = child.renderer.cells();
+            resize_all_panes(&child.panes, cols, rows);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        for child in self.child_windows.values() {
+            child.window.request_redraw();
+        }
+        tracing::info!("font size -> {size}pt");
+    }
+
+    /// Live-apply a bundled theme by name. Uses the registered
+    /// [`ThemeLoader`] if present; logs and skips otherwise. Updates
+    /// `self.theme`, retints every renderer, persists the choice to
+    /// `self.config.theme` so the next config save writes it.
+    fn apply_theme_by_name(&mut self, name: &str) {
+        if self.config.theme == name {
+            return;
+        }
+        let Some(loader) = self.theme_loader.as_ref() else {
+            tracing::warn!("ApplyTheme({name}): no theme_loader installed; ignoring");
+            return;
+        };
+        let theme = match loader(name) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("ApplyTheme({name}): load failed: {e:#}");
+                return;
+            }
+        };
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_theme(&theme);
+        }
+        for child in self.child_windows.values_mut() {
+            child.renderer.set_theme(&theme);
+        }
+        self.theme = theme;
+        self.config.theme = name.to_string();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        for child in self.child_windows.values() {
+            child.window.request_redraw();
+        }
+        tracing::info!("theme -> {name}");
+    }
+
+    fn toggle_tab_bar(&mut self) {
+        self.tab_bar_visible = !self.tab_bar_visible;
+        let visible = self.tab_bar_visible;
+        tracing::info!("tab bar visible -> {visible}");
+        if let Some(r) = self.renderer.as_mut() {
+            if r.set_tab_bar_visible(visible) {
+                let (cols, rows) = r.cells();
+                resize_all_panes(&self.panes, cols, rows);
+            }
+        }
+        for child in self.child_windows.values_mut() {
+            if child.renderer.set_tab_bar_visible(visible) {
+                let (cols, rows) = child.renderer.cells();
+                resize_all_panes(&child.panes, cols, rows);
+            }
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        for child in self.child_windows.values() {
+            child.window.request_redraw();
+        }
+    }
+
+    /// Pump actions queued by the macOS native menubar through
+    /// [`Self::run_action`]. Called from the `UserEvent::MenuAction`
+    /// wake-up arm.
+    fn drain_menubar_actions(&mut self) {
+        for action in crate::menubar_bridge::drain() {
+            tracing::debug!("menubar action: {action:?}");
+            self.run_action(&action);
+        }
+    }
+
+    /// Read-only accessor used by tests and (eventually) the
+    /// renderer to honor the View → Toggle Tab Bar menu item.
+    #[doc(hidden)]
+    pub fn tab_bar_visible(&self) -> bool {
+        self.tab_bar_visible
+    }
+
+    /// Test-only accessor: current live font size.
+    #[doc(hidden)]
+    pub fn font_size_for_test(&self) -> f32 {
+        self.config.font.size
+    }
+
+    /// Test-only accessor: current live theme name.
+    #[doc(hidden)]
+    pub fn theme_name_for_test(&self) -> &str {
+        &self.theme.name
+    }
+
+    /// Test-only accessor: snapshot of the live `Config`.
+    #[doc(hidden)]
+    pub fn config_for_test(&self) -> &sonic_core::config::Config {
+        &self.config
+    }
+
+    /// Test-only: install a [`ThemeLoader`].
+    #[doc(hidden)]
+    pub fn set_theme_loader_for_test(&mut self, loader: ThemeLoader) {
+        self.theme_loader = Some(loader);
     }
 
     /// Handle [`Action::OpenSshPane`]. Always validates the target string
@@ -2235,6 +2405,7 @@ impl ApplicationHandler<UserEvent> for App {
         // request_redraw()s every live window.
         match event {
             UserEvent::ConfigChanged => self.poll_config_reload(),
+            UserEvent::MenuAction => self.drain_menubar_actions(),
         }
     }
 
@@ -2499,7 +2670,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let py = self.cursor_pos.1 as f32;
                     let window_width =
                         self.window.as_ref().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
-                    let layout = TabBarLayout::compute(&self.tabs, window_width);
+                    let layout = TabBarLayout::compute(&self.tabs, window_width)
+                        .with_visible(self.tab_bar_visible);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {

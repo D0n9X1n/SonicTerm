@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
 #[cfg(target_os = "macos")]
+mod menubar;
+#[cfg(target_os = "macos")]
 mod os_drag_mac;
 
 fn main() -> Result<()> {
@@ -16,6 +18,14 @@ fn main() -> Result<()> {
     let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "macos")]
     {
+        // Install the native NSMenu before winit creates its event
+        // loop. Theme list is built once from the bundled
+        // `assets/themes/` directory — adding a theme file requires
+        // a restart, matching the rest of the bundled-assets
+        // contract.
+        let themes_dir = asset_dir().join("themes");
+        let themes = menubar::scan_themes(&themes_dir);
+        menubar::install(&themes);
         let pending = os_drag_mac::take_pending_payload();
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
@@ -32,6 +42,11 @@ fn main() -> Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // FUTURE: Win32 menu bar — native Windows menus are usually
+        // in-window, so wiring them belongs alongside the Win32
+        // chrome work in `sonic-windows`. The cross-platform
+        // `Action` plumbing + `menubar_bridge` queue are already
+        // ready when that lands.
         sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
     }
 }

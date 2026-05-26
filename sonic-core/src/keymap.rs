@@ -58,6 +58,13 @@ pub enum Action {
     DecreaseFontSize,
     ResetFontSize,
 
+    // Theme (live-apply by name; persists to config on next save).
+    // Bound from the View → Theme submenu in the macOS menubar.
+    ApplyTheme(String),
+
+    // UI chrome
+    ToggleTabBar,
+
     // Window
     NewWindow,
     ToggleFullscreen,

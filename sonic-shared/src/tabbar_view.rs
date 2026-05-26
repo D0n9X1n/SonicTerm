@@ -104,6 +104,10 @@ pub struct TabBarLayout {
     pub tabs: Vec<TabRect>,
     pub new_tab: Rect,
     pub active: Option<usize>,
+    /// When `false`, the tab bar is hidden and [`Self::hit`] /
+    /// [`Self::point_over_bar`] always return as if the cursor missed
+    /// the bar — so a hidden bar never silently captures clicks.
+    pub visible: bool,
 }
 
 impl TabBarLayout {
@@ -122,7 +126,7 @@ impl TabBarLayout {
         let n = bar.len();
         let mut tabs: Vec<TabRect> = Vec::with_capacity(n);
         if n == 0 {
-            return Self { bar: bar_rect, tabs, new_tab, active: None };
+            return Self { bar: bar_rect, tabs, new_tab, active: None, visible: true };
         }
 
         // Region available for tabs is from BAR_LEFT_PAD to the left edge of
@@ -149,13 +153,26 @@ impl TabBarLayout {
             x += per_tab + TAB_GAP;
         }
 
-        Self { bar: bar_rect, tabs, new_tab, active: Some(bar.active_index()) }
+        Self { bar: bar_rect, tabs, new_tab, active: Some(bar.active_index()), visible: true }
+    }
+
+    /// Builder-style helper to mark the layout as hidden. A hidden
+    /// layout reports no hits and no over-bar containment, so callers
+    /// can pass the layout through unchanged and still get correct
+    /// click routing when the tab bar is toggled off.
+    #[must_use]
+    pub fn with_visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
     }
 
     /// Map a pixel position to a tab-bar action. Returns `None` when the
     /// click is outside the bar entirely (caller should treat it as a
     /// terminal-area click in that case).
     pub fn hit(&self, px: f32, py: f32) -> Option<TabHit> {
+        if !self.visible {
+            return None;
+        }
         if !self.bar.contains(px, py) {
             return None;
         }
@@ -180,7 +197,7 @@ impl TabBarLayout {
     /// cross-window drag-merge flow to decide "is the cursor currently
     /// over THIS window's bar?".
     pub fn point_over_bar(&self, px: f32, py: f32) -> bool {
-        self.bar.contains(px, py)
+        self.visible && self.bar.contains(px, py)
     }
 
     /// Compute the insertion slot for a tab dropped at `(px, py)`. The
