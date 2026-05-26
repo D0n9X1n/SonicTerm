@@ -161,6 +161,16 @@ pub struct GpuRenderer {
     tab_active_fg: GColor,
     tab_inactive_fg: GColor,
     tab_close_fg: [f32; 4],
+    /// Optional user override for the close-button color. When `Some`,
+    /// the × is always drawn at this color (matching WezTerm's
+    /// `tab_close_button_color`). When `None`, the close button follows
+    /// WezTerm fancy-mode parity: hidden until the cursor is over the
+    /// tab, dim by default, brightened to `tab_active_fg` when the
+    /// cursor is over the × glyph itself.
+    tab_close_override: Option<[f32; 4]>,
+    /// Last reported cursor position in LOGICAL pixels, or `None` when
+    /// the cursor is outside the window. Drives tab-close hover state.
+    hover_cursor: Option<(f32, f32)>,
     /// Color for the wezterm-style vertical bar drawn between adjacent
     /// inactive tabs. A dim variant of the inactive-fg works in every
     /// theme; we precompute it here so the per-frame render path stays
@@ -251,6 +261,18 @@ struct FrameKey {
     /// Number of inactive-pane cursors drawn this frame. Folded in so
     /// adding/removing a split refreshes the cache.
     inactive_cursor_count: u32,
+    /// Index of the tab the cursor is currently over, or `u32::MAX`
+    /// when the cursor is not over any tab. Drives the WezTerm-style
+    /// "× only visible on tab hover" behaviour — moving the cursor
+    /// between tabs must invalidate the cached frame.
+    hover_tab: u32,
+    /// `1` when the cursor is over the close-button rect of the hovered
+    /// tab, `0` otherwise. Drives the dim → bright × transition.
+    hover_close: u8,
+    /// `1` when an always-on close-button color override is active.
+    /// Folded in so toggling the config option live invalidates the
+    /// frame cache.
+    close_override: u8,
 }
 
 impl GpuRenderer {
@@ -469,6 +491,8 @@ impl GpuRenderer {
             tab_active_fg,
             tab_inactive_fg,
             tab_close_fg,
+            tab_close_override: None,
+            hover_cursor: None,
             tab_separator,
             hyperlink_underline,
             hyperlink_tint,
@@ -793,6 +817,30 @@ impl GpuRenderer {
         self.last_frame_key = None;
     }
 
+    /// Update the renderer's view of where the cursor is, in LOGICAL
+    /// pixels (origin top-left). Drives WezTerm fancy-mode close-button
+    /// hover behaviour — when the cursor is over a tab, the dim × is
+    /// shown; when it's over the × itself the glyph brightens to
+    /// `tab_active_fg`. Pass `None` when the cursor leaves the window.
+    pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>) {
+        if self.hover_cursor != pos {
+            self.hover_cursor = pos;
+            self.last_frame_key = None;
+        }
+    }
+
+    /// Optional override for the close-button color. When `Some`, the ×
+    /// is drawn in this color and is always visible (matching WezTerm's
+    /// `tab_close_button_color` config). Accepts a `#rrggbb` string;
+    /// invalid strings are ignored.
+    pub fn set_tab_close_override(&mut self, color: Option<&str>) {
+        let parsed = color.map(|c| hex_to_rgba(c, 1.0));
+        if self.tab_close_override != parsed {
+            self.tab_close_override = parsed;
+            self.last_frame_key = None;
+        }
+    }
+
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
@@ -1000,6 +1048,34 @@ impl GpuRenderer {
         let blink_elapsed = self.blink_epoch.elapsed();
         let blink_alpha = cursor::blink_alpha(blink_elapsed, self.cursor_blink);
         let blink_phase = cursor::phase_bucket(blink_elapsed, self.cursor_blink);
+        // Compute hover state against the tab bar layout. Done before
+        // the FrameKey is built so the cache invalidates as the cursor
+        // moves between tabs / on and off the × glyph.
+        let (hover_tab_idx, hover_close_hit) = {
+            let mut idx: u32 = u32::MAX;
+            let mut on_close: u8 = 0;
+            if self.tab_bar_visible {
+                if let Some((cx, cy)) = self.hover_cursor {
+                    let sw_log = self.config.width as f32 / self.scale_factor;
+                    let layout = TabBarLayout::compute_with_height(
+                        tabs,
+                        sw_log,
+                        self.tab_bar_logical_height(),
+                    )
+                    .with_top_offset(self.titlebar_inset);
+                    for t in &layout.tabs {
+                        if t.bg.contains(cx, cy) {
+                            idx = t.index as u32;
+                            if t.close.contains(cx, cy) {
+                                on_close = 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            (idx, on_close)
+        };
         let key = FrameKey {
             grid_revision: grid.revision(),
             selection: selection.copied(),
@@ -1019,6 +1095,9 @@ impl GpuRenderer {
             cursor_phase: blink_phase,
             window_focused: self.window_focused,
             inactive_cursor_count: self.inactive_pane_cursors.len() as u32,
+            hover_tab: hover_tab_idx,
+            hover_close: hover_close_hit,
+            close_override: u8::from(self.tab_close_override.is_some()),
         };
         if Some(key) == self.last_frame_key {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -1524,33 +1603,62 @@ impl GpuRenderer {
                         });
                     }
                 }
-                // Close button × drawn as two crossing thin quads.
-                let cx = t.close.x;
-                let cy = t.close.y;
-                let cs = t.close.w;
-                let thick = 1.5_f32;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(
-                        cx + cs * 0.25,
-                        cy + cs * 0.5 - thick / 2.0,
-                        cs * 0.5,
-                        thick,
-                        sw,
-                        sh,
-                    ),
-                    color: self.tab_close_fg,
-                });
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(
-                        cx + cs * 0.5 - thick / 2.0,
-                        cy + cs * 0.25,
-                        thick,
-                        cs * 0.5,
-                        sw,
-                        sh,
-                    ),
-                    color: self.tab_close_fg,
-                });
+                // Close button × — WezTerm fancy-mode parity:
+                //   * if user set `tab_close_button_color`, always shown
+                //     in that color;
+                //   * otherwise hidden until the cursor is over THIS
+                //     tab, drawn dim by default, brightened to the
+                //     active-tab fg when the cursor is over the × rect.
+                let cursor_on_this_tab = hover_tab_idx == t.index as u32;
+                let cursor_on_close = cursor_on_this_tab && hover_close_hit == 1;
+                let draw_close = self.tab_close_override.is_some() || cursor_on_this_tab;
+                if draw_close {
+                    let close_color = if let Some(o) = self.tab_close_override {
+                        o
+                    } else if cursor_on_close {
+                        // Bright on glyph-hover — same path the title
+                        // takes (sRGB → linear so quads composite
+                        // identically to glyphon-rendered text).
+                        glyphon_color_to_linear_rgba(self.tab_active_fg)
+                    } else {
+                        // Dim default — multiply the configured close-fg
+                        // alpha by 0.55 so the × is clearly subordinate
+                        // to the title. Keeps theme color intact.
+                        let mut c = self.tab_close_fg;
+                        c[3] *= 0.55;
+                        c
+                    };
+                    let cx = t.close.x;
+                    let cy = t.close.y;
+                    // Slightly tighter glyph (~12px inside a 16px rect)
+                    // so it reads as a small, polished icon rather
+                    // than a heavy button face.
+                    let inset = t.close.w * 0.125;
+                    let glyph = t.close.w - inset * 2.0;
+                    let thick = 1.5_f32;
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(
+                            cx + inset,
+                            cy + t.close.h * 0.5 - thick / 2.0,
+                            glyph,
+                            thick,
+                            sw,
+                            sh,
+                        ),
+                        color: close_color,
+                    });
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(
+                            cx + t.close.w * 0.5 - thick / 2.0,
+                            cy + inset,
+                            thick,
+                            glyph,
+                            sw,
+                            sh,
+                        ),
+                        color: close_color,
+                    });
+                }
             }
             // `+` new-tab button
             let nt = layout.new_tab;

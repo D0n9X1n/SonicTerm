@@ -1279,6 +1279,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
         let (cols, rows) = renderer.cells();
         // Resize the migrated panes to the child window's grid and
@@ -2865,10 +2866,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             // -- Mouse --
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_hover_cursor(None);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
                 let sf = self.scale_factor as f32;
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_hover_cursor(Some((lx, ly)));
+                }
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 if let Some(s) = self.drag_session.as_mut() {
