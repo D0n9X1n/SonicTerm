@@ -83,7 +83,7 @@ fn local_to_global_handles_negative_drag() {
 
 #[test]
 fn global_to_local_clips_to_inner_area() {
-    let g = WindowGeom { inner_origin: (100, 50), inner_size: (400, 300) };
+    let g = WindowGeom::new((100, 50), (400, 300));
     assert!(global_to_local(g, (50, 200)).is_none()); // left of window
     assert!(global_to_local(g, (600, 200)).is_none()); // right of window
     assert_eq!(global_to_local(g, (100, 50)), Some((0.0, 0.0)));
@@ -94,11 +94,11 @@ fn drop_target_picks_correct_window_and_slot() {
     // Two non-overlapping windows side by side.
     let bar_a = synth_bar(3);
     let layout_a = TabBarLayout::compute(&bar_a, 800.0);
-    let geom_a = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+    let geom_a = WindowGeom::new((0, 0), (800, 600));
 
     let bar_b = synth_bar(4);
     let layout_b = TabBarLayout::compute(&bar_b, 800.0);
-    let geom_b = WindowGeom { inner_origin: (900, 0), inner_size: (800, 600) };
+    let geom_b = WindowGeom::new((900, 0), (800, 600));
 
     // Global cursor at (910, 10) → over window B, near left edge → slot 0.
     let cands = vec![("a", geom_a, layout_a.clone()), ("b", geom_b, layout_b.clone())];
@@ -118,7 +118,7 @@ fn drop_target_skips_source_window() {
     // If caller pre-filters out source, find_drop_target won't pick it.
     let bar = synth_bar(2);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let geom = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+    let geom = WindowGeom::new((0, 0), (800, 600));
     // Cursor over the (excluded) source → no candidate → None.
     let cands: Vec<(&str, WindowGeom, TabBarLayout)> = Vec::new();
     assert!(find_drop_target((100, 10), cands).is_none());
