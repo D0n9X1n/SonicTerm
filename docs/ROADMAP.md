@@ -128,19 +128,16 @@ in their own window is the next slice.
 2. **Check current state**: this file, `CHANGELOG.md`, `git log --oneline -20`.
 3. **Pick the highest-priority unchecked item from the next pending version.**
    If unsure, ask the user before starting.
-4. **Read the spec**: `docs/specs/2026-05-24-sonic-monorepo-bootstrap-design.md`
-   (parts of it are now superseded by this ROADMAP — header at the top of
-   the spec marks what still applies).
-5. **Follow `build-or-fix` skill**: usually one Standard or Complex PR per
+4. **Follow `build-or-fix` skill**: usually one Standard or Complex PR per
    version-level item. Don't bundle unrelated work.
-6. **Branch naming**: `feat/<topic>`, `fix/<topic>`, etc.
-7. **Local gate before push**:
+5. **Branch naming**: `feat/<topic>`, `fix/<topic>`, etc.
+6. **Local gate before push**:
    ```bash
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
-8. **Test bar**: every behavior change ships with a unit/integration test
+7. **Test bar**: every behavior change ships with a unit/integration test
    in the relevant crate's `tests/` folder. Workspace target: **never let
    test count regress.** Current floor: **171** as of v0.6 + per-crate
    `tests/` split (#27).
@@ -165,8 +162,9 @@ in their own window is the next slice.
   `toml 1`. Coordinate the next upgrade across all three.
 - **Release profile uses fat LTO + 1 codegen unit + strip + panic=abort.**
   Don't relax for "build is slow." Use `[profile.dev]` for fast iteration.
-- **Spec files live in `docs/specs/YYYY-MM-DD-<topic>-design.md`.**
-  Update this `ROADMAP.md` when shipping.
+- **Spec files**: kept in PRs/commit messages alongside the
+  [user guide](USER_GUIDE.md), not as standalone spec entries in this
+  repo. Update this `ROADMAP.md` when shipping.
 - **Crates live at the top level** (`sonic-core/`, `sonic-shared/`,
   `sonic-mac/`, `sonic-windows/`). The old `crates/` nesting was removed
   in `9c46c39`. Don't reintroduce it.
