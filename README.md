@@ -49,7 +49,7 @@ Sonic does all of that on macOS and Windows.
 | **Cross-process** tab drag (macOS) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Live config reload | ✅ | ✅ | ❌ | ✅ | ❌ |
 | Localized UI (en / zh-CN / ja) | ✅ | ❌ | ❌ | ❌ | ⚠️ macOS only |
-| Cross-platform | mac + win¹ | mac + win + linux | all | all | mac only |
+| Cross-platform | mac + win¹ | mac + win + linux | mac + linux | all | mac only |
 
 ¹ Linux support is deliberately deferred to v1.0 — see
 [`docs/ROADMAP.md`](docs/ROADMAP.md). We'd rather ship two great
