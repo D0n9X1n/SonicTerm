@@ -147,7 +147,6 @@ pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     }
 }
 
-
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)

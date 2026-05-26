@@ -199,6 +199,7 @@ mod tests {
                 cursor_shape: CursorShape::Bar,
             },
             extra: toml::Table::new(),
+            locale: String::new(),
         };
         cfg.save(&path).unwrap();
         let reloaded = Config::load_or_default(&path).unwrap();

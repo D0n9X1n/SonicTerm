@@ -55,6 +55,11 @@ fn placeholders_format_correctly() {
     // Same key in every locale uses `{ $text }`. Verifying just the
     // English bundle keeps the assertion language-stable; the other
     // bundles share the placeholder mechanic via Fluent itself.
+    // ENV_LOCK + remove_var because env_var_overrides_requested_locale
+    // (and others) toggle SONIC_LOCALE in parallel; without this guard
+    // we race and pick up "ja" instead of "en".
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("SONIC_LOCALE");
     let i = I18n::new(Some("en"));
     let out = i.t_args("ime-composing", Some(&[("text", "你好")]));
     assert!(out.contains("你好"), "placeholder missing in {out:?}");
