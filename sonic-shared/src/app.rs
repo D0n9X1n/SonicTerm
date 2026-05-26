@@ -1532,7 +1532,7 @@ impl ApplicationHandler for App {
                     // burning ~100% CPU as long as the VT thread had work
                     // queued). Holding the lock briefly is strictly cheaper
                     // than spinning the AppKit event loop.
-                    {
+                    let cursor_rc = {
                         let mut grid = pane.parser.lock();
                         // Mirror the latest OSC 0/2 title from the parser into
                         // the active tab so the tab bar reflects "vim foo" /
@@ -1561,7 +1561,42 @@ impl ApplicationHandler for App {
                             tracing::warn!("render error: {e}");
                         }
                         self.last_render = Instant::now();
+                        let g = grid.grid_mut();
+                        (g.cursor.row, g.cursor.col)
+                    };
+                    // Tell the OS where the active text cursor lives so the
+                    // IME candidate window (pinyin candidates, Japanese
+                    // romaji selector, Korean Hangul composer) appears
+                    // immediately below the cell being edited — not
+                    // pinned to the top-left corner of the screen as
+                    // happens when the area is never set.
+                    if let Some(w) = &self.window {
+                        let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
+                        let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
+                        let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
+                        let size = winit::dpi::PhysicalSize::new(
+                            r.cell_w.ceil() as u32,
+                            r.cell_h.ceil() as u32,
+                        );
+                        w.set_ime_cursor_area(pos, size);
                     }
+                }
+            }
+
+            WindowEvent::Focused(focused) => {
+                // Reset IME state across focus transitions. When focus is
+                // lost mid-composition, the OS IME panel detaches without
+                // sending us a Commit; dropping the preedit avoids replaying
+                // stale composition state on the next focus-in. Toggling
+                // `set_ime_allowed` nudges the OS to re-attach the input
+                // context cleanly on macOS / Windows.
+                self.ime.cancel();
+                if let Some(w) = &self.window {
+                    w.set_ime_allowed(focused);
+                    if focused {
+                        w.set_ime_allowed(true);
+                    }
+                    w.request_redraw();
                 }
             }
 
@@ -1796,11 +1831,16 @@ impl ApplicationHandler for App {
                 }
                 // While an IME composition is in flight, the OS owns the
                 // keystrokes — they will be delivered to us as Ime events
-                // instead. Forwarding them here would double-type. Escape
-                // remains a usable "cancel" for the user.
-                if self.ime.is_composing()
-                    && !matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                {
+                // instead. Forwarding them here would double-type. Esc
+                // cancels the in-flight composition (preedit dropped, no
+                // bytes sent to the PTY) instead of being forwarded.
+                if self.ime.is_composing() {
+                    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                        self.ime.cancel();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
                     return;
                 }
                 if self.search_active() {

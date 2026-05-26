@@ -78,6 +78,18 @@ impl ImeState {
         std::mem::take(&mut self.commit_buffer)
     }
 
+    /// Cancel an in-flight composition (Esc pressed, or focus lost). Drops
+    /// the preedit WITHOUT promoting it to the commit buffer, so no bytes
+    /// reach the PTY. Idempotent.
+    pub fn cancel(&mut self) {
+        self.preedit.clear();
+        self.cursor = None;
+        self.composing = false;
+        // Note: commit_buffer is left intact — a host may have already
+        // received a commit it hasn't drained yet, and cancel must not
+        // eat that.
+    }
+
     /// True while a non-empty preedit is in flight. The host should
     /// ignore regular `KeyboardInput` text events while this is true so
     /// the in-flight composition isn't typed twice.
