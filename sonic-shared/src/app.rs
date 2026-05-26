@@ -1326,6 +1326,7 @@ impl App {
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
+            Action::OpenSshPane(target) => self.open_ssh_pane(target),
             Action::Scroll(_)
             | Action::IncreaseFontSize
             | Action::DecreaseFontSize
@@ -1337,6 +1338,33 @@ impl App {
             }
         }
         true
+    }
+
+    /// Handle [`Action::OpenSshPane`]. Always validates the target string
+    /// before doing anything, so even in builds without the `ssh` feature
+    /// a malformed target is rejected loudly. Wiring to actually spawn an
+    /// `SshHandle`-backed pane lives behind the feature flag and is the
+    /// next follow-up PR (see PR description).
+    fn open_ssh_pane(&mut self, target: &str) {
+        match sonic_core::ssh::parse_target(target) {
+            Ok(parsed) => {
+                #[cfg(feature = "ssh")]
+                {
+                    tracing::info!("ssh: connecting to {parsed} (pane backend wiring pending)");
+                }
+                #[cfg(not(feature = "ssh"))]
+                {
+                    tracing::warn!(
+                        "ssh: target {parsed} parsed OK, but this build does not \
+                         include the `ssh` feature; rebuild with --features ssh"
+                    );
+                }
+                let _ = parsed; // silence unused-var when neither cfg branch above touches it
+            }
+            Err(e) => {
+                tracing::warn!("ssh: invalid target {target:?}: {e}");
+            }
+        }
     }
 
     fn open_search(&mut self) {

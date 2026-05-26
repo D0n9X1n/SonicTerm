@@ -10,6 +10,12 @@ description = "Sonic Terminal — shared: window, tabs, panes, app loop"
 [lints]
 workspace = true
 
+[features]
+default = []
+# Forwards to sonic-core/ssh so the bin crates can enable SSH at build time
+# with a single `--features ssh` on the workspace.
+ssh = ["sonic-core/ssh"]
+
 [dependencies]
 sonic-core.workspace = true
 winit.workspace = true

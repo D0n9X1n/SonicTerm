@@ -44,7 +44,10 @@ pub enum Action {
     SplitDown,
     ClosePane,
     FocusPane(Direction),
-    ResizePane { dir: Direction, amount: u16 },
+    ResizePane {
+        dir: Direction,
+        amount: u16,
+    },
 
     // Clipboard
     CopyToClipboard,
@@ -73,6 +76,15 @@ pub enum Action {
 
     // Config
     ReloadConfig,
+
+    /// Open a new pane connected to a remote shell over SSH. Argument is
+    /// a `user@host[:port]` target string; parsing/validation happens in
+    /// [`crate::ssh::parse_target`] before any connection attempt. The
+    /// action variant is always present so keymap deserialization works
+    /// regardless of whether the binary was built with the `ssh` feature;
+    /// the dispatch handler decides whether to actually connect or just
+    /// log "ssh disabled at build time".
+    OpenSshPane(String),
 }
 
 impl<'de> Deserialize<'de> for ActionWrapper {

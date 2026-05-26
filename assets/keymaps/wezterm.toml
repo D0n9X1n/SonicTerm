@@ -189,3 +189,9 @@ action = "scroll_to_prev_prompt"
 [[binding]]
 keys = "super+shift+down"
 action = "scroll_to_next_prompt"
+
+# --- SSH client (example; uncomment + edit target to enable) ---
+# Requires building sonic with `--features sonic-core/ssh`.
+# [[binding]]
+# keys = "super+shift+s"
+# action = { open_ssh_pane = "alice@dev.example.com:22" }

@@ -199,6 +199,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
+        Action::OpenSshPane(t) => format!("OpenSshPane({t})"),
     }
 }
 

@@ -11,6 +11,13 @@ description = "Sonic Terminal — core: VT parser, grid, PTY, config, keymap, th
 [lints]
 workspace = true
 
+[features]
+default = []
+# Optional SSH client backend. Pulls in russh + a tokio runtime, so it's
+# off by default to keep the cold build slim. Enable with
+# `cargo build -p sonic-core --features ssh` (or in the bin crate).
+ssh = ["dep:russh", "dep:tokio", "dep:async-trait"]
+
 [dependencies]
 vte.workspace = true
 portable-pty.workspace = true
@@ -27,6 +34,9 @@ tracing.workspace = true
 bytemuck.workspace = true
 bitflags.workspace = true
 serde_plain.workspace = true
+russh = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4"

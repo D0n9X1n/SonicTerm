@@ -27,6 +27,8 @@ unicode-segmentation = "1.13"
 # Async / runtime
 tokio = { version = "1.52", features = ["full"] }
 crossbeam-channel = "0.5"
+# SSH client (optional; enabled via sonic-core/ssh feature)
+russh = "0.46"
 parking_lot = "0.12"
 
 # Rendering — these three move as a coherent triple

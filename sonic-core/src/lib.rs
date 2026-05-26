@@ -20,6 +20,7 @@ pub mod grid;
 pub mod hyperlink;
 pub mod keymap;
 pub mod pty;
+pub mod ssh;
 pub mod theme;
 pub mod url_open;
 pub mod vt;
