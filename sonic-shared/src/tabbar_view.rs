@@ -64,6 +64,38 @@ pub enum TabHit {
     NewTab,
 }
 
+/// Minimum vertical drag distance below the bottom of the tab bar to
+/// promote a tab press into a tear-out gesture. Matches Firefox/Chrome.
+pub const TEAR_OUT_THRESHOLD_PX: f32 = 40.0;
+
+/// Result of evaluating a mouse-drag against the tab bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TearOut {
+    /// Index of the tab that was originally pressed.
+    pub tab_index: usize,
+    /// Pixel position where the drag was released / current cursor.
+    pub drop_position: (f32, f32),
+}
+
+/// Pure helper: was the press-then-move gesture a tear-out?
+///
+/// A tear-out fires when the cursor leaves the tab bar vertically by
+/// at least [`TEAR_OUT_THRESHOLD_PX`] pixels while the mouse button is
+/// still held. The caller owns the "is the mouse still down?" check —
+/// this function is mode-free so it can be unit-tested without winit.
+pub fn detect_tear_out(press_tab_index: usize, current_pos: (f32, f32)) -> Option<TearOut> {
+    let (cx, cy) = current_pos;
+    // The tab bar lives at y in [0, TAB_BAR_HEIGHT). A tear-out fires
+    // once the cursor moves at least THRESHOLD pixels below the bottom
+    // of the bar, regardless of horizontal position (so the user can
+    // drag straight down OR off to the side).
+    if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
+        Some(TearOut { tab_index: press_tab_index, drop_position: (cx, cy) })
+    } else {
+        None
+    }
+}
+
 /// Computed layout for the entire bar — bar background, every tab, and the
 /// `+` button.
 #[derive(Debug, Clone)]

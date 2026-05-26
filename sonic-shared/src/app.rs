@@ -38,9 +38,27 @@ use crate::{
     render::GpuRenderer,
     search::SearchState,
     selection::Selection,
-    tabbar_view::{TabBarLayout, TabHit},
+    tabbar_view::{detect_tear_out, TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
+
+/// A child terminal window spawned by tearing a tab off the bar.
+///
+/// v1 keeps this lightweight: it owns the OS window (so winit holds a
+/// reference and routes events to it) plus the pane state that used to
+/// live in the parent's tab. We deliberately do NOT spin up a second
+/// `GpuRenderer` here — the parallel render.rs PR is in flight, so the
+/// child window currently displays an empty native frame. The crucial
+/// invariant the v1 tests pin down is that the **PTY threads and grids
+/// migrate intact** (no orphan shells, no dropped output): the user can
+/// still keep typing into the original session, and a v2 follow-up will
+/// wire a renderer onto the child window.
+pub struct ChildWindow {
+    pub window: Arc<Window>,
+    pub tabs: TabBar,
+    pub tab_states: Vec<TabState>,
+    pub panes: HashMap<u64, PaneState>,
+}
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -87,7 +105,8 @@ pub struct TabState {
     pub search: Option<SearchState>,
 }
 
-struct App {
+#[doc(hidden)]
+pub struct App {
     theme: Theme,
     config: Config,
     keymap: Keymap,
@@ -113,10 +132,17 @@ struct App {
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
     command_palette: CommandPalette,
+    /// Tab index recorded on left-mouse-press inside a tab. Used to
+    /// detect the tear-out gesture (press → drag below bar → release).
+    pressed_tab: Option<usize>,
+    /// Windows spawned by tearing tabs out of the parent bar. Keyed by
+    /// winit WindowId so events route back to the right child.
+    child_windows: HashMap<WindowId, ChildWindow>,
 }
 
 impl App {
-    fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
+    #[doc(hidden)]
+    pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
         Self {
             theme,
             config,
@@ -140,6 +166,8 @@ impl App {
             pending_prefs_open: false,
             ime: ImeState::new(),
             command_palette: CommandPalette::new(),
+            pressed_tab: None,
+            child_windows: HashMap::new(),
         }
     }
 
@@ -274,6 +302,111 @@ impl App {
         if let Some(id) = self.tabs.tabs().get(index).map(|t| t.id) {
             self.tabs.close(id);
         }
+    }
+
+    /// Pure state transfer: pop tab at `index` out of this App's tab bar
+    /// + tab_states + panes map and return the detached pieces. The
+    /// returned `(Tab, TabState, HashMap<u64, PaneState>)` tuple has
+    /// every pane that belonged to the tab — PTY handles and parsers
+    /// transfer intact, so the underlying shell processes keep running
+    /// in the new owner. Caller is responsible for placing them into a
+    /// `ChildWindow` (or dropping them, which kills the shells via
+    /// `PtyHandle::Drop`).
+    ///
+    /// Returns `None` if `index` is out of range.
+    #[doc(hidden)]
+    pub fn detach_tab_state(
+        &mut self,
+        index: usize,
+    ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
+        if index >= self.tab_states.len() || index >= self.tabs.len() {
+            return None;
+        }
+        let tab = self.tabs.tabs().get(index).cloned()?;
+        let state = self.tab_states.remove(index);
+        let mut panes: HashMap<u64, PaneState> = HashMap::new();
+        for id in state.tree.leaves() {
+            if let Some(p) = self.panes.remove(&id) {
+                panes.insert(id, p);
+            }
+        }
+        self.tabs.close(tab.id);
+        Some((tab, state, panes))
+    }
+
+    /// Tear the tab at `index` out of this App and spawn it as a new
+    /// native window. Uses the supplied `ActiveEventLoop` to create the
+    /// child winit Window; the result is stored in `child_windows` so
+    /// events route back to it. If the index is invalid OR the
+    /// remaining bar would be empty (so tearing out is a no-op), this
+    /// is silently skipped.
+    fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) {
+        // Don't tear the only tab — that's a no-op (the new window
+        // would be identical to the old one, minus its renderer).
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let Some((tab, state, panes)) = self.detach_tab_state(index) else { return };
+
+        let attrs = Window::default_attributes()
+            .with_title(format!("Sonic — {}", tab.title))
+            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0));
+        let window = match el.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
+                // panes drop here, which kills the child shells via
+                // PtyHandle::Drop — acceptable for an OS-level failure.
+                return;
+            }
+        };
+        let win_id = window.id();
+        let mut child_tabs = TabBar::new();
+        let active_pane = state.active_pane;
+        child_tabs.push(tab);
+        let child = ChildWindow {
+            window,
+            tabs: child_tabs,
+            tab_states: vec![TabState { tree: state.tree, active_pane, search: state.search }],
+            panes,
+        };
+        self.child_windows.insert(win_id, child);
+        tracing::info!("tab torn out as new window; child_windows={}", self.child_windows.len());
+    }
+
+    #[doc(hidden)]
+    pub fn child_window_count(&self) -> usize {
+        self.child_windows.len()
+    }
+
+    /// Test-only: seed a synthetic tab with one pane that has no PTY
+    /// attached (just a Parser owning a fresh Grid). Lets integration
+    /// tests exercise tab/pane bookkeeping without spawning shells.
+    #[doc(hidden)]
+    pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
+        let pane_id = next_pane_id();
+        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+        self.panes.insert(pane_id, PaneState::new(parser, None));
+        self.tabs.push(Tab::new(title));
+        self.tab_states.push(TabState {
+            tree: PaneTree::leaf(pane_id),
+            active_pane: pane_id,
+            search: None,
+        });
+        pane_id
+    }
+
+    /// Test-only: read-only access to the internal panes map so tests
+    /// can assert "this pane id is gone after detach".
+    #[doc(hidden)]
+    pub fn __test_pane_ids(&self) -> Vec<u64> {
+        self.panes.keys().copied().collect()
+    }
+
+    /// Test-only: tab count.
+    #[doc(hidden)]
+    pub fn __test_tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     fn split_active(&mut self, dir: Direction) {
@@ -757,6 +890,16 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        // Tear-out child windows: handle close, otherwise swallow.
+        if self.child_windows.contains_key(&win_id) {
+            if matches!(event, WindowEvent::CloseRequested) {
+                // Dropping the ChildWindow drops PaneState → PtyHandle
+                // → kills the child shells. Matches the parent window
+                // close path.
+                self.child_windows.remove(&win_id);
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => el.exit(),
 
@@ -857,6 +1000,24 @@ impl ApplicationHandler for App {
             // -- Mouse --
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                // Tear-out detection: if a tab press is in flight and
+                // the cursor has dragged far enough below the bar, pop
+                // the tab into its own window.
+                if self.mouse_down {
+                    if let Some(idx) = self.pressed_tab {
+                        if let Some(t) =
+                            detect_tear_out(idx, (position.x as f32, position.y as f32))
+                        {
+                            self.pressed_tab = None;
+                            self.mouse_down = false;
+                            self.tear_out_tab(el, t.tab_index);
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                    }
+                }
                 if self.mouse_down {
                     if let Some(r) = self.renderer.as_ref() {
                         if let Some((row, col)) =
@@ -903,7 +1064,13 @@ impl ApplicationHandler for App {
                     let layout = TabBarLayout::compute(&self.tabs, window_width);
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
-                            TabHit::Activate(i) => self.tabs.activate(i),
+                            TabHit::Activate(i) => {
+                                self.tabs.activate(i);
+                                // Record the press so a subsequent drag
+                                // below the tab bar can be promoted to a
+                                // tear-out gesture.
+                                self.pressed_tab = Some(i);
+                            }
                             TabHit::Close(i) => self.close_tab_at(i),
                             TabHit::NewTab => {
                                 let n = self.tabs.len() + 1;
@@ -916,7 +1083,13 @@ impl ApplicationHandler for App {
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
-                        self.mouse_down = false;
+                        // Keep mouse_down=true when we recorded a tab
+                        // press so cursor-move can promote it to a
+                        // tear-out. Other hits (Close, NewTab) consume
+                        // the click fully.
+                        if self.pressed_tab.is_none() {
+                            self.mouse_down = false;
+                        }
                         return;
                     }
                     if let Some(r) = self.renderer.as_ref() {
@@ -943,6 +1116,7 @@ impl ApplicationHandler for App {
                 }
                 ElementState::Released => {
                     self.mouse_down = false;
+                    self.pressed_tab = None;
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;
