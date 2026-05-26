@@ -2,10 +2,6 @@
 
 Live SVG masters + baked exports for the Sonic Terminal icon.
 
-**Read first**: [`docs/brand/icon.md`](../../docs/brand/icon.md) — the
-official brand guide. It defines the palette, geometry, usage rules,
-and which file you should consume from.
-
 ## Layout
 
 ```
