@@ -69,14 +69,22 @@ this — only the account owner (`D0n9X1n`) can.
 ### Free-tier reminder
 
 Public repositories get **unlimited free Actions minutes on standard runners**
-regardless of plan. This repo (`D0n9X1n/sonic`) is **public**, so a pure
-billing block on it is unusual — it most often means:
+regardless of plan. **This repo (`D0n9X1n/sonic`) is currently PRIVATE**
+(verified via `gh repo view D0n9X1n/sonic --json visibility,owner` → `PRIVATE`,
+owner type `User`), so Actions minutes **are** metered against the personal
+account's free-tier quota and any overage is billed. That makes the billing
+block the expected failure mode when the quota is exhausted or the payment
+method has lapsed.
 
-- A **failed payment on a paid feature** (Copilot, private repo minutes, Pro
-  plan) has cascaded to disable all paid features account-wide, including
-  larger-runner / private-repo Actions billing, and the scheduler is rejecting
-  jobs defensively. Fixing the payment method unblocks everything.
-- Or the account is using a non-standard runner image (it isn't — the matrix is
+Common upstream causes:
+
+- A **failed payment on a paid feature** (Copilot, private repo minute
+  overage, Pro plan) has cascaded to disable all paid features account-wide,
+  and the scheduler rejects jobs defensively. Fixing the payment method
+  unblocks everything.
+- The personal free-tier minute budget for the month is exhausted (see §3 for
+  per-OS quotas) and the spending limit is still `$0`.
+- The account is using a non-standard runner image (it isn't — the matrix is
   `macos-14` + `windows-latest`, both standard).
 
 ---
@@ -86,33 +94,66 @@ billing block on it is unusual — it most often means:
 The release workflow (`.github/workflows/release.yml`) is triggered by pushing
 a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. It runs **two jobs** in parallel:
 
-| Job          | Runner          | Multiplier | Est. wall time | Est. billed minutes |
+| Job          | Runner          | Multiplier | Est. wall time | Weighted minutes    |
 | ------------ | --------------- | ---------- | -------------- | ------------------- |
-| `build-mac`  | `macos-14`      | **10×**    | 15–20 min      | 150–200             |
-| `build-win`  | `windows-latest`| **2×**     | 10–15 min      | 20–30               |
-| **Total**    |                 |            |                | **170–230**         |
+| `build-mac`  | `macos-14`      | **10×**    | ~15 min        | ~150                |
+| `build-win`  | `windows-latest`| **2×**     | ~10 min        | ~20                 |
+| **Total**    |                 |            |                | **~170 weighted**   |
+
+Plus per-push `ci.yml` runs (Linux 1× multiplier, ~10 min each = ~10 weighted
+min/push) which are essentially free against the generous Linux quota.
 
 (GitHub's [per-minute multipliers](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions#minute-multipliers):
 Linux 1×, Windows 2×, macOS 10×. macOS dominates the cost.)
 
-### Cost on free tier (public repo)
+### Personal-account free-tier quotas (this repo)
 
-**$0.** Public repos consume **no** billed Actions minutes on standard runners.
-A v0.8.0 release on this repo costs nothing once the account-level billing
-block is cleared — clearing the block is purely a gate to letting jobs start,
-not a per-run charge.
+For a personal (User-owned) **private** repo on the Free plan, GitHub grants:
 
-### Cost on private equivalent (for reference, not applicable here)
+- **2,000 macOS-weighted minutes / month** free, then **$0.08/min** metered.
+- **3,000 Windows-weighted minutes / month** free, then $0.016/min metered.
+- **50,000 Linux-weighted minutes / month** free, then $0.008/min metered.
 
-At GitHub's published rates ($0.08/min Linux, $0.16/min Windows, $0.08/min
-macOS for Pro, $0.16/min Windows / $0.08/min Linux / $0.08/min macOS metered):
+(Pro plan ups these to 3,000 / unlimited free Linux etc.; check
+<https://github.com/settings/billing> for the exact current allowance.)
 
-- macOS: 15 min × $0.08 = **$1.20**
-- Windows: 12 min × $0.016 = **$0.19**
-- **Total: ~$1.40 per release.**
+### Cost on the current (private) repo
 
-Even on a metered private account, a full v0.8.0 release fits inside the free
-$0–10/mo spend trivially.
+A single v0.8.0 release burns **~150 of the 2,000 free macOS-weighted
+minutes** (~7.5% of monthly quota) and **~20 of 3,000 Windows-weighted
+minutes**. As long as the monthly quota isn't already depleted by per-push
+`ci.yml` mac runs, the release itself is **$0 out of pocket**.
+
+If the macOS quota *is* depleted, the release costs ~150 min × $0.08 =
+**~$12** at metered rates. Windows overage adds ~$0.32. Linux runs are
+effectively free.
+
+### Recommendation — switch repo to public
+
+Making `D0n9X1n/sonic` **public** would:
+
+- Drop billed minutes for all standard-runner jobs to **$0** (public repos get
+  unlimited free Actions minutes on standard runners regardless of plan).
+- Remove the billing-block failure mode entirely — the scheduler stops
+  consulting account billing for public-repo standard-runner jobs.
+- Make the release badge / CI status visible to anyone (and reproducible by
+  contributors), which aligns with the project's eventual open-source posture.
+
+Worth doing at release time if the user is comfortable with the repo going
+public; until then, raise the spending limit to ~$15/month to absorb worst
+case.
+
+### Cost on the current (private) repo — quick reference
+
+At GitHub's published metered rates ($0.08/min macOS, $0.016/min Windows,
+$0.008/min Linux for personal private repos beyond the free quota):
+
+- macOS: ~15 min × $0.08 = **$1.20** per release (after quota).
+- Windows: ~10 min × $0.016 = **$0.16** per release (after quota).
+- **Total: ~$1.36 per release once quotas are exceeded.**
+
+Even fully metered, a full v0.8.0 release fits inside a $5/mo spend
+trivially.
 
 ### Why the release won't fire today
 
@@ -147,9 +188,15 @@ block, not to paper over it by removing coverage.
 ## 5. TL;DR
 
 - ✅ Confirmed billing-blocked (zero steps; explicit annotation; perms enabled).
-- ✅ Repo is public → standard-runner minutes are free → fix is account-level
-  billing, not repo config.
-- ✅ v0.8.0 release will cost **$0** in billed minutes once the block clears.
+- ⚠️ Repo is **private** (personal account) → standard-runner minutes ARE
+  metered against the personal account's free-tier quota. Fix is account-level
+  billing (payment method + spending limit at
+  <https://github.com/settings/billing>).
+- ✅ v0.8.0 release costs **~150 macOS-weighted + ~20 Windows-weighted
+  minutes** (~$0 within free quota, ~$1.36 fully metered).
+- 💡 Optional: making the repo **public** drops standard-runner billed minutes
+  to $0 and removes the billing-block failure mode entirely. Consider at
+  release time.
 - ❌ Do not tag v0.8.0 until the billing block is cleared at
   <https://github.com/settings/billing>, or the tag's release run will fail to
   start and no DMG/MSI artifacts will be produced.
