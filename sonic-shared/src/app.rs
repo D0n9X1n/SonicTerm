@@ -24,13 +24,14 @@ use sonic_core::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowId},
 };
 
 use crate::{
+    ime::ImeState,
     pane::PaneTree,
     prefs::{PrefsHit, PrefsState},
     render::GpuRenderer,
@@ -108,6 +109,8 @@ struct App {
     prefs_window: Option<Arc<Window>>,
     prefs_state: Option<PrefsState>,
     pending_prefs_open: bool,
+    /// IME composition state for CJK / other multi-key input methods.
+    ime: ImeState,
 }
 
 impl App {
@@ -133,6 +136,7 @@ impl App {
             prefs_window: None,
             prefs_state: None,
             pending_prefs_open: false,
+            ime: ImeState::new(),
         }
     }
 
@@ -636,6 +640,9 @@ impl ApplicationHandler for App {
                     + crate::tabbar_view::TAB_BAR_HEIGHT,
             ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
+        // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
+        // deliver preedit + commit events instead of raw keystrokes.
+        window.set_ime_allowed(true);
         self.scale_factor = window.scale_factor();
 
         let renderer = GpuRenderer::new(
@@ -872,8 +879,38 @@ impl ApplicationHandler for App {
                 }
             },
 
+            // -- IME (CJK / multi-key input methods) --
+            WindowEvent::Ime(ime_event) => {
+                match ime_event {
+                    Ime::Enabled => self.ime.handle_enabled(),
+                    Ime::Disabled => self.ime.handle_disabled(),
+                    Ime::Preedit(text, cursor) => {
+                        self.ime.handle_preedit(&text, cursor);
+                    }
+                    Ime::Commit(text) => {
+                        self.ime.handle_commit(&text);
+                        let committed = self.ime.take_commits();
+                        if !committed.is_empty() {
+                            self.write_to_pty(committed.into_bytes());
+                        }
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // While an IME composition is in flight, the OS owns the
+                // keystrokes — they will be delivered to us as Ime events
+                // instead. Forwarding them here would double-type. Escape
+                // remains a usable "cancel" for the user.
+                if self.ime.is_composing()
+                    && !matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    return;
+                }
                 if self.search_active() {
                     if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {

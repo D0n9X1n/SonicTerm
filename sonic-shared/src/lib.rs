@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod glyph_atlas;
+pub mod ime;
 pub mod pane;
 pub mod prefs;
 pub mod quad;
