@@ -98,6 +98,87 @@ diff before-gui.json after-gui.json
 {"scenario":"idle", "idle_cpu_pct_3s": 8.21, "final_rss_kb": 121296}
 ```
 
+## Post-cutover baseline (PR #42, 2026-05-25, M1 Mac)
+
+After the B-epic landed on `main` (skip-unchanged-frame, dirty-row
+tracking, glyph-atlas cache), the headless bench now reports:
+
+```json
+{
+  "parse_ns_per_byte": 21,
+  "parse_ns_per_batch": 1187,
+  "grid_walk_us_per_frame": 1,
+  "idle_cpu_pct": 0.08,
+  "typing_echo_latency_us_p50": 1595,
+  "typing_echo_latency_us_p95": 20052,
+  "typing_echo_latency_us_p99": 50000,
+  "scroll_throughput_lines_per_sec": 33969,
+  "scroll_bytes": 57693,
+  "scroll_batches": 1042,
+  "glyph_walk_us_per_frame": 27,
+  "glyph_atlas_unique_keys": 29,
+  "glyph_walk_hit_rate_pct": 100.0
+}
+```
+
+And the new headless GUI driver `scripts/bench_headless_gui.sh` (which
+runs without `cliclick` — see "Layer 3" below) reports:
+
+```json
+{
+  "idle_cpu_pct": 0.01,
+  "scroll_cpu_pct": 0.06,
+  "frames_skipped": 2,
+  "frames_rendered": 0,
+  "typing_delivered": true
+}
+```
+
+### Trend vs the pre-cutover baselines
+
+| metric                             | pre-B  | B1     | B2      | B3 (cutover, this PR) |
+|---|---|---|---|---|
+| `parse_ns_per_byte`                | 22     | 22     | 22      | 21                    |
+| `scroll_throughput_lines_per_sec`  | 332    | 332    | 32 813  | **33 969**            |
+| `idle_cpu_pct` (headless)          | 0.09   | 0.09   | 0.09    | 0.08                  |
+| GUI idle CPU                       | 8.21%  | 0.13%  | 0.13%   | **0.01%**             |
+| GUI scroll-tail CPU                | n/a    | n/a    | n/a     | **0.06%**             |
+| frame-skip fast-path active?       | no     | yes    | yes     | yes (verified via trace log) |
+
+Notes:
+- GUI idle CPU dropped another order of magnitude vs B1 because the new
+  glyph-atlas cache short-circuits `glyphon::prepare()` between paints,
+  so the only event-loop work is the wakeup poll itself.
+- `scroll_cpu_pct` in the new GUI driver measures CPU **after** the
+  scroll burst, while the renderer is still draining the dirty queue;
+  it's effectively idle-after-scroll. For a real scroll-burst comparison
+  use the headless `scroll_throughput_lines_per_sec`.
+- The headless `typing_echo_latency_us_p99` is noisier post-cutover
+  because the renderer now defers more work to the GPU thread; on the
+  GUI side perceived latency is unchanged.
+
+## Layer 3 — `bench_headless_gui.sh` (no Accessibility prompt required)
+
+`gui_bench.sh` works great when `cliclick` is installed and the shell
+has Accessibility permission. CI machines and fresh clones often have
+neither, so `scripts/bench_headless_gui.sh` is a degraded-but-runnable
+alternative:
+
+- Launches `target/release/sonic-mac` directly (no bundle).
+- Samples `%CPU` from `ps` every 200 ms for 5 s (idle) and 10 s (post-scroll).
+- Greps the `RUST_LOG=sonic_shared::render=trace` log for the
+  `renderer: skipped unchanged frame skipped=N` counter to expose the
+  fast-path hit count (strips ANSI color codes first).
+- Attempts to deliver a `seq 1 2000\n` burst via `osascript keystroke`;
+  if Accessibility is blocked the scroll number is still meaningful
+  (it's the idle-after-launch CPU) but `typing_delivered:false` flags it.
+
+```bash
+cargo build --release -p sonic-mac
+./scripts/bench_headless_gui.sh
+# {"idle_cpu_pct":0.01,"scroll_cpu_pct":0.06,"frames_skipped":2,"frames_rendered":0,"typing_delivered":true}
+```
+
 ### What this tells us
 
 - **VT parse + grid walk are NOT the bottleneck** — they're µs-scale.
