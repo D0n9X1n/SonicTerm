@@ -5,11 +5,9 @@
 //! by the per-instance color. This is the half of B3 that replaces
 //! glyphon's per-frame text shape + atlas-rebuild on the terminal grid.
 //!
-//! Wiring into `render.rs` is staged: the module is published, its
-//! shader compiles, and the data layout matches what the renderer
-//! will hand it, but the renderer still calls glyphon today. The
-//! cutover happens behind a follow-up PR that needs the GUI bench
-//! loop to verify pixel parity — that loop is not available headlessly.
+//! `render.rs` calls `draw()` once per frame, after the quad pass and
+//! before the glyphon `TextRenderer::render` pass that draws the tab
+//! bar + search bar.
 
 use wgpu::{
     BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
@@ -65,7 +63,15 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
     let x = inst.rect.x + c.x * inst.rect.z;
     let y = inst.rect.y + c.y * inst.rect.w;
     let u = mix(inst.uv.x, inst.uv.z, c.x);
-    let v = mix(inst.uv.y, inst.uv.w, c.y);
+    // Vertical flip: the quad's c.y=0 corner lands at NDC-y bottom
+    // (px_to_ndc gives rect.y = bottom-edge NDC value, h>0 grows
+    // upward). The glyph tile's v=0 row is the *top* of the rasterized
+    // bitmap, so c.y=0 must sample v=v1 (bottom of the tile) and c.y=1
+    // must sample v=v0 (top of the tile). Without this swap, glyphs
+    // render mirrored vertically and — combined with the baseline
+    // offset placing them inside the cell's empty padding — appear
+    // completely blank on most fonts.
+    let v = mix(inst.uv.w, inst.uv.y, c.y);
     var out: VsOut;
     out.pos = vec4<f32>(x, y, 0.0, 1.0);
     out.uv = vec2<f32>(u, v);

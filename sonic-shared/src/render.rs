@@ -20,38 +20,21 @@ use wgpu::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
+    glyph_atlas::{AtlasUpload, GlyphAtlas},
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
+    swash_rasterizer::SwashRasterizer,
     tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT},
     tabs::TabBar,
+    text_pipeline::{GlyphInstance, TextPipeline},
 };
 
-/// Internal: a contiguous run of cells that share text-attributes.
-struct SpanDesc {
-    range: std::ops::Range<usize>,
-    fg: GColor,
-    weight: glyphon::Weight,
-    italic: bool,
-}
-
-/// Per-row cache populated on first walk of each row and reused on
-/// subsequent frames as long as `Grid::is_row_dirty` says the row is
-/// clean. The win is avoiding the per-cell attribute walk for rows that
-/// haven't changed — concatenation of the cached `text` into the
-/// frame-wide buffer is cheap by comparison.
-struct RowCache {
-    /// Row text WITHOUT the trailing newline.
-    text: String,
-    /// Span descriptors with byte ranges local to `text` (no newline
-    /// offset). The renderer rebases these into the frame-wide buffer
-    /// when assembling the rich-text spans.
-    spans: Vec<SpanDesc>,
-    /// Underline runs for this row, columns only — the renderer wraps
-    /// them into `(row, col_a, col_b)` triples per frame.
-    underlines: Vec<(u16, u16)>,
-}
+// (Per-row cache + grid SpanDesc removed in the B3 cutover — the GPU
+// atlas does an O(1) lookup per cell, so the bookkeeping is wasted
+// work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
+// millisecond on the renderer thread.)
 
 #[allow(dead_code)]
 pub struct GpuRenderer {
@@ -67,10 +50,15 @@ pub struct GpuRenderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    buffer: Buffer,
     tab_buffer: Buffer,
     quad: QuadPipeline,
 
+    // B3 GPU text path for the terminal grid.
+    glyph_atlas: GlyphAtlas,
+    glyph_upload: AtlasUpload,
+    text_pipeline: TextPipeline,
+
+    font_family: String,
     font_size: f32,
     line_height: f32,
     pub cell_w: f32,
@@ -98,13 +86,6 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
-    /// Per-row span/text cache. One entry per visible grid row. The
-    /// cache is populated lazily during render() — entries for clean
-    /// rows are reused, dirty rows are rebuilt and replace the cache.
-    /// `cache_cols` records the column count the cache was built for;
-    /// any width change invalidates every entry.
-    row_cache: Vec<Option<RowCache>>,
-    cache_cols: u16,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -208,10 +189,19 @@ impl GpuRenderer {
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad = QuadPipeline::new(&device, format);
 
+        // B3 GPU text path. Allocate the CPU + GPU side of the glyph
+        // atlas up front so the first frame can stream tiles into it.
+        let glyph_atlas = GlyphAtlas::default_size();
+        let text_pipeline = TextPipeline::new(&device, format, 4096);
+        let glyph_upload =
+            AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
+
         let line_height = font_size * line_height_mult;
         let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut font_system, metrics);
-        buffer.set_size(&mut font_system, Some(size.width as f32), Some(size.height as f32));
+        // Grid no longer uses a glyphon Buffer — the atlas-backed
+        // text_pipeline draws it directly. We still construct
+        // `metrics` to share it with measure_cell below.
+        let _ = metrics;
 
         // A second buffer is used for the tab-bar titles. Tab titles use a
         // tighter line height than the terminal grid; one buffer per bar
@@ -264,9 +254,12 @@ impl GpuRenderer {
             viewport,
             atlas,
             text_renderer,
-            buffer,
             tab_buffer,
             quad,
+            glyph_atlas,
+            glyph_upload,
+            text_pipeline,
+            font_family: font_family.to_string(),
             font_size,
             line_height,
             cell_w,
@@ -290,8 +283,6 @@ impl GpuRenderer {
             search_buffer,
             last_frame_key: None,
             skipped_frames: 0,
-            row_cache: Vec::new(),
-            cache_cols: 0,
         })
     }
 
@@ -301,16 +292,6 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
-        // Window resize doesn't directly mean the grid cols changed,
-        // but the cached row text was sized for the old viewport — be
-        // safe and flush.
-        self.row_cache.clear();
-        self.cache_cols = 0;
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
         self.tab_buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
@@ -436,201 +417,112 @@ impl GpuRenderer {
         // that never actually got drawn, and the next redraw could
         // early-exit silently. Cache only AFTER successful submit+present.
 
-        // Walk the grid building (text, spans, underline cells) together.
-        // Per-row cache: if a row is not in the dirty set AND its cache
-        // entry exists AND grid.cols matches the cached width, reuse the
-        // cached text/spans/underlines instead of re-scanning the cells.
-        // This is the headline B2 win: a screen full of scrollback that
-        // didn't move costs us one Vec walk per frame, not 40 * 120 cell
-        // attribute comparisons.
-        if self.cache_cols != grid.cols || self.row_cache.len() != grid.rows as usize {
-            // Geometry change — every existing entry is stale.
-            self.row_cache.clear();
-            self.row_cache.resize_with(grid.rows as usize, || None);
-            self.cache_cols = grid.cols;
-        }
-
-        let mut text = String::with_capacity((grid.cols as usize + 1) * grid.rows as usize);
-        // span_descriptors records (byte_range, fg, bg, weight, italic) so we
-        // can build &str + Attrs pairs for set_rich_text after the String is
-        // fully materialised (so &str borrows are stable).
-        let mut span_descriptors: Vec<SpanDesc> = Vec::new();
-        // Underline cells in (row, col_start, col_end_inclusive) form so we
-        // can draw a quad pass beneath them after the text is laid out.
-        let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
-
+        // -------- B3 cutover: walk the grid once, emit one glyph
+        // instance per visible cell, route every miss through the
+        // swash rasterizer + atlas. No per-row cache, no rich-text
+        // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
-        for r in 0..grid.rows {
-            let row_dirty = grid.is_row_dirty(r);
-            let row_byte_base = text.len();
+        let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
+        let mut glyph_instances: Vec<GlyphInstance> =
+            Vec::with_capacity(grid.cols as usize * grid.rows as usize);
+        // Missing-glyph "tofu" outlines collected during the cell walk.
+        // Drawn via the quad pipeline after the text instances.
+        let mut missing_tofu: Vec<(f32, f32, f32, f32, glyphon::Color)> = Vec::new();
+        let sw = self.config.width as f32;
+        let sh = self.config.height as f32;
+        let top_inset = self.top_inset();
+        let pad = self.padding;
+        let cell_w = self.cell_w;
+        let cell_h = self.cell_h;
+        // Baseline offset inside the cell box. swash returns
+        // placement.top relative to the baseline; we want screen-y
+        // relative to the cell top. Using ≈80% of cell height matches
+        // a reasonable ascent for monospace fonts at the configured
+        // line-height; finer baseline control would require querying
+        // font metrics, which is a follow-up polish item.
+        let baseline_y_in_cell = cell_h * 0.8;
 
-            let reuse =
-                !row_dirty && self.row_cache.get(r as usize).map(|c| c.is_some()).unwrap_or(false);
-
-            if reuse {
-                // Cached fast-path: splice the row's text and rebase
-                // span byte ranges into the frame-wide text buffer.
-                let cached = self.row_cache[r as usize].as_ref().unwrap();
-                text.push_str(&cached.text);
-                for sd in &cached.spans {
-                    span_descriptors.push(SpanDesc {
-                        range: (row_byte_base + sd.range.start)..(row_byte_base + sd.range.end),
-                        fg: sd.fg,
-                        weight: sd.weight,
-                        italic: sd.italic,
-                    });
-                }
-                for (a, b) in &cached.underlines {
-                    underlines.push((r, *a, *b));
-                }
-            } else {
-                // Dirty (or never-cached) row: walk cells, then snapshot
-                // the result into the cache for the next frame.
-                let row_text_start = text.len();
+        {
+            let mut rasterizer =
+                SwashRasterizer::new(&mut self.font_system, &self.font_family, self.font_size);
+            for r in 0..grid.rows {
                 let row = grid.row(r);
-                // Open run state — flushed whenever a cell with different attrs
-                // appears (or at end of row).
-                let mut run_start_byte = text.len();
-                let mut run_fg = fg_default;
-                let mut run_weight = glyphon::Weight::NORMAL;
-                let mut run_italic = false;
-                let mut run_has_chars = false;
-                // Local copy of spans for THIS row only (so we can stash
-                // them in the cache with row-local byte ranges).
-                let mut row_spans: Vec<SpanDesc> = Vec::new();
-                // Underline run for this row.
                 let mut ul_start: Option<u16> = None;
                 let mut last_visible_col: u16 = 0;
-                let mut row_underlines: Vec<(u16, u16)> = Vec::new();
-
                 for (col, cell) in row.iter().enumerate() {
                     if cell.flags.contains(CellFlags::WIDE_CONT) {
                         continue;
                     }
-                    let cell_fg = cell_fg(cell, theme, fg_default);
-                    let cell_weight = if cell.flags.contains(CellFlags::BOLD) {
-                        glyphon::Weight::BOLD
-                    } else {
-                        glyphon::Weight::NORMAL
-                    };
-                    let cell_italic = cell.flags.contains(CellFlags::ITALIC);
-
-                    if run_has_chars
-                        && (cell_fg != run_fg
-                            || cell_weight != run_weight
-                            || cell_italic != run_italic)
-                    {
-                        let frame_range = run_start_byte..text.len();
-                        row_spans.push(SpanDesc {
-                            range: (frame_range.start - row_text_start)
-                                ..(frame_range.end - row_text_start),
-                            fg: run_fg,
-                            weight: run_weight,
-                            italic: run_italic,
-                        });
-                        span_descriptors.push(SpanDesc {
-                            range: frame_range,
-                            fg: run_fg,
-                            weight: run_weight,
-                            italic: run_italic,
-                        });
-                        run_start_byte = text.len();
-                        run_fg = cell_fg;
-                        run_weight = cell_weight;
-                        run_italic = cell_italic;
-                        run_has_chars = false;
-                    }
-                    if !run_has_chars {
-                        run_fg = cell_fg;
-                        run_weight = cell_weight;
-                        run_italic = cell_italic;
-                    }
-                    text.push(cell.ch);
-                    run_has_chars = true;
                     last_visible_col = col as u16;
-
-                    // Underline tracking — coalesce contiguous underlined cells
+                    // Underline tracking — coalesce contiguous underlined cells.
                     if cell.flags.contains(CellFlags::UNDERLINE) {
                         if ul_start.is_none() {
                             ul_start = Some(col as u16);
                         }
                     } else if let Some(s) = ul_start.take() {
-                        let end = last_visible_col.saturating_sub(1);
+                        let end = (col as u16).saturating_sub(1);
                         underlines.push((r, s, end));
-                        row_underlines.push((s, end));
                     }
+                    let Some(key) = sonic_core::glyph_key::GlyphKey::from_cell(cell) else {
+                        continue;
+                    };
+                    let is_wide = cell.flags.contains(CellFlags::WIDE);
+                    let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
+                    let Some(info) = self.glyph_atlas.get_or_insert(key, &mut rasterizer) else {
+                        continue;
+                    };
+                    if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                        // Blank tile: space or rasterizer miss. Spaces have
+                        // no character to draw. Missing glyphs get a tofu
+                        // outline so the user can SEE the gap rather than
+                        // a silently-missing char. Heuristic: if the char
+                        // is whitespace, skip; else queue a tofu quad.
+                        if !cell.ch.is_whitespace() {
+                            let cx = pad + f32::from(col as u16) * cell_w;
+                            let cy = top_inset + f32::from(r) * cell_h;
+                            let inset = (cell_h * 0.12).max(1.0);
+                            missing_tofu.push((
+                                cx + inset,
+                                cy + inset,
+                                cell_pixel_width - inset * 2.0,
+                                cell_h - inset * 2.0,
+                                cell_fg(cell, theme, fg_default),
+                            ));
+                        }
+                        continue;
+                    }
+                    let cx = pad + f32::from(col as u16) * cell_w;
+                    let cy = top_inset + f32::from(r) * cell_h;
+                    let gx = cx + info.px_offset[0] as f32;
+                    let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
+                    let gw = info.px_size[0] as f32;
+                    let gh = info.px_size[1] as f32;
+                    let color = cell_fg(cell, theme, fg_default);
+                    let rgba = [
+                        f32::from(color.r()) / 255.0,
+                        f32::from(color.g()) / 255.0,
+                        f32::from(color.b()) / 255.0,
+                        1.0,
+                    ];
+                    glyph_instances.push(GlyphInstance {
+                        rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
+                        uv: info.uv,
+                        color: rgba,
+                    });
+                    // For wide chars: the glyph itself was rasterized at
+                    // its natural width; we've laid it out in the lead
+                    // cell. WIDE_CONT cells are skipped above, so no
+                    // additional draw is needed — the wider cell footprint
+                    // is correctly reserved.
+                    let _ = cell_pixel_width;
                 }
-                // Flush trailing underline run on this row
                 if let Some(s) = ul_start.take() {
                     underlines.push((r, s, last_visible_col));
-                    row_underlines.push((s, last_visible_col));
                 }
-                // Flush the row's last attr run before pushing \n
-                if run_has_chars {
-                    let frame_range = run_start_byte..text.len();
-                    row_spans.push(SpanDesc {
-                        range: (frame_range.start - row_text_start)
-                            ..(frame_range.end - row_text_start),
-                        fg: run_fg,
-                        weight: run_weight,
-                        italic: run_italic,
-                    });
-                    span_descriptors.push(SpanDesc {
-                        range: frame_range,
-                        fg: run_fg,
-                        weight: run_weight,
-                        italic: run_italic,
-                    });
-                }
-
-                // Snapshot into cache for next frame.
-                let row_text = text[row_text_start..].to_string();
-                self.row_cache[r as usize] =
-                    Some(RowCache { text: row_text, spans: row_spans, underlines: row_underlines });
             }
-
-            text.push('\n');
         }
-
-        // Now that `text` is stable, build the spans iterator. The newlines
-        // between rows get a default-attrs single-char span so byte indices
-        // stay aligned.
-        let mut spans: Vec<(&str, Attrs<'_>)> = Vec::new();
-        let mut cursor_byte: usize = 0;
-        for d in &span_descriptors {
-            // Emit any newlines between previous and this span's start
-            if d.range.start > cursor_byte {
-                spans.push((
-                    &text[cursor_byte..d.range.start],
-                    Attrs::new().family(Family::Monospace).color(fg_default),
-                ));
-            }
-            let mut a = Attrs::new().family(Family::Monospace).color(d.fg).weight(d.weight);
-            if d.italic {
-                a = a.style(glyphon::Style::Italic);
-            }
-            spans.push((&text[d.range.start..d.range.end], a));
-            cursor_byte = d.range.end;
-        }
-        if cursor_byte < text.len() {
-            spans.push((
-                &text[cursor_byte..],
-                Attrs::new().family(Family::Monospace).color(fg_default),
-            ));
-        }
-
-        self.buffer.set_rich_text(
-            &mut self.font_system,
-            spans,
-            &Attrs::new().family(Family::Monospace).color(fg_default),
-            Shaping::Advanced,
-            None,
-        );
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut quads: Vec<QuadInstance> = Vec::new();
-        let sw = self.config.width as f32;
-        let sh = self.config.height as f32;
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
@@ -700,6 +592,34 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
+            });
+        }
+
+        // -------- Missing-glyph tofu fallback ------------------------------
+        // For cells whose rasterizer returned no tile (and char isn't
+        // whitespace), draw a thin outlined rectangle so the gap is
+        // visible. Helps catch font-fallback misses (emoji etc.).
+        for (x, y, w, h, col) in &missing_tofu {
+            let rgba = [
+                f32::from(col.r()) / 255.0,
+                f32::from(col.g()) / 255.0,
+                f32::from(col.b()) / 255.0,
+                0.55,
+            ];
+            let t = 1.0_f32; // border thickness
+                             // Top
+            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, *w, t, sw, sh), color: rgba });
+            // Bottom
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x, *y + *h - t, *w, t, sw, sh),
+                color: rgba,
+            });
+            // Left
+            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, t, *h, sw, sh), color: rgba });
+            // Right
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x + *w - t, *y, t, *h, sw, sh),
+                color: rgba,
             });
         }
 
@@ -908,20 +828,6 @@ impl GpuRenderer {
             Resolution { width: self.config.width, height: self.config.height },
         );
 
-        let area = TextArea {
-            buffer: &self.buffer,
-            left: self.padding,
-            top: self.top_inset(),
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: TAB_BAR_HEIGHT as i32,
-                right: self.config.width as i32,
-                bottom: self.config.height as i32,
-            },
-            default_color: self.fg_default,
-            custom_glyphs: &[],
-        };
         let title_top = ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
         let tab_area = TextArea {
             buffer: &self.tab_buffer,
@@ -957,10 +863,16 @@ impl GpuRenderer {
             None
         };
 
-        let mut areas: Vec<TextArea> = vec![area, tab_area];
+        let mut areas: Vec<TextArea> = vec![tab_area];
         if let Some(a) = search_area {
             areas.push(a);
         }
+
+        // B3: push any new glyph tiles to the GPU texture before any
+        // draw call samples it. Must come AFTER the grid walk above
+        // (which is what populated the dirty rects) and BEFORE the
+        // text_pipeline.draw call in the render pass below.
+        self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
 
         self.text_renderer.prepare(
             &self.device,
@@ -1019,6 +931,15 @@ impl GpuRenderer {
                 multiview_mask: None,
             });
             self.quad.draw(&self.device, &self.queue, &mut pass, &quads);
+            // B3 grid text: instanced atlas quads. Sampled per-cell
+            // from `self.glyph_atlas`'s GPU texture via `glyph_upload`.
+            self.text_pipeline.draw(
+                &self.device,
+                &self.queue,
+                &mut pass,
+                self.glyph_upload.bind_group(),
+                &glyph_instances,
+            );
             self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(Some(encoder.finish()));
