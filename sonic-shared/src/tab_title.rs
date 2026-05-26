@@ -12,6 +12,27 @@
 //! is available — handy for commands like `ssh user@host` which set the
 //! title themselves but never report a cwd.
 
+/// Wezterm's "fancy mode" vertical separator drawn between tabs.
+/// U+2502 BOX DRAWINGS LIGHT VERTICAL, followed by a single space of
+/// padding (~6–8px at typical monospace cell widths) to keep the
+/// separator visually clear of the next tab's title.
+pub const TAB_SEPARATOR_PREFIX: &str = "\u{2502} ";
+
+/// Build the on-screen label for a tab. Mirrors wezterm fancy-mode:
+/// every tab except the first is prefixed by `│ ` so a thin divider
+/// appears between adjacent tab titles. Callers that render the
+/// separator in a distinct color should use [`TAB_SEPARATOR_PREFIX`]
+/// directly and split the returned string on its length — or, more
+/// commonly, look at the tab `index` themselves.
+#[must_use]
+pub fn tab_display_label(index: usize, title: &str) -> String {
+    if index == 0 {
+        title.to_string()
+    } else {
+        format!("{TAB_SEPARATOR_PREFIX}{title}")
+    }
+}
+
 /// Format a tab title in wezterm style. See module docs for the contract.
 ///
 /// All inputs are optional so that the function works regardless of which
@@ -178,5 +199,43 @@ mod tests {
     #[test]
     fn node_icon() {
         assert_eq!(format_tab_title(0, Some("/x/y"), Some("node"), None), "#1 \u{F1842} x/y");
+    }
+
+    #[test]
+    fn first_tab_has_no_separator_prefix() {
+        assert_eq!(tab_display_label(0, "#1 zsh"), "#1 zsh");
+    }
+
+    #[test]
+    fn second_and_later_tabs_get_separator_prefix() {
+        assert_eq!(tab_display_label(1, "#2 nvim"), "\u{2502} #2 nvim");
+        assert_eq!(tab_display_label(4, "#5 cargo"), "\u{2502} #5 cargo");
+    }
+
+    #[test]
+    fn three_tab_list_has_separator_between_each() {
+        let titles = ["#1 zsh", "#2 nvim", "#3 cargo"];
+        let rendered: Vec<String> =
+            titles.iter().enumerate().map(|(i, t)| tab_display_label(i, t)).collect();
+        // First tab: bare title. Subsequent tabs each start with the separator.
+        assert_eq!(rendered[0], "#1 zsh");
+        assert!(rendered[1].starts_with(TAB_SEPARATOR_PREFIX));
+        assert!(rendered[2].starts_with(TAB_SEPARATOR_PREFIX));
+        // Concatenated, the strip contains the separator exactly (n - 1) times.
+        let joined = rendered.join("");
+        assert_eq!(joined.matches('\u{2502}').count(), 2);
+    }
+
+    #[test]
+    fn single_tab_has_no_separator_anywhere() {
+        let only = tab_display_label(0, "#1 shell");
+        assert!(!only.contains('\u{2502}'));
+    }
+
+    #[test]
+    fn separator_prefix_constant_matches_wezterm() {
+        // U+2502 BOX DRAWINGS LIGHT VERTICAL + a single space of padding.
+        assert_eq!(TAB_SEPARATOR_PREFIX, "\u{2502} ");
+        assert_eq!(TAB_SEPARATOR_PREFIX.chars().next(), Some('│'));
     }
 }
