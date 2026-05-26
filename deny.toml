@@ -3,7 +3,12 @@
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+    # bincode 1.x is permanently unmaintained per RUSTSEC-2025-0141 but the
+    # upstream team explicitly considers 1.3.3 a complete, stable release.
+    # Only pulled in by sonic-mux; migration tracked separately.
+    "RUSTSEC-2025-0141",
+]
 
 [licenses]
 version = 2
@@ -21,6 +26,7 @@ allow = [
     "CC0-1.0",
     "OpenSSL",
     "BSL-1.0",
+    "0BSD",
 ]
 confidence-threshold = 0.9
 
