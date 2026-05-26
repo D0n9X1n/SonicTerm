@@ -106,9 +106,7 @@ fn main() {
     // the sentinels. If printf wrote BEGIN and END but nothing between
     // them, that's a regression.
     if end_row <= begin_row + 1 {
-        eprintln!(
-            "FAIL: no content rows between BEGIN (row {begin_row}) and END (row {end_row})."
-        );
+        eprintln!("FAIL: no content rows between BEGIN (row {begin_row}) and END (row {end_row}).");
         std::process::exit(1);
     }
 
@@ -116,8 +114,7 @@ fn main() {
     println!("\n=== asserted region (rows {}..{}) ===", begin_row + 1, end_row);
     println!("{region}");
 
-    let missing: Vec<char> =
-        SHIBBOLETH.iter().copied().filter(|c| !region.contains(*c)).collect();
+    let missing: Vec<char> = SHIBBOLETH.iter().copied().filter(|c| !region.contains(*c)).collect();
     if !missing.is_empty() {
         eprintln!(
             "FAIL: {} of {} shibboleth chars are missing from the printf output region: {:?}",
