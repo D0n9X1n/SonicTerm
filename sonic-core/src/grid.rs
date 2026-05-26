@@ -327,6 +327,25 @@ impl Grid {
         self.scrollback.iter()
     }
 
+    /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
+    /// if `abs` lies past the bottom of the visible region. Rows inside
+    /// scrollback come from the saved backing store; rows ≥ `scrollback_len`
+    /// come from the live visible buffer.
+    ///
+    /// Used by the renderer when the viewport is scrolled away from the
+    /// live bottom (e.g. after `ScrollToPrevPrompt`) so the displayed
+    /// rows come from history rather than the live shell output.
+    #[inline]
+    pub fn row_at_abs(&self, abs: u64) -> Option<&Row> {
+        let sb = self.scrollback.len() as u64;
+        if abs < sb {
+            self.scrollback.get(abs as usize)
+        } else {
+            let r = (abs - sb) as usize;
+            self.visible.get(r)
+        }
+    }
+
     /// Put a character at cursor, advancing cursor by character width.
     pub fn put_char(&mut self, ch: char, fg: Color, bg: Color, flags: CellFlags) {
         self.put_char_linked(ch, fg, bg, flags, None);

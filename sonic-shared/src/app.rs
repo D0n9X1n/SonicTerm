@@ -899,6 +899,7 @@ impl App {
                         search,
                         None, // command palette: not exposed in child window yet
                         None, // ime preedit: not exposed in child window yet
+                        pane.viewport_top_abs,
                     ) {
                         tracing::warn!("child render error: {e}");
                     }
@@ -1378,6 +1379,9 @@ impl App {
         if let Some(top) = new_top {
             pane.viewport_top_abs = Some(top);
             tracing::info!(target = top, "scrolled to prompt row");
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 
@@ -1724,6 +1728,7 @@ impl ApplicationHandler for App {
                             search,
                             Some(&self.command_palette),
                             Some(&self.ime),
+                            pane.viewport_top_abs,
                         ) {
                             tracing::warn!("render error: {e}");
                         }

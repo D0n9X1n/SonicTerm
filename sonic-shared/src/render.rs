@@ -132,6 +132,7 @@ struct FrameKey {
     height: u32,
     tab_hash: u64,
     pane_rect_hash: u64,
+    viewport_top_abs: Option<u64>,
 }
 
 impl GpuRenderer {
@@ -448,6 +449,7 @@ impl GpuRenderer {
         search: Option<&SearchState>,
         palette: Option<&CommandPalette>,
         ime: Option<&ImeState>,
+        viewport_top_abs: Option<u64>,
     ) -> Result<()> {
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
@@ -530,6 +532,7 @@ impl GpuRenderer {
             height: self.config.height,
             tab_hash,
             pane_rect_hash,
+            viewport_top_abs,
         };
         if Some(key) == self.last_frame_key {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -574,8 +577,19 @@ impl GpuRenderer {
         {
             let mut rasterizer =
                 SwashRasterizer::new(&mut self.font_system, &self.font_family, self.font_size);
+            // Resolve which absolute row sits at the top of the rendered
+            // viewport. When the user hasn't scrolled (or hasn't scrolled
+            // past the visible bottom), this is the live-buffer top, i.e.
+            // `scrollback_len()`. Otherwise it's the explicit absolute
+            // index requested by the scroll action (e.g. a prompt row).
+            let live_top_abs = grid.scrollback_len() as u64;
+            let max_top_abs = live_top_abs; // never scroll below live
+            let view_top_abs = viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
             for r in 0..grid.rows {
-                let row = grid.row(r);
+                let row_abs = view_top_abs + r as u64;
+                let Some(row) = grid.row_at_abs(row_abs) else {
+                    continue;
+                };
                 let mut ul_start: Option<u16> = None;
                 let mut last_visible_col: u16 = 0;
                 for (col, cell) in row.iter().enumerate() {
@@ -697,12 +711,19 @@ impl GpuRenderer {
         }
 
         if cursor_visible {
-            let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
-            let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
-                color: self.cursor_color,
-            });
+            // Hide the cursor when the viewport is scrolled away from the
+            // live region — its absolute row is `scrollback_len + cursor.row`,
+            // which sits below the bottom of a scrolled-back view.
+            let live_top = grid.scrollback_len() as u64;
+            let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
+            if view_top == live_top {
+                let cx = self.padding + f32::from(grid.cursor.col) * self.cell_w;
+                let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
+                    color: self.cursor_color,
+                });
+            }
         }
 
         // OSC 133 shell-integration: draw a small left-edge marker on every
@@ -714,8 +735,20 @@ impl GpuRenderer {
         let marker_h = self.cell_h * 0.6;
         let mut marker_color = self.cursor_color;
         marker_color[3] = (marker_color[3] * 0.55).clamp(0.0, 1.0);
-        let prompt_rows: Vec<u16> =
-            grid.prompts().filter_map(|p| grid.prompt_visible_row(p)).collect();
+        let prompt_rows: Vec<u16> = {
+            let live_top = grid.scrollback_len() as u64;
+            let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
+            grid.prompts()
+                .filter_map(|p| {
+                    let rel = p.start_row.checked_sub(view_top)?;
+                    if rel < grid.rows as u64 {
+                        Some(rel as u16)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
         for row in prompt_rows {
             let mx = (self.padding - marker_w - 1.0).max(0.0);
             let my =
