@@ -27,8 +27,32 @@ use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{CursorIcon, Window, WindowId},
+    window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
+
+/// Apply WezTerm-style integrated titlebar on macOS: the titlebar is
+/// transparent and the content view extends underneath it, so there is
+/// no visible separator line above our tab bar. Traffic lights remain
+/// native (decorations stay on) — only the chrome strip is fused into
+/// the content. No-op on non-macOS platforms.
+///
+/// We keep this in one place so all three window-creation sites
+/// (main, tear-out, preferences) stay in sync.
+#[doc(hidden)]
+pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs.with_fullsize_content_view(true).with_titlebar_transparent(true)
+    }
+    // FUTURE: equivalent integration on Windows would require custom
+    // non-client area painting (WM_NCCALCSIZE); winit 0.30 does not
+    // expose this directly. Left as a no-op for now.
+    #[cfg(not(target_os = "macos"))]
+    {
+        attrs
+    }
+}
 
 use crate::{
     command_palette::CommandPalette,
@@ -1134,9 +1158,11 @@ impl App {
         }
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
-        let attrs = Window::default_attributes()
-            .with_title(format!("Sonic — {}", tab.title))
-            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0));
+        let attrs = with_integrated_titlebar(
+            Window::default_attributes()
+                .with_title(format!("Sonic — {}", tab.title))
+                .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+        );
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -2143,13 +2169,15 @@ impl App {
     /// after `open_preferences` set the pending flag (we need an
     /// `ActiveEventLoop` to create a `Window`).
     fn create_prefs_window(&mut self, el: &ActiveEventLoop) {
-        let attrs = Window::default_attributes()
-            .with_title("Sonic Preferences")
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                crate::prefs::PREFS_WIN_W,
-                crate::prefs::PREFS_WIN_H,
-            ))
-            .with_resizable(true);
+        let attrs = with_integrated_titlebar(
+            Window::default_attributes()
+                .with_title("Sonic Preferences")
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    crate::prefs::PREFS_WIN_W,
+                    crate::prefs::PREFS_WIN_H,
+                ))
+                .with_resizable(true),
+        );
         let w = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -2327,14 +2355,16 @@ impl ApplicationHandler<UserEvent> for App {
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
 
-        let attrs = Window::default_attributes()
-            .with_title(format!("Sonic Terminal — {}", self.theme.name))
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                f32::from(cols) * 9.0 + self.config.window.padding * 2.0,
-                f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                    + self.config.window.padding * 2.0
-                    + crate::tabbar_view::TAB_BAR_HEIGHT,
-            ));
+        let attrs = with_integrated_titlebar(
+            Window::default_attributes()
+                .with_title(format!("Sonic Terminal — {}", self.theme.name))
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    f32::from(cols) * 9.0 + self.config.window.padding * 2.0,
+                    f32::from(rows) * (self.config.font.size * self.config.font.line_height)
+                        + self.config.window.padding * 2.0
+                        + crate::tabbar_view::TAB_BAR_HEIGHT,
+                )),
+        );
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
