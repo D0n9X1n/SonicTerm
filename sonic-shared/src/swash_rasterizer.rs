@@ -12,40 +12,33 @@
 //!     atlas's tiles match what glyphon would have shaped for the same
 //!     character/weight/style.
 //!
-//! ## Lookup pipeline (per miss)
-//! ```text
-//! GlyphKey { ch, weight_bold, italic }
-//!     │
-//!     ▼ fontdb::Query (family + Weight + Style)
-//!     │
-//!     ▼ FontSystem::get_font(id, weight) -> Arc<cosmic_text::Font>
-//!     │
-//!     ▼ font.as_swash() -> swash::FontRef
-//!     │
-//!     ▼ ScaleContext::builder(font).size(px).build()
-//!     │
-//!     ▼ font.charmap().map(ch) -> glyph_id
-//!     │
-//!     ▼ Render::new(&[Source::Outline]).format(Alpha).render(...)
-//!     │
-//!     ▼ swash::Image { content: Mask, placement, data }
-//!     │
-//!     ▼ RasterTile { width, height, offset_x = placement.left,
-//!                    offset_y = -placement.top + ascent,
-//!                    coverage = data }
-//! ```
+//! ## Font fallback (B3.1, this PR)
 //!
-//! ## What returns `None`
-//! - Family not present in fontdb (lookup failure)
-//! - Charmap doesn't have a glyph for `ch` (0 glyph id, no fallback)
-//! - swash's Render returns `None` (rare)
+//! Before B3.1, the rasterizer queried a single family (default
+//! "Rec Mono Casual") and returned `None` for any codepoint that face
+//! lacked — every CJK character, emoji, and most accented letters
+//! rendered as a tofu box. Glyphon (the pre-B3 path) had this for free
+//! via cosmic-text's `Buffer` shaping; the atlas path lost it.
 //!
-//! Callers (the atlas) treat `None` as "blank tile" — the renderer
-//! never panics, the character is just invisible. Emoji and fallback
-//! fonts are not handled in this PR; see the PR body's "out of scope".
+//! We now hold a **fallback chain**: an ordered list of family names
+//! built from the user's configured `font_family` plus a platform-
+//! specific tail. On a miss we walk the chain in order and rasterize
+//! through the first face whose `charmap` has the codepoint.
+//!
+//! Per-codepoint resolution is cached in `slot_cache` so the second
+//! occurrence of '中' doesn't re-walk the chain. The resolved slot is
+//! also baked into the [`GlyphKey`] before it reaches the atlas —
+//! without this, two cells with the same char/style but resolved by
+//! different fonts would collide in the atlas's `HashMap`.
+//!
+//! ## What still returns `None`
+//! - Every face in the chain lacks the codepoint (true tofu — caller
+//!   draws the missing-glyph outline box)
+//! - swash's `Render` returns `None` for a valid glyph id (rare)
 
 use cosmic_text::FontSystem;
 use sonic_core::glyph_key::GlyphKey;
+use std::collections::HashMap;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 
@@ -57,6 +50,34 @@ use crate::glyph_atlas::{RasterTile, Rasterizer};
 /// atlas anyway). Matches the default font size used by [`crate::render`].
 pub const DEFAULT_RASTER_PX: f32 = 14.0;
 
+/// Platform-specific tail appended after the user's primary family. The
+/// chain is walked in order, so put the most-commonly-needed CJK face
+/// first, then the emoji face.
+///
+/// macOS: PingFang SC ships with the OS and covers Simplified Chinese,
+/// Traditional Chinese, Japanese kana, Korean Hangul (via the broader
+/// PingFang family fontdb tends to resolve). Hiragino is a strong
+/// secondary for Japanese-only. Apple Color Emoji covers emoji.
+///
+/// Windows: Microsoft YaHei (Simplified Chinese + most CJK), MS Gothic
+/// (Japanese), Malgun Gothic (Korean), Segoe UI Emoji (emoji).
+///
+/// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
+/// but the chain shouldn't be empty.
+#[cfg(target_os = "macos")]
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &["PingFang SC", "Hiragino Sans GB", "Apple Color Emoji"];
+#[cfg(target_os = "windows")]
+const PLATFORM_FALLBACK_CHAIN: &[&str] =
+    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Segoe UI Emoji"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const PLATFORM_FALLBACK_CHAIN: &[&str] =
+    &["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Color Emoji"];
+
+/// Maximum number of families in the fallback chain. One byte in the
+/// `GlyphKey` is plenty; we also keep an end-of-chain sentinel below
+/// for cells the entire chain can't satisfy.
+pub const MAX_FALLBACK_SLOTS: u8 = 8;
+
 /// Production [`Rasterizer`] impl. Holds a mutable borrow on the
 /// renderer's `FontSystem` and an owned `ScaleContext` (swash's
 /// per-thread cache for glyph outlines + hinted bitmaps).
@@ -66,29 +87,61 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 pub struct SwashRasterizer<'a> {
     font_system: &'a mut FontSystem,
     scale_ctx: ScaleContext,
-    family: String,
+    /// Fallback chain. Slot 0 is the user's configured primary family;
+    /// slots 1..N are the platform fallback chain. We cap at
+    /// `MAX_FALLBACK_SLOTS` entries; configured + platform usually fits
+    /// in 4–5.
+    families: Vec<String>,
     px: f32,
+    /// Memoizes which slot in `families` claims a given (char,
+    /// weight_bold, italic). Lets the second hit on '中' skip the
+    /// charmap walk. Capped only by the working set of distinct
+    /// codepoints rendered.
+    slot_cache: HashMap<(char, bool, bool), Option<u8>>,
 }
 
 impl<'a> SwashRasterizer<'a> {
-    /// Build a rasterizer that resolves all glyphs to `family` at
-    /// `px` em-size. `family` should be the same string the renderer
-    /// passes to glyphon's `Family::Name`.
+    /// Build a rasterizer with `family` as the primary face, followed
+    /// by the platform fallback chain. `px` is the em-size every
+    /// resolved face will be scaled to.
     pub fn new(font_system: &'a mut FontSystem, family: &str, px: f32) -> Self {
-        Self { font_system, scale_ctx: ScaleContext::new(), family: family.to_string(), px }
+        let mut families: Vec<String> = Vec::with_capacity(1 + PLATFORM_FALLBACK_CHAIN.len());
+        families.push(family.to_string());
+        for f in PLATFORM_FALLBACK_CHAIN {
+            // Dedup the primary if a user set their main font to one of
+            // the platform CJK faces.
+            if families.iter().any(|existing| existing.eq_ignore_ascii_case(f)) {
+                continue;
+            }
+            if families.len() >= MAX_FALLBACK_SLOTS as usize {
+                break;
+            }
+            families.push((*f).to_string());
+        }
+        Self {
+            font_system,
+            scale_ctx: ScaleContext::new(),
+            families,
+            px,
+            slot_cache: HashMap::new(),
+        }
     }
 
-    /// Em-size (px) the rasterizer was constructed with. Exposed for
-    /// tests that verify the renderer threads `config.font_size`
-    /// through instead of the legacy hardcoded `DEFAULT_RASTER_PX`.
+    /// Em-size (px) the rasterizer was constructed with.
     pub fn px(&self) -> f32 {
         self.px
     }
 
-    /// Font family the rasterizer was constructed with. Companion to
-    /// [`Self::px`] for the same renderer-config-honored test.
+    /// Primary family name (slot 0). Companion to `px` for the
+    /// renderer-config-honored test.
     pub fn family(&self) -> &str {
-        &self.family
+        &self.families[0]
+    }
+
+    /// Full fallback chain in resolution order. Exposed for tests
+    /// asserting the platform tail is wired correctly.
+    pub fn families(&self) -> &[String] {
+        &self.families
     }
 
     /// Convenience: build at [`DEFAULT_RASTER_PX`] with the bundled
@@ -97,15 +150,42 @@ impl<'a> SwashRasterizer<'a> {
         Self::new(font_system, "Rec Mono Casual", DEFAULT_RASTER_PX)
     }
 
-    /// Look up the font ID for the given (bold, italic) combination,
-    /// returning `None` if nothing in the fontdb matches.
-    fn lookup_id(&self, weight_bold: bool, italic: bool) -> Option<fontdb::ID> {
+    /// Look up the fontdb ID for `family` at the given (bold, italic)
+    /// combination, returning `None` if nothing in the fontdb matches.
+    fn lookup_id(&self, family: &str, weight_bold: bool, italic: bool) -> Option<fontdb::ID> {
         let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
         let style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
-        let families = [fontdb::Family::Name(self.family.as_str()), fontdb::Family::Monospace];
+        // Only ask fontdb for `Name(family)` — no Monospace tail here,
+        // otherwise the lookup for a CJK family on a system without it
+        // would silently substitute the default monospace and shadow
+        // a real fallback in the next slot.
+        let families = [fontdb::Family::Name(family)];
         let query =
             fontdb::Query { families: &families, weight, stretch: fontdb::Stretch::Normal, style };
         self.font_system.db().query(&query)
+    }
+
+    /// Walk the fallback chain and return the first slot whose face
+    /// has a non-zero glyph for `ch`. Memoized per (ch, bold, italic).
+    /// Returns `None` only if every face in the chain returns a zero
+    /// glyph id (true tofu).
+    pub fn resolve_slot(&mut self, ch: char, weight_bold: bool, italic: bool) -> Option<u8> {
+        if let Some(slot) = self.slot_cache.get(&(ch, weight_bold, italic)) {
+            return *slot;
+        }
+        let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
+        let mut found: Option<u8> = None;
+        for (idx, family) in self.families.iter().enumerate() {
+            let Some(id) = self.lookup_id(family, weight_bold, italic) else { continue };
+            let Some(font) = self.font_system.get_font(id, weight) else { continue };
+            let swash_font = font.as_swash();
+            if swash_font.charmap().map(ch) != 0 {
+                found = Some(idx as u8);
+                break;
+            }
+        }
+        self.slot_cache.insert((ch, weight_bold, italic), found);
+        found
     }
 }
 
@@ -121,21 +201,38 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 height: 0,
                 offset_x: 0,
                 offset_y: 0,
-                advance: self.px * 0.6, // approximate; not used on the grid path
+                advance: self.px * 0.6,
                 coverage: Vec::new(),
             });
         }
 
         let weight = if key.weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
-        let id = self.lookup_id(key.weight_bold, key.italic)?;
+
+        // Use the slot pinned in the key. The renderer is expected to
+        // have called `resolve_slot` first; if it didn't (e.g. tests
+        // built a key with `new(..)` which defaults to slot 0), we
+        // still try slot 0 and fall back to chain-walking on a charmap
+        // miss so the rasterizer stays usable standalone.
+        let slot = key.font_slot as usize;
+        let family = self.families.get(slot)?;
+        let id = self.lookup_id(family, key.weight_bold, key.italic)?;
         let font = self.font_system.get_font(id, weight)?;
         let swash_font = font.as_swash();
         let glyph_id = swash_font.charmap().map(key.ch);
         if glyph_id == 0 {
-            // No glyph in this face for this codepoint. We could fall
-            // back to a sibling family here but emoji / fallback fonts
-            // are out of scope for this PR — return None and let the
-            // atlas record a blank tile.
+            // The slot the caller pinned doesn't have this glyph. If
+            // the caller is the renderer, they will have already
+            // resolved the right slot via `resolve_slot`, so this
+            // branch is mainly for the bench/test path that builds a
+            // GlyphKey with slot=0 and expects a sensible answer.
+            if slot == 0 {
+                if let Some(resolved) = self.resolve_slot(key.ch, key.weight_bold, key.italic) {
+                    if resolved != 0 {
+                        let retry = key.with_font_slot(resolved);
+                        return self.rasterize(retry);
+                    }
+                }
+            }
             return None;
         }
 
@@ -157,15 +254,9 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             });
         }
 
-        // The atlas only understands 8-bit alpha coverage; we requested
-        // Format::Alpha so `image.data` is exactly that — one byte per
-        // pixel, row-major, top-down.
         let mut coverage = image.data;
         let expected = (p.width as usize) * (p.height as usize);
         if coverage.len() != expected {
-            // Defensive: if swash ever hands us a different layout, we
-            // bail rather than scribble out-of-bounds in the atlas
-            // copy_from_slice. Truncate or pad to the expected size.
             coverage.resize(expected, 0);
         }
 
@@ -173,11 +264,6 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             width: p.width,
             height: p.height,
             offset_x: p.left,
-            // swash gives `top` as the distance from the baseline up
-            // to the top of the bitmap (positive = above baseline). We
-            // want offset relative to the cell-box top — the renderer
-            // adds an ascent-based baseline correction when placing
-            // the quad, so we just flip the sign here.
             offset_y: -p.top,
             advance: self.px * 0.6,
             coverage,

@@ -587,9 +587,22 @@ impl GpuRenderer {
                         let end = (col as u16).saturating_sub(1);
                         underlines.push((r, s, end));
                     }
-                    let Some(key) = sonic_core::glyph_key::GlyphKey::from_cell(cell) else {
+                    let Some(mut key) = sonic_core::glyph_key::GlyphKey::from_cell(cell) else {
                         continue;
                     };
+                    // Resolve the font slot for this codepoint via the
+                    // rasterizer's fallback chain BEFORE looking it up
+                    // in the atlas. Without this step, CJK/emoji/etc.
+                    // characters all key as slot=0 (primary font, which
+                    // lacks them), collide on one tofu-tile entry, and
+                    // never get a chance to be rasterized from a
+                    // fallback face. The cache inside the rasterizer
+                    // makes the second '中' free.
+                    if let Some(slot) =
+                        rasterizer.resolve_slot(cell.ch, key.weight_bold, key.italic)
+                    {
+                        key.font_slot = slot;
+                    }
                     let is_wide = cell.flags.contains(CellFlags::WIDE);
                     let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
                     let Some(info) = self.glyph_atlas.get_or_insert(key, &mut rasterizer) else {
