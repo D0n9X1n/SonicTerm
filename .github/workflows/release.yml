@@ -58,17 +58,21 @@ jobs:
         run: bash assets/icons/bake-icons.sh
 
       - name: Import signing certificate
-        if: env.MACOS_CERT_P12_BASE64 != ''
+        if: env.MACOS_CERT_P12_BASE64 != '' && env.MACOS_CERT_PASSWORD != ''
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
 
+      - name: Mark signing ready
+        if: env.MACOS_CERT_P12_BASE64 != '' && env.MACOS_CERT_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != ''
+        run: echo "SONIC_SIGN_READY=1" >> "$GITHUB_ENV"
+
       - name: Build .app + .dmg
         run: bash packaging/mac/make-dmg.sh dist/sonic "${{ github.ref_name }}"
 
       - name: Notarize + staple .dmg
-        if: env.MACOS_NOTARY_USER != '' && env.MACOS_SIGNING_IDENTITY != ''
+        if: env.SONIC_SIGN_READY == '1' && env.MACOS_NOTARY_USER != '' && env.MACOS_NOTARY_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         run: |
           DMG=$(find dist -maxdepth 1 -name '*.dmg' -print -quit)
           echo "==> Submitting $DMG to notarytool"
@@ -121,30 +125,34 @@ jobs:
           cargo wix --no-build --nocapture --output ../../dist/
 
       - name: Sign .msi
-        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        if: env.WINDOWS_CERT_PFX_BASE64 != '' && env.WINDOWS_CERT_PASSWORD != ''
         shell: pwsh
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "sonic-signing.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
-                      Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { throw "signtool.exe not found" }
-          Write-Host "Using $($signtool.FullName)"
-          Get-ChildItem dist\*.msi | ForEach-Object {
-            & $signtool.FullName sign `
-              /f $pfxPath `
-              /p $env:WINDOWS_CERT_PASSWORD `
-              /fd SHA256 `
-              /tr http://timestamp.sectigo.com `
-              /td SHA256 `
-              /d "Sonic Terminal" `
-              $_.FullName
-            & $signtool.FullName verify /pa /v $_.FullName
+          try {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+                        Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw "signtool.exe not found" }
+            Write-Host "Using $($signtool.FullName)"
+            Get-ChildItem dist\*.msi | ForEach-Object {
+              & $signtool.FullName sign `
+                /f $pfxPath `
+                /p $env:WINDOWS_CERT_PASSWORD `
+                /fd SHA256 `
+                /tr http://timestamp.sectigo.com `
+                /td SHA256 `
+                /d "Sonic Terminal" `
+                $_.FullName
+              & $signtool.FullName verify /pa /v $_.FullName
+            }
           }
-          Remove-Item $pfxPath -Force
+          finally {
+            if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
+          }
 
       - name: Note unsigned build
-        if: env.WINDOWS_CERT_PFX_BASE64 == ''
+        if: env.WINDOWS_CERT_PFX_BASE64 == '' || env.WINDOWS_CERT_PASSWORD == ''
         shell: bash
         run: echo "::notice::Built unsigned Windows .msi (no WINDOWS_CERT_PFX_BASE64 secret configured)"
 
