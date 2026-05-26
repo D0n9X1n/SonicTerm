@@ -3,7 +3,7 @@ appearance = "dark"
 
 [colors]
 background    = "#141617"
-foreground    = "#d5c4a1"
+foreground    = "#cfbc97"
 cursor        = "#52ad70"
 cursor_text   = "#141617"
 selection_bg  = "#27414d"

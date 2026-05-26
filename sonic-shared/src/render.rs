@@ -1564,30 +1564,23 @@ impl GpuRenderer {
             // appears between adjacent tab titles regardless of which
             // tab is active.
             let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
-            let mut title_text = String::new();
-            // (range, color) — separator spans always use tab_inactive_fg.
-            let mut tab_spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
-            for t in &layout.tabs {
-                let tab = &tabs.tabs()[t.index];
-                let is_active = layout.active == Some(t.index);
-                let color = if is_active { self.tab_active_fg } else { self.tab_inactive_fg };
-                let max_chars = ((t.title.w / avg_glyph_w).floor() as usize).max(1);
-                let raw: String = tab.title.chars().take(max_chars).collect();
-                let target_col = (t.title.x / avg_glyph_w).floor() as usize;
-                while title_text.chars().count() < target_col {
-                    title_text.push(' ');
-                }
-                if t.index > 0 {
-                    let sep_start = title_text.len();
-                    title_text.push_str(crate::tab_title::TAB_SEPARATOR_PREFIX);
-                    let sep_end = title_text.len();
-                    tab_spans.push((sep_start..sep_end, self.tab_inactive_fg));
-                }
-                let start = title_text.len();
-                title_text.push_str(&raw);
-                let end = title_text.len();
-                tab_spans.push((start..end, color));
-            }
+            let tab_inputs: Vec<TabSpanInput> = layout
+                .tabs
+                .iter()
+                .map(|t| TabSpanInput {
+                    index: t.index,
+                    title: &tabs.tabs()[t.index].title,
+                    title_x: t.title.x,
+                    title_w: t.title.w,
+                    is_active: layout.active == Some(t.index),
+                })
+                .collect();
+            let (title_text, tab_spans) = build_tab_title_spans(
+                &tab_inputs,
+                avg_glyph_w,
+                self.tab_active_fg,
+                self.tab_inactive_fg,
+            );
             let mut spans2: Vec<(&str, Attrs<'_>)> = Vec::new();
             let mut tcur = 0usize;
             for (range, color) in &tab_spans {
@@ -2591,6 +2584,70 @@ pub fn recolor_cursor_glyphs(
             g.color = bg_rgba;
         }
     }
+}
+
+/// Input describing one tab for [`build_tab_title_spans`]: which slot it
+/// occupies, its formatted title, its layout rect's x/width in logical
+/// pixels, and whether it is the active tab.
+#[doc(hidden)]
+pub struct TabSpanInput<'a> {
+    pub index: usize,
+    pub title: &'a str,
+    pub title_x: f32,
+    pub title_w: f32,
+    pub is_active: bool,
+}
+
+/// Build the rich-text title row for the tab bar — one rendered line per
+/// frame — assigning each character a colour: gold (`active_fg`) for the
+/// active tab's full visible region, dim (`inactive_fg`) for every
+/// inactive tab title and every separator. The active tab's region is
+/// padded with trailing spaces out to its full title-rect width so the
+/// colour span covers every character, not just the leading icon /
+/// `#N` digits. Pulled out of the render method so it can be unit-
+/// tested without standing up wgpu / cosmic-text.
+///
+/// Returns `(text, spans)` where each span is `(byte_range, color)`.
+/// Bytes between consecutive spans are filled by the caller with
+/// `inactive_fg`.
+#[doc(hidden)]
+pub fn build_tab_title_spans(
+    tabs: &[TabSpanInput<'_>],
+    avg_glyph_w: f32,
+    active_fg: GColor,
+    inactive_fg: GColor,
+) -> (String, Vec<(std::ops::Range<usize>, GColor)>) {
+    let mut title_text = String::new();
+    let mut spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+    for t in tabs {
+        let color = if t.is_active { active_fg } else { inactive_fg };
+        let max_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(1);
+        let mut raw: String = t.title.chars().take(max_chars).collect();
+        let target_col = (t.title_x / avg_glyph_w).floor() as usize;
+        while title_text.chars().count() < target_col {
+            title_text.push(' ');
+        }
+        if t.index > 0 {
+            let sep_start = title_text.len();
+            title_text.push_str(crate::tab_title::TAB_SEPARATOR_PREFIX);
+            let sep_end = title_text.len();
+            spans.push((sep_start..sep_end, inactive_fg));
+        }
+        // Active-tab full-span gold: pad with trailing spaces so the
+        // colour span covers the entire tab rect, not just the icon/
+        // digit prefix glyphs.
+        if t.is_active {
+            let cur = raw.chars().count();
+            if cur < max_chars {
+                raw.extend(std::iter::repeat_n(' ', max_chars - cur));
+            }
+        }
+        let start = title_text.len();
+        title_text.push_str(&raw);
+        let end = title_text.len();
+        spans.push((start..end, color));
+    }
+    (title_text, spans)
 }
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink
