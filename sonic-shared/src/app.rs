@@ -32,6 +32,7 @@ use winit::{
 
 use crate::{
     command_palette::CommandPalette,
+    config_watch::ConfigWatcher,
     ime::ImeState,
     pane::PaneTree,
     prefs::{PrefsHit, PrefsState},
@@ -247,6 +248,10 @@ pub struct App {
     theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
     keymap_loader: Option<KeymapLoader>,
+    /// Live-reload watcher for the user's `sonic.toml`. Spawned in
+    /// `resumed`; `None` if the config path could not be resolved or
+    /// the watcher failed to start (e.g. parent dir unwritable).
+    config_watcher: Option<ConfigWatcher>,
 }
 
 impl App {
@@ -281,6 +286,7 @@ impl App {
             main_hidden: false,
             theme_loader: None,
             keymap_loader: None,
+            config_watcher: None,
         }
     }
 
@@ -1098,12 +1104,93 @@ impl App {
         }
     }
 
+    /// Drain the config-watcher channel and apply any incoming Config.
+    /// Idempotent and cheap when nothing changed (early-returns when no
+    /// new config is queued).
+    #[doc(hidden)]
+    pub fn poll_config_reload(&mut self) {
+        let Some(latest) = self.config_watcher.as_ref().and_then(ConfigWatcher::try_latest) else {
+            return;
+        };
+        self.apply_new_config(latest);
+    }
+
+    /// Manual reload (bound to `Action::ReloadConfig`). Reads the config
+    /// from disk and applies it, bypassing the watcher channel.
+    fn force_reload_config(&mut self) {
+        let Some(path) = sonic_core::config::Config::default_path() else { return };
+        match Config::load_or_default(&path) {
+            Ok(cfg) => self.apply_new_config(cfg),
+            Err(e) => tracing::warn!("force_reload_config: parse failed: {e:#}"),
+        }
+    }
+
+    /// Diff `new_cfg` against the live `self.config` and apply the
+    /// minimal set of swaps: theme reload, font rebuild (atlas
+    /// invalidated), keymap reload. Always replaces `self.config` last
+    /// so observers see a consistent snapshot.
+    fn apply_new_config(&mut self, new_cfg: Config) {
+        let assets = crate::asset_dir();
+
+        // Theme
+        if new_cfg.theme != self.config.theme {
+            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            match Theme::load(&theme_path) {
+                Ok(t) => {
+                    tracing::info!("live-reload: theme -> {}", t.name);
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_theme(&t);
+                    }
+                    self.theme = t;
+                }
+                Err(e) => tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path),
+            }
+        }
+
+        // Font
+        let font_changed = new_cfg.font.family != self.config.font.family
+            || (new_cfg.font.size - self.config.font.size).abs() > f32::EPSILON
+            || (new_cfg.font.line_height - self.config.font.line_height).abs() > f32::EPSILON;
+        if font_changed {
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+            }
+            tracing::info!(
+                "live-reload: font -> {} @ {}px x{}",
+                new_cfg.font.family,
+                new_cfg.font.size,
+                new_cfg.font.line_height,
+            );
+        }
+
+        // Keymap
+        if new_cfg.keymap != self.config.keymap {
+            let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
+            match Keymap::load(&km_path) {
+                Ok(km) => {
+                    tracing::info!(
+                        "live-reload: keymap -> {} ({} bindings)",
+                        km.meta.name,
+                        km.bindings.len()
+                    );
+                    self.keymap = km;
+                }
+                Err(e) => tracing::warn!("live-reload: keymap {:?} failed: {e:#}", km_path),
+            }
+        }
+
+        self.config = new_cfg;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Run a keymap-bound action. Returns true if handled (= consume the key).
     fn run_action(&mut self, action: &Action) -> bool {
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::PasteFromClipboard => self.paste_clipboard(),
-            Action::ReloadConfig => tracing::info!("reload_config: not yet implemented"),
+            Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 let n = self.tabs.len() + 1;
                 self.new_tab(format!("shell {n}"));
@@ -1630,9 +1717,28 @@ impl ApplicationHandler for App {
             rr,
         );
         window.request_redraw();
+
+        // Spawn the sonic.toml live-reload watcher (best-effort; if the
+        // user has no config path or the parent dir is unreadable, the
+        // app still runs — just without live reload).
+        if self.config_watcher.is_none() {
+            if let Some(path) = sonic_core::config::Config::default_path() {
+                match ConfigWatcher::spawn(path.clone()) {
+                    Ok(w) => {
+                        tracing::info!("config watcher: watching {path:?}");
+                        self.config_watcher = Some(w);
+                    }
+                    Err(e) => tracing::warn!("config watcher disabled: {e:#}"),
+                }
+            }
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
+        // Drain any pending sonic.toml live-reload deliveries before
+        // dispatching the event — guarantees font/theme/keymap swaps
+        // land on the same redraw tick they were detected on.
+        self.poll_config_reload();
         // v0.6: route events to the preferences window if it owns this id.
         if let Some(pw) = self.prefs_window.as_ref() {
             if pw.id() == win_id {

@@ -2283,6 +2283,7 @@ dependencies = [
  "crossbeam-channel",
  "fontdb",
  "glyphon",
+ "notify",
  "parking_lot",
  "pollster",
  "raw-window-handle",

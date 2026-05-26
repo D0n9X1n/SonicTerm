@@ -422,6 +422,85 @@ impl GpuRenderer {
         (cols.max(1), rows.max(1))
     }
 
+    /// Current font family in effect. Test-only inspector for the
+    /// live-reload path; production code reads font fields directly.
+    #[doc(hidden)]
+    pub fn font_family(&self) -> &str {
+        &self.font_family
+    }
+
+    /// Current font size in px.
+    #[doc(hidden)]
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Number of glyph tiles currently resident in the rasterizer atlas.
+    /// Test-only; the atlas is cleared and rebuilt by [`Self::set_font`].
+    #[doc(hidden)]
+    pub fn glyph_atlas_len(&self) -> usize {
+        self.glyph_atlas.len()
+    }
+
+    /// Apply a new font family / size / line-height multiplier without
+    /// reconstructing the renderer.
+    ///
+    /// The shelf-packed glyph atlas is cleared because existing tiles
+    /// are sized for the old metrics — reusing them would render at the
+    /// wrong pixel scale. The frame-key cache is also invalidated so
+    /// the next `render()` call cannot short-circuit through the
+    /// fast-path against a now-stale frame.
+    pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
+        let new_line_h = size * line_height_mult;
+        let no_change = self.font_family == family
+            && (self.font_size - size).abs() < f32::EPSILON
+            && (self.line_height - new_line_h).abs() < f32::EPSILON;
+        if no_change {
+            return;
+        }
+        self.font_family = family.to_string();
+        self.font_size = size;
+        self.line_height = new_line_h;
+        let (cw, ch) = measure_cell(&mut self.font_system, family, size, self.line_height);
+        self.cell_w = cw;
+        self.cell_h = ch;
+        let w = self.glyph_atlas.width();
+        let h = self.glyph_atlas.height();
+        self.glyph_atlas = GlyphAtlas::new(w, h);
+        self.last_frame_key = None;
+        tracing::info!(
+            "renderer.set_font: family={family} size={size} line_h={} cell={cw:.2}x{ch:.2}",
+            self.line_height
+        );
+    }
+
+    /// Apply a new color theme without reconstructing the renderer.
+    /// Recomputes every cached wgpu / glyphon color derived from the
+    /// theme so the next frame reflects the swap.
+    pub fn set_theme(&mut self, theme: &Theme) {
+        self.bg = hex_to_wgpu(theme.colors.background.0.as_str());
+        self.fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.6);
+        self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+        self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
+        self.tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
+        self.tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
+        self.tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
+        self.tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
+        self.tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
+        self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        let tint_alpha = match theme.appearance {
+            sonic_core::theme::Appearance::Dark => 0.14,
+            sonic_core::theme::Appearance::Light => 0.10,
+        };
+        self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
+        self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
+        self.search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        self.search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        self.last_frame_key = None;
+        tracing::info!("renderer.set_theme: {}", theme.name);
+    }
+
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         let x = px - self.padding;
         let y = py - self.top_inset();
