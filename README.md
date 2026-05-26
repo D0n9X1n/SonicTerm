@@ -61,7 +61,8 @@ platforms than three mediocre ones.
   wide chars, and the wrong fallback font;
 - want a clean default that **works without configuration** — the
   bundled keymap is WezTerm-compatible, the bundled font is JetBrains
-  Mono Nerd Font, the bundled theme is Tokyo Night;
+  Mono Nerd Font, the default theme is the WezTerm-style `wezterm` palette
+  (out-of-box visual parity with WezTerm);
 - hate when their idle terminal eats 5% of a CPU core just to blink a
   cursor;
 - need both a **GPU terminal** and a **multiplexer** without running two

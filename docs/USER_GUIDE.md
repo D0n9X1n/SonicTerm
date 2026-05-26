@@ -232,8 +232,10 @@ restart.
 
 ## Themes
 
-Bundled themes (selectable from Preferences or `[appearance] theme = "…"`):
+Bundled themes (selectable from Preferences or `[appearance] theme = "…"`).
+The default is `wezterm` for out-of-box visual parity with WezTerm:
 
+- `wezterm` (default)
 - `tokyo-night`
 - `dracula`
 - `nord`

@@ -1,6 +1,15 @@
 use sonic_core::config::*;
 
 #[test]
+fn default_theme_is_wezterm() {
+    // Out-of-box visual parity with WezTerm — keep this in sync with the
+    // default keymap (also "wezterm").
+    let cfg = Config::default();
+    assert_eq!(cfg.theme, "wezterm");
+    assert_eq!(cfg.keymap, "wezterm");
+}
+
+#[test]
 fn defaults_roundtrip_through_toml() {
     let cfg = Config::default();
     let s = cfg.to_toml().unwrap();
