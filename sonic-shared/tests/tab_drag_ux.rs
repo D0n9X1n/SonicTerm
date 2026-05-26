@@ -62,7 +62,7 @@ fn scenario3_drag_to_other_window_bar_release_merges_at_slot() {
     // Destination window has 3 tabs at global x in [1000..1800].
     let dest_bar = synth_bar(3);
     let dest_layout = TabBarLayout::compute(&dest_bar, 800.0);
-    let dest_geom = WindowGeom { inner_origin: (1000, 0), inner_size: (800, 600) };
+    let dest_geom = WindowGeom::new((1000, 0), (800, 600));
 
     let mut s = DragSession::new(0, (50.0, 10.0));
     s.current_pos = (50.0, 999.0); // foreign target wins regardless

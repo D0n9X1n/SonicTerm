@@ -87,12 +87,28 @@ pub fn compute_action<W: Copy>(
 /// Geometry of a candidate destination window for drop hit-testing.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowGeom {
-    /// Top-left of the window's CONTENT area in screen-global pixels.
-    /// Use `Window::inner_position()` for this — the tab bar is laid
-    /// out relative to the inner (client) area, not the outer frame.
+    /// Top-left of the window's CONTENT area in screen-global physical
+    /// pixels. Use `Window::inner_position()` for this — the tab bar
+    /// is laid out relative to the inner (client) area, not the outer
+    /// frame. Stays physical because cross-window math must operate
+    /// in the same coordinate system the OS reports cursor positions
+    /// in (i.e. physical px on the global desktop).
     pub inner_origin: (i32, i32),
-    /// Inner size of the window in physical pixels (width, height).
+    /// Inner size of the window in PHYSICAL pixels (width, height).
     pub inner_size: (u32, u32),
+    /// HiDPI scale factor of this window. `global_to_local` divides
+    /// the resulting local offset by this so callers receive LOGICAL
+    /// pixel coordinates — which is the unit `TabBarLayout` is
+    /// computed in. Default of `1.0` keeps pre-HiDPI tests valid.
+    pub scale_factor: f32,
+}
+
+impl WindowGeom {
+    /// Convenience constructor for the common pre-HiDPI/test case
+    /// where scale factor is 1.0.
+    pub fn new(inner_origin: (i32, i32), inner_size: (u32, u32)) -> Self {
+        Self { inner_origin, inner_size, scale_factor: 1.0 }
+    }
 }
 
 /// The drop slot a cross-window drag will land at on mouse-up.
@@ -112,8 +128,13 @@ pub fn local_to_global(source_inner_origin: (i32, i32), local: (f64, f64)) -> (i
 }
 
 /// Translate a screen-global cursor position into the given
-/// destination window's local pixel coordinates, returning `None` if
-/// the cursor is not inside the window's inner area at all.
+/// destination window's local LOGICAL pixel coordinates, returning
+/// `None` if the cursor is not inside the window's inner area at all.
+///
+/// The destination geometry stores its origin/size in physical px
+/// (winit's natural unit) and its HiDPI scale factor. The returned
+/// local position is divided by `scale_factor` so it lines up with
+/// `TabBarLayout`, which is computed in logical px.
 pub fn global_to_local(dest: WindowGeom, global: (i32, i32)) -> Option<(f32, f32)> {
     let (gx, gy) = global;
     let (ox, oy) = dest.inner_origin;
@@ -123,7 +144,8 @@ pub fn global_to_local(dest: WindowGeom, global: (i32, i32)) -> Option<(f32, f32
     if lx < 0 || ly < 0 || lx as u32 >= w || ly as u32 >= h {
         return None;
     }
-    Some((lx as f32, ly as f32))
+    let sf = dest.scale_factor.max(f32::EPSILON);
+    Some((lx as f32 / sf, ly as f32 / sf))
 }
 
 /// Iterate candidate destination windows and return the first one whose
@@ -169,7 +191,7 @@ mod tests {
 
     #[test]
     fn global_to_local_rejects_outside() {
-        let g = WindowGeom { inner_origin: (200, 100), inner_size: (800, 600) };
+        let g = WindowGeom::new((200, 100), (800, 600));
         assert_eq!(global_to_local(g, (199, 200)), None);
         assert_eq!(global_to_local(g, (1000, 200)), None);
         assert_eq!(global_to_local(g, (300, 99)), None);
@@ -182,11 +204,11 @@ mod tests {
     fn drop_target_picks_window_under_cursor() {
         let bar_a = synth_bar(3);
         let layout_a = TabBarLayout::compute(&bar_a, 800.0);
-        let geom_a = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+        let geom_a = WindowGeom::new((0, 0), (800, 600));
 
         let bar_b = synth_bar(2);
         let layout_b = TabBarLayout::compute(&bar_b, 800.0);
-        let geom_b = WindowGeom { inner_origin: (1000, 0), inner_size: (800, 600) };
+        let geom_b = WindowGeom::new((1000, 0), (800, 600));
 
         // Cursor at global (1100, 10) → inside window B's bar.
         let candidates = vec![("a", geom_a, layout_a), ("b", geom_b, layout_b)];
@@ -198,7 +220,7 @@ mod tests {
     fn drop_target_none_when_no_window_underneath() {
         let bar = synth_bar(2);
         let layout = TabBarLayout::compute(&bar, 800.0);
-        let geom = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+        let geom = WindowGeom::new((0, 0), (800, 600));
         assert!(find_drop_target((2000, 2000), vec![("a", geom, layout)]).is_none());
     }
 
@@ -206,7 +228,7 @@ mod tests {
     fn drop_target_none_when_cursor_below_bar_in_window() {
         let bar = synth_bar(2);
         let layout = TabBarLayout::compute(&bar, 800.0);
-        let geom = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+        let geom = WindowGeom::new((0, 0), (800, 600));
         // Inside the window but well below the 32px bar.
         assert!(find_drop_target((100, 400), vec![("a", geom, layout)]).is_none());
     }
@@ -215,7 +237,7 @@ mod tests {
     fn drop_slot_at_end_of_bar() {
         let bar = synth_bar(2);
         let layout = TabBarLayout::compute(&bar, 800.0);
-        let geom = WindowGeom { inner_origin: (0, 0), inner_size: (800, 600) };
+        let geom = WindowGeom::new((0, 0), (800, 600));
         // Far-right end of the bar (past last tab midpoint, before +
         // button) → slot 2 (== len).
         let t = find_drop_target((700, 10), vec![("a", geom, layout)]).expect("over bar");

@@ -91,7 +91,25 @@ static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
     let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
     let size = w.inner_size();
-    crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
+    crate::tab_drag::WindowGeom {
+        inner_origin: origin,
+        inner_size: (size.width, size.height),
+        scale_factor: w.scale_factor() as f32,
+    }
+}
+
+/// Divide a `winit` `CursorMoved` position by the window's HiDPI
+/// scale factor to land in LOGICAL pixel coordinates. The whole
+/// tab-bar layout (`TabBarLayout`), drag-action thresholds
+/// (`TAB_BAR_HEIGHT`, `TEAR_OUT_THRESHOLD_PX`) and the drag-chip
+/// overlay are expressed in logical px, so every hit-test path must
+/// normalize the raw cursor position through this helper. (PR #76
+/// did the same for the cell grid via `pixel_to_cell`; this is the
+/// matching fix for the chrome layer the haiku reviewer flagged.)
+#[inline]
+fn to_logical_pos(position_x: f64, position_y: f64, scale_factor: f32) -> (f32, f32) {
+    let sf = scale_factor.max(f32::EPSILON);
+    ((position_x as f32) / sf, (position_y as f32) / sf)
 }
 
 #[doc(hidden)]
@@ -812,7 +830,8 @@ impl App {
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
         let candidates = self.child_windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
+            let layout = TabBarLayout::compute(&c.tabs, bar_width)
                 .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
@@ -834,7 +853,8 @@ impl App {
         let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, TabBarLayout)> = Vec::new();
         if let Some(main) = self.window.as_ref() {
             let geom = window_geom(main);
-            let width = self.renderer.as_ref().map(|r| r.width()).unwrap_or(0) as f32;
+            let width =
+                self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
             candidates.push((
                 main.id(),
                 geom,
@@ -846,7 +866,8 @@ impl App {
                 continue;
             }
             let geom = window_geom(&c.window);
-            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32)
+            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
+            let layout = TabBarLayout::compute(&c.tabs, bar_width)
                 .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
@@ -1305,16 +1326,21 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
+                let sf = child.renderer.scale_factor();
+                let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 if let Some(s) = child.drag_session.as_mut() {
-                    s.current_pos = (position.x as f32, position.y as f32);
+                    s.current_pos = (lx, ly);
                     let title = child
                         .tabs
                         .tabs()
                         .get(s.press_tab_index)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    let chip_x = (position.x as f32) - 30.0;
-                    let chip_y = (position.y as f32) - 12.0;
+                    // Chip is drawn through the renderer's LOGICAL
+                    // coordinate space (sw/sh in px_to_ndc were
+                    // normalized by PR #76). Feed it logical too.
+                    let chip_x = lx - 30.0;
+                    let chip_y = ly - 12.0;
                     child.renderer.set_drag_chip(Some(crate::render::DragChipOverlay {
                         top_left: (chip_x, chip_y),
                         title,
@@ -1348,8 +1374,9 @@ impl App {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
-                    let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-                    let bar_width = child.renderer.width() as f32;
+                    let sf = child.renderer.scale_factor();
+                    let (px, py) = to_logical_pos(child.cursor_pos.0, child.cursor_pos.1, sf);
+                    let bar_width = child.renderer.width() as f32 / sf;
                     let layout = TabBarLayout::compute(&child.tabs, bar_width)
                         .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
@@ -1370,7 +1397,12 @@ impl App {
                         return;
                     }
                     child.mouse_down = true;
-                    if let Some((row, col)) = child.renderer.pixel_to_cell(px, py) {
+                    // `pixel_to_cell` still expects PHYSICAL px (it
+                    // divides by scale_factor internally — PR #76).
+                    if let Some((row, col)) = child
+                        .renderer
+                        .pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
+                    {
                         child.selection = Some(Selection::new(row, col));
                     }
                     child.window.request_redraw();
@@ -1388,7 +1420,8 @@ impl App {
                         }
                     }
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
-                        let bar_width = child.renderer.width() as f32;
+                        let sf = child.renderer.scale_factor();
+                        let bar_width = child.renderer.width() as f32 / sf;
                         let layout = TabBarLayout::compute(&child.tabs, bar_width);
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
@@ -2597,18 +2630,22 @@ impl ApplicationHandler<UserEvent> for App {
             // -- Mouse --
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                let sf = self.scale_factor as f32;
+                let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 if let Some(s) = self.drag_session.as_mut() {
-                    s.current_pos = (position.x as f32, position.y as f32);
+                    s.current_pos = (lx, ly);
                     let title = self
                         .tabs
                         .tabs()
                         .get(s.press_tab_index)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    let chip_x = (position.x as f32) - 30.0;
-                    let chip_y = (position.y as f32) - 12.0;
+                    // Chip position is in LOGICAL px (renderer
+                    // normalizes sw/sh by scale_factor — PR #76).
+                    let chip_x = lx - 30.0;
+                    let chip_y = ly - 12.0;
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_drag_chip(Some(crate::render::DragChipOverlay {
                             top_left: (chip_x, chip_y),
@@ -2666,10 +2703,13 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
-                    let px = self.cursor_pos.0 as f32;
-                    let py = self.cursor_pos.1 as f32;
-                    let window_width =
-                        self.window.as_ref().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
+                    let sf = self.scale_factor as f32;
+                    let (px, py) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
+                    let window_width = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
+                        .unwrap_or(0.0);
                     let layout = TabBarLayout::compute(&self.tabs, window_width)
                         .with_visible(self.tab_bar_visible);
                     if let Some(hit) = layout.hit(px, py) {
@@ -2709,7 +2749,10 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(r) = self.renderer.as_ref() {
-                        if let Some((row, col)) = r.pixel_to_cell(px, py) {
+                        // `pixel_to_cell` expects PHYSICAL px.
+                        if let Some((row, col)) =
+                            r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                        {
                             // Cmd/Super-click on a hyperlink opens it. The
                             // parser lock is released inside hyperlink_uri_at
                             // before we ever call sonic_core::url_open::open,
@@ -2745,7 +2788,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let window_width = self
                             .window
                             .as_ref()
-                            .map(|w| w.inner_size().width as f32)
+                            .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                             .unwrap_or(0.0);
                         let layout = TabBarLayout::compute(&self.tabs, window_width);
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
