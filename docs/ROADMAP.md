@@ -162,8 +162,9 @@ in their own window is the next slice.
   `toml 1`. Coordinate the next upgrade across all three.
 - **Release profile uses fat LTO + 1 codegen unit + strip + panic=abort.**
   Don't relax for "build is slow." Use `[profile.dev]` for fast iteration.
-- **Spec files**: kept in PRs/commit messages, not as separate `docs/specs/`
-  entries. Update this `ROADMAP.md` when shipping.
+- **Spec files**: kept in PRs/commit messages alongside the
+  [user guide](USER_GUIDE.md), not as standalone spec entries in this
+  repo. Update this `ROADMAP.md` when shipping.
 - **Crates live at the top level** (`sonic-core/`, `sonic-shared/`,
   `sonic-mac/`, `sonic-windows/`). The old `crates/` nesting was removed
   in `9c46c39`. Don't reintroduce it.

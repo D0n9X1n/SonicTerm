@@ -42,12 +42,12 @@ Sonic does all of that on macOS and Windows.
 | Color emoji | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Programming ligatures | ✅ | ✅ | ❌ | ✅ | ✅ |
 | End-to-end CJK IME (Pinyin / 日本語 / 한글) | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Multiplexer built in | ✅ (`sonic-mux`) | ✅ | ❌ | ✅ | ❌ |
-| SSH client built in | ✅ (optional) | ❌ | ❌ | ❌ | ❌ |
-| Tab tear-out → new window | ✅ in-process | ✅ | ❌ | ❌ | ✅ |
-| Cross-window tab merge | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Multiplexer built in | ✅ (`sonic-mux`) | ✅ | ❌ | ❌ | ❌ |
+| SSH client built in | ✅ (optional) | ✅ (`wezterm ssh`) | ❌ | ⚠️ (`kitten ssh`) | ❌ |
+| Tab tear-out → new window | ✅ in-process | ⚠️ via CLI | ❌ | ❌ | ✅ |
+| Cross-window tab merge | ✅ | ⚠️ via CLI | ❌ | ❌ | ✅ |
 | **Cross-process** tab drag (macOS) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Live config reload | ✅ | ✅ | ❌ | ⚠️ | ❌ |
+| Live config reload | ✅ | ✅ | ❌ | ✅ | ❌ |
 | Localized UI (en / zh-CN / ja) | ✅ | ❌ | ❌ | ❌ | ⚠️ macOS only |
 | Cross-platform | mac + win¹ | mac + win + linux | all | all | mac only |
 
@@ -83,6 +83,22 @@ platforms than three mediocre ones.
   language — all persisted, all live-applied.
 
 Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
+
+### What Sonic doesn't have (yet)
+
+Being honest about the gaps so you can pick the right tool:
+
+- **No Linux build.** Deferred to v1.0 — see
+  [`docs/ROADMAP.md`](docs/ROADMAP.md). WezTerm, Alacritty, and Kitty
+  all run on Linux today; Sonic does not.
+- **No code signing.** macOS `.dmg` and Windows `.msi` are unsigned —
+  signing certs aren't configured yet. You'll see Gatekeeper /
+  SmartScreen warnings on first launch.
+- **No auto-update.** Grab new releases manually from the Releases page.
+- **No remote multiplexer / network protocol.** `sonic-mux` is in-process
+  only — there's no `wezterm connect`-style remote attach yet.
+- **Younger and less battle-tested** than WezTerm, Alacritty, Kitty, or
+  iTerm2. Expect rough edges; please file issues.
 
 ---
 
