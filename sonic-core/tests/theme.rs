@@ -59,6 +59,34 @@ fn wezterm_theme_pins_accent_colors() {
     assert_eq!(t.colors.tab.hover_fg.rgb(), Some((0xd5, 0xc4, 0xa1)), "hover_fg cream");
 }
 
+/// Pin the ANSI 16-color palette to WezTerm's built-in
+/// "Gruvbox dark, hard (base16)" scheme — what the user selects via
+/// `color_scheme = "Gruvbox dark, hard (base16)"` in wezterm.lua.
+/// Exact-byte parity is the contract; any drift here breaks visual
+/// parity with the user's running WezTerm.
+#[test]
+fn wezterm_theme_pins_gruvbox_hard_base16_ansi_palette() {
+    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    // Normal
+    assert_eq!(t.colors.ansi.black.rgb(), Some((0x1d, 0x20, 0x21)), "ansi.black");
+    assert_eq!(t.colors.ansi.red.rgb(), Some((0xcc, 0x24, 0x1d)), "ansi.red");
+    assert_eq!(t.colors.ansi.green.rgb(), Some((0x98, 0x97, 0x1a)), "ansi.green");
+    assert_eq!(t.colors.ansi.yellow.rgb(), Some((0xd7, 0x99, 0x21)), "ansi.yellow");
+    assert_eq!(t.colors.ansi.blue.rgb(), Some((0x45, 0x85, 0x88)), "ansi.blue");
+    assert_eq!(t.colors.ansi.magenta.rgb(), Some((0xb1, 0x62, 0x86)), "ansi.magenta");
+    assert_eq!(t.colors.ansi.cyan.rgb(), Some((0x68, 0x9d, 0x6a)), "ansi.cyan");
+    assert_eq!(t.colors.ansi.white.rgb(), Some((0xa8, 0x99, 0x84)), "ansi.white");
+    // Bright
+    assert_eq!(t.colors.bright.black.rgb(), Some((0x92, 0x83, 0x74)), "bright.black");
+    assert_eq!(t.colors.bright.red.rgb(), Some((0xfb, 0x49, 0x34)), "bright.red");
+    assert_eq!(t.colors.bright.green.rgb(), Some((0xb8, 0xbb, 0x26)), "bright.green");
+    assert_eq!(t.colors.bright.yellow.rgb(), Some((0xfa, 0xbd, 0x2f)), "bright.yellow");
+    assert_eq!(t.colors.bright.blue.rgb(), Some((0x83, 0xa5, 0x98)), "bright.blue");
+    assert_eq!(t.colors.bright.magenta.rgb(), Some((0xd3, 0x86, 0x9b)), "bright.magenta");
+    assert_eq!(t.colors.bright.cyan.rgb(), Some((0x8e, 0xc0, 0x7c)), "bright.cyan");
+    assert_eq!(t.colors.bright.white.rgb(), Some((0xeb, 0xdb, 0xb2)), "bright.white");
+}
+
 #[test]
 fn hex_parser() {
     assert_eq!(Hex("#1a2b3c".to_string()).rgb(), Some((0x1a, 0x2b, 0x3c)));
