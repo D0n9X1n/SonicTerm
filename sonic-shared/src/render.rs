@@ -1221,8 +1221,15 @@ impl GpuRenderer {
             // Tab titles: render as a single rich-text line where each tab title
             // is positioned by inserting padding spaces. This is approximate but
             // readable; precise per-tab text layout is a v0.4 polish item.
+            //
+            // Wezterm fancy-mode parity: every tab except the first is
+            // prefixed with `│ ` (U+2502 BOX DRAWINGS LIGHT VERTICAL +
+            // padding) drawn in `tab_inactive_fg` so a thin divider
+            // appears between adjacent tab titles regardless of which
+            // tab is active.
             let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
             let mut title_text = String::new();
+            // (range, color) — separator spans always use tab_inactive_fg.
             let mut tab_spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
             for t in &layout.tabs {
                 let tab = &tabs.tabs()[t.index];
@@ -1233,6 +1240,12 @@ impl GpuRenderer {
                 let target_col = (t.title.x / avg_glyph_w).floor() as usize;
                 while title_text.chars().count() < target_col {
                     title_text.push(' ');
+                }
+                if t.index > 0 {
+                    let sep_start = title_text.len();
+                    title_text.push_str(crate::tab_title::TAB_SEPARATOR_PREFIX);
+                    let sep_end = title_text.len();
+                    tab_spans.push((sep_start..sep_end, self.tab_inactive_fg));
                 }
                 let start = title_text.len();
                 title_text.push_str(&raw);
