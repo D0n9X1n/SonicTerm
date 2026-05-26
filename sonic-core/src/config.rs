@@ -101,7 +101,8 @@ impl Default for Config {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { family: "Rec Mono Casual".to_string(), size: 14.0, line_height: 1.2 }
+        // line_height 1.1 matches WezTerm's default (visual-parity target).
+        Self { family: "Rec Mono Casual".to_string(), size: 14.0, line_height: 1.1 }
     }
 }
 
