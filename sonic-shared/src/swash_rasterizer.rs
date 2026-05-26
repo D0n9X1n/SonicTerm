@@ -44,6 +44,35 @@ use swash::zeno::Format;
 
 use crate::glyph_atlas::{RasterTile, Rasterizer};
 
+/// In-place convert a buffer of straight-alpha RGBA pixels (the format
+/// swash returns for `Content::Color` strikes) into premultiplied BGRA
+/// (the format our atlas texture + alpha-blend state expect).
+///
+/// Both transformations happen in a single pass:
+///   - channel swap: `R` and `B` are exchanged
+///   - premultiply:  `R`, `G`, `B` are each scaled by `A / 255`
+///
+/// Without this, color emoji would render with red and blue swapped and
+/// with bright edge fringes when composited over a non-black background
+/// (the classic straight-alpha-into-premultiplied-blend artifact).
+#[doc(hidden)]
+pub fn rgba_straight_to_bgra_premul(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
+        let r = px[0];
+        let g = px[1];
+        let b = px[2];
+        let a = px[3];
+        // Standard "round to nearest" 8-bit premultiply: (c * a + 127) / 255.
+        // The +127 makes the truncating divide round-half-up without a
+        // float conversion.
+        let pm = |c: u8| -> u8 { ((c as u16 * a as u16 + 127) / 255) as u8 };
+        px[0] = pm(b);
+        px[1] = pm(g);
+        px[2] = pm(r);
+        px[3] = a;
+    }
+}
+
 /// Default rasterization size in pixels. We bake at this fixed em-size
 /// so a single tile per `GlyphKey` is enough — the renderer never
 /// resizes the grid font at runtime (that would invalidate the entire
@@ -281,6 +310,11 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 if data.len() != expected {
                     data.resize(expected, 0);
                 }
+                // swash emits color bitmaps as straight-alpha RGBA; the
+                // atlas contract (and our wgpu blend state) is
+                // premultiplied BGRA. Swap R↔B and multiply RGB by A in
+                // a single pass so the upload is a memcpy.
+                rgba_straight_to_bgra_premul(&mut data);
                 return Some(RasterTile {
                     width: p.width,
                     height: p.height,
