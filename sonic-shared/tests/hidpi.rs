@@ -156,9 +156,8 @@ fn atlas_offsets_scale_logically_on_2x() {
     let mut fs = font_system_with_bundled();
     let mut r = SwashRasterizer::new(&mut fs, FONT_FAMILY, FONT_SIZE * 2.0);
     let mut atlas = GlyphAtlas::default_size();
-    let info = atlas
-        .get_or_insert(GlyphKey::new('A', false, false), &mut r)
-        .expect("A insertable at 2x");
+    let info =
+        atlas.get_or_insert(GlyphKey::new('A', false, false), &mut r).expect("A insertable at 2x");
     // After dividing by scale_factor, the X offset must be within
     // ~font_size (i.e. roughly one cell width).
     let logical_x = info.px_offset[0] as f32 / 2.0;
@@ -268,4 +267,70 @@ fn rasterizer_px_round_trips_through_scale() {
     drop(r_a);
     let r_b = SwashRasterizer::new(&mut fs, FONT_FAMILY, 28.0);
     assert!((r_b.px() - 28.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn atlas_upload_recreated_matches_new_atlas_dim_after_scale_change() {
+    // Regression for PR #63 review: GpuRenderer::set_scale_factor used
+    // to replace the CPU GlyphAtlas with a larger one on 1x→2x while
+    // leaving the GPU-side AtlasUpload pointing at the OLD-size
+    // texture. The next sync()/draw would either OOB-write or sample
+    // tiles at stale UVs.
+    //
+    // This test models the fix: after rebuilding the atlas for the new
+    // scale, AtlasUpload::new must produce a texture+bind_group whose
+    // reported dimensions match the new atlas. We spin up a real wgpu
+    // device (same offscreen pattern as text_pipeline_offscreen.rs) so
+    // the assertion is grounded in actual GPU resources, not a mock.
+    use pollster::FutureExt as _;
+    use sonic_shared::glyph_atlas::{AtlasUpload, GlyphAtlas};
+    use sonic_shared::text_pipeline::TextPipeline;
+    use wgpu::{
+        DeviceDescriptor, InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat,
+    };
+
+    let instance = wgpu::Instance::new(InstanceDescriptor::new_without_display_handle());
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .block_on()
+        .expect("adapter");
+    let (device, queue) =
+        adapter.request_device(&DeviceDescriptor::default()).block_on().expect("device");
+    let pipeline = TextPipeline::new(&device, TextureFormat::Rgba8UnormSrgb, 16);
+
+    // Step 1: build "1x" atlas + upload.
+    let dim_1x = sonic_shared::render::atlas_dim_for_scale(1.0);
+    let atlas_1x = GlyphAtlas::new(dim_1x, dim_1x);
+    let upload_1x = AtlasUpload::new(&device, &queue, &atlas_1x, &pipeline.bind_group_layout);
+    assert_eq!(upload_1x.width(), dim_1x);
+    assert_eq!(upload_1x.height(), dim_1x);
+
+    // Step 2: model set_scale_factor(2.0) — replace the CPU atlas with
+    // a larger one, then recreate AtlasUpload so the GPU texture +
+    // bind group match the new dimensions.
+    let dim_2x = sonic_shared::render::atlas_dim_for_scale(2.0);
+    assert!(dim_2x > dim_1x, "2x atlas dim must exceed 1x for the regression to be meaningful");
+    let atlas_2x = GlyphAtlas::new(dim_2x, dim_2x);
+    let upload_2x = AtlasUpload::new(&device, &queue, &atlas_2x, &pipeline.bind_group_layout);
+
+    assert_eq!(
+        upload_2x.width(),
+        atlas_2x.width(),
+        "AtlasUpload width must track the new GlyphAtlas after scale change"
+    );
+    assert_eq!(
+        upload_2x.height(),
+        atlas_2x.height(),
+        "AtlasUpload height must track the new GlyphAtlas after scale change"
+    );
+    assert_eq!(upload_2x.width(), dim_2x);
+
+    // And sync() against the new atlas must not panic (would OOB if
+    // the upload were still sized to dim_1x).
+    let mut atlas_2x = atlas_2x;
+    upload_2x.sync(&queue, &mut atlas_2x);
 }

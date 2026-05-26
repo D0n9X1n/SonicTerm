@@ -516,6 +516,18 @@ impl GpuRenderer {
         self.scale_factor = sf;
         let dim = atlas_dim_for_scale(sf);
         self.glyph_atlas = GlyphAtlas::new(dim, dim);
+        // The GPU-side AtlasUpload owns a texture sized to the old atlas
+        // dimensions and a bind group pointing at it. After replacing the
+        // CPU `GlyphAtlas` with one of a different size, the next
+        // `glyph_upload.sync(...)` would either write out-of-bounds or
+        // sample tiles at stale UVs. Rebuild the upload so its texture +
+        // bind group match the new atlas dimensions exactly.
+        self.glyph_upload = AtlasUpload::new(
+            &self.device,
+            &self.queue,
+            &self.glyph_atlas,
+            &self.text_pipeline.bind_group_layout,
+        );
         self.last_frame_key = None;
         if let Some(w) = Some(&self.window) {
             w.request_redraw();
