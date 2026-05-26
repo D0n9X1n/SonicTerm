@@ -302,6 +302,60 @@ fn daemon_socket_is_user_only_0600() {
     );
 }
 
+/// Regression: when a client disconnects, `handle_connection` must
+/// return promptly. Earlier `handle_connection` held a `SubscriberSink`
+/// (which owns a clone of the bounded-channel `Sender`) live across the
+/// `writer_thread.join()`. That kept the channel open, so the writer's
+/// `rx.recv()` never observed `Disconnected`, and the connection-handler
+/// thread blocked forever joining a thread that would never exit. Two
+/// threads leaked per client/reconnect cycle.
+///
+/// We exercise the real `handle_connection` over a UnixStream pair: spawn
+/// a session, attach, then drop the client end. The handler must return
+/// within 1s.
+#[cfg(unix)]
+#[test]
+fn handle_connection_returns_after_client_disconnect() {
+    use std::os::unix::net::UnixStream;
+
+    let (client_end, server_end) = UnixStream::pair().expect("socket pair");
+    let server_write = server_end.try_clone().expect("clone server end");
+    let state = ServerState::new();
+
+    // Pre-seed a session so Attach has something real to subscribe to;
+    // this installs a SubscriberSink in the pane's subscriber slot, which
+    // is exactly the leak pathway we are guarding against.
+    let (sid, _pid) = state.spawn("/bin/sh", 80, 24).expect("spawn");
+
+    let state_clone = state.clone();
+    let handler = thread::spawn(move || handle_connection(state_clone, server_end, server_write));
+
+    // Drive a real Attach so the SubscriberSink is installed in the pane.
+    let mut writer = client_end.try_clone().expect("clone client end");
+    write_frame(&mut writer, &ClientMsg::Attach(sid)).expect("write attach");
+
+    // Give the server a moment to wire the subscriber in.
+    thread::sleep(Duration::from_millis(100));
+
+    // Simulate GUI quit: drop BOTH halves of the client side. The handler's
+    // read loop must observe EOF, run cleanup, drop its sender clones, and
+    // exit. We then join with a deadline.
+    drop(writer);
+    drop(client_end);
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !handler.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        handler.is_finished(),
+        "handle_connection failed to return within 1s after client disconnect; \
+         writer_thread.join() is hanging because a SubscriberSink clone is \
+         still keeping the bounded channel alive"
+    );
+    let _ = handler.join();
+}
+
 #[test]
 fn subscriber_channel_is_bounded_and_drops_oldest() {
     // Build a sink with a small capacity and shove far more messages in

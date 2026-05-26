@@ -412,8 +412,22 @@ where
 
     // Client disconnected: detach so panes stop trying to push to the
     // (now-dead) writer channel. PTYs themselves stay alive.
+    //
+    // CRITICAL: every clone of the bounded sender must be dropped before
+    // we `join` the writer thread, otherwise the writer's `rx.recv()`
+    // never observes `Disconnected` and we leak two threads per
+    // client/reconnect. The senders live in three places:
+    //
+    //   1. the local `tx` we hold here,
+    //   2. the local `sink` (which owns another `Sender` clone), and
+    //   3. zero or more `Option<SubscriberSink>` slots inside each
+    //      attached pane (installed by `attach` / `subscribe_if_unattached`).
+    //
+    // `state.detach()` clears (3). We then explicitly drop (1) and (2)
+    // before the `join` so the channel actually closes.
     state.detach();
     drop(tx);
+    drop(sink);
     let _ = writer_thread.join();
     Ok(())
 }
