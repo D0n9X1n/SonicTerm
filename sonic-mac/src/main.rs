@@ -5,13 +5,33 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
+#[cfg(target_os = "macos")]
+mod os_drag_mac;
+
 fn main() -> Result<()> {
     let config = load_config()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
     let theme_loader: sonic_shared::ThemeLoader = Box::new(|name: &str| load_theme(name));
     let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
-    sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(p) = os_drag_mac::take_pending_payload() {
+            tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup");
+        }
+        sonic_shared::app::run_with_os_drag(
+            theme,
+            config,
+            keymap,
+            os_drag_mac::MacOsDragSink::arc(),
+            Some(theme_loader),
+            Some(keymap_loader),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+    }
 }
 
 fn load_config() -> Result<Config> {

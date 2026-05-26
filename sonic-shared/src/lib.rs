@@ -12,6 +12,7 @@ pub mod config_watch;
 pub mod glyph_atlas;
 pub mod i18n;
 pub mod ime;
+pub mod os_drag;
 pub mod overlays;
 pub mod pane;
 pub mod prefs;
