@@ -204,3 +204,41 @@ cargo build --release -p sonic-mac
 4. **Mailbox present mode + render thread** — `PresentMode::Mailbox`
    drops superseded frames, optimizing for latest-input visibility over
    no-drop guarantees.
+
+## Reference numbers (2026-05-26, post visual-parity, M1 Mac)
+
+Best-of-4 headless `bench` runs after visual-parity work landed:
+
+```json
+{
+  "parse_ns_per_byte": 36,
+  "parse_ns_per_batch": 1184,
+  "grid_walk_us_per_frame": 1,
+  "idle_cpu_pct": 0.08,
+  "typing_echo_latency_us_p50": 703,
+  "typing_echo_latency_us_p95": 1199,
+  "typing_echo_latency_us_p99": 1324,
+  "scroll_throughput_lines_per_sec": 34527,
+  "glyph_walk_us_per_frame": 44,
+  "glyph_atlas_unique_keys": 30,
+  "glyph_walk_hit_rate_pct": 100.0
+}
+```
+
+GUI bench (`bench_headless_gui.sh`), 3-run range:
+
+```
+{"idle_cpu_pct": 4.86–11.85, "scroll_cpu_pct": 0.13–6.43, "typing_delivered": true}
+```
+
+### Findings vs prior baselines
+
+- **`parse_ns_per_byte`: 21 → 36 (+71%) — regression >20%.** Worth investigating; likely
+  related to richer per-cell attribute work the parser now emits for visual parity.
+- **`glyph_walk_us_per_frame`: 27 → 44 (+63%) — regression >20%.** Still well under the
+  50µs goal but trending the wrong way; investigate span-building cost.
+- `scroll_throughput_lines_per_sec`: 33969 → 34527 — stable / slight improvement.
+- `idle_cpu_pct`: 0.01 → 0.08 — proxy metric still well under the <1 goal.
+- Typing-echo latency: p99 1324µs, comfortably under the 2000µs goal.
+
+Tests/gate: `cargo test --workspace` = 623 tests passing (floor 171), `pty_dump` e2e OK.
