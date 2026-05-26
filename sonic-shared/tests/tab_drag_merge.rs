@@ -319,3 +319,53 @@ fn merge_with_multiple_tabs_reindexes_remaining_tabs() {
     assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 0));
     assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 1));
 }
+
+// ---- single-tab cross-window merge (bug: tabs.len()<=1 short-circuit) ------
+//
+// Before the fix, `App::tear_out_tab` early-returned whenever the source
+// bar held only one tab. That was correct for "don't spawn a new window
+// identical to this one," but it ALSO swallowed cross-window drops: if a
+// user dragged the only main tab onto a child window, `tear_out_tab` was
+// invoked by the tear-out gesture detector and silently no-op'd before
+// the merge could run. The fix routes through `try_cross_window_merge`
+// first; the single-tab guard now only fires when no drop target is
+// pending.
+
+use sonic_shared::tab_drag::DropTarget;
+
+#[test]
+fn cross_window_merge_runs_even_with_one_main_tab() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    assert_eq!(app.__test_tab_count(), 1);
+
+    let phantom = make_phantom_window_id();
+    app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
+
+    let consumed = app.try_cross_window_merge(0);
+    assert!(consumed, "1-tab cross-window merge must NOT be blocked by tabs.len()<=1");
+    assert_eq!(app.__test_tab_count(), 0);
+}
+
+#[test]
+fn single_tab_with_no_drag_target_still_noops() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    app.__test_set_drag_target(None);
+
+    let consumed = app.try_cross_window_merge(0);
+    assert!(!consumed, "no drop target → cross-window merge must not fire");
+    assert_eq!(app.__test_tab_count(), 1);
+}
+
+#[test]
+fn cross_window_merge_clears_drag_state_on_consume() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    let phantom = make_phantom_window_id();
+    app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
+
+    assert!(app.try_cross_window_merge(0));
+    // After consume the target is cleared; second call must return false.
+    assert!(!app.try_cross_window_merge(0));
+}

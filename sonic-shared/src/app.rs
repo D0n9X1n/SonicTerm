@@ -1003,9 +1003,47 @@ impl App {
     /// notifies the child window from now on. If the index is
     /// invalid OR the remaining bar would be empty (so tearing out
     /// is a no-op), this is silently skipped.
+    /// If a pending `drag_target` exists and points to ANOTHER window
+    /// (a child while this is main; the source main window's bar can't
+    /// be a candidate per `compute_main_drag_target`), execute the
+    /// cross-window merge and return `true`. Returns `false` when no
+    /// such target exists — the caller should then fall through to its
+    /// normal tear-out path. Used by [`Self::tear_out_tab`] to bypass
+    /// the single-tab short-circuit so a 1-tab main can still merge
+    /// into an existing child.
+    #[doc(hidden)]
+    pub fn try_cross_window_merge(&mut self, index: usize) -> bool {
+        let main_id = self.window.as_ref().map(|w| w.id());
+        let Some(target) = self.drag_target.filter(|t| Some(t.window) != main_id) else {
+            return false;
+        };
+        self.drag_target = None;
+        self.pressed_tab = None;
+        self.mouse_down = false;
+        self.merge_main_into_child(index, target);
+        true
+    }
+
+    /// Test-only: install a synthetic `drag_target` so the
+    /// cross-window-merge gate can be exercised without driving a
+    /// live winit cursor through `CursorMoved`.
+    #[doc(hidden)]
+    pub fn __test_set_drag_target(
+        &mut self,
+        target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    ) {
+        self.drag_target = target;
+    }
+
     fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) {
-        // Don't tear the only tab — that's a no-op (the new window
-        // would be identical to the old one, minus its renderer).
+        // Cross-window merge takes priority over the single-tab guard:
+        // see [`Self::try_cross_window_merge`] for the gate.
+        if self.try_cross_window_merge(index) {
+            return;
+        }
+        // Don't tear the only tab when there's no cross-window target —
+        // that's a no-op (the new window would be identical to the old
+        // one, minus its renderer).
         if self.tabs.len() <= 1 {
             return;
         }
