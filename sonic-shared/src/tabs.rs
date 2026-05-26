@@ -80,6 +80,18 @@ impl TabBar {
         id
     }
 
+    /// Insert `tab` at `index`, clamping to `[0, len]`. The newly-inserted
+    /// tab becomes the active tab. Used by the cross-window drag-merge
+    /// flow to drop a torn tab into the destination bar at the slot the
+    /// user released over.
+    pub fn insert(&mut self, index: usize, tab: Tab) -> TabId {
+        let idx = index.min(self.tabs.len());
+        let id = tab.id;
+        self.tabs.insert(idx, tab);
+        self.active = idx;
+        id
+    }
+
     pub fn close(&mut self, id: TabId) {
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
             self.tabs.remove(pos);

@@ -174,4 +174,35 @@ impl TabBarLayout {
         // click so it doesn't fall through to the terminal grid.
         Some(TabHit::Activate(self.active.unwrap_or(0)))
     }
+
+    /// True if `(px, py)` falls anywhere inside the bar background,
+    /// regardless of which specific tab/control it hits. Used by the
+    /// cross-window drag-merge flow to decide "is the cursor currently
+    /// over THIS window's bar?".
+    pub fn point_over_bar(&self, px: f32, py: f32) -> bool {
+        self.bar.contains(px, py)
+    }
+
+    /// Compute the insertion slot for a tab dropped at `(px, py)`. The
+    /// slot is an index in `[0, n]` where `n == self.tabs.len()`:
+    ///   * left of tab `i`'s horizontal midpoint → slot `i`
+    ///   * right of the last tab's midpoint (or in the empty bar) → `n`
+    ///
+    /// The vertical coordinate is ignored beyond a coarse "is roughly
+    /// over the bar" check — for cross-window merge we already gated on
+    /// `point_over_bar` before getting here, and the bar is thin enough
+    /// that any vertical position inside it should map to the obvious
+    /// horizontal slot.
+    pub fn drop_slot(&self, px: f32, _py: f32) -> usize {
+        if self.tabs.is_empty() {
+            return 0;
+        }
+        for t in &self.tabs {
+            let midx = t.bg.x + t.bg.w * 0.5;
+            if px < midx {
+                return t.index;
+            }
+        }
+        self.tabs.len()
+    }
 }
