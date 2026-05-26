@@ -601,3 +601,51 @@ fn prompt_region_limit_evicts_oldest() {
     }
     assert_eq!(g.prompts_len(), PROMPT_REGION_LIMIT);
 }
+
+#[test]
+fn zwj_codepoints_are_retained_as_cell_extras() {
+    // 👨‍👩‍👧 = MAN (U+1F468, width 2) + ZWJ (U+200D, width 0) +
+    // WOMAN (U+1F469, width 2) + ZWJ (U+200D, width 0) + GIRL
+    // (U+1F467, width 2). Without ZWJ retention the shaper sees three
+    // independent base emoji and can never compose the family glyph.
+    // After retention: the three base emoji each occupy a wide cell,
+    // and the ZWJs are attached as `extras` to the preceding lead
+    // cell so the shaper sees the full cluster.
+    let mut g = Grid::new(20, 1);
+    for ch in "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".chars() {
+        g.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+
+    // Reconstruct the byte stream the shaper would see by walking
+    // non-WIDE_CONT cells in row 0 and inlining their extras.
+    let mut shaped_text = String::new();
+    for cell in g.row(0) {
+        if cell.flags.contains(CellFlags::WIDE_CONT) {
+            continue;
+        }
+        if cell.ch == ' ' && cell.extras.is_none() {
+            continue;
+        }
+        shaped_text.push(cell.ch);
+        if let Some(extras) = &cell.extras {
+            for ch in extras.chars() {
+                shaped_text.push(ch);
+            }
+        }
+    }
+    assert_eq!(
+        shaped_text, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        "ZWJ codepoints (U+200D) must be retained in cell extras so \
+         the shaper sees the full ZWJ family cluster"
+    );
+
+    // Confirm the U+200D codepoint is literally present somewhere in
+    // a cell's `extras` (not just in shaped_text by accident).
+    let zwjs: usize = g
+        .row(0)
+        .iter()
+        .filter_map(|c| c.extras.as_ref())
+        .map(|ex| ex.chars().filter(|c| *c == '\u{200D}').count())
+        .sum();
+    assert_eq!(zwjs, 2, "expected two ZWJ joiners attached as cell extras");
+}

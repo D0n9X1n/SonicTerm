@@ -38,12 +38,20 @@ use crate::grid::{Cell, CellFlags};
 /// the atlas could not express the fallback at all.
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
 pub struct GlyphKey {
-    /// The rendered character.
+    /// The rendered character. For shaped keys (`glyph_id != 0`) this is
+    /// informational — it carries the *first* codepoint of the cluster
+    /// that produced the shaped glyph and is useful for diagnostics, but
+    /// the rasterizer ignores it in favor of `glyph_id`.
     pub ch: char,
     /// Index into the rasterizer's font fallback chain. `0` is the
     /// primary configured family; higher values are platform-specific
     /// fallbacks (PingFang SC, Apple Color Emoji, Microsoft YaHei, …).
     /// One byte: realistic chains are 3–6 entries.
+    ///
+    /// For shaped keys, `font_slot` is the slot the shaper resolved
+    /// the glyph from (via the same SwashRasterizer fallback table),
+    /// so it still uniquely identifies the face — preserving the
+    /// pre-shaping no-collision invariant.
     pub font_slot: u8,
     /// True when the cell carries `CellFlags::BOLD`. Bold and non-bold
     /// share the same glyph face from the rasterizer's point of view
@@ -53,6 +61,15 @@ pub struct GlyphKey {
     pub weight_bold: bool,
     /// True when the cell carries `CellFlags::ITALIC`.
     pub italic: bool,
+    /// Pre-shaped glyph identifier inside the resolved font. `0` is
+    /// reserved as the "no shaping was used" sentinel — the rasterizer
+    /// falls back to the char-based charmap lookup in that case. This
+    /// preserves backward compatibility with every pre-shaping caller
+    /// (tests, bench harness, the original cell-driven path) while
+    /// letting the new shaper-driven path key tiles by the actual
+    /// glyph the shaper produced (e.g. one composed ZWJ-family glyph,
+    /// one `=>` ligature glyph).
+    pub glyph_id: u16,
 }
 
 impl GlyphKey {
@@ -77,14 +94,17 @@ impl GlyphKey {
             font_slot: 0,
             weight_bold: c.flags.contains(CellFlags::BOLD),
             italic: c.flags.contains(CellFlags::ITALIC),
+            glyph_id: 0,
         })
     }
 
     /// Convenience constructor for tests and the bench harness.
-    /// Defaults to `font_slot = 0` (primary family).
+    /// Defaults to `font_slot = 0` (primary family) and `glyph_id = 0`
+    /// (char-based key — let the rasterizer's charmap walk pick the
+    /// glyph).
     #[inline]
     pub fn new(ch: char, weight_bold: bool, italic: bool) -> Self {
-        Self { ch, font_slot: 0, weight_bold, italic }
+        Self { ch, font_slot: 0, weight_bold, italic, glyph_id: 0 }
     }
 
     /// Constructor pinning a specific font slot. Used by the
@@ -92,7 +112,19 @@ impl GlyphKey {
     /// tiles from different fonts cache separately.
     #[inline]
     pub fn with_slot(ch: char, font_slot: u8, weight_bold: bool, italic: bool) -> Self {
-        Self { ch, font_slot, weight_bold, italic }
+        Self { ch, font_slot, weight_bold, italic, glyph_id: 0 }
+    }
+
+    /// Constructor for a *shaped* glyph: identity comes from
+    /// `(font_slot, glyph_id, weight_bold, italic)`, not the
+    /// codepoint. `ch` is recorded for diagnostics only (the first
+    /// codepoint of the cluster the shaper collapsed into this
+    /// glyph). Used by the shaper-driven renderer path so ligatures
+    /// (`=>`) and ZWJ sequences (👨‍👩‍👧) cache as one tile each
+    /// instead of one per source codepoint.
+    #[inline]
+    pub fn shaped(ch: char, font_slot: u8, glyph_id: u16, weight_bold: bool, italic: bool) -> Self {
+        Self { ch, font_slot, weight_bold, italic, glyph_id }
     }
 
     /// Return a new key with `font_slot` replaced. Lets the rasterizer

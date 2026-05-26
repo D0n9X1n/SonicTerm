@@ -199,8 +199,13 @@ fn rasterizes_emoji_single_codepoint() {
 
 #[test]
 fn rasterizes_emoji_zwj_components() {
-    // We don't (yet) draw the family as one cluster; what must work is
-    // every base emoji rasterizes to a non-blank tile so the user sees
-    // 'man woman girl' rather than three tofus.
+    // Historically this test only checked that the three base emoji of
+    // the family ZWJ sequence each rasterize independently — the
+    // pre-shaping renderer drew them as three glyphs. With shaping
+    // wired in (see `tests/text_shaping.rs`) the shaper composes the
+    // ZWJ sequence into one glyph when the font supports it and falls
+    // back to the three components when it doesn't. Either way the
+    // base components MUST still rasterize, so the assertion below
+    // remains a useful regression check on the font-fallback chain.
     assert_all_rasterize("emoji_zwj_components", "👨👩👧");
 }

@@ -184,6 +184,17 @@ impl<'a> SwashRasterizer<'a> {
         &self.families
     }
 
+    /// Borrow the underlying [`FontSystem`] mutably. Needed by the
+    /// shaper-driven render path so a single mutable borrow of
+    /// `GpuRenderer.font_system` can be threaded through *both* the
+    /// rasterizer (charmap + outline scaling) and cosmic-text shaping
+    /// (which also wants `&mut FontSystem`). Without this accessor
+    /// the borrow checker would force the renderer to drop and rebuild
+    /// the rasterizer between every shape pass.
+    pub fn font_system_mut(&mut self) -> &mut FontSystem {
+        self.font_system
+    }
+
     /// Convenience: build at [`DEFAULT_RASTER_PX`] with the bundled
     /// "Rec Mono Casual" family. Used by the test harness.
     pub fn with_default_family(font_system: &'a mut FontSystem) -> Self {
@@ -203,6 +214,29 @@ impl<'a> SwashRasterizer<'a> {
         let query =
             fontdb::Query { families: &families, weight, stretch: fontdb::Stretch::Normal, style };
         self.font_system.db().query(&query)
+    }
+
+    /// Reverse-lookup the slot index for a fontdb ID. Used by the
+    /// shaper-driven render path: cosmic-text returns a
+    /// `LayoutGlyph::font_id`, and we need the matching slot to bake
+    /// into the [`GlyphKey`] so atlas tiles don't collide across
+    /// faces. Returns `None` for IDs not in our chain (cosmic-text
+    /// substituted from the fontdb at large — we fall back to the
+    /// slot we asked for at the run level in that case).
+    pub fn slot_for_font_id(
+        &self,
+        target: fontdb::ID,
+        weight_bold: bool,
+        italic: bool,
+    ) -> Option<u8> {
+        for (idx, family) in self.families.iter().enumerate() {
+            if let Some(id) = self.lookup_id(family, weight_bold, italic) {
+                if id == target {
+                    return Some(idx as u8);
+                }
+            }
+        }
+        None
     }
 
     /// Walk the fallback chain and return the first slot whose face
@@ -235,7 +269,12 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
         // empty tile. The atlas stores a zero-area UV for these and
         // the renderer skips the draw instance — saves an outline
         // scaler build for every blank cell on the screen.
-        if key.ch == ' ' || key.ch == '\t' {
+        //
+        // Skipped for shaped keys (glyph_id != 0): the shaper may have
+        // produced a real shaped glyph whose first cluster codepoint
+        // happens to be ' ' (rare but possible inside RTL/cluster
+        // edge cases), so we rasterize by glyph_id regardless.
+        if key.glyph_id == 0 && (key.ch == ' ' || key.ch == '\t') {
             return Some(RasterTile {
                 width: 0,
                 height: 0,
@@ -259,23 +298,33 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
         let id = self.lookup_id(family, key.weight_bold, key.italic)?;
         let font = self.font_system.get_font(id, weight)?;
         let swash_font = font.as_swash();
-        let glyph_id = swash_font.charmap().map(key.ch);
-        if glyph_id == 0 {
-            // The slot the caller pinned doesn't have this glyph. If
-            // the caller is the renderer, they will have already
-            // resolved the right slot via `resolve_slot`, so this
-            // branch is mainly for the bench/test path that builds a
-            // GlyphKey with slot=0 and expects a sensible answer.
-            if slot == 0 {
-                if let Some(resolved) = self.resolve_slot(key.ch, key.weight_bold, key.italic) {
-                    if resolved != 0 {
-                        let retry = key.with_font_slot(resolved);
-                        return self.rasterize(retry);
+        // Shaped path: the caller already knows the glyph id (cosmic-text
+        // shaped it). Skip the charmap lookup entirely — for ligatures
+        // and ZWJ-composed clusters the charmap of the *first*
+        // codepoint would resolve to a different (component) glyph or
+        // none at all.
+        let glyph_id = if key.glyph_id != 0 {
+            key.glyph_id
+        } else {
+            let g = swash_font.charmap().map(key.ch);
+            if g == 0 {
+                // The slot the caller pinned doesn't have this glyph. If
+                // the caller is the renderer, they will have already
+                // resolved the right slot via `resolve_slot`, so this
+                // branch is mainly for the bench/test path that builds a
+                // GlyphKey with slot=0 and expects a sensible answer.
+                if slot == 0 {
+                    if let Some(resolved) = self.resolve_slot(key.ch, key.weight_bold, key.italic) {
+                        if resolved != 0 {
+                            let retry = key.with_font_slot(resolved);
+                            return self.rasterize(retry);
+                        }
                     }
                 }
+                return None;
             }
-            return None;
-        }
+            g
+        };
 
         let mut scaler = self.scale_ctx.builder(swash_font).size(self.px).hint(true).build();
 
