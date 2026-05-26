@@ -39,7 +39,7 @@ use crate::{
     render::GpuRenderer,
     search::SearchState,
     selection::Selection,
-    tabbar_view::{detect_tear_out, TabBarLayout, TabHit},
+    tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
 
@@ -74,6 +74,8 @@ pub struct ChildWindow {
     /// `App::pressed_tab` but for the child window. Used for
     /// drag-from-child merging.
     pub pressed_tab: Option<usize>,
+    /// Live drag session for a held-tab gesture in this child window.
+    pub drag_session: Option<crate::tab_drag::DragSession>,
     /// Pending cross-window drop target chosen during a drag in the
     /// child's bar; consumed on mouse-up.
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
@@ -313,6 +315,11 @@ pub struct App {
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
     pressed_tab: Option<usize>,
+    /// Live drag session for the held-tab gesture in the MAIN window.
+    /// Tracks press + current cursor position so the renderer can draw
+    /// the translucent drag chip and `compute_action` can pick a
+    /// commit-on-release outcome. `None` when no tab is being dragged.
+    drag_session: Option<crate::tab_drag::DragSession>,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     child_windows: HashMap<WindowId, ChildWindow>,
@@ -395,6 +402,7 @@ impl App {
             ime: ImeState::new(),
             command_palette: CommandPalette::new(),
             pressed_tab: None,
+            drag_session: None,
             child_windows: HashMap::new(),
             drag_target: None,
             main_hidden: false,
@@ -1169,6 +1177,7 @@ impl App {
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),
             pressed_tab: None,
+            drag_session: None,
             drag_target: None,
         };
         self.child_windows.insert(win_id, child);
@@ -1271,11 +1280,25 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
+                if let Some(s) = child.drag_session.as_mut() {
+                    s.current_pos = (position.x as f32, position.y as f32);
+                    let title = child
+                        .tabs
+                        .tabs()
+                        .get(s.press_tab_index)
+                        .map(|t| t.title.clone())
+                        .unwrap_or_default();
+                    let chip_x = (position.x as f32) - 30.0;
+                    let chip_y = (position.y as f32) - 12.0;
+                    child.renderer.set_drag_chip(Some(crate::render::DragChipOverlay {
+                        top_left: (chip_x, chip_y),
+                        title,
+                    }));
+                }
                 // Cross-window drag-merge from child: when a tab in the
                 // child's bar is held, look for a destination on another
-                // window (main or sibling). Drops the &mut child borrow
-                // before calling compute_child_drag_target (which needs
-                // &self.child_windows for sibling lookups).
+                // window (main or sibling). The final action (tear /
+                // merge / cancel) is deferred to mouse-up.
                 if child.mouse_down && child.pressed_tab.is_some() {
                     let local = (position.x, position.y);
                     // child borrow ends at last use; safe to call &mut self next
@@ -1283,10 +1306,7 @@ impl App {
                     let tgt = self.compute_child_drag_target(win_id, local);
                     if let Some(c) = self.child_windows.get_mut(&win_id) {
                         c.drag_target = tgt;
-                        if tgt.is_some() {
-                            c.window.request_redraw();
-                            return;
-                        }
+                        c.window.request_redraw();
                     }
                     return;
                 }
@@ -1312,6 +1332,8 @@ impl App {
                                 child.tabs.activate(i);
                                 child.pressed_tab = Some(i);
                                 child.mouse_down = true;
+                                child.drag_session =
+                                    Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
                             TabHit::Close(_) | TabHit::NewTab => {
                                 // close/new-tab in child are deferred —
@@ -1328,21 +1350,38 @@ impl App {
                     child.window.request_redraw();
                 }
                 ElementState::Released => {
-                    let pending_drop = child.pressed_tab.zip(child.drag_target.take());
+                    let session = child.drag_session.take();
+                    let foreign = child.drag_target.take();
+                    let pressed = child.pressed_tab.take();
                     child.mouse_down = false;
-                    child.pressed_tab = None;
-                    child.drag_target = None;
+                    child.renderer.set_drag_chip(None);
                     if let Some(sel) = child.selection.as_ref() {
                         if sel.is_empty() {
                             child.selection = None;
                             child.window.request_redraw();
                         }
                     }
-                    if let Some((src_idx, target)) = pending_drop {
+                    if let (Some(s), Some(src_idx)) = (session, pressed) {
+                        let bar_width = child.renderer.width() as f32;
+                        let layout = TabBarLayout::compute(&child.tabs, bar_width);
+                        let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
-                        // &mut self via the merge path.
+                        // &mut self via the merge / tear path.
                         let _ = child;
-                        self.merge_child_into_target(win_id, src_idx, target);
+                        match action {
+                            crate::tab_drag::DragAction::ReturnToOriginalBar => {
+                                // No-op cancel.
+                            }
+                            crate::tab_drag::DragAction::MergeIntoWindow(target) => {
+                                self.merge_child_into_target(win_id, src_idx, target);
+                            }
+                            crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
+                                // Tearing out of a child today is a
+                                // no-op: single-tab children are the
+                                // common case and re-parenting the
+                                // only tab would be visually identical.
+                            }
+                        }
                     }
                 }
             },
@@ -2377,54 +2416,35 @@ impl ApplicationHandler<UserEvent> for App {
             // -- Mouse --
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
-                // Cross-window drag-merge: if a tab is held, update the
-                // pending drop target based on the global cursor
-                // position. If a target is found, suppress tear-out —
-                // mouse-up will merge instead. If no target, fall
-                // through to the existing tear-out check.
-                if self.mouse_down && self.pressed_tab.is_some() {
-                    self.drag_target = self.compute_main_drag_target((position.x, position.y));
-                    if self.drag_target.is_some() {
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        return;
+                // Update the live drag session position so the chip
+                // can follow the cursor in the renderer overlay.
+                if let Some(s) = self.drag_session.as_mut() {
+                    s.current_pos = (position.x as f32, position.y as f32);
+                    let title = self
+                        .tabs
+                        .tabs()
+                        .get(s.press_tab_index)
+                        .map(|t| t.title.clone())
+                        .unwrap_or_default();
+                    let chip_x = (position.x as f32) - 30.0;
+                    let chip_y = (position.y as f32) - 12.0;
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_drag_chip(Some(crate::render::DragChipOverlay {
+                            top_left: (chip_x, chip_y),
+                            title,
+                        }));
                     }
                 }
-                // Tear-out detection: if a tab press is in flight and
-                // the cursor has dragged far enough below the bar, try
-                // to pop the tab into its own window. `tear_out_tab`
-                // returns `false` when the gesture is a single-tab
-                // no-op (no cross-window target yet) — in that case we
-                // MUST keep `pressed_tab` and `mouse_down` alive so a
-                // subsequent CursorMoved can land on a sibling window's
-                // tab bar and merge there (Haiku review of PR #62). We
-                // also gate on `tear_out_would_be_noop` *before* the
-                // call so the drag survives even the very first
-                // threshold-crossing event with no target.
-                if self.mouse_down {
-                    if let Some(idx) = self.pressed_tab {
-                        if let Some(t) =
-                            detect_tear_out(idx, (position.x as f32, position.y as f32))
-                        {
-                            if self.tear_out_would_be_noop() {
-                                // Keep gesture alive; user may still
-                                // navigate to another window. Don't
-                                // even request a redraw — nothing
-                                // visible changed.
-                                return;
-                            }
-                            let consumed = self.tear_out_tab(el, t.tab_index);
-                            if consumed {
-                                self.pressed_tab = None;
-                                self.mouse_down = false;
-                            }
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
+                // Cross-window drag-merge: if a tab is held, update the
+                // pending drop target based on the global cursor
+                // position. The actual decision (tear / merge / cancel)
+                // is deferred to mouse-up via `compute_action`.
+                if self.mouse_down && self.pressed_tab.is_some() {
+                    self.drag_target = self.compute_main_drag_target((position.x, position.y));
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
                     }
+                    return;
                 }
                 if self.mouse_down {
                     if let Some(r) = self.renderer.as_ref() {
@@ -2478,6 +2498,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 // below the tab bar can be promoted to a
                                 // tear-out gesture.
                                 self.pressed_tab = Some(i);
+                                self.drag_session =
+                                    Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
                             TabHit::Close(i) => self.close_tab_at(i),
                             TabHit::NewTab => {
@@ -2527,16 +2549,40 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 ElementState::Released => {
-                    // If a cross-window drop is pending, execute it
-                    // before clearing drag state.
-                    if let (Some(src_idx), Some(target)) =
-                        (self.pressed_tab, self.drag_target.take())
-                    {
-                        self.merge_main_into_child(src_idx, target);
-                    }
+                    // Commit-on-release: read the live drag session and
+                    // foreign drop target, decide what to do via the
+                    // pure compute_action helper, then execute.
+                    let session = self.drag_session.take();
+                    let foreign = self.drag_target.take();
+                    let pressed = self.pressed_tab.take();
                     self.mouse_down = false;
-                    self.pressed_tab = None;
-                    self.drag_target = None;
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_drag_chip(None);
+                    }
+                    if let (Some(s), Some(idx)) = (session, pressed) {
+                        let window_width = self
+                            .window
+                            .as_ref()
+                            .map(|w| w.inner_size().width as f32)
+                            .unwrap_or(0.0);
+                        let layout = TabBarLayout::compute(&self.tabs, window_width);
+                        let action = crate::tab_drag::compute_action(&s, foreign, &layout);
+                        match action {
+                            crate::tab_drag::DragAction::ReturnToOriginalBar => {
+                                // No-op — moving back over the source
+                                // bar before releasing cancels the drag.
+                            }
+                            crate::tab_drag::DragAction::MergeIntoWindow(target) => {
+                                self.merge_main_into_child(idx, target);
+                            }
+                            crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
+                                self.tear_out_tab(el, idx);
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;

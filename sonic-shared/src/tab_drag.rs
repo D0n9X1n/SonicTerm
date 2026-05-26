@@ -23,7 +23,66 @@
 // device). v1 is same-process only — we only look at our own
 // `windows: HashMap<WindowId, ...>`.
 
-use crate::tabbar_view::TabBarLayout;
+use crate::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
+
+/// What a tab drag will do on mouse-release, given the current cursor
+/// position. Computed each frame from the `DragSession`, but only
+/// executed when the button comes up — this is browser-standard
+/// behavior: moving the cursor back onto the original bar cancels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragAction<W> {
+    /// Cursor is back over the source window's tab bar — release is a
+    /// no-op (or, optionally, a within-bar reorder; we leave that to a
+    /// dedicated future path).
+    ReturnToOriginalBar,
+    /// Cursor is over another Sonic window's tab bar — release merges
+    /// the dragged tab into that window at the indicated slot.
+    MergeIntoWindow(DropTarget<W>),
+    /// Cursor is anywhere else (well below the source bar, or off any
+    /// window entirely) — release tears the tab into a new floating
+    /// window at the drop position (source-local coordinates).
+    TearOutToNewWindow { drop_local: (f32, f32) },
+}
+
+/// State carried while the user is holding-and-dragging a tab.
+#[derive(Debug, Clone, Copy)]
+pub struct DragSession {
+    /// Index of the tab in the SOURCE bar at the moment of press.
+    pub press_tab_index: usize,
+    /// Source-local cursor position at the moment of press.
+    pub press_pos: (f32, f32),
+    /// Most-recent source-local cursor position.
+    pub current_pos: (f32, f32),
+}
+
+impl DragSession {
+    pub fn new(press_tab_index: usize, press_pos: (f32, f32)) -> Self {
+        Self { press_tab_index, press_pos, current_pos: press_pos }
+    }
+}
+
+/// Pure helper: decide what `mouse-up` should do given the live
+/// session, the optional foreign drop target, and the source bar.
+///
+/// Ordering: foreign target wins; else over-source-bar = cancel; else
+/// past tear threshold = tear; else = cancel (hysteresis).
+pub fn compute_action<W: Copy>(
+    session: &DragSession,
+    foreign_target: Option<DropTarget<W>>,
+    source_bar: &TabBarLayout,
+) -> DragAction<W> {
+    if let Some(t) = foreign_target {
+        return DragAction::MergeIntoWindow(t);
+    }
+    let (cx, cy) = session.current_pos;
+    if source_bar.point_over_bar(cx, cy) {
+        return DragAction::ReturnToOriginalBar;
+    }
+    if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
+        return DragAction::TearOutToNewWindow { drop_local: (cx, cy) };
+    }
+    DragAction::ReturnToOriginalBar
+}
 
 /// Geometry of a candidate destination window for drop hit-testing.
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +149,7 @@ pub fn find_drop_target<W: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tabbar_view::TabBarLayout;
+    use crate::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT};
     use crate::tabs::{Tab, TabBar};
 
     fn synth_bar(n: usize) -> TabBar {
@@ -161,5 +220,57 @@ mod tests {
         // button) → slot 2 (== len).
         let t = find_drop_target((700, 10), vec![("a", geom, layout)]).expect("over bar");
         assert_eq!(t.slot, 2);
+    }
+
+    // --- DragSession / compute_action ---
+
+    fn src_layout() -> TabBarLayout {
+        TabBarLayout::compute(&synth_bar(3), 800.0)
+    }
+
+    #[test]
+    fn action_returns_to_original_bar_when_cursor_over_source() {
+        let mut s = DragSession::new(1, (100.0, 10.0));
+        s.current_pos = (120.0, 5.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert_eq!(a, DragAction::ReturnToOriginalBar);
+    }
+
+    #[test]
+    fn action_returns_to_bar_when_just_below_bar_within_hysteresis() {
+        let mut s = DragSession::new(1, (100.0, 10.0));
+        s.current_pos = (120.0, TAB_BAR_HEIGHT + 5.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert_eq!(a, DragAction::ReturnToOriginalBar);
+    }
+
+    #[test]
+    fn action_tears_out_when_well_below_bar() {
+        let mut s = DragSession::new(1, (100.0, 10.0));
+        s.current_pos = (120.0, TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX + 1.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert!(matches!(a, DragAction::TearOutToNewWindow { .. }));
+    }
+
+    #[test]
+    fn action_merges_when_foreign_target_set_even_if_cursor_far_below() {
+        let mut s = DragSession::new(1, (100.0, 10.0));
+        s.current_pos = (500.0, 999.0);
+        let target = DropTarget { window: "b", slot: 2 };
+        let a = compute_action(&s, Some(target), &src_layout());
+        assert_eq!(a, DragAction::MergeIntoWindow(target));
+    }
+
+    #[test]
+    fn action_drag_below_then_back_over_bar_cancels() {
+        let mut s = DragSession::new(1, (100.0, 10.0));
+        s.current_pos = (120.0, TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX + 50.0);
+        assert!(matches!(
+            compute_action::<&str>(&s, None, &src_layout()),
+            DragAction::TearOutToNewWindow { .. }
+        ));
+        s.current_pos = (140.0, 5.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert_eq!(a, DragAction::ReturnToOriginalBar);
     }
 }

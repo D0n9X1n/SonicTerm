@@ -117,6 +117,18 @@ pub struct GpuRenderer {
     /// px); a row whose content + style hasn't changed since the
     /// last frame hits the cache and skips cosmic-text entirely.
     shape_cache: ShapeCache,
+    /// Active drag-chip overlay: translucent rect drawn at the cursor
+    /// while a tab is held. Cleared on release.
+    drag_chip: Option<DragChipOverlay>,
+}
+
+/// Translucent ~120x24 quad drawn at the cursor while a tab is held.
+#[derive(Debug, Clone)]
+pub struct DragChipOverlay {
+    /// Top-left of the chip rect in physical pixels.
+    pub top_left: (f32, f32),
+    /// Title text of the dragged tab.
+    pub title: String,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -351,6 +363,7 @@ impl GpuRenderer {
             skipped_frames: 0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
+            drag_chip: None,
         })
     }
 
@@ -454,6 +467,16 @@ impl GpuRenderer {
     /// The shelf-packed glyph atlas is cleared because existing tiles
     /// are sized for the old metrics — reusing them would render at the
     /// wrong pixel scale. The frame-key cache is also invalidated so
+    /// Set (or clear) the translucent drag-chip overlay drawn on top
+    /// of the frame. Called by the app on every CursorMoved during a
+    /// held-tab drag, and with `None` on release.
+    pub fn set_drag_chip(&mut self, chip: Option<DragChipOverlay>) {
+        self.drag_chip = chip;
+        // Bust the frame-key cache so a new chip position is actually
+        // drawn — otherwise the no-change fast path would short-circuit.
+        self.last_frame_key = None;
+    }
+
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
@@ -1258,6 +1281,38 @@ impl GpuRenderer {
                 None,
             );
             self.ime_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // Drag-chip overlay: translucent ~120×24 quad that follows the
+        // cursor while a tab is held. Drawn AFTER ime/search so it
+        // sits on top of everything.
+        if let Some(chip) = self.drag_chip.clone() {
+            const CHIP_W: f32 = 120.0;
+            const CHIP_H: f32 = 24.0;
+            // Subtle drop-shadow, then the chip on top.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    chip.top_left.0 + 2.0,
+                    chip.top_left.1 + 2.0,
+                    CHIP_W,
+                    CHIP_H,
+                    sw,
+                    sh,
+                ),
+                color: [0.0, 0.0, 0.0, 0.25],
+            });
+            let mut chip_color = self.tab_active_bg;
+            chip_color[3] = 0.85;
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(chip.top_left.0, chip.top_left.1, CHIP_W, CHIP_H, sw, sh),
+                color: chip_color,
+            });
+            // Title is intentionally not drawn here — wiring a new
+            // glyphon buffer for the chip would conflict with the
+            // existing single-pass text shaping. The translucent quad
+            // alone is the v1 visual; title rendering can land as a
+            // small follow-up against the overlay text pipeline.
+            let _ = chip.title;
         }
 
         self.viewport.update(
