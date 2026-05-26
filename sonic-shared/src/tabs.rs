@@ -77,7 +77,28 @@ impl TabBar {
         let id = tab.id;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.recompute_all_titles();
         id
+    }
+
+    /// Rewrite the `#N ` prefix of every tab's title so it matches the
+    /// tab's current 1-based position in the bar. The body (icon + cwd)
+    /// is preserved verbatim. This must be called after any operation
+    /// that changes the tab list shape (close / insert / reorder /
+    /// detach / drag-merge) so that INACTIVE tabs don't keep a stale
+    /// `#N` from their previous slot — only the active tab is rebuilt
+    /// from scratch each frame in the render loop.
+    pub fn recompute_all_titles(&mut self) {
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            // Only rewrite tabs that already carry a `#N ` prefix —
+            // leave raw user/system titles ("A", "Welcome", …) alone.
+            let Some(body) = strip_index_prefix(&tab.title) else { continue };
+            let new_prefix = format!("#{} ", i + 1);
+            let mut s = String::with_capacity(new_prefix.len() + body.len());
+            s.push_str(&new_prefix);
+            s.push_str(body);
+            tab.title = s;
+        }
     }
 
     /// Insert `tab` at `index`, clamping to `[0, len]`. The newly-inserted
@@ -89,6 +110,7 @@ impl TabBar {
         let id = tab.id;
         self.tabs.insert(idx, tab);
         self.active = idx;
+        self.recompute_all_titles();
         id
     }
 
@@ -98,6 +120,7 @@ impl TabBar {
             if self.active >= self.tabs.len() {
                 self.active = self.tabs.len().saturating_sub(1);
             }
+            self.recompute_all_titles();
         }
     }
 
@@ -129,6 +152,7 @@ impl TabBar {
         if self.active == from {
             self.active = to;
         }
+        self.recompute_all_titles();
     }
 
     /// Pop a tab out of this bar — used to seed a new window when the user
@@ -139,6 +163,20 @@ impl TabBar {
         if self.active >= self.tabs.len() && !self.tabs.is_empty() {
             self.active = self.tabs.len() - 1;
         }
+        self.recompute_all_titles();
         Some(tab)
     }
+}
+
+/// Strip a leading `#<digits> ` index prefix (if any) from a tab title,
+/// returning the remaining body. Used by `recompute_all_titles` so a tab
+/// can be re-prefixed with its current position without doubling up the
+/// `#N`.
+fn strip_index_prefix(title: &str) -> Option<&str> {
+    let rest = title.strip_prefix('#')?;
+    let digits_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if digits_end == 0 {
+        return None;
+    }
+    rest[digits_end..].strip_prefix(' ')
 }

@@ -92,3 +92,83 @@ fn macos_proc_probe_returns_known_name_for_self() {
         assert!(!n.starts_with('-'), "leading - should be stripped, got {n}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Recompute-all-titles regression (PR #77 review): close / insert / reorder /
+// detach must renumber INACTIVE tabs too, not just the active one.
+// ---------------------------------------------------------------------------
+
+use sonic_shared::tabs::{Tab, TabBar};
+
+fn titles(bar: &TabBar) -> Vec<String> {
+    bar.tabs().iter().map(|t| t.title.clone()).collect()
+}
+
+#[test]
+fn three_tabs_get_sequential_index_prefixes_on_push() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 \u{F018D} tmp"));
+    bar.push(Tab::new("#1 \u{F018D} tmp")); // body identical, prefix should renumber
+    bar.push(Tab::new("#1 \u{F018D} tmp"));
+    let t = titles(&bar);
+    assert_eq!(t[0], "#1 \u{F018D} tmp");
+    assert_eq!(t[1], "#2 \u{F018D} tmp");
+    assert_eq!(t[2], "#3 \u{F018D} tmp");
+}
+
+#[test]
+fn close_middle_tab_renumbers_inactive_tabs() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 a"));
+    bar.push(Tab::new("#1 b"));
+    bar.push(Tab::new("#1 c"));
+    // After push: ["#1 a", "#2 b", "#3 c"]; close index 1 (b).
+    let mid = bar.tabs()[1].id;
+    bar.close(mid);
+    let t = titles(&bar);
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[0], "#1 a", "first tab keeps #1");
+    assert_eq!(t[1], "#2 c", "trailing tab renumbered from #3 to #2");
+    assert!(!t.iter().any(|s| s.starts_with("#3 ")), "stale #3 must be gone");
+}
+
+#[test]
+fn reorder_renumbers_all_tabs() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 a"));
+    bar.push(Tab::new("#1 b"));
+    bar.push(Tab::new("#1 c"));
+    // Move index 0 → 2: order becomes [b, c, a].
+    bar.reorder(0, 2);
+    let t = titles(&bar);
+    assert_eq!(t[0], "#1 b");
+    assert_eq!(t[1], "#2 c");
+    assert_eq!(t[2], "#3 a");
+}
+
+#[test]
+fn insert_renumbers_trailing_tabs() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 a"));
+    bar.push(Tab::new("#1 b"));
+    // Insert at index 1: order becomes [a, new, b].
+    bar.insert(1, Tab::new("#1 new"));
+    let t = titles(&bar);
+    assert_eq!(t[0], "#1 a");
+    assert_eq!(t[1], "#2 new");
+    assert_eq!(t[2], "#3 b");
+}
+
+#[test]
+fn detach_renumbers_remaining_tabs() {
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 a"));
+    bar.push(Tab::new("#1 b"));
+    bar.push(Tab::new("#1 c"));
+    let first = bar.tabs()[0].id;
+    let popped = bar.detach(first).expect("detach should return the tab");
+    assert!(popped.title.starts_with("#1 "));
+    let t = titles(&bar);
+    assert_eq!(t[0], "#1 b");
+    assert_eq!(t[1], "#2 c");
+}
