@@ -50,7 +50,13 @@ pub struct TabColors {
     pub inactive_bg: Hex,
     pub inactive_fg: Hex,
     pub hover_bg: Hex,
+    #[serde(default = "default_hover_fg")]
+    pub hover_fg: Hex,
     pub close_button_fg: Hex,
+}
+
+fn default_hover_fg() -> Hex {
+    Hex("#d5c4a1".to_string())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

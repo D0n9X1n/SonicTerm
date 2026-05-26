@@ -48,6 +48,7 @@ fn synth_theme() -> Theme {
                 inactive_bg: hex(),
                 inactive_fg: hex(),
                 hover_bg: hex(),
+                hover_fg: hex(),
                 close_button_fg: hex(),
             },
         },
