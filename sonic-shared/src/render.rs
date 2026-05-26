@@ -20,7 +20,10 @@ use wgpu::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
+    command_palette::CommandPalette,
     glyph_atlas::{AtlasUpload, GlyphAtlas},
+    ime::ImeState,
+    overlays::{search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout},
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
@@ -50,8 +53,21 @@ pub struct GpuRenderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    /// Second TextRenderer used exclusively for overlay text (palette
+    /// query/rows, search input badge, IME preedit). Sharing the atlas with
+    /// `text_renderer` keeps glyph caching unified; using a distinct renderer
+    /// lets us submit two `render()` calls inside one pass — the overlay
+    /// renderer's draw is sequenced AFTER the terminal glyph pipeline so
+    /// overlay glyphs always paint on top of terminal content (fix for
+    /// PR #45 review: overlays were being undercut by terminal text).
+    text_renderer_overlay: TextRenderer,
     tab_buffer: Buffer,
     quad: QuadPipeline,
+    /// Second QuadPipeline for overlay backgrounds / accents drawn AFTER
+    /// terminal text. Same rationale as `text_renderer_overlay`: a single
+    /// pipeline can't be `draw()`ed twice in one pass without clobbering
+    /// its own instance buffer.
+    quad_overlay: QuadPipeline,
 
     // B3 GPU text path for the terminal grid.
     glyph_atlas: GlyphAtlas,
@@ -80,6 +96,9 @@ pub struct GpuRenderer {
     search_fg: GColor,
     search_bg: [f32; 4],
     search_buffer: Buffer,
+    palette_query_buffer: Buffer,
+    palette_rows_buffer: Buffer,
+    ime_buffer: Buffer,
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
@@ -100,6 +119,8 @@ struct FrameKey {
     tab: u64,
     pane: u64,
     search_hash: u64,
+    palette_hash: u64,
+    ime_hash: u64,
     width: u32,
     height: u32,
     tab_hash: u64,
@@ -187,7 +208,10 @@ impl GpuRenderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let text_renderer_overlay =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad = QuadPipeline::new(&device, format);
+        let quad_overlay = QuadPipeline::new(&device, format);
 
         // B3 GPU text path. Allocate the CPU + GPU side of the glyph
         // atlas up front so the first frame can stream tiles into it.
@@ -242,6 +266,26 @@ impl GpuRenderer {
             Some(font_size * 0.85 * 1.2),
         );
 
+        // Overlay text buffers. Sized lazily inside render() since palette
+        // and ime geometry depend on state. They start out at window
+        // width so glyphon doesn't reject them before the first frame.
+        let palette_metrics = Metrics::new(font_size, font_size * 1.25);
+        let mut palette_query_buffer = Buffer::new(&mut font_system, palette_metrics);
+        palette_query_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(font_size * 1.25),
+        );
+        let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_metrics);
+        palette_rows_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
+        let ime_metrics = Metrics::new(font_size, font_size * 1.25);
+        let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
+        ime_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
+
         Ok(Self {
             instance,
             device,
@@ -254,8 +298,10 @@ impl GpuRenderer {
             viewport,
             atlas,
             text_renderer,
+            text_renderer_overlay,
             tab_buffer,
             quad,
+            quad_overlay,
             glyph_atlas,
             glyph_upload,
             text_pipeline,
@@ -281,6 +327,9 @@ impl GpuRenderer {
             search_fg,
             search_bg,
             search_buffer,
+            palette_query_buffer,
+            palette_rows_buffer,
+            ime_buffer,
             last_frame_key: None,
             skipped_frames: 0,
         })
@@ -301,6 +350,21 @@ impl GpuRenderer {
             &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.font_size * 0.85 * 1.2),
+        );
+        self.palette_query_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.font_size * 1.25),
+        );
+        self.palette_rows_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+        self.ime_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.font_size * 1.5),
         );
     }
 
@@ -355,6 +419,8 @@ impl GpuRenderer {
         pane_rects: &[(u64, PaneRect)],
         active_pane: u64,
         search: Option<&SearchState>,
+        palette: Option<&CommandPalette>,
+        ime: Option<&ImeState>,
     ) -> Result<()> {
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
@@ -366,6 +432,35 @@ impl GpuRenderer {
                 s.query.hash(&mut h);
                 s.matches.len().hash(&mut h);
                 s.current.hash(&mut h);
+                h.finish()
+            })
+            .unwrap_or(0);
+        // Per-component dirty flag for the command palette so that a
+        // keystroke into the query box (which changes neither the grid
+        // revision nor the active tab) still invalidates the cached frame.
+        let palette_hash: u64 = palette
+            .filter(|p| p.is_open())
+            .map(|p| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                // The open-bit is implicit in the filter above; mark with
+                // a salt so closed→empty-query opens differ from a stale
+                // hash.
+                0xC0DE_FA17_u64.hash(&mut h);
+                p.query().hash(&mut h);
+                p.selected().hash(&mut h);
+                p.len().hash(&mut h);
+                h.finish()
+            })
+            .unwrap_or(0);
+        // Likewise for IME preedit — composition changes don't bump grid
+        // revision until commit.
+        let ime_hash: u64 = ime
+            .map(|i| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                i.preedit().hash(&mut h);
+                i.is_composing().hash(&mut h);
                 h.finish()
             })
             .unwrap_or(0);
@@ -402,6 +497,8 @@ impl GpuRenderer {
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
             pane: active_pane,
             search_hash,
+            palette_hash,
+            ime_hash,
             width: self.config.width,
             height: self.config.height,
             tab_hash,
@@ -523,6 +620,11 @@ impl GpuRenderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        // Overlay quads — drawn AFTER terminal text + main quads so that
+        // palette / search-input / IME backgrounds visually cover the
+        // terminal content underneath. (Regression caught in PR #45 review:
+        // terminal glyphs were bleeding through overlay dialogs.)
+        let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
@@ -823,6 +925,136 @@ impl GpuRenderer {
             self.search_buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
+        // -------- Bottom-right search bar (state-only overlay) -------------
+        // This is the lightweight "N/M" badge that lives in the corner,
+        // distinct from the legacy full-width status bar above. It shows
+        // whenever search state exists, so the user has a persistent
+        // affordance while typing.
+        let search_bar_layout = search.map(|_| SearchBarLayout::compute(sw, sh));
+        let mut have_search_overlay = false;
+        if let (Some(s), Some(layout)) = (search, search_bar_layout) {
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.border.x,
+                    layout.border.y,
+                    layout.border.w,
+                    layout.border.h,
+                    sw,
+                    sh,
+                ),
+                color: self.hyperlink_underline,
+            });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
+                color: self.search_bg,
+            });
+            let label = search_bar_label(s);
+            self.search_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+            have_search_overlay = true;
+            // Repurpose the (now-redundant) top status-bar slot below by
+            // hiding it when the corner overlay carries the same info.
+            have_search_bar = false;
+            search_bar_top = layout.bg.y;
+        }
+
+        // -------- Command palette overlay ----------------------------------
+        let palette_layout = palette.and_then(|p| PaletteLayout::compute(p, sw, sh));
+        if let Some(layout) = &palette_layout {
+            // Outer 1px border (accent color).
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.border.x,
+                    layout.border.y,
+                    layout.border.w,
+                    layout.border.h,
+                    sw,
+                    sh,
+                ),
+                color: self.hyperlink_underline,
+            });
+            // Dark modal background.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
+                color: [0.08, 0.09, 0.12, 0.96],
+            });
+            // Selected row highlight.
+            if let Some(sel) = layout.selected_row {
+                if let Some(row) = layout.rows.get(sel) {
+                    quads_overlay.push(QuadInstance {
+                        rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
+                        color: self.selection_color,
+                    });
+                }
+            }
+            // Shape the query row text.
+            self.palette_query_buffer.set_text(
+                &mut self.font_system,
+                &layout.query_label,
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.palette_query_buffer.shape_until_scroll(&mut self.font_system, false);
+
+            // Shape the action-list as one multi-line buffer; the renderer
+            // positions it at the first row's y and lets glyphon stack
+            // lines at the buffer's line height.
+            let mut rows_text = String::new();
+            for (i, label) in layout.row_labels.iter().enumerate() {
+                if i > 0 {
+                    rows_text.push('\n');
+                }
+                rows_text.push_str(label);
+            }
+            self.palette_rows_buffer.set_text(
+                &mut self.font_system,
+                &rows_text,
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.palette_rows_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // -------- IME preedit overlay --------------------------------------
+        let ime_layout = ime.and_then(|i| {
+            let cursor_x = self.padding + f32::from(grid.cursor.col) * self.cell_w;
+            let cursor_y = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
+            ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
+        });
+        if let (Some(state), Some(layout)) = (ime, &ime_layout) {
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
+                color: [0.10, 0.11, 0.14, 0.95],
+            });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.underline.x,
+                    layout.underline.y,
+                    layout.underline.w,
+                    layout.underline.h,
+                    sw,
+                    sh,
+                ),
+                color: self.hyperlink_underline,
+            });
+            self.ime_buffer.set_text(
+                &mut self.font_system,
+                state.preedit(),
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.ime_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution { width: self.config.width, height: self.config.height },
@@ -863,9 +1095,95 @@ impl GpuRenderer {
             None
         };
 
+        // Overlay text areas. Each is built only when its state is active.
+        let search_overlay_area = if have_search_overlay {
+            search_bar_layout.map(|layout| TextArea {
+                buffer: &self.search_buffer,
+                left: layout.bg.x + 6.0,
+                top: layout.bg.y + 4.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: layout.bg.x as i32,
+                    top: layout.bg.y as i32,
+                    right: (layout.bg.x + layout.bg.w) as i32,
+                    bottom: (layout.bg.y + layout.bg.h) as i32,
+                },
+                default_color: self.search_fg,
+                custom_glyphs: &[],
+            })
+        } else {
+            None
+        };
+
+        let palette_query_area = palette_layout.as_ref().map(|layout| TextArea {
+            buffer: &self.palette_query_buffer,
+            left: layout.query_row.x + 4.0,
+            top: layout.query_row.y + 2.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.query_row.x as i32,
+                top: layout.query_row.y as i32,
+                right: (layout.query_row.x + layout.query_row.w) as i32,
+                bottom: (layout.query_row.y + layout.query_row.h) as i32,
+            },
+            default_color: self.search_fg,
+            custom_glyphs: &[],
+        });
+        let palette_rows_area = palette_layout.as_ref().and_then(|layout| {
+            layout.rows.first().map(|first| TextArea {
+                buffer: &self.palette_rows_buffer,
+                left: first.rect.x + 4.0,
+                top: first.rect.y + 2.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: layout.bg.x as i32,
+                    top: first.rect.y as i32,
+                    right: (layout.bg.x + layout.bg.w) as i32,
+                    bottom: (layout.bg.y + layout.bg.h) as i32,
+                },
+                default_color: self.search_fg,
+                custom_glyphs: &[],
+            })
+        });
+        let ime_area = ime_layout.as_ref().map(|layout| TextArea {
+            buffer: &self.ime_buffer,
+            left: layout.bg.x + 4.0,
+            top: layout.bg.y + 2.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.bg.x as i32,
+                top: layout.bg.y as i32,
+                right: (layout.bg.x + layout.bg.w) as i32,
+                bottom: (layout.bg.y + layout.bg.h) as i32,
+            },
+            default_color: self.search_fg,
+            custom_glyphs: &[],
+        });
+
+        // Pre-overlay text areas: tab bar titles + (legacy) bottom status bar.
+        // These render BEFORE overlay quads/text, so any overlay drawn on top
+        // will visually cover them — same as the terminal grid glyphs.
         let mut areas: Vec<TextArea> = vec![tab_area];
         if let Some(a) = search_area {
             areas.push(a);
+        }
+
+        // Overlay text areas: every dialog/popup/transient piece of UI that
+        // should sit ABOVE both terminal text and pre-overlay chrome. Driven
+        // through a dedicated TextRenderer so the draw call can be sequenced
+        // after the terminal glyph pipeline inside the render pass below.
+        let mut overlay_areas: Vec<TextArea> = Vec::new();
+        if let Some(a) = search_overlay_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = palette_query_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = palette_rows_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = ime_area {
+            overlay_areas.push(a);
         }
 
         // B3: push any new glyph tiles to the GPU texture before any
@@ -881,6 +1199,15 @@ impl GpuRenderer {
             &mut self.atlas,
             &self.viewport,
             areas,
+            &mut self.swash_cache,
+        )?;
+        self.text_renderer_overlay.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            overlay_areas,
             &mut self.swash_cache,
         )?;
 
@@ -941,6 +1268,14 @@ impl GpuRenderer {
                 &glyph_instances,
             );
             self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)?;
+            // Overlay layer — backgrounds first, then text — drawn LAST so
+            // command-palette / search-input / IME dialogs visually cover
+            // the terminal content underneath. Order matters within the
+            // pass: quad_overlay establishes the dim/dialog backdrop,
+            // text_renderer_overlay paints the palette query, action rows,
+            // search badge and IME preedit on top. (PR #45 review fix.)
+            self.quad_overlay.draw(&self.device, &self.queue, &mut pass, &quads_overlay);
+            self.text_renderer_overlay.render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();

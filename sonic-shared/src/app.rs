@@ -1172,6 +1172,8 @@ impl ApplicationHandler for App {
                             &pane_rects,
                             active_id,
                             search,
+                            Some(&self.command_palette),
+                            Some(&self.ime),
                         ) {
                             tracing::warn!("render error: {e}");
                         }
