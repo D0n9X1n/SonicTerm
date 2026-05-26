@@ -218,6 +218,21 @@ mod tests {
         assert!(path.exists());
     }
 
+    /// WezTerm parity: `window_background_opacity` defaults to 1.0
+    /// (fully opaque) and `macos_window_background_blur` defaults to 0.
+    /// Native window decorations (titlebar + traffic lights, with the
+    /// OS-supplied rounded corners and drop shadow) are kept on.
+    /// Regression test for the window-opacity-decoration-parity change:
+    /// shipping anything less than opaque-by-default lets the desktop
+    /// bleed through and breaks color fidelity vs WezTerm.
+    #[test]
+    fn window_defaults_match_wezterm_parity() {
+        let w = WindowConfig::default();
+        assert_eq!(w.opacity, 1.0, "default opacity must be fully opaque (WezTerm parity)");
+        assert!(!w.blur, "default macOS blur must be off (WezTerm parity)");
+        assert!(w.decorations, "default decorations must be on (rounded corners + shadow)");
+    }
+
     #[test]
     fn cursor_shape_parses_case_insensitive() {
         assert_eq!(CursorShape::from_str_ci("BLOCK"), Some(CursorShape::Block));
