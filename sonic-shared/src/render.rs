@@ -1815,17 +1815,44 @@ impl GpuRenderer {
                 }
                 let cx = pad + f32::from(g.lead_col) * cell_w;
                 let cy = top_inset + f32::from(row) * cell_h;
-                let gx = cx + info.px_offset[0] as f32;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
-                let gw = info.px_size[0] as f32;
-                let gh = info.px_size[1] as f32;
+                // Atlas tiles are rasterized at `font_size * scale_factor`
+                // physical pixels, but GPU output is in *logical* units —
+                // we MUST scale back by `inv_s`. The shaped path below
+                // applies this; the char-based fallback used to omit it,
+                // producing CJK + emoji glyphs at 2x size on Retina that
+                // overflowed into the next cell horizontally and stomped
+                // neighbouring Latin text. Regression target:
+                // `wide_cell_glyph_width_does_not_exceed_two_cells`.
+                let inv_s = 1.0 / scale_factor;
+                let gx = cx + info.px_offset[0] as f32 * inv_s;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let mut gw = info.px_size[0] as f32 * inv_s;
+                let mut gh = info.px_size[1] as f32 * inv_s;
+                // Clamp tile to the cell box the codepoint reserves
+                // (1 cell for narrow, 2 for WIDE). Some fallback faces
+                // (notably Apple Color Emoji at small sizes, certain CJK
+                // fonts) emit bitmaps slightly wider than the cell box;
+                // unclamped they bleed into the following column.
+                if gw > cell_pixel_width {
+                    let ratio = cell_pixel_width / gw;
+                    gw = cell_pixel_width;
+                    gh *= ratio;
+                }
                 let color = cell_fg(&lead_cell, theme, fg_default);
-                let rgba = [
-                    f32::from(color.r()) / 255.0,
-                    f32::from(color.g()) / 255.0,
-                    f32::from(color.b()) / 255.0,
-                    1.0,
-                ];
+                // Color glyphs (emoji) carry their own colour in the
+                // BGRA atlas; the shader ignores `color` when
+                // `flags.x >= 0.5`. Set `color` to white so that a
+                // buggy shader fallback wouldn't tint the emoji red.
+                let rgba = if info.is_color {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [
+                        f32::from(color.r()) / 255.0,
+                        f32::from(color.g()) / 255.0,
+                        f32::from(color.b()) / 255.0,
+                        1.0,
+                    ]
+                };
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -1853,15 +1880,28 @@ impl GpuRenderer {
             let inv_s = 1.0 / scale_factor;
             let gx = cx + info.px_offset[0] as f32 * inv_s;
             let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-            let gw = info.px_size[0] as f32 * inv_s;
-            let gh = info.px_size[1] as f32 * inv_s;
+            let mut gw = info.px_size[0] as f32 * inv_s;
+            let mut gh = info.px_size[1] as f32 * inv_s;
+            // See the fallback path above for why we clamp to
+            // `cell_pixel_width` — the same overflow class can occur on
+            // shaped color emoji where the strike bitmap is slightly
+            // wider than the reserved 2-cell box.
+            if gw > cell_pixel_width {
+                let ratio = cell_pixel_width / gw;
+                gw = cell_pixel_width;
+                gh *= ratio;
+            }
             let color = cell_fg(&lead_cell, theme, fg_default);
-            let rgba = [
-                f32::from(color.r()) / 255.0,
-                f32::from(color.g()) / 255.0,
-                f32::from(color.b()) / 255.0,
-                1.0,
-            ];
+            let rgba = if info.is_color {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [
+                    f32::from(color.r()) / 255.0,
+                    f32::from(color.g()) / 255.0,
+                    f32::from(color.b()) / 255.0,
+                    1.0,
+                ]
+            };
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,
