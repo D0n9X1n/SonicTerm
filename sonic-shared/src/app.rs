@@ -1200,7 +1200,7 @@ impl App {
         // Build the renderer for the new surface. If GPU init fails
         // we drop the panes (kills shells) and bail — the child
         // window would otherwise be invisible/unusable.
-        let renderer = match GpuRenderer::new(
+        let mut renderer = match GpuRenderer::new(
             window.clone(),
             el,
             &self.theme,
@@ -1215,6 +1215,10 @@ impl App {
                 return true;
             }
         };
+        // Inherit cursor config from the parent app so the torn-out
+        // window doesn't suddenly revert to default block/blink.
+        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
+        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
         let (cols, rows) = renderer.cells();
         // Resize the migrated panes to the child window's grid and
@@ -1691,6 +1695,18 @@ impl App {
                 new_cfg.font.size,
                 new_cfg.font.line_height,
             );
+        }
+
+        // Cursor visuals — cheap to apply; the setters short-circuit
+        // when nothing changed, so an unrelated config edit (e.g. a
+        // theme swap) doesn't reset the blink phase.
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_cursor_shape(new_cfg.terminal.cursor_shape);
+            r.set_cursor_blink(new_cfg.terminal.cursor_blink);
+        }
+        for child in self.child_windows.values_mut() {
+            child.renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
+            child.renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
 
         // Keymap
@@ -2403,7 +2419,7 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_ime_allowed(true);
         self.scale_factor = window.scale_factor();
 
-        let renderer = GpuRenderer::new(
+        let mut renderer = GpuRenderer::new(
             window.clone(),
             el,
             &self.theme,
@@ -2413,6 +2429,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.config.window.padding,
         )
         .expect("init renderer");
+        // Seed cursor visuals from config so the very first frame draws
+        // the user-selected shape rather than the default. Subsequent
+        // edits to sonic.toml take effect through the config-watch hook
+        // (see apply_config below).
+        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
+        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
         self.window = Some(window.clone());
         self.renderer = Some(renderer);
@@ -2530,6 +2552,30 @@ impl ApplicationHandler<UserEvent> for App {
                     .unwrap_or_default();
                 let active_id = self.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
 
+                // Collect cursor positions for every INACTIVE pane in
+                // the current tab so the renderer can draw a hollow
+                // outline at each — wezterm-style multi-cursor split
+                // affordance. The active pane's cursor is rendered
+                // separately (filled or hollow depending on window
+                // focus). PR #81 review.
+                let inactive_cursors: Vec<crate::render::InactivePaneCursor> = pane_rects
+                    .iter()
+                    .filter(|(id, _)| *id != active_id)
+                    .filter_map(|(id, rect)| {
+                        let p = self.panes.get(id)?;
+                        let g = p.parser.lock();
+                        let grid = g.grid();
+                        Some(crate::render::InactivePaneCursor {
+                            row: grid.cursor.row,
+                            col: grid.cursor.col,
+                            rect: *rect,
+                        })
+                    })
+                    .collect();
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_inactive_pane_cursors(inactive_cursors);
+                }
+
                 if let (Some(r), Some(pane)) = (self.renderer.as_mut(), self.panes.get(&active_id))
                 {
                     // Block on the parser lock: the VT thread holds it only
@@ -2617,6 +2663,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // `set_ime_allowed` nudges the OS to re-attach the input
                 // context cleanly on macOS / Windows.
                 self.ime.cancel();
+                // Propagate window focus to the renderer so the active
+                // pane's block cursor flips between filled (focused) and
+                // hollow (unfocused) — wezterm/iTerm2 parity. PR #81
+                // review.
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_window_focused(focused);
+                }
                 // Forward focus in/out to the active pane if it asked for
                 // focus reporting via DECSET ?1004 (CSI ?1004h).
                 if let Some(pane) = self.active_pane() {
@@ -2966,6 +3019,35 @@ impl ApplicationHandler<UserEvent> for App {
 
             _ => {}
         }
+    }
+
+    fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+        // When our `WaitUntil(..)` timer expires, winit fires
+        // `NewEvents(ResumeTimeReached)` and then nothing else unless
+        // we explicitly ask. Request a redraw so the blink animation
+        // actually advances to the next phase bucket. PR #81 review.
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // Schedule the next blink-only redraw via `WaitUntil(..)`
+        // rather than `request_redraw()` from inside the render path
+        // (which produced the tight redraw loop flagged on PR #81).
+        // The renderer hands us the exact instant of the next phase
+        // bucket boundary; we leave the default `Wait` in place when
+        // blinking is off or no renderer exists.
+        if let Some(r) = self.renderer.as_ref() {
+            if self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(at) = r.next_blink_redraw_at() {
+                    el.set_control_flow(ControlFlow::WaitUntil(at));
+                }
+            }
+        }
+        // No blink work pending; let the existing default (`Wait`) sit.
     }
 }
 
