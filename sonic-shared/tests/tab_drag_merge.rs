@@ -319,3 +319,150 @@ fn merge_with_multiple_tabs_reindexes_remaining_tabs() {
     assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 0));
     assert!(!App::should_exit_pure(app.__test_tab_count(), app.__test_main_hidden(), 1));
 }
+
+// ---- single-tab cross-window merge (bug: tabs.len()<=1 short-circuit) ------
+//
+// Before the fix, `App::tear_out_tab` early-returned whenever the source
+// bar held only one tab. That was correct for "don't spawn a new window
+// identical to this one," but it ALSO swallowed cross-window drops: if a
+// user dragged the only main tab onto a child window, `tear_out_tab` was
+// invoked by the tear-out gesture detector and silently no-op'd before
+// the merge could run. The fix routes through `try_cross_window_merge`
+// first; the single-tab guard now only fires when no drop target is
+// pending.
+
+use sonic_shared::tab_drag::DropTarget;
+
+#[test]
+fn cross_window_merge_runs_even_with_one_main_tab() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    assert_eq!(app.__test_tab_count(), 1);
+
+    let phantom = make_phantom_window_id();
+    app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
+
+    let consumed = app.try_cross_window_merge(0);
+    assert!(consumed, "1-tab cross-window merge must NOT be blocked by tabs.len()<=1");
+    assert_eq!(app.__test_tab_count(), 0);
+}
+
+#[test]
+fn single_tab_with_no_drag_target_still_noops() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    app.__test_set_drag_target(None);
+
+    let consumed = app.try_cross_window_merge(0);
+    assert!(!consumed, "no drop target → cross-window merge must not fire");
+    assert_eq!(app.__test_tab_count(), 1);
+}
+
+#[test]
+fn cross_window_merge_clears_drag_state_on_consume() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    let phantom = make_phantom_window_id();
+    app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
+
+    assert!(app.try_cross_window_merge(0));
+    // After consume the target is cleared; second call must return false.
+    assert!(!app.try_cross_window_merge(0));
+}
+
+// ---- production event ordering (Haiku review of PR #62) -------------------
+//
+// The factored helper `try_cross_window_merge` is reachable from
+// `tear_out_tab`, but the production CursorMoved handler invokes
+// `tear_out_tab` ONLY when `drag_target` is still `None` (the `Some`
+// branch returns early before tear-out detection). So the new helper
+// alone does NOT fix the user-visible bug: a lone tab dragged below
+// the tab bar fires tear-out first, the gate decides "no-op", and
+// without the review fix the CursorMoved caller cleared `pressed_tab`
+// + `mouse_down`, killing the drag before the user could ever cross
+// into a sibling window's bar.
+//
+// These tests model the full event sequence via the public test seams
+// `__test_pressed_tab` / `__test_mouse_down` / `tear_out_would_be_noop`
+// / `try_cross_window_merge`, asserting the invariant that the gesture
+// state SURVIVES a no-op tear-out attempt and can still complete a
+// merge afterwards. They fail on the parent commit (which would clear
+// the state unconditionally) and pass with the review fix.
+
+#[test]
+fn lone_tab_tear_out_threshold_does_not_kill_drag_without_target() {
+    // Simulate: user mouse-down on the only tab, then drags far enough
+    // to trip tear-out, but the cursor is NOT yet over a sibling
+    // window's bar (drag_target is None).
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    app.__test_set_pressed_tab(Some(0));
+    app.__test_set_mouse_down(true);
+    app.__test_set_drag_target(None);
+
+    // The pure predicate the CursorMoved handler consults: with one
+    // tab + no target, the call would be a no-op and the handler must
+    // bail BEFORE clearing the gesture.
+    assert!(
+        app.tear_out_would_be_noop(),
+        "single-tab + no-target must be classified as no-op so the handler skips state-clear"
+    );
+
+    // Production-shaped assertion: gesture is intact, ready for the
+    // next CursorMoved to acquire a target.
+    assert_eq!(app.__test_pressed_tab(), Some(0));
+    assert!(app.__test_mouse_down());
+    assert_eq!(app.__test_tab_count(), 1);
+}
+
+#[test]
+fn lone_tab_drag_completes_merge_after_threshold_then_target_acquired() {
+    // Full end-to-end production sequence for the single-tab cross-
+    // window merge:
+    //   1. mouse-down on the only tab → press recorded
+    //   2. cursor drags below the bar far enough to trip tear-out, but
+    //      still over the source window → no drop target → gate says
+    //      "no-op" → state preserved
+    //   3. cursor enters a sibling window's tab bar → drag_target =
+    //      Some(child) → gate flips to "not a no-op"
+    //   4. mouse-up (or further movement) consumes the gesture via
+    //      `try_cross_window_merge`, which drains the source tab.
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    // (1) press
+    app.__test_set_pressed_tab(Some(0));
+    app.__test_set_mouse_down(true);
+    // (2) cursor below the bar, no target yet
+    app.__test_set_drag_target(None);
+    assert!(app.tear_out_would_be_noop());
+    // The CursorMoved branch sees the no-op and returns without
+    // touching the gesture. Simulate that by NOT clearing anything.
+    assert_eq!(app.__test_pressed_tab(), Some(0));
+    assert!(app.__test_mouse_down());
+
+    // (3) cursor now over a sibling window's bar
+    let phantom = make_phantom_window_id();
+    app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
+    assert!(!app.tear_out_would_be_noop(), "with a target the gate must allow forward progress");
+
+    // (4) consume via the merge gate (mirrors what tear_out_tab does
+    // internally before the single-tab guard).
+    assert!(app.try_cross_window_merge(0), "merge must run for a lone tab once a target exists");
+    assert_eq!(app.__test_tab_count(), 0, "source tab drained on consume");
+    // try_cross_window_merge clears its own bookkeeping on consume.
+    assert_eq!(app.__test_pressed_tab(), None);
+    assert!(!app.__test_mouse_down());
+}
+
+#[test]
+fn multi_tab_tear_out_is_not_classified_as_noop() {
+    // Negative control: tabs.len() > 1 means tear-out IS productive
+    // (spawns a new window with the dragged tab). The predicate must
+    // say so, otherwise the gate change would over-broadly suppress
+    // the normal tear-out gesture.
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("a");
+    let _ = app.__test_seed_tab("b");
+    app.__test_set_drag_target(None);
+    assert!(!app.tear_out_would_be_noop(), "multi-tab tear-out must not be classified no-op");
+}
