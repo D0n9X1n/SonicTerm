@@ -3280,6 +3280,7 @@ pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
                 inactive_bg: hex(),
                 inactive_fg: hex(),
                 hover_bg: hex(),
+                hover_fg: hex(),
                 close_button_fg: hex(),
             },
         },

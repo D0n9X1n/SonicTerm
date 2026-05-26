@@ -36,16 +36,27 @@ fn tab_bar_bg_is_flush_with_body() {
 
 /// Pin the wezterm theme to the exact colors that match the actual WezTerm
 /// app's default appearance. Sampled from a running WezTerm window: warm
-/// dark grey background `#141617` and warm cream foreground `#cfbc97`.
+/// dark grey background `#141617` and gruvbox fg2 `#d5c4a1` foreground.
 /// Regression guard for the visual parity fix.
 #[test]
 fn wezterm_theme_matches_actual_wezterm_colors() {
     let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
     assert_eq!(t.colors.background.rgb(), Some((0x14, 0x16, 0x17)), "bg");
-    assert_eq!(t.colors.foreground.rgb(), Some((0xcf, 0xbc, 0x97)), "fg");
+    assert_eq!(t.colors.foreground.rgb(), Some((0xd5, 0xc4, 0xa1)), "fg");
     assert_eq!(t.colors.tab.bar_bg.rgb(), Some((0x14, 0x16, 0x17)), "tab.bar_bg flush");
-    assert_eq!(t.colors.tab.active_bg.rgb(), Some((0x1c, 0x1f, 0x20)), "tab.active_bg");
+    assert_eq!(t.colors.tab.active_bg.rgb(), Some((0x14, 0x16, 0x17)), "tab.active_bg flush");
     assert_eq!(t.colors.tab.inactive_bg.rgb(), Some((0x14, 0x16, 0x17)), "tab.inactive_bg");
+}
+
+/// Pin the WezTerm accent palette: gruvbox bright yellow `#fabd2f` on the
+/// active tab, neutral gray `#928374` on inactive tabs, and `#d5c4a1` on
+/// hover — matching the user's `wezterm.lua` config exactly.
+#[test]
+fn wezterm_theme_pins_accent_colors() {
+    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    assert_eq!(t.colors.tab.active_fg.rgb(), Some((0xfa, 0xbd, 0x2f)), "active_fg gold");
+    assert_eq!(t.colors.tab.inactive_fg.rgb(), Some((0x92, 0x83, 0x74)), "inactive_fg dim");
+    assert_eq!(t.colors.tab.hover_fg.rgb(), Some((0xd5, 0xc4, 0xa1)), "hover_fg cream");
 }
 
 #[test]

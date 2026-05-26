@@ -3,11 +3,11 @@ appearance = "dark"
 
 [colors]
 background    = "#141617"
-foreground    = "#cfbc97"
+foreground    = "#d5c4a1"
 cursor        = "#52ad70"
 cursor_text   = "#141617"
 selection_bg  = "#27414d"
-selection_fg  = "#cfbc97"
+selection_fg  = "#d5c4a1"
 
 [colors.ansi]
 black   = "#000000"
@@ -31,9 +31,10 @@ white   = "#ffffff"
 
 [colors.tab]
 bar_bg          = "#141617"
-active_bg       = "#1c1f20"
+active_bg       = "#141617"
 active_fg       = "#fabd2f"
 inactive_bg     = "#141617"
 inactive_fg     = "#928374"
 hover_bg        = "#1c1f20"
+hover_fg        = "#d5c4a1"
 close_button_fg = "#ff5555"
