@@ -1027,6 +1027,24 @@ impl App {
     /// Test-only: install a synthetic `drag_target` so the
     /// cross-window-merge gate can be exercised without driving a
     /// live winit cursor through `CursorMoved`.
+    /// Pure decision used by the CursorMoved tear-out branch: would a
+    /// call to `tear_out_tab` right now be a guaranteed no-op (because
+    /// we have only one tab AND no cross-window drop target)? Hoisted
+    /// out of `tear_out_tab` so the CursorMoved caller can decide
+    /// *whether to invoke at all* and, crucially, leave gesture state
+    /// (`pressed_tab`, `mouse_down`) intact when the answer is "yes".
+    /// Without this gate, the production sequence (lone tab → cursor
+    /// crosses tear-out threshold → cursor finally enters another
+    /// window's bar) is impossible: the threshold trip would clear the
+    /// gesture before the user ever reaches a sibling bar. Haiku
+    /// review of PR #62 caught this.
+    #[doc(hidden)]
+    pub fn tear_out_would_be_noop(&self) -> bool {
+        let main_id = self.window.as_ref().map(|w| w.id());
+        let no_target = self.drag_target.filter(|t| Some(t.window) != main_id).is_none();
+        no_target && self.tabs.len() <= 1
+    }
+
     #[doc(hidden)]
     pub fn __test_set_drag_target(
         &mut self,
@@ -1035,17 +1053,30 @@ impl App {
         self.drag_target = target;
     }
 
-    fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) {
+    /// Returns `true` if the gesture was consumed (tab actually torn
+    /// out into its own window, cross-window merged, handed off to the
+    /// OS, or aborted by a hard error after pane state was already
+    /// drained). Returns `false` ONLY when the call was a no-op the
+    /// caller must NOT treat as a completed gesture — currently the
+    /// single-tab-with-no-target case. The caller is responsible for
+    /// clearing `pressed_tab` / `mouse_down` only on `true`, so a
+    /// lone-tab drag that crosses the tear-out threshold before
+    /// reaching another window's bar stays alive and can still be
+    /// merged on a subsequent CursorMoved / mouse-release.
+    fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
         // Cross-window merge takes priority over the single-tab guard:
         // see [`Self::try_cross_window_merge`] for the gate.
         if self.try_cross_window_merge(index) {
-            return;
+            return true;
         }
         // Don't tear the only tab when there's no cross-window target —
         // that's a no-op (the new window would be identical to the old
-        // one, minus its renderer).
+        // one, minus its renderer). Critically: return `false` so the
+        // CursorMoved caller keeps the drag gesture alive; otherwise
+        // the user can never recover by moving the cursor onto a
+        // sibling window's tab bar.
         if self.tabs.len() <= 1 {
-            return;
+            return false;
         }
         // OS-level cross-process drag: if a sink is installed AND the
         // cursor has left every Sonic-owned window, hand the tab off
@@ -1055,9 +1086,9 @@ impl App {
         // from its own pasteboard read and spawns a fresh tab with
         // the same cwd/cmd/env, showing scrollback as history.
         if self.try_os_drag_handoff(index) {
-            return;
+            return true;
         }
-        let Some((tab, state, panes)) = self.detach_tab_state(index) else { return };
+        let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
         let attrs = Window::default_attributes()
             .with_title(format!("Sonic — {}", tab.title))
@@ -1068,7 +1099,9 @@ impl App {
                 tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
                 // panes drop here, which kills the child shells via
                 // PtyHandle::Drop — acceptable for an OS-level failure.
-                return;
+                // The gesture IS consumed — we already drained the
+                // source tab — so the caller must clear drag state.
+                return true;
             }
         };
         window.set_ime_allowed(true);
@@ -1088,7 +1121,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
-                return;
+                return true;
             }
         };
 
@@ -1126,6 +1159,7 @@ impl App {
         self.child_windows.insert(win_id, child);
         window.request_redraw();
         tracing::info!("tab torn out as new window; child_windows={}", self.child_windows.len());
+        true
     }
 
     /// Handle a winit event addressed to a torn-out child window.
@@ -1370,6 +1404,31 @@ impl App {
     #[doc(hidden)]
     pub fn __test_try_os_drag_handoff(&mut self, index: usize) -> bool {
         self.try_os_drag_handoff(index)
+    }
+
+    /// Test-only: inspect and mutate the drag-gesture state
+    /// (`pressed_tab`, `mouse_down`) so an integration test can
+    /// reproduce the production sequence "tab pressed → cursor
+    /// crosses tear-out threshold → eventually drops on sibling
+    /// window" without needing a live winit `ActiveEventLoop`.
+    #[doc(hidden)]
+    pub fn __test_pressed_tab(&self) -> Option<usize> {
+        self.pressed_tab
+    }
+
+    #[doc(hidden)]
+    pub fn __test_mouse_down(&self) -> bool {
+        self.mouse_down
+    }
+
+    #[doc(hidden)]
+    pub fn __test_set_pressed_tab(&mut self, v: Option<usize>) {
+        self.pressed_tab = v;
+    }
+
+    #[doc(hidden)]
+    pub fn __test_set_mouse_down(&mut self, v: bool) {
+        self.mouse_down = v;
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,
@@ -2307,16 +2366,33 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 // Tear-out detection: if a tab press is in flight and
-                // the cursor has dragged far enough below the bar, pop
-                // the tab into its own window.
+                // the cursor has dragged far enough below the bar, try
+                // to pop the tab into its own window. `tear_out_tab`
+                // returns `false` when the gesture is a single-tab
+                // no-op (no cross-window target yet) — in that case we
+                // MUST keep `pressed_tab` and `mouse_down` alive so a
+                // subsequent CursorMoved can land on a sibling window's
+                // tab bar and merge there (Haiku review of PR #62). We
+                // also gate on `tear_out_would_be_noop` *before* the
+                // call so the drag survives even the very first
+                // threshold-crossing event with no target.
                 if self.mouse_down {
                     if let Some(idx) = self.pressed_tab {
                         if let Some(t) =
                             detect_tear_out(idx, (position.x as f32, position.y as f32))
                         {
-                            self.pressed_tab = None;
-                            self.mouse_down = false;
-                            self.tear_out_tab(el, t.tab_index);
+                            if self.tear_out_would_be_noop() {
+                                // Keep gesture alive; user may still
+                                // navigate to another window. Don't
+                                // even request a redraw — nothing
+                                // visible changed.
+                                return;
+                            }
+                            let consumed = self.tear_out_tab(el, t.tab_index);
+                            if consumed {
+                                self.pressed_tab = None;
+                                self.mouse_down = false;
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
