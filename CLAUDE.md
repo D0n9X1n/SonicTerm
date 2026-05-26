@@ -277,3 +277,65 @@ Acceptable in-flight footprint: one scratch per active agent. After all agents r
 
 Local `target/` is a separate ~5 GB cost (debug + release + deps + incremental). Run `cargo clean` periodically when not actively building. The shipped `.dmg` is **~22 MB**; the 5 GB is purely build-time intermediates.
 
+---
+
+## 13. GUI smoke test — MANDATORY for every PR that touches rendering / input / VT / window state
+
+The headless local gate (fmt / clippy / test / pty_dump) is necessary but not sufficient. Several real bugs have shipped past it: blank window (PR #36), CJK tofu (PR #42), 100 % idle CPU (PR #31), sRGB gamma washing out theme colors, low-DPI blur on Retina. None of these show up in `cargo test` because they need a real wgpu surface + real macOS window + real glyph upload.
+
+**Rule:** every PR that touches any file under `sonic-shared/src/render*.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`, `text_pipeline.rs`, `app.rs`, `quad.rs`, `tabbar_view.rs`, `sonic-core/src/vt.rs`, `sonic-core/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review:
+
+```bash
+pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
+./target/release/sonic-mac > /tmp/gui-smoke.log 2>&1 &
+sleep 2.5
+PID=$(pgrep -f sonic-mac | head -1)
+
+# 1. Bring to front + position (so the screenshot actually captures Sonic, not whatever was front)
+osascript <<EOF
+tell application "System Events"
+  tell process "sonic-mac"
+    set frontmost to true
+    set position of window 1 to {500, 200}
+    set size of window 1 to {1000, 700}
+  end tell
+end tell
+EOF
+sleep 0.5
+
+# 2. Inject a representative keystroke payload that exercises:
+#    - ASCII echo round-trip (PTY ↔ grid)
+#    - CJK glyph rasterization + font fallback
+#    - emoji color rendering
+#    - Enter / RET handling
+osascript -e 'tell application "System Events" to keystroke "echo 中文 🎉 sonic && date"'
+sleep 0.3
+osascript -e 'tell application "System Events" to key code 36'   # Enter / Return
+sleep 1
+
+# 3. Screencap full main display (-D 1)
+screencapture -x -D 1 /tmp/gui-smoke.png
+
+# 4. Inspect /tmp/gui-smoke.png — sample background pixel (theme.background should
+#    match the configured hex), confirm text renders, confirm no tofu boxes, confirm
+#    cursor present. Note pixel value of background; should match the active theme.
+
+kill -9 $PID 2>/dev/null
+```
+
+Things to check on the screenshot (open + look — do not trust your absence of an error message):
+
+- Window background pixel value matches `theme.colors.background` (no sRGB/linear double-gamma)
+- CJK 中 文 render as glyphs, not `?` and not tofu boxes
+- 🎉 renders in color (not monochrome silhouette)
+- Cursor is visible (not blank)
+- Text is sharp (no HiDPI upscale blur on Retina)
+- No 0 %–100 % CPU sweep (check `ps -p $PID -o %cpu` during the 5 s window — should sit < 5 %)
+
+If any of those fail, the PR is not ready. Include the screenshot path AND a 1-line observation per check in the PR body. Reviewers will compare against the previous baseline screenshot.
+
+This rule was added after a session in which 10 PRs landed clean through fmt+clippy+test, then the user opened the actual app and immediately saw three visual bugs (wrong theme color, blurry text, garbled CJK box drawing) that none of the existing tests could catch.
+
+**For background agents:** the same gate applies — every agent dispatch for a render/input/VT PR must include the GUI smoke as a numbered step in the prompt, and the agent must paste the screenshot path + observation list in its reply. If the agent has no display (CI / sandbox), it MUST flag that fact explicitly and the PM (you) runs the smoke locally before merging.
+
+
