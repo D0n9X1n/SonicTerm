@@ -54,10 +54,7 @@ impl Parser {
     /// Construct a parser that can send replies (DSR, DA, XTVERSION, focus
     /// reporting) back to the pty via the given channel.
     pub fn new_with_reply(grid: Grid, reply_tx: Sender<Vec<u8>>) -> Self {
-        Self {
-            inner: vte::Parser::new(),
-            performer: Performer::new(grid, Some(reply_tx)),
-        }
+        Self { inner: vte::Parser::new(), performer: Performer::new(grid, Some(reply_tx)) }
     }
 
     /// Whether DECSET ?1004 (focus reporting) is currently enabled. App should

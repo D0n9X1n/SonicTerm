@@ -491,8 +491,7 @@ impl App {
     fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser =
-            Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
         // Pre-create the redraw target Arc bound to the current parent
         // window. If the pane later tears out, `tear_out_tab` swaps the
         // inner Option to the child window's Arc<Window> so the VT
