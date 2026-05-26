@@ -40,6 +40,18 @@ use crate::{
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
 // millisecond on the renderer thread.)
 
+/// Pure helper computing the top inset reserved for the tab bar.
+/// Returns 0 when the bar is hidden so the grid recovers the row.
+/// Exposed so tests can validate visibility wiring without needing
+/// a live GPU context.
+pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
+    if visible {
+        TAB_BAR_HEIGHT + padding
+    } else {
+        0.0
+    }
+}
+
 #[allow(dead_code)]
 pub struct GpuRenderer {
     instance: wgpu::Instance,
@@ -107,6 +119,10 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Whether the tab bar is currently shown. Toggled at runtime by the
+    /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
+    /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
+    tab_bar_visible: bool,
     /// Characters from the most recent `render()` call that the
     /// rasterizer could not produce a tile for (i.e. would draw as a
     /// tofu outline). Whitespace is excluded. Test-only diagnostic
@@ -349,6 +365,7 @@ impl GpuRenderer {
             ime_buffer,
             last_frame_key: None,
             skipped_frames: 0,
+            tab_bar_visible: true,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
         })
@@ -387,9 +404,27 @@ impl GpuRenderer {
         );
     }
 
-    /// Top inset reserved for the tab bar.
+    /// Top inset reserved for the tab bar. Returns 0 when the tab bar is
+    /// hidden via [`Self::set_tab_bar_visible`].
     pub fn top_inset(&self) -> f32 {
-        TAB_BAR_HEIGHT + self.padding
+        tab_bar_top_inset(self.tab_bar_visible, self.padding)
+    }
+
+    /// Show or hide the tab bar. Returns `true` if the visibility actually
+    /// changed (so callers can decide whether to recompute grid dims).
+    /// Invalidates the cached frame key so the next `render()` call rebuilds.
+    pub fn set_tab_bar_visible(&mut self, visible: bool) -> bool {
+        if self.tab_bar_visible == visible {
+            return false;
+        }
+        self.tab_bar_visible = visible;
+        self.last_frame_key = None;
+        true
+    }
+
+    /// Whether the tab bar is currently shown.
+    pub fn tab_bar_visible(&self) -> bool {
+        self.tab_bar_visible
     }
 
     pub fn width(&self) -> u32 {
@@ -961,126 +996,127 @@ impl GpuRenderer {
         }
 
         // -------- Tab bar ---------------------------------------------------
-        let layout = TabBarLayout::compute(tabs, sw);
-        quads.push(QuadInstance {
-            rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
-            color: self.tab_bar_bg,
-        });
-        for t in &layout.tabs {
-            let is_active = layout.active == Some(t.index);
-            let bg_color = if is_active { self.tab_active_bg } else { self.tab_inactive_bg };
+        if self.tab_bar_visible {
+            let layout = TabBarLayout::compute(tabs, sw);
             quads.push(QuadInstance {
-                rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
-                color: bg_color,
+                rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
+                color: self.tab_bar_bg,
             });
-            // Close button × drawn as two crossing thin quads.
-            let cx = t.close.x;
-            let cy = t.close.y;
-            let cs = t.close.w;
-            let thick = 1.5_f32;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(
-                    cx + cs * 0.25,
-                    cy + cs * 0.5 - thick / 2.0,
-                    cs * 0.5,
-                    thick,
-                    sw,
-                    sh,
-                ),
-                color: self.tab_close_fg,
-            });
-            quads.push(QuadInstance {
-                rect: px_to_ndc(
-                    cx + cs * 0.5 - thick / 2.0,
-                    cy + cs * 0.25,
-                    thick,
-                    cs * 0.5,
-                    sw,
-                    sh,
-                ),
-                color: self.tab_close_fg,
-            });
-        }
-        // `+` new-tab button
-        let nt = layout.new_tab;
-        let plus_thick = 2.0_f32;
-        let plus_len = nt.w.min(nt.h) * 0.4;
-        let pcx = nt.x + nt.w / 2.0;
-        let pcy = nt.y + nt.h / 2.0;
-        quads.push(QuadInstance {
-            rect: px_to_ndc(
-                pcx - plus_len / 2.0,
-                pcy - plus_thick / 2.0,
-                plus_len,
-                plus_thick,
-                sw,
-                sh,
-            ),
-            color: self.tab_close_fg,
-        });
-        quads.push(QuadInstance {
-            rect: px_to_ndc(
-                pcx - plus_thick / 2.0,
-                pcy - plus_len / 2.0,
-                plus_thick,
-                plus_len,
-                sw,
-                sh,
-            ),
-            color: self.tab_close_fg,
-        });
-
-        // Tab titles: render as a single rich-text line where each tab title
-        // is positioned by inserting padding spaces. This is approximate but
-        // readable; precise per-tab text layout is a v0.4 polish item.
-        let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
-        let mut title_text = String::new();
-        let mut tab_spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
-        for t in &layout.tabs {
-            let tab = &tabs.tabs()[t.index];
-            let is_active = layout.active == Some(t.index);
-            let color = if is_active { self.tab_active_fg } else { self.tab_inactive_fg };
-            let max_chars = ((t.title.w / avg_glyph_w).floor() as usize).max(1);
-            let raw: String = tab.title.chars().take(max_chars).collect();
-            let target_col = (t.title.x / avg_glyph_w).floor() as usize;
-            while title_text.chars().count() < target_col {
-                title_text.push(' ');
+            for t in &layout.tabs {
+                let is_active = layout.active == Some(t.index);
+                let bg_color = if is_active { self.tab_active_bg } else { self.tab_inactive_bg };
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                    color: bg_color,
+                });
+                // Close button × drawn as two crossing thin quads.
+                let cx = t.close.x;
+                let cy = t.close.y;
+                let cs = t.close.w;
+                let thick = 1.5_f32;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(
+                        cx + cs * 0.25,
+                        cy + cs * 0.5 - thick / 2.0,
+                        cs * 0.5,
+                        thick,
+                        sw,
+                        sh,
+                    ),
+                    color: self.tab_close_fg,
+                });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(
+                        cx + cs * 0.5 - thick / 2.0,
+                        cy + cs * 0.25,
+                        thick,
+                        cs * 0.5,
+                        sw,
+                        sh,
+                    ),
+                    color: self.tab_close_fg,
+                });
             }
-            let start = title_text.len();
-            title_text.push_str(&raw);
-            let end = title_text.len();
-            tab_spans.push((start..end, color));
-        }
-        let mut spans2: Vec<(&str, Attrs<'_>)> = Vec::new();
-        let mut tcur = 0usize;
-        for (range, color) in &tab_spans {
-            if range.start > tcur {
+            // `+` new-tab button
+            let nt = layout.new_tab;
+            let plus_thick = 2.0_f32;
+            let plus_len = nt.w.min(nt.h) * 0.4;
+            let pcx = nt.x + nt.w / 2.0;
+            let pcy = nt.y + nt.h / 2.0;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(
+                    pcx - plus_len / 2.0,
+                    pcy - plus_thick / 2.0,
+                    plus_len,
+                    plus_thick,
+                    sw,
+                    sh,
+                ),
+                color: self.tab_close_fg,
+            });
+            quads.push(QuadInstance {
+                rect: px_to_ndc(
+                    pcx - plus_thick / 2.0,
+                    pcy - plus_len / 2.0,
+                    plus_thick,
+                    plus_len,
+                    sw,
+                    sh,
+                ),
+                color: self.tab_close_fg,
+            });
+
+            // Tab titles: render as a single rich-text line where each tab title
+            // is positioned by inserting padding spaces. This is approximate but
+            // readable; precise per-tab text layout is a v0.4 polish item.
+            let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
+            let mut title_text = String::new();
+            let mut tab_spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+            for t in &layout.tabs {
+                let tab = &tabs.tabs()[t.index];
+                let is_active = layout.active == Some(t.index);
+                let color = if is_active { self.tab_active_fg } else { self.tab_inactive_fg };
+                let max_chars = ((t.title.w / avg_glyph_w).floor() as usize).max(1);
+                let raw: String = tab.title.chars().take(max_chars).collect();
+                let target_col = (t.title.x / avg_glyph_w).floor() as usize;
+                while title_text.chars().count() < target_col {
+                    title_text.push(' ');
+                }
+                let start = title_text.len();
+                title_text.push_str(&raw);
+                let end = title_text.len();
+                tab_spans.push((start..end, color));
+            }
+            let mut spans2: Vec<(&str, Attrs<'_>)> = Vec::new();
+            let mut tcur = 0usize;
+            for (range, color) in &tab_spans {
+                if range.start > tcur {
+                    spans2.push((
+                        &title_text[tcur..range.start],
+                        Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                    ));
+                }
                 spans2.push((
-                    &title_text[tcur..range.start],
+                    &title_text[range.start..range.end],
+                    Attrs::new().family(Family::Monospace).color(*color),
+                ));
+                tcur = range.end;
+            }
+            if tcur < title_text.len() {
+                spans2.push((
+                    &title_text[tcur..],
                     Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
                 ));
             }
-            spans2.push((
-                &title_text[range.start..range.end],
-                Attrs::new().family(Family::Monospace).color(*color),
-            ));
-            tcur = range.end;
+            self.tab_buffer.set_rich_text(
+                &mut self.font_system,
+                spans2,
+                &Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
         }
-        if tcur < title_text.len() {
-            spans2.push((
-                &title_text[tcur..],
-                Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
-            ));
-        }
-        self.tab_buffer.set_rich_text(
-            &mut self.font_system,
-            spans2,
-            &Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
-            Shaping::Advanced,
-            None,
-        );
-        self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
-
         // -------- Search highlights + status bar ---------------------------
         // When search is active: paint a translucent yellow quad over every
         // match in the grid, then draw a single-line status bar pinned to
@@ -1266,19 +1302,23 @@ impl GpuRenderer {
         );
 
         let title_top = ((TAB_BAR_HEIGHT - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
-        let tab_area = TextArea {
-            buffer: &self.tab_buffer,
-            left: 0.0,
-            top: title_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: self.config.width as i32,
-                bottom: TAB_BAR_HEIGHT as i32,
-            },
-            default_color: self.tab_inactive_fg,
-            custom_glyphs: &[],
+        let tab_area = if self.tab_bar_visible {
+            Some(TextArea {
+                buffer: &self.tab_buffer,
+                left: 0.0,
+                top: title_top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: TAB_BAR_HEIGHT as i32,
+                },
+                default_color: self.tab_inactive_fg,
+                custom_glyphs: &[],
+            })
+        } else {
+            None
         };
 
         let search_area = if have_search_bar {
@@ -1368,7 +1408,10 @@ impl GpuRenderer {
         // Pre-overlay text areas: tab bar titles + (legacy) bottom status bar.
         // These render BEFORE overlay quads/text, so any overlay drawn on top
         // will visually cover them — same as the terminal grid glyphs.
-        let mut areas: Vec<TextArea> = vec![tab_area];
+        let mut areas: Vec<TextArea> = Vec::new();
+        if let Some(a) = tab_area {
+            areas.push(a);
+        }
         if let Some(a) = search_area {
             areas.push(a);
         }

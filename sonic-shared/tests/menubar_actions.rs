@@ -133,3 +133,20 @@ fn toggle_tab_bar_flips_visibility_flag() {
     app.run_action(&Action::ToggleTabBar);
     assert!(app.tab_bar_visible());
 }
+
+/// Regression for Haiku review on PR #66: toggling the bar must also
+/// drop the renderer's top inset to 0 so the grid recovers the row.
+/// We validate the pure helper that backs `GpuRenderer::top_inset` —
+/// any production change that severs the wiring will also have to
+/// rewrite this assertion.
+#[test]
+fn tab_bar_top_inset_zeroes_when_hidden() {
+    use sonic_shared::render::tab_bar_top_inset;
+    use sonic_shared::tabbar_view::TAB_BAR_HEIGHT;
+    let pad = 4.0_f32;
+    let shown = tab_bar_top_inset(true, pad);
+    let hidden = tab_bar_top_inset(false, pad);
+    assert!(shown > 0.0);
+    assert_eq!(shown, TAB_BAR_HEIGHT + pad);
+    assert_eq!(hidden, 0.0);
+}

@@ -1627,9 +1627,25 @@ impl App {
 
     fn toggle_tab_bar(&mut self) {
         self.tab_bar_visible = !self.tab_bar_visible;
-        tracing::info!("tab bar visible -> {}", self.tab_bar_visible);
+        let visible = self.tab_bar_visible;
+        tracing::info!("tab bar visible -> {visible}");
+        if let Some(r) = self.renderer.as_mut() {
+            if r.set_tab_bar_visible(visible) {
+                let (cols, rows) = r.cells();
+                resize_all_panes(&self.panes, cols, rows);
+            }
+        }
+        for child in self.child_windows.values_mut() {
+            if child.renderer.set_tab_bar_visible(visible) {
+                let (cols, rows) = child.renderer.cells();
+                resize_all_panes(&child.panes, cols, rows);
+            }
+        }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+        for child in self.child_windows.values() {
+            child.window.request_redraw();
         }
     }
 
