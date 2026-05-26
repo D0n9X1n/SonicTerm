@@ -57,9 +57,15 @@ fn font_system() -> FontSystem {
 }
 
 /// True iff `ch` rasterizes to a tile with non-zero pixel dimensions
-/// through the production rasterizer + atlas path. Whitespace returns
-/// `false` because the rasterizer (correctly) short-circuits it to a
-/// zero-area tile — callers should filter whitespace out.
+/// AND at least one non-zero alpha-coverage byte in the atlas through
+/// the production rasterizer + atlas path. Whitespace returns `false`
+/// because the rasterizer (correctly) short-circuits it to a zero-area
+/// tile — callers should filter whitespace out.
+///
+/// The coverage check (added in PR #47 review by Haiku) catches a
+/// future regression that would allocate a tile with dimensions but
+/// upload blank coverage — i.e. a sized-but-invisible glyph. Non-zero
+/// `px_size` alone would let that slip through.
 fn rasterizes(ch: char) -> bool {
     let mut fs = font_system();
     let mut atlas = GlyphAtlas::default_size();
@@ -67,7 +73,25 @@ fn rasterizes(ch: char) -> bool {
     let Some(info) = atlas.get_or_insert(GlyphKey::new(ch, false, false), &mut r) else {
         return false;
     };
-    info.px_size[0] > 0 && info.px_size[1] > 0
+    if info.px_size[0] == 0 || info.px_size[1] == 0 {
+        return false;
+    }
+    // Map UVs back to atlas pixel coordinates and scan the tile region
+    // for at least one non-zero coverage byte. A wholly-zero tile means
+    // the rasterizer reserved space but uploaded no visible pixels —
+    // the renderer would draw an invisible glyph at the right metrics.
+    let x0 = (info.uv[0] * atlas.width() as f32).round() as u32;
+    let y0 = (info.uv[1] * atlas.height() as f32).round() as u32;
+    let w = info.px_size[0];
+    let h = info.px_size[1];
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            if atlas.sample(x, y) > 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Assert every char in `s` rasterizes. Skips whitespace because the
