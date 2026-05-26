@@ -1378,13 +1378,9 @@ impl GpuRenderer {
         }
 
         // Underline quads — drawn last so they appear on top of the text.
-        // Color: foreground default at full alpha.
-        let underline_color = [
-            f32::from(self.fg_default.r()) / 255.0,
-            f32::from(self.fg_default.g()) / 255.0,
-            f32::from(self.fg_default.b()) / 255.0,
-            1.0,
-        ];
+        // Color: foreground default at full alpha, linearized so the sRGB
+        // surface format doesn't double-encode (matches the body glyph path).
+        let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &underlines {
             let x = self.padding + f32::from(*col_a) * self.cell_w;
@@ -1402,12 +1398,8 @@ impl GpuRenderer {
         // whitespace), draw a thin outlined rectangle so the gap is
         // visible. Helps catch font-fallback misses (emoji etc.).
         for (x, y, w, h, col) in &missing_tofu {
-            let rgba = [
-                f32::from(col.r()) / 255.0,
-                f32::from(col.g()) / 255.0,
-                f32::from(col.b()) / 255.0,
-                0.55,
-            ];
+            let mut rgba = glyphon_color_to_linear_rgba(*col);
+            rgba[3] = 0.55;
             let t = 1.0_f32; // border thickness
                              // Top
             quads.push(QuadInstance { rect: px_to_ndc(*x, *y, *w, t, sw, sh), color: rgba });
@@ -1431,18 +1423,8 @@ impl GpuRenderer {
         // v0.3d only renders the active pane's grid (above) inside the full
         // content rect — per-pane glyphon Buffer rendering is v0.4 work.
         if pane_rects.len() > 1 {
-            let border = [
-                f32::from(self.fg_default.r()) / 255.0 * 0.5,
-                f32::from(self.fg_default.g()) / 255.0 * 0.5,
-                f32::from(self.fg_default.b()) / 255.0 * 0.5,
-                1.0,
-            ];
-            let focus_border = [
-                f32::from(self.fg_default.r()) / 255.0,
-                f32::from(self.fg_default.g()) / 255.0,
-                f32::from(self.fg_default.b()) / 255.0,
-                1.0,
-            ];
+            let focus_border = glyphon_color_to_linear_rgba(self.fg_default);
+            let border = [focus_border[0] * 0.5, focus_border[1] * 0.5, focus_border[2] * 0.5, 1.0];
             for (id, r) in pane_rects {
                 let is_active = *id == active_pane;
                 let color = if is_active { focus_border } else { border };
@@ -2154,12 +2136,7 @@ impl GpuRenderer {
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba = [
-                    f32::from(color.r()) / 255.0,
-                    f32::from(color.g()) / 255.0,
-                    f32::from(color.b()) / 255.0,
-                    1.0,
-                ];
+                let rgba = glyphon_color_to_linear_rgba(color);
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -2270,12 +2247,7 @@ impl GpuRenderer {
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    [
-                        f32::from(color.r()) / 255.0,
-                        f32::from(color.g()) / 255.0,
-                        f32::from(color.b()) / 255.0,
-                        1.0,
-                    ]
+                    glyphon_color_to_linear_rgba(color)
                 };
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
@@ -2319,12 +2291,7 @@ impl GpuRenderer {
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
-                [
-                    f32::from(color.r()) / 255.0,
-                    f32::from(color.g()) / 255.0,
-                    f32::from(color.b()) / 255.0,
-                    1.0,
-                ]
+                glyphon_color_to_linear_rgba(color)
             };
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
@@ -2334,6 +2301,32 @@ impl GpuRenderer {
             });
         }
     }
+}
+
+/// Convert an sRGB-encoded glyphon color into a linear-space `[r, g, b, a]`
+/// suitable for the body text pipeline.
+///
+/// The body glyph pass writes into a `Bgra8UnormSrgb` surface, which applies
+/// linear→sRGB encoding on store. The per-instance `color` therefore MUST be
+/// in linear space, mirroring `hex_to_rgba` used by the quad pipeline. Without
+/// linearization, raw sRGB bytes (e.g. wezterm foreground `#cfbc97`) are
+/// double-encoded on the way to the framebuffer and brighten to `#e9dfca` —
+/// the regression that motivated PR #92's follow-up.
+///
+/// glyphon's own text path is unaffected because cosmic-text + the glyphon
+/// atlas swizzle through their own gamma-aware blend (see comment on
+/// `hex_to_rgba`).
+#[inline]
+pub fn glyphon_color_to_linear_rgba(c: GColor) -> [f32; 4] {
+    let r = f64::from(c.r()) / 255.0;
+    let g = f64::from(c.g()) / 255.0;
+    let b = f64::from(c.b()) / 255.0;
+    [
+        srgb_channel_to_linear(r) as f32,
+        srgb_channel_to_linear(g) as f32,
+        srgb_channel_to_linear(b) as f32,
+        1.0,
+    ]
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
