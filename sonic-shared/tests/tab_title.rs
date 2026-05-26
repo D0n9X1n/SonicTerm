@@ -10,27 +10,24 @@ use sonic_shared::tab_title::format_tab_title;
 
 #[test]
 fn format_tab_title_nvim_two_components() {
-    assert_eq!(
-        format_tab_title(0, Some("/foo/bar/baz"), Some("nvim"), None),
-        "#1 \u{E62B} bar/baz"
-    );
+    assert_eq!(format_tab_title(0, Some("/foo/bar/baz"), Some("nvim"), None), "#1\u{E62B} bar/baz");
 }
 
 #[test]
 fn format_tab_title_no_process_uses_folder() {
-    assert_eq!(format_tab_title(0, Some("/foo/bar"), None, None), "#1 \u{F07B} foo/bar");
+    assert_eq!(format_tab_title(0, Some("/foo/bar"), None, None), "#1\u{F07B} foo/bar");
 }
 
 #[test]
 fn format_tab_title_ssh_with_raw_title() {
-    assert_eq!(format_tab_title(0, None, Some("ssh"), Some("user@host")), "#1 \u{F08C0} user@host");
+    assert_eq!(format_tab_title(0, None, Some("ssh"), Some("user@host")), "#1\u{F08C0} user@host");
 }
 
 #[test]
 fn format_tab_title_unknown_process_falls_back_to_folder() {
     assert_eq!(
         format_tab_title(0, Some("/Users/me/proj"), Some("htop"), None),
-        "#1 \u{F07B} me/proj"
+        "#1\u{F07B} me/proj"
     );
 }
 
@@ -63,15 +60,15 @@ fn osc7_accepts_payload_without_scheme() {
 fn format_tab_title_cargo_in_project() {
     assert_eq!(
         format_tab_title(1, Some("/proj/sonic"), Some("cargo"), None),
-        "#2 \u{F1617} proj/sonic"
+        "#2\u{F1617} proj/sonic"
     );
 }
 
 #[test]
 fn format_tab_title_shell_index_zero_to_one() {
     // Index is 0-based; rendered N is 1-based.
-    assert_eq!(format_tab_title(0, Some("/tmp"), Some("zsh"), None), "#1 \u{F018D} tmp");
-    assert_eq!(format_tab_title(4, Some("/tmp"), Some("zsh"), None), "#5 \u{F018D} tmp");
+    assert_eq!(format_tab_title(0, Some("/tmp"), Some("zsh"), None), "#1\u{F018D} tmp");
+    assert_eq!(format_tab_title(4, Some("/tmp"), Some("zsh"), None), "#5\u{F018D} tmp");
 }
 
 #[cfg(target_os = "macos")]
@@ -107,13 +104,13 @@ fn titles(bar: &TabBar) -> Vec<String> {
 #[test]
 fn three_tabs_get_sequential_index_prefixes_on_push() {
     let mut bar = TabBar::new();
-    bar.push(Tab::new("#1 \u{F018D} tmp"));
-    bar.push(Tab::new("#1 \u{F018D} tmp")); // body identical, prefix should renumber
-    bar.push(Tab::new("#1 \u{F018D} tmp"));
+    bar.push(Tab::new("#1\u{F018D} tmp"));
+    bar.push(Tab::new("#1\u{F018D} tmp")); // body identical, prefix should renumber
+    bar.push(Tab::new("#1\u{F018D} tmp"));
     let t = titles(&bar);
-    assert_eq!(t[0], "#1 \u{F018D} tmp");
-    assert_eq!(t[1], "#2 \u{F018D} tmp");
-    assert_eq!(t[2], "#3 \u{F018D} tmp");
+    assert_eq!(t[0], "#1\u{F018D} tmp");
+    assert_eq!(t[1], "#2\u{F018D} tmp");
+    assert_eq!(t[2], "#3\u{F018D} tmp");
 }
 
 #[test]
