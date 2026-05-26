@@ -255,14 +255,44 @@ pub fn shape_run(
             cluster_cells = 1;
         }
         let ch_first = text[g.start..end].chars().next().unwrap_or('\0');
-        let slot = rasterizer.slot_for_font_id(g.font_id, style.bold, style.italic).unwrap_or(0);
-        out.push(ShapedGlyph {
-            lead_col,
-            ch: ch_first,
-            font_slot: slot,
-            glyph_id: g.glyph_id,
-            cluster_cells,
-        });
+        // Resolve the cosmic-text-chosen font back to a slot in our
+        // fallback chain. Two production failure modes if we trust the
+        // shaped (slot, glyph_id) pair blindly for 1:1 cells:
+        //
+        //   1. `slot_for_font_id` returns None — cosmic-text shaped
+        //      through an OS-resolved font that isn't in our
+        //      PLATFORM_FALLBACK chain. Previously `unwrap_or(0)`
+        //      pinned the shaped id to slot 0 (primary, e.g. Rec Mono
+        //      Casual). Rasterizing a CJK glyph_id with the primary
+        //      font produces an unrelated glyph at that index — bug:
+        //      '中' rendered as '臭'.
+        //
+        //   2. `slot_for_font_id` returns Some(N), but cosmic-text and
+        //      our `lookup_id(family[N], …)` resolve DIFFERENT files
+        //      that share the family name (PingFang SC ships several
+        //      variants; fontdb's `Name` query returns one variant,
+        //      cosmic-text's shaping may have used another). The two
+        //      files have different glyph orderings, so the shaped
+        //      `glyph_id` points to a different *Chinese* glyph in the
+        //      file we eventually rasterize through — bug: '中'
+        //      rendered as '恶'.
+        //
+        // Both modes hit 1:1 cells (cluster_cells == 1) — for those the
+        // shaped id buys us nothing (it would be a charmap lookup
+        // either way), so zero the glyph_id and let the renderer take
+        // the char-based fallback path (resolve_slot + charmap().map(ch)
+        // against the actually-loaded font). Composed clusters
+        // (ligatures `=>`, ZWJ emoji 👨‍👩‍👧) keep the shaped id —
+        // cluster_cells > 1 and the shaped id is the ONLY way to get
+        // the composed glyph; for those we accept the slot risk because
+        // the composed visual is otherwise unreachable.
+        let (slot, glyph_id) =
+            match rasterizer.slot_for_font_id(g.font_id, style.bold, style.italic) {
+                Some(s) if cluster_cells > 1 => (s, g.glyph_id),
+                Some(s) => (s, 0),
+                None => (0, 0),
+            };
+        out.push(ShapedGlyph { lead_col, ch: ch_first, font_slot: slot, glyph_id, cluster_cells });
     }
     out
 }

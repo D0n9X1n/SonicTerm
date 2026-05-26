@@ -1599,11 +1599,31 @@ impl GpuRenderer {
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
             let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
 
-            // Notdef from the shaper: cosmic-text couldn't resolve the
-            // glyph even through its own fallback. Draw a tofu and
-            // move on.
+            // glyph_id == 0 from the shaper means one of two things:
+            //   (a) true notdef — cosmic-text couldn't shape it at all
+            //       (lead_cell.ch is '\0' or whitespace), OR
+            //   (b) cosmic-text shaped through an OS font outside our
+            //       fallback chain, so `shape_run` zeroed the glyph_id
+            //       to fall back to the char-based path (see comment in
+            //       shape.rs). In that case lead_cell.ch is a real
+            //       printable codepoint and we should resolve a slot
+            //       via the rasterizer's charmap walk and rasterize
+            //       through the char path instead of drawing tofu.
+            //
+            // Regression target: CJK + emoji mangled to wrong glyphs in
+            // production (PR fix/cjk-render-mangled-v2). The old
+            // unwrap_or(0) in shape.rs caused '中' to render as '臭'
+            // because the shaped id was sent to the primary font.
             if g.glyph_id == 0 {
-                if !lead_cell.ch.is_whitespace() && lead_cell.ch != '\0' {
+                let ch = lead_cell.ch;
+                if ch == '\0' || ch.is_whitespace() {
+                    continue;
+                }
+                // Try char-based fallback resolution.
+                let resolved = rasterizer.resolve_slot(ch, style.bold, style.italic);
+                let Some(slot) = resolved else {
+                    // Every face in the chain lacks this codepoint —
+                    // genuine tofu.
                     let cx = pad + f32::from(g.lead_col) * cell_w;
                     let cy = top_inset + f32::from(row) * cell_h;
                     let inset = (cell_h * 0.12).max(1.0);
@@ -1614,8 +1634,41 @@ impl GpuRenderer {
                         cell_h - inset * 2.0,
                         cell_fg(&lead_cell, theme, fg_default),
                     ));
-                    missing_chars_this_frame.push(lead_cell.ch);
+                    missing_chars_this_frame.push(ch);
+                    continue;
+                };
+                let key = sonic_core::glyph_key::GlyphKey {
+                    ch,
+                    font_slot: slot,
+                    weight_bold: style.bold,
+                    italic: style.italic,
+                    glyph_id: 0,
+                };
+                let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                    continue;
+                };
+                if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    continue;
                 }
+                let cx = pad + f32::from(g.lead_col) * cell_w;
+                let cy = top_inset + f32::from(row) * cell_h;
+                let gx = cx + info.px_offset[0] as f32;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32;
+                let gw = info.px_size[0] as f32;
+                let gh = info.px_size[1] as f32;
+                let color = cell_fg(&lead_cell, theme, fg_default);
+                let rgba = [
+                    f32::from(color.r()) / 255.0,
+                    f32::from(color.g()) / 255.0,
+                    f32::from(color.b()) / 255.0,
+                    1.0,
+                ];
+                glyph_instances.push(GlyphInstance {
+                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
+                    uv: info.uv,
+                    color: rgba,
+                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                });
                 continue;
             }
 
