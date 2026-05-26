@@ -222,3 +222,85 @@ fn shape_cache_hits_on_repeat_calls() {
     let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, italic, &cells);
     assert_eq!(cache.misses(), 2, "different style must miss the cache");
 }
+
+#[test]
+fn shape_cache_rebases_lead_col_across_positions() {
+    // Same shaped text at column 5 vs column 10 must produce identical
+    // glyph LISTs (count + slot + glyph_id), but the `lead_col` of each
+    // glyph must reflect the actual run start. Previously the cache
+    // stored absolute columns and returned stale positions on a hit —
+    // the renderer then drew the run at the wrong x. Regression for
+    // Haiku review on PR #57.
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut cache = sonic_shared::shape::ShapeCache::new();
+
+    fn run_at(text: &str, start_col: u16) -> Vec<(u16, Cell)> {
+        text.chars().enumerate().map(|(i, ch)| (start_col + i as u16, cell(ch))).collect()
+    }
+
+    let style = RunStyle { bold: false, italic: false };
+    let at5 = run_at("hello", 5);
+    let at10 = run_at("hello", 10);
+
+    let g5 = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &at5);
+    assert_eq!(cache.misses(), 1);
+    let g10 = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &at10);
+    // Same text — must hit the cache (proves relative-column keying).
+    assert_eq!(cache.hits(), 1, "same text at different col must hit the cache");
+    assert_eq!(cache.misses(), 1);
+
+    assert_eq!(g5.len(), g10.len(), "glyph counts must match");
+    assert_eq!(g5.len(), 5);
+    for i in 0..g5.len() {
+        // Glyph identity must be identical.
+        assert_eq!(g5[i].glyph_id, g10[i].glyph_id, "glyph {i} id mismatch");
+        assert_eq!(g5[i].font_slot, g10[i].font_slot, "glyph {i} slot mismatch");
+        // But `lead_col` must differ by the column offset.
+        assert_eq!(g5[i].lead_col, 5 + i as u16, "g5[{i}] lead_col");
+        assert_eq!(g10[i].lead_col, 10 + i as u16, "g10[{i}] lead_col");
+        assert_eq!(
+            g10[i].lead_col - g5[i].lead_col,
+            5,
+            "g10[{i}].lead_col must be g5[{i}].lead_col + 5",
+        );
+    }
+}
+
+#[test]
+fn ascii_fast_path_skips_ligature_triggers() {
+    // The single most important regression for this PR: ASCII strings
+    // that contain ligature-trigger bytes (`=`, `!`, `<`, `>`, `-`,
+    // `_`, `:`, `|`, `&`, `*`) MUST route through the shaper so
+    // programming ligatures actually render. Previously the fast path
+    // matched any printable ASCII, silently disabling ligatures in the
+    // renderer despite the shape_run unit tests proving the shaper
+    // could produce them.
+    let cells = cells_for("let foo = bar();");
+    assert!(
+        !sonic_shared::shape::run_is_ascii_fast(&cells),
+        "ASCII with `=` must NOT take the fast path (would miss `=>` / `==` ligatures)",
+    );
+    for trigger in ['=', '!', '<', '>', '-', '_', ':', '|', '&', '*'] {
+        let s = format!("a{trigger}b");
+        let cells = cells_for(&s);
+        assert!(
+            !sonic_shared::shape::run_is_ascii_fast(&cells),
+            "ASCII containing {trigger:?} must route through the shaper",
+        );
+    }
+}
+
+#[test]
+fn ascii_fast_path_keeps_plain_text_fast() {
+    // Counter-test: plain English / shell text with no ligature
+    // triggers MUST still hit the fast path — otherwise we've just
+    // moved every cell through cosmic-text and lost the perf win.
+    for s in ["hello world", "the quick brown fox", "$ ls", "echo 1234567890"] {
+        let cells = cells_for(s);
+        assert!(
+            sonic_shared::shape::run_is_ascii_fast(&cells),
+            "plain ASCII {s:?} must take the fast path",
+        );
+    }
+}

@@ -56,19 +56,43 @@ use sonic_core::grid::{Cell, CellFlags};
 
 use crate::swash_rasterizer::SwashRasterizer;
 
+/// Characters that commonly participate in programming ligatures across
+/// the fonts Sonic ships (Rec Mono Casual, JetBrains Mono). If a run
+/// contains ANY of these, the ASCII fast path must defer to the shaper
+/// so contextual GSUB substitutions (`=>`, `!=`, `>=`, `->`, `<-`,
+/// `::`, `||`, `&&`, etc.) actually render as the composed ligature
+/// glyph instead of two separate cells.
+///
+/// Kept deliberately small — adding harmless ASCII (digits, letters)
+/// here would needlessly defeat the fast path.
+#[inline]
+fn is_ligature_trigger(b: u8) -> bool {
+    matches!(b, b'=' | b'!' | b'<' | b'>' | b'-' | b'_' | b':' | b'|' | b'&' | b'*')
+}
+
 /// True when every cell in `cells` is a plain printable-ASCII codepoint
-/// (0x20..=0x7E) with no `extras` cluster. The renderer can then bypass
-/// cosmic-text entirely and emit one `GlyphKey` per cell via the
-/// pre-shaping char→glyph lookup path. ASCII shells (the steady-state
-/// for almost every interactive session) hit this hundreds of times
-/// per frame; shaping was previously running unconditionally.
+/// (0x20..=0x7E) with no `extras` cluster AND the run contains none of
+/// the characters that commonly trigger programming ligatures. The
+/// renderer can then bypass cosmic-text entirely and emit one
+/// `GlyphKey` per cell via the pre-shaping char→glyph lookup path.
+/// ASCII shells (the steady-state for almost every interactive session)
+/// hit this hundreds of times per frame; shaping was previously running
+/// unconditionally.
+///
+/// Runs that contain a ligature-trigger byte (`=`, `!`, `<`, `>`, `-`,
+/// `_`, `:`, `|`, `&`, `*`) MUST go through the shaper even when
+/// otherwise pure ASCII — `=>`, `!=`, `>=`, `->`, `::`, `||`, `&&`,
+/// etc. are pure ASCII and would otherwise silently miss ligature
+/// shaping in the actual render path. The bias is deliberately toward
+/// "shape it" — a few extra cosmic-text calls on prompts containing
+/// `=` cost less than a wrong rendering.
 #[inline]
 pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
     cells.iter().all(|(_, c)| {
         c.extras.is_none()
             && {
                 let n = c.ch as u32;
-                (0x20..=0x7E).contains(&n)
+                (0x20..=0x7E).contains(&n) && !is_ligature_trigger(n as u8)
             }
             // Reject anything carrying cluster intent through a flag
             // we don't model in the fast path. WIDE_CONT shouldn't
@@ -247,6 +271,15 @@ pub fn shape_run(
 /// The renderer holds one of these across frames and reuses the glyph
 /// list when a row's content+style hasn't changed since the last frame.
 ///
+/// **Column-relative storage.** Cached glyphs store `lead_col` as an
+/// offset from the run's first column (so the entry for `"hello"`
+/// shaped at column 5 is identical to the entry for `"hello"` shaped
+/// at column 10). On retrieval, the cache rebases each glyph's
+/// `lead_col` to the caller's actual run start. Without this, the same
+/// text at a different column would either cache-miss unnecessarily or
+/// — worse — return stale absolute columns and the renderer would draw
+/// the run at the original column instead of where it now belongs.
+///
 /// Cache invalidation is implicit: an unchanged row produces the same
 /// `(text, style, font_family, px)` and therefore the same key.
 #[derive(Default)]
@@ -288,6 +321,12 @@ impl ShapeCache {
 
     /// Lookup-or-shape. Bounded at 512 entries; on overflow the
     /// cache is cleared (LRU is overkill at this scale).
+    ///
+    /// Cached glyphs are stored with `lead_col` rebased to the run's
+    /// first column (i.e. relative offsets starting from 0). On both
+    /// miss and hit, the returned vec has `lead_col` values rebased to
+    /// the caller's actual `cells[0].0` so the renderer can place each
+    /// glyph at its real screen column without further bookkeeping.
     pub fn get_or_shape(
         &mut self,
         rasterizer: &mut SwashRasterizer,
@@ -296,6 +335,7 @@ impl ShapeCache {
         style: RunStyle,
         cells: &[(u16, Cell)],
     ) -> Vec<ShapedGlyph> {
+        let base_col = cells.first().map(|(c, _)| *c).unwrap_or(0);
         let mut text = String::with_capacity(cells.len() * 2);
         for (_, c) in cells {
             text.push(c.ch);
@@ -314,14 +354,25 @@ impl ShapeCache {
         };
         if let Some(v) = self.map.get(&key) {
             self.hits += 1;
-            return v.clone();
+            // Rebase relative columns to the caller's run start.
+            return v
+                .iter()
+                .map(|g| ShapedGlyph { lead_col: g.lead_col.saturating_add(base_col), ..*g })
+                .collect();
         }
         self.misses += 1;
         if self.map.len() >= 512 {
             self.map.clear();
         }
         let shaped = shape_run(rasterizer, family, font_size, style, cells);
-        self.map.insert(key, shaped.clone());
+        // Store with column-relative `lead_col` (subtract the run's
+        // base column) so the same shaped text at a different column
+        // produces an identical cache entry on the next call.
+        let stored: Vec<ShapedGlyph> = shaped
+            .iter()
+            .map(|g| ShapedGlyph { lead_col: g.lead_col.saturating_sub(base_col), ..*g })
+            .collect();
+        self.map.insert(key, stored);
         shaped
     }
 
