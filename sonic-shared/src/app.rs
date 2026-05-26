@@ -69,9 +69,27 @@ pub struct ChildWindow {
     pub modifiers: ModifiersState,
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
     pub last_render: Instant,
+    /// Tab index pressed in the child's bar — same role as
+    /// `App::pressed_tab` but for the child window. Used for
+    /// drag-from-child merging.
+    pub pressed_tab: Option<usize>,
+    /// Pending cross-window drop target chosen during a drag in the
+    /// child's bar; consumed on mouse-up.
+    pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Read a window's screen-global inner origin + inner size into the
+/// pure helper struct used by the drag-merge module. Falls back to
+/// (0, 0) origin if the platform refuses to report position (e.g. on
+/// some Wayland configurations); on such platforms the drag-merge
+/// path is best-effort.
+fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
+    let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
+    let size = w.inner_size();
+    crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
+}
 
 #[doc(hidden)]
 #[doc(hidden)]
@@ -156,6 +174,17 @@ pub struct App {
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     child_windows: HashMap<WindowId, ChildWindow>,
+    /// Pending cross-window drag-merge target chosen on the most recent
+    /// `CursorMoved` while a tab is held. On mouse-up we use this to
+    /// decide between "tear out into new window" (None) and "merge into
+    /// destination window at slot" (Some).
+    drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    /// True when the main window has been drained (its last tab moved
+    /// out via cross-window merge) or its close button was clicked
+    /// while child windows still owned tabs. In that state the main
+    /// window is hidden but the event loop keeps spinning so live
+    /// child windows continue to run.
+    main_hidden: bool,
 }
 
 impl App {
@@ -186,7 +215,45 @@ impl App {
             command_palette: CommandPalette::new(),
             pressed_tab: None,
             child_windows: HashMap::new(),
+            drag_target: None,
+            main_hidden: false,
         }
+    }
+
+    /// Decide whether the event loop should exit. The app should keep
+    /// running as long as ANY window owns at least one tab — that is,
+    /// the main window has tabs AND is visible, OR any child window is
+    /// still alive. This is shared by both the main-window
+    /// `CloseRequested` handler and the post-merge drain check so a
+    /// drained-but-still-visible main with live children doesn't kill
+    /// the app.
+    #[doc(hidden)]
+    pub fn should_exit(&self) -> bool {
+        let main_alive = !self.main_hidden && !self.tabs.is_empty();
+        !main_alive && self.child_windows.is_empty()
+    }
+
+    /// Test-only: pure policy fn mirroring `should_exit` so integration
+    /// tests can exercise the rule without constructing a real
+    /// `ChildWindow` (which requires a live winit Window + GpuRenderer).
+    #[doc(hidden)]
+    pub fn should_exit_pure(main_tabs: usize, main_hidden: bool, child_count: usize) -> bool {
+        let main_alive = !main_hidden && main_tabs > 0;
+        !main_alive && child_count == 0
+    }
+
+    /// Test-only: read the `main_hidden` latch.
+    #[doc(hidden)]
+    pub fn __test_main_hidden(&self) -> bool {
+        self.main_hidden
+    }
+
+    /// Test-only: force-set the `main_hidden` latch so post-merge
+    /// drain-policy tests can simulate the "main already retired" state
+    /// without driving a real winit close event.
+    #[doc(hidden)]
+    pub fn __test_set_main_hidden(&mut self, v: bool) {
+        self.main_hidden = v;
     }
 
     fn active_pane_id(&self) -> Option<u64> {
@@ -362,6 +429,257 @@ impl App {
         Some((tab, state, panes))
     }
 
+    /// Inverse of `detach_tab_state`: insert a previously-detached tab +
+    /// pane bundle into this App's tab bar at `index` and adopt the
+    /// panes. The bundle's PTY threads keep running — we just swap each
+    /// pane's `redraw_target` so output now triggers redraws on THIS
+    /// window's surface. Used by the cross-window drag-merge flow when
+    /// a tab from a child window is dropped onto the main bar.
+    ///
+    /// Caller is responsible for matching pty/grid size to the
+    /// destination renderer (we resize panes to current cells here).
+    #[doc(hidden)]
+    pub fn attach_tab_state(
+        &mut self,
+        index: usize,
+        tab: Tab,
+        state: TabState,
+        panes: HashMap<u64, PaneState>,
+    ) {
+        let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
+        for (id, pane) in panes {
+            pane.parser.lock().grid_mut().resize(cols, rows);
+            if let Some(pty) = pane.pty.as_ref() {
+                (pty.resize)(cols, rows);
+            }
+            *pane.redraw_target.lock() = self.window.clone();
+            self.panes.insert(id, pane);
+        }
+        let idx = index.min(self.tabs.len());
+        self.tabs.insert(idx, tab);
+        self.tab_states.insert(idx, state);
+    }
+
+    /// Detach a tab + pane bundle from the child window `src_id`.
+    /// Mirror of `App::detach_tab_state` but for child windows.
+    /// Returns `None` if the child window or index is unknown.
+    #[doc(hidden)]
+    pub fn detach_from_child(
+        &mut self,
+        src_id: WindowId,
+        index: usize,
+    ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
+        let child = self.child_windows.get_mut(&src_id)?;
+        if index >= child.tabs.len() || index >= child.tab_states.len() {
+            return None;
+        }
+        let tab = child.tabs.tabs().get(index).cloned()?;
+        let state = child.tab_states.remove(index);
+        let mut panes: HashMap<u64, PaneState> = HashMap::new();
+        for id in state.tree.leaves() {
+            if let Some(p) = child.panes.remove(&id) {
+                panes.insert(id, p);
+            }
+        }
+        child.tabs.close(tab.id);
+        Some((tab, state, panes))
+    }
+
+    /// Insert a tab + pane bundle into the child window `dst_id` at
+    /// `index`. Panes are resized to the child's renderer and have
+    /// their `redraw_target` swapped to the child's window. Returns
+    /// false if the child doesn't exist (in which case caller must
+    /// decide whether to drop the bundle — losing those shells).
+    #[doc(hidden)]
+    pub fn attach_to_child(
+        &mut self,
+        dst_id: WindowId,
+        index: usize,
+        tab: Tab,
+        state: TabState,
+        panes: HashMap<u64, PaneState>,
+    ) -> bool {
+        let Some(child) = self.child_windows.get_mut(&dst_id) else { return false };
+        let (cols, rows) = child.renderer.cells();
+        for (id, pane) in panes {
+            pane.parser.lock().grid_mut().resize(cols, rows);
+            if let Some(pty) = pane.pty.as_ref() {
+                (pty.resize)(cols, rows);
+            }
+            *pane.redraw_target.lock() = Some(child.window.clone());
+            child.panes.insert(id, pane);
+        }
+        let idx = index.min(child.tabs.len());
+        child.tabs.insert(idx, tab);
+        child.tab_states.insert(idx, state);
+        child.window.request_redraw();
+        true
+    }
+
+    /// Close and reap a child window whose bar has become empty. The
+    /// VT threads for the panes that were already moved out have had
+    /// their redraw target swapped; this just drops the renderer +
+    /// window + (now-empty) bookkeeping maps.
+    fn reap_empty_child(&mut self, win_id: WindowId) {
+        if let Some(child) = self.child_windows.get(&win_id) {
+            if child.tabs.is_empty() {
+                if let Some(removed) = self.child_windows.remove(&win_id) {
+                    // panes map should already be empty; defensively
+                    // null out any stragglers' redraw targets.
+                    for pane in removed.panes.values() {
+                        *pane.redraw_target.lock() = None;
+                    }
+                    drop(removed);
+                    tracing::info!(
+                        "child window reaped after drag-merge; remaining children={}",
+                        self.child_windows.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Test-only: how many tabs the named child window currently owns.
+    #[doc(hidden)]
+    pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
+        self.child_windows.get(&id).map(|c| c.tabs.len())
+    }
+
+    /// Look at the global cursor position derived from the main
+    /// window's local coordinates and pick a drop target on one of the
+    /// CHILD windows' tab bars (the main window itself is the source
+    /// — dragging back to it is a future reorder concern). Returns
+    /// `None` if the cursor is not over any child bar.
+    fn compute_main_drag_target(
+        &self,
+        local_in_main: (f64, f64),
+    ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
+        let main_window = self.window.as_ref()?;
+        let main_origin =
+            main_window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
+        let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
+        let candidates = self.child_windows.iter().map(|(id, c)| {
+            let geom = window_geom(&c.window);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            (*id, geom, layout)
+        });
+        crate::tab_drag::find_drop_target(global, candidates)
+    }
+
+    /// Same as [`Self::compute_main_drag_target`] but for a drag that
+    /// originated in the child window `src_id`. Considers the main
+    /// window AND the other child windows as candidates.
+    fn compute_child_drag_target(
+        &self,
+        src_id: WindowId,
+        local_in_src: (f64, f64),
+    ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
+        let src_child = self.child_windows.get(&src_id)?;
+        let src_origin =
+            src_child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
+        let global = crate::tab_drag::local_to_global(src_origin, local_in_src);
+        let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, TabBarLayout)> = Vec::new();
+        if let Some(main) = self.window.as_ref() {
+            let geom = window_geom(main);
+            let width = self.renderer.as_ref().map(|r| r.width()).unwrap_or(0) as f32;
+            candidates.push((main.id(), geom, TabBarLayout::compute(&self.tabs, width)));
+        }
+        for (id, c) in &self.child_windows {
+            if *id == src_id {
+                continue;
+            }
+            let geom = window_geom(&c.window);
+            let layout = TabBarLayout::compute(&c.tabs, c.renderer.width() as f32);
+            candidates.push((*id, geom, layout));
+        }
+        crate::tab_drag::find_drop_target(global, candidates)
+    }
+
+    /// Move the main window's tab at `src_idx` into the destination
+    /// described by `target`. The destination is always a child window
+    /// (the main is the source in this path). Source-window emptiness
+    /// is impossible since the main window's bar can't be drained
+    /// through detach_tab_state alone — `__test_seed_tab` / `new_tab`
+    /// guarantee at least one remains, and the existing tear-out
+    /// pathway also refuses to detach when `len() <= 1`.
+    fn merge_main_into_child(
+        &mut self,
+        src_idx: usize,
+        target: crate::tab_drag::DropTarget<WindowId>,
+    ) {
+        let Some((tab, state, panes)) = self.detach_tab_state(src_idx) else { return };
+        if !self.attach_to_child(target.window, target.slot, tab, state, panes) {
+            tracing::warn!(
+                "drag-merge: destination child {:?} disappeared mid-drop; panes dropped",
+                target.window
+            );
+        }
+        // If main has been drained but child windows are still alive,
+        // hide the main window without exiting the app.
+        if self.tabs.is_empty() && !self.child_windows.is_empty() {
+            self.hide_main_window();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Hide the main window and latch `main_hidden = true`. Used when
+    /// the main window has been drained of its last tab via a
+    /// cross-window merge, or when the user clicks the close button
+    /// while child windows are still alive. Both paths keep the event
+    /// loop running so the surviving children continue to function.
+    fn hide_main_window(&mut self) {
+        if let Some(w) = &self.window {
+            w.set_visible(false);
+        }
+        self.main_hidden = true;
+        tracing::info!("main window hidden (drained); child_windows={}", self.child_windows.len());
+    }
+
+    /// Reveal the main window again, e.g. when a tab is merged back
+    /// into it from a child. Clears the `main_hidden` latch.
+    fn show_main_window(&mut self) {
+        if let Some(w) = &self.window {
+            w.set_visible(true);
+        }
+        self.main_hidden = false;
+    }
+
+    /// Move the source child window's tab at `src_idx` into `target`.
+    /// `target.window` can be the main window OR another child. If the
+    /// source child empties out as a result, it is reaped.
+    fn merge_child_into_target(
+        &mut self,
+        src_id: WindowId,
+        src_idx: usize,
+        target: crate::tab_drag::DropTarget<WindowId>,
+    ) {
+        let Some((tab, state, panes)) = self.detach_from_child(src_id, src_idx) else { return };
+        let main_id = self.window.as_ref().map(|w| w.id());
+        let attached = if Some(target.window) == main_id {
+            self.attach_tab_state(target.slot, tab, state, panes);
+            // Receiving a tab back into main un-hides the window if it
+            // had been drained.
+            if self.main_hidden {
+                self.show_main_window();
+            }
+            true
+        } else {
+            self.attach_to_child(target.window, target.slot, tab, state, panes)
+        };
+        if !attached {
+            tracing::warn!(
+                "drag-merge: destination {:?} disappeared mid-drop; panes dropped",
+                target.window
+            );
+        }
+        self.reap_empty_child(src_id);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Tear the tab at `index` out of this App and spawn it as a new
     /// native window. Creates a winit Window AND a `GpuRenderer`
     /// bound to that window's surface, transfers the dragged tab's
@@ -438,6 +756,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),
+            pressed_tab: None,
+            drag_target: None,
         };
         self.child_windows.insert(win_id, child);
         window.request_redraw();
@@ -450,7 +770,7 @@ impl App {
     /// single-tab/single-pane in v2 — splits/new-tabs are deferred.
     fn handle_child_window_event(
         &mut self,
-        _el: &ActiveEventLoop,
+        el: &ActiveEventLoop,
         win_id: WindowId,
         event: WindowEvent,
     ) {
@@ -468,6 +788,12 @@ impl App {
                         *pane.redraw_target.lock() = None;
                     }
                     drop(removed);
+                }
+                // If this was the last child AND the main window had
+                // been previously drained/hidden, nothing is alive
+                // anymore — exit the loop.
+                if self.should_exit() {
+                    el.exit();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -526,6 +852,25 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
+                // Cross-window drag-merge from child: when a tab in the
+                // child's bar is held, look for a destination on another
+                // window (main or sibling). Drops the &mut child borrow
+                // before calling compute_child_drag_target (which needs
+                // &self.child_windows for sibling lookups).
+                if child.mouse_down && child.pressed_tab.is_some() {
+                    let local = (position.x, position.y);
+                    // child borrow ends at last use; safe to call &mut self next
+                    let _ = child;
+                    let tgt = self.compute_child_drag_target(win_id, local);
+                    if let Some(c) = self.child_windows.get_mut(&win_id) {
+                        c.drag_target = tgt;
+                        if tgt.is_some() {
+                            c.window.request_redraw();
+                            return;
+                        }
+                    }
+                    return;
+                }
                 if child.mouse_down {
                     if let Some((row, col)) =
                         child.renderer.pixel_to_cell(position.x as f32, position.y as f32)
@@ -539,20 +884,46 @@ impl App {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
-                    child.mouse_down = true;
                     let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                    let bar_width = child.renderer.width() as f32;
+                    let layout = TabBarLayout::compute(&child.tabs, bar_width);
+                    if let Some(hit) = layout.hit(px, py) {
+                        match hit {
+                            TabHit::Activate(i) => {
+                                child.tabs.activate(i);
+                                child.pressed_tab = Some(i);
+                                child.mouse_down = true;
+                            }
+                            TabHit::Close(_) | TabHit::NewTab => {
+                                // close/new-tab in child are deferred —
+                                // single-tab children today. Swallow.
+                            }
+                        }
+                        child.window.request_redraw();
+                        return;
+                    }
+                    child.mouse_down = true;
                     if let Some((row, col)) = child.renderer.pixel_to_cell(px, py) {
                         child.selection = Some(Selection::new(row, col));
                     }
                     child.window.request_redraw();
                 }
                 ElementState::Released => {
+                    let pending_drop = child.pressed_tab.zip(child.drag_target.take());
                     child.mouse_down = false;
+                    child.pressed_tab = None;
+                    child.drag_target = None;
                     if let Some(sel) = child.selection.as_ref() {
                         if sel.is_empty() {
                             child.selection = None;
                             child.window.request_redraw();
                         }
+                    }
+                    if let Some((src_idx, target)) = pending_drop {
+                        // Release the child borrow before re-entering
+                        // &mut self via the merge path.
+                        let _ = child;
+                        self.merge_child_into_target(win_id, src_idx, target);
                     }
                 }
             },
@@ -1110,7 +1481,17 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                // If child windows still own tabs, hide the main
+                // window instead of exiting the app — the children
+                // are independent live terminals and must keep
+                // running. Only exit when nothing else is alive.
+                if self.child_windows.is_empty() {
+                    el.exit();
+                } else {
+                    self.hide_main_window();
+                }
+            }
 
             WindowEvent::RedrawRequested => {
                 // Compute per-pane rects in window pixels so the renderer can
@@ -1211,6 +1592,20 @@ impl ApplicationHandler for App {
             // -- Mouse --
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                // Cross-window drag-merge: if a tab is held, update the
+                // pending drop target based on the global cursor
+                // position. If a target is found, suppress tear-out —
+                // mouse-up will merge instead. If no target, fall
+                // through to the existing tear-out check.
+                if self.mouse_down && self.pressed_tab.is_some() {
+                    self.drag_target = self.compute_main_drag_target((position.x, position.y));
+                    if self.drag_target.is_some() {
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
                 // Tear-out detection: if a tab press is in flight and
                 // the cursor has dragged far enough below the bar, pop
                 // the tab into its own window.
@@ -1289,7 +1684,11 @@ impl ApplicationHandler for App {
                             }
                         }
                         if self.tabs.is_empty() {
-                            el.exit();
+                            if self.child_windows.is_empty() {
+                                el.exit();
+                            } else {
+                                self.hide_main_window();
+                            }
                         }
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -1326,8 +1725,16 @@ impl ApplicationHandler for App {
                     }
                 }
                 ElementState::Released => {
+                    // If a cross-window drop is pending, execute it
+                    // before clearing drag state.
+                    if let (Some(src_idx), Some(target)) =
+                        (self.pressed_tab, self.drag_target.take())
+                    {
+                        self.merge_main_into_child(src_idx, target);
+                    }
                     self.mouse_down = false;
                     self.pressed_tab = None;
+                    self.drag_target = None;
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;
