@@ -42,3 +42,21 @@ fn unknown_keys_survive_load_save_roundtrip() {
     assert!(reread.contains("[experimental]"), "lost unknown section header; file was:\n{reread}");
     assert!(reread.contains("foo = 1"), "lost unknown nested key; file was:\n{reread}");
 }
+
+#[test]
+fn defaults_match_wezterm_visual_parity() {
+    // Regression: visual-parity targets cribbed from the user's wezterm.lua.
+    // If you change these, update docs/ROADMAP.md and confirm with the user.
+    let font = FontConfig::default();
+    let window = WindowConfig::default();
+    assert!(
+        (font.line_height - 1.1).abs() < f32::EPSILON,
+        "wezterm parity: line_height must be 1.1, got {}",
+        font.line_height
+    );
+    assert!(
+        (window.padding - 8.0).abs() < f32::EPSILON,
+        "wezterm parity: window padding must be 8.0, got {}",
+        window.padding
+    );
+}
