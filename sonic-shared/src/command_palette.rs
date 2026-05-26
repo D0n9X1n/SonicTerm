@@ -200,6 +200,8 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
         Action::OpenSshPane(t) => format!("OpenSshPane({t})"),
+        Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
+        Action::ToggleTabBar => "ToggleTabBar".into(),
     }
 }
 
