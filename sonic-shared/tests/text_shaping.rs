@@ -304,3 +304,61 @@ fn ascii_fast_path_keeps_plain_text_fast() {
         );
     }
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn cjk_shaping_never_returns_primary_slot_glyph_for_cjk_codepoint() {
+    // Regression target: PR fix(render): CJK + emoji mangled to wrong
+    // glyphs in production.
+    //
+    // The bug: when cosmic-text shaped a CJK codepoint like '中' (U+4E2D)
+    // through an OS-resolved font that was NOT in our PLATFORM_FALLBACK
+    // chain, `slot_for_font_id` returned None and `unwrap_or(0)` pinned
+    // the shaped glyph_id to slot 0 (the primary, e.g. Rec Mono Casual).
+    // Rasterizing that foreign glyph_id with the primary font produced
+    // a *different unrelated* glyph from the primary face — '中' rendered
+    // as '臭'. After the fix, shape_run must NOT emit (font_slot=0,
+    // glyph_id=N!=0) for a CJK codepoint when the primary font lacks it.
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+
+    let cells = cells_for("中文测试");
+    let glyphs = shape_run(
+        &mut r,
+        "Rec Mono Casual",
+        DEFAULT_RASTER_PX,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
+
+    // The shaper produces some number of glyphs (1 per cluster cell at
+    // minimum). For each glyph, we assert: if it claims slot 0 (the
+    // primary font), then it MUST NOT carry a non-zero glyph_id —
+    // because slot 0 is Rec Mono Casual which lacks CJK. The pre-fix
+    // behavior was to do exactly that and produce wrong glyphs.
+    // For 1:1 cells (cluster_cells == 1, no composition happened), the
+    // shaped glyph_id MUST be zeroed by shape_run — the renderer then
+    // resolves via charmap against the actually-loaded font. Any
+    // non-zero glyph_id on a 1:1 cell risks the production bug:
+    // PingFang SC ships multiple variants that disagree on glyph
+    // ordering, so the shaped id from one variant can point to a wrong
+    // CJK glyph in the file the rasterizer actually opens via fontdb
+    // (manifests as '中' → '恶'). Composed clusters (cluster_cells > 1
+    // — ligatures / ZWJ emoji) are exempt: the shaped id is the only
+    // way to reach the composed glyph and the family-substitution risk
+    // is acceptable there.
+    assert!(!glyphs.is_empty(), "shaper must emit at least one glyph for 4 CJK cells");
+    for g in &glyphs {
+        if g.cluster_cells == 1 && g.glyph_id != 0 {
+            panic!(
+                "shape_run emitted non-zero glyph_id={} for a 1:1 CJK cell \
+                 (ch={:?}, slot={}). This is the pre-fix production bug: a \
+                 shaped id from one PingFang variant gets rasterized through \
+                 a different file with the same family name, producing the \
+                 wrong CJK glyph. Zero glyph_id on 1:1 clusters so the \
+                 renderer takes the char-based fallback path.",
+                g.glyph_id, g.ch, g.font_slot,
+            );
+        }
+    }
+}
