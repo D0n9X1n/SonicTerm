@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-25 (after `7f8b83c`, v0.6 + per-crate `tests/` split)
+Last updated: 2026-05-26 (after v0.8.0 release — see [`CHANGELOG.md`](../CHANGELOG.md) and [`RELEASE.md`](../RELEASE.md))
 
 ---
 
@@ -47,12 +47,22 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | In-page search (`Cmd+F`) | ✅ v0.4 | `sonic-shared/src/search.rs` |
 | Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonic-core::vt` |
 | **In-app graphical preferences UI subsystem** | ✅ v0.6 | `sonic-shared/src/prefs/` (controls + state + `super+comma`; in-window rendering deferred) |
-| Tab tear-out + cross-window merge | ⏳ | API hook in `TabBar::detach` |
+| Tab tear-out + cross-window merge | ✅ v0.8 | `sonic-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
+| Command palette (`super+shift+P`) | ✅ v0.8 | (#41, #45) |
+| IME composition + preedit anchoring | ✅ v0.8 | (#40, #50) |
+| In-page + scrollback search | ✅ v0.8 | (#51) |
+| Bracketed paste + OSC 133 shell-integration | ✅ v0.8 | (#52) |
+| Font / theme / keymap live-reload + prefs persist | ✅ v0.8 | (#53, #54) |
+| i18n (en / zh-CN / ja) | ✅ v0.8 | (#55) |
+| `sonic-mux` daemon (persistent PTY sessions) | ✅ v0.8 | `sonic-mux/` (#56) |
+| Programming ligatures + ZWJ shaping | ✅ v0.8 | (#57) |
+| SSH client pane (russh, feature-gated) | ✅ v0.8 | (#58) |
+| Native macOS menubar | ✅ v0.8 | (#66) |
+| B3 atlas renderer + headless GUI bench | ✅ v0.8 | (#42, #44, #74) |
+| WezTerm visual parity (≤ 3 ΔE on standard recipe) | ✅ v0.8 | (#70, #75) |
 | Half-transparent / blur backgrounds | ⏳ | — |
-| Ligatures, IME, command palette | ⏳ | — |
-| In-window preferences control rendering | ⏳ | follow-up to v0.6 |
-| Code signing + notarization + auto-update | ⏳ v1.0 | — |
-| Linux re-enable, built-in SSH, session restore | ⏳ v1.0 | — |
+| Code signing + notarization + auto-update | ⏳ v1.0 | infra in `#39`; secrets pending |
+| Linux re-enable, session restore | ⏳ v1.0 | — |
 
 ---
 
@@ -111,14 +121,56 @@ control rendering, theme live-preview, and config hot-reload through the
 `notify` watcher. The state and controls already land; surfacing them
 in their own window is the next slice.
 
+### ✅ v0.8.0 — Production polish (2026-05-26)
+
+The bridge from v0.6 to v1.0. Everything between "preferences ship" and
+"ready to sign + release to the public" lands here. Full per-PR detail
+in [`CHANGELOG.md`](../CHANGELOG.md); cut script in [`RELEASE.md`](../RELEASE.md).
+
+Highlights:
+1. **Idle CPU 99% → ~0%** — render `try_lock` spin fixed (#37).
+2. **B3 atlas renderer is default** (#42) with headless GUI bench (#44),
+   capability matrix regression net (#47), and pixel-diff visual
+   snapshot harness (#74).
+3. **Tab tear-out + cross-window drag-to-merge** including OS-level
+   `NSPasteboard` cross-process drag (#43, #48, #59, #62, #64).
+4. **Command palette, in-page/scrollback search, IME with anchored
+   preedit, visual overlays** (#40, #41, #45, #50, #51).
+5. **WezTerm visual parity within 3 ΔE** on the standard recipe (#70,
+   #75) — HiDPI physical-px rasterization (#63, #72, #76), sRGB→linear
+   gamma (#65), CJK / emoji / Hangul / Powerline / ZWJ (#49, #57, #68).
+6. **Live reload** of font/theme/keymap + prefs persist & live-apply
+   (#53, #54).
+7. **`sonic-mux` daemon** for persistent PTY sessions (#56).
+8. **SSH client pane** behind `ssh` feature flag (#58).
+9. **Native macOS menubar** (#66) + WezTerm-style tab titles (#77).
+10. **i18n** en / zh-CN / ja (#55).
+11. **Code-signing workflow** infra (#39) — gated on secrets; certs
+    deferred to v1.0.
+12. **Bracketed paste + OSC 133** (#52), DSR/DA replies fix nvim hang
+    (#61).
+13. **Docs**: README/USER_GUIDE overhaul (#60), TESTING.md (#67),
+    VISUAL_PARITY.md (#70), CI-BILLING.md (#73).
+
 ### ⏳ v1.0.0 — Production
-1. **macOS signing + notarization** (requires Apple Developer Program $99/yr). Workflow infra prepped — see [`docs/release/signing.md`](release/signing.md); just add the secrets.
-2. **Windows signing** (requires EV cert, $200-400/yr). Workflow infra prepped — see [`docs/release/signing.md`](release/signing.md).
-3. **Auto-update**: macOS uses Sparkle; Windows uses Squirrel or WinSparkle.
-4. **Built-in SSH** (via `russh`) — optional, behind a feature flag.
-5. **Session mux + restore**: persist tabs/panes to disk; restore on next launch.
-6. **Linux support**: re-enable `sonic-linux` crate, add to CI matrix and
-   release pipeline, AppImage + .deb.
+
+The remaining gates between v0.8 and a public 1.0 are operational, not
+code:
+
+1. **macOS signing + notarization** — Apple Developer Program ($99/yr).
+   Workflow infra is already in place (see #39 +
+   [`docs/release/signing.md`](release/signing.md)); just add the
+   secrets and re-tag.
+2. **Windows signing** — EV cert ($200-400/yr). Workflow infra ready;
+   secrets pending.
+3. **Auto-update**: Sparkle on macOS, Squirrel or WinSparkle on Windows.
+   See open question below.
+4. **Session restore**: persist tab/pane layouts to disk on shutdown,
+   restore on next launch (complements `sonic-mux` from v0.8).
+5. **Linux support**: re-enable `sonic-linux`, add to CI matrix and
+   release pipeline, AppImage + `.deb`.
+6. **Half-transparent / blur backgrounds** (carry-over from the v0.8
+   scope; rolled to v1.0 as a visual polish item).
 
 ---
 
