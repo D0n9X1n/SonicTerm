@@ -99,5 +99,5 @@ jobs:
         shell: bash
         run: |
           cd crates/sonic-windows
-          cargo wix --no-build --nocapture --output ../dist/
-          ls -la ../dist/
+          cargo wix --no-build --nocapture --output ../../dist/
+          ls -la ../../dist/
