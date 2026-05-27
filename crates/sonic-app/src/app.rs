@@ -601,6 +601,20 @@ pub struct App {
     /// next vsync boundary via `pending_redraw`. Cleared on every
     /// frame we actually render. See PR #132 Haiku review.
     input_dirty: bool,
+    /// Shared with every VT-thread spawned in `spawn_pty_for_pane` (one
+    /// per pane). Set to `true` by the VT loop whenever a non-empty
+    /// chunk of PTY bytes is processed; read on each `RedrawRequested`
+    /// to decide whether to bypass the vsync coalescing gate. This is
+    /// the high-throughput sibling to `input_dirty`: PR #132 only
+    /// bypassed the gate for keyboard/mouse/theme events, leaving
+    /// terminal-spew workloads (vtebench, `cat largefile`, `tail -f`)
+    /// capped at one frame per refresh interval (~14 ms on 60 Hz). That
+    /// produced a 6–66× wezterm regression. Atomic because the writer
+    /// (VT thread) and reader (main / winit thread) are different
+    /// threads; `Ordering::Release` on set and `Ordering::Acquire` on
+    /// load synchronize with the parser-lock release that publishes the
+    /// new grid contents. Cleared on every frame we actually render.
+    pty_burst_dirty: Arc<std::sync::atomic::AtomicBool>,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     i18n: sonic_ui::i18n::I18n,
@@ -691,6 +705,7 @@ impl App {
             frame_period: Duration::from_micros(16_667),
             pending_redraw: false,
             input_dirty: false,
+            pty_burst_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
@@ -705,13 +720,28 @@ impl App {
     /// predicate used in the `WindowEvent::RedrawRequested` arm.
     #[doc(hidden)]
     pub fn would_coalesce_redraw(&self) -> bool {
-        !self.input_dirty && self.last_render.elapsed() < self.frame_period
+        !self.input_dirty
+            && !self.pty_burst_dirty.load(std::sync::atomic::Ordering::Acquire)
+            && self.last_render.elapsed() < self.frame_period
     }
 
     /// Test-only setter for the input-dirty flag.
     #[doc(hidden)]
     pub fn mark_input_dirty_for_test(&mut self) {
         self.input_dirty = true;
+    }
+
+    /// Test-only setter for the PTY-burst-dirty flag. Mirrors what the
+    /// VT thread does when it processes a non-empty byte chunk.
+    #[doc(hidden)]
+    pub fn mark_pty_burst_dirty_for_test(&self) {
+        self.pty_burst_dirty.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Test-only accessor for the PTY-burst-dirty flag.
+    #[doc(hidden)]
+    pub fn pty_burst_dirty_for_test(&self) -> bool {
+        self.pty_burst_dirty.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Test-only setter for `last_render` so tests can simulate "we
@@ -838,6 +868,7 @@ impl App {
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = self.cursor_visible.clone();
+                let pty_burst_dirty = self.pty_burst_dirty.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -881,6 +912,25 @@ impl App {
                                 Duration::from_secs(3600)
                             }) {
                                 Ok(bytes) => {
+                                    // PR #133: signal the main thread
+                                    // that real PTY output landed so the
+                                    // next RedrawRequested bypasses the
+                                    // vsync coalescing gate. Without
+                                    // this the gate caps terminal
+                                    // throughput at 1 frame/refresh
+                                    // (~14 ms on 60 Hz), producing a
+                                    // 6–66× wezterm regression on
+                                    // vtebench scrolling. We mark
+                                    // dirty even before parsing — the
+                                    // parser will publish under its
+                                    // lock; Release here pairs with the
+                                    // Acquire in `would_coalesce_redraw`
+                                    // so the renderer sees a non-empty
+                                    // grid by the time it reads.
+                                    if !bytes.is_empty() {
+                                        pty_burst_dirty
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                    }
                                     // Collect side-effects under the parser
                                     // lock, then DROP it before touching winit.
                                     // On macOS `Window::set_title` marshals to
@@ -3228,6 +3278,7 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 let was_dirty = self.input_dirty;
+                let pty_burst = self.pty_burst_dirty.load(std::sync::atomic::Ordering::Acquire);
                 // Perf audit #9: if we already rendered within the
                 // current vsync window, defer this redraw until the
                 // next monitor refresh boundary. `about_to_wait` will
@@ -3240,9 +3291,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // PR #132 review: input-driven redraws must be
                 // immediate — gating them on the vsync deadline adds
                 // perceptible latency to typing/resize/theme changes.
-                // Only redraws that arrive purely from streaming PTY
-                // bytes (input_dirty stays false) get coalesced.
-                if !was_dirty && self.last_render.elapsed() < self.frame_period {
+                // PR #133 (this change): PTY-burst redraws ALSO bypass
+                // the gate. The original coalescing assumed terminal
+                // output was the cheap-and-frequent path that needed
+                // throttling, but vtebench / `cat largefile` proved
+                // the opposite — gating the burst path caps throughput
+                // at 1 frame/refresh and made sonic 6–66× slower than
+                // wezterm. Idle CPU stays low because the flag is only
+                // set on non-empty PTY chunks (i.e. when there is real
+                // work to draw), not on the timer-driven cursor blink.
+                if !was_dirty && !pty_burst && self.last_render.elapsed() < self.frame_period {
                     self.pending_redraw = true;
                     return;
                 }
@@ -3378,6 +3436,12 @@ impl ApplicationHandler<UserEvent> for App {
                             tracing::warn!("render error: {e}");
                         }
                         self.input_dirty = false;
+                        // PR #133: clear AFTER the render call returns
+                        // so any PTY bytes that arrive DURING render
+                        // re-arm the flag and force another immediate
+                        // frame on the next RedrawRequested. Release
+                        // here pairs with Acquire in the gate check.
+                        self.pty_burst_dirty.store(false, std::sync::atomic::Ordering::Release);
                         self.last_render = Instant::now();
                         let g = grid.grid_mut();
                         (g.cursor.row, g.cursor.col)
