@@ -37,7 +37,7 @@
 //! - swash's `Render` returns `None` for a valid glyph id (rare)
 
 use cosmic_text::FontSystem;
-use sonic_core::glyph_key::GlyphKey;
+use sonic_types::GlyphKey;
 use std::collections::HashMap;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;

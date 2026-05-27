@@ -1,9 +1,9 @@
-//! Tests for `sonic_shared::glyph_atlas::GlyphAtlas`.
+//! Tests for `sonic_text::glyph_atlas::GlyphAtlas`.
 
-use sonic_core::glyph_key::GlyphKey;
-use sonic_shared::glyph_atlas::{
+use sonic_text::glyph_atlas::{
     GlyphAtlas, Rasterizer, ShelfPacker, SyntheticRasterizer, ATLAS_DIM,
 };
+use sonic_types::GlyphKey;
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)
@@ -148,8 +148,8 @@ fn atlas_full_returns_none_gracefully() {
     let mut a = GlyphAtlas::new(16, 16);
     struct Oversize;
     impl Rasterizer for Oversize {
-        fn rasterize(&mut self, _: GlyphKey) -> Option<sonic_shared::glyph_atlas::RasterTile> {
-            Some(sonic_shared::glyph_atlas::RasterTile {
+        fn rasterize(&mut self, _: GlyphKey) -> Option<sonic_text::glyph_atlas::RasterTile> {
+            Some(sonic_text::glyph_atlas::RasterTile {
                 width: 32,
                 height: 32,
                 offset_x: 0,

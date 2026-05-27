@@ -4227,6 +4227,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonic-core",
+ "sonic-text",
  "swash",
  "sys-locale",
  "tempfile",
@@ -4236,6 +4237,18 @@ dependencies = [
  "unic-langid",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "sonic-text"
+version = "0.3.0"
+dependencies = [
+ "bytemuck",
+ "cosmic-text",
+ "fontdb",
+ "lru 0.12.5",
+ "sonic-types",
+ "swash",
 ]
 
 [[package]]

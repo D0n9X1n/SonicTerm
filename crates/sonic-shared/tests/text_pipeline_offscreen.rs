@@ -20,7 +20,8 @@ use cosmic_text::FontSystem;
 use pollster::FutureExt as _;
 use sonic_core::glyph_key::GlyphKey;
 use sonic_shared::{
-    glyph_atlas::{AtlasUpload, GlyphAtlas},
+    atlas_upload::AtlasUpload,
+    glyph_atlas::GlyphAtlas,
     quad::px_to_ndc,
     swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
     text_pipeline::{GlyphInstance, TextPipeline},

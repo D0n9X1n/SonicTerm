@@ -7,11 +7,11 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
+pub mod atlas_upload;
 pub mod command_label;
 pub mod command_palette;
 pub mod config_watch;
 pub mod cursor;
-pub mod glyph_atlas;
 pub mod i18n;
 pub mod ime;
 pub mod menu;
@@ -24,17 +24,19 @@ pub mod prefs;
 pub mod prefs_renderer;
 pub mod quad;
 pub mod render;
-pub mod row_glyph_cache;
 pub mod search;
 pub mod selection;
-pub mod shape;
-pub mod swash_rasterizer;
 pub mod tab_drag;
 pub mod tab_title;
 pub mod tabbar_view;
 pub mod tabs;
 pub mod text_pipeline;
 pub mod ui_tokens;
+
+// Re-exports from the extracted `sonic-text` crate so legacy import paths
+// (`sonic_shared::shape::*`, `sonic_shared::glyph_atlas::*`, etc.) keep
+// compiling unchanged. New code should depend on `sonic-text` directly.
+pub use sonic_text::{glyph_atlas, row_glyph_cache, shape, swash_rasterizer};
 
 /// Re-exports for binary crates.
 pub use app::run;
