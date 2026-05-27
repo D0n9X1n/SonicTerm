@@ -23,7 +23,12 @@ pub fn foreground_process(pid: u32) -> Option<String> {
     macos::foreground_process(pid)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub fn foreground_process(pid: u32) -> Option<String> {
+    crate::foreground_proc::current_foreground_pid(pid).map(|(_pid, name)| name)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn foreground_process(_pid: u32) -> Option<String> {
     None
 }

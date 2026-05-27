@@ -15,6 +15,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod config;
+#[cfg(windows)]
+pub mod foreground_proc;
 pub mod glyph_key;
 pub mod grid;
 pub mod hyperlink;
