@@ -2786,21 +2786,33 @@ impl App {
         // window's CURRENT values — on macOS the first scale_factor
         // reported inside the constructor is often the stale 1.0 even
         // when the window has been placed on a 2× display.
+        // Install the window slot FIRST so any RedrawRequested events
+        // posted during renderer construction (e.g. by
+        // `force_rebuild_for_scale`, which calls
+        // `self.window.request_redraw()` internally) are routed to the
+        // prefs handler via `window_event` instead of falling through
+        // to the main-window code path. Without this, the early redraw
+        // is silently ignored and the prefs window stays blank until
+        // an unrelated event happens to land in `handle_prefs_event`.
+        self.prefs_window = Some(w.clone());
         match crate::prefs_renderer::PrefsRenderer::new(w.clone(), el) {
             Ok(mut r) => {
                 let real_sf = w.scale_factor() as f32;
                 r.force_rebuild_for_scale(real_sf);
                 let real_inner = w.inner_size();
                 r.resize(real_inner.width.max(1), real_inner.height.max(1));
-                w.request_redraw();
+                // Install the renderer BEFORE the explicit
+                // request_redraw below so the queued RedrawRequested
+                // finds `prefs_renderer` populated and actually draws.
                 self.prefs_renderer = Some(r);
             }
             Err(e) => {
                 tracing::error!("prefs renderer init failed: {e}");
             }
         }
+        // Belt-and-suspenders: explicitly schedule the first frame now
+        // that both renderer + window slot are populated.
         w.request_redraw();
-        self.prefs_window = Some(w);
     }
 
     /// Persist current prefs edit buffer to disk and live-apply
@@ -2890,9 +2902,6 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(w) = self.prefs_window.as_ref() {
-                    w.request_redraw();
-                }
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
@@ -2943,6 +2952,15 @@ impl App {
                             }
                         }
                     }
+                }
+                // Redraw AFTER mutation so the next frame reflects the
+                // new state. Calling request_redraw BEFORE the
+                // mutation (as the previous code did) painted the
+                // pre-click state — the user saw their previous click's
+                // result instead of the current one, and on a fresh
+                // prefs window the result was a stale blank surface.
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
