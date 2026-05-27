@@ -2152,11 +2152,20 @@ impl App {
     /// Pump actions queued by the macOS native menubar through
     /// [`Self::run_action`]. Called from the `UserEvent::MenuAction`
     /// wake-up arm.
-    fn drain_menubar_actions(&mut self) {
+    fn drain_menubar_actions(&mut self, el: &ActiveEventLoop) {
         for action in crate::menubar_bridge::drain() {
             tracing::debug!("menubar action: {action:?}");
             self.run_action(&action);
         }
+        // Menubar dispatch can set window-creation flags (e.g.
+        // `pending_prefs_open` via OpenPreferences). The KeyboardInput
+        // path used to consume these inline; the menubar / UserEvent
+        // path didn't, so ⌘, from the macOS menubar — and from the
+        // keymap, since that path also flows through here when the
+        // EventLoopProxy delivers — silently dropped the request.
+        // Funnel through the single drain helper so every dispatch
+        // site is covered. See `drain_pending_window_creates`.
+        self.drain_pending_window_creates(el);
     }
 
     /// Read-only accessor used by tests and (eventually) the
@@ -2475,6 +2484,37 @@ impl App {
         let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
         drop(guard);
         uri
+    }
+
+    /// Consume any window-creation flags that were set outside of an
+    /// `ActiveEventLoop` callback (e.g. by `open_preferences` from a
+    /// menubar action, a keybinding action, or a command-palette
+    /// dispatch). All of these set `pending_prefs_open = true` because
+    /// they don't hold an `ActiveEventLoop` and can't call
+    /// `el.create_window(..)` themselves. The actual window must be
+    /// born from a winit-owned callback that hands us an `el`.
+    ///
+    /// Call this at the tail of every event-handler arm that runs an
+    /// action (`window_event` after `run_action`, `user_event` after
+    /// menubar drain). Centralizing it here is the fix for the bug
+    /// where ⌘, from the macOS menubar logged "awaiting
+    /// resumed-event-loop hook" but the prefs window never appeared —
+    /// the inline consumer existed only on the KeyboardInput path.
+    ///
+    /// Manual GUI smoke recipe (PM runs locally; agent has no display):
+    /// ```text
+    /// ./target/release/sonic-mac > /tmp/p.log 2>&1 &
+    /// sleep 2.5
+    /// osascript -e 'tell application "System Events" to keystroke "," using {command down}'
+    /// sleep 1.5
+    /// osascript -e 'tell application "System Events" to tell process "sonic-mac" to count of windows'
+    /// # expect 2
+    /// ```
+    fn drain_pending_window_creates(&mut self, el: &ActiveEventLoop) {
+        if self.pending_prefs_open {
+            self.pending_prefs_open = false;
+            self.create_prefs_window(el);
+        }
     }
 
     /// Create the v0.6 preferences window. Called from `window_event`
@@ -2835,15 +2875,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         // Watcher-thread wake. Drain the channel and apply any new
         // config immediately so the reload doesn't sit queued until
         // the next OS event arrives. apply_new_config already
         // request_redraw()s every live window.
         match event {
             UserEvent::ConfigChanged => self.poll_config_reload(),
-            UserEvent::MenuAction => self.drain_menubar_actions(),
+            UserEvent::MenuAction => self.drain_menubar_actions(el),
         }
+        // Any path above that ran an action may have set
+        // `pending_prefs_open` — make sure the prefs window actually
+        // materializes regardless of the dispatch source.
+        self.drain_pending_window_creates(el);
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
@@ -3403,10 +3447,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     self.command_palette_handle_key(&event);
-                    if self.pending_prefs_open {
-                        self.pending_prefs_open = false;
-                        self.create_prefs_window(el);
-                    }
+                    self.drain_pending_window_creates(el);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -3447,10 +3488,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
-                            if self.pending_prefs_open {
-                                self.pending_prefs_open = false;
-                                self.create_prefs_window(el);
-                            }
+                            self.drain_pending_window_creates(el);
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -3688,5 +3726,79 @@ pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
     assert!(matches!(action, sonic_core::keymap::Action::OpenPreferences));
     app.command_palette.close();
     app.run_action(&action);
+    app.pending_prefs_open
+}
+
+/// Test-only helper: dispatch the menubar `OpenPreferences` action the
+/// same way the macOS NSMenu bridge does (push onto the bridge queue,
+/// then call the actions drain), and report whether the resulting state
+/// is "ready for `drain_pending_window_creates` to materialize the
+/// prefs window" — i.e. `pending_prefs_open == true`.
+///
+/// This is the regression for the bug where ⌘, (and the macOS
+/// menubar > Preferences item, which routes through the same bridge)
+/// logged "awaiting resumed-event-loop hook" but the prefs window
+/// never appeared. The inline consumer for `pending_prefs_open` lived
+/// only on the KeyboardInput path; menubar dispatch never hit it. The
+/// fix centralizes the consumer in `drain_pending_window_creates` and
+/// calls it from both `user_event` (menubar/UserEvent) and the
+/// KeyboardInput arm of `window_event`.
+///
+/// We can't construct an `ActiveEventLoop` in a unit test, so this
+/// helper stops one step short of `create_window` and asserts the
+/// pre-condition the bug violated. The full GUI verify recipe lives
+/// in the doc comment on `drain_pending_window_creates`.
+#[doc(hidden)]
+pub fn __test_menubar_dispatch_open_preferences_sets_pending() -> bool {
+    use sonic_core::keymap::{Action, Keymap, Meta};
+    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    let hex = || Hex("#000000".to_string());
+    let ansi = || AnsiColors {
+        black: hex(),
+        red: hex(),
+        green: hex(),
+        yellow: hex(),
+        blue: hex(),
+        magenta: hex(),
+        cyan: hex(),
+        white: hex(),
+    };
+    let theme = Theme {
+        name: "test".into(),
+        appearance: Appearance::Dark,
+        colors: Palette {
+            background: hex(),
+            foreground: hex(),
+            cursor: hex(),
+            cursor_text: hex(),
+            selection_bg: hex(),
+            selection_fg: hex(),
+            ansi: ansi(),
+            bright: ansi(),
+            tab: TabColors {
+                bar_bg: hex(),
+                active_bg: hex(),
+                active_fg: hex(),
+                inactive_bg: hex(),
+                inactive_fg: hex(),
+                hover_bg: hex(),
+                hover_fg: hex(),
+                close_button_fg: hex(),
+            },
+        },
+    };
+    let config = Config::default();
+    let keymap =
+        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
+    let mut app = App::new(theme, config, keymap);
+    // Mirror what NSMenu does: enqueue Action::OpenPreferences and let
+    // the App run every queued action. This is the action-loop portion
+    // of `drain_menubar_actions` — we stop just before the
+    // `drain_pending_window_creates(el)` step (which needs a real
+    // `ActiveEventLoop`) and verify the flag landed.
+    let _ = crate::menubar_bridge::push_action(Action::OpenPreferences);
+    for action in crate::menubar_bridge::__test_drain() {
+        app.run_action(&action);
+    }
     app.pending_prefs_open
 }
