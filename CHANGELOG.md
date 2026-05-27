@@ -4,11 +4,95 @@ All notable changes to Sonic Terminal will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — v1.0-RC (2026-05-27)
 
-_v1.0.0 release notes below are staged here pending tag cut._
+29+ PRs landed this session on top of the earlier v1.0.0 staging
+notes. Highlights: the engine was decomposed from a 4-crate
+`sonic-core` + `sonic-shared` monolith into 10 leaf crates under
+`crates/`, the bulk `render.rs` and `app.rs` files were split into
+focused modules, a P0 ANSI-background-color regression was caught
+and fixed, the PTY burst flag became a generation counter, and the
+default font flipped to St Helens. The tag will go out once the
+remaining perf-parity gap with WezTerm is closed and signing certs
+are procured.
 
-## [1.0.0] — 2026-05-27
+### 🏗 Refactor — crate decomposition
+
+- `#145` Move all crates from the flat top-level layout into
+  `crates/<name>/` to make room for the leaf split.
+- `#151` Extract `sonic-types` — zero-dep value types (`Cell`, `Pos`,
+  `Action`, `GlyphKey`, `HyperlinkId`, geometry primitives).
+- `#152` Decompose `sonic-core` into four leaf crates: `sonic-vt`
+  (parser), `sonic-grid` (grid + hyperlink registry), `sonic-cfg`
+  (config / theme / keymap / url_open), `sonic-io` (PTY + proc_info
+  + ssh + foreground_proc). `sonic-core` remains as a deprecated
+  re-export façade so `use sonic_core::vt::Parser;` still compiles.
+- `#153` Extract `sonic-text` — shape (LRU cache), swash rasterizer,
+  glyph atlas, row glyph cache.
+- `#154` Extract `sonic-ui` — tabs, tabbar_view, pane, selection,
+  search, command_palette, cursor, IME, i18n, prefs subsystem.
+- `#155` Extract `sonic-render-model` — renderer-agnostic frame
+  geometry / inputs / painter traits (what to draw, not how).
+- `#156` Extract `sonic-gpu` — `quad::QuadPipeline`, `text_pipeline`,
+  `atlas_upload`.
+- `#157` Split `sonic-shared/src/render.rs` into
+  `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs`.
+- `#158` Extract `sonic-app` — winit ApplicationHandler + menu +
+  os_drag + tab_drag + config_watch.
+- `#159` Auto-closed during rebase as scaffolding-only; the accepted
+  app-split content shipped via `#160`.
+- `#160` Split `sonic-app/src/app.rs` into 16 focused modules under
+  `app/`: `mod`, `window_event`, `event_loop`, `spawn_pane`,
+  `keymap_dispatch`, `key_encoding`, `input`, `redraw`, `overlays`,
+  `tab_state`, `tear_out`, `child_window`, `prefs_window`,
+  `config_apply`, `search_handle`, `misc`.
+
+### 🐛 Fixed (correctness)
+
+- `#146` Regression tests cover user-reported palette, prefs, and font
+  bugs so the v1.0 fixes stay pinned.
+- `#149` Auto-closed during rebase; the palette/prefs fix shipped via
+  `#150`.
+- `#150` Palette highlight alignment, prefs blank-on-open, and prefs
+  click-freeze fixes landed together.
+- `#161` (spec) → `#163` (fix) **P0 — per-cell ANSI background colors
+  now render.** Before #163, the text pipeline silently dropped the
+  `bg` field on its way from `Cell` to glyphon — only fg + attrs
+  reached the renderer. Visible result: `htop` selected-row stripe,
+  `tmux` statusline, `fzf` preview, and any TUI relying on cell-level
+  ANSI bg colors rendered with the theme background instead of the
+  intended bg. Capability matrix gained a "colored background round
+  trip" check fed by `pty_dump` so this can't silently regress.
+- `#162` **PTY burst flag race.** The old `bool input_dirty` raced
+  when a second PTY burst landed in the window between the
+  renderer clearing the flag and presenting the frame, dropping the
+  redraw. Replaced with a generation counter: the renderer remembers
+  the last counter it drew and compares against the counter the PTY
+  thread bumps, so the second burst can't be lost.
+
+### ⚡ Performance
+
+- `#164` Bypass the vsync gate on PTY bursts so fresh shell output can
+  present immediately; replaces the auto-closed `#162` approach.
+
+### ✨ Added / changed
+
+- `#147` Auto-closed during rebase; the St Helens font and tab-title
+  config work shipped via `#148`.
+- `#148` Default font switched to **St Helens** (system-installed,
+  not bundled). `Rec Mono Casual` remains in `assets/fonts/` as
+  guaranteed-present fallback. Override via `[font] family = "..."`
+  in `sonic.toml` or the prefs Font tab.
+
+### ⏳ Still required before the v1.0 tag
+
+- Honest perf-parity sign-off — vtebench within ~2× of WezTerm
+  (currently 6×–302× slower depending on the benchmark; see §14 of
+  `CLAUDE.md` and `docs/ROADMAP.md`).
+- Apple Developer ID cert procurement (#39 + #128 pipeline is ready).
+- Azure Trusted Signing cert procurement (#128 pipeline is ready).
+
+## [1.0.0] — 2026-05-27 (staged)
 
 The production release. Sonic crosses the line from "v0.8 polish" to
 "v1.0 ship": Windows MVP lands (MSI installer, custom titlebar with
