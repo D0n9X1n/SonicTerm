@@ -2488,6 +2488,10 @@ impl App {
                     crate::prefs::PREFS_WIN_W,
                     crate::prefs::PREFS_WIN_H,
                 ))
+                .with_min_inner_size(winit::dpi::LogicalSize::new(
+                    crate::prefs::PREFS_MIN_W,
+                    crate::prefs::PREFS_MIN_H,
+                ))
                 .with_resizable(true),
         );
         let w = match el.create_window(attrs) {

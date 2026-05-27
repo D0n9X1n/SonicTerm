@@ -5,7 +5,7 @@
 //! - [`controls`] — pure widget structs (Toggle, Slider, Dropdown,
 //!   ColorSwatch, TextField) with hit-testing and value get/set.
 //! - [`layout`] — category sidebar + form-panel rectangles for the
-//!   ~720x560 logical preferences window.
+//!   760×600 logical preferences window (min 680×520).
 //! - [`state`] — an in-memory edit buffer that wraps the user [`Config`],
 //!   tracks dirty state, and can apply (write TOML) or cancel.
 //!
@@ -21,5 +21,10 @@ pub use layout::{Category, PrefsLayout, CATEGORIES};
 pub use state::{PrefsHit, PrefsState};
 
 /// Logical (DPI-independent) size of the preferences window.
-pub const PREFS_WIN_W: f32 = 720.0;
-pub const PREFS_WIN_H: f32 = 560.0;
+pub const PREFS_WIN_W: f32 = 760.0;
+pub const PREFS_WIN_H: f32 = 600.0;
+/// Minimum logical size enforced by both the winit window builder
+/// (`with_min_inner_size`) and [`layout::PrefsLayout::new`]. Must match
+/// the clamp values inside `layout.rs`.
+pub const PREFS_MIN_W: f32 = 680.0;
+pub const PREFS_MIN_H: f32 = 520.0;
