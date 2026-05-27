@@ -35,6 +35,13 @@ pub enum DragAction<W> {
     /// no-op (or, optionally, a within-bar reorder; we leave that to a
     /// dedicated future path).
     ReturnToOriginalBar,
+    /// Cursor is over the SOURCE window's tab bar but at a different
+    /// horizontal slot than the press. Release reorders the tab from
+    /// `from` to `to` within the source `TabBar`. Indices are in the
+    /// pre-reorder coordinate space (i.e. `to` is the destination slot
+    /// in the original tab vector); `TabBar::reorder` handles the
+    /// remove-then-insert shift.
+    ReorderTab { from: usize, to: usize },
     /// Cursor is over another Sonic window's tab bar — release merges
     /// the dragged tab into that window at the indicated slot.
     MergeIntoWindow(DropTarget<W>),
@@ -76,6 +83,23 @@ pub fn compute_action<W: Copy>(
     }
     let (cx, cy) = session.current_pos;
     if source_bar.point_over_bar(cx, cy) {
+        // Within-bar reorder: compute the destination slot from the
+        // cursor X and compare to the press tab index. `drop_slot`
+        // returns a value in `[0, n]` (insertion-slot semantics). We
+        // convert that to a tab-vec index in `[0, n-1]` and gate the
+        // ReorderTab variant on it actually differing from the source
+        // — otherwise this is the regular "drop on yourself" no-op
+        // that browsers also treat as a cancel.
+        let n = source_bar.tabs.len();
+        if n > 0 {
+            let raw_slot = source_bar.drop_slot(cx, cy);
+            // Clamp insertion-slot semantics: `raw_slot == n` means
+            // "after the last tab", which is the last index.
+            let to = raw_slot.min(n - 1);
+            if to != session.press_tab_index {
+                return DragAction::ReorderTab { from: session.press_tab_index, to };
+            }
+        }
         return DragAction::ReturnToOriginalBar;
     }
     if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
@@ -252,8 +276,10 @@ mod tests {
 
     #[test]
     fn action_returns_to_original_bar_when_cursor_over_source() {
-        let mut s = DragSession::new(1, (100.0, 10.0));
-        s.current_pos = (120.0, 5.0);
+        // Press tab 1; release directly on top of tab 1 (same x) →
+        // no reorder, no tear, plain cancel.
+        let mut s = DragSession::new(1, (300.0, 10.0));
+        s.current_pos = (300.0, 5.0);
         let a: DragAction<&str> = compute_action(&s, None, &src_layout());
         assert_eq!(a, DragAction::ReturnToOriginalBar);
     }
@@ -294,5 +320,38 @@ mod tests {
         s.current_pos = (140.0, 5.0);
         let a: DragAction<&str> = compute_action(&s, None, &src_layout());
         assert_eq!(a, DragAction::ReturnToOriginalBar);
+    }
+
+    #[test]
+    fn action_reorders_when_cursor_over_different_slot_on_source_bar() {
+        // Press tab #2 (index 2), drag to the left side over tab #0.
+        // x=10 sits left of tab 0's midpoint, so drop_slot=0 ≠ 2 →
+        // ReorderTab { from: 2, to: 0 }. No tear-out, no foreign merge.
+        let mut s = DragSession::new(2, (500.0, 10.0));
+        s.current_pos = (10.0, 5.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert_eq!(a, DragAction::ReorderTab { from: 2, to: 0 });
+    }
+
+    #[test]
+    fn action_no_reorder_when_cursor_over_same_slot() {
+        // Press tab #1 and release with the cursor at the same X — slot
+        // resolves back to 1, so this is a cancel, NOT a reorder. Avoids
+        // a churny "reorder" on a plain click.
+        let mut s = DragSession::new(1, (300.0, 10.0));
+        s.current_pos = (300.0, 5.0);
+        let a: DragAction<&str> = compute_action(&s, None, &src_layout());
+        assert_eq!(a, DragAction::ReturnToOriginalBar);
+    }
+
+    #[test]
+    fn action_foreign_target_wins_over_within_bar_reorder() {
+        // If a foreign drop target was set this frame, we always merge —
+        // even if the source bar would also have matched a reorder slot.
+        let mut s = DragSession::new(0, (10.0, 10.0));
+        s.current_pos = (500.0, 5.0); // still over source bar at slot 2
+        let target = DropTarget { window: "b", slot: 1 };
+        let a = compute_action(&s, Some(target), &src_layout());
+        assert_eq!(a, DragAction::MergeIntoWindow(target));
     }
 }

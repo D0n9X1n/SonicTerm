@@ -1295,6 +1295,23 @@ impl App {
         renderer.set_titlebar_inset(integrated_titlebar_inset());
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
+        // On macOS the freshly created window often reports
+        // scale_factor=1.0 inside `GpuRenderer::new` because it hasn't
+        // been placed on a display yet. Once the OS positions it on a
+        // Retina display the real scale is 2.0 but no
+        // `ScaleFactorChanged` necessarily fires synchronously, so the
+        // child window would render with stale 1× glyph tiles + a
+        // surface that's actually 2× — producing the "huge letter
+        // spacing, no colors, missing nerd-font glyphs" repro. Force
+        // an atlas rebuild against the window's CURRENT scale factor,
+        // then re-configure the surface to the window's CURRENT
+        // physical inner size so cells/rows are derived from real
+        // numbers instead of the 800×500 logical seed.
+        let real_sf = window.scale_factor() as f32;
+        renderer.force_rebuild_for_scale(real_sf);
+        let real_inner = window.inner_size();
+        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+
         let (cols, rows) = renderer.cells();
         // Resize the migrated panes to the child window's grid and
         // swap each pane's VT-thread redraw target so further pty
@@ -1559,6 +1576,19 @@ impl App {
                         match action {
                             crate::tab_drag::DragAction::ReturnToOriginalBar => {
                                 // No-op cancel.
+                            }
+                            crate::tab_drag::DragAction::ReorderTab { from, to } => {
+                                // Re-borrow via self.child_windows
+                                // because `let _ = child;` above
+                                // released the long-lived mut borrow.
+                                if let Some(c) = self.child_windows.get_mut(&win_id) {
+                                    c.tabs.reorder(from, to);
+                                    if from < c.tab_states.len() && to < c.tab_states.len() {
+                                        let st = c.tab_states.remove(from);
+                                        c.tab_states.insert(to, st);
+                                    }
+                                    c.window.request_redraw();
+                                }
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
                                 self.merge_child_into_target(win_id, src_idx, target);
@@ -3146,6 +3176,9 @@ impl ApplicationHandler<UserEvent> for App {
                             crate::tab_drag::DragAction::ReturnToOriginalBar => {
                                 // No-op — moving back over the source
                                 // bar before releasing cancels the drag.
+                            }
+                            crate::tab_drag::DragAction::ReorderTab { from, to } => {
+                                self.tabs.reorder(from, to);
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
                                 self.merge_main_into_child(idx, target);

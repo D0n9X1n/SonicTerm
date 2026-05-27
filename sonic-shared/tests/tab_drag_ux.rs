@@ -76,16 +76,18 @@ fn scenario3_drag_to_other_window_bar_release_merges_at_slot() {
 }
 
 #[test]
-fn bonus_release_between_tabs_of_source_bar_is_noop_not_tear() {
+fn bonus_release_between_tabs_of_source_bar_reorders_not_tears() {
     // Pick an x that's still over the SOURCE bar (within bar y range),
-    // landed between two tab midpoints. v1 returns ReturnToOriginalBar
-    // — the important guarantee is NO TEAR. Reorder is a future path.
+    // landed past tab #1's right edge → slot resolves to the last tab.
+    // The important guarantees: NO TEAR, and (now that reorder is
+    // wired up) the action is ReorderTab from the press index to the
+    // new slot.
     let layout = src_layout(3);
     let mut s = DragSession::new(0, (50.0, 10.0));
     let between_x = layout.tabs[1].bg.x + layout.tabs[1].bg.w + 1.0;
     s.current_pos = (between_x, 12.0);
     let a: DragAction<&str> = compute_action(&s, None, &layout);
-    assert_eq!(a, DragAction::ReturnToOriginalBar);
+    assert_eq!(a, DragAction::ReorderTab { from: 0, to: 2 });
 }
 
 #[test]
@@ -97,4 +99,37 @@ fn just_below_bar_within_hysteresis_releases_as_noop() {
     s.current_pos = (120.0, TAB_BAR_HEIGHT + 5.0);
     let a: DragAction<&str> = compute_action(&s, None, &layout);
     assert_eq!(a, DragAction::ReturnToOriginalBar);
+}
+
+#[test]
+fn reorder_press_tab2_drop_on_tab0_swaps_in_place() {
+    // Press tab #2, drag the cursor left until it's over tab #0's
+    // left half → release. The bar reorders so the formerly-2nd tab
+    // is now first, and (per TabBar::reorder) the active tab follows
+    // the moved tab. Critically: no child window is spawned, no
+    // tear-out fires, and the action is purely a within-bar reorder.
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("A"));
+    bar.push(Tab::new("B"));
+    bar.push(Tab::new("C")); // active = 2 after the third push
+    assert_eq!(bar.active_index(), 2);
+    let titles_before: Vec<&str> = bar.tabs().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles_before, vec!["A", "B", "C"]);
+
+    let layout = TabBarLayout::compute(&bar, 800.0);
+    // Press at the middle of tab 2, move cursor to x=10 (well left of
+    // tab 0's midpoint). y stays inside the bar.
+    let mut s = DragSession::new(2, (layout.tabs[2].bg.x + layout.tabs[2].bg.w / 2.0, 10.0));
+    s.current_pos = (10.0, 10.0);
+    let action: DragAction<&str> = compute_action(&s, None, &layout);
+    assert_eq!(action, DragAction::ReorderTab { from: 2, to: 0 });
+
+    // Execute the reorder the way the app's match arm does.
+    if let DragAction::ReorderTab { from, to } = action {
+        bar.reorder(from, to);
+    }
+    let titles_after: Vec<&str> = bar.tabs().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles_after, vec!["C", "A", "B"]);
+    // Active follows the moved tab.
+    assert_eq!(bar.active_index(), 0);
 }
