@@ -1967,7 +1967,20 @@ impl GpuRenderer {
         // -------- Command palette overlay ----------------------------------
         let palette_layout = palette.and_then(|p| PaletteLayout::compute(p, sw, sh));
         if let Some(layout) = &palette_layout {
-            // Outer 1px border (accent color).
+            // Full-window scrim — #05070D at 28% — sits below the modal
+            // so the underlying terminal recedes visually.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.scrim.x,
+                    layout.scrim.y,
+                    layout.scrim.w,
+                    layout.scrim.h,
+                    sw,
+                    sh,
+                ),
+                color: [0.020, 0.027, 0.051, 0.28],
+            });
+            // Outer 1px border (white at 10%).
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
                     layout.border.x,
@@ -1977,26 +1990,56 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: self.hyperlink_underline,
+                color: [1.0, 1.0, 1.0, 0.10],
             });
-            // Dark modal background.
+            // Modal background — #10131A at 92%.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: [0.08, 0.09, 0.12, 0.96],
+                color: [0.063, 0.075, 0.102, 0.92],
             });
-            // Selected row highlight.
+            // Query field background — #0B0E14 at 72%.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.query_row.x,
+                    layout.query_row.y,
+                    layout.query_row.w,
+                    layout.query_row.h,
+                    sw,
+                    sh,
+                ),
+                color: [0.043, 0.055, 0.078, 0.72],
+            });
+            // Selected row highlight — #7AA2F7 at 16%.
             if let Some(sel) = layout.selected_row {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
-                        color: self.selection_color,
+                        color: [0.478, 0.635, 0.969, 0.16],
                     });
                 }
             }
-            // Shape the query row text.
+            // Selected row left accent strip — #7AA2F7 100%.
+            if let Some(accent) = &layout.selected_accent {
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(accent.x, accent.y, accent.w, accent.h, sw, sh),
+                    color: [0.478, 0.635, 0.969, 1.0],
+                });
+            }
+            // Footer top border — #FFFFFF at 7%.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
+                color: [1.0, 1.0, 1.0, 0.07],
+            });
+            // Shape the query row text. The renderer paints either the
+            // placeholder (empty query) or the typed text + cursor.
+            let query_text = if let Some(ph) = &layout.query_placeholder {
+                ph.clone()
+            } else {
+                layout.query_label.clone()
+            };
             self.palette_query_buffer.set_text(
                 &mut self.font_system,
-                &layout.query_label,
+                &query_text,
                 &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
@@ -2005,7 +2048,8 @@ impl GpuRenderer {
 
             // Shape the action-list as one multi-line buffer; the renderer
             // positions it at the first row's y and lets glyphon stack
-            // lines at the buffer's line height.
+            // lines at the buffer's line height. When no matches, paint
+            // the empty-state placeholder + hint instead.
             let mut rows_text = String::new();
             for (i, label) in layout.row_labels.iter().enumerate() {
                 if i > 0 {
@@ -2013,10 +2057,18 @@ impl GpuRenderer {
                 }
                 rows_text.push_str(label);
             }
-            // No matches: render the placeholder in place of the row list.
             if let Some(ph) = &layout.empty_label {
                 rows_text.push_str(ph);
+                if let Some(hint) = &layout.empty_hint {
+                    rows_text.push('\n');
+                    rows_text.push_str(hint);
+                }
             }
+            // Append the footer label on its own line so glyphon paints
+            // it as part of the same overlay buffer. The renderer doesn't
+            // need a second TextArea for one short status line.
+            rows_text.push('\n');
+            rows_text.push_str(&layout.footer_label);
             self.palette_rows_buffer.set_text(
                 &mut self.font_system,
                 &rows_text,
