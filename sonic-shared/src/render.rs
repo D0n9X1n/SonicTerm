@@ -1007,6 +1007,17 @@ impl GpuRenderer {
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
+        {
+            let mut prebake_raster = SwashRasterizer::new(
+                &mut self.font_system,
+                &self.font_family,
+                self.font_size * self.scale_factor,
+            );
+            let _inserted = swash_rasterizer::prebake_box_and_powerline(
+                &mut prebake_raster,
+                &mut self.glyph_atlas,
+            );
+        }
         self.row_glyph_cache.invalidate_all();
         self.last_frame_key = None;
         tracing::info!(
@@ -1059,6 +1070,17 @@ impl GpuRenderer {
         self.scale_factor = sf;
         let dim = atlas_dim_for_scale(sf);
         self.glyph_atlas = GlyphAtlas::new(dim, dim);
+        {
+            let mut prebake_raster = SwashRasterizer::new(
+                &mut self.font_system,
+                &self.font_family,
+                self.font_size * self.scale_factor,
+            );
+            let _inserted = swash_rasterizer::prebake_box_and_powerline(
+                &mut prebake_raster,
+                &mut self.glyph_atlas,
+            );
+        }
         self.row_glyph_cache.invalidate_all();
         // The GPU-side AtlasUpload owns a texture sized to the old atlas
         // dimensions and a bind group pointing at it. After replacing the
