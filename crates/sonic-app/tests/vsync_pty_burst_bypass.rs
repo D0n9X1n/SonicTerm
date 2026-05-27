@@ -4,14 +4,15 @@
 //! gated, which capped sonic at 1 frame per refresh interval (~14 ms
 //! on 60 Hz) on terminal-throughput workloads. vtebench scrolling
 //! showed sonic 6–66× slower than wezterm as a direct result. The fix
-//! introduces a `pty_burst_dirty: Arc<AtomicBool>` flag the VT thread
-//! sets on every non-empty byte chunk; the renderer reads it on each
-//! `RedrawRequested` and clears it after the render returns.
+//! introduces a `pty_burst_gen: Arc<AtomicU32>` counter the VT thread
+//! increments on every non-empty byte chunk; the renderer snapshots it
+//! on each `RedrawRequested` and records only that snapshot after the
+//! render returns.
 //!
 //! These tests pin the contract by exercising `would_coalesce_redraw`
 //! (the exact predicate used by the `RedrawRequested` arm) with the
-//! same simulated `last_render` and `pty_burst_dirty` states the real
-//! event loop would have.
+//! same simulated `last_render`, `pty_burst_gen`, and
+//! `last_seen_burst_gen` states the real event loop would have.
 
 use std::time::{Duration, Instant};
 
@@ -75,9 +76,14 @@ fn app() -> App {
 }
 
 #[test]
-fn pty_burst_dirty_starts_false() {
+fn pty_burst_gen_starts_at_zero() {
     let a = app();
-    assert!(!a.pty_burst_dirty_for_test(), "fresh App must not have a stale PTY burst flag");
+    assert_eq!(a.pty_burst_gen_for_test(), 0, "fresh App must not have a stale PTY burst");
+    assert_eq!(
+        a.last_seen_burst_gen_for_test(),
+        0,
+        "fresh App must start with no seen PTY burst generation"
+    );
 }
 
 #[test]
@@ -86,7 +92,7 @@ fn pty_burst_bypasses_the_gate_even_immediately_after_a_render() {
     // Simulate "we rendered ~100us ago" — well inside the ~16.667 ms
     // frame_period — with no user input but a fresh PTY burst.
     a.set_last_render_for_test(Instant::now() - Duration::from_micros(100));
-    a.mark_pty_burst_dirty_for_test();
+    a.mark_pty_burst_for_test();
     assert!(
         !a.would_coalesce_redraw(),
         "a PTY-burst redraw within the vsync window MUST render immediately, \
@@ -108,12 +114,20 @@ fn no_pty_burst_and_no_input_within_frame_period_still_coalesces() {
 }
 
 #[test]
-fn pty_burst_flag_survives_until_render_clears_it() {
-    let a = app();
-    a.mark_pty_burst_dirty_for_test();
-    assert!(a.pty_burst_dirty_for_test(), "flag must remain set until render clears it");
-    // The real render path clears via Release store; mirror that.
-    a.pty_burst_dirty_for_test();
+fn seen_pty_burst_generation_coalesces_until_another_burst_arrives() {
+    let mut a = app();
+    a.set_last_render_for_test(Instant::now() - Duration::from_millis(1));
+    a.mark_pty_burst_for_test();
+    let snapshot = a.pty_burst_gen_for_test();
+    a.mark_burst_gen_seen_for_test(snapshot);
+
+    assert!(
+        a.would_coalesce_redraw(),
+        "once render has seen a PTY burst generation, timer redraws inside the vsync window coalesce"
+    );
+
+    a.mark_pty_burst_for_test();
+    assert!(!a.would_coalesce_redraw(), "a later PTY burst generation must bypass the vsync gate");
 }
 
 #[test]
@@ -126,5 +140,27 @@ fn input_dirty_still_wins_independently_of_pty_burst() {
     assert!(
         !a.would_coalesce_redraw(),
         "input_dirty bypass from PR #132 must continue to render immediately"
+    );
+}
+
+#[test]
+fn vt_burst_during_render_is_not_erased_by_seen_snapshot() {
+    let mut a = app();
+    a.set_last_render_for_test(Instant::now() - Duration::from_millis(1));
+
+    // Render snapshots generation 1 at the start of RedrawRequested.
+    a.mark_pty_burst_for_test();
+    let render_snapshot = a.pty_burst_gen_for_test();
+
+    // The VT thread receives more bytes while that render is in flight.
+    a.mark_pty_burst_for_test();
+
+    // Render completion must mark only the starting snapshot as seen.
+    // The current generation is now ahead, so the next redraw must render
+    // immediately instead of waiting for the next vsync gate.
+    a.mark_burst_gen_seen_for_test(render_snapshot);
+    assert!(
+        !a.would_coalesce_redraw(),
+        "a PTY burst that arrives during render must remain pending for the next redraw"
     );
 }
