@@ -14,6 +14,7 @@ pub mod cursor;
 pub mod glyph_atlas;
 pub mod i18n;
 pub mod ime;
+pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;
 pub mod overlays;
