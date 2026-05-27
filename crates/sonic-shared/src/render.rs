@@ -1923,7 +1923,12 @@ impl GpuRenderer {
             // is a no-op there. See sonic-shared/src/quad.rs::paint_caption_buttons.
             if crate::app::integrated_titlebar_inset_px() > 0 {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
-                crate::quad::paint_caption_buttons(&mut quads, &rects, (sw, sh), bar_bg);
+                let tuples = [
+                    (rects[0].x, rects[0].y, rects[0].w, rects[0].h),
+                    (rects[1].x, rects[1].y, rects[1].w, rects[1].h),
+                    (rects[2].x, rects[2].y, rects[2].w, rects[2].h),
+                ];
+                crate::quad::paint_caption_buttons(&mut quads, &tuples, (sw, sh), bar_bg);
             }
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);

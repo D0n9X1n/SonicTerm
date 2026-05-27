@@ -204,28 +204,28 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
 /// by the text pipeline; this helper only owns the background plates so
 /// hover/press states can be styled by theme later.
 ///
-/// On platforms where [`crate::app::integrated_titlebar_inset_px`]
-/// returns 0 (macOS / Linux), callers should early-return without ever
-/// invoking this helper — the function itself is portable but the
-/// caption strip only exists on Windows.
+/// Callers on platforms without an integrated titlebar inset (macOS /
+/// Linux) should early-return without ever invoking this helper — the
+/// function itself is portable but the caption strip only exists on
+/// Windows. The previous in-function guard was removed when this code
+/// moved into `sonic-gpu` (which cannot depend on `sonic-shared::app`);
+/// the single existing caller (`sonic-shared::render`) already gates on
+/// `app::integrated_titlebar_inset_px() > 0`, so behavior is unchanged.
 ///
-/// `rects` is `[min, max, close]` in physical pixels (see
-/// [`crate::tabbar_view::caption_button_rects`]); `surface` is `(w, h)`
-/// in the same units used by [`px_rect_to_ndc`]. `bg` is the plate
-/// background color (RGBA, premultiplied straight). The close button
-/// gets no special tint here — hover-red is a future enhancement.
+/// `rects` is `[min, max, close]` as `(x, y, w, h)` in physical pixels
+/// (see `sonic_ui::tabbar_view::caption_button_rects`); `surface` is
+/// `(w, h)` in the same units used by [`px_rect_to_ndc`]. `bg` is the
+/// plate background color (RGBA, premultiplied straight). The close
+/// button gets no special tint here — hover-red is a future enhancement.
 pub fn paint_caption_buttons(
     out: &mut Vec<QuadInstance>,
-    rects: &[crate::tabbar_view::Rect; 3],
+    rects: &[(f32, f32, f32, f32); 3],
     surface: (f32, f32),
     bg: [f32; 4],
 ) {
-    if crate::app::integrated_titlebar_inset_px() == 0 {
-        return;
-    }
     let (sw, sh) = surface;
-    for r in rects {
-        let ndc = px_to_ndc(r.x, r.y, r.w, r.h, sw, sh);
+    for &(x, y, w, h) in rects {
+        let ndc = px_to_ndc(x, y, w, h, sw, sh);
         out.push(QuadInstance::sharp(ndc, bg));
     }
 }
