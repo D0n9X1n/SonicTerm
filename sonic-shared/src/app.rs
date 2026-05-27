@@ -663,24 +663,45 @@ impl App {
                                 Duration::from_secs(3600)
                             }) {
                                 Ok(bytes) => {
-                                    let mut p = parser_clone.lock();
-                                    for ev in p.advance(&bytes) {
-                                        match ev {
-                                            VtEvent::SetTitle(t) => {
-                                                if let Some(w) =
-                                                    redraw_target_thread.lock().as_ref()
-                                                {
-                                                    w.set_title(&format!("Sonic — {t}"));
+                                    // Collect side-effects under the parser
+                                    // lock, then DROP it before touching winit.
+                                    // On macOS `Window::set_title` marshals to
+                                    // the AppKit main thread synchronously; if
+                                    // we held `parser` across that call and
+                                    // the main thread happened to be sitting
+                                    // in its RedrawRequested handler waiting
+                                    // for `parser.lock()`, both threads would
+                                    // deadlock (VT thread waiting on the
+                                    // AppKit runloop, main thread waiting on
+                                    // parser). This was the v0.6 tear-out
+                                    // hang. Same reasoning for
+                                    // `request_redraw` below — winit promises
+                                    // it's thread-safe, but we keep all winit
+                                    // calls outside the parser critical
+                                    // section as a defence-in-depth rule.
+                                    let mut new_title: Option<String> = None;
+                                    {
+                                        let mut p = parser_clone.lock();
+                                        for ev in p.advance(&bytes) {
+                                            match ev {
+                                                VtEvent::SetTitle(t) => {
+                                                    new_title = Some(t);
                                                 }
+                                                VtEvent::CursorVisibility(v) => {
+                                                    cursor_visible.store(
+                                                        v,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+                                                _ => {}
                                             }
-                                            VtEvent::CursorVisibility(v) => {
-                                                cursor_visible
-                                                    .store(v, std::sync::atomic::Ordering::Relaxed);
-                                            }
-                                            _ => {}
                                         }
                                     }
-                                    drop(p);
+                                    if let Some(t) = new_title {
+                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
+                                            w.set_title(&format!("Sonic — {t}"));
+                                        }
+                                    }
                                     if last_request.elapsed() >= min_interval {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
