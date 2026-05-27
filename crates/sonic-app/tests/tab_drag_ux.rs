@@ -5,7 +5,7 @@
 //! are locked in here; the event-loop glue is covered by the existing
 //! tear-out / merge integration tests.
 
-use sonic_shared::tab_drag::{
+use sonic_app::tab_drag::{
     compute_action, find_drop_target, DragAction, DragSession, DropTarget, WindowGeom,
 };
 use sonic_shared::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};

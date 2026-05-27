@@ -4,8 +4,8 @@
 //! (sonic-mac, sonic-windows) implementing [`PlatformMenu`] can rely
 //! on the same canonical structure being present at compile/link time.
 
+use sonic_app::menu::{blueprint, Binding, KeyMods, Sender};
 use sonic_core::keymap::Action;
-use sonic_shared::menu::{blueprint, Binding, KeyMods, Sender};
 
 #[test]
 fn blueprint_has_five_top_level_submenus_in_order() {

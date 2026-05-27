@@ -11,7 +11,7 @@ fn integrated_titlebar_applied_on_macos() {
 
     let base = Window::default_attributes().with_title("probe");
     let baseline = format!("{:?}", base);
-    let out = sonic_shared::app::with_integrated_titlebar(base);
+    let out = sonic_app::app::with_integrated_titlebar(base);
     let dbg = format!("{:?}", out);
 
     // Sanity: baseline must NOT already have the flags set.
@@ -36,7 +36,7 @@ fn integrated_titlebar_applied_on_macos() {
 fn integrated_titlebar_is_noop_off_macos() {
     use winit::window::Window;
     // Just confirm the helper is callable and returns without panic.
-    let _ = sonic_shared::app::with_integrated_titlebar(Window::default_attributes());
+    let _ = sonic_app::app::with_integrated_titlebar(Window::default_attributes());
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn integrated_titlebar_inset_macos_reserves_at_least_22_logical_px() {
     // titlebar style extends our content under the traffic lights, so
     // we must reserve a band ≥ 22pt (the minimum a standard NSWindow
     // titlebar consumes; AppKit's default is 28pt).
-    let inset = sonic_shared::app::integrated_titlebar_inset();
+    let inset = sonic_app::app::integrated_titlebar_inset();
     assert!(
         inset >= 22.0,
         "macOS integrated titlebar inset must reserve >=22 logical px (got {inset})"
@@ -68,5 +68,5 @@ fn integrated_titlebar_inset_macos_reserves_at_least_22_logical_px() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn integrated_titlebar_inset_is_zero_off_macos() {
-    assert_eq!(sonic_shared::app::integrated_titlebar_inset(), 0.0);
+    assert_eq!(sonic_app::app::integrated_titlebar_inset(), 0.0);
 }

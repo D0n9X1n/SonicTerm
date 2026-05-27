@@ -11,13 +11,13 @@
 
 use std::sync::Arc;
 
+use sonic_app::app::App;
+use sonic_app::tab_drag::{find_drop_target, global_to_local, local_to_global, WindowGeom};
 use sonic_core::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonic_shared::app::App;
-use sonic_shared::tab_drag::{find_drop_target, global_to_local, local_to_global, WindowGeom};
 use sonic_shared::tabbar_view::TabBarLayout;
 use sonic_shared::tabs::{Tab, TabBar};
 
@@ -365,7 +365,7 @@ fn merge_with_multiple_tabs_reindexes_remaining_tabs() {
 // first; the single-tab guard now only fires when no drop target is
 // pending.
 
-use sonic_shared::tab_drag::DropTarget;
+use sonic_app::tab_drag::DropTarget;
 
 #[test]
 fn cross_window_merge_runs_even_with_one_main_tab() {

@@ -13,7 +13,7 @@
 
 #![cfg(target_os = "windows")]
 
-use sonic_shared::app::integrated_titlebar_inset_px;
+use sonic_app::app::integrated_titlebar_inset_px;
 use sonic_shared::tabbar_view::caption_button_rects;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, MARGINS};

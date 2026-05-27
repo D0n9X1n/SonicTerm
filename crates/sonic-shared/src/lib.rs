@@ -1,4 +1,11 @@
-//! sonic-shared — windowing, app loop, GPU rendering.
+//! sonic-shared — GPU rendering scaffolding shared by the app loop and
+//! the prefs window.
+//!
+//! Historically this crate held the entire app surface (winit loop, OS
+//! drag, menubar bridge, tabs, panes, etc.). PR 8a of the workspace
+//! refactor split the app loop out into [`sonic_app`]; this crate now
+//! owns just the renderers (and the asset-directory probe shared by the
+//! app and the live-reload path).
 //!
 //! Pre-PR-5 this crate also held UI-shaped state (tabs, panes, palette,
 //! prefs view, overlays, etc.); those modules now live in [`sonic_ui`]
@@ -7,15 +14,8 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-pub mod app;
-pub mod config_watch;
-pub mod menu;
-pub mod menubar_bridge;
-pub mod os_drag;
-pub mod os_drag_bridge;
 pub mod prefs_renderer;
 pub mod render;
-pub mod tab_drag;
 
 // Re-exports from the extracted `sonic-gpu` crate (PR 7a of the workspace
 // refactor). `sonic-gpu` owns the wgpu/glyphon/cosmic-text-touching pipeline
@@ -35,10 +35,6 @@ pub use sonic_ui::{
 // (`sonic_shared::shape::*`, `sonic_shared::glyph_atlas::*`, etc.) keep
 // compiling unchanged. New code should depend on `sonic-text` directly.
 pub use sonic_text::{glyph_atlas, row_glyph_cache, shape, swash_rasterizer};
-
-/// Re-exports for binary crates.
-pub use app::run;
-pub use app::{run_with, KeymapLoader, ThemeLoader};
 
 /// Locate the bundled `assets/` directory: prefers
 /// `<binary>/../Resources/assets` (macOS .app layout) and falls back to

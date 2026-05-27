@@ -4112,6 +4112,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonic-app"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "bytemuck",
+ "cosmic-text",
+ "crossbeam-channel",
+ "fontdb",
+ "glyphon",
+ "notify",
+ "parking_lot",
+ "pollster",
+ "raw-window-handle",
+ "regex",
+ "serde",
+ "serde_json",
+ "sonic-core",
+ "sonic-gpu",
+ "sonic-shared",
+ "sonic-text",
+ "sonic-ui",
+ "swash",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "sonic-cfg"
 version = "0.3.0"
 dependencies = [
@@ -4190,8 +4222,10 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "sonic-app",
  "sonic-core",
  "sonic-shared",
+ "sonic-ui",
  "tempfile",
  "tracing",
 ]
@@ -4322,6 +4356,7 @@ dependencies = [
  "muda",
  "raw-window-handle",
  "serde_json",
+ "sonic-app",
  "sonic-core",
  "sonic-shared",
  "tracing",

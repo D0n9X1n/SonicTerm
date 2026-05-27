@@ -30,6 +30,21 @@ use super::tab_spans::{
     TabTitleRichTextSpans,
 };
 
+/// Integer-pixel inset for the Windows custom titlebar strip; 0
+/// elsewhere. Duplicated (in tiny form) from `sonic_app::app` so this
+/// module can stay independent of the app crate.
+#[inline]
+fn integrated_titlebar_inset_px() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        32
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
 use crate::{
     atlas_upload::AtlasUpload,
     command_palette::CommandPalette,
@@ -1867,7 +1882,7 @@ impl GpuRenderer {
             // integrated titlebar inset is non-zero (Windows). On macOS the
             // inset is 0 and `paint_caption_buttons` early-returns, so this
             // is a no-op there. See sonic-shared/src/quad.rs::paint_caption_buttons.
-            if crate::app::integrated_titlebar_inset_px() > 0 {
+            if integrated_titlebar_inset_px() > 0 {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
                 let tuples = [
                     (rects[0].x, rects[0].y, rects[0].w, rects[0].h),

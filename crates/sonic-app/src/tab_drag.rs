@@ -23,7 +23,7 @@
 // device). v1 is same-process only — we only look at our own
 // `windows: HashMap<WindowId, ...>`.
 
-use crate::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
+use sonic_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
 
 /// What a tab drag will do on mouse-release, given the current cursor
 /// position. Computed each frame from the `DragSession`, but only
@@ -99,7 +99,7 @@ pub fn build_drag_chip_overlay(
     session: &DragSession,
     source_bar: &TabBarLayout,
     title: String,
-) -> Option<crate::render::DragChipOverlay> {
+) -> Option<sonic_shared::render::DragChipOverlay> {
     if !drag_moved_enough(session) {
         return None;
     }
@@ -117,7 +117,7 @@ pub fn build_drag_chip_overlay(
     let scale = if over_bar { 1.0 } else { 1.02 };
     let chip_x = cx - 30.0;
     let chip_y = cy - 12.0;
-    Some(crate::render::DragChipOverlay {
+    Some(sonic_shared::render::DragChipOverlay {
         top_left: (chip_x, chip_y),
         title,
         drop_line_x,
@@ -253,8 +253,8 @@ pub fn find_drop_target<W: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT};
-    use crate::tabs::{Tab, TabBar};
+    use sonic_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT};
+    use sonic_ui::tabs::{Tab, TabBar};
 
     fn synth_bar(n: usize) -> TabBar {
         let mut b = TabBar::new();

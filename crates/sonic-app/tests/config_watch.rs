@@ -1,4 +1,4 @@
-//! Tests for the [`sonic_shared::config_watch`] module: file-system
+//! Tests for the [`sonic_app::config_watch`] module: file-system
 //! reload, malformed-toml resilience, atomic-replace handling.
 //!
 //! The atlas-cleared-on-font-change check is exercised by a small
@@ -12,8 +12,8 @@ use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
+use sonic_app::config_watch::ConfigWatcher;
 use sonic_core::config::Config;
-use sonic_shared::config_watch::ConfigWatcher;
 use sonic_shared::glyph_atlas::GlyphAtlas;
 
 /// Write `body` to `path` and fsync so the watcher observes a real

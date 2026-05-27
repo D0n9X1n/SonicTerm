@@ -14,7 +14,7 @@
 //!    formatted `String`.
 //! 3. Add a discriminant entry in [`ALL_VARIANT_KINDS`] so the palette
 //!    universe enumeration stays exhaustive.
-//! 4. Add a dispatch arm in `sonic_shared::app::App::run_action`.
+//! 4. Add a dispatch arm in `sonic_app::app::App::run_action`.
 //!
 //! The compile-time `match` in [`label`] guarantees we cannot forget
 //! step 2 — the build breaks until every variant has a label. Step 3

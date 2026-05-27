@@ -14,8 +14,8 @@ fn main() -> Result<()> {
     let config = load_config()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
-    let theme_loader: sonic_shared::ThemeLoader = Box::new(|name: &str| load_theme(name));
-    let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
+    let theme_loader: sonic_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
+    let keymap_loader: sonic_app::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "macos")]
     {
         // The native NSMenu MUST be installed AFTER winit has built
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        sonic_shared::app::run_with_os_drag_pending_and_hook(
+        sonic_app::app::run_with_os_drag_pending_and_hook(
             theme,
             config,
             keymap,
@@ -56,7 +56,7 @@ fn main() -> Result<()> {
         // chrome work in `sonic-windows`. The cross-platform
         // `Action` plumbing + `menubar_bridge` queue are already
         // ready when that lands.
-        sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+        sonic_app::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
     }
 }
 

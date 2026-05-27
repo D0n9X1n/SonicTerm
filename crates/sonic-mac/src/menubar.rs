@@ -2,14 +2,14 @@
 //!
 //! Top-level submenus (in order): **Sonic / Shell / Edit / View / Help**.
 //! Items dispatch to `sonic_core::keymap::Action`s via the
-//! [`sonic_shared::menubar_bridge`] queue; the winit loop drains and
+//! [`sonic_app::menubar_bridge`] queue; the winit loop drains and
 //! routes through `App::run_action` — the same path used by keybindings.
 //!
 //! Help items that point to URLs are opened directly from the AppKit
 //! main thread via `NSWorkspace::openURL:` so no new `Action` variant
 //! is required.
 //!
-//! Shared blueprint + types live in [`sonic_shared::menu`]; this file
+//! Shared blueprint + types live in [`sonic_app::menu`]; this file
 //! is now the macOS-specific [`PlatformMenu`] implementation only.
 
 #![cfg(target_os = "macos")]
@@ -23,13 +23,13 @@ use objc2::{define_class, msg_send, sel, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSWorkspace};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSURL};
 
+use sonic_app::menu::{self, PlatformMenu, Sender};
 use sonic_core::keymap::Action;
-use sonic_shared::menu::{self, PlatformMenu, Sender};
 
 // Re-export shared blueprint types so external integration tests and
 // call sites that referenced `menubar::Item` / `Binding` / `KeyMods`
 // still compile.
-pub use sonic_shared::menu::{blueprint, Binding, Item, KeyMods, MenuBlueprint, Submenu};
+pub use sonic_app::menu::{blueprint, Binding, Item, KeyMods, MenuBlueprint, Submenu};
 
 // ---------------------------------------------------------------------
 // Dispatch registry: tag → MenuEntry.

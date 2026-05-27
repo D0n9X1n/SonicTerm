@@ -9,12 +9,12 @@
 //!    the right pane state out of the parent App (PTY threads / shells
 //!    are not started here — the seeded tabs have None pty handles).
 
+use sonic_app::app::App;
 use sonic_core::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonic_shared::app::App;
 use sonic_shared::tabbar_view::{detect_tear_out, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
 
 fn synth_theme() -> Theme {

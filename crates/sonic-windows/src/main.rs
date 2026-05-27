@@ -22,11 +22,11 @@ fn main() -> Result<()> {
     let config = load_config()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
-    let theme_loader: sonic_shared::ThemeLoader = Box::new(|name: &str| load_theme(name));
-    let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
+    let theme_loader: sonic_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
+    let keymap_loader: sonic_app::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "windows")]
     {
-        use sonic_shared::menu::{PlatformMenu, Sender};
+        use sonic_app::menu::{PlatformMenu, Sender};
         // Initialize OLE once on the main thread so RegisterDragDrop /
         // DoDragDrop are usable from the same thread that owns the
         // winit HWND.
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }
             });
-        let result = sonic_shared::app::run_with_os_drag_pending_and_window_hook(
+        let result = sonic_app::app::run_with_os_drag_pending_and_window_hook(
             theme,
             config,
             keymap,
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        sonic_shared::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+        sonic_app::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
     }
 }
 

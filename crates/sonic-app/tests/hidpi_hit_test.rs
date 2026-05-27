@@ -17,7 +17,7 @@
 //! `WindowGeom` carries the destination window's scale factor so
 //! `global_to_local` returns logical coords end-to-end.
 
-use sonic_shared::tab_drag::{find_drop_target, global_to_local, WindowGeom};
+use sonic_app::tab_drag::{find_drop_target, global_to_local, WindowGeom};
 use sonic_shared::tabbar_view::{TabBarLayout, TabHit, TAB_BAR_HEIGHT};
 use sonic_shared::tabs::{Tab, TabBar};
 

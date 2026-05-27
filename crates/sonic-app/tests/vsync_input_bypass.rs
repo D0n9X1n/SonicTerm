@@ -6,12 +6,12 @@
 
 use std::time::{Duration, Instant};
 
+use sonic_app::app::App;
 use sonic_core::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonic_shared::app::App;
 
 fn hex() -> Hex {
     Hex("#000000".to_string())
