@@ -361,3 +361,51 @@ impl TabBarLayout {
         (self.bar.y, self.bar.y + self.bar.h)
     }
 }
+
+/// Width (logical px) of a single caption button (min/max/close).
+/// Matches the Win11 standard 46x32 caption button hit/visual target.
+pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+
+/// Height of the caption-button strip (logical px). Matches
+/// [`crate::app::WINDOWS_INTEGRATED_TITLEBAR_INSET`].
+pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
+
+/// Returns the [min, max, close] caption-button rects, in **physical
+/// pixels**, anchored to the right edge of a window of the given width.
+///
+/// `width` is the window's physical pixel width; `dpi` is the scale
+/// factor (1.0 on standard displays, 1.5/2.0 on HiDPI). The buttons are
+/// laid out right-to-left as close ▶ max ▶ min, matching the Win11
+/// titlebar order.
+#[must_use]
+pub fn caption_button_rects(width: u32, dpi: f32) -> [Rect; 3] {
+    let bw = CAPTION_BUTTON_WIDTH * dpi;
+    let bh = CAPTION_BUTTON_HEIGHT * dpi;
+    let right = width as f32;
+    let close = Rect { x: right - bw, y: 0.0, w: bw, h: bh };
+    let max = Rect { x: right - bw * 2.0, y: 0.0, w: bw, h: bh };
+    let min = Rect { x: right - bw * 3.0, y: 0.0, w: bw, h: bh };
+    [min, max, close]
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::*;
+
+    #[test]
+    fn caption_buttons_layout_right_to_left() {
+        let [min, max, close] = caption_button_rects(1000, 1.0);
+        assert!(min.x < max.x);
+        assert!(max.x < close.x);
+        assert_eq!(close.x + close.w, 1000.0);
+        assert_eq!(min.w, CAPTION_BUTTON_WIDTH);
+        assert_eq!(min.h, CAPTION_BUTTON_HEIGHT);
+    }
+
+    #[test]
+    fn caption_buttons_scale_with_dpi() {
+        let [min, _, close] = caption_button_rects(2000, 2.0);
+        assert_eq!(min.w, CAPTION_BUTTON_WIDTH * 2.0);
+        assert_eq!(close.x + close.w, 2000.0);
+    }
+}

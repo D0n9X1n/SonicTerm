@@ -17,8 +17,10 @@ anyhow.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 muda = "0.19"
+window-vibrancy = "0.5"
+raw-window-handle = { workspace = true }
 
 [[bin]]
 name = "sonic-windows"

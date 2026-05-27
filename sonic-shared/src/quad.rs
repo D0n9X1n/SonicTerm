@@ -198,3 +198,34 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
     let nh = (h / sh) * 2.0;
     [nx, ny, nw, nh]
 }
+
+/// Paint the three Win11-style caption-button backgrounds (min / max /
+/// close) into the given quad list. Glyph rendering (─ □ ✕) is handled
+/// by the text pipeline; this helper only owns the background plates so
+/// hover/press states can be styled by theme later.
+///
+/// On platforms where [`crate::app::integrated_titlebar_inset_px`]
+/// returns 0 (macOS / Linux), callers should early-return without ever
+/// invoking this helper — the function itself is portable but the
+/// caption strip only exists on Windows.
+///
+/// `rects` is `[min, max, close]` in physical pixels (see
+/// [`crate::tabbar_view::caption_button_rects`]); `surface` is `(w, h)`
+/// in the same units used by [`px_rect_to_ndc`]. `bg` is the plate
+/// background color (RGBA, premultiplied straight). The close button
+/// gets no special tint here — hover-red is a future enhancement.
+pub fn paint_caption_buttons(
+    out: &mut Vec<QuadInstance>,
+    rects: &[crate::tabbar_view::Rect; 3],
+    surface: (f32, f32),
+    bg: [f32; 4],
+) {
+    if crate::app::integrated_titlebar_inset_px() == 0 {
+        return;
+    }
+    let (sw, sh) = surface;
+    for r in rects {
+        let ndc = px_to_ndc(r.x, r.y, r.w, r.h, sw, sh);
+        out.push(QuadInstance::sharp(ndc, bg));
+    }
+}

@@ -83,6 +83,32 @@ pub fn integrated_titlebar_inset() -> f32 {
     }
 }
 
+/// Windows-only integrated titlebar height (logical pixels) reserved for
+/// our custom caption strip (drag region + min/max/close buttons drawn by
+/// us when the HWND subclass zeros out the OS NC area).
+///
+/// Returns 0 on non-Windows platforms so the caption-button paint path
+/// in [`crate::quad`] is a no-op on macOS / Linux — the macOS integrated
+/// titlebar uses [`integrated_titlebar_inset`] (the AppKit traffic-light
+/// inset) instead.
+pub const WINDOWS_INTEGRATED_TITLEBAR_INSET: u32 = 32;
+
+/// Integer-pixel inset for the Windows custom titlebar strip. Used by
+/// `sonic-windows::chrome` (WM_NCHITTEST) and `sonic-shared::quad`
+/// (caption-button paint). Returns 0 elsewhere so call sites stay
+/// portable without per-platform branches.
+#[must_use]
+pub fn integrated_titlebar_inset_px() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        WINDOWS_INTEGRATED_TITLEBAR_INSET
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
 use crate::{
     command_palette::CommandPalette,
     config_watch::ConfigWatcher,
