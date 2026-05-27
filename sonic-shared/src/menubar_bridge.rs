@@ -65,6 +65,13 @@ pub(crate) fn drain() -> Vec<Action> {
     q.drain(..).collect()
 }
 
+/// Test bridge: same as [`drain`] but reachable from integration tests
+/// in other crates. Hidden from docs.
+#[doc(hidden)]
+pub fn __test_drain() -> Vec<Action> {
+    drain()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
