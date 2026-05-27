@@ -1479,7 +1479,7 @@ mod tests {
         assert_eq!(crate::prefs::PREFS_MIN_H, 520.0);
         // app.rs `create_prefs_window` must reference both via
         // `with_min_inner_size(LogicalSize::new(PREFS_MIN_W, PREFS_MIN_H))`.
-        let app_src = include_str!("../../sonic-app/src/app.rs");
+        let app_src = include_str!("../../sonic-app/src/app/core.rs");
         assert!(
             app_src.contains("with_min_inner_size"),
             "prefs window builder is missing with_min_inner_size"

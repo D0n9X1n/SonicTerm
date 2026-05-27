@@ -299,7 +299,7 @@ fn palette_text_top_offset_centers_line_box_inside_row() {
 /// refactor moves the calls back to the wrong order, the test fires.
 #[test]
 fn prefs_create_installs_renderer_before_first_request_redraw() {
-    let src = include_str!("../../sonic-app/src/app.rs");
+    let src = include_str!("../../sonic-app/src/app/core.rs");
     let create_fn_start = src.find("fn create_prefs_window").expect("function present");
     let create_fn_end = src[create_fn_start..]
         .find("\n    }\n")
