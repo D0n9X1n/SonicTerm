@@ -2,6 +2,6 @@
 * @D0n9X1n
 
 # Platform-specific
-/sonic-mac/      @D0n9X1n
-/sonic-windows/  @D0n9X1n
+/crates/sonic-mac/      @D0n9X1n
+/crates/sonic-windows/  @D0n9X1n
 /.github/        @D0n9X1n

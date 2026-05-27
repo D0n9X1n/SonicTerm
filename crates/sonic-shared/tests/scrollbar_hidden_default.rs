@@ -18,9 +18,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR points at sonic-shared/. Parent is the workspace root.
+    // CARGO_MANIFEST_DIR points at crates/sonic-shared/. Workspace root is two levels up.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.parent().expect("workspace root above sonic-shared").to_path_buf()
+    manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root above crates/sonic-shared")
+        .to_path_buf()
 }
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -47,7 +51,12 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn no_scrollbar_rendering_by_default() {
     let root = workspace_root();
     // Only scan the runtime crates that contribute to a rendered frame.
-    let crates = ["sonic-core/src", "sonic-shared/src", "sonic-mac/src", "sonic-windows/src"];
+    let crates = [
+        "crates/sonic-core/src",
+        "crates/sonic-shared/src",
+        "crates/sonic-mac/src",
+        "crates/sonic-windows/src",
+    ];
 
     let mut files = Vec::new();
     for c in &crates {

@@ -21,14 +21,15 @@ The authoritative running-status doc is **`docs/ROADMAP.md`**. Read it first. Up
 
 ## 1. What ships and where it lives
 
-### Crates (flat layout — at top of repo, NOT under `crates/`)
+### Crates (under `crates/` directory at top of repo)
 
 | Crate | Role | Key items |
 |---|---|---|
-| `sonic-core/` | Platform-agnostic engine | `vt::Parser` (vte + Performer), `grid::Grid` (cells, scrollback, wide chars, alt screen), `pty::PtyHandle`, `keymap::{Action, Keymap}`, `theme::Theme`, `config::Config`, `hyperlink::HyperlinkRegistry`, `url_open` |
-| `sonic-shared/` | GPU rendering + app loop + UI models | `app::App` (winit ApplicationHandler), `render::GpuRenderer` (wgpu+glyphon), `quad::QuadPipeline`, `tabs::TabBar`, `tabbar_view::TabBarLayout`, `pane::PaneTree`, `selection::Selection`, `search::SearchState`, `prefs/` subsystem |
-| `sonic-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonic_shared::run` |
-| `sonic-windows/` | Windows bin | same shape |
+| `crates/sonic-core/` | Platform-agnostic engine | `vt::Parser` (vte + Performer), `grid::Grid` (cells, scrollback, wide chars, alt screen), `pty::PtyHandle`, `keymap::{Action, Keymap}`, `theme::Theme`, `config::Config`, `hyperlink::HyperlinkRegistry`, `url_open` |
+| `crates/sonic-shared/` | GPU rendering + app loop + UI models | `app::App` (winit ApplicationHandler), `render::GpuRenderer` (wgpu+glyphon), `quad::QuadPipeline`, `tabs::TabBar`, `tabbar_view::TabBarLayout`, `pane::PaneTree`, `selection::Selection`, `search::SearchState`, `prefs/` subsystem |
+| `crates/sonic-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonic_shared::run` |
+| `crates/sonic-windows/` | Windows bin | same shape |
+| `crates/sonic-mux/` | Mux scaffolding (deferred) | placeholder for v1.0 mux work |
 
 ### Assets
 

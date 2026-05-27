@@ -86,7 +86,7 @@ fn wezterm_fg_linearized_round_trips_to_authored_hex() {
         (s.clamp(0.0, 1.0) * 255.0).round() as u8
     }
     let theme_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/themes/wezterm.toml");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/wezterm.toml");
     let theme = sonic_core::theme::Theme::load(&theme_path).expect("load wezterm.toml");
     let (er, eg, eb) = theme.colors.foreground.rgb().expect("parse #cfbc97");
     assert_eq!((er, eg, eb), (0xcf, 0xbc, 0x97), "PR #92 hex pinned");

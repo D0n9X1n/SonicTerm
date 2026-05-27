@@ -125,7 +125,7 @@ jobs:
       - name: Build .msi
         shell: bash
         run: |
-          cd sonic-windows
+          cd crates/sonic-windows
           cargo wix --no-build --nocapture --output ../dist/
 
       - name: Sign .msi (Azure Trusted Signing)
