@@ -53,3 +53,8 @@ path = "examples/pty_dump.rs"
 # (so the tab title can show e.g. `nvim` instead of `zsh` when the user
 # is editing a file). macOS-only; Linux/Windows ship stubs for v1.
 libproc = "0.14"
+
+[target.'cfg(windows)'.dependencies]
+# Used by `foreground_proc` to enumerate processes via NtQuerySystemInformation
+# and resolve names via QueryFullProcessImageNameW for the tab-title probe.
+windows = { workspace = true }
