@@ -57,7 +57,15 @@ fn render_source_has_no_hardcoded_monospace_family() {
     // no `Family::Monospace` literal sneaks back in. This catches
     // future regressions where a copy-pasted call site bypasses the
     // helper.
-    let src = include_str!("../src/render.rs");
+    let src = concat!(
+        include_str!("../src/render/core.rs"),
+        include_str!("../src/render/color.rs"),
+        include_str!("../src/render/metrics.rs"),
+        include_str!("../src/render/tab_spans.rs"),
+        include_str!("../src/render/cursor.rs"),
+        include_str!("../src/render/drag_chip.rs"),
+        include_str!("../src/render/mod.rs"),
+    );
     // Strip comments and doc-strings first (we mention Monospace in a
     // doc-comment as historical context).
     let mut code_only = String::new();
@@ -81,7 +89,15 @@ fn render_source_has_no_hardcoded_font_name_literal() {
     // Catch typos like a stray "JetBrains" or "Monaco" baked into the
     // renderer; the only legitimate font-name string should come from
     // config.font.family at runtime.
-    let src = include_str!("../src/render.rs");
+    let src = concat!(
+        include_str!("../src/render/core.rs"),
+        include_str!("../src/render/color.rs"),
+        include_str!("../src/render/metrics.rs"),
+        include_str!("../src/render/tab_spans.rs"),
+        include_str!("../src/render/cursor.rs"),
+        include_str!("../src/render/drag_chip.rs"),
+        include_str!("../src/render/mod.rs"),
+    );
     let mut code_only = String::new();
     for line in src.lines() {
         let trimmed = line.trim_start();
@@ -109,7 +125,8 @@ fn render_source_has_no_hardcoded_font_name_literal() {
 #[test]
 fn no_attrs_new_family_outside_helper() {
     for (path, src) in [
-        ("sonic-shared/src/render.rs", include_str!("../src/render.rs")),
+        ("sonic-shared/src/render/core.rs", include_str!("../src/render/core.rs")),
+        ("sonic-shared/src/render/tab_spans.rs", include_str!("../src/render/tab_spans.rs")),
         ("sonic-shared/src/tabbar_view.rs", include_str!("../../sonic-ui/src/tabbar_view.rs")),
         ("sonic-text/src/shape.rs", include_str!("../../sonic-text/src/shape.rs")),
     ] {
