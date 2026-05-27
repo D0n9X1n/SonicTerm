@@ -6,8 +6,8 @@
 //! between many fonts/themes used to grow the atlas unboundedly; now
 //! they cycle a fixed working set instead.
 
-use sonic_types::GlyphKey;
 use sonic_text::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer, SyntheticRasterizer};
+use sonic_types::GlyphKey;
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)

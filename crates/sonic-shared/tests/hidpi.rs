@@ -283,8 +283,8 @@ fn atlas_upload_recreated_matches_new_atlas_dim_after_scale_change() {
     // device (same offscreen pattern as text_pipeline_offscreen.rs) so
     // the assertion is grounded in actual GPU resources, not a mock.
     use pollster::FutureExt as _;
-    use sonic_shared::{atlas_upload::AtlasUpload, glyph_atlas::GlyphAtlas};
     use sonic_shared::text_pipeline::TextPipeline;
+    use sonic_shared::{atlas_upload::AtlasUpload, glyph_atlas::GlyphAtlas};
     use wgpu::{
         DeviceDescriptor, InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat,
     };

@@ -15,6 +15,5 @@ sonic-types.workspace = true
 cosmic-text.workspace = true
 swash.workspace = true
 fontdb.workspace = true
-glyphon.workspace = true
 bytemuck.workspace = true
 lru = "0.12"

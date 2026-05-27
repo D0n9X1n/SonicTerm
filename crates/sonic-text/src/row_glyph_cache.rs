@@ -42,7 +42,7 @@
 //! memory cost trivial.
 
 use crate::GlyphInstance;
-use glyphon::Color as GColor;
+use cosmic_text::Color as GColor;
 use sonic_types::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;

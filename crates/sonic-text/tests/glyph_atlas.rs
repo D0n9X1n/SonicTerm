@@ -1,9 +1,9 @@
 //! Tests for `sonic_text::glyph_atlas::GlyphAtlas`.
 
-use sonic_types::GlyphKey;
 use sonic_text::glyph_atlas::{
     GlyphAtlas, Rasterizer, ShelfPacker, SyntheticRasterizer, ATLAS_DIM,
 };
+use sonic_types::GlyphKey;
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)

@@ -34,11 +34,11 @@
 //!   shipped.
 
 use cosmic_text::FontSystem;
-use sonic_types::GlyphKey;
 use sonic_text::{
     glyph_atlas::GlyphAtlas,
     swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
 };
+use sonic_types::GlyphKey;
 
 /// Build a `FontSystem` populated with every TTF/OTF under
 /// `assets/fonts/` — the same loader used by the real renderer.

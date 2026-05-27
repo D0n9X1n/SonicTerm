@@ -4246,7 +4246,6 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "fontdb",
- "glyphon",
  "lru 0.12.5",
  "sonic-types",
  "swash",
