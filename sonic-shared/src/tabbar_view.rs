@@ -273,4 +273,46 @@ impl TabBarLayout {
         }
         self.tabs.len()
     }
+
+    /// X coordinate in logical/physical pixels at which the drop-line
+    /// indicator should be drawn for an insertion slot in `[0, n]`.
+    ///
+    ///   * slot `0`            → just left of the first tab
+    ///   * slot `i` (mid)      → in the gap before tab `i`
+    ///   * slot `n` (== len)   → just right of the last tab
+    ///
+    /// Returns `None` when the bar is empty or hidden — there's no
+    /// meaningful insertion gap to render.
+    pub fn insertion_x(&self, slot: usize) -> Option<f32> {
+        if !self.visible || self.tabs.is_empty() {
+            return None;
+        }
+        let n = self.tabs.len();
+        let slot = slot.min(n);
+        if slot == 0 {
+            // Just inside the bar's left padding.
+            return Some(self.tabs[0].bg.x - TAB_GAP * 0.5);
+        }
+        if slot == n {
+            // After the last tab — between its right edge and the
+            // `+` button (if any).
+            let last = &self.tabs[n - 1];
+            return Some(last.bg.x + last.bg.w + TAB_GAP * 0.5);
+        }
+        // Between tab `slot - 1` and tab `slot`: halfway between
+        // their adjacent edges, which is what the rendered gap is.
+        let prev = &self.tabs[slot - 1];
+        let next = &self.tabs[slot];
+        let right = prev.bg.x + prev.bg.w;
+        let left = next.bg.x;
+        Some((right + left) * 0.5)
+    }
+
+    /// Vertical span `(top, bottom)` of the bar's background rect in
+    /// the same coordinate space as [`Self::insertion_x`]. Used by
+    /// callers that want to size the drop-line accent flush with the
+    /// bar chrome.
+    pub fn bar_y_range(&self) -> (f32, f32) {
+        (self.bar.y, self.bar.y + self.bar.h)
+    }
 }

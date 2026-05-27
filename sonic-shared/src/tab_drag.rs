@@ -68,6 +68,64 @@ impl DragSession {
     }
 }
 
+/// Minimum Euclidean distance, in logical pixels, the cursor must
+/// travel from the press point before a press-hold is treated as a
+/// drag. Below this floor the chip is suppressed — otherwise every
+/// click would flash a one-frame ghost. Matches Cocoa / GTK defaults.
+pub const DRAG_START_THRESHOLD_PX: f32 = 5.0;
+
+/// True when the live drag session has moved at least
+/// [`DRAG_START_THRESHOLD_PX`] from its press point. Pure — the app
+/// uses this each cursor-move to decide whether to publish a
+/// `DragChipOverlay` to the renderer.
+pub fn drag_moved_enough(session: &DragSession) -> bool {
+    let dx = session.current_pos.0 - session.press_pos.0;
+    let dy = session.current_pos.1 - session.press_pos.1;
+    (dx * dx + dy * dy).sqrt() >= DRAG_START_THRESHOLD_PX
+}
+
+/// Pure builder for the renderer-facing drag-chip overlay.
+///
+/// Returns `None` until the cursor has moved past
+/// [`DRAG_START_THRESHOLD_PX`] from the press position — the spec
+/// requires no chip flash on small accidental wiggles.
+///
+/// When the cursor is still over the bar's Y range, the returned
+/// overlay carries a `drop_line_x` matching the insertion slot under
+/// the cursor and `scale = 1.0`. Once the cursor leaves the bar
+/// vertically (tear-out armed), the drop line is cleared and `scale`
+/// eases out to `1.02` to telegraph the tear gesture.
+pub fn build_drag_chip_overlay(
+    session: &DragSession,
+    source_bar: &TabBarLayout,
+    title: String,
+) -> Option<crate::render::DragChipOverlay> {
+    if !drag_moved_enough(session) {
+        return None;
+    }
+    let (cx, cy) = session.current_pos;
+    let over_bar = source_bar.point_over_bar(cx, cy);
+    let drop_line_x = if over_bar {
+        let slot = source_bar.drop_slot(cx, cy);
+        source_bar.insertion_x(slot)
+    } else {
+        None
+    };
+    // Subtle scale ease — the renderer interpolates from the previous
+    // frame, so we just publish the target value here. 1.0 in-bar,
+    // 1.02 once the cursor leaves the bar.
+    let scale = if over_bar { 1.0 } else { 1.02 };
+    let chip_x = cx - 30.0;
+    let chip_y = cy - 12.0;
+    Some(crate::render::DragChipOverlay {
+        top_left: (chip_x, chip_y),
+        title,
+        drop_line_x,
+        drop_line_y: source_bar.bar_y_range(),
+        scale,
+    })
+}
+
 /// Pure helper: decide what `mouse-up` should do given the live
 /// session, the optional foreign drop target, and the source bar.
 ///
