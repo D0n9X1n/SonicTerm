@@ -3707,6 +3707,7 @@ dependencies = [
  "async-trait",
  "bitflags 2.11.1",
  "bytemuck",
+ "bytes",
  "crossbeam-channel",
  "libproc",
  "notify",
