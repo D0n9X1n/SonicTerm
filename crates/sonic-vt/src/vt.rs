@@ -1,6 +1,6 @@
 //! VT/ANSI parser. We delegate the lexer to the `vte` crate (the same
 //! implementation alacritty uses) and translate parsed events into mutations
-//! on a [`crate::grid::Grid`].
+//! on a [`sonic_grid::grid::Grid`].
 //!
 //! The supported subset (v0.1.0):
 //! - Printable ASCII + UTF-8
@@ -16,8 +16,8 @@
 use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
-use crate::grid::{CellFlags, Color, Grid, Pos};
-use crate::hyperlink::{HyperlinkId, HyperlinkRegistry};
+use sonic_grid::grid::{CellFlags, Color, Grid, Pos};
+use sonic_grid::hyperlink::{HyperlinkId, HyperlinkRegistry};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "Sonic 0.7";

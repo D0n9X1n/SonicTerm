@@ -6,57 +6,32 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — core: VT parser, grid, PTY, config, keymap, theme"
+description = "Sonic Terminal — deprecated façade re-exporting sonic-{vt,grid,cfg,io}"
 
 [lints]
 workspace = true
 
 [features]
 default = []
-# Optional SSH client backend. Pulls in russh + a tokio runtime, so it's
-# off by default to keep the cold build slim. Enable with
-# `cargo build -p sonic-core --features ssh` (or in the bin crate).
-ssh = ["dep:russh", "dep:tokio", "dep:async-trait"]
+# Forwards to `sonic-io/ssh` — keeps the old `sonic-core/ssh` feature working.
+ssh = ["sonic-io/ssh"]
 
 [dependencies]
 sonic-types.workspace = true
-vte.workspace = true
-portable-pty.workspace = true
-unicode-width.workspace = true
-unicode-segmentation.workspace = true
-serde.workspace = true
-toml.workspace = true
-notify.workspace = true
-parking_lot.workspace = true
-crossbeam-channel.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-bytemuck.workspace = true
-bitflags.workspace = true
-serde_plain.workspace = true
-bytes = "1"
-memchr = "2"
-russh = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-async-trait = { version = "0.1", optional = true }
+sonic-vt.workspace = true
+sonic-grid.workspace = true
+sonic-cfg.workspace = true
+sonic-io.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4"
 serde_json = "1"
 tempfile = "3"
+parking_lot.workspace = true
+toml.workspace = true
+serde.workspace = true
+crossbeam-channel.workspace = true
 
 [[example]]
 name = "pty_dump"
 path = "examples/pty_dump.rs"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-# Used by `proc_info` to map a pty's shell pid to the foreground process
-# (so the tab title can show e.g. `nvim` instead of `zsh` when the user
-# is editing a file). macOS-only; Linux/Windows ship stubs for v1.
-libproc = "0.14"
-
-[target.'cfg(windows)'.dependencies]
-# Used by `foreground_proc` to enumerate processes via NtQuerySystemInformation
-# and resolve names via QueryFullProcessImageNameW for the tab-title probe.
-windows = { workspace = true }

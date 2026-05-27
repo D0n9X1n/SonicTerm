@@ -1,32 +1,39 @@
-//! sonic-core — terminal engine for Sonic Terminal.
+//! sonic-core — **deprecated façade** for back-compat with pre-PR-3 imports.
 //!
-//! Modules:
-//! - [`vt`]      — VT/ANSI parser built on top of the `vte` crate, with a
-//!   semantic [`vt::Performer`] that mutates a [`grid::Grid`].
-//! - [`grid`]    — terminal screen model: cells, attributes, scrollback.
-//! - [`pty`]     — cross-platform pty spawning and IO.
-//! - [`config`]  — TOML configuration with hot-reload.
-//! - [`keymap`]  — keymap binding loader.
-//! - [`theme`]   — color theme loader.
+//! The original `sonic-core` crate has been decomposed into four leaf crates:
 //!
-//! The crate is platform-agnostic. Windowing and GPU rendering live in
-//! `sonic-shared` and the platform bin crates.
+//! - [`sonic_vt`]   — VT/ANSI parser (`vt::Parser`, `vt::Performer`, …)
+//! - [`sonic_grid`] — terminal grid + hyperlink registry
+//! - [`sonic_cfg`]  — config / theme / keymap / url_open loaders
+//! - [`sonic_io`]   — PTY + process probes + optional SSH backend
+//!
+//! This crate re-exports each leaf as a module so existing imports of the
+//! form `use sonic_core::vt::Parser;` and `use sonic_core::grid::Grid;`
+//! continue to compile unchanged. New code should depend on the leaf crates
+//! directly.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-pub mod config;
+// Module-shaped re-exports — preserve `sonic_core::vt::...`,
+// `sonic_core::grid::...`, etc.
+pub use sonic_cfg::config;
+pub use sonic_cfg::keymap;
+pub use sonic_cfg::theme;
+pub use sonic_cfg::url_open;
+pub use sonic_grid::grid;
+pub use sonic_grid::hyperlink;
+pub use sonic_io::proc_info;
+pub use sonic_io::pty;
+pub use sonic_io::ssh;
+pub use sonic_vt::vt;
+
 #[cfg(windows)]
-pub mod foreground_proc;
+pub use sonic_io::foreground_proc;
+
+// `glyph_key` historically lived in sonic-core; it's a thin wrapper that
+// just re-exports `sonic_types::GlyphKey`. Keep it as a sub-module here so
+// `sonic_core::glyph_key::GlyphKey` resolves.
 pub mod glyph_key;
-pub mod grid;
-pub mod hyperlink;
-pub mod keymap;
-pub mod proc_info;
-pub mod pty;
-pub mod ssh;
-pub mod theme;
-pub mod url_open;
-pub mod vt;
 
 /// Re-exports of the most commonly used items.
 pub mod prelude {
