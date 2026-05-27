@@ -18,19 +18,27 @@ fn main() -> Result<()> {
     let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "macos")]
     {
-        // Install the native NSMenu before winit creates its event
-        // loop. Theme list is built once from the bundled
-        // `assets/themes/` directory — adding a theme file requires
-        // a restart, matching the rest of the bundled-assets
-        // contract.
+        // The native NSMenu MUST be installed AFTER winit has built
+        // the AppKit event loop — installing it before
+        // `event_loop.run_app` leaves AppKit with only the default
+        // `Apple, sonic-mac` menu bar (release-binary smoke caught
+        // this on PR #114). The menubar_bridge proxy is installed by
+        // `run_with_os_drag_pending_and_hook` BEFORE the hook fires,
+        // so NSMenu selectors can wake the loop on first click.
+        //
+        // Theme list is built once from the bundled `assets/themes/`
+        // directory — adding a theme file requires a restart, matching
+        // the rest of the bundled-assets contract.
         let themes_dir = asset_dir().join("themes");
         let themes = menubar::scan_themes(&themes_dir);
-        menubar::install(&themes);
+        let on_resumed: Box<dyn FnOnce() + Send> = Box::new(move || {
+            menubar::install(&themes);
+        });
         let pending = os_drag_mac::take_pending_payload();
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        sonic_shared::app::run_with_os_drag_and_pending(
+        sonic_shared::app::run_with_os_drag_pending_and_hook(
             theme,
             config,
             keymap,
@@ -38,6 +46,7 @@ fn main() -> Result<()> {
             Some(theme_loader),
             Some(keymap_loader),
             pending,
+            Some(on_resumed),
         )
     }
     #[cfg(not(target_os = "macos"))]

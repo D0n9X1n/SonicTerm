@@ -304,6 +304,36 @@ pub fn run_with_os_drag_and_pending(
     keymap_loader: Option<KeymapLoader>,
     pending: Option<crate::os_drag::TabPayload>,
 ) -> Result<()> {
+    run_with_os_drag_pending_and_hook(
+        theme,
+        config,
+        keymap,
+        sink,
+        theme_loader,
+        keymap_loader,
+        pending,
+        None,
+    )
+}
+
+/// Like [`run_with_os_drag_and_pending`] but also accepts a one-shot
+/// `on_resumed` hook invoked at the top of the first
+/// `ApplicationHandler::resumed` tick. The macOS bin uses this slot to
+/// install the native NSMenu — by then winit has built the AppKit event
+/// loop and `setMainMenu` sticks. Installing it before `event_loop.
+/// run_app` left AppKit with only the default `Apple, sonic-mac`
+/// menubar (bug caught by the PR #114 release-binary smoke).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_os_drag_pending_and_hook(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    sink: Arc<dyn crate::os_drag::OsDragSink>,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+    pending: Option<crate::os_drag::TabPayload>,
+    on_resumed: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<()> {
     init_tracing();
     let event_loop =
         EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
@@ -317,6 +347,9 @@ pub fn run_with_os_drag_and_pending(
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
     app.os_drag_sink = Some(sink);
+    if let Some(hook) = on_resumed {
+        app.on_resumed = Some(hook);
+    }
     if let Some(p) = pending {
         let _ = app.new_tab_from_payload(&p);
     }
@@ -463,6 +496,14 @@ pub struct App {
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
     /// + hit-test code can read it on each frame.
     tab_bar_visible: bool,
+    /// One-shot hook fired the first time the winit `ApplicationHandler::
+    /// resumed` callback runs — i.e. when NSApp / the platform event
+    /// loop is fully initialized but BEFORE we hand control back to
+    /// winit's `run_app`. macOS uses this slot to install the native
+    /// NSMenu; calling `setMainMenu` earlier (before winit builds the
+    /// AppKit loop) leaves AppKit with only the default
+    /// `Apple, sonic-mac` menubar.
+    on_resumed: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl App {
@@ -519,7 +560,17 @@ impl App {
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
+            on_resumed: None,
         }
+    }
+
+    /// Install a one-shot callback fired at the top of the first
+    /// `ApplicationHandler::resumed` tick. macOS uses this to install
+    /// the native NSMenu after winit has built the AppKit event loop —
+    /// installing earlier leaves AppKit with only the default
+    /// `Apple, sonic-mac` menu bar.
+    pub fn set_on_resumed<F: FnOnce() + Send + 'static>(&mut self, hook: F) {
+        self.on_resumed = Some(Box::new(hook));
     }
 
     /// Translate a UI message id. See [`crate::i18n::I18n::t`]. Returns
@@ -2611,6 +2662,16 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
+        // Fire the one-shot post-resume hook before any window work.
+        // macOS uses this slot to install the native NSMenu — by now
+        // winit has built the AppKit event loop, so `setMainMenu`
+        // sticks. Installing it before `run_app` left AppKit with only
+        // the default `Apple, sonic-mac` menubar (bug caught by the
+        // PR #114 release-binary smoke).
+        if let Some(hook) = self.on_resumed.take() {
+            hook();
+        }
+
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
 
