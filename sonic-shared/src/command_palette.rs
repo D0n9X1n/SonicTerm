@@ -23,7 +23,7 @@ use nucleo_matcher::{
 };
 use sonic_core::keymap::{Action, Direction, ScrollAction};
 
-use crate::command_label::{label as human_label, ALL_VARIANT_KINDS};
+use crate::command_label::{search_haystack, ALL_VARIANT_KINDS};
 
 /// State for the command palette overlay. Owned by `App`.
 #[derive(Debug, Clone)]
@@ -37,6 +37,15 @@ pub struct CommandPalette {
     /// fuzzy-score, with canonical-order tiebreak.
     items: Vec<usize>,
     selected: usize,
+    /// First visible item index in the rendered viewport. Maintained by
+    /// [`Self::ensure_selected_in_view`] so that arrow-key navigation
+    /// keeps the highlighted row inside the modal even when the
+    /// filtered list is longer than `visible_rows`.
+    scroll_offset: usize,
+    /// Cached count of rows the renderer can actually display, set via
+    /// [`Self::set_visible_rows`]. Zero means "unconstrained" — used by
+    /// tests that don't know the modal size yet.
+    visible_rows: usize,
 }
 
 impl Default for CommandPalette {
@@ -49,7 +58,15 @@ impl CommandPalette {
     pub fn new() -> Self {
         let all = all_actions();
         let items = (0..all.len()).collect();
-        Self { open: false, query: String::new(), all, items, selected: 0 }
+        Self {
+            open: false,
+            query: String::new(),
+            all,
+            items,
+            selected: 0,
+            scroll_offset: 0,
+            visible_rows: 0,
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -83,6 +100,7 @@ impl CommandPalette {
         self.open = true;
         self.query.clear();
         self.selected = 0;
+        self.scroll_offset = 0;
         self.refilter();
     }
 
@@ -90,6 +108,7 @@ impl CommandPalette {
         self.open = false;
         self.query.clear();
         self.selected = 0;
+        self.scroll_offset = 0;
         self.refilter();
     }
 
@@ -106,18 +125,21 @@ impl CommandPalette {
     pub fn set_query(&mut self, q: impl Into<String>) {
         self.query = q.into();
         self.selected = 0;
+        self.scroll_offset = 0;
         self.refilter();
     }
 
     pub fn input_char(&mut self, ch: char) {
         self.query.push(ch);
         self.selected = 0;
+        self.scroll_offset = 0;
         self.refilter();
     }
 
     pub fn backspace(&mut self) {
         if self.query.pop().is_some() {
             self.selected = 0;
+            self.scroll_offset = 0;
             self.refilter();
         }
     }
@@ -125,17 +147,61 @@ impl CommandPalette {
     pub fn move_selection_down(&mut self) {
         if self.items.is_empty() {
             self.selected = 0;
+            self.scroll_offset = 0;
             return;
         }
         self.selected = (self.selected + 1) % self.items.len();
+        self.ensure_selected_in_view();
     }
 
     pub fn move_selection_up(&mut self) {
         if self.items.is_empty() {
             self.selected = 0;
+            self.scroll_offset = 0;
             return;
         }
         self.selected = if self.selected == 0 { self.items.len() - 1 } else { self.selected - 1 };
+        self.ensure_selected_in_view();
+    }
+
+    /// Current first-visible-row offset. The renderer uses this to draw
+    /// only items `[scroll_offset .. scroll_offset + visible_rows]` and
+    /// to position the highlight relative to that window.
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Number of rows the renderer can show. Set by the renderer once
+    /// it knows the modal height (see [`crate::overlays::PaletteLayout`]).
+    /// A zero value means "unconstrained" and disables clamping — useful
+    /// only for tests; production layout always sets a concrete value.
+    pub fn set_visible_rows(&mut self, rows: usize) {
+        self.visible_rows = rows;
+        self.ensure_selected_in_view();
+    }
+
+    pub fn visible_rows(&self) -> usize {
+        self.visible_rows
+    }
+
+    /// Clamp `scroll_offset` so `selected` is always inside the
+    /// `[scroll_offset, scroll_offset + visible_rows)` half-open window.
+    /// When `visible_rows == 0` this is a no-op (no constraint known).
+    fn ensure_selected_in_view(&mut self) {
+        if self.visible_rows == 0 || self.items.is_empty() {
+            return;
+        }
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = self.selected + 1 - self.visible_rows;
+        }
+        // Don't leave a trailing gap of empty rows at the bottom when the
+        // list shrinks under us (post-refilter).
+        let max_off = self.items.len().saturating_sub(self.visible_rows);
+        if self.scroll_offset > max_off {
+            self.scroll_offset = max_off;
+        }
     }
 
     /// The currently highlighted action, if any.
@@ -159,7 +225,7 @@ impl CommandPalette {
                 .enumerate()
                 .filter_map(|(i, a)| {
                     scratch.clear();
-                    let label = human_label(a);
+                    let label = search_haystack(a);
                     let haystack = Utf32Str::new(&label, &mut scratch);
                     pattern.score(haystack, &mut matcher).map(|s| (i, s))
                 })
@@ -170,6 +236,7 @@ impl CommandPalette {
         if self.selected >= self.items.len() {
             self.selected = 0;
         }
+        self.ensure_selected_in_view();
     }
 }
 

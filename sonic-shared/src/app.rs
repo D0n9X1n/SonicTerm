@@ -2875,7 +2875,7 @@ impl ApplicationHandler<UserEvent> for App {
                             &pane_rects,
                             active_id,
                             search,
-                            Some(&self.command_palette),
+                            Some(&mut self.command_palette),
                             Some(&self.ime),
                             pane.viewport_top_abs,
                         ) {

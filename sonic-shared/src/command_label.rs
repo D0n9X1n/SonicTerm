@@ -135,6 +135,64 @@ pub fn label(a: &Action) -> String {
     }
 }
 
+/// Additional words that the palette fuzzy matcher should treat as part
+/// of an action's haystack so users can find commands by synonym instead
+/// of by the exact label wording. Returning `&'static [&'static str]`
+/// keeps this allocation-free on the hot search path.
+///
+/// Example: typing `sett` in the palette must surface
+/// [`Action::OpenPreferences`] even though its label is
+/// "Open Preferences" (no `sett` subsequence). We expose
+/// `["settings", "config", "options", "prefs"]` so any of those land it.
+#[must_use]
+pub fn keywords(a: &Action) -> &'static [&'static str] {
+    match a {
+        Action::NewTab => &["create", "open"],
+        Action::CloseTab => &["quit", "x"],
+        Action::NextTab => &["forward", "right"],
+        Action::PrevTab => &["back", "left", "previous"],
+        Action::ActivateTab(_) => &["switch", "go"],
+        Action::ActivateLastTab => &["recent", "switch"],
+        Action::SplitRight => &["pane", "vertical", "vsplit"],
+        Action::SplitDown => &["pane", "horizontal", "hsplit"],
+        Action::ClosePane => &["kill", "x"],
+        Action::FocusPane(_) => &["move", "switch", "navigate"],
+        Action::ResizePane { .. } => &["grow", "shrink"],
+        Action::CopyToClipboard => &["yank"],
+        Action::PasteFromClipboard => &["yank"],
+        Action::IncreaseFontSize => &["bigger", "zoom in", "larger"],
+        Action::DecreaseFontSize => &["smaller", "zoom out"],
+        Action::ResetFontSize => &["default", "zoom reset"],
+        Action::ApplyTheme(_) => &["color", "colors", "colour", "scheme", "appearance"],
+        Action::ToggleTabBar => &["hide", "show"],
+        Action::NewWindow => &["create", "open"],
+        Action::ToggleFullscreen => &["maximize", "full"],
+        Action::OpenSearch => &["find"],
+        Action::OpenCommandPalette => &["palette", "commands"],
+        // The whole point of this PR's alias path: "sett" → Open Preferences.
+        Action::OpenPreferences => &["settings", "config", "options", "prefs", "preferences"],
+        Action::Scroll(_) => &["page", "line", "scrollback"],
+        Action::ScrollToPrevPrompt => &["jump", "prompt", "previous"],
+        Action::ScrollToNextPrompt => &["jump", "prompt", "next"],
+        Action::ReloadConfig => &["refresh", "config", "settings"],
+        Action::OpenSshPane(_) => &["remote", "connect"],
+    }
+}
+
+/// The fuzzy-search haystack for a single action: its display label plus
+/// every keyword from [`keywords`], joined by spaces. Joining (rather
+/// than scoring each alias separately) keeps a single nucleo score per
+/// candidate which preserves the existing rank ordering behavior.
+#[must_use]
+pub fn search_haystack(a: &Action) -> String {
+    let mut s = label(a);
+    for kw in keywords(a) {
+        s.push(' ');
+        s.push_str(kw);
+    }
+    s
+}
+
 fn dir_human(d: Direction) -> &'static str {
     match d {
         Direction::Left => "Left",

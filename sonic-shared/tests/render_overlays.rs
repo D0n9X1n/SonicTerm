@@ -14,16 +14,16 @@ use sonic_shared::search::SearchState;
 
 #[test]
 fn palette_layout_is_none_when_closed() {
-    let p = CommandPalette::new();
+    let mut p = CommandPalette::new();
     assert!(!p.is_open());
-    assert!(PaletteLayout::compute(&p, 1200.0, 800.0).is_none());
+    assert!(PaletteLayout::compute(&mut p, 1200.0, 800.0).is_none());
 }
 
 #[test]
 fn palette_layout_is_some_when_open() {
     let mut p = CommandPalette::new();
     p.open();
-    let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("palette open");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("palette open");
     // Modal sits inside the window.
     assert!(layout.border.x >= 0.0);
     assert!(layout.border.y >= 0.0);
@@ -48,13 +48,13 @@ fn palette_layout_appears_in_glyph_label_list_when_open() {
     // names are part of the label list that glyphon receives.
     let mut p = CommandPalette::new();
     p.open();
-    let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("open");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
     let joined = layout.row_labels.join("\n");
     assert!(joined.contains("New Tab"));
     assert!(joined.contains("Close Tab"));
     // …and hides when closed.
     p.close();
-    assert!(PaletteLayout::compute(&p, 1200.0, 800.0).is_none());
+    assert!(PaletteLayout::compute(&mut p, 1200.0, 800.0).is_none());
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn palette_layout_filters_with_query() {
     let mut p = CommandPalette::new();
     p.open();
     p.set_query("newtab");
-    let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("open");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
     let joined = layout.row_labels.join("\n");
     assert!(joined.contains("New Tab"));
     assert!(!joined.contains("Close Tab"));
@@ -74,7 +74,7 @@ fn palette_layout_filters_with_query() {
 fn palette_layout_clamps_to_small_window() {
     let mut p = CommandPalette::new();
     p.open();
-    let layout = PaletteLayout::compute(&p, 200.0, 160.0).expect("open");
+    let layout = PaletteLayout::compute(&mut p, 200.0, 160.0).expect("open");
     assert!(layout.border.w <= 200.0);
     assert!(layout.border.h <= 160.0);
 }
@@ -87,7 +87,7 @@ fn palette_layout_scrolls_to_keep_selection_visible() {
     for _ in 0..20 {
         p.move_selection_down();
     }
-    let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("open");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
     // The selected row, if surfaced, must be inside the visible window.
     if let Some(sel) = layout.selected_row {
         assert!(sel < layout.rows.len(), "sel={} rows={}", sel, layout.rows.len());

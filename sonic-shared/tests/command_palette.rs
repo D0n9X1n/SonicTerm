@@ -266,3 +266,92 @@ fn keybinding_hint_uses_pretty_glyphs_when_bound() {
     // Unbound action returns None.
     assert!(keybinding_hint(&km, &Action::ReloadConfig).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Scroll-to-selection + alias-keyword + empty-results placeholder tests.
+
+#[test]
+fn palette_scrolls_to_keep_selection_in_viewport() {
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_visible_rows(5);
+    // Walk past the visible window — selection should always be inside it.
+    for _ in 0..12 {
+        p.move_selection_down();
+        let off = p.scroll_offset();
+        let sel = p.selected();
+        let rows = p.visible_rows();
+        assert!(sel >= off && sel < off + rows, "sel={sel} not in [{off}, {})", off + rows);
+    }
+}
+
+#[test]
+fn palette_selecting_below_fold_scrolls_down() {
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_visible_rows(4);
+    assert_eq!(p.scroll_offset(), 0);
+    // Move past the fold: down 4 times lands selected=4, which forces
+    // the viewport to start at index 1 so the selection stays visible.
+    for _ in 0..4 {
+        p.move_selection_down();
+    }
+    assert_eq!(p.selected(), 4);
+    assert_eq!(p.scroll_offset(), 1, "viewport must scroll down to keep selection in view");
+    // Going back up to the top must scroll the viewport back too.
+    for _ in 0..4 {
+        p.move_selection_up();
+    }
+    assert_eq!(p.selected(), 0);
+    assert_eq!(p.scroll_offset(), 0);
+}
+
+#[test]
+fn palette_arrow_up_from_first_wraps_to_last() {
+    // The current behavior is wrap-around (see move_selection_wraps_around_bounds);
+    // confirm scroll_offset follows the wrap so the (now last) row is visible.
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_visible_rows(5);
+    assert_eq!(p.selected(), 0);
+    p.move_selection_up(); // wraps to last
+    let n = p.len();
+    assert_eq!(p.selected(), n - 1);
+    let off = p.scroll_offset();
+    assert!(p.selected() >= off && p.selected() < off + p.visible_rows());
+}
+
+#[test]
+fn palette_query_sett_matches_preferences() {
+    // The whole reason this PR exists: typing "sett" must surface
+    // Open Preferences via the keyword alias path.
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_query("sett");
+    let labels: Vec<String> =
+        p.visible().iter().map(|a| sonic_shared::command_label::label(a)).collect();
+    assert!(
+        labels.iter().any(|l| l == "Open Preferences"),
+        "'sett' should match 'Open Preferences' via keyword alias: {labels:?}"
+    );
+}
+
+#[test]
+fn palette_zero_matches_shows_no_commands_placeholder() {
+    use sonic_shared::overlays::{PaletteLayout, NO_MATCHES};
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_query("zzz_definitely_no_match_zzz");
+    assert!(p.is_empty(), "filter must produce zero matches");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    assert!(layout.rows.is_empty(), "no rows must be drawn");
+    assert_eq!(
+        layout.empty_label.as_deref(),
+        Some(NO_MATCHES),
+        "empty placeholder must be present"
+    );
+    // Empty query alone should NOT show the placeholder.
+    p.set_query("");
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    assert!(layout.empty_label.is_none(), "empty query is not the same as zero matches");
+}
