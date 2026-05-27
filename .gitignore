@@ -27,3 +27,4 @@ Thumbs.db
 *.log
 crash-reports/
 /rust_out
+gui-smoke.png

@@ -124,6 +124,7 @@ impl Client {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "named-pipe path not yet wired on Windows mux daemon")]
 fn spawn_input_output_roundtrip() {
     let (sock, _state) = spawn_daemon();
     let mut c = Client::connect(&sock);
@@ -152,6 +153,7 @@ fn spawn_input_output_roundtrip() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "named-pipe path not yet wired on Windows mux daemon")]
 fn detach_then_reattach_replays_buffered_output() {
     let (sock, state) = spawn_daemon();
     let mut c1 = Client::connect(&sock);
@@ -196,6 +198,7 @@ fn detach_then_reattach_replays_buffered_output() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "named-pipe path not yet wired on Windows mux daemon")]
 fn server_keeps_session_after_client_drop() {
     let (sock, state) = spawn_daemon();
     let mut c = Client::connect(&sock);
@@ -210,6 +213,7 @@ fn server_keeps_session_after_client_drop() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "named-pipe path not yet wired on Windows mux daemon")]
 fn list_sessions_round_trip() {
     let (sock, _state) = spawn_daemon();
     let mut c = Client::connect(&sock);

@@ -16,8 +16,9 @@
 use sonic_app::app::integrated_titlebar_inset_px;
 use sonic_shared::tabbar_view::caption_button_rects;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, MARGINS};
-use windows::Win32::UI::Controls::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, WM_DWMCOMPOSITIONCHANGED,
     WM_NCCALCSIZE, WM_NCHITTEST,

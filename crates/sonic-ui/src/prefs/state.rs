@@ -64,12 +64,11 @@ pub const KNOWN_FONTS: &[&str] = &[
     "Cascadia Code",
     "Source Code Pro",
     "Rec Mono Casual",
-    // "St Helens" is the brand-default family (see
-    // `sonic_cfg::config::DEFAULT_FONT_FAMILY`). It is NOT bundled in
-    // `assets/fonts/` — users must install it system-wide for it to
-    // resolve. Listed last so existing test expectations against
-    // `KNOWN_FONTS[1]` ("Fira Code") keep holding.
-    "St Helens",
+    // "Rec Mono St.Helens" is the brand-default family (see
+    // `sonic_cfg::config::DEFAULT_FONT_FAMILY`). It IS bundled in
+    // `assets/fonts/` (4 variants, SIL OFL 1.1). Listed last so existing
+    // test expectations against `KNOWN_FONTS[1]` ("Fira Code") keep holding.
+    "Rec Mono St.Helens",
 ];
 
 /// (tag, native display label) pairs for the Language dropdown. The empty

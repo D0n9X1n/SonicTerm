@@ -1,6 +1,7 @@
 //! Integration test for B3.1 — font fallback for non-ASCII glyphs.
 //!
 //! Regression target: PR #42 (B3 cutover) routed grid rendering
+#![allow(dead_code, unused_imports)]
 //! through the swash-backed atlas without any font fallback, so CJK
 //! characters, emoji, and even basic accented Latin letters rendered
 //! as tofu boxes. This test pins the contract that the rasterizer
