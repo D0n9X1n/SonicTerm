@@ -357,10 +357,8 @@ impl GlyphAtlas {
                 advance: 0.0,
                 is_color: false,
             };
-            self.map.insert(
-                key,
-                AtlasEntry { info, last_used_frame: self.current_frame, rect: None },
-            );
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         };
         // Empty tile (space, etc.) — stash a zero-area UV; no upload
@@ -373,10 +371,8 @@ impl GlyphAtlas {
                 advance: tile.advance,
                 is_color: tile.is_color,
             };
-            self.map.insert(
-                key,
-                AtlasEntry { info, last_used_frame: self.current_frame, rect: None },
-            );
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         }
         // Allocate: try free-list first (slots reclaimed by prior
@@ -473,16 +469,16 @@ impl GlyphAtlas {
         // Evict at least 1 entry even when 25% rounds to 0 — otherwise
         // a tiny atlas could deadlock here on a single hot-key miss.
         let evict_n = (total / 4).max(1);
-        // Collect (last_used_frame, key) pairs and partial-sort to the
-        // Nth element by frame ascending. O(n) average via
-        // select_nth_unstable; cheaper than a full sort for the common
-        // case of n ≈ thousands of entries, of which we drop a few hundred.
+        // Collect (last_used_frame, key) pairs and use a deterministic
+        // total ordering before taking the oldest quartile. The secondary
+        // key prevents equal timestamps from depending on HashMap iteration
+        // order or an unstable selection algorithm.
         let mut ages: Vec<(u64, GlyphKey)> =
             self.map.iter().map(|(k, e)| (e.last_used_frame, *k)).collect();
-        if evict_n < ages.len() {
-            ages.select_nth_unstable_by_key(evict_n, |(f, _)| *f);
-            ages.truncate(evict_n);
-        }
+        ages.sort_by_key(|(frame, key)| {
+            (*frame, u32::from(key.ch), key.font_slot, key.weight_bold, key.italic, key.glyph_id)
+        });
+        ages.truncate(evict_n);
         for (_, k) in ages {
             if let Some(entry) = self.map.remove(&k) {
                 if let Some(rect) = entry.rect {

@@ -7,7 +7,7 @@
 //! they cycle a fixed working set instead.
 
 use sonic_core::glyph_key::GlyphKey;
-use sonic_shared::glyph_atlas::{GlyphAtlas, Rasterizer, RasterTile, SyntheticRasterizer};
+use sonic_shared::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer, SyntheticRasterizer};
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)
