@@ -51,8 +51,9 @@ fn palette_modal_uses_rounded_quad_radius_16() {
     );
 
     // And the constant is wired to 16.0 px in overlays.rs.
-    let overlays = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlays.rs"))
-        .expect("read overlays.rs");
+    let overlays =
+        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../sonic-ui/src/overlays.rs"))
+            .expect("read overlays.rs");
     assert!(
         overlays.contains("pub const PALETTE_PANEL_RADIUS: f32 = 16.0"),
         "PALETTE_PANEL_RADIUS must equal 16.0 per spec"

@@ -1,7 +1,7 @@
 //! Command palette (Cmd+Shift+P). Pure-data state holder.
 //!
 //! The palette is a fuzzy-searchable list of every bindable
-//! [`sonic_core::keymap::Action`]. The keyboard-event handler in
+//! [`sonic_cfg::keymap::Action`]. The keyboard-event handler in
 //! [`crate::app`] routes printable characters, arrow keys, Enter and Esc
 //! into this state instead of forwarding them to the active pty when
 //! [`CommandPalette::is_open`] returns `true`. On Enter the dispatcher
@@ -21,7 +21,7 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
 };
-use sonic_core::keymap::{Action, Direction, ScrollAction};
+use sonic_cfg::keymap::{Action, Direction, ScrollAction};
 
 use crate::command_label::{search_haystack, ALL_VARIANT_KINDS};
 
@@ -302,7 +302,7 @@ fn scroll_name(s: ScrollAction) -> &'static str {
 /// Canonical list of every bindable action, in the order the palette
 /// should present them when no query is entered. Keep grouped by
 /// feature area for readability. **Every variant kind in
-/// [`sonic_core::keymap::Action`] must appear at least once**; the
+/// [`sonic_cfg::keymap::Action`] must appear at least once**; the
 /// `palette_lists_every_action_variant` integration test asserts this.
 pub fn all_actions() -> Vec<Action> {
     vec![

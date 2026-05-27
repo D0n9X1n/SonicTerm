@@ -1,6 +1,6 @@
 //! Pane tree — recursive horizontal/vertical splits inside a tab.
 
-use sonic_core::keymap::Direction;
+use sonic_cfg::keymap::Direction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitAxis {

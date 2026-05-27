@@ -1,37 +1,32 @@
-//! sonic-shared — windowing, tab/pane tree, app loop.
+//! sonic-shared — windowing, app loop, GPU rendering.
 //!
-//! This crate contains everything that is platform-agnostic but UI-shaped:
-//! the [`tabs::TabBar`] model, [`pane::PaneTree`] for splits, and an
-//! [`app::App`] that ties [`sonic_core`] (engine) to `winit` + `wgpu`.
+//! Pre-PR-5 this crate also held UI-shaped state (tabs, panes, palette,
+//! prefs view, overlays, etc.); those modules now live in [`sonic_ui`]
+//! and are re-exported here so legacy imports of the form
+//! `use sonic_shared::tabs::TabBar;` continue to work unchanged.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
 pub mod atlas_upload;
-pub mod command_label;
-pub mod command_palette;
 pub mod config_watch;
-pub mod cursor;
-pub mod i18n;
-pub mod ime;
 pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;
 pub mod os_drag_bridge;
-pub mod overlays;
-pub mod pane;
-pub mod prefs;
 pub mod prefs_renderer;
 pub mod quad;
 pub mod render;
-pub mod search;
-pub mod selection;
 pub mod tab_drag;
-pub mod tab_title;
-pub mod tabbar_view;
-pub mod tabs;
 pub mod text_pipeline;
-pub mod ui_tokens;
+
+// Re-exports from the extracted `sonic-ui` crate (PR-5 of the workspace
+// refactor, issue #121). `sonic-ui` owns pure UI state + layout with no
+// winit / wgpu / glyphon deps.
+pub use sonic_ui::{
+    command_label, command_palette, cursor, i18n, ime, overlays, pane, prefs, search, selection,
+    tab_title, tabbar_view, tabs, ui_tokens,
+};
 
 // Re-exports from the extracted `sonic-text` crate so legacy import paths
 // (`sonic_shared::shape::*`, `sonic_shared::glyph_atlas::*`, etc.) keep

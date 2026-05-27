@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-pub use sonic_core::config::CursorShape;
+pub use sonic_cfg::config::CursorShape;
 
 /// One full blink cycle (off → on → off) in milliseconds. Matches the
 /// 600ms cadence specified for v0.6 (close enough to wezterm's default
