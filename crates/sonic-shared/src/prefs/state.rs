@@ -57,8 +57,20 @@ pub const KNOWN_CURSOR_SHAPES: &[&str] = &["block", "bar", "underline"];
 
 /// Pre-canned monospace families. Free-form text still wins for advanced
 /// users; this is just a quick picker.
-pub const KNOWN_FONTS: &[&str] =
-    &["JetBrainsMono Nerd Font", "Fira Code", "Menlo", "Cascadia Code", "Source Code Pro"];
+pub const KNOWN_FONTS: &[&str] = &[
+    "JetBrainsMono Nerd Font",
+    "Fira Code",
+    "Menlo",
+    "Cascadia Code",
+    "Source Code Pro",
+    "Rec Mono Casual",
+    // "St Helens" is the brand-default family (see
+    // `sonic_core::config::DEFAULT_FONT_FAMILY`). It is NOT bundled in
+    // `assets/fonts/` — users must install it system-wide for it to
+    // resolve. Listed last so existing test expectations against
+    // `KNOWN_FONTS[1]` ("Fira Code") keep holding.
+    "St Helens",
+];
 
 /// (tag, native display label) pairs for the Language dropdown. The empty
 /// tag means "auto-detect from OS locale". The native script for the
