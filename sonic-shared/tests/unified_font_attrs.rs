@@ -99,3 +99,54 @@ fn render_source_has_no_hardcoded_font_name_literal() {
         );
     }
 }
+
+/// Strict source-grep audit: any `Attrs::new().family(...)` call outside
+/// the `terminal_font_attrs` helper itself bypasses the unified font
+/// pipeline. Historically this hid the tab-title and drag-chip
+/// regressions where copy-pasted call sites silently rebuilt their own
+/// Attrs and drifted from the grid's font family. The ONLY legitimate
+/// occurrence is the body of `pub fn terminal_font_attrs`.
+#[test]
+fn no_attrs_new_family_outside_helper() {
+    for (path, src) in [
+        ("sonic-shared/src/render.rs", include_str!("../src/render.rs")),
+        ("sonic-shared/src/tabbar_view.rs", include_str!("../src/tabbar_view.rs")),
+    ] {
+        let mut in_helper = false;
+        let mut helper_brace_depth = 0i32;
+        let mut offenders: Vec<(usize, String)> = Vec::new();
+        for (idx, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // Detect entering the terminal_font_attrs function body.
+            if !in_helper && line.contains("fn terminal_font_attrs") {
+                in_helper = true;
+                helper_brace_depth = 0;
+            }
+            if in_helper {
+                helper_brace_depth += line.matches('{').count() as i32;
+                helper_brace_depth -= line.matches('}').count() as i32;
+            }
+            if line.contains("Attrs::new().family(") && !in_helper {
+                offenders.push((idx + 1, line.to_string()));
+            }
+            if in_helper && helper_brace_depth <= 0 && line.contains('}') {
+                in_helper = false;
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{path} contains `Attrs::new().family(` outside the terminal_font_attrs helper. \
+             Every text-render site must route through terminal_font_attrs(&self.font_family) \
+             so tab titles, drag chips, palette, search bar, and IME pre-edit share the same \
+             Family::Name as grid cells. Offenders:\n{}",
+            offenders
+                .iter()
+                .map(|(n, l)| format!("  {path}:{n}: {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+}
