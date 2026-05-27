@@ -925,6 +925,25 @@ impl GpuRenderer {
         if (self.scale_factor - sf).abs() < f32::EPSILON {
             return;
         }
+        self.rebuild_for_scale(sf);
+    }
+
+    /// Force-rebuild atlas + GPU upload for the given scale factor,
+    /// regardless of whether the cached value matches. Used by the
+    /// tear-out path where `GpuRenderer::new` may have latched the
+    /// wrong scale (window not yet placed on a display, so
+    /// `window.scale_factor()` reports 1.0); once the OS places the
+    /// new window on its real Retina display, we must re-rasterize
+    /// glyphs at the correct physical em-size or the child window
+    /// shows blurry tiles + atlas tofu instead of real text. See the
+    /// bug report on torn-out windows rendering with wrong cell width
+    /// and missing nerd-font glyphs.
+    pub fn force_rebuild_for_scale(&mut self, scale_factor: f32) {
+        let sf = scale_factor.max(0.1);
+        self.rebuild_for_scale(sf);
+    }
+
+    fn rebuild_for_scale(&mut self, sf: f32) {
         self.scale_factor = sf;
         let dim = atlas_dim_for_scale(sf);
         self.glyph_atlas = GlyphAtlas::new(dim, dim);
