@@ -311,9 +311,14 @@ pub fn shape_run(
 ///
 /// Cache invalidation is implicit: an unchanged row produces the same
 /// `(text, style, font_family, px)` and therefore the same key.
-#[derive(Default)]
+///
+/// **Eviction.** Backed by `lru::LruCache` with capacity
+/// [`ShapeCache::CAPACITY`]. On overflow, the least-recently-used entry
+/// is evicted (not the whole cache). This avoids the cold-cache stall
+/// that the previous clear-on-overflow strategy caused when scrolling
+/// through long files.
 pub struct ShapeCache {
-    map: std::collections::HashMap<ShapeCacheKey, Vec<ShapedGlyph>>,
+    map: lru::LruCache<ShapeCacheKey, Vec<ShapedGlyph>>,
     hits: u64,
     misses: u64,
 }
@@ -327,9 +332,27 @@ struct ShapeCacheKey {
     px: u32,
 }
 
+impl Default for ShapeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShapeCache {
+    /// Maximum number of distinct shaped runs retained before LRU
+    /// eviction kicks in. 4096 is ~8× the prior clear-on-overflow cap
+    /// and comfortably covers a screen's worth of unique rows with
+    /// headroom for scrollback-driven churn.
+    pub const CAPACITY: usize = 4096;
+
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            map: lru::LruCache::new(
+                std::num::NonZeroUsize::new(Self::CAPACITY).expect("CAPACITY is non-zero"),
+            ),
+            hits: 0,
+            misses: 0,
+        }
     }
 
     pub fn hits(&self) -> u64 {
@@ -348,8 +371,52 @@ impl ShapeCache {
         self.map.is_empty()
     }
 
-    /// Lookup-or-shape. Bounded at 512 entries; on overflow the
-    /// cache is cleared (LRU is overkill at this scale).
+    /// Capacity (max entries before LRU eviction). Exposed for tests.
+    pub fn capacity(&self) -> usize {
+        self.map.cap().get()
+    }
+
+    /// True if the cache currently holds an entry for the same
+    /// (text, style, family, px) key built from these cells. Test-only
+    /// helper — does NOT update LRU recency.
+    #[doc(hidden)]
+    pub fn contains_run(
+        &self,
+        family: &str,
+        font_size: f32,
+        style: RunStyle,
+        cells: &[(u16, Cell)],
+    ) -> bool {
+        let key = Self::make_key(family, font_size, style, cells);
+        self.map.peek(&key).is_some()
+    }
+
+    fn make_key(
+        family: &str,
+        font_size: f32,
+        style: RunStyle,
+        cells: &[(u16, Cell)],
+    ) -> ShapeCacheKey {
+        let mut text = String::with_capacity(cells.len() * 2);
+        for (_, c) in cells {
+            text.push(c.ch);
+            if let Some(ex) = &c.extras {
+                for ch in ex.chars() {
+                    text.push(ch);
+                }
+            }
+        }
+        ShapeCacheKey {
+            text,
+            bold: style.bold,
+            italic: style.italic,
+            family: family.to_string(),
+            px: (font_size * 100.0).round() as u32,
+        }
+    }
+
+    /// Lookup-or-shape. Bounded at [`Self::CAPACITY`] entries; on
+    /// overflow the least-recently-used entry is evicted.
     ///
     /// Cached glyphs are stored with `lead_col` rebased to the run's
     /// first column (i.e. relative offsets starting from 0). On both
@@ -365,22 +432,7 @@ impl ShapeCache {
         cells: &[(u16, Cell)],
     ) -> Vec<ShapedGlyph> {
         let base_col = cells.first().map(|(c, _)| *c).unwrap_or(0);
-        let mut text = String::with_capacity(cells.len() * 2);
-        for (_, c) in cells {
-            text.push(c.ch);
-            if let Some(ex) = &c.extras {
-                for ch in ex.chars() {
-                    text.push(ch);
-                }
-            }
-        }
-        let key = ShapeCacheKey {
-            text,
-            bold: style.bold,
-            italic: style.italic,
-            family: family.to_string(),
-            px: (font_size * 100.0).round() as u32,
-        };
+        let key = Self::make_key(family, font_size, style, cells);
         if let Some(v) = self.map.get(&key) {
             self.hits += 1;
             // Rebase relative columns to the caller's run start.
@@ -390,9 +442,6 @@ impl ShapeCache {
                 .collect();
         }
         self.misses += 1;
-        if self.map.len() >= 512 {
-            self.map.clear();
-        }
         let shaped = shape_run(rasterizer, family, font_size, style, cells);
         // Store with column-relative `lead_col` (subtract the run's
         // base column) so the same shaped text at a different column
@@ -401,7 +450,7 @@ impl ShapeCache {
             .iter()
             .map(|g| ShapedGlyph { lead_col: g.lead_col.saturating_sub(base_col), ..*g })
             .collect();
-        self.map.insert(key, stored);
+        self.map.put(key, stored);
         shaped
     }
 
