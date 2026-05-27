@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bytes::{Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
@@ -18,7 +19,13 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 /// Outgoing message: bytes to write to the pty master (typed by user).
 type Outgoing = Vec<u8>;
 /// Incoming message: bytes read from the pty master (program output).
-type Incoming = Vec<u8>;
+///
+/// Uses [`bytes::Bytes`] — a refcounted slice — so the reader thread can
+/// hand the buffer off to the VT thread without per-read `Vec::to_vec`
+/// allocations. The reader keeps a single [`BytesMut`] ring of 64 KiB and
+/// `split_to`s the filled prefix into a `Bytes` each iteration; once the
+/// ring drains below capacity it reuses the same allocation.
+type Incoming = Bytes;
 
 /// Handle to a running pty process.
 ///
@@ -118,12 +125,43 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
     thread::Builder::new()
         .name("sonic-pty-reader".into())
         .spawn(move || {
-            let mut buf = [0u8; 8192];
+            // 64 KiB ring. We `split` the filled prefix into a `Bytes`
+            // (refcounted view into the same allocation) on each read and
+            // send it downstream. Once consumers drop their `Bytes`, the
+            // next `reserve` call reclaims the original allocation in-place
+            // — no per-read heap alloc, no `to_vec`. Replaces the previous
+            // `[u8; 8192]` stack buffer + `buf[..n].to_vec()` pattern that
+            // allocated once per read (and the reader can fire thousands of
+            // reads per second under `cat largefile`).
+            const RING_CAP: usize = 64 * 1024;
+            // Keep at least one full PTY chunk (typical kernel pipe buffer
+            // is 4–16 KiB) of headroom before each read to avoid forcing a
+            // realloc mid-read.
+            const READ_HEADROOM: usize = 8 * 1024;
+            let mut buf = BytesMut::with_capacity(RING_CAP);
             loop {
-                match reader.read(&mut buf) {
+                if buf.capacity() - buf.len() < READ_HEADROOM {
+                    // If downstream has dropped its `Bytes` views, this
+                    // reclaims the original buffer; otherwise it allocates
+                    // a fresh one and drops our half of the previous ring.
+                    buf.reserve(RING_CAP);
+                }
+                // Zero-initialise the spare region before handing it to
+                // `Read::read`. `Read` requires an initialised destination
+                // slice (passing `MaybeUninit` bytes via a `&mut [u8]` cast
+                // is UB even though most impls never read from it). The
+                // memset cost on a 64 KiB region is dominated by the syscall
+                // itself; the underlying allocation is still reused across
+                // reads, preserving the zero-alloc steady state.
+                let initial_len = buf.len();
+                let read_cap = buf.capacity() - initial_len;
+                buf.resize(initial_len + read_cap, 0);
+                match reader.read(&mut buf[initial_len..]) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
+                        buf.truncate(initial_len + n);
+                        let chunk = buf.split().freeze();
+                        if tx.send(chunk).is_err() {
                             break;
                         }
                     }
