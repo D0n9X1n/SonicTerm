@@ -402,6 +402,7 @@ pub struct App {
     // v0.6: optional graphical preferences window.
     prefs_window: Option<Arc<Window>>,
     prefs_state: Option<PrefsState>,
+    prefs_renderer: Option<crate::prefs_renderer::PrefsRenderer>,
     pending_prefs_open: bool,
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
@@ -503,6 +504,7 @@ impl App {
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             prefs_window: None,
             prefs_state: None,
+            prefs_renderer: None,
             pending_prefs_open: false,
             ime: ImeState::new(),
             ime_cursor_throttle: crate::ime::ImeCursorThrottle::new(),
@@ -2447,6 +2449,27 @@ impl App {
         let path = sonic_core::config::Config::default_path()
             .unwrap_or_else(|| std::path::PathBuf::from("sonic.toml"));
         self.prefs_state = Some(PrefsState::new(self.config.clone(), path));
+        // Spin up a dedicated GPU renderer for the prefs surface.
+        // Without this the window's wgpu surface is never drawn into,
+        // which is what produced the "preferences window is solid
+        // black" repro. Mirror the tear-out-window fix (PR #104) and
+        // force the renderer's scale + physical size to match the
+        // window's CURRENT values — on macOS the first scale_factor
+        // reported inside the constructor is often the stale 1.0 even
+        // when the window has been placed on a 2× display.
+        match crate::prefs_renderer::PrefsRenderer::new(w.clone(), el) {
+            Ok(mut r) => {
+                let real_sf = w.scale_factor() as f32;
+                r.set_scale_factor(real_sf);
+                let real_inner = w.inner_size();
+                r.resize(real_inner.width.max(1), real_inner.height.max(1));
+                self.prefs_renderer = Some(r);
+            }
+            Err(e) => {
+                tracing::error!("prefs renderer init failed: {e}");
+            }
+        }
+        w.request_redraw();
         self.prefs_window = Some(w);
     }
 
@@ -2505,12 +2528,41 @@ impl App {
                 self.commit_prefs_and_apply_live();
                 self.prefs_window = None;
                 self.prefs_state = None;
+                self.prefs_renderer = None;
+            }
+            WindowEvent::RedrawRequested => {
+                if let (Some(r), Some(s)) =
+                    (self.prefs_renderer.as_mut(), self.prefs_state.as_ref())
+                {
+                    if let Err(e) = r.render(s, &self.theme) {
+                        tracing::warn!("prefs render failed: {e}");
+                    }
+                }
+            }
+            WindowEvent::Resized(sz) => {
+                if let Some(r) = self.prefs_renderer.as_mut() {
+                    r.resize(sz.width, sz.height);
+                }
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(r) = self.prefs_renderer.as_mut() {
+                    r.set_scale_factor(scale_factor as f32);
+                }
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
@@ -2523,6 +2575,7 @@ impl App {
                         }
                         self.prefs_window = None;
                         self.prefs_state = None;
+                        self.prefs_renderer = None;
                     }
                     other => {
                         let Some(s) = self.prefs_state.as_mut() else { return };
@@ -2563,6 +2616,9 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
                 let Some(s) = self.prefs_state.as_mut() else { return };
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
@@ -2590,6 +2646,7 @@ impl App {
                         s.cancel();
                         self.prefs_window = None;
                         self.prefs_state = None;
+                        self.prefs_renderer = None;
                     }
                     Key::Character(chs) => {
                         for ch in chs.chars() {
@@ -2606,6 +2663,11 @@ impl App {
             }
             _ => {}
         }
+        // NB: do NOT unconditionally request_redraw here — RedrawRequested
+        // itself flows through this handler, so a tail redraw creates an
+        // idle vsync feedback loop (CLAUDE.md §4 land-mine). Redraws are
+        // requested only inside the arms that actually mutate visible
+        // state (MouseInput, KeyboardInput, Resize, ScaleFactorChanged).
     }
 }
 
