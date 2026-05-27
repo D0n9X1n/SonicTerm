@@ -47,7 +47,7 @@
                             Id='exe0'
                             Name='sonic-windows.exe'
                             DiskId='1'
-                            Source='target\x86_64-pc-windows-msvc\release\sonic-windows.exe'
+                            Source='..\target\x86_64-pc-windows-msvc\release\sonic-windows.exe'
                             KeyPath='yes'/>
                     </Component>
 
