@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
 #[cfg(target_os = "macos")]
-mod menubar;
+use sonic_mac::menubar;
 #[cfg(target_os = "macos")]
 mod os_drag_mac;
 

@@ -1,97 +1,107 @@
 //! Native macOS `NSMenu` for Sonic Terminal.
 //!
-//! ## What this delivers
+//! Top-level submenus (in order): **Sonic / Shell / Edit / View / Help**.
+//! Items dispatch to `sonic_core::keymap::Action`s via the
+//! [`sonic_shared::menubar_bridge`] queue; the winit loop drains and
+//! routes through `App::run_action` — the same path used by keybindings.
 //!
-//! macOS users who launch `Sonic.app` (or `cargo run -p sonic-mac`)
-//! now see the standard Apple-menu / app-menu / File / Edit / View
-//! / Terminal / Window / Help bar across the top of the screen.
-//! Items marked with ⌘-key shortcuts mirror the wezterm-default
-//! keymap; the menu is an *additional* surface for the same
-//! `Action`s the existing keybindings already trigger, so a user
-//! who relies on `super+,` to open prefs is unaffected.
-//!
-//! ## How dispatch works
-//!
-//! AppKit calls `[target action:]` on the AppKit main thread. We
-//! install a single `Retained<MenuTarget>` as the action receiver
-//! for every Sonic-owned menu item; the selector decodes a tag
-//! into a [`sonic_core::keymap::Action`] and posts it through
-//! [`sonic_shared::menubar_bridge::push_action`]. The bridge wakes
-//! the winit event loop, which drains the queue and dispatches via
-//! `App::run_action`. We never call into `App` directly from the
-//! AppKit thread — the winit borrow lives behind `run_app(&mut app)`.
-//!
-//! Items that map cleanly to *standard* AppKit selectors
-//! (`terminate:`, `hide:`, etc.) use those directly so they get
-//! the standard system behavior (e.g. "Quit" honors the
-//! per-application restart preference).
-//!
-//! ## Theme submenu
-//!
-//! Built by reading the on-disk `assets/themes/*.toml` directory
-//! at startup. Each item dispatches `Action::ApplyTheme(name)`,
-//! which (in `App::run_action`) live-applies the new theme and
-//! persists it to `Config.theme` for the next save.
-//!
-//! ## Why not `muda`?
-//!
-//! `muda` is the canonical cross-platform menu crate but at
-//! v0.13 it lacks a clean way to bridge menu events into a
-//! `winit::EventLoop<UserEvent>` without spinning a second
-//! `mpsc` thread, and it pulls in a non-trivial dependency tree
-//! (`gtk` shim feature gating, etc.) we'd then have to audit.
-//! The direct objc2 path is ~250 lines and depends only on
-//! crates already in this binary.
-//!
-//! ## Windows
-//!
-//! Stubbed to a no-op in [`crate::menubar::install`]'s sibling
-//! `#[cfg(not(target_os = "macos"))]` arm. Native Windows menus
-//! are usually in-window, not at the top of the screen — wiring
-//! them belongs alongside the Win32 chrome work, post-v1.
+//! Help items that point to URLs are opened directly from the AppKit
+//! main thread via `NSWorkspace::openURL:` so no new `Action` variant
+//! is required.
 
 #![cfg(target_os = "macos")]
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
 use objc2::{define_class, msg_send, sel, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
+use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSWorkspace};
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSURL};
 
 use sonic_core::keymap::Action;
 use sonic_shared::menubar_bridge;
 
 // ---------------------------------------------------------------------
-// Tag ↔ Action mapping.
-//
-// We can't store a `String` in a `NSMenuItem` tag (it's an `isize`), so
-// we keep an in-process registry of `(tag, Action)`. The MenuTarget's
-// `dispatch:` selector looks up the sender's tag and queues the action.
+// Dispatch registry: tag → MenuEntry.
 // ---------------------------------------------------------------------
 
-use std::sync::Mutex;
+/// Anything an in-process menu item can do when clicked.
+#[derive(Debug, Clone)]
+pub enum MenuEntry {
+    /// Queue a keymap [`Action`] for the next event-loop drain.
+    Act(Action),
+    /// Open `url` via `NSWorkspace::openURL:` from the AppKit thread.
+    Url(String),
+}
 
-static ACTIONS: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+static ENTRIES: Mutex<Vec<MenuEntry>> = Mutex::new(Vec::new());
 
-fn register(action: Action) -> isize {
-    let mut v = ACTIONS.lock().expect("menubar action registry poisoned");
-    v.push(action);
-    // 1-based: a tag of 0 is AppKit's default and we don't want to
-    // collide with an "untagged" item that may exist for some reason.
+fn register(entry: MenuEntry) -> isize {
+    let mut v = ENTRIES.lock().expect("menubar entry registry poisoned");
+    v.push(entry);
+    // 1-based: 0 is AppKit's default tag.
     v.len() as isize
 }
 
-fn lookup(tag: isize) -> Option<Action> {
-    let v = ACTIONS.lock().ok()?;
+fn lookup(tag: isize) -> Option<MenuEntry> {
+    let v = ENTRIES.lock().ok()?;
     let idx = (tag as usize).checked_sub(1)?;
     v.get(idx).cloned()
 }
 
+#[cfg(test)]
+fn reset_registry_for_tests() {
+    if let Ok(mut v) = ENTRIES.lock() {
+        v.clear();
+    }
+}
+
+/// Test bridge: register a menu entry from outside the crate without
+/// constructing AppKit objects. Returns the assigned tag. Hidden from
+/// docs; used only by integration tests under `tests/`.
+#[doc(hidden)]
+pub fn __test_register(entry: MenuEntry) -> isize {
+    register(entry)
+}
+
+/// Dispatch the entry registered at `tag`. Public for the test bridge so
+/// we can simulate an AppKit click without spinning AppKit.
+pub fn dispatch_tag(tag: isize) -> bool {
+    let Some(entry) = lookup(tag) else {
+        tracing::warn!("SonicMenuTarget: tag {tag} has no registered entry");
+        return false;
+    };
+    match entry {
+        MenuEntry::Act(action) => {
+            tracing::debug!("menubar dispatch -> {action:?}");
+            menubar_bridge::push_action(action)
+        }
+        MenuEntry::Url(url) => {
+            #[cfg(target_os = "macos")]
+            open_url(&url);
+            true
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) {
+    // Best-effort: invalid URLs are silently ignored (logged at WARN).
+    let nsurl = NSURL::URLWithString(&NSString::from_str(url));
+    if let Some(nsurl) = nsurl {
+        let _ = MainThreadMarker::new()
+            .expect("open_url must run on the macOS main thread (AppKit invariant)");
+        let workspace = NSWorkspace::sharedWorkspace();
+        workspace.openURL(&nsurl);
+    } else {
+        tracing::warn!("menubar: ignoring malformed URL {url:?}");
+    }
+}
+
 // ---------------------------------------------------------------------
-// MenuTarget — the Objective-C object that receives every Sonic-owned
-// menu item's action selector.
+// MenuTarget — the Objective-C action receiver.
 // ---------------------------------------------------------------------
 
 define_class!(
@@ -106,18 +116,7 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(dispatch:))]
         fn dispatch(&self, sender: &NSMenuItem) {
-            let tag = sender.tag();
-            let Some(action) = lookup(tag) else {
-                tracing::warn!("SonicMenuTarget: tag {tag} has no registered action");
-                return;
-            };
-            tracing::debug!("menubar dispatch -> {action:?}");
-            if !menubar_bridge::push_action(action) {
-                tracing::warn!(
-                    "menubar dispatch: action queued but no event-loop proxy is installed; \
-                     it will not run until the loop wakes for another reason"
-                );
-            }
+            dispatch_tag(sender.tag());
         }
     }
 );
@@ -130,314 +129,302 @@ impl MenuTarget {
 }
 
 // ---------------------------------------------------------------------
-// Menu construction.
+// Blueprint — pure-data description of the menubar.
+//
+// Tests assert on this; the AppKit installer also walks it to build
+// NSMenuItems, so the two representations cannot drift.
 // ---------------------------------------------------------------------
 
-/// Install the Sonic NSMenu as the application's main menu.
-///
-/// `theme_names` is the list of bundled themes to expose under
-/// View → Theme; pass the result of scanning `assets/themes/`.
-/// Order is preserved.
-pub fn install(theme_names: &[String]) {
-    // Safe to call from `main()` before the event loop spins; AppKit
-    // requires the main thread, which `main()` is by definition.
-    let mtm = MainThreadMarker::new().expect("install_menubar must run on the macOS main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    let target = MenuTarget::new(mtm);
-
-    let main = NSMenu::new(mtm);
-
-    main.addItem(&app_submenu(mtm, &target));
-    main.addItem(&file_submenu(mtm, &target));
-    main.addItem(&edit_submenu(mtm, &target));
-    main.addItem(&view_submenu(mtm, &target, theme_names));
-    main.addItem(&terminal_submenu(mtm, &target));
-    main.addItem(&window_submenu(mtm, &target));
-    main.addItem(&help_submenu(mtm, &target));
-
-    app.setMainMenu(Some(&main));
-
-    // MenuTarget must outlive the menu items that reference it.
-    // The menu items don't retain their target, by AppKit convention.
-    // We leak it intentionally — it lives for the program's lifetime.
-    let _ = Retained::into_raw(target);
-
-    tracing::info!("macOS native menubar installed ({} themes)", theme_names.len());
+/// A single leaf item in the blueprint.
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub title: &'static str,
+    pub key: &'static str,
+    pub mods: KeyMods,
+    pub binding: Binding,
 }
+
+/// Modifier-key shorthand used in the blueprint (translated to
+/// `NSEventModifierFlags` at install time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMods {
+    None,
+    Cmd,
+    CmdShift,
+    CmdOpt,
+}
+
+/// What activating an item does.
+#[derive(Debug, Clone)]
+pub enum Binding {
+    /// Queue an `Action` via the menubar bridge.
+    Action(Action),
+    /// Open a URL via `NSWorkspace`.
+    Url(&'static str),
+    /// Bound to a standard AppKit selector; passed through as a string
+    /// so the blueprint stays platform-agnostic for unit tests.
+    System(&'static str),
+    Separator,
+}
+
+/// A top-level submenu in the blueprint.
+#[derive(Debug, Clone)]
+pub struct Submenu {
+    pub title: &'static str,
+    pub items: Vec<Item>,
+}
+
+/// Build the menubar blueprint. Pure: no AppKit calls, safe in tests.
+pub fn blueprint() -> Vec<Submenu> {
+    use Binding::*;
+    use KeyMods::*;
+
+    let sep = || Item { title: "", key: "", mods: None, binding: Separator };
+
+    vec![
+        Submenu {
+            title: "Sonic",
+            items: vec![
+                Item {
+                    title: "About Sonic",
+                    key: "",
+                    mods: None,
+                    binding: System("orderFrontStandardAboutPanel:"),
+                },
+                sep(),
+                Item {
+                    title: "Preferences…",
+                    key: ",",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::OpenPreferences),
+                },
+                sep(),
+                Item { title: "Hide Sonic", key: "h", mods: Cmd, binding: System("hide:") },
+                Item {
+                    title: "Hide Others",
+                    key: "h",
+                    mods: CmdOpt,
+                    binding: System("hideOtherApplications:"),
+                },
+                Item {
+                    title: "Show All",
+                    key: "",
+                    mods: None,
+                    binding: System("unhideAllApplications:"),
+                },
+                sep(),
+                Item { title: "Quit Sonic", key: "q", mods: Cmd, binding: System("terminate:") },
+            ],
+        },
+        Submenu {
+            title: "Shell",
+            items: vec![
+                Item {
+                    title: "New Tab",
+                    key: "t",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::NewTab),
+                },
+                Item {
+                    title: "New Window",
+                    key: "n",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::NewWindow),
+                },
+                sep(),
+                Item {
+                    title: "Split Right",
+                    key: "d",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::SplitRight),
+                },
+                Item {
+                    title: "Split Down",
+                    key: "d",
+                    mods: CmdShift,
+                    binding: Action(sonic_core::keymap::Action::SplitDown),
+                },
+                sep(),
+                Item {
+                    title: "Close Tab",
+                    key: "w",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::CloseTab),
+                },
+                Item {
+                    title: "Close Pane",
+                    key: "w",
+                    mods: CmdShift,
+                    binding: Action(sonic_core::keymap::Action::ClosePane),
+                },
+            ],
+        },
+        Submenu {
+            title: "Edit",
+            items: vec![
+                Item {
+                    title: "Copy",
+                    key: "c",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::CopyToClipboard),
+                },
+                Item {
+                    title: "Paste",
+                    key: "v",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::PasteFromClipboard),
+                },
+                sep(),
+                Item {
+                    title: "Find…",
+                    key: "f",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::OpenSearch),
+                },
+                Item {
+                    title: "Command Palette",
+                    key: "p",
+                    mods: CmdShift,
+                    binding: Action(sonic_core::keymap::Action::OpenCommandPalette),
+                },
+            ],
+        },
+        Submenu {
+            title: "View",
+            items: vec![
+                Item {
+                    title: "Toggle Tab Bar",
+                    key: "t",
+                    mods: CmdShift,
+                    binding: Action(sonic_core::keymap::Action::ToggleTabBar),
+                },
+                Item {
+                    title: "Reset Zoom",
+                    key: "0",
+                    mods: Cmd,
+                    binding: Action(sonic_core::keymap::Action::ResetFontSize),
+                },
+            ],
+        },
+        Submenu {
+            title: "Help",
+            items: vec![
+                Item {
+                    title: "Sonic Help",
+                    key: "",
+                    mods: None,
+                    binding: Url("https://github.com/D0n9X1n/sonic"),
+                },
+                Item {
+                    title: "Report Issue",
+                    key: "",
+                    mods: None,
+                    binding: Url("https://github.com/D0n9X1n/sonic/issues/new"),
+                },
+            ],
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------
+// AppKit installer.
+// ---------------------------------------------------------------------
 
 fn ns(s: &str) -> Retained<NSString> {
     NSString::from_str(s)
 }
 
-fn separator(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-    NSMenuItem::separatorItem(mtm)
+fn flags(m: KeyMods) -> NSEventModifierFlags {
+    match m {
+        KeyMods::None => NSEventModifierFlags::empty(),
+        KeyMods::Cmd => NSEventModifierFlags::Command,
+        KeyMods::CmdShift => NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+        KeyMods::CmdOpt => NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    }
 }
 
-/// Build a top-level submenu container item with `title`. Caller
-/// fills its `submenu`.
-fn submenu_item(
-    mtm: MainThreadMarker,
-    title: &str,
-    items: Vec<Retained<NSMenuItem>>,
-) -> Retained<NSMenuItem> {
-    let item = NSMenuItem::new(mtm);
-    item.setTitle(&ns(title));
+fn ns_selector_from_str(name: &str) -> Sel {
+    match name {
+        "orderFrontStandardAboutPanel:" => sel!(orderFrontStandardAboutPanel:),
+        "hide:" => sel!(hide:),
+        "hideOtherApplications:" => sel!(hideOtherApplications:),
+        "unhideAllApplications:" => sel!(unhideAllApplications:),
+        "terminate:" => sel!(terminate:),
+        other => panic!("unknown system selector in menu blueprint: {other}"),
+    }
+}
+
+fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retained<NSMenuItem> {
+    if matches!(item.binding, Binding::Separator) {
+        return NSMenuItem::separatorItem(mtm);
+    }
+    let nsi = NSMenuItem::new(mtm);
+    nsi.setTitle(&ns(item.title));
+    nsi.setKeyEquivalent(&ns(item.key));
+    nsi.setKeyEquivalentModifierMask(flags(item.mods));
+    match &item.binding {
+        Binding::Action(a) => {
+            let tag = register(MenuEntry::Act(a.clone()));
+            unsafe {
+                nsi.setTag(tag);
+                nsi.setTarget(Some(target));
+                nsi.setAction(Some(sel!(dispatch:)));
+            }
+        }
+        Binding::Url(url) => {
+            let tag = register(MenuEntry::Url((*url).to_string()));
+            unsafe {
+                nsi.setTag(tag);
+                nsi.setTarget(Some(target));
+                nsi.setAction(Some(sel!(dispatch:)));
+            }
+        }
+        Binding::System(name) => unsafe {
+            nsi.setAction(Some(ns_selector_from_str(name)));
+        },
+        Binding::Separator => unreachable!(),
+    }
+    nsi
+}
+
+fn build_submenu(mtm: MainThreadMarker, sm: &Submenu, target: &MenuTarget) -> Retained<NSMenuItem> {
+    let container = NSMenuItem::new(mtm);
+    container.setTitle(&ns(sm.title));
     let menu = NSMenu::new(mtm);
-    menu.setTitle(&ns(title));
-    for it in items {
-        menu.addItem(&it);
+    menu.setTitle(&ns(sm.title));
+    for it in &sm.items {
+        menu.addItem(&build_item(mtm, it, target));
     }
-    item.setSubmenu(Some(&menu));
-    item
+    container.setSubmenu(Some(&menu));
+    container
 }
 
-/// Build a custom item that dispatches `action` via [`MenuTarget`].
-fn custom_item(
-    mtm: MainThreadMarker,
-    title: &str,
-    key: &str,
-    mods: NSEventModifierFlags,
-    target: &MenuTarget,
-    action: Action,
-) -> Retained<NSMenuItem> {
-    let tag = register(action);
-    let item = NSMenuItem::new(mtm);
-    item.setTitle(&ns(title));
-    item.setKeyEquivalent(&ns(key));
-    unsafe {
-        item.setKeyEquivalentModifierMask(mods);
-        item.setTag(tag);
-        item.setTarget(Some(target));
-        item.setAction(Some(sel!(dispatch:)));
+/// Install the Sonic NSMenu as the application's main menu. The
+/// `_theme_names` argument is accepted for backward compatibility with
+/// existing call sites; the blueprint no longer surfaces themes in the
+/// menubar (they live in Preferences).
+pub fn install(_theme_names: &[String]) {
+    let mtm = MainThreadMarker::new().expect("install_menubar must run on the macOS main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    let target = MenuTarget::new(mtm);
+
+    let main = NSMenu::new(mtm);
+    for sm in blueprint() {
+        main.addItem(&build_submenu(mtm, &sm, &target));
     }
-    item
-}
+    app.setMainMenu(Some(&main));
 
-/// Build an item bound to a standard AppKit selector (no custom
-/// dispatch). `target` of `None` means "first responder".
-fn system_item(
-    mtm: MainThreadMarker,
-    title: &str,
-    key: &str,
-    mods: NSEventModifierFlags,
-    selector: Sel,
-) -> Retained<NSMenuItem> {
-    let item = NSMenuItem::new(mtm);
-    item.setTitle(&ns(title));
-    item.setKeyEquivalent(&ns(key));
-    unsafe {
-        item.setKeyEquivalentModifierMask(mods);
-        item.setAction(Some(selector));
-    }
-    item
-}
+    // MenuTarget must outlive the menu items that reference it.
+    // Leak intentionally — lives for the program's lifetime.
+    let _ = Retained::into_raw(target);
 
-fn cmd() -> NSEventModifierFlags {
-    NSEventModifierFlags::Command
-}
-fn cmd_shift() -> NSEventModifierFlags {
-    NSEventModifierFlags::Command | NSEventModifierFlags::Shift
-}
-
-// ---- Sonic (app) menu -------------------------------------------------
-
-fn app_submenu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSMenuItem> {
-    let about = system_item(
-        mtm,
-        "About Sonic",
-        "",
-        NSEventModifierFlags::empty(),
-        sel!(orderFrontStandardAboutPanel:),
-    );
-    let prefs =
-        custom_item(mtm, "Preferences\u{2026}", ",", cmd(), target, Action::OpenPreferences);
-    let hide = system_item(mtm, "Hide Sonic", "h", cmd(), sel!(hide:));
-    let hide_others = system_item(
-        mtm,
-        "Hide Others",
-        "h",
-        cmd() | NSEventModifierFlags::Option,
-        sel!(hideOtherApplications:),
-    );
-    let show_all = system_item(
-        mtm,
-        "Show All",
-        "",
-        NSEventModifierFlags::empty(),
-        sel!(unhideAllApplications:),
-    );
-    let quit = system_item(mtm, "Quit Sonic", "q", cmd(), sel!(terminate:));
-
-    submenu_item(
-        mtm,
-        // Title on the app submenu is overridden by AppKit to the
-        // process name on launch; we still set a placeholder.
-        "Sonic",
-        vec![
-            about,
-            separator(mtm),
-            prefs,
-            separator(mtm),
-            hide,
-            hide_others,
-            show_all,
-            separator(mtm),
-            quit,
-        ],
-    )
-}
-
-// ---- File menu --------------------------------------------------------
-
-fn file_submenu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSMenuItem> {
-    submenu_item(
-        mtm,
-        "File",
-        vec![
-            custom_item(mtm, "New Tab", "t", cmd(), target, Action::NewTab),
-            custom_item(mtm, "New Window", "n", cmd(), target, Action::NewWindow),
-            separator(mtm),
-            custom_item(mtm, "Close Tab", "w", cmd(), target, Action::CloseTab),
-            system_item(mtm, "Close Window", "w", cmd_shift(), sel!(performClose:)),
-        ],
-    )
-}
-
-// ---- Edit menu --------------------------------------------------------
-
-fn edit_submenu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSMenuItem> {
-    submenu_item(
-        mtm,
-        "Edit",
-        vec![
-            custom_item(mtm, "Copy", "c", cmd(), target, Action::CopyToClipboard),
-            custom_item(mtm, "Paste", "v", cmd(), target, Action::PasteFromClipboard),
-            separator(mtm),
-            custom_item(mtm, "Find\u{2026}", "f", cmd(), target, Action::OpenSearch),
-            // Find Next / Previous: no first-class actions yet; queue
-            // OpenSearch as a placeholder so the menu items still light
-            // up. A follow-up PR will add SearchNext / SearchPrev to
-            // the Action enum and re-route these.
-            custom_item(mtm, "Find Next", "g", cmd(), target, Action::OpenSearch),
-            custom_item(mtm, "Find Previous", "g", cmd_shift(), target, Action::OpenSearch),
-        ],
-    )
-}
-
-// ---- View menu --------------------------------------------------------
-
-fn view_submenu(
-    mtm: MainThreadMarker,
-    target: &MenuTarget,
-    theme_names: &[String],
-) -> Retained<NSMenuItem> {
-    let mut items = vec![
-        custom_item(mtm, "Increase Font", "=", cmd(), target, Action::IncreaseFontSize),
-        custom_item(mtm, "Decrease Font", "-", cmd(), target, Action::DecreaseFontSize),
-        custom_item(mtm, "Reset Font", "0", cmd(), target, Action::ResetFontSize),
-        separator(mtm),
-    ];
-
-    // Theme submenu.
-    let theme_items: Vec<_> = theme_names
-        .iter()
-        .map(|name| {
-            custom_item(
-                mtm,
-                name,
-                "",
-                NSEventModifierFlags::empty(),
-                target,
-                Action::ApplyTheme(name.clone()),
-            )
-        })
-        .collect();
-    items.push(submenu_item(mtm, "Theme", theme_items));
-    items.push(separator(mtm));
-    items.push(custom_item(mtm, "Toggle Tab Bar", "t", cmd_shift(), target, Action::ToggleTabBar));
-
-    submenu_item(mtm, "View", items)
-}
-
-// ---- Terminal menu ----------------------------------------------------
-
-fn terminal_submenu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSMenuItem> {
-    // NOTE: New SSH Connection… is intentionally NOT exposed here
-    // yet — the `Action::OpenSshPane(_)` enum variant exists, but
-    // `sonic-mac` doesn't yet declare the `ssh` cargo feature that
-    // gates real connection wiring in `sonic-core`. Adding the menu
-    // item before the feature is wired would put a permanently
-    // dead item in the bar. Follow-up PR adds the feature + UX.
-    let items = vec![custom_item(
-        mtm,
-        "Open Command Palette",
-        "p",
-        cmd_shift(),
-        target,
-        Action::OpenCommandPalette,
-    )];
-    submenu_item(mtm, "Terminal", items)
-}
-
-// ---- Window menu ------------------------------------------------------
-
-fn window_submenu(mtm: MainThreadMarker, _target: &MenuTarget) -> Retained<NSMenuItem> {
-    let items = vec![
-        system_item(mtm, "Minimize", "m", cmd(), sel!(performMiniaturize:)),
-        system_item(mtm, "Zoom", "", NSEventModifierFlags::empty(), sel!(performZoom:)),
-        separator(mtm),
-        system_item(
-            mtm,
-            "Bring All to Front",
-            "",
-            NSEventModifierFlags::empty(),
-            sel!(arrangeInFront:),
-        ),
-    ];
-    let item = submenu_item(mtm, "Window", items);
-    // Tell AppKit this is THE Window menu (gets auto-populated with
-    // the live window list). Requires a separate `setWindowsMenu:`
-    // call on the application.
-    if let Some(menu) = item.submenu() {
-        let mtm2 = mtm;
-        let app = NSApplication::sharedApplication(mtm2);
-        app.setWindowsMenu(Some(&menu));
-    }
-    item
-}
-
-// ---- Help menu --------------------------------------------------------
-
-fn help_submenu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<NSMenuItem> {
-    submenu_item(
-        mtm,
-        "Help",
-        vec![custom_item(
-            mtm,
-            "Sonic User Guide",
-            "",
-            NSEventModifierFlags::empty(),
-            target,
-            // Reuse OpenSshPane(...) is wrong — we want a distinct
-            // browser-open path. The cleanest way without bloating
-            // the Action enum further is to push a no-op + run the
-            // open via a small helper here. Below dispatch uses
-            // OpenPreferences as a placeholder; the actual user-guide
-            // open is fired synchronously here before dispatch.
-            Action::OpenPreferences,
-        )],
-    )
+    tracing::info!("macOS native menubar installed");
 }
 
 // ---------------------------------------------------------------------
-// Theme list helper.
+// Theme list helper (kept for callers that still scan).
 // ---------------------------------------------------------------------
 
-/// Scan `assets/themes/` for `*.toml` files and return a sorted list
-/// of bare theme names (e.g. `["dracula", "nord", "tokyo-night"]`).
-/// Returns an empty list (logged at WARN) if the directory cannot be
-/// read — the menubar still installs, just with an empty Theme
-/// submenu.
 pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
     let Ok(read) = std::fs::read_dir(themes_dir) else {
         tracing::warn!("menubar: cannot read theme dir {themes_dir:?}");
@@ -482,11 +469,12 @@ mod tests {
 
     #[test]
     fn register_and_lookup_round_trips() {
-        let tag = register(Action::NewTab);
+        reset_registry_for_tests();
+        let tag = register(MenuEntry::Act(Action::NewTab));
         assert!(tag >= 1);
         let got = lookup(tag).expect("registered tag should resolve");
-        assert!(matches!(got, Action::NewTab));
-        assert!(lookup(0).is_none(), "tag 0 is invalid by design");
+        assert!(matches!(got, MenuEntry::Act(Action::NewTab)));
+        assert!(lookup(0).is_none());
         assert!(lookup(-1).is_none());
     }
 }
