@@ -70,6 +70,11 @@ pub struct PaletteLayout {
     pub query_label: String,
     /// Display labels for each row in `rows`, parallel order.
     pub row_labels: Vec<String>,
+    /// When the filter produced zero matches, the layout still emits a
+    /// modal + query row but `rows` is empty; the renderer should paint
+    /// this centered placeholder string instead of the unfiltered list.
+    /// `None` whenever `rows` is non-empty.
+    pub empty_label: Option<String>,
 }
 
 /// One row inside the palette action list.
@@ -84,9 +89,16 @@ impl PaletteLayout {
     /// Build the layout for a window of `window_w × window_h` physical
     /// pixels. Returns `None` when the palette is closed — callers should
     /// not draw anything in that case.
+    ///
+    /// Takes the palette by `&mut` so it can publish the current
+    /// `visible_rows` count back into the state — subsequent arrow-key
+    /// navigation uses that to keep the highlighted row inside the
+    /// rendered viewport (the bug this PR fixes was that the selection
+    /// could move past the visible window and the highlight quad would
+    /// then be drawn offscreen below the modal).
     #[must_use]
     pub fn compute(
-        palette: &CommandPalette,
+        palette: &mut CommandPalette,
         window_w: f32,
         window_h: f32,
     ) -> Option<PaletteLayout> {
@@ -118,19 +130,21 @@ impl PaletteLayout {
         let list_bottom = bg.y + bg.h - PALETTE_INNER_PAD;
         let avail = (list_bottom - list_top).max(0.0);
         let max_rows = (avail / PALETTE_ROW_HEIGHT).floor() as usize;
+
+        // Publish viewport size to the state so the next key press can
+        // clamp scroll_offset correctly.
+        palette.set_visible_rows(max_rows);
+
         let visible = palette.visible();
         let total = visible.len();
 
-        // Scroll so the selected index is always inside the window.
-        let selected = palette.selected();
-        let window_start = if total == 0 || max_rows == 0 {
-            0
-        } else if selected >= max_rows {
-            selected + 1 - max_rows
-        } else {
-            0
-        };
+        // Use the palette's own scroll_offset (kept in sync by
+        // ensure_selected_in_view inside the state) so the viewport
+        // tracks the selection across every input path — keys, mouse,
+        // backspace, refilter.
+        let window_start = palette.scroll_offset().min(total.saturating_sub(max_rows));
         let window_end = (window_start + max_rows).min(total);
+        let selected = palette.selected();
 
         let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
         let mut row_labels = Vec::with_capacity(rows.capacity());
@@ -160,9 +174,32 @@ impl PaletteLayout {
         // keystroke lands.
         query_label.push('▏');
 
-        Some(PaletteLayout { border, bg, query_row, rows, selected_row, query_label, row_labels })
+        // Zero-matches placeholder. Shown only when the user has typed
+        // something AND every action was filtered out. With an empty
+        // query we still surface the full action universe.
+        let empty_label = if total == 0 && !palette.query().is_empty() {
+            Some(NO_MATCHES.to_string())
+        } else {
+            None
+        };
+
+        Some(PaletteLayout {
+            border,
+            bg,
+            query_row,
+            rows,
+            selected_row,
+            query_label,
+            row_labels,
+            empty_label,
+        })
     }
 }
+
+/// Placeholder shown in the action list when the current query filters
+/// every action out. Exposed for tests + so the renderer doesn't have to
+/// duplicate the string.
+pub const NO_MATCHES: &str = "No commands found";
 
 /// Layout of the bottom-right search bar.
 #[derive(Debug, Clone, Copy, PartialEq)]

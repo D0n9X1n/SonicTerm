@@ -25,7 +25,9 @@ use crate::{
     cursor::{self, CursorShape},
     glyph_atlas::{AtlasUpload, GlyphAtlas},
     ime::ImeState,
-    overlays::{search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout},
+    overlays::{
+        search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_INNER_PAD,
+    },
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
@@ -1080,7 +1082,7 @@ impl GpuRenderer {
         pane_rects: &[(u64, PaneRect)],
         active_pane: u64,
         search: Option<&SearchState>,
-        palette: Option<&CommandPalette>,
+        palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
@@ -1101,6 +1103,7 @@ impl GpuRenderer {
         // keystroke into the query box (which changes neither the grid
         // revision nor the active tab) still invalidates the cached frame.
         let palette_hash: u64 = palette
+            .as_deref()
             .filter(|p| p.is_open())
             .map(|p| {
                 use std::hash::{Hash, Hasher};
@@ -1112,6 +1115,7 @@ impl GpuRenderer {
                 p.query().hash(&mut h);
                 p.selected().hash(&mut h);
                 p.len().hash(&mut h);
+                p.scroll_offset().hash(&mut h);
                 h.finish()
             })
             .unwrap_or(0);
@@ -2010,6 +2014,10 @@ impl GpuRenderer {
                 }
                 rows_text.push_str(label);
             }
+            // No matches: render the placeholder in place of the row list.
+            if let Some(ph) = &layout.empty_label {
+                rows_text.push_str(ph);
+            }
             self.palette_rows_buffer.set_text(
                 &mut self.font_system,
                 &rows_text,
@@ -2217,14 +2225,24 @@ impl GpuRenderer {
             custom_glyphs: &[],
         });
         let palette_rows_area = palette_layout.as_ref().and_then(|layout| {
-            layout.rows.first().map(|first| TextArea {
+            // Pick the y-position: first real row when there are matches,
+            // otherwise just below the query row for the empty placeholder.
+            let (row_x, row_y) = if let Some(first) = layout.rows.first() {
+                (first.rect.x, first.rect.y)
+            } else if layout.empty_label.is_some() {
+                let y = layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD;
+                (layout.bg.x + PALETTE_INNER_PAD, y)
+            } else {
+                return None;
+            };
+            Some(TextArea {
                 buffer: &self.palette_rows_buffer,
-                left: first.rect.x + 4.0,
-                top: first.rect.y + 2.0,
+                left: row_x + 4.0,
+                top: row_y + 2.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: layout.bg.x as i32,
-                    top: first.rect.y as i32,
+                    top: row_y as i32,
                     right: (layout.bg.x + layout.bg.w) as i32,
                     bottom: (layout.bg.y + layout.bg.h) as i32,
                 },
