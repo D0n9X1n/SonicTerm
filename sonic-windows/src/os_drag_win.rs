@@ -406,7 +406,14 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
                 Ok(p) => {
-                    PENDING_PAYLOAD.put(p);
+                    // Both stash in the legacy single-slot (kept for
+                    // backwards-compat with the one-shot startup drain
+                    // in main.rs) AND wake the event loop via the
+                    // bridge so subsequent drops in the same session
+                    // are observed — the legacy slot is only drained
+                    // once at startup. See PR #139 review.
+                    PENDING_PAYLOAD.put(p.clone());
+                    sonic_shared::os_drag_bridge::push_tab_payload(p);
                     // SAFETY: OLE out-param.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };
                     return Ok(());
@@ -418,11 +425,18 @@ impl IDropTarget_Impl for DropTarget_Impl {
         }
         // Fall through to CF_HDROP file drop.
         if let Some(paths) = read_hdrop(data) {
-            let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
+            // Route through the bridge so the main thread spawns the
+            // paste action under the App borrow. Falling back to the
+            // legacy install_file_drop_sink callback if one was
+            // installed for tests / future use.
+            let pathbufs: Vec<std::path::PathBuf> =
+                paths.iter().map(std::path::PathBuf::from).collect();
+            sonic_shared::os_drag_bridge::push_files(pathbufs);
             if let Some(sink) = file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()).clone() {
+                let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
                 sink(quoted);
             } else {
-                tracing::debug!(?paths, "CF_HDROP dropped but no file-drop sink installed");
+                tracing::debug!(?paths, "CF_HDROP routed via os_drag_bridge");
             }
             // SAFETY: OLE out-param.
             unsafe { *pdweffect = DROPEFFECT_COPY };
