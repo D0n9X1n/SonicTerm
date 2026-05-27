@@ -146,6 +146,8 @@ client.
   feature, with keybindings.
 - 🗺️ **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — what's shipped, what's
   next, what's deferred.
+- 🏗 **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the 10-crate
+  dependency graph and where to put new modules.
 - 🐚 **[`docs/shell-integration.md`](docs/shell-integration.md)** —
   one-line snippets to enable OSC 133 prompt marks in bash / zsh / fish /
   PowerShell.

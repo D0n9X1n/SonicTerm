@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-27 (v1.0.0 IN PROGRESS — release notes staged in [`CHANGELOG.md`](../CHANGELOG.md), tag pending operational cert procurement; see [`RELEASE.md`](../RELEASE.md))
+Last updated: 2026-05-27 (v1.0-RC — 29+ PRs this session: crate decomposition #145/#151–#160, render+app module split #157/#160, Windows MVP #133–#139, perf pass #129–#142, P0 ANSI-bg fix #163. Release notes in [`CHANGELOG.md`](../CHANGELOG.md); tag pending operational cert procurement and honest perf-parity sign-off; see [`RELEASE.md`](../RELEASE.md))
 
 ---
 
@@ -25,7 +25,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 
 | Capability | Status | Where |
 |---|---|---|
-| Cargo workspace, 4 crates (flat top-level layout) | ✅ | bootstrap |
+| Cargo workspace, 10 leaf crates under `crates/` (post-#145, #151–#158) | ✅ | `crates/` |
 | GitHub Actions CI (mac+win: fmt/clippy/test + deny) | ✅ | bootstrap |
 | Release pipeline (tag → universal .dmg + x64 .msi) | ✅ | bootstrap |
 | VT/ANSI parser (CSI cursor, ED, EL, SGR 256+truecolor, OSC 0/2/8/52) | ✅ | bootstrap |
@@ -61,8 +61,13 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | B3 atlas renderer + headless GUI bench | ✅ v0.8 | (#42, #44, #74) |
 | WezTerm visual parity (≤ 3 ΔE on standard recipe) | ✅ v0.8 | (#70, #75) |
 | Windows MVP (MSI, titlebar+Mica, menu, OLE drag, fg-proc probe) | ✅ v1.0 | (#133, #134, #135, #137, #139) |
-| Renderer + VT + PTY perf pass | ✅ v1.0 | (#129, #130, #131, #132, #136, #138, #140, #141, #142) |
-| Code-signing pipeline (Azure Trusted Signing + macOS notarization) | ✅ v1.0 | (#128); certs pending |
+| Renderer + VT + PTY perf pass (8 wins) | ⏳ partial | landed: #129, #130, #131, #132, #136, #138, #140, #141, #142; still 6–302× behind WezTerm on vtebench — Phase E continues |
+| Crate decomposition (sonic-core → sonic-{vt,grid,cfg,io} + sonic-{types,text,ui,render-model,gpu,app}) | ✅ v1.0-RC | (#145, #151, #152, #153, #154, #155, #156, #157, #158, #160) |
+| Per-cell ANSI background colors render correctly (P0 regression fix) | ✅ v1.0-RC | (#161 spec → #163 fix) |
+| PTY burst flag converted to generation counter (race fix) | ✅ v1.0-RC | (#162) |
+| Default font switched to St Helens (system-installed, not bundled) | ✅ v1.0-RC | (#148) |
+| Code-signing pipeline (Azure Trusted Signing + macOS notarization) | ✅ pipeline / ⏳ certs | (#39, #128); certs pending procurement |
+| Honest perf parity with WezTerm on vtebench | ⏳ v1.x | — |
 | Half-transparent / blur backgrounds | ⏳ | — |
 | Auto-update (Sparkle / WinSparkle) | ⏳ post-v1.0 | — |
 | Linux re-enable, session restore | ⏳ post-v1.0 | — |
@@ -155,43 +160,72 @@ Highlights:
 13. **Docs**: README/USER_GUIDE overhaul (#60), TESTING.md (#67),
     VISUAL_PARITY.md (#70), CI-BILLING.md (#73).
 
-### ⏳ v1.0.0 — Production (IN PROGRESS, 2026-05-27)
+### ⏳ v1.0-RC — Production candidate (IN PROGRESS, 2026-05-27)
 
-15 PRs landed in this session; release notes are staged in
+29+ PRs landed in this session; release notes staged in
 [`CHANGELOG.md`](../CHANGELOG.md). Tag pending operational cert
-procurement.
+procurement AND an honest perf-parity sign-off (see below).
 
-PRs landed today:
+PRs landed this session:
 
+- **Crate decomposition (refactor)**: #145 (move to `crates/` nesting),
+  #151 (extract `sonic-types`), #152 (split `sonic-core` into
+  `sonic-vt` / `sonic-grid` / `sonic-cfg` / `sonic-io` + façade), #153
+  (extract `sonic-text`: shape + atlas + raster), #154 (extract
+  `sonic-ui`: tabs / panes / search / palette / IME / prefs / i18n),
+  #155 (extract `sonic-render-model`), #156 (extract `sonic-gpu`),
+  #157 (split `render.rs` → `render/{color,metrics,tab_spans,cursor,drag_chip,core}.rs`),
+  #158 (extract `sonic-app`), #160 (split `app.rs` into 16 modules
+  under `app/`).
+- **P0 correctness fix**: #161 (spec) → #163 (fix) — per-cell ANSI
+  background colors were silently dropped before reaching the text
+  pipeline; htop/tmux/fzf rendered with theme bg instead of cell bg.
+- **PTY race fix**: #162 — `input_dirty` flipped from bool to
+  generation counter so the renderer can't lose a burst that lands
+  between "clear flag" and "draw frame".
+- **Default font**: #148 — `St Helens` is the new default (system,
+  not bundled); `Rec Mono Casual` remains as guaranteed fallback.
 - **Windows MVP**: #133 (MSI pipeline), #134 (foreground-process
   probe), #135 (cross-platform menu abstraction), #137 (custom
   titlebar + Mica backdrop), #139 (OLE drag-drop for tab tear-out +
   file drop).
-- **Renderer perf**: #130 (dirty bitset foundation), #136 (atlas LRU
-  eviction), #140 (per-row glyph cache), #141 (VecDeque visible rows),
-  #142 (pre-baked box-drawing + Powerline).
-- **VT + PTY + app loop**: #129 (4k LRU shape cache), #131 (zero-copy
-  PTY reads via BytesMut ring), #132 (vsync frame pacing via
-  `ControlFlow::WaitUntil`), #138 (SWAR ASCII fast-path in VT parser).
+- **Renderer / VT / PTY perf**: #129 (4k LRU shape cache), #130
+  (dirty bitset foundation), #131 (zero-copy PTY BytesMut ring),
+  #132 (vsync pacing via `ControlFlow::WaitUntil`), #136 (atlas LRU
+  eviction), #138 (SWAR ASCII fast-path), #140 (per-row glyph cache),
+  #141 (VecDeque visible rows), #142 (pre-baked box-drawing +
+  Powerline glyphs).
 - **Signing pipeline**: #128 (Azure Trusted Signing for Windows +
   macOS notarization plumbing).
 
-Remaining gates before the v1.0 tag goes out are operational, not
-code:
+#### Honest perf status
 
-1. **macOS signing + notarization** — Apple Developer Program ($99/yr).
+The 8 perf wins closed ~30–60% of the gap on cat-large-file and
+tail-f hot paths. They did **not** achieve WezTerm parity. Current
+`vtebench` numbers vs WezTerm on the same hardware show Sonic
+**6×–302× slower** depending on the benchmark — worst on heavy SGR
+attribute streams and dense scrollback writes (see
+`/tmp/sonic-vs-wezterm.md` notes). Phase E (perf parity) is ongoing,
+not done. Do not call this "complete" in commit messages or PR
+bodies.
+
+Remaining gates before the v1.0 tag goes out:
+
+1. **Honest perf-parity sign-off** — vtebench within ~2× of WezTerm
+   on the standard suite. This is the substantive blocker.
+2. **macOS signing + notarization** — Apple Developer Program ($99/yr).
    Workflow infra in place (#39 + #128); add the secrets and re-tag.
-2. **Windows signing** — Azure Trusted Signing tenant + cert. Workflow
-   infra ready (#128); secrets pending.
+3. **Windows signing** — Azure Trusted Signing tenant + cert.
+   Workflow infra ready (#128); secrets pending.
 
 Still deferred past v1.0:
 
-3. **Auto-update**: Sparkle on macOS, Squirrel or WinSparkle on Windows.
-4. **Session restore**: persist tab/pane layouts to disk on shutdown,
+4. **Auto-update**: Sparkle on macOS, Squirrel or WinSparkle on Windows.
+5. **Session restore**: persist tab/pane layouts to disk on shutdown,
    restore on next launch (complements `sonic-mux` from v0.8).
-5. **Linux support**: re-enable `sonic-linux`, add to CI matrix and
+6. **Linux support**: re-enable `sonic-linux`, add to CI matrix and
    release pipeline, AppImage + `.deb`.
-6. **Half-transparent / blur backgrounds** (rolled forward from v0.8).
+7. **Half-transparent / blur backgrounds** (rolled forward from v0.8).
 
 ---
 
@@ -212,8 +246,7 @@ Still deferred past v1.0:
    ```
 7. **Test bar**: every behavior change ships with a unit/integration test
    in the relevant crate's `tests/` folder. Workspace target: **never let
-   test count regress.** Current floor: **171** as of v0.6 + per-crate
-   `tests/` split (#27).
+   test count regress.** Current floor: **824** as of v1.0-RC.
 
 ---
 
@@ -238,9 +271,10 @@ Still deferred past v1.0:
 - **Spec files**: kept in PRs/commit messages alongside the
   [user guide](USER_GUIDE.md), not as standalone spec entries in this
   repo. Update this `ROADMAP.md` when shipping.
-- **Crates live at the top level** (`sonic-core/`, `sonic-shared/`,
-  `sonic-mac/`, `sonic-windows/`). The old `crates/` nesting was removed
-  in `9c46c39`. Don't reintroduce it.
+- **Crates live under `crates/`** — flat top-level layout was used between
+  `9c46c39` and #145; PR #145 restored the nested `crates/<name>/`
+  layout to keep room for the leaf decomposition (#151–#158). Don't
+  flatten again without an explicit plan.
 - **Tests go in each crate's `tests/` folder** (integration-style), not
   inline `#[cfg(test)] mod tests` blocks (#27).
 - **Commit format**: Conventional Commits with scope =

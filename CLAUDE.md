@@ -10,8 +10,8 @@ The intent of this file is that **any Claude agent dropped into this repo can be
 
 A **GPU-accelerated, cross-platform terminal** for macOS + Windows.
 
-- Performance first. Beat WezTerm if at all possible.
-- Linux, code signing, auto-update, SSH, mux are **explicitly deferred** to v1.0.
+- Performance first. Beat WezTerm if at all possible. We are not there yet — see §14.
+- Linux, code signing (cert procurement), auto-update, session restore are **explicitly deferred** past v1.0.
 - WezTerm-compatible keymap is the default.
 - The icon is canonical and user-supplied — don't replace it.
 
@@ -21,27 +21,42 @@ The authoritative running-status doc is **`docs/ROADMAP.md`**. Read it first. Up
 
 ## 1. What ships and where it lives
 
-### Crates (under `crates/` directory at top of repo)
+### Crates (under `crates/` directory — restored to nested layout in PR #145)
+
+Pre-#145 the crates lived flat at the repo root. The reorganization in PR #145 moved everything under `crates/`, and PRs #151–#158 then decomposed the original `sonic-core` + `sonic-shared` monoliths into ten leaf crates plus two thin façades. New code should depend on the leaf crate directly; `sonic-core` remains as a deprecated re-export shim for back-compat.
 
 | Crate | Role | Key items |
 |---|---|---|
-| `crates/sonic-core/` | Platform-agnostic engine | `vt::Parser` (vte + Performer), `grid::Grid` (cells, scrollback, wide chars, alt screen), `pty::PtyHandle`, `keymap::{Action, Keymap}`, `theme::Theme`, `config::Config`, `hyperlink::HyperlinkRegistry`, `url_open` |
-| `crates/sonic-shared/` | GPU rendering + app loop + UI models | `app::App` (winit ApplicationHandler), `render::GpuRenderer` (wgpu+glyphon), `quad::QuadPipeline`, `tabs::TabBar`, `tabbar_view::TabBarLayout`, `pane::PaneTree`, `selection::Selection`, `search::SearchState`, `prefs/` subsystem |
+| `crates/sonic-types/` | Zero-dep value types | `Cell`, `Pos`, `Action`, `GlyphKey`, `HyperlinkId`, geometry primitives (#151) |
+| `crates/sonic-vt/` | VT/ANSI parser | `vt::Parser`, `vt::Performer` (vte + Performer), SWAR ASCII fast-path (#152, #138) |
+| `crates/sonic-grid/` | Terminal grid + scrollback | `grid::Grid` (cells, scrollback, wide chars, alt screen), `hyperlink::HyperlinkRegistry`, dirty bitset (#152, #130) |
+| `crates/sonic-cfg/` | Config / theme / keymap / URL safety | `config::Config`, `theme::Theme`, `keymap::{Action, Keymap}`, `url_open::validate` (#152) |
+| `crates/sonic-io/` | PTY + process probes + SSH | `pty::PtyHandle`, `proc_info`, `foreground_proc` (Windows), `ssh` (feature-gated) (#152) |
+| `crates/sonic-text/` | Shaping + atlas | `shape` (LRU shape cache), `swash_rasterizer`, `glyph_atlas`, `row_glyph_cache` (#153) |
+| `crates/sonic-render-model/` | Renderer-agnostic frame model | `geometry`, `inputs`, `painter` traits — what to draw, not how (#155) |
+| `crates/sonic-ui/` | UI widgets & overlays | `tabs`, `tabbar_view`, `pane`, `selection`, `search`, `command_palette`, `ime`, `cursor`, `i18n`, `prefs/` (#154) |
+| `crates/sonic-gpu/` | wgpu pipelines | `quad::QuadPipeline`, `text_pipeline`, `atlas_upload` (#156) |
+| `crates/sonic-app/` | Winit app loop + platform glue | `app::App` (winit ApplicationHandler) split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,prefs_window,config_apply,search_handle,misc}.rs`; `menu`, `os_drag`, `tab_drag`, `config_watch` (#158, #160) |
+| `crates/sonic-core/` | **Deprecated façade** | re-exports `sonic_vt::vt`, `sonic_grid::{grid,hyperlink}`, `sonic_cfg::{config,theme,keymap,url_open}`, `sonic_io::{pty,proc_info,ssh,foreground_proc}` for back-compat |
+| `crates/sonic-shared/` | **Thin façade** | re-exports `sonic_ui::*` + `render/` module split across `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs` (#157) |
 | `crates/sonic-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonic_shared::run` |
 | `crates/sonic-windows/` | Windows bin | same shape |
-| `crates/sonic-mux/` | Mux scaffolding (deferred) | placeholder for v1.0 mux work |
+| `crates/sonic-mux/` | Persistent PTY mux daemon | shipped v0.8 (#56), feature-gated remote attach is post-v1.0 |
+
+See **`docs/ARCHITECTURE.md`** for the full dep graph.
 
 ### Assets
 
 - `assets/icons/source/sonic.svg` — hand-authored SVG master (user-supplied final design). Variants: `sonic-mono.svg`, `sonic-glyph.svg`.
 - `assets/icons/exports/` — committed PNG / .icns / .ico bakes. Regenerate with `bash assets/icons/bake-icons.sh` (needs `brew install librsvg`).
-- `assets/themes/{tokyo-night,dracula,nord,catppuccin-mocha}.toml`
+- `assets/themes/{tokyo-night,dracula,nord,catppuccin-mocha,gruvbox-dark-hard,wezterm}.toml`
 - `assets/keymaps/wezterm.toml`
-- `assets/fonts/` — JetBrainsMono Nerd Font (provisioned by build / bake script).
+- `assets/fonts/` — `Rec Mono Casual` shipped as guaranteed-present fallback. **Default font is `St Helens`** (#148), system-installed, not bundled — renderer falls through to system mono if missing.
 
 ### Docs
 
 - `docs/ROADMAP.md` — ground truth for milestone status + constraints.
+- `docs/ARCHITECTURE.md` — 10-crate dep graph and module split rationale.
 - `docs/brand/icon.md` — brand guide: palette, geometry, usage rules.
 - `docs/specs/` — historical design specs (mark "superseded" rather than delete).
 
@@ -60,12 +75,12 @@ cargo build --release -p sonic-mac                             # confirms fat-LT
 
 `cargo-deny` runs in CI on Ubuntu (`cargo install cargo-deny --locked` + `cargo deny check` locally if you touched any dep). CI matrix is `macos-14` + `windows-latest` only.
 
-**Test floor: never let workspace test count regress. Current floor = 171.** Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
+**Test floor: never let workspace test count regress. Current floor = 824** (post-#160 split — was 171 at v0.6, climbed steadily through v0.8 capability matrix + v1.0 perf PRs). Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
 
 ### E2E binaries (use these to verify, not just unit tests)
 
-- `cargo run --example pty_dump -p sonic-core --release` — spawns the user shell, runs `ls --color=always /` + a bold/italic/underline `printf`. **Exits non-zero if grid lacks colored/styled cells.** This is the canonical end-to-end gate; any VT/grid/PTY change must keep this green.
-- `cargo run --example pty_dump_unicode -p sonic-core --release` — sibling that feeds one shibboleth char from every Unicode class we promise to support (CJK, Hiragana, Katakana, Hangul, emoji, box-drawing, Powerline PUA, fullwidth, Latin-1) and **exits non-zero if any are missing from the resulting grid**. This is the canonical Unicode-end-to-end gate — added to catch the PR-#42-class regression where every existing test used ASCII only.
+- `cargo run --example pty_dump -p sonic-core --release` — spawns the user shell, runs `ls --color=always /` + a bold/italic/underline `printf`. **Exits non-zero if grid lacks colored/styled cells.** Canonical end-to-end gate; any VT/grid/PTY change must keep this green.
+- `cargo run --example pty_dump_unicode -p sonic-core --release` — feeds one shibboleth char from every Unicode class we promise to support (CJK, Hiragana, Katakana, Hangul, emoji, box-drawing, Powerline PUA, fullwidth, Latin-1) and **exits non-zero if any are missing from the resulting grid**. Canonical Unicode-end-to-end gate — added to catch the PR-#42-class regression where every existing test used ASCII only.
 - `cargo run --example altscreen_smoke -p sonic-core --release`
 - `cargo run --example pane_smoke -p sonic-shared --release`
 
@@ -75,46 +90,51 @@ cargo build --release -p sonic-mac                             # confirms fat-LT
 
 ```
                           ┌──────────────────────────────┐
-   shell stdout ──pty▶    │  Parser (vte + Performer)    │ ─▶ Grid (cells, scrollback,
-   ▲                       │  sonic-core::vt              │     wide chars, alt screen)
-   │                       └──────────────────────────────┘                │
+   shell stdout ──pty▶    │  Parser (vte + SWAR fast-path)│ ─▶ Grid (cells, scrollback,
+   ▲                       │  sonic-vt::vt                 │     wide chars, alt screen,
+   │                       └──────────────────────────────┘     dirty bitset)
+   │                                                                       │  sonic-grid
+   PTY thread (BytesMut ring,                                              ▼
+   redraw-coalesced — see                                            Grid is the
+   spawn_pane.rs)                                                    shared state
+   ▲                                                                       │
    │                                                                       ▼
-   PTY thread (16ms coalesce)                                       Grid is the
-   ▲                                                                shared state
+   App (winit ApplicationHandler)  ──▶  shape (LRU) ──▶ atlas ──▶ wgpu (quad + text)
+   ▲   sonic-app::app::App                sonic-text          sonic-gpu
+   │   split across app/*.rs (#160)
    │
-   App (winit ApplicationHandler) ──▶ GpuRenderer (wgpu+glyphon) ──▶ frame
-   ▲       sonic-shared::app             sonic-shared::render
-   │
-   keys/mouse  ──▶ keymap dispatcher (sonic_core::keymap::Action)
+   keys/mouse  ──▶ keymap dispatcher (sonic_cfg::keymap::Action)
                    super+T new tab, super+D split, super+, prefs, etc.
 ```
 
 **Per-pane state** (since v0.3d): each pane in a tab owns its own `Grid + Parser + PtyHandle`. Splitting a pane spawns a new shell. `impl Drop for PtyHandle` explicitly kills the child to prevent orphans (caught by Haiku review of PR #21).
 
 **Rendering pipeline** has two layers per frame:
-1. **glyphon** for shaped text — fed via `Buffer::set_rich_text(spans)` with one styled span per attribute run (color + weight + italic).
-2. **Custom wgpu quad pipeline** (`sonic-shared/src/quad.rs`) for everything else — cursor, selection highlight, underlines, hyperlink tints, tab-bar chrome, search-match highlight, focused-pane border.
+1. **Text** through `sonic-text` (LRU shape cache → swash rasterizer → glyph atlas → row-glyph cache) into the wgpu text pipeline in `sonic-gpu`. Per-cell foreground + background ANSI colors and bold/italic/underline are emitted as styled attributes per run.
+2. **Custom wgpu quad pipeline** (`sonic-gpu/src/quad.rs`) for everything else — cursor, selection highlight, underlines, hyperlink tints, tab-bar chrome, search-match highlight, focused-pane border.
 
 ---
 
 ## 4. Land-mines (each was a real bug; do not re-introduce)
 
 ### Threading / event loop
-- **Render uses `try_lock` on the parser, not `lock`.** Earlier `lock()` deadlocked the macOS main thread under shell-startup output bursts.
-- **VT thread coalesces redraw requests to ≥16ms.** Otherwise the OS marks the app unresponsive.
+- **Render uses `try_lock` on the parser, not `lock`.** Earlier `lock()` deadlocked the macOS main thread under shell-startup output bursts. Current locations: `crates/sonic-app/src/app/window_event.rs` (the redraw path) and `crates/sonic-app/src/app/{child_window,misc}.rs`. Comments in window_event.rs at lines ~143 / ~162 explain the AB-BA deadlock.
+- **PTY-thread redraw coalescing.** Live in `crates/sonic-app/src/app/spawn_pane.rs` (~line 76: "Coalesce redraw requests so a burst of pty output…"). A 16 ms min interval keeps the OS from marking the app unresponsive. PR #132 layered vsync pacing on top via `ControlFlow::WaitUntil` in `event_loop.rs`.
+- **PTY burst flag is a generation counter, not a bool** (PR #162). The original `bool input_dirty` raced when the renderer cleared it between two bursts. The counter version compares "what I last drew" vs "what arrived" — see `crates/sonic-app/src/app/window_event.rs` ~line 34: "with this flag still false and continue to coalesce". Don't revert to `bool`.
 - **No unconditional "heartbeat redraw" at the end of `window_event`.** It creates a feedback loop. Real triggers (pty bytes / mouse drag / key / resize) cover every case.
 
 ### Parser correctness
-- **CSI `J` (ED) and `K` (EL) MUST honor the mode parameter.** `J0` is "erase below", `J1` is "above", `J2` is "all". The original code erased everything regardless — every shell prompt redraw wiped output. Regression: `tests/vt.rs::shell_prompt_redraw_preserves_above_cursor`.
-- **CSI `?1049h` must be a no-op when already in alt screen.** Otherwise vim/fzf re-entry clobbers `saved_cursor`. Regression: `dec_1049h_repeated_does_not_clobber_saved_cursor`.
-- **`PtyHandle::Drop` kills the child explicitly.** Just dropping the trait object doesn't terminate the shell.
+- **CSI `J` (ED) and `K` (EL) MUST honor the mode parameter.** `J0` is "erase below", `J1` is "above", `J2` is "all". The original code erased everything regardless — every shell prompt redraw wiped output. Lives in `crates/sonic-vt/src/vt.rs`. Regression: `crates/sonic-vt/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor`.
+- **CSI `?1049h` must be a no-op when already in alt screen.** Otherwise vim/fzf re-entry clobbers `saved_cursor`. `crates/sonic-vt/src/vt.rs`. Regression: `dec_1049h_repeated_does_not_clobber_saved_cursor`.
+- **`PtyHandle::Drop` kills the child explicitly.** Just dropping the trait object doesn't terminate the shell. Lives in `crates/sonic-io/src/pty.rs`.
 
 ### Security / safety
-- **`sonic_core::url_open::validate()` is mandatory before spawning anything.** OSC 8 URIs come from untrusted pty output; on Windows `cmd /C start` re-tokenizes through cmd's parser. Allow-list: `http`, `https`, `mailto`, `file`. Denylist: `& | ^ < > " ' \` CR LF NUL` + other control chars. Length capped at 4096.
+- **`sonic_cfg::url_open::validate()` is mandatory before spawning anything.** OSC 8 URIs come from untrusted pty output; on Windows `cmd /C start` re-tokenizes through cmd's parser. Allow-list: `http`, `https`, `mailto`, `file`. Denylist: `& | ^ < > " ' \` CR LF NUL` + other control chars. Length capped at 4096. Lives in `crates/sonic-cfg/src/url_open.rs`.
 
 ### Rendering
-- **`wgpu::CurrentSurfaceTexture::Suboptimal(frame)` must drop the SurfaceTexture before calling `surface.configure(...)`.** Otherwise wgpu 29 panics ("texture still alive").
-- **`set_text` vs `set_rich_text`**: per-cell color/weight/style requires `set_rich_text(spans, default_attrs, Shaping::Advanced, None)` — the cosmic-text 0.18 API.
+- **Per-cell ANSI background colors must be emitted (P0, #161 → #163).** Pre-#163 the text pipeline silently dropped the `bg` field — only fg + attrs reached glyphon. A whole class of TUIs (`htop` selected-row stripe, `tmux` statusline, fzf preview) rendered with the theme background instead of the cell background. Fix in `crates/sonic-shared/src/render/core.rs` + `crates/sonic-gpu/src/text_pipeline.rs`. Don't regress: the test floor includes a "colored background round-trip" check fed by `pty_dump`.
+- **`wgpu::CurrentSurfaceTexture::Suboptimal(frame)` must drop the SurfaceTexture before calling `surface.configure(...)`.** Otherwise wgpu 29 panics ("texture still alive"). `crates/sonic-shared/src/render/core.rs`.
+- **`set_text` vs `set_rich_text`**: per-cell color/weight/style requires `set_rich_text(spans, default_attrs, Shaping::Advanced, None)` — the cosmic-text 0.18 API. Lives in `crates/sonic-shared/src/render/core.rs`.
 
 ### Coupling
 - **`wgpu`, `glyphon`, `cosmic-text` are a coherent triple.** Bumping one forces the others. Current: `wgpu 29` + `glyphon 0.11` + `cosmic-text 0.18`. Don't upgrade just one.
@@ -124,10 +144,10 @@ cargo build --release -p sonic-mac                             # confirms fat-LT
 
 ## 5. Coding conventions
 
-- **Prefer per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files. **New tests should follow this pattern.** The `sonic-shared/src/prefs/` subsystem (layout.rs, controls.rs, state.rs) still has inline `#[cfg(test)] mod tests {}` blocks from v0.6 and is the known exception — feel free to migrate them when you next touch that area, but it's not blocking.
+- **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files. **New tests follow this pattern.** The `sonic-ui/src/prefs/` subsystem (layout / controls / state) still has inline `#[cfg(test)] mod tests {}` blocks from v0.6 and is the known exception — migrate them when you next touch that area; not blocking.
 - **Test-only items that must remain accessible to integration tests stay `pub` with `#[doc(hidden)]`.** No `__test_support` shim modules — that pattern was explicitly removed.
-- **Public API for actions**: adding a new bindable user action means adding a variant to `sonic_core::keymap::Action` AND a match arm in `sonic_shared::app::App::run_action`.
-- **Conventional Commits** with scope: `feat(v0.3d): ...`, `fix(vt): ...`, `chore(deps): ...`, `docs: ...`.
+- **Public API for actions**: adding a new bindable user action means adding a variant to `sonic_cfg::keymap::Action` AND a match arm in `sonic_app::app::App` (via `keymap_dispatch.rs`).
+- **Conventional Commits** with scope: `feat(v1.0): ...`, `fix(vt): ...`, `chore(deps): ...`, `docs: ...`, `refactor(crates): ...`.
 - **Commit trailer**: every Claude-authored commit ends with:
   ```
   Co-Authored-By: Claude Opus 4 (1M context) <noreply@anthropic.com>
@@ -171,16 +191,16 @@ cd rebase-NN
 git config user.email noreply@anthropic.com && git config user.name "Claude Opus 4"
 git fetch origin main:main
 git rebase main
-# resolve conflicts; run the gate; cargo test must still print exactly N tests
+# resolve conflicts; run the gate; cargo test must still print ≥ floor tests
 git push --force-with-lease
 gh pr merge <N> -R D0n9X1n/sonic --squash --admin --delete-branch
 ```
 
 ### Parallelism rules
 
-- **Truly independent files only.** Two PRs that both touch `render.rs` or `app.rs` WILL conflict — serialize them.
-- Safe parallel: `sonic-core/src/hyperlink.rs` (new) + `sonic-shared/src/search.rs` (new) + `sonic-shared/src/quad.rs` (existing).
-- Risky parallel: anything touching render.rs / app.rs / Cell.
+- **Truly independent files only.** Two PRs that both touch `app/window_event.rs` or `render/core.rs` WILL conflict — serialize them.
+- Safe parallel: new files in `sonic-text/`, new modules under `app/`, documentation work.
+- Risky parallel: anything touching `app/window_event.rs`, `render/core.rs`, `Cell`, `keymap::Action`.
 - Documentation work is independent of code — always parallelizable.
 
 ### CI status
@@ -221,17 +241,17 @@ User config lives at:
 - macOS: `~/Library/Application Support/Sonic/sonic.toml`
 - Windows: `%APPDATA%\Sonic\sonic.toml`
 
-Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5).
+Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5). Default font is `St Helens` (system, not bundled); `Rec Mono Casual` ships under `assets/fonts/` as guaranteed fallback.
 
 ---
 
 ## 9. Release
 
 ```bash
-git tag v0.3.0 && git push origin v0.3.0
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
-triggers `.github/workflows/release.yml` → produces a universal macOS `.dmg` + x64 Windows `.msi`. No code signing yet (deferred). The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
+triggers `.github/workflows/release.yml` → produces a universal macOS `.dmg` + x64 Windows `.msi`. Signing pipeline is wired (Azure Trusted Signing for Windows in #128, Developer ID notarization for macOS in #39 + #128) but **certs are still pending procurement** — the v1.0 tag will ship unsigned until that operational step lands. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
 
 ---
 
@@ -245,9 +265,9 @@ triggers `.github/workflows/release.yml` → produces a universal macOS `.dmg` +
 
 ## 11. Renderer regressions (the rule that didn't exist before PR #42)
 
-PR #42 cut the terminal grid over to a swash-rasterized atlas (`sonic-shared/src/render.rs` + `swash_rasterizer.rs` + `glyph_atlas.rs`). It passed the local gate, Haiku review, AND the canonical `pty_dump` e2e — yet shipped a regression that drew every non-ASCII character as a tofu box. Cause: every test, every example, every benchmark used only ASCII, and the rasterizer's "primary family only, no fallback" code path was never exercised on a CJK glyph in CI.
+PR #42 cut the terminal grid over to a swash-rasterized atlas (now `crates/sonic-shared/src/render/core.rs` + `crates/sonic-text/src/swash_rasterizer.rs` + `crates/sonic-text/src/glyph_atlas.rs`). It passed the local gate, Haiku review, AND the canonical `pty_dump` e2e — yet shipped a regression that drew every non-ASCII character as a tofu box. Cause: every test, every example, every benchmark used only ASCII, and the rasterizer's "primary family only, no fallback" code path was never exercised on a CJK glyph in CI.
 
-**Rule:** any change to `sonic-shared/src/render.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`, `text_pipeline.rs`, or any file under `sonic-shared/src/*atlas*` / `*pipeline*` MUST be gated on the capability matrix passing:
+**Rule:** any change to `crates/sonic-shared/src/render/*.rs`, `crates/sonic-text/src/{swash_rasterizer,glyph_atlas,row_glyph_cache,shape}.rs`, or `crates/sonic-gpu/src/{text_pipeline,atlas_upload,quad}.rs` MUST be gated on the capability matrix passing:
 
 ```bash
 cargo test -p sonic-core --test vt_capability_matrix
@@ -257,7 +277,7 @@ cargo run --example pty_dump_unicode -p sonic-core --release
 
 The matrix exists because **the existing pty_dump e2e cannot catch this class of bug** — its shell payload is pure ASCII. Do NOT delete or weaken the matrix; if a class is intentionally dropped from scope, mark the corresponding test `#[ignore]` with a comment naming the deciding PR, never `#[cfg(skip)]` or deletion.
 
-Ignored tests in the matrix document capability gaps awaiting a fix (e.g. `fix/atlas-font-fallback`). Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.
+Ignored tests in the matrix document capability gaps awaiting a fix. Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.
 
 ---
 
@@ -282,9 +302,9 @@ Local `target/` is a separate ~5 GB cost (debug + release + deps + incremental).
 
 ## 13. GUI smoke test — MANDATORY for every PR that touches rendering / input / VT / window state
 
-The headless local gate (fmt / clippy / test / pty_dump) is necessary but not sufficient. Several real bugs have shipped past it: blank window (PR #36), CJK tofu (PR #42), 100 % idle CPU (PR #31), sRGB gamma washing out theme colors, low-DPI blur on Retina. None of these show up in `cargo test` because they need a real wgpu surface + real macOS window + real glyph upload.
+The headless local gate (fmt / clippy / test / pty_dump) is necessary but not sufficient. Several real bugs have shipped past it: blank window (PR #36), CJK tofu (PR #42), 100 % idle CPU (PR #31), sRGB gamma washing out theme colors, low-DPI blur on Retina, and **dropped ANSI background colors (#161 → P0 #163)**. None of these show up in `cargo test` because they need a real wgpu surface + real macOS window + real glyph upload.
 
-**Rule:** every PR that touches any file under `sonic-shared/src/render*.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`, `text_pipeline.rs`, `app.rs`, `quad.rs`, `tabbar_view.rs`, `sonic-core/src/vt.rs`, `sonic-core/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review:
+**Rule:** every PR that touches any file under `crates/sonic-shared/src/render/`, `crates/sonic-text/src/`, `crates/sonic-gpu/src/`, `crates/sonic-app/src/app/`, `crates/sonic-ui/src/{tabbar_view,overlays,cursor,selection,search}.rs`, `crates/sonic-vt/src/vt.rs`, `crates/sonic-grid/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review:
 
 ```bash
 pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
@@ -308,8 +328,9 @@ sleep 0.5
 #    - ASCII echo round-trip (PTY ↔ grid)
 #    - CJK glyph rasterization + font fallback
 #    - emoji color rendering
+#    - ANSI background color (the #163 regression class — must show a red stripe)
 #    - Enter / RET handling
-osascript -e 'tell application "System Events" to keystroke "echo 中文 🎉 sonic && date"'
+osascript -e 'tell application "System Events" to keystroke "printf '"'"'\\033[41mRED-BG\\033[0m echo 中文 🎉 sonic\\n'"'"' && date"'
 sleep 0.3
 osascript -e 'tell application "System Events" to key code 36'   # Enter / Return
 sleep 1
@@ -319,7 +340,7 @@ screencapture -x -D 1 /tmp/gui-smoke.png
 
 # 4. Inspect /tmp/gui-smoke.png — sample background pixel (theme.background should
 #    match the configured hex), confirm text renders, confirm no tofu boxes, confirm
-#    cursor present. Note pixel value of background; should match the active theme.
+#    cursor present, confirm the RED-BG cells show a red rectangle (not theme bg).
 
 kill -9 $PID 2>/dev/null
 ```
@@ -327,6 +348,7 @@ kill -9 $PID 2>/dev/null
 Things to check on the screenshot (open + look — do not trust your absence of an error message):
 
 - Window background pixel value matches `theme.colors.background` (no sRGB/linear double-gamma)
+- **Per-cell ANSI bg renders** — the `RED-BG` cells are red, not theme background (regression-guard for #163)
 - CJK 中 文 render as glyphs, not `?` and not tofu boxes
 - 🎉 renders in color (not monochrome silhouette)
 - Cursor is visible (not blank)
@@ -335,8 +357,12 @@ Things to check on the screenshot (open + look — do not trust your absence of 
 
 If any of those fail, the PR is not ready. Include the screenshot path AND a 1-line observation per check in the PR body. Reviewers will compare against the previous baseline screenshot.
 
-This rule was added after a session in which 10 PRs landed clean through fmt+clippy+test, then the user opened the actual app and immediately saw three visual bugs (wrong theme color, blurry text, garbled CJK box drawing) that none of the existing tests could catch.
-
 **For background agents:** the same gate applies — every agent dispatch for a render/input/VT PR must include the GUI smoke as a numbered step in the prompt, and the agent must paste the screenshot path + observation list in its reply. If the agent has no display (CI / sandbox), it MUST flag that fact explicitly and the PM (you) runs the smoke locally before merging.
 
+---
 
+## 14. Honest perf status (v1.0-RC)
+
+We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows Sonic **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
+
+**Rule:** do not describe perf work as "done" in commit messages or PR bodies. Phase E (perf parity) is ongoing. Concrete remaining items live in the v1.x section of `docs/ROADMAP.md`.
