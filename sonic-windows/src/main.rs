@@ -10,6 +10,8 @@ use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
 #[cfg(target_os = "windows")]
+mod menubar;
+#[cfg(target_os = "windows")]
 mod os_drag_win;
 
 fn main() -> Result<()> {
@@ -20,13 +22,33 @@ fn main() -> Result<()> {
     let keymap_loader: sonic_shared::KeymapLoader = Box::new(|name: &str| load_keymap(name));
     #[cfg(target_os = "windows")]
     {
-        sonic_shared::app::run_with_os_drag(
+        use sonic_shared::menu::{PlatformMenu, Sender};
+        // Install the muda menubar the instant winit hands us an HWND.
+        // muda's `init_for_hwnd` requires the window to exist; the
+        // `on_window_ready` hook fires exactly once, right after
+        // `el.create_window(...)` succeeds in `App::resumed`.
+        let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
+            Box::new(|raw| {
+                if let raw_window_handle::RawWindowHandle::Win32(h) = raw {
+                    let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+                    let mac = menubar::WinMenu::new(hwnd);
+                    if let Err(e) = mac.install(Sender::new()) {
+                        tracing::error!("WinMenu install failed: {e}");
+                    }
+                } else {
+                    tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
+                }
+            });
+        sonic_shared::app::run_with_os_drag_pending_and_window_hook(
             theme,
             config,
             keymap,
             os_drag_win::WinOsDragSink::arc(),
             Some(theme_loader),
             Some(keymap_loader),
+            None,
+            None,
+            Some(on_window_ready),
         )
     }
     #[cfg(not(target_os = "windows"))]

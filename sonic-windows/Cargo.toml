@@ -18,6 +18,7 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+muda = "0.19"
 
 [[bin]]
 name = "sonic-windows"

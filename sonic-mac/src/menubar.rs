@@ -8,6 +8,9 @@
 //! Help items that point to URLs are opened directly from the AppKit
 //! main thread via `NSWorkspace::openURL:` so no new `Action` variant
 //! is required.
+//!
+//! Shared blueprint + types live in [`sonic_shared::menu`]; this file
+//! is now the macOS-specific [`PlatformMenu`] implementation only.
 
 #![cfg(target_os = "macos")]
 
@@ -21,7 +24,12 @@ use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSW
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSURL};
 
 use sonic_core::keymap::Action;
-use sonic_shared::menubar_bridge;
+use sonic_shared::menu::{self, PlatformMenu, Sender};
+
+// Re-export shared blueprint types so external integration tests and
+// call sites that referenced `menubar::Item` / `Binding` / `KeyMods`
+// still compile.
+pub use sonic_shared::menu::{blueprint, Binding, Item, KeyMods, MenuBlueprint, Submenu};
 
 // ---------------------------------------------------------------------
 // Dispatch registry: tag → MenuEntry.
@@ -76,17 +84,15 @@ pub fn dispatch_tag(tag: isize) -> bool {
     match entry {
         MenuEntry::Act(action) => {
             tracing::debug!("menubar dispatch -> {action:?}");
-            menubar_bridge::push_action(action)
+            Sender::new().push(action)
         }
         MenuEntry::Url(url) => {
-            #[cfg(target_os = "macos")]
             open_url(&url);
             true
         }
     }
 }
 
-#[cfg(target_os = "macos")]
 fn open_url(url: &str) {
     // Best-effort: invalid URLs are silently ignored (logged at WARN).
     let nsurl = NSURL::URLWithString(&NSString::from_str(url));
@@ -126,204 +132,6 @@ impl MenuTarget {
         let this = Self::alloc(mtm).set_ivars(());
         unsafe { msg_send![super(this), init] }
     }
-}
-
-// ---------------------------------------------------------------------
-// Blueprint — pure-data description of the menubar.
-//
-// Tests assert on this; the AppKit installer also walks it to build
-// NSMenuItems, so the two representations cannot drift.
-// ---------------------------------------------------------------------
-
-/// A single leaf item in the blueprint.
-#[derive(Debug, Clone)]
-pub struct Item {
-    pub title: &'static str,
-    pub key: &'static str,
-    pub mods: KeyMods,
-    pub binding: Binding,
-}
-
-/// Modifier-key shorthand used in the blueprint (translated to
-/// `NSEventModifierFlags` at install time).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyMods {
-    None,
-    Cmd,
-    CmdShift,
-    CmdOpt,
-}
-
-/// What activating an item does.
-#[derive(Debug, Clone)]
-pub enum Binding {
-    /// Queue an `Action` via the menubar bridge.
-    Action(Action),
-    /// Open a URL via `NSWorkspace`.
-    Url(&'static str),
-    /// Bound to a standard AppKit selector; passed through as a string
-    /// so the blueprint stays platform-agnostic for unit tests.
-    System(&'static str),
-    Separator,
-}
-
-/// A top-level submenu in the blueprint.
-#[derive(Debug, Clone)]
-pub struct Submenu {
-    pub title: &'static str,
-    pub items: Vec<Item>,
-}
-
-/// Build the menubar blueprint. Pure: no AppKit calls, safe in tests.
-pub fn blueprint() -> Vec<Submenu> {
-    use Binding::*;
-    use KeyMods::*;
-
-    let sep = || Item { title: "", key: "", mods: None, binding: Separator };
-
-    vec![
-        Submenu {
-            title: "Sonic",
-            items: vec![
-                Item {
-                    title: "About Sonic",
-                    key: "",
-                    mods: None,
-                    binding: System("orderFrontStandardAboutPanel:"),
-                },
-                sep(),
-                Item {
-                    title: "Preferences…",
-                    key: ",",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::OpenPreferences),
-                },
-                sep(),
-                Item { title: "Hide Sonic", key: "h", mods: Cmd, binding: System("hide:") },
-                Item {
-                    title: "Hide Others",
-                    key: "h",
-                    mods: CmdOpt,
-                    binding: System("hideOtherApplications:"),
-                },
-                Item {
-                    title: "Show All",
-                    key: "",
-                    mods: None,
-                    binding: System("unhideAllApplications:"),
-                },
-                sep(),
-                Item { title: "Quit Sonic", key: "q", mods: Cmd, binding: System("terminate:") },
-            ],
-        },
-        Submenu {
-            title: "Shell",
-            items: vec![
-                Item {
-                    title: "New Tab",
-                    key: "t",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::NewTab),
-                },
-                Item {
-                    title: "New Window",
-                    key: "n",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::NewWindow),
-                },
-                sep(),
-                Item {
-                    title: "Split Right",
-                    key: "d",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::SplitRight),
-                },
-                Item {
-                    title: "Split Down",
-                    key: "d",
-                    mods: CmdShift,
-                    binding: Action(sonic_core::keymap::Action::SplitDown),
-                },
-                sep(),
-                Item {
-                    title: "Close Tab",
-                    key: "w",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::CloseTab),
-                },
-                Item {
-                    title: "Close Pane",
-                    key: "w",
-                    mods: CmdShift,
-                    binding: Action(sonic_core::keymap::Action::ClosePane),
-                },
-            ],
-        },
-        Submenu {
-            title: "Edit",
-            items: vec![
-                Item {
-                    title: "Copy",
-                    key: "c",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::CopyToClipboard),
-                },
-                Item {
-                    title: "Paste",
-                    key: "v",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::PasteFromClipboard),
-                },
-                sep(),
-                Item {
-                    title: "Find…",
-                    key: "f",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::OpenSearch),
-                },
-                Item {
-                    title: "Command Palette",
-                    key: "p",
-                    mods: CmdShift,
-                    binding: Action(sonic_core::keymap::Action::OpenCommandPalette),
-                },
-            ],
-        },
-        Submenu {
-            title: "View",
-            items: vec![
-                Item {
-                    title: "Toggle Tab Bar",
-                    key: "t",
-                    mods: CmdShift,
-                    binding: Action(sonic_core::keymap::Action::ToggleTabBar),
-                },
-                Item {
-                    title: "Reset Zoom",
-                    key: "0",
-                    mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::ResetFontSize),
-                },
-            ],
-        },
-        Submenu {
-            title: "Help",
-            items: vec![
-                Item {
-                    title: "Sonic Help",
-                    key: "",
-                    mods: None,
-                    binding: Url("https://github.com/D0n9X1n/sonic"),
-                },
-                Item {
-                    title: "Report Issue",
-                    key: "",
-                    mods: None,
-                    binding: Url("https://github.com/D0n9X1n/sonic/issues/new"),
-                },
-            ],
-        },
-    ]
 }
 
 // ---------------------------------------------------------------------
@@ -390,13 +198,51 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
 fn build_submenu(mtm: MainThreadMarker, sm: &Submenu, target: &MenuTarget) -> Retained<NSMenuItem> {
     let container = NSMenuItem::new(mtm);
     container.setTitle(&ns(sm.title));
-    let menu = NSMenu::new(mtm);
-    menu.setTitle(&ns(sm.title));
+    let m = NSMenu::new(mtm);
+    m.setTitle(&ns(sm.title));
     for it in &sm.items {
-        menu.addItem(&build_item(mtm, it, target));
+        m.addItem(&build_item(mtm, it, target));
     }
-    container.setSubmenu(Some(&menu));
+    container.setSubmenu(Some(&m));
     container
+}
+
+/// macOS [`PlatformMenu`] implementation. The `Sender` is accepted
+/// by the trait for symmetry with the Windows impl, but on macOS each
+/// click ultimately routes through the same `menubar_bridge` static
+/// queue that the `Sender` wraps — so passing a fresh `Sender::new()`
+/// produces identical behavior.
+#[derive(Debug, Default)]
+pub struct MacMenu {
+    blueprint: MenuBlueprint,
+}
+
+impl MacMenu {
+    pub fn new() -> Self {
+        Self { blueprint: menu::blueprint() }
+    }
+}
+
+impl PlatformMenu for MacMenu {
+    fn install(&self, _sender: Sender) -> anyhow::Result<()> {
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| anyhow::anyhow!("MacMenu::install must run on the macOS main thread"))?;
+        let app = NSApplication::sharedApplication(mtm);
+        let target = MenuTarget::new(mtm);
+
+        let main = NSMenu::new(mtm);
+        for sm in &self.blueprint {
+            main.addItem(&build_submenu(mtm, sm, &target));
+        }
+        app.setMainMenu(Some(&main));
+
+        // MenuTarget must outlive the menu items that reference it.
+        // Leak intentionally — lives for the program's lifetime.
+        let _ = Retained::into_raw(target);
+
+        tracing::info!("macOS native menubar installed");
+        Ok(())
+    }
 }
 
 /// Install the Sonic NSMenu as the application's main menu. The
@@ -404,21 +250,9 @@ fn build_submenu(mtm: MainThreadMarker, sm: &Submenu, target: &MenuTarget) -> Re
 /// existing call sites; the blueprint no longer surfaces themes in the
 /// menubar (they live in Preferences).
 pub fn install(_theme_names: &[String]) {
-    let mtm = MainThreadMarker::new().expect("install_menubar must run on the macOS main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    let target = MenuTarget::new(mtm);
-
-    let main = NSMenu::new(mtm);
-    for sm in blueprint() {
-        main.addItem(&build_submenu(mtm, &sm, &target));
+    if let Err(e) = MacMenu::new().install(Sender::new()) {
+        tracing::error!("install_menubar: {e}");
     }
-    app.setMainMenu(Some(&main));
-
-    // MenuTarget must outlive the menu items that reference it.
-    // Leak intentionally — lives for the program's lifetime.
-    let _ = Retained::into_raw(target);
-
-    tracing::info!("macOS native menubar installed");
 }
 
 // ---------------------------------------------------------------------

@@ -350,6 +350,35 @@ pub fn run_with_os_drag_pending_and_hook(
     pending: Option<crate::os_drag::TabPayload>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<()> {
+    run_with_os_drag_pending_and_window_hook(
+        theme,
+        config,
+        keymap,
+        sink,
+        theme_loader,
+        keymap_loader,
+        pending,
+        on_resumed,
+        None,
+    )
+}
+
+/// Like [`run_with_os_drag_pending_and_hook`] but also accepts a
+/// one-shot `on_window_ready` hook invoked immediately after
+/// `create_window` succeeds, with the raw window handle. The Windows
+/// bin uses this slot to install the muda menubar (needs the HWND).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_os_drag_pending_and_window_hook(
+    theme: Theme,
+    config: Config,
+    keymap: Keymap,
+    sink: Arc<dyn crate::os_drag::OsDragSink>,
+    theme_loader: Option<ThemeLoader>,
+    keymap_loader: Option<KeymapLoader>,
+    pending: Option<crate::os_drag::TabPayload>,
+    on_resumed: Option<Box<dyn FnOnce() + Send>>,
+    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+) -> Result<()> {
     init_tracing();
     let event_loop =
         EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
@@ -365,6 +394,9 @@ pub fn run_with_os_drag_pending_and_hook(
     app.os_drag_sink = Some(sink);
     if let Some(hook) = on_resumed {
         app.on_resumed = Some(hook);
+    }
+    if let Some(hook) = on_window_ready {
+        app.on_window_ready = Some(hook);
     }
     if let Some(p) = pending {
         let _ = app.new_tab_from_payload(&p);
@@ -544,6 +576,13 @@ pub struct App {
     /// AppKit loop) leaves AppKit with only the default
     /// `Apple, sonic-mac` menubar.
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
+
+    /// One-shot hook fired the moment the main window has been created
+    /// (immediately after `el.create_window` succeeds, before the first
+    /// redraw is requested). Receives the `raw-window-handle` of the
+    /// window. Windows uses this slot to install the muda menubar,
+    /// which requires the HWND at install time. Unused on macOS.
+    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
 }
 
 impl App {
@@ -607,6 +646,7 @@ impl App {
             os_drag_sink: None,
             tab_bar_visible: true,
             on_resumed: None,
+            on_window_ready: None,
         }
     }
 
@@ -639,6 +679,16 @@ impl App {
     /// `Apple, sonic-mac` menu bar.
     pub fn set_on_resumed<F: FnOnce() + Send + 'static>(&mut self, hook: F) {
         self.on_resumed = Some(Box::new(hook));
+    }
+
+    /// Set the one-shot hook fired right after window creation, with
+    /// the window's raw handle. See the field docs for the use-case
+    /// (Windows muda menubar install).
+    pub fn set_on_window_ready<F>(&mut self, hook: F)
+    where
+        F: FnOnce(raw_window_handle::RawWindowHandle) + Send + 'static,
+    {
+        self.on_window_ready = Some(Box::new(hook));
     }
 
     /// Translate a UI message id. See [`crate::i18n::I18n::t`]. Returns
@@ -2945,6 +2995,17 @@ impl ApplicationHandler<UserEvent> for App {
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
         self.window = Some(window.clone());
+        // Fire the one-shot window-ready hook (Windows uses this slot
+        // to install the muda menubar against the HWND). Best-effort:
+        // if the platform can't surface a raw handle, skip the hook
+        // and log — the rest of the app still runs.
+        if let Some(hook) = self.on_window_ready.take() {
+            use raw_window_handle::HasWindowHandle;
+            match window.window_handle() {
+                Ok(h) => hook(h.as_raw()),
+                Err(e) => tracing::warn!("on_window_ready: no raw handle: {e}"),
+            }
+        }
         self.renderer = Some(renderer);
         if let Some(r) = self.renderer.as_mut() {
             r.set_titlebar_inset(integrated_titlebar_inset());
