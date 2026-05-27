@@ -2057,31 +2057,17 @@ impl GpuRenderer {
                 self.tab_active_fg,
                 self.tab_inactive_fg,
             );
-            let mut spans2: Vec<(&str, Attrs<'_>)> = Vec::new();
-            let mut tcur = 0usize;
-            for (range, color) in &tab_spans {
-                if range.start > tcur {
-                    spans2.push((
-                        &title_text[tcur..range.start],
-                        terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
-                    ));
-                }
-                spans2.push((
-                    &title_text[range.start..range.end],
-                    terminal_font_attrs(tab_family_name.as_str()).color(*color),
-                ));
-                tcur = range.end;
-            }
-            if tcur < title_text.len() {
-                spans2.push((
-                    &title_text[tcur..],
-                    terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
-                ));
-            }
+            let TabTitleRichTextSpans { spans: spans2, default_attrs } =
+                build_tab_title_rich_text_spans(
+                    &title_text,
+                    &tab_spans,
+                    tab_family_name.as_str(),
+                    self.tab_inactive_fg,
+                );
             self.tab_buffer.set_rich_text(
                 &mut self.font_system,
                 spans2,
-                &terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
+                &default_attrs,
                 Shaping::Advanced,
                 None,
             );
@@ -3353,6 +3339,45 @@ pub fn tab_title_font_size(body_font_size: f32) -> f32 {
 #[must_use]
 pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
     Attrs::new().family(Family::Name(family))
+}
+
+#[doc(hidden)]
+pub struct TabTitleRichTextSpans<'a> {
+    pub spans: Vec<(&'a str, Attrs<'a>)>,
+    pub default_attrs: Attrs<'a>,
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn build_tab_title_rich_text_spans<'a>(
+    title_text: &'a str,
+    tab_spans: &[(std::ops::Range<usize>, GColor)],
+    font_family: &'a str,
+    inactive_fg: GColor,
+) -> TabTitleRichTextSpans<'a> {
+    let mut spans: Vec<(&str, Attrs<'_>)> = Vec::new();
+    let mut cursor = 0usize;
+    for (range, color) in tab_spans {
+        if range.start > cursor {
+            spans.push((
+                &title_text[cursor..range.start],
+                terminal_font_attrs(font_family).color(inactive_fg),
+            ));
+        }
+        spans.push((
+            &title_text[range.start..range.end],
+            terminal_font_attrs(font_family).color(*color),
+        ));
+        cursor = range.end;
+    }
+    if cursor < title_text.len() {
+        spans.push((&title_text[cursor..], terminal_font_attrs(font_family).color(inactive_fg)));
+    }
+
+    TabTitleRichTextSpans {
+        spans,
+        default_attrs: terminal_font_attrs(font_family).color(inactive_fg),
+    }
 }
 
 #[doc(hidden)]

@@ -18,14 +18,14 @@
 //! 5. Global font is user-configurable via `sonic.toml [font] family`.
 //!    (Lives in `sonic-core/tests/user_font_regression.rs`.)
 
-use glyphon::{Color as GColor, Family};
+use glyphon::{Attrs, Color as GColor, Family};
 use sonic_core::config::Config;
 use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonic_shared::command_palette::CommandPalette;
 use sonic_shared::overlays::{PaletteLayout, PALETTE_ROW_HEIGHT};
 use sonic_shared::prefs::PrefsState;
 use sonic_shared::prefs_renderer::build_draw_list;
-use sonic_shared::render::{build_tab_title_spans, terminal_font_attrs, TabSpanInput};
+use sonic_shared::render::{build_tab_title_rich_text_spans, build_tab_title_spans, TabSpanInput};
 use std::path::PathBuf;
 
 fn test_theme() -> Theme {
@@ -239,39 +239,61 @@ fn extract_fn_body(src: &str, signature: &str) -> Option<String> {
 // Bug 4 — tab title font must equal the configured font family
 // =====================================================================
 //
-// The render path builds tab title spans, then sets them on the
-// `tab_buffer` with `terminal_font_attrs(font_family)`. We assert the
-// public helper actually wires the supplied family into `Attrs.family`
-// as `Family::Name(...)` — not `Family::Monospace` and not a
-// hard-coded "JetBrainsMono".
+// The render path builds tab title spans, then maps those color spans to
+// glyphon rich-text spans before setting `tab_buffer`. Exercise that same
+// Attrs-building path with a deliberately distinctive configured family so
+// any hard-coded `Family::Name("JetBrains Mono")` regression fails here.
 #[test]
 fn tab_title_uses_config_font_family_not_hardcoded() {
-    let cfg_family = "FooBar Mono";
-    let attrs = terminal_font_attrs(cfg_family);
+    let mut cfg = Config::default();
+    cfg.font.family = "DistinctMarker Mono".to_string();
+
+    const ACTIVE: GColor = GColor::rgb(0xfa, 0xbd, 0x2f);
+    const INACTIVE: GColor = GColor::rgb(0x92, 0x83, 0x74);
+    let (title_text, tab_spans) = build_tab_title_spans(
+        &[
+            TabSpanInput {
+                index: 0,
+                title: "#1 shell",
+                title_x: 0.0,
+                title_w: 80.0,
+                is_active: false,
+            },
+            TabSpanInput {
+                index: 1,
+                title: "#2 editor",
+                title_x: 110.0,
+                title_w: 110.0,
+                is_active: true,
+            },
+        ],
+        10.0,
+        ACTIVE,
+        INACTIVE,
+    );
+    assert!(!tab_spans.is_empty(), "tab title color spans must be non-empty");
+
+    let rich = build_tab_title_rich_text_spans(
+        &title_text,
+        &tab_spans,
+        cfg.font.family.as_str(),
+        INACTIVE,
+    );
+    assert!(!rich.spans.is_empty(), "tab title rich-text spans must be non-empty");
+
+    assert_attrs_family_is_distinct_marker(&rich.default_attrs, "default tab title attrs");
+    for (text, attrs) in &rich.spans {
+        assert!(!text.is_empty(), "tab title rich-text spans must not include empty text");
+        assert_attrs_family_is_distinct_marker(attrs, text);
+    }
+}
+
+fn assert_attrs_family_is_distinct_marker(attrs: &Attrs<'_>, label: &str) {
     match attrs.family {
         Family::Name(name) => assert_eq!(
-            name, cfg_family,
-            "terminal_font_attrs must propagate the configured family verbatim"
+            name, "DistinctMarker Mono",
+            "{label} must use configured font family, not a hard-coded family"
         ),
-        other => panic!("tab title attrs must use Family::Name(<configured>), got {:?}", other),
+        other => panic!("{label} must use Family::Name(\"DistinctMarker Mono\"), got {other:?}"),
     }
-
-    // Sanity: with the default config the family must NOT be the
-    // historical hard-coded "JetBrainsMono Nerd Font".
-    let default_family = Config::default().font.family;
-    assert_ne!(
-        default_family, "JetBrainsMono Nerd Font",
-        "default font family must come from config, not the legacy hard-coded value"
-    );
-
-    // Also exercise the broader span builder to confirm it doesn't
-    // panic with a custom-family input pattern.
-    const C: GColor = GColor::rgb(0xff, 0xff, 0xff);
-    let (_text, spans) = build_tab_title_spans(
-        &[TabSpanInput { index: 0, title: "x", title_x: 0.0, title_w: 40.0, is_active: true }],
-        10.0,
-        C,
-        C,
-    );
-    assert!(!spans.is_empty(), "tab title spans must be non-empty");
 }
