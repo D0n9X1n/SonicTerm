@@ -39,6 +39,25 @@ use super::{
 use crate::app::integrated_titlebar_inset;
 use sonic_ui::prefs::PrefsHit;
 
+/// True iff any field in `new_cfg.font` differs from `old_cfg.font`
+/// (family, size, or line_height) in a way that should drive a live
+/// renderer re-apply.
+///
+/// Extracted as a free function so the prefs commit path
+/// (`App::commit_prefs_and_apply_live`) and the file-watcher path
+/// (`App::apply_new_config`) share one source of truth and so this
+/// classification can be unit-tested without a live `GpuRenderer`.
+///
+/// Regression cover: issue #167 — changing `font.size` in prefs had
+/// no live effect because the commit path only handled theme/keymap
+/// and the file-watcher's later diff saw the live `self.config`
+/// already updated (no-op).
+pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool {
+    new_cfg.font.family != old_cfg.font.family
+        || (new_cfg.font.size - old_cfg.font.size).abs() > f32::EPSILON
+        || (new_cfg.font.line_height - old_cfg.font.line_height).abs() > f32::EPSILON
+}
+
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
@@ -69,9 +88,7 @@ impl App {
         }
 
         // Font
-        let font_changed = new_cfg.font.family != self.config.font.family
-            || (new_cfg.font.size - self.config.font.size).abs() > f32::EPSILON
-            || (new_cfg.font.line_height - self.config.font.line_height).abs() > f32::EPSILON;
+        let font_changed = config_diff_needs_font_apply(&self.config, &new_cfg);
         if font_changed {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);

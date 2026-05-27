@@ -461,6 +461,7 @@ mod spawn_pane;
 mod tab_state;
 mod tear_out;
 mod window_event;
+pub use config_apply::config_diff_needs_font_apply;
 pub use key_encoding::{encode_logical, key_name, KeyName};
 
 fn init_tracing() {
@@ -490,7 +491,7 @@ pub struct PaneState {
     /// Cached foreground-process name + the wall-clock instant we last
     /// probed. The probe walks the whole macOS process table (~600 procs)
     /// so we MUST NOT re-run it on every render — when the cursor blinks,
-    /// the render path fires ~26×/sec and an uncached probe burned ~17%
+    /// the render path fires ~26Ã—/sec and an uncached probe burned ~17%
     /// CPU on an idle window (regression caught by
     /// `scripts/bench_headless_gui.sh`). TTL is short enough that
     /// `nvim foo` still flips the tab title quickly.
@@ -791,6 +792,35 @@ impl App {
     #[doc(hidden)]
     pub fn input_dirty_for_test(&self) -> bool {
         self.input_dirty
+    }
+
+    /// Test-only setter that clears the `input_dirty` flag. Lets a
+    /// regression test (e.g. issue #167) establish a clean baseline
+    /// before driving an action that is expected to set it.
+    #[doc(hidden)]
+    pub fn clear_input_dirty_for_test(&mut self) {
+        self.input_dirty = false;
+    }
+
+    /// Test-only setter for `prefs_state`. Mirrors what
+    /// [`Self::create_prefs_window`] does at runtime when the user
+    /// presses Cmd/Ctrl+, — minus the wgpu surface — so a regression
+    /// test can drive [`Self::commit_prefs_and_apply_live`] without
+    /// instantiating a real preferences window.
+    #[doc(hidden)]
+    pub fn install_prefs_state_for_test(&mut self, state: sonic_ui::prefs::PrefsState) {
+        self.prefs_state = Some(state);
+    }
+
+    /// Test-only entry point for the exact slot the prefs UI invokes
+    /// when the user clicks Apply (or hits Esc while dirty). Drives
+    /// the real `commit_prefs_and_apply_live` path so a regression
+    /// test (issue #167) can assert that font / theme / keymap edits
+    /// flow through `apply_new_config` and reach the renderer — not
+    /// just into `self.config`.
+    #[doc(hidden)]
+    pub fn commit_prefs_for_test(&mut self) {
+        self.commit_prefs_and_apply_live();
     }
 
     /// Called from the `RedrawRequested` handler when the active pane's
