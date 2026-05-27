@@ -561,14 +561,17 @@ pub struct PrefsRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
+    format: TextureFormat,
     scale_factor: f32,
     font_system: FontSystem,
     swash_cache: SwashCache,
+    cache: Cache,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     quad: QuadPipeline,
     cell_w: f32,
+    window: Arc<Window>,
 }
 
 const BASE_CELL_W: f32 = 8.0;
@@ -631,14 +634,17 @@ impl PrefsRenderer {
             device,
             queue,
             config,
+            format,
             scale_factor,
             font_system,
             swash_cache,
+            cache,
             viewport,
             atlas,
             text_renderer,
             quad,
             cell_w: scale_factor * BASE_CELL_W,
+            window,
         })
     }
 
@@ -651,6 +657,40 @@ impl PrefsRenderer {
     pub fn set_scale_factor(&mut self, sf: f32) {
         self.scale_factor = sf;
         self.cell_w = sf * BASE_CELL_W;
+    }
+
+    /// Full rebuild of the glyphon atlas / text renderer / surface for a
+    /// new scale factor. On macOS the scale_factor reported inside the
+    /// window constructor is often the stale 1.0 even when the window
+    /// has been placed on a 2× display, so the atlas + text renderer get
+    /// built at 1× and every glyph then lands off-canvas or at sub-pixel
+    /// addresses on the real 2× surface — the symptom is a solid-black
+    /// prefs window. Mirror `GpuRenderer::force_rebuild_for_scale` (PR
+    /// #104): replace the cached atlas + text renderer, reconfigure the
+    /// surface to its current physical extent, and request a redraw.
+    pub fn force_rebuild_for_scale(&mut self, sf: f32) {
+        let sf = sf.max(0.1);
+        self.scale_factor = sf;
+        self.cell_w = sf * BASE_CELL_W;
+        // Re-create the glyphon atlas + text renderer so any glyphs
+        // cached at the prior (wrong) metric are evicted.
+        let mut atlas = TextAtlas::new(&self.device, &self.queue, &self.cache, self.format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &self.device, MultisampleState::default(), None);
+        self.atlas = atlas;
+        self.text_renderer = text_renderer;
+        // The window may have been moved between displays of different
+        // densities. Pick up the current physical size and re-configure.
+        let phys = self.window.inner_size();
+        self.config.width = phys.width.max(1);
+        self.config.height = phys.height.max(1);
+        self.surface.configure(&self.device, &self.config);
+        self.window.request_redraw();
+        tracing::info!(
+            "prefs_renderer.force_rebuild_for_scale: scale={sf} surface={}x{}",
+            self.config.width,
+            self.config.height
+        );
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -914,6 +954,19 @@ mod tests {
             let cw = sf * BASE_CELL_W;
             assert!((cw - sf * BASE_CELL_W).abs() < f32::EPSILON);
         }
+    }
+
+    /// Regression: PR #123 fix was incomplete because `set_scale_factor`
+    /// only flipped two fields without rebuilding the glyphon atlas or
+    /// reconfiguring the surface. The follow-up adds
+    /// `force_rebuild_for_scale`. This test compiles only while that
+    /// method (and `set_scale_factor`) exist with the expected
+    /// signature, so it is a static guard against the symbol going
+    /// away during a future refactor.
+    #[test]
+    fn prefs_renderer_exposes_force_rebuild_for_scale() {
+        let _set: fn(&mut PrefsRenderer, f32) = PrefsRenderer::set_scale_factor;
+        let _force: fn(&mut PrefsRenderer, f32) = PrefsRenderer::force_rebuild_for_scale;
     }
 
     #[test]
