@@ -57,6 +57,7 @@ impl App {
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = self.cursor_visible.clone();
+                let pty_burst_gen = self.pty_burst_gen.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -100,6 +101,14 @@ impl App {
                                 Duration::from_secs(3600)
                             }) {
                                 Ok(bytes) => {
+                                    // PR #133/#162: bump generation so the
+                                    // next RedrawRequested bypasses the
+                                    // vsync coalescing gate. Counter (not
+                                    // bool) so a burst arriving during
+                                    // render is not erased on completion.
+                                    if !bytes.is_empty() {
+                                        pty_burst_gen.fetch_add(1, Ordering::Release);
+                                    }
                                     // Collect side-effects under the parser
                                     // lock, then DROP it before touching winit.
                                     // On macOS `Window::set_title` marshals to
