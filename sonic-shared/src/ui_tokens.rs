@@ -37,30 +37,34 @@ pub mod color {
     /// Returns opaque black on any parse error (so token usage stays
     /// infallible at call sites).
     pub fn hex(s: &str) -> [f32; 4] {
+        const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         let s = s.trim();
         let s = s.strip_prefix('#').unwrap_or(s);
-        match s.len() {
-            6 => {
-                let r = u8::from_str_radix(&s[0..2], 16);
-                let g = u8::from_str_radix(&s[2..4], 16);
-                let b = u8::from_str_radix(&s[4..6], 16);
-                match (r, g, b) {
-                    (Ok(r), Ok(g), Ok(b)) => rgba8_premul_linear(r, g, b, 1.0),
-                    _ => [0.0, 0.0, 0.0, 1.0],
-                }
-            }
-            8 => {
-                let r = u8::from_str_radix(&s[0..2], 16);
-                let g = u8::from_str_radix(&s[2..4], 16);
-                let b = u8::from_str_radix(&s[4..6], 16);
-                let a = u8::from_str_radix(&s[6..8], 16);
-                match (r, g, b, a) {
-                    (Ok(r), Ok(g), Ok(b), Ok(a)) => rgba8_premul_linear(r, g, b, a as f32 / 255.0),
-                    _ => [0.0, 0.0, 0.0, 1.0],
-                }
-            }
-            _ => [0.0, 0.0, 0.0, 1.0],
+        let bytes = s.as_bytes();
+        if bytes.len() != 6 && bytes.len() != 8 {
+            return SENTINEL;
         }
+        if !bytes.iter().all(u8::is_ascii_hexdigit) {
+            return SENTINEL;
+        }
+        #[inline]
+        fn nyb(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => 0,
+            }
+        }
+        #[inline]
+        fn pair(b: &[u8], i: usize) -> u8 {
+            (nyb(b[i]) << 4) | nyb(b[i + 1])
+        }
+        let r = pair(bytes, 0);
+        let g = pair(bytes, 2);
+        let b = pair(bytes, 4);
+        let a = if bytes.len() == 8 { pair(bytes, 6) as f32 / 255.0 } else { 1.0 };
+        rgba8_premul_linear(r, g, b, a)
     }
 
     /// Replace the alpha channel of a premultiplied token.
@@ -390,6 +394,23 @@ mod tests {
         // sRGB→linear is applied: mid-grey is NOT 0.5 in linear.
         let mid = color::hex("#808080");
         assert!(mid[0] < 0.25, "expected linearised mid-grey < 0.25, got {}", mid[0]);
+    }
+
+    #[test]
+    fn hex_non_ascii_does_not_panic() {
+        // 6 chars / 18 bytes — exact char count of valid hex but multibyte.
+        assert_eq!(color::hex("中中中中中中"), [0.0, 0.0, 0.0, 1.0]);
+        // 3 chars / 9 bytes — different multibyte boundary.
+        assert_eq!(color::hex("中中中"), [0.0, 0.0, 0.0, 1.0]);
+        // With '#' prefix too.
+        assert_eq!(color::hex("#中中中中中中"), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn hex_invalid_chars_returns_sentinel() {
+        assert_eq!(color::hex("#ZZZZZZ"), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(color::hex("GGGGGG"), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(color::hex("#ZZZZZZZZ"), [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
