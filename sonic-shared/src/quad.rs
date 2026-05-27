@@ -1,17 +1,51 @@
 //! Minimal wgpu quad pipeline. Draws axis-aligned colored rectangles for
 //! the cursor and selection highlight, in normalized device coordinates.
 //!
-//! Each instance is 4 floats (x, y, w, h) in NDC plus an RGBA color.
-//! Vertex shader expands a unit triangle strip per instance.
+//! Each instance is a `rect` in NDC plus an RGBA color. The pipeline also
+//! supports a per-instance SDF rounded-rect cutoff: when `radius_px > 0`
+//! the fragment shader computes a signed distance against the rounded
+//! interior and smoothsteps the edge for 1 px of AA. `size_px` is the
+//! rectangle's size in **physical pixels** (needed because NDC alone has
+//! no notion of "1 pixel"). For sharp rectangles set `radius_px = 0` and
+//! `size_px = [0, 0]` and the shader skips the SDF math.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct QuadInstance {
     pub rect: [f32; 4], // x, y, w, h in NDC ([-1,1])
     pub color: [f32; 4],
+    /// Rectangle width/height in physical pixels (used by the SDF path).
+    /// `[0.0, 0.0]` (the default) keeps the sharp-rect path.
+    pub size_px: [f32; 2],
+    /// Corner radius in physical pixels. `0.0` (default) skips the SDF
+    /// rounded-rect path and the quad renders sharp like before.
+    pub radius_px: f32,
+    /// Padding so the layout stays 16-byte aligned for WGSL `vec4` ergonomics.
+    pub _pad: f32,
+}
+
+impl Default for QuadInstance {
+    fn default() -> Self {
+        Self { rect: [0.0; 4], color: [0.0; 4], size_px: [0.0; 2], radius_px: 0.0, _pad: 0.0 }
+    }
+}
+
+impl QuadInstance {
+    /// Sharp-edged rectangle (the legacy default).
+    #[must_use]
+    pub fn sharp(rect: [f32; 4], color: [f32; 4]) -> Self {
+        Self { rect, color, ..Default::default() }
+    }
+
+    /// Rounded rectangle in physical pixels. `size_px` is the rect's size
+    /// in physical pixels (must match the NDC `rect` size).
+    #[must_use]
+    pub fn rounded(rect: [f32; 4], color: [f32; 4], size_px: [f32; 2], radius_px: f32) -> Self {
+        Self { rect, color, size_px, radius_px, _pad: 0.0 }
+    }
 }
 
 pub struct QuadPipeline {
@@ -22,13 +56,16 @@ pub struct QuadPipeline {
 
 const SHADER: &str = r#"
 struct Instance {
-    @location(0) rect:  vec4<f32>,
-    @location(1) color: vec4<f32>,
+    @location(0) rect:    vec4<f32>,
+    @location(1) color:   vec4<f32>,
+    @location(2) params:  vec4<f32>, // size_px.x, size_px.y, radius_px, pad
 }
 
 struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @builtin(position) pos:    vec4<f32>,
+    @location(0)        color: vec4<f32>,
+    @location(1)        local: vec2<f32>, // pixel offset from rect center
+    @location(2)        params: vec4<f32>,
 }
 
 @vertex
@@ -46,12 +83,26 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: Instance) -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
     out.color = inst.color;
+    // Local coord in pixels, from the rect center, used for the SDF path.
+    let size = inst.params.xy;
+    out.local = (c - vec2<f32>(0.5, 0.5)) * size;
+    out.params = inst.params;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let r = in.params.z;
+    if (r <= 0.0) {
+        return in.color;
+    }
+    let half_size = in.params.xy * 0.5;
+    // Signed distance to a rounded rect centered at origin.
+    let q = abs(in.local) - (half_size - vec2<f32>(r, r));
+    let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+    // 1-pixel antialias band: alpha = 1 inside, 0 outside, smooth in between.
+    let aa = clamp(0.5 - d, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * aa);
 }
 "#;
 
@@ -76,7 +127,11 @@ impl QuadPipeline {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<QuadInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,
+                        1 => Float32x4,
+                        2 => Float32x4
+                    ],
                 }],
             },
             fragment: Some(wgpu::FragmentState {

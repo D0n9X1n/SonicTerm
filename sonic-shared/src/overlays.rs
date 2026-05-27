@@ -84,6 +84,18 @@ pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
 /// Inset between the modal edge and the inner content (rows, query, footer).
 pub const PALETTE_INNER_PAD: f32 = 12.0;
 
+/// Corner radius for the modal panel (and its 1px border ring) in physical
+/// pixels. Quad pipeline draws this via an SDF-style rounded-rect path
+/// (see `sonic-shared/src/quad.rs`).
+pub const PALETTE_PANEL_RADIUS: f32 = 16.0;
+
+/// Corner radius for the query input field. Slightly tighter than the
+/// panel so it reads as nested chrome.
+pub const PALETTE_QUERY_RADIUS: f32 = 8.0;
+
+/// Corner radius for the selected-row highlight quad.
+pub const PALETTE_ROW_RADIUS: f32 = 6.0;
+
 /// Margin between the search bar and the right/bottom window edge.
 pub const SEARCH_BAR_MARGIN: f32 = 8.0;
 
