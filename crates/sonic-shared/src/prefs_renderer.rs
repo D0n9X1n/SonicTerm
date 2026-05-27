@@ -711,19 +711,33 @@ impl PrefsRenderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                // The surface isn't ready yet — commonly happens for
+                // the first few frames after window creation on macOS
+                // (the CALayer takes a moment to wire up). Re-configure
+                // the surface and request another redraw so we try
+                // again on the next tick. Without this the window stays
+                // BLANK forever: nothing else wakes the event loop
+                // because the renderer didn't produce a frame, and the
+                // user only sees content after clicking inside the
+                // window (which incidentally triggers a redraw).
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 drop(frame);
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -835,6 +849,14 @@ impl PrefsRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        // Evict unused glyph entries from the atlas. The prefs render
+        // path builds a fresh `Buffer` for every text run on every
+        // frame, so the atlas accumulates one cache entry per (glyph,
+        // size, weight) for every category visited. Without periodic
+        // trimming the atlas grows on every click and eventually
+        // stalls the GPU thread (observed as a hard freeze after a
+        // handful of sidebar clicks in live testing).
+        self.atlas.trim();
         Ok(())
     }
 }
