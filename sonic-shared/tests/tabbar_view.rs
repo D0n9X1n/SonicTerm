@@ -147,3 +147,44 @@ fn with_top_offset_zero_is_noop() {
     assert_eq!(same.bar.y, base.bar.y);
     assert_eq!(same.tabs[0].bg.y, base.tabs[0].bg.y);
 }
+
+#[test]
+fn hit_test_blank_area_of_tab_activates_it() {
+    // Regression: previously the hit-test used `t.bg.contains(px, py)`
+    // and `bg` is inset by 2px on top and 2px on bottom from the full
+    // bar height. A click in those thin slivers fell through to the
+    // "click between tabs → activate currently-active tab" default,
+    // making the user feel they had to aim at the title glyphs to
+    // switch tabs. After the fix, ANY pixel inside the bar whose x is
+    // within a tab's horizontal range activates that tab.
+    let mut bar = bar_with(3);
+    bar.activate(1); // tab 2 is currently active
+    let layout = TabBarLayout::compute(&bar, 800.0);
+
+    let t0 = layout.tabs[0];
+    // 1) Click at tab0's right edge, vertically at the top sliver
+    //    (y < bg.y) — must STILL activate tab 0, not snap to active=1.
+    let click_x = t0.bg.x + t0.bg.w - 1.0;
+    let click_y_top = 0.5; // above bg.y = 2.0
+    assert_eq!(
+        layout.hit(click_x, click_y_top),
+        Some(TabHit::Activate(0)),
+        "click at tab0 right edge / top sliver must activate tab 0"
+    );
+
+    // 2) Bottom sliver of tab 0 (y > bg.y + bg.h but y < bar.h).
+    let click_y_bottom = TAB_BAR_HEIGHT - 0.5;
+    assert_eq!(
+        layout.hit(click_x, click_y_bottom),
+        Some(TabHit::Activate(0)),
+        "click at tab0 right edge / bottom sliver must activate tab 0"
+    );
+
+    // 3) Middle of tab 0 — already worked, stays working.
+    let click_y_mid = TAB_BAR_HEIGHT / 2.0;
+    assert_eq!(
+        layout.hit(click_x, click_y_mid),
+        Some(TabHit::Activate(0)),
+        "click in middle of tab 0 activates tab 0"
+    );
+}

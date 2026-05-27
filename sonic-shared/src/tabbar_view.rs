@@ -220,6 +220,14 @@ impl TabBarLayout {
     /// Map a pixel position to a tab-bar action. Returns `None` when the
     /// click is outside the bar entirely (caller should treat it as a
     /// terminal-area click in that case).
+    ///
+    /// The activation hit-zone is the FULL bar height for each tab's
+    /// horizontal range `[bg.x, bg.x + bg.w)` — not just the inset
+    /// background rect. This matches user expectation that the entire
+    /// chrome strip belonging to a tab is clickable; previously the
+    /// 2px sliver above/below the visible `bg` rect would fall through
+    /// to the "click between tabs → activate currently-active tab"
+    /// default, making the user feel they had to aim at the title text.
     pub fn hit(&self, px: f32, py: f32) -> Option<TabHit> {
         if !self.visible {
             return None;
@@ -234,7 +242,10 @@ impl TabBarLayout {
             if t.close.contains(px, py) {
                 return Some(TabHit::Close(t.index));
             }
-            if t.bg.contains(px, py) {
+            // Full-bar-height hit zone: any vertical position inside
+            // the bar that falls within this tab's horizontal range
+            // counts as a click on this tab.
+            if px >= t.bg.x && px < t.bg.x + t.bg.w {
                 return Some(TabHit::Activate(t.index));
             }
         }
