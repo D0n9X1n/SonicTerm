@@ -97,9 +97,12 @@ jobs:
   build-windows:
     name: Build Windows .msi
     runs-on: windows-latest
+    permissions:
+      id-token: write   # for Azure OIDC
     env:
-      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
-      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v5
 
@@ -124,37 +127,26 @@ jobs:
           cd crates/sonic-windows
           cargo wix --no-build --nocapture --output ../../dist/
 
-      - name: Sign .msi
-        if: env.WINDOWS_CERT_PFX_BASE64 != '' && env.WINDOWS_CERT_PASSWORD != ''
-        shell: pwsh
-        run: |
-          $pfxPath = Join-Path $env:RUNNER_TEMP "sonic-signing.pfx"
-          try {
-            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
-            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
-                        Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $signtool) { throw "signtool.exe not found" }
-            Write-Host "Using $($signtool.FullName)"
-            Get-ChildItem dist\*.msi | ForEach-Object {
-              & $signtool.FullName sign `
-                /f $pfxPath `
-                /p $env:WINDOWS_CERT_PASSWORD `
-                /fd SHA256 `
-                /tr http://timestamp.sectigo.com `
-                /td SHA256 `
-                /d "Sonic Terminal" `
-                $_.FullName
-              & $signtool.FullName verify /pa /v $_.FullName
-            }
-          }
-          finally {
-            if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
-          }
+      - name: Sign .msi (Azure Trusted Signing)
+        if: env.AZURE_TENANT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TS_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TS_PROFILE }}
+          files-folder: dist
+          files-folder-filter: msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Note unsigned build
-        if: env.WINDOWS_CERT_PFX_BASE64 == '' || env.WINDOWS_CERT_PASSWORD == ''
+        if: env.AZURE_TENANT_ID == ''
         shell: bash
-        run: echo "::notice::Built unsigned Windows .msi (no WINDOWS_CERT_PFX_BASE64 secret configured)"
+        run: echo "::notice::Built unsigned Windows .msi (no AZURE_TENANT_ID secret configured)"
 
       - uses: actions/upload-artifact@v5
         with:
