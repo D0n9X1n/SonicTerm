@@ -90,11 +90,22 @@ struct ProcEntry {
     create_time: i64,
 }
 
+/// Bound the STATUS_INFO_LENGTH_MISMATCH retry loop so a pathologically
+/// racing process table (or a buggy kernel) can't keep us spinning forever.
+/// 8 doublings from 1 MiB caps growth at 128 MiB before we'd give up; the
+/// explicit byte cap below (`MAX_BUFFER_BYTES`) clamps individual grows
+/// earlier than that.
+const MAX_RETRIES: u32 = 8;
+/// Hard ceiling on the snapshot buffer. 64 MiB comfortably fits the largest
+/// real-world Windows process tables (~10k procs × ~1 KiB record) with
+/// headroom; anything bigger is almost certainly a runaway.
+const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 fn snapshot_processes() -> Option<Vec<ProcEntry>> {
     // Grow the buffer until ntdll stops complaining. Start at 1 MiB which is
     // enough for typical workstations (~600 procs × ~1 KiB record).
     let mut buf: Vec<u8> = vec![0u8; 1024 * 1024];
-    loop {
+    for _attempt in 0..MAX_RETRIES {
         let mut return_length: u32 = 0;
         let status: NTSTATUS = unsafe {
             NtQuerySystemInformation(
@@ -109,7 +120,12 @@ fn snapshot_processes() -> Option<Vec<ProcEntry>> {
         if status == STATUS_INFO_LENGTH_MISMATCH {
             // Grow generously — ntdll's returned length is a hint, not a
             // hard requirement, and the table can race larger between calls.
-            let new_size = (return_length as usize).max(buf.len() * 2);
+            let requested = (return_length as usize).max(buf.len().saturating_mul(2));
+            let new_size = requested.min(MAX_BUFFER_BYTES);
+            if new_size <= buf.len() {
+                // Already at the cap and ntdll still wants more — bail.
+                return None;
+            }
             buf.resize(new_size, 0);
             continue;
         }
@@ -118,6 +134,8 @@ fn snapshot_processes() -> Option<Vec<ProcEntry>> {
         }
         return None;
     }
+    // Retry budget exhausted without ever getting a successful snapshot.
+    None
 }
 
 fn parse_snapshot(buf: &[u8]) -> Vec<ProcEntry> {
