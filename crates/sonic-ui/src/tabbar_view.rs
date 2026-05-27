@@ -419,6 +419,77 @@ pub fn caption_button_rects(width: u32, dpi: f32) -> [Rect; 3] {
     [min, max, close]
 }
 
+/// Identifies one of the three Win11-style caption buttons.
+///
+/// Pure data — used both by the renderer (to apply a hover tint) and
+/// by the Windows chrome subclass (to dispatch WM_NCLBUTTONUP to the
+/// right action). Kept platform-neutral so the rect/hit-test logic
+/// can be unit-tested off Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// The high-level action a caption-button click should perform on the
+/// host window. Pure-fn output — the actual Win32 call is in
+/// `sonic-windows::chrome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionAction {
+    Minimize,
+    /// "Restore if maximized, else maximize". The chrome layer decides
+    /// which direction to call based on `IsZoomed(hwnd)`.
+    ToggleMaximize,
+    Close,
+}
+
+impl CaptionButton {
+    /// Pure mapping from `WM_NCHITTEST` return code to the caption
+    /// button enum. Kept here (in `sonic-ui`) so it can be unit-tested
+    /// without dragging in `windows-sys`.
+    ///
+    /// Accepts the raw `u32` values of `HTMINBUTTON` (8), `HTMAXBUTTON`
+    /// (9) and `HTCLOSE` (20). Returns `None` for any other code.
+    #[must_use]
+    pub fn from_hit_test(ht: u32) -> Option<Self> {
+        // From <winuser.h>: HTMINBUTTON=8, HTMAXBUTTON=9, HTCLOSE=20.
+        match ht {
+            8 => Some(CaptionButton::Minimize),
+            9 => Some(CaptionButton::Maximize),
+            20 => Some(CaptionButton::Close),
+            _ => None,
+        }
+    }
+
+    /// Action this button should perform when clicked. Pure for tests.
+    #[must_use]
+    pub fn action(self) -> CaptionAction {
+        match self {
+            CaptionButton::Minimize => CaptionAction::Minimize,
+            CaptionButton::Maximize => CaptionAction::ToggleMaximize,
+            CaptionButton::Close => CaptionAction::Close,
+        }
+    }
+}
+
+/// Pure helper: return the caption button (if any) under the given
+/// **physical-pixel** cursor coordinate. `width` is the window's
+/// physical pixel width, `dpi` matches [`caption_button_rects`].
+#[must_use]
+pub fn caption_button_at(x: f32, y: f32, width: u32, dpi: f32) -> Option<CaptionButton> {
+    let [min, max, close] = caption_button_rects(width, dpi);
+    if close.contains(x, y) {
+        Some(CaptionButton::Close)
+    } else if max.contains(x, y) {
+        Some(CaptionButton::Maximize)
+    } else if min.contains(x, y) {
+        Some(CaptionButton::Minimize)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod caption_tests {
     use super::*;
@@ -438,5 +509,44 @@ mod caption_tests {
         let [min, _, close] = caption_button_rects(2000, 2.0);
         assert_eq!(min.w, CAPTION_BUTTON_WIDTH * 2.0);
         assert_eq!(close.x + close.w, 2000.0);
+    }
+
+    #[test]
+    fn caption_button_from_hit_test_known_codes() {
+        assert_eq!(CaptionButton::from_hit_test(8), Some(CaptionButton::Minimize));
+        assert_eq!(CaptionButton::from_hit_test(9), Some(CaptionButton::Maximize));
+        assert_eq!(CaptionButton::from_hit_test(20), Some(CaptionButton::Close));
+        assert_eq!(CaptionButton::from_hit_test(2), None); // HTCAPTION
+        assert_eq!(CaptionButton::from_hit_test(0), None);
+    }
+
+    #[test]
+    fn caption_button_actions() {
+        assert_eq!(CaptionButton::Minimize.action(), CaptionAction::Minimize);
+        assert_eq!(CaptionButton::Maximize.action(), CaptionAction::ToggleMaximize);
+        assert_eq!(CaptionButton::Close.action(), CaptionAction::Close);
+    }
+
+    #[test]
+    fn caption_button_at_hits_each_button() {
+        // 1000px-wide, dpi 1.0 → close.x in [862..908], max in [816..862], min in [770..816].
+        let [min, max, close] = caption_button_rects(1000, 1.0);
+        let mid_y = CAPTION_BUTTON_HEIGHT * 0.5;
+        assert_eq!(
+            caption_button_at(close.x + close.w * 0.5, mid_y, 1000, 1.0),
+            Some(CaptionButton::Close)
+        );
+        assert_eq!(
+            caption_button_at(max.x + max.w * 0.5, mid_y, 1000, 1.0),
+            Some(CaptionButton::Maximize)
+        );
+        assert_eq!(
+            caption_button_at(min.x + min.w * 0.5, mid_y, 1000, 1.0),
+            Some(CaptionButton::Minimize)
+        );
+        // Outside the strip horizontally.
+        assert_eq!(caption_button_at(10.0, mid_y, 1000, 1.0), None);
+        // Below the strip vertically.
+        assert_eq!(caption_button_at(close.x + 4.0, CAPTION_BUTTON_HEIGHT + 1.0, 1000, 1.0), None);
     }
 }

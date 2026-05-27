@@ -280,6 +280,10 @@ struct FrameKey {
     /// Folded in so toggling the config option live invalidates the
     /// frame cache.
     close_override: u8,
+    /// Caption-button hover state (Windows integrated titlebar). `0`
+    /// nothing, `1` min, `2` max, `3` close. Folded into the key so
+    /// hover transitions across the three buttons repaint promptly.
+    caption_hover: u8,
 }
 
 impl GpuRenderer {
@@ -1242,6 +1246,24 @@ impl GpuRenderer {
             }
             (idx, on_close)
         };
+        // Caption-button hover (Windows integrated titlebar). Computed
+        // here so the FrameKey can fold it in alongside the tab hover.
+        let caption_hover_key: u8 = if integrated_titlebar_inset_px() > 0 {
+            self.hover_cursor
+                .and_then(|(cx, cy)| {
+                    let px = cx * self.scale_factor;
+                    let py = cy * self.scale_factor;
+                    crate::tabbar_view::caption_button_at(px, py, self.config.width, 1.0)
+                })
+                .map(|b| match b {
+                    crate::tabbar_view::CaptionButton::Minimize => 1u8,
+                    crate::tabbar_view::CaptionButton::Maximize => 2u8,
+                    crate::tabbar_view::CaptionButton::Close => 3u8,
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let key = FrameKey {
             grid_revision: grid.revision(),
             selection: selection.copied(),
@@ -1273,6 +1295,7 @@ impl GpuRenderer {
             hover_tab: hover_tab_idx,
             hover_close: hover_close_hit,
             close_override: u8::from(self.tab_close_override.is_some()),
+            caption_hover: caption_hover_key,
         };
         if Some(key) == self.last_frame_key {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -1902,8 +1925,7 @@ impl GpuRenderer {
             });
             // Win11-style caption buttons (─ □ ✕) — only painted when the
             // integrated titlebar inset is non-zero (Windows). On macOS the
-            // inset is 0 and `paint_caption_buttons` early-returns, so this
-            // is a no-op there. See sonic-shared/src/quad.rs::paint_caption_buttons.
+            // inset is 0 and we skip the helper entirely.
             if integrated_titlebar_inset_px() > 0 {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
                 let tuples = [
@@ -1911,7 +1933,30 @@ impl GpuRenderer {
                     (rects[1].x, rects[1].y, rects[1].w, rects[1].h),
                     (rects[2].x, rects[2].y, rects[2].w, rects[2].h),
                 ];
-                crate::quad::paint_caption_buttons(&mut quads, &tuples, (sw, sh), bar_bg);
+                // Hover: cursor in physical-pixel space against the
+                // physical-pixel rects from caption_button_rects.
+                use crate::quad::{CaptionColors, CaptionHover};
+                let hover = self
+                    .hover_cursor
+                    .and_then(|(cx, cy)| {
+                        let px = cx * self.scale_factor;
+                        let py = cy * self.scale_factor;
+                        crate::tabbar_view::caption_button_at(px, py, sw as u32, 1.0)
+                    })
+                    .map(|btn| match btn {
+                        crate::tabbar_view::CaptionButton::Minimize => CaptionHover::Min,
+                        crate::tabbar_view::CaptionButton::Maximize => CaptionHover::Max,
+                        crate::tabbar_view::CaptionButton::Close => CaptionHover::Close,
+                    })
+                    .unwrap_or(CaptionHover::None);
+                let colors = CaptionColors {
+                    bg: bar_bg,
+                    hover_bg,
+                    close_hover_bg: [0.91, 0.07, 0.14, 1.0], // Win11 close red #E81123
+                    fg: primary,
+                    close_hover_fg: [1.0, 1.0, 1.0, 1.0],
+                };
+                crate::quad::paint_caption_buttons(&mut quads, &tuples, (sw, sh), colors, hover);
             }
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);

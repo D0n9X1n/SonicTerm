@@ -5,23 +5,27 @@
 //! - reapply DWM frame extension after composition changes
 //! - serve `WM_NCHITTEST` ourselves, returning `HTCAPTION` for the drag
 //!   strip and `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE` for the three
-//!   caption buttons painted by `sonic-shared::quad::paint_caption_buttons`.
+//!   caption buttons painted by `sonic-gpu::quad::paint_caption_buttons`.
+//! - dispatch `WM_NCLBUTTONUP` over a caption button to the matching
+//!   window action (minimize / maximize-or-restore / close). Without
+//!   this, the buttons were hit-tested but no click ever did anything.
 //!
 //! Caption-button rects come from
-//! [`sonic_shared::tabbar_view::caption_button_rects`] so the hit-test
+//! [`sonic_ui::tabbar_view::caption_button_rects`] so the hit-test
 //! geometry stays in sync with what's drawn.
 
 #![cfg(target_os = "windows")]
 
 use sonic_app::app::integrated_titlebar_inset_px;
-use sonic_shared::tabbar_view::caption_button_rects;
+use sonic_shared::tabbar_view::{caption_button_rects, CaptionAction, CaptionButton};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, WM_DWMCOMPOSITIONCHANGED,
-    WM_NCCALCSIZE, WM_NCHITTEST,
+    IsZoomed, PostMessageW, ShowWindow, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DWMCOMPOSITIONCHANGED, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_NCLBUTTONUP,
 };
 
 const SUBCLASS_ID: usize = 0x5071_C001;
@@ -40,6 +44,18 @@ unsafe fn extend_frame(hwnd: HWND) {
     unsafe {
         let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
+}
+
+/// Pure-fn translation from a `WM_NCLBUTTONUP` `wparam` (the HT* code)
+/// to the action the chrome should execute. Returns `None` when the
+/// hit-test code is not a caption-button code so the default proc
+/// handles it (drag, etc.).
+///
+/// Extracted as a free function so it can be unit-tested without a
+/// real HWND or Windows event loop.
+#[must_use]
+pub fn caption_action_for(ht: u32) -> Option<CaptionAction> {
+    CaptionButton::from_hit_test(ht).map(CaptionButton::action)
 }
 
 unsafe extern "system" fn subclass_proc(
@@ -88,6 +104,14 @@ unsafe extern "system" fn subclass_proc(
                 LRESULT(HTCAPTION as isize)
             }
         }
+        WM_NCLBUTTONUP => {
+            // wparam carries the HT* code our WM_NCHITTEST returned.
+            if let Some(action) = caption_action_for(wparam.0 as u32) {
+                unsafe { perform_caption_action(hwnd, action) };
+                return LRESULT(0);
+            }
+            unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+        }
         WM_DWMCOMPOSITIONCHANGED => {
             unsafe { extend_frame(hwnd) };
             LRESULT(0)
@@ -96,7 +120,43 @@ unsafe extern "system" fn subclass_proc(
     }
 }
 
+unsafe fn perform_caption_action(hwnd: HWND, action: CaptionAction) {
+    match action {
+        CaptionAction::Minimize => {
+            let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+        }
+        CaptionAction::ToggleMaximize => {
+            let zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
+            let cmd = if zoomed { SW_RESTORE } else { SW_MAXIMIZE };
+            let _ = unsafe { ShowWindow(hwnd, cmd) };
+        }
+        CaptionAction::Close => {
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        }
+    }
+}
+
 // Suppress dead-code warning for HTCLIENT — kept imported so future
 // edits to the hit-test that want to fall through to the client area
 // don't have to rediscover the symbol.
 const _: u32 = HTCLIENT;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caption_action_for_known_hits() {
+        assert_eq!(caption_action_for(HTMINBUTTON), Some(CaptionAction::Minimize));
+        assert_eq!(caption_action_for(HTMAXBUTTON), Some(CaptionAction::ToggleMaximize));
+        assert_eq!(caption_action_for(HTCLOSE), Some(CaptionAction::Close));
+    }
+
+    #[test]
+    fn caption_action_for_other_codes_is_none() {
+        // HTCAPTION (2) and HTCLIENT (1) are not button hits.
+        assert_eq!(caption_action_for(HTCAPTION), None);
+        assert_eq!(caption_action_for(HTCLIENT), None);
+        assert_eq!(caption_action_for(0), None);
+    }
+}

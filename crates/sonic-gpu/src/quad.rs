@@ -199,33 +199,215 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
     [nx, ny, nw, nh]
 }
 
-/// Paint the three Win11-style caption-button backgrounds (min / max /
-/// close) into the given quad list. Glyph rendering (─ □ ✕) is handled
-/// by the text pipeline; this helper only owns the background plates so
-/// hover/press states can be styled by theme later.
+/// Hover state for the caption-button strip. `None` when no caption
+/// button is under the cursor. Encoded as an index `0/1/2 = min/max/close`
+/// so callers don't have to depend on `sonic-ui` from the GPU crate.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum CaptionHover {
+    #[default]
+    None,
+    Min,
+    Max,
+    Close,
+}
+
+/// Theme colors used by [`paint_caption_buttons`]. Kept as a small POD
+/// struct so the caller (renderer) can derive them from its theme/UI
+/// tokens once and pass them through without sonic-gpu needing to know
+/// about themes.
+#[derive(Copy, Clone, Debug)]
+pub struct CaptionColors {
+    /// Strip background (no-hover state) — usually the same as the bar bg.
+    pub bg: [f32; 4],
+    /// Hover-plate color for minimize / maximize.
+    pub hover_bg: [f32; 4],
+    /// Hover-plate color for close (the canonical Win11 red `#E81123`).
+    pub close_hover_bg: [f32; 4],
+    /// Foreground glyph color (─ □ ✕) when not hovered.
+    pub fg: [f32; 4],
+    /// Foreground glyph color while the close button is hovered (white
+    /// on top of the red plate for legibility).
+    pub close_hover_fg: [f32; 4],
+}
+
+/// Paint the three Win11-style caption buttons (min / max / close) into
+/// the given quad list — full visuals: hover-state background plate +
+/// minimal geometric glyph for each button. The glyphs are drawn as
+/// thin axis-aligned and rotated quads instead of going through the
+/// text pipeline, both to avoid a font dependency for chrome-only
+/// symbols and so that the icons render even before the glyph atlas
+/// has warmed up.
 ///
 /// Callers on platforms without an integrated titlebar inset (macOS /
 /// Linux) should early-return without ever invoking this helper — the
 /// function itself is portable but the caption strip only exists on
-/// Windows. The previous in-function guard was removed when this code
-/// moved into `sonic-gpu` (which cannot depend on `sonic-shared::app`);
-/// the single existing caller (`sonic-shared::render`) already gates on
-/// `app::integrated_titlebar_inset_px() > 0`, so behavior is unchanged.
+/// Windows. The single existing caller (`sonic-shared::render`) already
+/// gates on `app::integrated_titlebar_inset_px() > 0`.
 ///
 /// `rects` is `[min, max, close]` as `(x, y, w, h)` in physical pixels
 /// (see `sonic_ui::tabbar_view::caption_button_rects`); `surface` is
-/// `(w, h)` in the same units used by [`px_rect_to_ndc`]. `bg` is the
-/// plate background color (RGBA, premultiplied straight). The close
-/// button gets no special tint here — hover-red is a future enhancement.
+/// `(w, h)` in the same units used by [`px_to_ndc`]. `hover` tints the
+/// button under the cursor (close → red, others → muted surface).
 pub fn paint_caption_buttons(
     out: &mut Vec<QuadInstance>,
     rects: &[(f32, f32, f32, f32); 3],
     surface: (f32, f32),
-    bg: [f32; 4],
+    colors: CaptionColors,
+    hover: CaptionHover,
 ) {
     let (sw, sh) = surface;
-    for &(x, y, w, h) in rects {
+    let hover_idx = match hover {
+        CaptionHover::None => usize::MAX,
+        CaptionHover::Min => 0,
+        CaptionHover::Max => 1,
+        CaptionHover::Close => 2,
+    };
+    // 1) Background plates.
+    for (i, &(x, y, w, h)) in rects.iter().enumerate() {
+        let plate_color = if i == hover_idx {
+            if i == 2 {
+                colors.close_hover_bg
+            } else {
+                colors.hover_bg
+            }
+        } else {
+            colors.bg
+        };
         let ndc = px_to_ndc(x, y, w, h, sw, sh);
-        out.push(QuadInstance::sharp(ndc, bg));
+        out.push(QuadInstance::sharp(ndc, plate_color));
+    }
+    // 2) Glyphs — single thin centered shapes drawn with the sharp
+    //    quad path. Geometry is intentionally minimal (Win11 caption
+    //    icons are 10×10 outlined). Sizes are physical pixels and
+    //    assume the surface size is already physical too.
+    const ICON_PX: f32 = 10.0;
+    const STROKE_PX: f32 = 1.0;
+    // Minimize — horizontal dash centered in the button.
+    {
+        let (bx, by, bw, bh) = rects[0];
+        let cx = bx + bw * 0.5;
+        let cy = by + bh * 0.5;
+        let fg = colors.fg;
+        let dash = (cx - ICON_PX * 0.5, cy - STROKE_PX * 0.5, ICON_PX, STROKE_PX);
+        out.push(QuadInstance::sharp(px_to_ndc(dash.0, dash.1, dash.2, dash.3, sw, sh), fg));
+    }
+    // Maximize — 10×10 square outline (4 strokes).
+    {
+        let (bx, by, bw, bh) = rects[1];
+        let cx = bx + bw * 0.5;
+        let cy = by + bh * 0.5;
+        let fg = colors.fg;
+        let left = cx - ICON_PX * 0.5;
+        let top = cy - ICON_PX * 0.5;
+        // top edge
+        out.push(QuadInstance::sharp(px_to_ndc(left, top, ICON_PX, STROKE_PX, sw, sh), fg));
+        // bottom edge
+        out.push(QuadInstance::sharp(
+            px_to_ndc(left, top + ICON_PX - STROKE_PX, ICON_PX, STROKE_PX, sw, sh),
+            fg,
+        ));
+        // left edge
+        out.push(QuadInstance::sharp(px_to_ndc(left, top, STROKE_PX, ICON_PX, sw, sh), fg));
+        // right edge
+        out.push(QuadInstance::sharp(
+            px_to_ndc(left + ICON_PX - STROKE_PX, top, STROKE_PX, ICON_PX, sw, sh),
+            fg,
+        ));
+    }
+    // Close — `+`-rotated "X". Drawn as a small square of rotated
+    //   single-pixel rows; cheap proxy for the ✕ glyph that's
+    //   readable at the 32px button height. Implemented as a step
+    //   pattern (two diagonals built from short axis-aligned quads)
+    //   since the quad pipeline doesn't do rotated rects directly.
+    {
+        let (bx, by, bw, bh) = rects[2];
+        let cx = bx + bw * 0.5;
+        let cy = by + bh * 0.5;
+        let fg = if hover_idx == 2 { colors.close_hover_fg } else { colors.fg };
+        let half = (ICON_PX * 0.5).floor() as i32;
+        // Two diagonals: y = cy + dx (down-right) and y = cy - dx (up-right).
+        // Each "pixel" of the diagonal is a 1.5×1.5 quad so the X
+        // reads cleanly at DPI=1.0 without going through SDF.
+        let s = STROKE_PX.max(1.0);
+        for dx in -half..=half {
+            let fx = cx + dx as f32 - s * 0.5;
+            let fy_dr = cy + dx as f32 - s * 0.5; // down-right diagonal
+            let fy_ur = cy - dx as f32 - s * 0.5; // up-right diagonal
+            out.push(QuadInstance::sharp(px_to_ndc(fx, fy_dr, s, s, sw, sh), fg));
+            out.push(QuadInstance::sharp(px_to_ndc(fx, fy_ur, s, s, sw, sh), fg));
+        }
+    }
+}
+
+#[cfg(test)]
+mod caption_paint_tests {
+    use super::*;
+
+    fn dummy_colors() -> CaptionColors {
+        CaptionColors {
+            bg: [0.1, 0.1, 0.1, 1.0],
+            hover_bg: [0.2, 0.2, 0.2, 1.0],
+            close_hover_bg: [0.91, 0.07, 0.14, 1.0], // #E81123
+            fg: [0.9, 0.9, 0.9, 1.0],
+            close_hover_fg: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    fn rects_1000x32() -> [(f32, f32, f32, f32); 3] {
+        [(862.0, 0.0, 46.0, 32.0), (908.0, 0.0, 46.0, 32.0), (954.0, 0.0, 46.0, 32.0)]
+    }
+
+    #[test]
+    fn paint_emits_plates_and_glyphs() {
+        let mut quads = Vec::new();
+        paint_caption_buttons(
+            &mut quads,
+            &rects_1000x32(),
+            (1000.0, 700.0),
+            dummy_colors(),
+            CaptionHover::None,
+        );
+        // 3 plates + 1 (min dash) + 4 (max square) + 11×2 (close X, dx ∈ -5..=5)
+        // = 3 + 1 + 4 + 22 = 30.
+        assert_eq!(quads.len(), 30);
+        // Plates use the no-hover bg color.
+        for plate in &quads[..3] {
+            assert_eq!(plate.color, [0.1, 0.1, 0.1, 1.0]);
+        }
+    }
+
+    #[test]
+    fn paint_close_hover_uses_red_plate_and_white_glyph() {
+        let mut quads = Vec::new();
+        paint_caption_buttons(
+            &mut quads,
+            &rects_1000x32(),
+            (1000.0, 700.0),
+            dummy_colors(),
+            CaptionHover::Close,
+        );
+        // Plate index 2 (close) should now be red, the other two unchanged.
+        assert_eq!(quads[0].color, [0.1, 0.1, 0.1, 1.0]);
+        assert_eq!(quads[1].color, [0.1, 0.1, 0.1, 1.0]);
+        assert_eq!(quads[2].color, [0.91, 0.07, 0.14, 1.0]);
+        // The X glyphs (quads 8..) should be white (close_hover_fg).
+        for q in &quads[8..] {
+            assert_eq!(q.color, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn paint_min_hover_tints_only_min_plate() {
+        let mut quads = Vec::new();
+        paint_caption_buttons(
+            &mut quads,
+            &rects_1000x32(),
+            (1000.0, 700.0),
+            dummy_colors(),
+            CaptionHover::Min,
+        );
+        assert_eq!(quads[0].color, [0.2, 0.2, 0.2, 1.0]); // hover_bg
+        assert_eq!(quads[1].color, [0.1, 0.1, 0.1, 1.0]);
+        assert_eq!(quads[2].color, [0.1, 0.1, 0.1, 1.0]);
     }
 }
