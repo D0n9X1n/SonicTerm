@@ -146,22 +146,20 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
                     // a fresh one and drops our half of the previous ring.
                     buf.reserve(RING_CAP);
                 }
-                let spare = buf.spare_capacity_mut();
-                // SAFETY: `Read::read` is documented to never read from the
-                // destination slice, only write up to its len. We cast
-                // `MaybeUninit<u8>` to `u8` for the duration of the call
-                // and only `set_len` over the prefix that `read` reported
-                // as initialised. This is the same pattern `tokio::io` and
-                // `bytes::BufMut::chunk_mut` use under the hood.
-                let dst: &mut [u8] = unsafe {
-                    std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), spare.len())
-                };
-                match reader.read(dst) {
+                // Zero-initialise the spare region before handing it to
+                // `Read::read`. `Read` requires an initialised destination
+                // slice (passing `MaybeUninit` bytes via a `&mut [u8]` cast
+                // is UB even though most impls never read from it). The
+                // memset cost on a 64 KiB region is dominated by the syscall
+                // itself; the underlying allocation is still reused across
+                // reads, preserving the zero-alloc steady state.
+                let initial_len = buf.len();
+                let read_cap = buf.capacity() - initial_len;
+                buf.resize(initial_len + read_cap, 0);
+                match reader.read(&mut buf[initial_len..]) {
                     Ok(0) => break,
                     Ok(n) => {
-                        // SAFETY: `read` returned `n` initialised bytes
-                        // starting at the previous len.
-                        unsafe { buf.set_len(buf.len() + n) };
+                        buf.truncate(initial_len + n);
                         let chunk = buf.split().freeze();
                         if tx.send(chunk).is_err() {
                             break;
