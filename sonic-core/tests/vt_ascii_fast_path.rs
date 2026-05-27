@@ -133,3 +133,43 @@ fn fast_path_equivalent_to_byte_at_a_time() {
     }
     assert_eq!(bulk.grid().cursor, drip.grid().cursor);
 }
+
+#[test]
+fn fast_path_does_not_resume_inside_dcs() {
+    // Regression for PR #138: execute() used to set ground=true unconditionally,
+    // but vte dispatches C0 controls (BEL/LF/CR/HT/BS) even while the state
+    // machine is inside an ESC/CSI/OSC/DCS sequence. If ground flipped back to
+    // true mid-escape, the next byte of the DCS payload would be consumed by
+    // the SWAR fast-path and printed verbatim instead of being swallowed by
+    // vte's DCS state. Here we feed a DCS XTGETTCAP query with printable bytes
+    // inside the payload — none of those payload bytes must land on the grid.
+    let mut p = Parser::new(Grid::new(80, 2));
+    // hello, then DCS + q 544e (= "TN") ST, then world.
+    p.advance(b"hello\x1bP+q544e\x1b\\world");
+    let text = row_text(&p, 0);
+    // "hello" and "world" should be adjacent — the DCS payload contributed
+    // nothing to the visible grid.
+    assert_eq!(&text[..10], "helloworld", "got {text:?}");
+}
+
+#[test]
+fn fast_path_does_not_resume_after_bel_inside_csi() {
+    // CSI parameter bytes followed by BEL (0x07): vte calls execute(BEL) while
+    // still parsing the CSI. The pre-fix code would set ground=true here, so
+    // the next byte ("c" — the CSI final byte) would slip into the SWAR fast-
+    // path and be printed as ASCII instead of completing the CSI. Verify that
+    // does not happen by feeding a CSI with an embedded BEL and a final byte
+    // that, if mishandled, would visibly land on the grid.
+    let mut p = Parser::new(Grid::new(80, 1));
+    // "a" then ESC [ 3 1 BEL m "b" — the BEL inside CSI must not break the
+    // sequence into "31" + "m" + "b" via fast-path. After vte processes the
+    // (possibly-malformed) CSI, "b" should print normally.
+    p.advance(b"a\x1b[31\x07mb");
+    let text = row_text(&p, 0);
+    // 'a' must be present and 'b' must be present; no stray '3', '1', or 'm'
+    // from the CSI payload should appear in the grid.
+    assert!(text.starts_with('a'), "got {text:?}");
+    assert!(text.contains('b'), "got {text:?}");
+    assert!(!text.contains('3'), "CSI payload leaked: {text:?}");
+    assert!(!text.contains('1'), "CSI payload leaked: {text:?}");
+}

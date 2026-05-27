@@ -395,11 +395,15 @@ impl Perform for Performer {
             0x0D => self.grid.carriage_return(),
             _ => {}
         }
-        self.ground = true;
+        // NB: do NOT set ground=true here. vte may call execute() while still
+        // inside an ESC/CSI/OSC/DCS state machine (C0 bytes are dispatched
+        // even mid-escape). Resuming the SWAR fast-path here would consume
+        // the remainder of the escape sequence as printable text.
+        self.ground = false;
     }
 
     fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
-        self.ground = true;
+        self.ground = false;
         if inter.first() == Some(&b'?') {
             match action {
                 'h' => {
@@ -498,7 +502,7 @@ impl Perform for Performer {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.ground = true;
+        self.ground = false;
         let code = params
             .first()
             .and_then(|s| std::str::from_utf8(s).ok())
@@ -581,11 +585,13 @@ impl Perform for Performer {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
         self.ground = false;
     }
-    fn put(&mut self, _byte: u8) {}
+    fn put(&mut self, _byte: u8) {
+        self.ground = false;
+    }
     fn unhook(&mut self) {
-        self.ground = true;
+        self.ground = false;
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
-        self.ground = true;
+        self.ground = false;
     }
 }
