@@ -35,6 +35,7 @@ bytemuck.workspace = true
 bitflags.workspace = true
 serde_plain.workspace = true
 bytes = "1"
+memchr = "2"
 russh = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
