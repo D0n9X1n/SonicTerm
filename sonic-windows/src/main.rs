@@ -10,6 +10,10 @@ use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
 #[cfg(target_os = "windows")]
+mod backdrop;
+#[cfg(target_os = "windows")]
+mod chrome;
+#[cfg(target_os = "windows")]
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
@@ -31,6 +35,8 @@ fn main() -> Result<()> {
             Box::new(|raw| {
                 if let raw_window_handle::RawWindowHandle::Win32(h) = raw {
                     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+                    chrome::install_subclass(hwnd);
+                    backdrop::apply_backdrop(hwnd);
                     let mac = menubar::WinMenu::new(hwnd);
                     if let Err(e) = mac.install(Sender::new()) {
                         tracing::error!("WinMenu install failed: {e}");
