@@ -5,19 +5,10 @@
 //! interns `(id, uri)` pairs and hands out stable ids.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT_HYPERLINK_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Opaque id referencing a [`Hyperlink`] in a [`HyperlinkRegistry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HyperlinkId(pub u64);
-
-impl HyperlinkId {
-    pub fn next() -> Self {
-        Self(NEXT_HYPERLINK_ID.fetch_add(1, Ordering::Relaxed))
-    }
-}
+// `HyperlinkId` lives in `sonic-types` so value types like `Cell` can carry
+// it without depending on this crate. Re-exported for source compatibility.
+pub use sonic_types::HyperlinkId;
 
 /// A parsed OSC 8 hyperlink: optional client-supplied id + uri.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

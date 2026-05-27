@@ -5,94 +5,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Direction for split/focus actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-/// Scroll target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScrollAction {
-    LineUp,
-    LineDown,
-    PageUp,
-    PageDown,
-    ToTop,
-    ToBottom,
-}
-
-/// All actions a binding may trigger. The renaming makes the TOML pretty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    // Tabs
-    NewTab,
-    CloseTab,
-    NextTab,
-    PrevTab,
-    ActivateTab(usize),
-    ActivateLastTab,
-
-    // Splits
-    SplitRight,
-    SplitDown,
-    ClosePane,
-    FocusPane(Direction),
-    ResizePane {
-        dir: Direction,
-        amount: u16,
-    },
-
-    // Clipboard
-    CopyToClipboard,
-    PasteFromClipboard,
-
-    // Font
-    IncreaseFontSize,
-    DecreaseFontSize,
-    ResetFontSize,
-
-    // Theme (live-apply by name; persists to config on next save).
-    // Bound from the View → Theme submenu in the macOS menubar.
-    ApplyTheme(String),
-
-    // UI chrome
-    ToggleTabBar,
-
-    // Window
-    NewWindow,
-    ToggleFullscreen,
-
-    // Search / palette
-    OpenSearch,
-    OpenCommandPalette,
-    OpenPreferences,
-
-    // Scroll
-    Scroll(ScrollAction),
-
-    // Shell integration (OSC 133)
-    ScrollToPrevPrompt,
-    ScrollToNextPrompt,
-
-    // Config
-    ReloadConfig,
-
-    /// Open a new pane connected to a remote shell over SSH. Argument is
-    /// a `user@host[:port]` target string; parsing/validation happens in
-    /// [`crate::ssh::parse_target`] before any connection attempt. The
-    /// action variant is always present so keymap deserialization works
-    /// regardless of whether the binary was built with the `ssh` feature;
-    /// the dispatch handler decides whether to actually connect or just
-    /// log "ssh disabled at build time".
-    OpenSshPane(String),
-}
+// Value types (Action, Direction, ScrollAction) live in `sonic-types` so any
+// crate can match on an Action without pulling in toml/notify/etc. Re-exported
+// for source compatibility: every existing
+// `use sonic_core::keymap::{Action, Direction, ScrollAction}` keeps compiling.
+pub use sonic_types::{Action, Direction, ScrollAction};
 
 impl<'de> Deserialize<'de> for ActionWrapper {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
