@@ -18,7 +18,8 @@
 //! Coordinate system: physical pixels, origin top-left (the same system
 //! [`crate::tabbar_view`] uses).
 
-use crate::command_palette::{action_display_name, CommandPalette};
+use crate::command_label::label as action_label;
+use crate::command_palette::CommandPalette;
 use crate::ime::ImeState;
 use crate::search::SearchState;
 use crate::tabbar_view::Rect;
@@ -142,7 +143,7 @@ impl PaletteLayout {
             };
             rows.push(PaletteRow { item_index, rect: r });
             if let Some(a) = visible.get(item_index) {
-                row_labels.push(action_display_name(a));
+                row_labels.push(action_label(a));
             } else {
                 row_labels.push(String::new());
             }

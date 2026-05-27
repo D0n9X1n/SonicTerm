@@ -151,3 +151,118 @@ fn palette_dispatch_of_open_preferences_sets_pending_flag() {
     // sets, so the next event-loop tick can create the prefs window.
     assert!(sonic_shared::app::__test_palette_dispatch_open_preferences_sets_pending());
 }
+
+// ---------------------------------------------------------------------------
+// Full-coverage + VSCode-style fuzzy search tests (see PR feat(palette)).
+
+#[test]
+fn palette_lists_every_action_variant() {
+    // Every variant kind in sonic_core::keymap::Action must be
+    // represented at least once in the palette universe — otherwise
+    // a brand-new bindable action would silently never appear.
+    use sonic_shared::command_label::{variant_kind, ALL_VARIANT_KINDS};
+    use sonic_shared::command_palette::covers_every_variant_kind;
+    assert!(covers_every_variant_kind(), "all_actions() is missing a variant kind");
+    let universe = all_actions();
+    for kind in ALL_VARIANT_KINDS {
+        assert!(
+            universe.iter().any(|a| variant_kind(a) == *kind),
+            "variant kind {kind} is not in palette universe"
+        );
+    }
+    // And the universe size is at least the kind count (Direction-
+    // parameterized kinds appear multiple times, so >= not ==).
+    assert!(universe.len() >= ALL_VARIANT_KINDS.len());
+}
+
+#[test]
+fn fuzzy_match_ranks_substring_before_subsequence() {
+    // Typing "neta" should match "New Tab" (a subsequence: N-e-T-a)
+    // and rank it ahead of any candidate where the chars only barely
+    // appear. "Open Preferences" has no 'n' followed by 'e' followed
+    // by 't' followed by 'a', so it must NOT match at all.
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_query("neta");
+    let visible_actions = p.visible();
+    let labels: Vec<String> =
+        visible_actions.iter().map(|a| sonic_shared::command_label::label(a)).collect();
+    assert!(
+        labels.iter().any(|l| l == "New Tab"),
+        "'neta' should match 'New Tab' as a subsequence: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Open Preferences"),
+        "'neta' should NOT match 'Open Preferences': {labels:?}"
+    );
+
+    // And against a query that exists as a contiguous substring in
+    // one label, the contiguous match must outrank a merely-subsequence
+    // hit. "new t" vs the candidates: "New Tab" has it contiguous;
+    // a hypothetical scatter match like "Next Tab" has it scattered.
+    p.set_query("new t");
+    let top = p.current().cloned().expect("at least one match");
+    assert_eq!(
+        sonic_shared::command_label::label(&top),
+        "New Tab",
+        "contiguous substring should rank first"
+    );
+}
+
+#[test]
+fn enter_on_selected_dispatches_action() {
+    // The palette state exposes the currently-selected Action via
+    // `current()`. The app's enter handler reads that and forwards
+    // to App::run_action. We assert the contract that current()
+    // returns the action that Enter would dispatch.
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_query("open command palette");
+    let dispatched = p.current().cloned().expect("at least one match");
+    assert!(matches!(dispatched, Action::OpenCommandPalette));
+
+    // OpenPreferences is reachable by name even though no keybinding
+    // is set for it in the default keymap.
+    p.set_query("preferences");
+    let dispatched = p.current().cloned().expect("at least one match");
+    assert!(matches!(dispatched, Action::OpenPreferences));
+
+    // ReloadConfig is also reachable.
+    p.set_query("reload");
+    let dispatched = p.current().cloned().expect("at least one match");
+    assert!(matches!(dispatched, Action::ReloadConfig));
+}
+
+#[test]
+fn esc_closes_palette() {
+    let mut p = CommandPalette::new();
+    p.open();
+    p.set_query("split");
+    assert!(p.is_open());
+    assert!(!p.is_empty());
+    // The Esc key handler in app.rs calls .close().
+    p.close();
+    assert!(!p.is_open(), "palette must close on Esc");
+    assert_eq!(p.query(), "", "query is cleared so reopening is fresh");
+    assert_eq!(p.selected(), 0, "selection resets to top");
+}
+
+#[test]
+fn keybinding_hint_uses_pretty_glyphs_when_bound() {
+    use sonic_core::keymap::{ActionWrapper, Binding, Keymap, Meta};
+    use sonic_shared::command_label::keybinding_hint;
+    let km = Keymap {
+        meta: Meta { name: "test".into(), version: "1".into() },
+        bindings: vec![
+            Binding { keys: "super+t".into(), action: ActionWrapper(Action::NewTab) },
+            Binding {
+                keys: "super+shift+p".into(),
+                action: ActionWrapper(Action::OpenCommandPalette),
+            },
+        ],
+    };
+    assert_eq!(keybinding_hint(&km, &Action::NewTab).as_deref(), Some("⌘T"));
+    assert_eq!(keybinding_hint(&km, &Action::OpenCommandPalette).as_deref(), Some("⌘⇧P"));
+    // Unbound action returns None.
+    assert!(keybinding_hint(&km, &Action::ReloadConfig).is_none());
+}

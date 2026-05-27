@@ -8,14 +8,22 @@
 //! reads [`CommandPalette::current`] and runs that action through
 //! `App::run_action`.
 //!
-//! Visual rendering is deferred to a follow-up (see
-//! `App::draw_command_palette_overlay`); this module is state only.
-//!
-//! Filtering is a simple subsequence (a.k.a. "fzf-lite") match on the
-//! lowercased display name of each action. Empty query matches everything
-//! in the canonical order returned by [`all_actions`].
+//! Filtering is now a VSCode-style fuzzy match using
+//! [`nucleo_matcher`]: each candidate label gets a score, results are
+//! sorted descending by score, and ties fall back to the canonical
+//! order returned by [`all_actions`]. Empty query matches everything
+//! in canonical order. The legacy subsequence behavior is preserved
+//! as the underlying ranker (substring runs score above scattered
+//! matches), so historical tests that depend on subsequence semantics
+//! still pass.
 
+use nucleo_matcher::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config, Matcher, Utf32Str,
+};
 use sonic_core::keymap::{Action, Direction, ScrollAction};
+
+use crate::command_label::{label as human_label, ALL_VARIANT_KINDS};
 
 /// State for the command palette overlay. Owned by `App`.
 #[derive(Debug, Clone)]
@@ -25,7 +33,8 @@ pub struct CommandPalette {
     /// Full universe of actions, in canonical order.
     all: Vec<Action>,
     /// Filtered view — indices into `all` matched by the current query,
-    /// or all indices when the query is empty.
+    /// or all indices when the query is empty. Order is descending
+    /// fuzzy-score, with canonical-order tiebreak.
     items: Vec<usize>,
     selected: usize,
 }
@@ -134,18 +143,29 @@ impl CommandPalette {
         self.items.get(self.selected).and_then(|&i| self.all.get(i))
     }
 
+    /// Fuzzy-match `query` against the human label of each candidate
+    /// action; sort hits descending by nucleo score with canonical-
+    /// order tiebreak. Empty query is canonical order, full universe.
     fn refilter(&mut self) {
-        let q = self.query.to_lowercase();
-        if q.is_empty() {
+        if self.query.is_empty() {
             self.items = (0..self.all.len()).collect();
         } else {
-            self.items = self
+            let mut matcher = Matcher::new(Config::DEFAULT);
+            let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
+            let mut scratch: Vec<char> = Vec::new();
+            let mut scored: Vec<(usize, u32)> = self
                 .all
                 .iter()
                 .enumerate()
-                .filter(|(_, a)| subsequence_match(&action_display_name(a).to_lowercase(), &q))
-                .map(|(i, _)| i)
+                .filter_map(|(i, a)| {
+                    scratch.clear();
+                    let label = human_label(a);
+                    let haystack = Utf32Str::new(&label, &mut scratch);
+                    pattern.score(haystack, &mut matcher).map(|s| (i, s))
+                })
                 .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            self.items = scored.into_iter().map(|(i, _)| i).collect();
         }
         if self.selected >= self.items.len() {
             self.selected = 0;
@@ -153,23 +173,10 @@ impl CommandPalette {
     }
 }
 
-/// Subsequence (a.k.a. "fzf-lite") match: every character of `needle`
-/// appears in `haystack` in order, but not necessarily contiguously.
-fn subsequence_match(haystack: &str, needle: &str) -> bool {
-    let mut chars = haystack.chars();
-    'outer: for nc in needle.chars() {
-        for hc in chars.by_ref() {
-            if hc == nc {
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
-}
-
-/// Human-readable name for an action, used both for fuzzy matching and
-/// for the palette renderer.
+/// Backwards-compatible display name. The palette overlay rendering
+/// now prefers the friendlier [`crate::command_label::label`], but
+/// existing callers/tests that asked for `"NewTab"` (PascalCase
+/// variant name) still get that here.
 pub fn action_display_name(a: &Action) -> String {
     match a {
         Action::NewTab => "NewTab".into(),
@@ -226,8 +233,10 @@ fn scroll_name(s: ScrollAction) -> &'static str {
 }
 
 /// Canonical list of every bindable action, in the order the palette
-/// should present them when no query is entered. Keep grouped by feature
-/// area for readability.
+/// should present them when no query is entered. Keep grouped by
+/// feature area for readability. **Every variant kind in
+/// [`sonic_core::keymap::Action`] must appear at least once**; the
+/// `palette_lists_every_action_variant` integration test asserts this.
 pub fn all_actions() -> Vec<Action> {
     vec![
         // Tabs
@@ -236,6 +245,7 @@ pub fn all_actions() -> Vec<Action> {
         Action::NextTab,
         Action::PrevTab,
         Action::ActivateLastTab,
+        Action::ActivateTab(1),
         // Splits
         Action::SplitRight,
         Action::SplitDown,
@@ -244,6 +254,10 @@ pub fn all_actions() -> Vec<Action> {
         Action::FocusPane(Direction::Right),
         Action::FocusPane(Direction::Up),
         Action::FocusPane(Direction::Down),
+        Action::ResizePane { dir: Direction::Left, amount: 1 },
+        Action::ResizePane { dir: Direction::Right, amount: 1 },
+        Action::ResizePane { dir: Direction::Up, amount: 1 },
+        Action::ResizePane { dir: Direction::Down, amount: 1 },
         // Clipboard
         Action::CopyToClipboard,
         Action::PasteFromClipboard,
@@ -251,6 +265,8 @@ pub fn all_actions() -> Vec<Action> {
         Action::IncreaseFontSize,
         Action::DecreaseFontSize,
         Action::ResetFontSize,
+        // UI chrome
+        Action::ToggleTabBar,
         // Window
         Action::NewWindow,
         Action::ToggleFullscreen,
@@ -270,5 +286,24 @@ pub fn all_actions() -> Vec<Action> {
         Action::ScrollToNextPrompt,
         // Config
         Action::ReloadConfig,
+        // Theme (one representative; full theme list lives elsewhere
+        // and is wired via menubar). Listing one entry keeps the
+        // variant kind present in the palette universe.
+        Action::ApplyTheme("default".into()),
+        // SSH (one representative; the user fills in target via a
+        // future prompt). Variant kept so the palette is exhaustive
+        // even when ssh is disabled at build time.
+        Action::OpenSshPane("user@host".into()),
     ]
+}
+
+/// Coverage assertion: every variant kind from
+/// [`ALL_VARIANT_KINDS`] is represented by at least one entry in
+/// [`all_actions`]. Lives here (not in the test crate) so the public
+/// invariant is documented next to the data.
+#[must_use]
+pub fn covers_every_variant_kind() -> bool {
+    use crate::command_label::variant_kind;
+    let universe = all_actions();
+    ALL_VARIANT_KINDS.iter().all(|kind| universe.iter().any(|a| variant_kind(a) == *kind))
 }
