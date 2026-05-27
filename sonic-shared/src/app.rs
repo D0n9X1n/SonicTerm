@@ -2568,9 +2568,10 @@ impl App {
         match crate::prefs_renderer::PrefsRenderer::new(w.clone(), el) {
             Ok(mut r) => {
                 let real_sf = w.scale_factor() as f32;
-                r.set_scale_factor(real_sf);
+                r.force_rebuild_for_scale(real_sf);
                 let real_inner = w.inner_size();
                 r.resize(real_inner.width.max(1), real_inner.height.max(1));
+                w.request_redraw();
                 self.prefs_renderer = Some(r);
             }
             Err(e) => {
