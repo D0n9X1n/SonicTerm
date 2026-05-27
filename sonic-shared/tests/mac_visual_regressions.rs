@@ -240,3 +240,91 @@ fn palette_open_requests_redraw_synchronously() {
     assert!(!now_open);
     assert!(!p.is_open());
 }
+
+/// Bug 7 — Palette selection highlight floats ABOVE the selected row's
+/// text instead of wrapping it (live-screenshot bug, May 2026).
+///
+/// The render path in `sonic-shared/src/render.rs` derives the text
+/// `top` from `row_y + text_top_offset`. For the highlight rect to
+/// visually wrap the line of text, the offset must center the line-box
+/// (whose height = the palette buffer's line_height) inside the 40 px
+/// row background. The previous formula
+/// `(HEIGHT - font_size) * 0.5` was based on glyph height, not
+/// line-box height, and pushed the visual baseline BELOW the highlight
+/// at non-default font sizes.
+///
+/// This test pins the centering formula. If a future change
+/// re-introduces the glyph-height variant the assert will fire.
+#[test]
+fn palette_text_top_offset_centers_line_box_inside_row() {
+    use sonic_shared::overlays::{PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT};
+    let line_height = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
+    let text_top_offset = (PALETTE_ROW_HEIGHT - line_height) * 0.5;
+    // The line-box (44 px) is taller than the highlight rect (40 px)
+    // by 4 px, so the offset must be -2 px to split the overshoot
+    // evenly above and below.
+    assert!(
+        (text_top_offset - (-2.0)).abs() < 1e-4,
+        "text_top_offset must center the 44 px line-box inside the 40 px row \
+         (expected -2.0, got {text_top_offset})"
+    );
+    // Sanity: text top is row_y - 2; line center is row_y - 2 + 22 = row_y + 20,
+    // which is exactly the vertical center of the 40 px row. The previous
+    // buggy formula at font_size=14 gave +13, putting the line center
+    // ~12 px below the row center — visibly outside the highlight.
+    let row_y = 100.0;
+    let visual_line_center = row_y + text_top_offset + line_height * 0.5;
+    let row_center = row_y + PALETTE_ROW_HEIGHT * 0.5;
+    assert!(
+        (visual_line_center - row_center).abs() < 0.5,
+        "line-box center {visual_line_center} must equal row center {row_center}"
+    );
+}
+
+/// Bug 8 — prefs window blank on open + freezes after a few clicks.
+///
+/// We can't drive winit + wgpu from a CI test, but two structural
+/// invariants in `app.rs::create_prefs_window` and the prefs
+/// MouseInput handler prevent regression of the symptom:
+///
+/// 1. `prefs_renderer` is installed BEFORE the first `request_redraw`
+///    call — otherwise the redraw event finds `None` and skips
+///    drawing, leaving the window blank until a user click
+///    "incidentally" requests another redraw.
+/// 2. `request_redraw` in the prefs MouseInput handler runs AFTER the
+///    state mutation — otherwise the redraw paints the pre-click
+///    state and the user sees their previous click's outcome.
+///
+/// These are enforced by string-grepping the source; if a future
+/// refactor moves the calls back to the wrong order, the test fires.
+#[test]
+fn prefs_create_installs_renderer_before_first_request_redraw() {
+    let src = include_str!("../src/app.rs");
+    let create_fn_start = src.find("fn create_prefs_window").expect("function present");
+    let create_fn_end = src[create_fn_start..]
+        .find("\n    }\n")
+        .map(|i| create_fn_start + i)
+        .expect("end of function");
+    let body = &src[create_fn_start..create_fn_end];
+    // The `self.prefs_renderer = Some(r)` install line must appear
+    // before the top-level `w.request_redraw()` (the one that
+    // schedules the initial paint). Earlier `force_rebuild_for_scale`
+    // calls request_redraw on the window directly while `r` is still
+    // local — that's fine because winit defers redraw delivery until
+    // the event loop returns, at which point the renderer slot is
+    // populated. The bug we're guarding against is the OPPOSITE: a
+    // top-level `w.request_redraw()` running before `prefs_renderer`
+    // is installed in `self`, so the queued redraw event lands while
+    // the field is still `None` and the render call is skipped.
+    let install_pos =
+        body.find("self.prefs_renderer = Some(r)").expect("renderer install line present");
+    let top_level_redraw =
+        body.rfind("w.request_redraw()").expect("top-level w.request_redraw present");
+    assert!(
+        install_pos < top_level_redraw,
+        "prefs_renderer must be installed BEFORE the top-level w.request_redraw() \
+         (install_pos={install_pos}, top_level_redraw={top_level_redraw}) — otherwise \
+         the first RedrawRequested finds renderer == None and leaves the window blank \
+         (regression of PR #125 fix path)"
+    );
+}

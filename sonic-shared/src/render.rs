@@ -2548,13 +2548,23 @@ impl GpuRenderer {
             } else {
                 return None;
             };
-            // Vertically center the row text within its 40 px background
-            // rect (was `row_y + 2` which sat the text at the top of the
-            // row with ~18 px of dead space below — the bug from live
-            // testing). glyphon places the baseline ~0.8 × font_size
-            // below `top`, so centering by line-box height suffices.
-            let text_top_offset =
-                ((crate::overlays::PALETTE_ROW_HEIGHT - self.font_size) * 0.5).max(0.0);
+            // Vertically center the row text inside its 40 px background
+            // rect. The rows buffer's line_height is set to
+            // (PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP), so consecutive
+            // lines stack at the same stride as the highlight rects.
+            // glyphon places each line so its line-box (of size
+            // line_height) starts at `top`. To center that line-box
+            // inside the 40 px highlight, shift `top` up by half the
+            // difference — i.e. offset = (HEIGHT - line_height) * 0.5,
+            // which is negative when line_height > HEIGHT (the case here:
+            // 40 - 44 = -2). The previous formula derived the offset from
+            // `font_size`, which let the visual baseline sit BELOW the
+            // highlight rect at any non-default font size — that was the
+            // shipped regression where the gold highlight floated ABOVE
+            // the row's text instead of wrapping it.
+            let line_height =
+                crate::overlays::PALETTE_ROW_HEIGHT + crate::overlays::PALETTE_ROW_GAP;
+            let text_top_offset = (crate::overlays::PALETTE_ROW_HEIGHT - line_height) * 0.5;
             Some(TextArea {
                 buffer: &self.palette_rows_buffer,
                 left: row_x + 4.0,
@@ -2562,7 +2572,7 @@ impl GpuRenderer {
                 scale: 1.0,
                 bounds: TextBounds {
                     left: layout.bg.x as i32,
-                    top: row_y as i32,
+                    top: (row_y + text_top_offset).floor() as i32,
                     right: (layout.bg.x + layout.bg.w) as i32,
                     bottom: (layout.bg.y + layout.bg.h) as i32,
                 },
