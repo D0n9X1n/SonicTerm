@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-26 (after v0.8.0 release — see [`CHANGELOG.md`](../CHANGELOG.md) and [`RELEASE.md`](../RELEASE.md))
+Last updated: 2026-05-27 (v1.0.0 IN PROGRESS — release notes staged in [`CHANGELOG.md`](../CHANGELOG.md), tag pending operational cert procurement; see [`RELEASE.md`](../RELEASE.md))
 
 ---
 
@@ -60,9 +60,12 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | Native macOS menubar | ✅ v0.8 | (#66) |
 | B3 atlas renderer + headless GUI bench | ✅ v0.8 | (#42, #44, #74) |
 | WezTerm visual parity (≤ 3 ΔE on standard recipe) | ✅ v0.8 | (#70, #75) |
+| Windows MVP (MSI, titlebar+Mica, menu, OLE drag, fg-proc probe) | ✅ v1.0 | (#133, #134, #135, #137, #139) |
+| Renderer + VT + PTY perf pass | ✅ v1.0 | (#129, #130, #131, #132, #136, #138, #140, #141, #142) |
+| Code-signing pipeline (Azure Trusted Signing + macOS notarization) | ✅ v1.0 | (#128); certs pending |
 | Half-transparent / blur backgrounds | ⏳ | — |
-| Code signing + notarization + auto-update | ⏳ v1.0 | infra in `#39`; secrets pending |
-| Linux re-enable, session restore | ⏳ v1.0 | — |
+| Auto-update (Sparkle / WinSparkle) | ⏳ post-v1.0 | — |
+| Linux re-enable, session restore | ⏳ post-v1.0 | — |
 
 ---
 
@@ -152,25 +155,43 @@ Highlights:
 13. **Docs**: README/USER_GUIDE overhaul (#60), TESTING.md (#67),
     VISUAL_PARITY.md (#70), CI-BILLING.md (#73).
 
-### ⏳ v1.0.0 — Production
+### ⏳ v1.0.0 — Production (IN PROGRESS, 2026-05-27)
 
-The remaining gates between v0.8 and a public 1.0 are operational, not
+15 PRs landed in this session; release notes are staged in
+[`CHANGELOG.md`](../CHANGELOG.md). Tag pending operational cert
+procurement.
+
+PRs landed today:
+
+- **Windows MVP**: #133 (MSI pipeline), #134 (foreground-process
+  probe), #135 (cross-platform menu abstraction), #137 (custom
+  titlebar + Mica backdrop), #139 (OLE drag-drop for tab tear-out +
+  file drop).
+- **Renderer perf**: #130 (dirty bitset foundation), #136 (atlas LRU
+  eviction), #140 (per-row glyph cache), #141 (VecDeque visible rows),
+  #142 (pre-baked box-drawing + Powerline).
+- **VT + PTY + app loop**: #129 (4k LRU shape cache), #131 (zero-copy
+  PTY reads via BytesMut ring), #132 (vsync frame pacing via
+  `ControlFlow::WaitUntil`), #138 (SWAR ASCII fast-path in VT parser).
+- **Signing pipeline**: #128 (Azure Trusted Signing for Windows +
+  macOS notarization plumbing).
+
+Remaining gates before the v1.0 tag goes out are operational, not
 code:
 
 1. **macOS signing + notarization** — Apple Developer Program ($99/yr).
-   Workflow infra is already in place (see #39 +
-   [`docs/release/signing.md`](release/signing.md)); just add the
-   secrets and re-tag.
-2. **Windows signing** — EV cert ($200-400/yr). Workflow infra ready;
-   secrets pending.
+   Workflow infra in place (#39 + #128); add the secrets and re-tag.
+2. **Windows signing** — Azure Trusted Signing tenant + cert. Workflow
+   infra ready (#128); secrets pending.
+
+Still deferred past v1.0:
+
 3. **Auto-update**: Sparkle on macOS, Squirrel or WinSparkle on Windows.
-   See open question below.
 4. **Session restore**: persist tab/pane layouts to disk on shutdown,
    restore on next launch (complements `sonic-mux` from v0.8).
 5. **Linux support**: re-enable `sonic-linux`, add to CI matrix and
    release pipeline, AppImage + `.deb`.
-6. **Half-transparent / blur backgrounds** (carry-over from the v0.8
-   scope; rolled to v1.0 as a visual polish item).
+6. **Half-transparent / blur backgrounds** (rolled forward from v0.8).
 
 ---
 

@@ -6,7 +6,90 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet — v0.8.0 just shipped. v1.0 work begins next._
+_v1.0.0 release notes below are staged here pending tag cut._
+
+## [1.0.0] — 2026-05-27
+
+The production release. Sonic crosses the line from "v0.8 polish" to
+"v1.0 ship": Windows MVP lands (MSI installer, custom titlebar with
+Mica backdrop, cross-platform menu, OLE drag-drop, foreground process
+probe), the renderer + VT + PTY stack gets a deep perf pass, and the
+code-signing pipeline is wired end-to-end on both platforms (Azure
+Trusted Signing on Windows; Developer ID notarization on macOS — both
+pending operational cert procurement to flip the switch).
+
+### 🎉 Highlights
+
+- **Windows MVP**: cargo-wix MSI installer, custom titlebar + Mica /
+  Acrylic backdrop, cross-platform menu abstraction (NSMenu + muda),
+  OLE drag-drop for tab tear-out + file drop, and a foreground-process
+  probe via `NtQuerySystemInformation` so tab titles match macOS.
+  (#133, #134, #135, #137, #139)
+- **Renderer perf pass**: per-row glyph cache so clean rows don't
+  re-shape, VecDeque-backed visible rows for O(1) scroll, LRU eviction
+  in the glyph atlas before growing VRAM, and pre-baked
+  box-drawing + Powerline glyphs at font load. (#130, #136, #140,
+  #141, #142)
+- **VT + PTY hot paths**: SWAR ASCII fast-path bypasses `vte` for
+  printable runs, 4k LRU shape cache replaces the old clear-on-overflow
+  cache, PTY reads go zero-copy through a `BytesMut` ring, and the app
+  loop now gates redraws to the vsync cadence via
+  `ControlFlow::WaitUntil`. (#129, #131, #132, #138)
+- **Signing pipeline ready**: Windows release flow switched to Azure
+  Trusted Signing; macOS Developer ID notarization plumbing wired.
+  Certs still to be procured before the next tagged build is signed.
+  (#128)
+
+### ✨ Added
+
+- `#128` Switch Windows release signing to Azure Trusted Signing; carry
+  over macOS notarization plumbing from #39.
+- `#133` `cargo-wix` MSI pipeline wired in CI, with the full asset
+  bundle (themes, keymap, fonts) and the Sonic icon embedded.
+- `#134` Windows foreground-process probe via
+  `NtQuerySystemInformation`, feeding the WezTerm-style tab title.
+- `#135` Cross-platform menu abstraction: NSMenu on macOS, `muda` on
+  Windows, single keymap-action surface.
+- `#137` Windows custom titlebar with Mica / Acrylic backdrop on
+  Windows 11 (graceful fallback on Windows 10).
+- `#139` OLE drag-drop on Windows: tab tear-out across windows + file
+  drop into a pane (parity with the existing `NSPasteboard` path on
+  macOS).
+
+### ⚡ Improved (Performance)
+
+- `#129` 4k LRU shape cache replaces clear-on-overflow — no more shape
+  thrash when scrolling large buffers.
+- `#130` Grid exposes a dirty bitset + invalidation hooks; foundation
+  for the per-row renderer cache.
+- `#131` PTY reads use a `BytesMut` ring; zero-copy from kernel → vte.
+- `#132` Frame pacing via `ControlFlow::WaitUntil` — redraws gate to
+  the vsync cadence instead of busy-waking.
+- `#136` Glyph atlas now LRU-evicts before growing the GPU texture,
+  bounding VRAM under heavy glyph churn.
+- `#138` SWAR ASCII fast-path in the VT parser bypasses `vte` entirely
+  for printable ASCII runs — the common case for `cat`/`tail -f`.
+- `#140` Per-row glyph cache: the renderer skips re-shaping rows that
+  haven't changed since the last frame.
+- `#141` `VecDeque`-backed visible rows give O(1) scroll instead of
+  O(n) memmove.
+- `#142` Box-drawing + Powerline glyphs pre-baked into the atlas at
+  font load — no first-frame stutter on TUIs that lean on them.
+
+### 🔧 Internals
+
+- Test floor held; per-PR gate (fmt + clippy + workspace test +
+  pty_dump + pty_dump_unicode + release build + GUI smoke for any
+  render/input/VT touch) enforced on all 15 PRs.
+
+### ⏳ Still deferred past v1.0
+
+- Linux support (`sonic-linux` re-enable + CI matrix + AppImage / .deb).
+- Cert procurement for Apple Developer ID + Azure Trusted Signing —
+  pipelines are ready, signed builds ship once the certs land.
+- Auto-update (Sparkle / WinSparkle).
+- Session restore on relaunch.
+- Half-transparent / blur backgrounds.
 
 ## [0.8.0] — 2026-05-26
 
