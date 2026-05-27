@@ -92,7 +92,12 @@ impl App {
                 if let Some(pane) = child.panes.get(&active_id) {
                     // CLAUDE.md §4 land-mine: render path must not block on
                     // the parser lock, or VT bursts can AB-BA deadlock the UI.
+                    // Issue #175: lock-contention bail must also reschedule
+                    // a redraw, or the next prompt frame is lost until an
+                    // unrelated event wakes the loop. Same fix as the main
+                    // window's RedrawRequested arm.
                     let Some(mut grid) = pane.parser.try_lock() else {
+                        child.window.request_redraw();
                         return;
                     };
                     if let Some(search) =
