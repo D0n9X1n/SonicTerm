@@ -246,6 +246,68 @@ pub enum DragAck {
 /// [`DragAck`]. Until v2 wires a cross-process consumption ack, real
 /// platform sinks should return [`DragAck::NotAcknowledged`] so the
 /// user's live session is preserved if the drop falls on the floor.
+/// Thread-safe one-slot mailbox for an incoming [`TabPayload`].
+///
+/// Added in the Windows OLE drag-drop PR: unlike macOS, where the
+/// pending payload lives on the system `NSPasteboard` and is read
+/// synchronously on app activation, Windows delivers `IDropTarget::Drop`
+/// callbacks on the OLE worker thread. The Windows side stashes the
+/// payload here from that thread; the winit/main thread drains it on
+/// the next event-loop tick.
+///
+/// Single-slot semantics on purpose: only the most recent unconsumed
+/// drop is kept. If two drags land before the main loop drains, the
+/// older one is replaced — matching macOS's pasteboard semantics where
+/// later writes overwrite earlier ones for the same type. Future work
+/// (queue, dedup) can build on this; v1 keeps it dead simple.
+///
+/// Mac currently reads from `NSPasteboard` directly and does not use
+/// this slot. It's available for any future platform receiver that
+/// runs off-main-thread and needs a thread-safe rendezvous.
+#[derive(Debug, Default)]
+pub struct PendingPayloadSlot {
+    inner: std::sync::Mutex<Option<TabPayload>>,
+}
+
+impl PendingPayloadSlot {
+    /// Construct an empty slot.
+    pub const fn new() -> Self {
+        Self { inner: std::sync::Mutex::new(None) }
+    }
+
+    /// Store a payload, replacing any older un-drained entry. Lock
+    /// poisoning is recovered from in place — a panicked writer left
+    /// the slot in a defined state (either Some or None) and the next
+    /// reader/writer is allowed to proceed. The Windows OLE worker
+    /// thread is short-lived and stateless beyond this call, so there
+    /// is no follow-on invariant to repair.
+    pub fn put(&self, payload: TabPayload) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(payload);
+    }
+
+    /// Drain the slot. Returns the payload (if any) and leaves the
+    /// slot empty.
+    pub fn take(&self) -> Option<TabPayload> {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take()
+    }
+}
+
+/// Trait implemented by platform-specific OS-drag senders.
+///
+/// `sonic-shared` knows when a tab has been dragged outside every
+/// Sonic-owned window — that's the trigger for an OS-level handoff.
+/// What it does NOT know is how to actually start an NSDragging
+/// session or a `DoDragDrop` call; those live in `sonic-mac` and
+/// `sonic-windows` respectively. The platform binary installs an
+/// `OsDragSink` impl at startup; the app dispatches into it.
 pub trait OsDragSink: Send + Sync {
     /// Hand the payload off to the OS. On macOS this writes it to
     /// the general `NSPasteboard` under [`PASTEBOARD_TYPE`]. On
@@ -367,5 +429,45 @@ mod tests {
         let back = TabPayload::from_json(&json).expect("decode");
         let decoded = TabPayload::decode_scrollback(&back.scrollback_b64).expect("b64 decode");
         assert_eq!(decoded.as_slice(), nasty);
+    }
+
+    #[test]
+    fn pending_payload_slot_put_then_take() {
+        let slot = PendingPayloadSlot::new();
+        assert!(slot.take().is_none(), "fresh slot is empty");
+        let p = TabPayload {
+            pty_pid: 7,
+            tab_title: "t".to_string(),
+            scrollback_b64: String::new(),
+            cwd: String::new(),
+            cmd: "/bin/sh".to_string(),
+            env: vec![],
+        };
+        slot.put(p.clone());
+        assert_eq!(slot.take(), Some(p));
+        assert!(slot.take().is_none(), "draining is one-shot");
+    }
+
+    #[test]
+    fn pending_payload_slot_overwrites_older() {
+        let slot = PendingPayloadSlot::new();
+        let mk = |pid: i32| TabPayload {
+            pty_pid: pid,
+            tab_title: String::new(),
+            scrollback_b64: String::new(),
+            cwd: String::new(),
+            cmd: String::new(),
+            env: vec![],
+        };
+        slot.put(mk(1));
+        slot.put(mk(2));
+        slot.put(mk(3));
+        assert_eq!(slot.take().map(|p| p.pty_pid), Some(3));
+    }
+
+    #[test]
+    fn pending_payload_slot_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PendingPayloadSlot>();
     }
 }

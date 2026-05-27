@@ -212,6 +212,24 @@ pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// Quote a single path or word for POSIX-shell paste. Single-quotes
+/// everything and escapes embedded `'` as `'\''`. Mirrors the helper in
+/// `sonic-windows::os_drag_win::shell_quote` so file drops on either
+/// platform paste the same bytes. Pure function, exported for tests.
+pub fn shell_quote_posix(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Compute the absolute viewport-top row for "scroll to previous / next
 /// prompt". Returns `None` if there is no prompt in the requested
 /// direction. Pure function so tests can drive it without a window.
@@ -311,6 +329,12 @@ pub enum UserEvent {
     /// [`crate::menubar_bridge`] buffer; this variant is just the
     /// wake-up signal so the loop drains it.
     MenuAction,
+    /// A platform OS-drag drop landed and stashed payloads in
+    /// [`crate::os_drag_bridge`]. The variant is just the wake-up
+    /// signal so the loop drains the queues — separate from
+    /// [`Self::MenuAction`] so a noisy drag stream does not flood the
+    /// menubar drain path.
+    OsDrag,
 }
 
 /// Same as [`run`] but installs a platform-specific OS-drag sink.
@@ -414,6 +438,7 @@ pub fn run_with_os_drag_pending_and_window_hook(
     // NSMenu selectors can wake the event loop and dispatch through
     // `run_action`. Safe + cheap on platforms without a menubar.
     crate::menubar_bridge::install_proxy(proxy.clone());
+    crate::os_drag_bridge::install_proxy(proxy.clone());
     let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
@@ -2336,6 +2361,39 @@ impl App {
         self.drain_pending_window_creates(el);
     }
 
+    /// Drain payloads stashed by the platform OLE / NSPasteboard drop
+    /// callback in [`crate::os_drag_bridge`]. Called from the
+    /// `UserEvent::OsDrag` wake-up arm. Each queued tab payload
+    /// becomes a new tab via [`Self::new_tab_from_payload`]; each
+    /// queued file-drop list is shell-quoted and written to the
+    /// focused pane's PTY as a bracketed paste (matches `paste_clipboard`).
+    fn drain_os_drag(&mut self) {
+        for payload in crate::os_drag_bridge::drain_tab_payloads() {
+            let idx = self.new_tab_from_payload(&payload);
+            tracing::info!(idx, "spawned tab from OS-drag payload");
+        }
+        let drops = crate::os_drag_bridge::drain_file_drops();
+        if drops.is_empty() {
+            return;
+        }
+        // Pre-compute bracketed-paste preference under a short-lived
+        // borrow so we don't hold the parser lock across write_to_pty.
+        let bracketed =
+            self.active_pane().map(|p| p.parser.lock().bracketed_paste_enabled()).unwrap_or(false);
+        for paths in drops {
+            let quoted = paths
+                .iter()
+                .map(|p| shell_quote_posix(&p.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let bytes = wrap_paste(&quoted, bracketed);
+            self.write_to_pty(bytes);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Read-only accessor used by tests and (eventually) the
     /// renderer to honor the View → Toggle Tab Bar menu item.
     #[doc(hidden)]
@@ -3092,6 +3150,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::ConfigChanged => self.poll_config_reload(),
             UserEvent::MenuAction => self.drain_menubar_actions(el),
+            UserEvent::OsDrag => self.drain_os_drag(),
         }
         // Any path above that ran an action may have set
         // `pending_prefs_open` — make sure the prefs window actually

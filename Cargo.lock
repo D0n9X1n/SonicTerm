@@ -4218,11 +4218,14 @@ dependencies = [
  "anyhow",
  "muda",
  "raw-window-handle",
+ "serde_json",
  "sonic-core",
  "sonic-shared",
  "tracing",
  "window-vibrancy",
  "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-implement 0.60.2",
 ]
 
 [[package]]

@@ -27,6 +27,10 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use sonic_shared::menu::{PlatformMenu, Sender};
+        // Initialize OLE once on the main thread so RegisterDragDrop /
+        // DoDragDrop are usable from the same thread that owns the
+        // winit HWND.
+        os_drag_win::init_ole();
         // Install the muda menubar the instant winit hands us an HWND.
         // muda's `init_for_hwnd` requires the window to exist; the
         // `on_window_ready` hook fires exactly once, right after
@@ -41,21 +45,27 @@ fn main() -> Result<()> {
                     if let Err(e) = mac.install(Sender::new()) {
                         tracing::error!("WinMenu install failed: {e}");
                     }
+                    // SAFETY: HWND is alive (winit just created it)
+                    // and OLE was initialized above on this same
+                    // thread.
+                    unsafe { os_drag_win::register_for_window(hwnd) };
                 } else {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }
             });
-        sonic_shared::app::run_with_os_drag_pending_and_window_hook(
+        let result = sonic_shared::app::run_with_os_drag_pending_and_window_hook(
             theme,
             config,
             keymap,
             os_drag_win::WinOsDragSink::arc(),
             Some(theme_loader),
             Some(keymap_loader),
-            None,
+            os_drag_win::take_pending_payload(),
             None,
             Some(on_window_ready),
-        )
+        );
+        os_drag_win::shutdown_ole();
+        result
     }
     #[cfg(not(target_os = "windows"))]
     {
