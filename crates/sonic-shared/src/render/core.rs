@@ -1531,6 +1531,29 @@ impl GpuRenderer {
         // terminal glyphs were bleeding through overlay dialogs.)
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
+        // Per-cell ANSI background colors. Must be pushed FIRST so that
+        // selection / cursor / overlay quads draw on top — otherwise an
+        // ANSI-colored cell would obscure the selection highlight. The
+        // helper run-length coalesces adjacent same-bg cells into a single
+        // wide quad (an 80-col `\033[41m` fill becomes 1 quad, not 80).
+        // Cells whose bg resolves to the theme default are skipped: the
+        // surface `LoadOp::Clear(self.bg)` already covers that area.
+        emit_cell_bg_quads(
+            grid,
+            {
+                let live_top_abs = grid.scrollback_len() as u64;
+                viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+            },
+            theme,
+            pad,
+            top_inset,
+            cell_w,
+            cell_h,
+            sw,
+            sh,
+            &mut quads,
+        );
+
         if let Some(sel) = selection {
             if !sel.is_empty() {
                 let (a, b) = sel.normalized();
@@ -2969,6 +2992,109 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
         Color::Default => default,
         Color::Rgb(r, g, b) => GColor::rgb(r, g, b),
         Color::Indexed(i) => indexed(i, theme).unwrap_or(default),
+    }
+}
+
+/// Resolve a cell's background to a linear-space `[r,g,b,a]` suitable for the
+/// quad pipeline, OR `None` if the cell should fall through to the surface
+/// clear color (`theme.colors.background`).
+///
+/// Returning `None` for the default-bg case lets the per-row emit loop skip
+/// pushing a no-op quad over every blank cell — the `LoadOp::Clear(self.bg)`
+/// already covers that area.
+///
+/// Note on color space: the wgpu surface is `Bgra8UnormSrgb`, so the quad
+/// fragment shader's output is sRGB-encoded on write. Inputs MUST therefore
+/// be in linear-light space, otherwise gamma is applied twice and the result
+/// looks washed out (same trap documented in `color.rs::hex_to_rgba`). The
+/// sRGB→linear LUT here is bit-exact with the one feeding `hex_to_rgba`, so
+/// `Color::Indexed(1)` (ANSI red) ends up identical to the theme's `ansi.red`
+/// rendered through the LoadOp clear path.
+#[doc(hidden)]
+pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
+    let (r, g, b) = match cell.bg {
+        Color::Default => return None,
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(i) => {
+            let gc = indexed(i, theme)?;
+            (gc.r(), gc.g(), gc.b())
+        }
+    };
+    let lut = super::color::srgb_u8_to_linear_lut();
+    Some([lut[r as usize], lut[g as usize], lut[b as usize], 1.0])
+}
+
+/// Walk the visible rows of `grid`, emit one `QuadInstance` per maximal run
+/// of horizontally-adjacent cells that share the same non-default background
+/// color. Cells whose `bg` resolves to the theme default are skipped — the
+/// surface `LoadOp::Clear(theme.background)` already covers them, so emitting
+/// a quad there would be wasted bandwidth.
+///
+/// Run-length coalescing is essential: a single `\033[41m` color-fill of an
+/// 80-column row would otherwise produce 80 quads where 1 suffices. The
+/// renderer can hit tens of thousands of background cells per frame during
+/// e.g. `htop` or `vim` syntax highlighting; per-cell quads would blow the
+/// instance buffer and tank fill-rate.
+///
+/// `WIDE_CONT` cells (the right half of a wide CJK cell) inherit the lead
+/// cell's bg via the parser, so they participate in the same run naturally.
+///
+/// The emitted quads are sharp-edged (no SDF) and pushed onto `out` in row-
+/// major order. Caller is responsible for placing this BEFORE selection /
+/// cursor / overlay quads in the draw vector so those still paint on top.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)] // mirrors flush_shape_run / collect_hyperlink_runs siblings — all geometry must be threaded in explicitly to keep this a free function (testable without a full GpuRenderer)
+pub fn emit_cell_bg_quads(
+    grid: &Grid,
+    view_top_abs: u64,
+    theme: &Theme,
+    pad: f32,
+    top_inset: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    out: &mut Vec<QuadInstance>,
+) {
+    for r in 0..grid.rows {
+        let row_abs = view_top_abs + r as u64;
+        let Some(row) = grid.row_at_abs(row_abs) else {
+            continue;
+        };
+        // Run-length encode adjacent same-bg cells into one quad.
+        let mut run_start: Option<u16> = None;
+        let mut run_color: Option<[f32; 4]> = None;
+        let mut col: u16 = 0;
+        let flush =
+            |start: u16, end_exclusive: u16, color: [f32; 4], out: &mut Vec<QuadInstance>| {
+                let x = pad + f32::from(start) * cell_w;
+                let y = top_inset + f32::from(r) * cell_h;
+                let w = f32::from(end_exclusive - start) * cell_w;
+                out.push(QuadInstance::sharp(px_to_ndc(x, y, w, cell_h, sw, sh), color));
+            };
+        for cell in row.iter() {
+            let bg = cell_bg_rgba(cell, theme);
+            match (run_color, bg) {
+                (Some(prev), Some(cur)) if prev == cur => {
+                    // extend run
+                }
+                (Some(prev), _) => {
+                    let start = run_start.expect("run_start set when run_color is");
+                    flush(start, col, prev, out);
+                    run_start = bg.map(|_| col);
+                    run_color = bg;
+                }
+                (None, Some(_)) => {
+                    run_start = Some(col);
+                    run_color = bg;
+                }
+                (None, None) => {}
+            }
+            col = col.saturating_add(1);
+        }
+        if let (Some(start), Some(color)) = (run_start, run_color) {
+            flush(start, col, color, out);
+        }
     }
 }
 
