@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Pending migration to UiPalette (PR #119 follow-up).
 use sonic_shared::tabbar_view::*;
 use sonic_shared::tabs::{Tab, TabBar};
 

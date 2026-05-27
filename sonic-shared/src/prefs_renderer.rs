@@ -888,10 +888,11 @@ mod tests {
         let (state, theme) = fresh();
         let dl = build_draw_list(&state, &theme);
         assert!(dl.clear[3] > 0.99, "prefs background must be opaque");
-        // Should match BG_BASE (#0B0E14) — premultiplied linear.
-        let expected = color::BG_BASE();
+        // Should match UiPalette::from_theme(theme).bg_base — chrome
+        // follows the active theme (PR #119).
+        let expected = crate::ui_tokens::UiPalette::from_theme(&theme).bg_base;
         for (i, ex) in expected.iter().enumerate() {
-            assert!((dl.clear[i] - ex).abs() < 1e-4, "clear[{i}] ≠ BG_BASE");
+            assert!((dl.clear[i] - ex).abs() < 1e-4, "clear[{i}] ≠ palette.bg_base");
         }
     }
 

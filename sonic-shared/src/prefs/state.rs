@@ -21,7 +21,11 @@ use super::layout::{Category, PrefsLayout};
 /// `UiPalette::accent` uses) directly instead of round-tripping
 /// through the linear-sRGB premultiplied palette.
 fn accent_swatch_rgba(theme: &Theme) -> [u8; 4] {
-    ColorSwatch::from_hex(&theme.colors.tab.active_fg.0).unwrap_or([0x7a, 0xa2, 0xf7, 0xff])
+    // Neutral sentinel on parse failure — never bake a theme-specific default
+    // (a Tokyo-Night blue here used to leak through when a user-supplied theme
+    // had a malformed accent hex). The renderer overlays the active palette
+    // accent at draw time, so a transparent fallback is correct.
+    ColorSwatch::from_hex(&theme.colors.tab.active_fg.0).unwrap_or([0, 0, 0, 0])
 }
 
 /// Classified result of a pointer click inside the preferences window.
