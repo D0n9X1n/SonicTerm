@@ -3065,6 +3065,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                let was_dirty = self.input_dirty;
                 // Perf audit #9: if we already rendered within the
                 // current vsync window, defer this redraw until the
                 // next monitor refresh boundary. `about_to_wait` will
@@ -3079,12 +3080,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // perceptible latency to typing/resize/theme changes.
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
-                if !self.input_dirty && self.last_render.elapsed() < self.frame_period {
+                if !was_dirty && self.last_render.elapsed() < self.frame_period {
                     self.pending_redraw = true;
                     return;
                 }
                 self.pending_redraw = false;
-                self.input_dirty = false;
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
                 // the focused pane). The active pane's grid is rendered into
@@ -3215,6 +3215,7 @@ impl ApplicationHandler<UserEvent> for App {
                         ) {
                             tracing::warn!("render error: {e}");
                         }
+                        self.input_dirty = false;
                         self.last_render = Instant::now();
                         let g = grid.grid_mut();
                         (g.cursor.row, g.cursor.col)
