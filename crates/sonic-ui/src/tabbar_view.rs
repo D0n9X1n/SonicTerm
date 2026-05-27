@@ -28,8 +28,13 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
 /// Maximum width of a single tab (a long-title tab is clamped to this).
 pub const TAB_MAX_WIDTH: f32 = 240.0;
 
-/// Minimum width of a single tab — below this we just clip the title.
-pub const TAB_MIN_WIDTH: f32 = 100.0;
+/// Minimum width of a single tab. The bar enforces this as a hard floor:
+/// when many tabs would otherwise have to shrink below this, the tabs are
+/// clamped at the floor and the bar effectively overflows the right edge
+/// (clipped against the `+` button gutter). This keeps common shell titles
+/// (`Administrator: cmd.exe`, `pwsh`, …) readable without aggressive
+/// ellipsizing in the common 2–4 tab case at 1000 px wide.
+pub const TAB_MIN_WIDTH: f32 = 200.0;
 
 /// Width of the `+` new-tab button drawn after the last tab.
 /// Browser-style 28×28 hit/visual target with radius 8 (issue #112 Round 3).
@@ -183,8 +188,11 @@ impl TabBarLayout {
             (window_width - BAR_LEFT_PAD - NEW_TAB_BUTTON_WIDTH - BAR_LEFT_PAD - TAB_GAP).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
-        let per_tab = raw.min(TAB_MAX_WIDTH);
-        let _ = TAB_MIN_WIDTH; // advisory; tabs shrink below this when many
+        // Enforce TAB_MIN_WIDTH as a hard floor: bars with many tabs overflow
+        // the right gutter rather than shrink each tab into illegibility.
+        // The min floor wins over the equal-share `raw` value, then the max
+        // cap clamps very wide allocations down to TAB_MAX_WIDTH.
+        let per_tab = raw.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
 
         let bg_y = TAB_VERT_INSET;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET).max(1.0);
@@ -205,6 +213,26 @@ impl TabBarLayout {
         }
 
         Self { bar: bar_rect, tabs, new_tab, active: Some(bar.active_index()), visible: true }
+    }
+
+    /// Rect (in the same coordinate space as `self.tabs`) at which the
+    /// renderer should paint the active-tab top-accent bar. Returns
+    /// `None` when there is no active tab in the layout (empty bar) or
+    /// when the active index points past the laid-out tabs (defensive —
+    /// stale state must never paint an accent floating in the new-tab
+    /// gutter, which was the user-reported bug in issue #171).
+    ///
+    /// The rect is anchored to the active tab's own `bg.x`/`bg.y` — it
+    /// MUST NOT be derived from `active_idx * tab_w`, because the bar
+    /// applies a left padding `BAR_LEFT_PAD` and per-tab spacing
+    /// `TAB_GAP` that the naive multiplication ignores.
+    #[must_use]
+    pub fn active_accent_rect(&self) -> Option<Rect> {
+        let idx = self.active?;
+        let t = self.tabs.get(idx)?;
+        let x = t.bg.x + ACTIVE_TOP_ACCENT_INSET;
+        let w = (t.bg.w - 2.0 * ACTIVE_TOP_ACCENT_INSET).max(0.0);
+        Some(Rect { x, y: t.bg.y, w, h: ACTIVE_TOP_ACCENT_H })
     }
 
     /// Builder-style helper to mark the layout as hidden. A hidden
