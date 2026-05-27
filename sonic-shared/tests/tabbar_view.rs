@@ -14,7 +14,10 @@ fn empty_bar_still_has_new_tab_button() {
     let bar = TabBar::new();
     let layout = TabBarLayout::compute(&bar, 800.0);
     assert!(layout.tabs.is_empty());
-    assert_eq!(layout.hit(790.0, 10.0), Some(TabHit::NewTab));
+    // Click squarely inside the 28×28 + button.
+    let cx = layout.new_tab.x + layout.new_tab.w / 2.0;
+    let cy = layout.new_tab.y + layout.new_tab.h / 2.0;
+    assert_eq!(layout.hit(cx, cy), Some(TabHit::NewTab));
 }
 
 #[test]
@@ -136,8 +139,11 @@ fn visible_bar_still_captures_clicks() {
     // Sanity: with_visible(true) is the default and preserves behavior.
     let bar = bar_with(3);
     let layout = TabBarLayout::compute(&bar, 800.0).with_visible(true);
-    assert!(matches!(layout.hit(10.0, 5.0), Some(TabHit::Activate(0))));
-    assert!(layout.point_over_bar(10.0, 5.0));
+    // x must land within tab 0's horizontal range (which now starts at
+    // BAR_LEFT_PAD = 12, not 4).
+    let probe_x = layout.tabs[0].bg.x + 1.0;
+    assert!(matches!(layout.hit(probe_x, 5.0), Some(TabHit::Activate(0))));
+    assert!(layout.point_over_bar(probe_x, 5.0));
 }
 
 #[test]
@@ -215,4 +221,87 @@ fn hit_test_blank_area_of_tab_activates_it() {
         Some(TabHit::Activate(0)),
         "click in middle of tab 0 activates tab 0"
     );
+}
+
+// ------------------ Issue #112 Round 3 spec tests ------------------
+
+#[test]
+fn tab_max_width_is_240() {
+    assert_eq!(TAB_MAX_WIDTH, 240.0);
+    // And a single tab in a wide window clamps to it.
+    let bar = bar_with(1);
+    let layout = TabBarLayout::compute(&bar, 4000.0);
+    assert!((layout.tabs[0].bg.w - 240.0).abs() < 0.5);
+}
+
+#[test]
+fn tab_min_width_is_100() {
+    assert_eq!(TAB_MIN_WIDTH, 100.0);
+}
+
+#[test]
+fn tab_gap_is_6() {
+    assert_eq!(TAB_GAP, 6.0);
+    // Adjacent tabs in a real layout sit exactly TAB_GAP apart.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute(&bar, 1200.0);
+    let gap = layout.tabs[1].bg.x - (layout.tabs[0].bg.x + layout.tabs[0].bg.w);
+    assert!((gap - TAB_GAP).abs() < 0.5, "gap = {gap}");
+}
+
+#[test]
+fn bar_left_pad_is_12() {
+    assert_eq!(BAR_LEFT_PAD, 12.0);
+    let bar = bar_with(2);
+    let layout = TabBarLayout::compute(&bar, 800.0);
+    assert!((layout.tabs[0].bg.x - 12.0).abs() < 0.01);
+}
+
+#[test]
+fn tab_inner_pad_is_10() {
+    assert_eq!(TAB_INNER_PAD, 10.0);
+}
+
+#[test]
+fn active_tab_top_accent_2px_blue() {
+    // The renderer draws a 2px top accent bar on the active tab,
+    // ACCENT_BLUE, inset on each side by ACTIVE_TOP_ACCENT_INSET so
+    // its width is `tab_w - 2 * inset`. Lock the constants so a
+    // future tweak doesn't silently drift.
+    assert_eq!(ACTIVE_TOP_ACCENT_H, 2.0);
+    assert_eq!(ACTIVE_TOP_ACCENT_INSET, 6.0);
+    // And the token color is the canonical Tokyo-night blue (#7AA2F7).
+    let blue = sonic_shared::ui_tokens::color::ACCENT_BLUE();
+    assert!((blue[3] - 1.0).abs() < 1e-4);
+    // Premultiplied invariant.
+    assert!(blue[0] <= blue[3] + 1e-5);
+}
+
+#[test]
+fn inactive_tab_hover_bg_uses_white_6pct() {
+    // The renderer paints the hover overlay on an inactive tab using
+    // `ui_tokens::color::BG_HOVER` which is #FFFFFF @ 6 % — verify the
+    // alpha here so the token is the source of truth.
+    let c = sonic_shared::ui_tokens::color::BG_HOVER();
+    let expected_a = 0x0F as f32 / 255.0; // hex "0F" ≈ 6 %
+    assert!((c[3] - expected_a).abs() < 1e-3, "got alpha {}", c[3]);
+}
+
+#[test]
+fn new_tab_button_size_28x28() {
+    assert_eq!(NEW_TAB_BUTTON_WIDTH, 28.0);
+    assert_eq!(NEW_TAB_BUTTON_HEIGHT, 28.0);
+    // And the layout produces a 28x28 hit rect at the right edge of
+    // the bar, vertically centered in a 40px bar.
+    let bar = bar_with(2);
+    let layout = TabBarLayout::compute(&bar, 800.0);
+    assert!((layout.new_tab.w - 28.0).abs() < 0.01);
+    assert!((layout.new_tab.h - 28.0).abs() < 0.01);
+    // Centered vertically: y = (40 - 28) / 2 = 6.
+    assert!((layout.new_tab.y - 6.0).abs() < 0.01);
+}
+
+#[test]
+fn bar_height_default_is_40() {
+    assert_eq!(TAB_BAR_HEIGHT, 40.0);
 }

@@ -33,9 +33,8 @@ fn palette_modal_uses_rounded_quad_radius_16() {
     let palette_block_start =
         src.find("Command palette overlay").expect("palette overlay block present");
     let palette_block = &src[palette_block_start..];
-    let modal_bg_idx = palette_block
-        .find("Modal background")
-        .expect("modal background comment present");
+    let modal_bg_idx =
+        palette_block.find("Modal background").expect("modal background comment present");
     let modal_bg_block =
         &palette_block[modal_bg_idx..modal_bg_idx + 600.min(palette_block.len() - modal_bg_idx)];
     assert!(
@@ -52,9 +51,8 @@ fn palette_modal_uses_rounded_quad_radius_16() {
     );
 
     // And the constant is wired to 16.0 px in overlays.rs.
-    let overlays =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlays.rs"))
-            .expect("read overlays.rs");
+    let overlays = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlays.rs"))
+        .expect("read overlays.rs");
     assert!(
         overlays.contains("pub const PALETTE_PANEL_RADIUS: f32 = 16.0"),
         "PALETTE_PANEL_RADIUS must equal 16.0 per spec"
