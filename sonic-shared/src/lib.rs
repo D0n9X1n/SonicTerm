@@ -23,6 +23,7 @@ pub mod prefs;
 pub mod prefs_renderer;
 pub mod quad;
 pub mod render;
+pub mod row_glyph_cache;
 pub mod search;
 pub mod selection;
 pub mod shape;

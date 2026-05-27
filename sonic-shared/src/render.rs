@@ -223,6 +223,17 @@ pub struct GpuRenderer {
     /// px); a row whose content + style hasn't changed since the
     /// last frame hits the cache and skips cosmic-text entirely.
     shape_cache: ShapeCache,
+    /// Per-row glyph cache (PR after #130). Stores the shaped
+    /// `GlyphInstance`s, underline coalescing, and missing-tofu list
+    /// for each visible row, keyed by absolute row index + a content
+    /// hash. A row whose contents / style / selection-overlap haven't
+    /// changed splices its cached output straight into the frame and
+    /// skips the entire `flush_shape_run` walk.
+    row_glyph_cache: crate::row_glyph_cache::RowGlyphCache,
+    /// Monotonic counter bumped on theme / default-fg / default-bg
+    /// changes. Folded into every `row_hash` so palette swaps
+    /// invalidate cached colours without iterating the cache.
+    style_rev: u64,
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
@@ -576,6 +587,8 @@ impl GpuRenderer {
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
+            row_glyph_cache: crate::row_glyph_cache::RowGlyphCache::new(),
+            style_rev: 0,
             drag_chip: None,
         })
     }
@@ -586,6 +599,10 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
+        // Cell layout and absolute-row positioning both change with
+        // the surface size; cached glyph instances would land at the
+        // wrong NDC coordinates.
+        self.row_glyph_cache.invalidate_all();
         // Text buffers are laid out in LOGICAL pixels (their font_size
         // is logical); pass logical widths so wrapping/clipping doesn't
         // give them 2× the room on Retina.
@@ -980,6 +997,7 @@ impl GpuRenderer {
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
+        self.row_glyph_cache.invalidate_all();
         self.last_frame_key = None;
         tracing::info!(
             "renderer.set_font: family={family} size={size} line_h={} cell={cw:.2}x{ch:.2}",
@@ -1031,6 +1049,7 @@ impl GpuRenderer {
         self.scale_factor = sf;
         let dim = atlas_dim_for_scale(sf);
         self.glyph_atlas = GlyphAtlas::new(dim, dim);
+        self.row_glyph_cache.invalidate_all();
         // The GPU-side AtlasUpload owns a texture sized to the old atlas
         // dimensions and a bind group pointing at it. After replacing the
         // CPU `GlyphAtlas` with one of a different size, the next
@@ -1079,6 +1098,8 @@ impl GpuRenderer {
         self.search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
         self.search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         self.last_frame_key = None;
+        self.style_rev = self.style_rev.wrapping_add(1);
+        self.row_glyph_cache.invalidate_all();
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
@@ -1331,11 +1352,59 @@ impl GpuRenderer {
             let live_top_abs = grid.scrollback_len() as u64;
             let max_top_abs = live_top_abs; // never scroll below live
             let view_top_abs = viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
+            // Drop cache entries for every row the VT thread mutated
+            // since the last frame. `grid.dirty_rows()` already covers
+            // theme/font/resize/scroll/focus/selection changes via the
+            // PR #130 invalidation hooks; renderer-side state changes
+            // (font/theme/scale/resize) already cleared the cache
+            // wholesale above. Translating dirty row indices to
+            // absolute rows uses the current view top — the same key
+            // we'll look up by below.
+            for r in grid.dirty_rows() {
+                self.row_glyph_cache.invalidate_row_abs(view_top_abs + r as u64);
+            }
+            // Normalise selection once outside the loop so we hash a
+            // canonical bbox per row.
+            let sel_bbox: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+                let (a, b) = s.normalized();
+                (a.0, a.1, b.0, b.1)
+            });
             for r in 0..grid.rows {
                 let row_abs = view_top_abs + r as u64;
                 let Some(row) = grid.row_at_abs(row_abs) else {
                     continue;
                 };
+                // ------ Cache lookup ------
+                let key = crate::row_glyph_cache::row_hash(
+                    view_top_abs,
+                    r as usize,
+                    row,
+                    self.style_rev,
+                    cell_w,
+                    cell_h,
+                    self.scale_factor,
+                    sel_bbox,
+                );
+                if let Some(cached) = self.row_glyph_cache.get(row_abs, key) {
+                    glyph_instances.extend_from_slice(&cached.glyphs);
+                    for (s, e) in &cached.underlines {
+                        underlines.push((r, *s, *e));
+                    }
+                    for t in &cached.tofu {
+                        missing_tofu.push(*t);
+                    }
+                    missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
+                    continue;
+                }
+                // ------ Miss: shape into row-local buffers, then
+                // splice into the frame buffers AND insert into the
+                // cache. Keeping the per-row work in local Vecs is
+                // what lets us cache without scanning the frame
+                // buffers after the fact. ------
+                let glyph_base = glyph_instances.len();
+                let tofu_base = missing_tofu.len();
+                let miss_base = missing_chars_this_frame.len();
+                let mut row_underlines: Vec<(u16, u16)> = Vec::new();
                 let mut ul_start: Option<u16> = None;
                 let mut last_visible_col: u16 = 0;
                 // First pass: per-cell underline coalescing (unchanged
@@ -1352,10 +1421,12 @@ impl GpuRenderer {
                         }
                     } else if let Some(s) = ul_start.take() {
                         let end = (col as u16).saturating_sub(1);
+                        row_underlines.push((s, end));
                         underlines.push((r, s, end));
                     }
                 }
                 if let Some(s) = ul_start.take() {
+                    row_underlines.push((s, last_visible_col));
                     underlines.push((r, s, last_visible_col));
                 }
 
@@ -1439,6 +1510,22 @@ impl GpuRenderer {
                         baseline_y_in_cell,
                     );
                 }
+                // Capture this row's contributions and insert into
+                // the cache so subsequent unchanged frames replay
+                // without shaping.
+                let row_glyphs = glyph_instances[glyph_base..].to_vec();
+                let row_tofu = missing_tofu[tofu_base..].to_vec();
+                let row_missing = missing_chars_this_frame[miss_base..].to_vec();
+                self.row_glyph_cache.insert(
+                    row_abs,
+                    key,
+                    crate::row_glyph_cache::CachedRow {
+                        glyphs: row_glyphs,
+                        underlines: row_underlines,
+                        tofu: row_tofu,
+                        missing_chars: row_missing,
+                    },
+                );
             }
         }
 
