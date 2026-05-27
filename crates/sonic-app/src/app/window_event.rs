@@ -5,6 +5,7 @@
 //! block; field access works because all referenced `App` fields are
 //! `pub(super)`.
 
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sonic_core::keymap::Action;
@@ -80,6 +81,8 @@ impl App {
 
             WindowEvent::RedrawRequested => {
                 let was_dirty = self.input_dirty;
+                let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
+                let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
                 // Perf audit #9: if we already rendered within the
                 // current vsync window, defer this redraw until the
                 // next monitor refresh boundary. `about_to_wait` will
@@ -94,7 +97,7 @@ impl App {
                 // perceptible latency to typing/resize/theme changes.
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
-                if !was_dirty && self.last_render.elapsed() < self.frame_period {
+                if !was_dirty && !pty_burst && self.last_render.elapsed() < self.frame_period {
                     self.pending_redraw = true;
                     return;
                 }
@@ -227,6 +230,12 @@ impl App {
                             tracing::warn!("render error: {e}");
                         }
                         self.input_dirty = false;
+                        // PR #162: mark only the generation sampled at
+                        // the start of this RedrawRequested as seen.
+                        // A burst arriving during render keeps the
+                        // counter ahead of last_seen_burst_gen so the
+                        // next redraw bypasses the vsync gate.
+                        self.last_seen_burst_gen = pty_burst_snapshot;
                         self.last_render = Instant::now();
                         let g = grid.grid_mut();
                         (g.cursor.row, g.cursor.col)

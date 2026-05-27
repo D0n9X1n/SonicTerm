@@ -5,7 +5,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -610,6 +610,16 @@ pub struct App {
     /// next vsync boundary via `pending_redraw`. Cleared on every
     /// frame we actually render. See PR #132 Haiku review.
     pub(super) input_dirty: bool,
+    /// Shared with every VT-thread spawned in `spawn_pty_for_pane` (one
+    /// per pane). Incremented by the VT loop whenever a non-empty chunk
+    /// of PTY bytes is processed; sampled on each `RedrawRequested` to
+    /// decide whether to bypass the vsync coalescing gate. PR #133/#162.
+    pub(super) pty_burst_gen: Arc<AtomicU32>,
+    /// Last PTY-burst generation that a completed render observed. If
+    /// the VT thread increments [`Self::pty_burst_gen`] during render,
+    /// this remains behind the current generation so the next redraw
+    /// bypasses the vsync gate instead of losing the burst.
+    pub(super) last_seen_burst_gen: u32,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     pub(super) i18n: sonic_ui::i18n::I18n,
@@ -700,6 +710,8 @@ impl App {
             frame_period: Duration::from_micros(16_667),
             pending_redraw: false,
             input_dirty: false,
+            pty_burst_gen: Arc::new(AtomicU32::new(0)),
+            last_seen_burst_gen: 0,
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
@@ -714,7 +726,36 @@ impl App {
     /// predicate used in the `WindowEvent::RedrawRequested` arm.
     #[doc(hidden)]
     pub fn would_coalesce_redraw(&self) -> bool {
-        !self.input_dirty && self.last_render.elapsed() < self.frame_period
+        !self.input_dirty
+            && self.pty_burst_gen.load(Ordering::Acquire) == self.last_seen_burst_gen
+            && self.last_render.elapsed() < self.frame_period
+    }
+
+    /// Test-only snapshot of the PTY-burst generation counter.
+    #[doc(hidden)]
+    pub fn pty_burst_gen_for_test(&self) -> u32 {
+        self.pty_burst_gen.load(Ordering::Acquire)
+    }
+
+    /// Test-only accessor for the last PTY-burst generation that render
+    /// marked as seen.
+    #[doc(hidden)]
+    pub fn last_seen_burst_gen_for_test(&self) -> u32 {
+        self.last_seen_burst_gen
+    }
+
+    /// Test-only marker for a PTY burst. Mirrors what the VT thread does
+    /// when it processes a non-empty byte chunk.
+    #[doc(hidden)]
+    pub fn mark_pty_burst_for_test(&self) {
+        self.pty_burst_gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// Test-only marker for render completing after sampling a PTY-burst
+    /// generation at the start of `RedrawRequested`.
+    #[doc(hidden)]
+    pub fn mark_burst_gen_seen_for_test(&mut self, snapshot: u32) {
+        self.last_seen_burst_gen = snapshot;
     }
 
     /// Test-only setter for the input-dirty flag.
