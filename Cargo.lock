@@ -4202,6 +4202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonic-render-model"
+version = "0.3.0"
+dependencies = [
+ "sonic-cfg",
+ "sonic-text",
+ "sonic-types",
+]
+
+[[package]]
 name = "sonic-shared"
 version = "0.3.0"
 dependencies = [
