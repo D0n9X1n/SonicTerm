@@ -425,6 +425,7 @@ impl PrefsRenderer {
             .map(|q| QuadInstance {
                 rect: px_to_ndc(q.rect.x * sf, q.rect.y * sf, q.rect.w * sf, q.rect.h * sf, sw, sh),
                 color: q.color,
+                ..Default::default()
             })
             .collect();
 

@@ -26,7 +26,8 @@ use crate::{
     glyph_atlas::{AtlasUpload, GlyphAtlas},
     ime::ImeState,
     overlays::{
-        search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_INNER_PAD,
+        search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
+        PALETTE_INNER_PAD, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_RADIUS,
     },
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
@@ -187,6 +188,7 @@ pub struct GpuRenderer {
     search_buffer: Buffer,
     palette_query_buffer: Buffer,
     palette_rows_buffer: Buffer,
+    palette_footer_buffer: Buffer,
     ime_buffer: Buffer,
     /// Dedicated text buffer for the drag-chip title overlay.
     drag_chip_buffer: Buffer,
@@ -472,11 +474,28 @@ impl GpuRenderer {
             Some(size.width as f32),
             Some(font_size * 1.25),
         );
-        let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_metrics);
+        // Rows buffer: use the palette row stride (40px) as the line height
+        // so each row's text aligns with its row background rect. The
+        // default monospace line height (~22px) caused the labels to be
+        // vertically compressed, with multiple labels sitting inside a
+        // single row's background quad. See PR #116 Haiku findings.
+        let palette_rows_metrics = Metrics::new(font_size, crate::overlays::PALETTE_ROW_HEIGHT);
+        let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
         palette_rows_buffer.set_size(
             &mut font_system,
             Some(size.width as f32),
             Some(size.height as f32),
+        );
+        // Dedicated footer buffer so the hint sits in `layout.footer`
+        // instead of being appended to the rows list (which made it
+        // appear near the top of the visible window).
+        let palette_footer_metrics =
+            Metrics::new(font_size * 0.85, crate::overlays::PALETTE_FOOTER_HEIGHT);
+        let mut palette_footer_buffer = Buffer::new(&mut font_system, palette_footer_metrics);
+        palette_footer_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
         );
         let ime_metrics = Metrics::new(font_size, font_size * 1.25);
         let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
@@ -542,6 +561,7 @@ impl GpuRenderer {
             search_buffer,
             palette_query_buffer,
             palette_rows_buffer,
+            palette_footer_buffer,
             ime_buffer,
             drag_chip_buffer,
             drag_chip_visual: None,
@@ -579,6 +599,11 @@ impl GpuRenderer {
             Some(self.font_size * 1.25),
         );
         self.palette_rows_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
+        self.palette_footer_buffer.set_size(
+            &mut self.font_system,
+            Some(logical_w),
+            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
+        );
         self.ime_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
@@ -1431,6 +1456,7 @@ impl GpuRenderer {
                     quads.push(QuadInstance {
                         rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
                         color: self.selection_color,
+                        ..Default::default()
                     });
                 }
             }
@@ -1466,6 +1492,7 @@ impl GpuRenderer {
                             quads.push(QuadInstance {
                                 rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
                                 color,
+                                ..Default::default()
                             });
                             // Recolor every glyph instance that sits in the
                             // cursor cell from fg → theme.bg, producing the
@@ -1517,6 +1544,7 @@ impl GpuRenderer {
                         quads.push(QuadInstance {
                             rect: px_to_ndc(cx, cy, SUBSHAPE_PX, self.cell_h, sw, sh),
                             color,
+                            ..Default::default()
                         });
                     }
                     CursorShape::Underline => {
@@ -1530,6 +1558,7 @@ impl GpuRenderer {
                                 sh,
                             ),
                             color,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1603,6 +1632,7 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(mx, my, marker_w, marker_h, sw, sh),
                 color: marker_color,
+                ..Default::default()
             });
         }
 
@@ -1618,10 +1648,12 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
                 color: self.hyperlink_tint,
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y + self.cell_h - hl_thickness, w, hl_thickness, sw, sh),
                 color: self.hyperlink_underline,
+                ..Default::default()
             });
         }
 
@@ -1638,6 +1670,7 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
+                ..Default::default()
             });
         }
 
@@ -1650,18 +1683,28 @@ impl GpuRenderer {
             rgba[3] = 0.55;
             let t = 1.0_f32; // border thickness
                              // Top
-            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, *w, t, sw, sh), color: rgba });
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x, *y, *w, t, sw, sh),
+                color: rgba,
+                ..Default::default()
+            });
             // Bottom
             quads.push(QuadInstance {
                 rect: px_to_ndc(*x, *y + *h - t, *w, t, sw, sh),
                 color: rgba,
+                ..Default::default()
             });
             // Left
-            quads.push(QuadInstance { rect: px_to_ndc(*x, *y, t, *h, sw, sh), color: rgba });
+            quads.push(QuadInstance {
+                rect: px_to_ndc(*x, *y, t, *h, sw, sh),
+                color: rgba,
+                ..Default::default()
+            });
             // Right
             quads.push(QuadInstance {
                 rect: px_to_ndc(*x + *w - t, *y, t, *h, sw, sh),
                 color: rgba,
+                ..Default::default()
             });
         }
 
@@ -1677,15 +1720,25 @@ impl GpuRenderer {
                 let is_active = *id == active_pane;
                 let color = if is_active { focus_border } else { border };
                 let t = if is_active { 2.0_f32 } else { 1.0_f32 };
-                quads.push(QuadInstance { rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh), color });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
+                    color,
+                    ..Default::default()
+                });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y + r.h - t, r.w, t, sw, sh),
                     color,
+                    ..Default::default()
                 });
-                quads.push(QuadInstance { rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh), color });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh),
+                    color,
+                    ..Default::default()
+                });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x + r.w - t, r.y, t, r.h, sw, sh),
                     color,
+                    ..Default::default()
                 });
             }
         }
@@ -1697,6 +1750,7 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
                 color: self.tab_bar_bg,
+                ..Default::default()
             });
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);
@@ -1704,6 +1758,7 @@ impl GpuRenderer {
                 quads.push(QuadInstance {
                     rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
                     color: bg_color,
+                    ..Default::default()
                 });
                 // Wezterm-style vertical separator: a 1px dim-gray bar
                 // sitting in the gap to the right of each tab except the
@@ -1724,6 +1779,7 @@ impl GpuRenderer {
                                 sh,
                             ),
                             color: self.tab_separator,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1770,6 +1826,7 @@ impl GpuRenderer {
                             sh,
                         ),
                         color: close_color,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: px_to_ndc(
@@ -1781,6 +1838,7 @@ impl GpuRenderer {
                             sh,
                         ),
                         color: close_color,
+                        ..Default::default()
                     });
                 }
             }
@@ -1800,6 +1858,7 @@ impl GpuRenderer {
                     sh,
                 ),
                 color: self.tab_close_fg,
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: px_to_ndc(
@@ -1811,6 +1870,7 @@ impl GpuRenderer {
                     sh,
                 ),
                 color: self.tab_close_fg,
+                ..Default::default()
             });
 
             // Tab titles: render as a single rich-text line where each tab title
@@ -1899,7 +1959,11 @@ impl GpuRenderer {
                 } else {
                     self.search_highlight
                 };
-                quads.push(QuadInstance { rect: px_to_ndc(x, y, w, self.cell_h, sw, sh), color });
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                    color,
+                    ..Default::default()
+                });
             }
             // Status bar background pinned to bottom edge.
             search_bar_top = sh - search_bar_h;
@@ -1907,6 +1971,7 @@ impl GpuRenderer {
             quads.push(QuadInstance {
                 rect: px_to_ndc(0.0, search_bar_top, sw, search_bar_h, sw, sh),
                 color: self.search_bg,
+                ..Default::default()
             });
             let n = s.matches.len();
             let cur = s.current.map(|i| i + 1).unwrap_or(0);
@@ -1943,10 +2008,12 @@ impl GpuRenderer {
                     sh,
                 ),
                 color: self.hyperlink_underline,
+                ..Default::default()
             });
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
                 color: self.search_bg,
+                ..Default::default()
             });
             let label = search_bar_label(s);
             self.search_buffer.set_text(
@@ -1967,7 +2034,23 @@ impl GpuRenderer {
         // -------- Command palette overlay ----------------------------------
         let palette_layout = palette.and_then(|p| PaletteLayout::compute(p, sw, sh));
         if let Some(layout) = &palette_layout {
-            // Outer 1px border (accent color).
+            // Full-window scrim — #05070D at 28% — sits below the modal
+            // so the underlying terminal recedes visually.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.scrim.x,
+                    layout.scrim.y,
+                    layout.scrim.w,
+                    layout.scrim.h,
+                    sw,
+                    sh,
+                ),
+                color: [0.020, 0.027, 0.051, 0.28],
+                ..Default::default()
+            });
+            // Outer 1px border (white at 10%). Rounded radius 16 per spec
+            // — the border sits 1px outside `bg`, so its radius equals the
+            // panel's plus the border thickness.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
                     layout.border.x,
@@ -1977,26 +2060,76 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: self.hyperlink_underline,
+                color: [1.0, 1.0, 1.0, 0.10],
+                size_px: [layout.border.w, layout.border.h],
+                radius_px: PALETTE_PANEL_RADIUS + PALETTE_BORDER,
+                ..Default::default()
             });
-            // Dark modal background.
+            // Modal background — #10131A at 92%. Rounded radius 16 per spec.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: [0.08, 0.09, 0.12, 0.96],
+                color: [0.063, 0.075, 0.102, 0.92],
+                size_px: [layout.bg.w, layout.bg.h],
+                radius_px: PALETTE_PANEL_RADIUS,
+                ..Default::default()
             });
-            // Selected row highlight.
+            // Query field background — #0B0E14 at 72%. Slightly smaller
+            // radius than the panel reads as nested chrome.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.query_row.x,
+                    layout.query_row.y,
+                    layout.query_row.w,
+                    layout.query_row.h,
+                    sw,
+                    sh,
+                ),
+                color: [0.043, 0.055, 0.078, 0.72],
+                size_px: [layout.query_row.w, layout.query_row.h],
+                radius_px: PALETTE_QUERY_RADIUS,
+                ..Default::default()
+            });
+            // Selected row highlight — #7AA2F7 at 16%. Small radius (6).
             if let Some(sel) = layout.selected_row {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
-                        color: self.selection_color,
+                        color: [0.478, 0.635, 0.969, 0.16],
+                        size_px: [row.rect.w, row.rect.h],
+                        radius_px: PALETTE_ROW_RADIUS,
+                        ..Default::default()
                     });
                 }
             }
-            // Shape the query row text.
+            // Selected row left accent strip — #7AA2F7 100%. 3px wide,
+            // rounded with a 1.5px radius so it reads as a pill.
+            if let Some(accent) = &layout.selected_accent {
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(accent.x, accent.y, accent.w, accent.h, sw, sh),
+                    color: [0.478, 0.635, 0.969, 1.0],
+                    size_px: [accent.w, accent.h],
+                    radius_px: accent.w * 0.5,
+                    ..Default::default()
+                });
+            }
+            // Footer top border — #FFFFFF at 7% — 1px line at the top edge
+            // of the footer rect. Kept sharp; a 1px hairline doesn't
+            // benefit from SDF rounding.
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
+                color: [1.0, 1.0, 1.0, 0.07],
+                ..Default::default()
+            });
+            // Shape the query row text. The renderer paints either the
+            // placeholder (empty query) or the typed text + cursor.
+            let query_text = if let Some(ph) = &layout.query_placeholder {
+                ph.clone()
+            } else {
+                layout.query_label.clone()
+            };
             self.palette_query_buffer.set_text(
                 &mut self.font_system,
-                &layout.query_label,
+                &query_text,
                 &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
@@ -2005,7 +2138,10 @@ impl GpuRenderer {
 
             // Shape the action-list as one multi-line buffer; the renderer
             // positions it at the first row's y and lets glyphon stack
-            // lines at the buffer's line height.
+            // lines at the buffer's line height (set to PALETTE_ROW_HEIGHT
+            // so each label aligns with its row background quad). When
+            // there are no matches, paint the empty-state placeholder +
+            // hint instead.
             let mut rows_text = String::new();
             for (i, label) in layout.row_labels.iter().enumerate() {
                 if i > 0 {
@@ -2013,9 +2149,12 @@ impl GpuRenderer {
                 }
                 rows_text.push_str(label);
             }
-            // No matches: render the placeholder in place of the row list.
             if let Some(ph) = &layout.empty_label {
                 rows_text.push_str(ph);
+                if let Some(hint) = &layout.empty_hint {
+                    rows_text.push('\n');
+                    rows_text.push_str(hint);
+                }
             }
             self.palette_rows_buffer.set_text(
                 &mut self.font_system,
@@ -2025,6 +2164,20 @@ impl GpuRenderer {
                 None,
             );
             self.palette_rows_buffer.shape_until_scroll(&mut self.font_system, false);
+
+            // Footer hint — rendered into a dedicated buffer positioned in
+            // `layout.footer` (see palette_footer_area below). Painting it
+            // here rather than appending to `palette_rows_buffer` means
+            // the hint always sits inside the footer strip instead of
+            // being pushed up into the action list.
+            self.palette_footer_buffer.set_text(
+                &mut self.font_system,
+                &layout.footer_label,
+                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.palette_footer_buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
         // -------- IME preedit overlay --------------------------------------
@@ -2037,6 +2190,7 @@ impl GpuRenderer {
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
                 color: [0.10, 0.11, 0.14, 0.95],
+                ..Default::default()
             });
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
@@ -2048,6 +2202,7 @@ impl GpuRenderer {
                     sh,
                 ),
                 color: self.hyperlink_underline,
+                ..Default::default()
             });
             self.ime_buffer.set_text(
                 &mut self.font_system,
@@ -2082,6 +2237,7 @@ impl GpuRenderer {
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(x0 + off, y0 + off, w, h, sw, sh),
                     color: [0.0, 0.0, 0.0, alpha],
+                    ..Default::default()
                 });
             }
 
@@ -2097,6 +2253,7 @@ impl GpuRenderer {
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
                     color: line_color,
+                    ..Default::default()
                 });
             }
 
@@ -2104,8 +2261,11 @@ impl GpuRenderer {
             // of the active-tab style.
             let mut chip_color = self.tab_active_bg;
             chip_color[3] = 0.7;
-            quads_overlay
-                .push(QuadInstance { rect: px_to_ndc(x0, y0, w, h, sw, sh), color: chip_color });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(x0, y0, w, h, sw, sh),
+                color: chip_color,
+                ..Default::default()
+            });
 
             // Title text via glyphon: shape into the dedicated
             // drag-chip buffer so it composites on top of the ghost
@@ -2248,6 +2408,20 @@ impl GpuRenderer {
                 custom_glyphs: &[],
             })
         });
+        let palette_footer_area = palette_layout.as_ref().map(|layout| TextArea {
+            buffer: &self.palette_footer_buffer,
+            left: layout.footer.x + 12.0,
+            top: layout.footer.y + 8.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.footer.x as i32,
+                top: layout.footer.y as i32,
+                right: (layout.footer.x + layout.footer.w) as i32,
+                bottom: (layout.footer.y + layout.footer.h) as i32,
+            },
+            default_color: self.search_fg,
+            custom_glyphs: &[],
+        });
         let ime_area = ime_layout.as_ref().map(|layout| TextArea {
             buffer: &self.ime_buffer,
             left: layout.bg.x + 4.0,
@@ -2286,6 +2460,9 @@ impl GpuRenderer {
             overlay_areas.push(a);
         }
         if let Some(a) = palette_rows_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = palette_footer_area {
             overlay_areas.push(a);
         }
         if let Some(a) = ime_area {
@@ -2901,18 +3078,28 @@ pub fn push_hollow_rect(
     }
     let t = t.min(cell_w * 0.5).min(cell_h * 0.5);
     // top
-    quads.push(QuadInstance { rect: px_to_ndc(cell_x, cell_y, cell_w, t, sw, sh), color });
+    quads.push(QuadInstance {
+        rect: px_to_ndc(cell_x, cell_y, cell_w, t, sw, sh),
+        color,
+        ..Default::default()
+    });
     // bottom
     quads.push(QuadInstance {
         rect: px_to_ndc(cell_x, cell_y + cell_h - t, cell_w, t, sw, sh),
         color,
+        ..Default::default()
     });
     // left
-    quads.push(QuadInstance { rect: px_to_ndc(cell_x, cell_y, t, cell_h, sw, sh), color });
+    quads.push(QuadInstance {
+        rect: px_to_ndc(cell_x, cell_y, t, cell_h, sw, sh),
+        color,
+        ..Default::default()
+    });
     // right
     quads.push(QuadInstance {
         rect: px_to_ndc(cell_x + cell_w - t, cell_y, t, cell_h, sw, sh),
         color,
+        ..Default::default()
     });
 }
 

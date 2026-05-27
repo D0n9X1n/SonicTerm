@@ -91,8 +91,9 @@ fn overlay_quad_pushes_go_to_overlay_vec_not_main_vec() {
     // that accidentally routed them back through the main vec.
     let src = fs::read_to_string(RENDER_RS).expect("read render.rs");
 
-    // The palette modal background uses a distinctive RGBA literal.
-    let palette_bg = must_find(&src, "[0.08, 0.09, 0.12, 0.96]");
+    // The palette modal background uses a distinctive RGBA literal
+    // (#10131A at 92%, post-#112 Round 1 redesign).
+    let palette_bg = must_find(&src, "[0.063, 0.075, 0.102, 0.92]");
     // The IME preedit background uses another distinctive literal.
     let ime_bg = must_find(&src, "[0.10, 0.11, 0.14, 0.95]");
 

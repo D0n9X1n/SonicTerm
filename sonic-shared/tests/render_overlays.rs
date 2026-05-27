@@ -7,8 +7,8 @@
 use sonic_shared::command_palette::CommandPalette;
 use sonic_shared::ime::ImeState;
 use sonic_shared::overlays::{
-    search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_HEIGHT,
-    PALETTE_WIDTH,
+    search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_FOOTER_HEIGHT,
+    PALETTE_HEIGHT, PALETTE_QUERY_HEIGHT, PALETTE_ROW_ACCENT_W, PALETTE_ROW_HEIGHT, PALETTE_WIDTH,
 };
 use sonic_shared::search::SearchState;
 
@@ -32,8 +32,10 @@ fn palette_layout_is_some_when_open() {
     // Default modal size is honoured on a large enough window.
     assert!((layout.border.w - PALETTE_WIDTH).abs() < 0.5);
     assert!((layout.border.h - PALETTE_HEIGHT).abs() < 0.5);
-    // Query row is non-empty and starts with the prompt prefix.
-    assert!(layout.query_label.starts_with("> "));
+    // Query row is non-empty. The redesign drops the `> ` prefix; the
+    // label now starts directly with the user's query (or the block
+    // cursor when empty) and the search icon stands in for the prompt.
+    assert!(!layout.query_label.starts_with("> "));
     // At least one row appears with the default (empty) query — there
     // are many bindable actions.
     assert!(!layout.rows.is_empty());
@@ -171,4 +173,83 @@ fn ime_overlay_shifts_left_when_cursor_near_right_edge() {
         ImePreeditLayout::compute(&ime, 1180.0, 100.0, 8.0, 16.0, 1200.0, 800.0).expect("live");
     // Layout was shifted left so it doesn't escape the right edge.
     assert!(layout.bg.x + layout.bg.w <= 1200.0 + 0.001);
+}
+
+// ----- Issue #112 Round 1 redesign -----------------------------------------
+
+#[test]
+fn palette_modal_width_clamps_to_viewport() {
+    let mut p = CommandPalette::new();
+    p.open();
+    // Big viewport: modal honours the ideal 680px width.
+    let big = PaletteLayout::compute(&mut p, 1600.0, 1000.0).expect("open");
+    assert!((big.border.w - PALETTE_WIDTH).abs() < 0.5);
+    // Tight viewport: modal clamps to `viewport_w - 48`.
+    let mut p2 = CommandPalette::new();
+    p2.open();
+    let tight = PaletteLayout::compute(&mut p2, 500.0, 1000.0).expect("open");
+    assert!(tight.border.w <= 500.0 - 48.0 + 0.5);
+    assert!(tight.border.w < PALETTE_WIDTH);
+    // Modal never escapes the viewport.
+    assert!(tight.border.x + tight.border.w <= 500.0 + 0.001);
+}
+
+#[test]
+fn palette_query_field_height_is_52() {
+    let mut p = CommandPalette::new();
+    p.open();
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    assert!((layout.query_row.h - PALETTE_QUERY_HEIGHT).abs() < 0.001);
+    assert!((PALETTE_QUERY_HEIGHT - 52.0).abs() < 0.001);
+    // Search icon is positioned inside the query field at x=16.
+    assert!((layout.query_icon.x - layout.query_row.x - 16.0).abs() < 0.001);
+    assert!((layout.query_icon.w - 16.0).abs() < 0.001);
+    // Placeholder text appears when the query is empty.
+    let ph = layout.query_placeholder.as_deref().unwrap_or("");
+    assert!(ph.contains("Search commands"));
+}
+
+#[test]
+fn palette_row_selected_renders_left_accent() {
+    let mut p = CommandPalette::new();
+    p.open();
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    let sel = layout.selected_row.expect("first row selected on open");
+    let row = layout.rows[sel];
+    let accent = layout.selected_accent.expect("accent strip on selected row");
+    // Accent strip is 3px wide, aligns to the row's left edge, and lives
+    // vertically inside the row's bounds.
+    assert!((accent.w - PALETTE_ROW_ACCENT_W).abs() < 0.001);
+    assert!((accent.x - row.rect.x).abs() < 0.001);
+    assert!(accent.y >= row.rect.y - 0.001);
+    assert!(accent.y + accent.h <= row.rect.y + row.rect.h + 0.001);
+    // Row height matches the redesign spec (40px).
+    assert!((row.rect.h - PALETTE_ROW_HEIGHT).abs() < 0.001);
+    assert!((PALETTE_ROW_HEIGHT - 40.0).abs() < 0.001);
+    // When the palette closes the accent goes away (sanity check that
+    // it isn't a sticky field).
+    p.close();
+    assert!(PaletteLayout::compute(&mut p, 1200.0, 800.0).is_none());
+}
+
+#[test]
+fn palette_footer_shows_count_and_hint() {
+    let mut p = CommandPalette::new();
+    p.open();
+    let layout = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    // Footer rect sits at the bottom of the modal background.
+    assert!((layout.footer.h - PALETTE_FOOTER_HEIGHT).abs() < 0.001);
+    assert!(layout.footer.y + layout.footer.h <= layout.bg.y + layout.bg.h + 0.001);
+    // Footer label carries both a command count and the nav hint.
+    let label = &layout.footer_label;
+    assert!(label.contains("command"), "footer missing count: {label}");
+    assert!(label.contains("navigate"), "footer missing nav hint: {label}");
+    assert!(label.contains("run"), "footer missing run hint: {label}");
+    assert!(label.contains("close"), "footer missing close hint: {label}");
+    // Empty-state hint appears when no matches.
+    p.set_query("zzzzzzzzzzzz_no_match");
+    let layout2 = PaletteLayout::compute(&mut p, 1200.0, 800.0).expect("open");
+    assert!(layout2.empty_label.is_some());
+    let hint = layout2.empty_hint.as_deref().unwrap_or("");
+    assert!(hint.contains("Try"), "empty hint missing examples: {hint}");
 }
