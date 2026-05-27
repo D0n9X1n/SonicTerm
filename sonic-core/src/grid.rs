@@ -196,6 +196,30 @@ impl Grid {
         }
     }
 
+    /// Mark every row dirty. Public alias of the internal `mark_all`
+    /// helper, exposed so callers that mutate state *outside* the grid
+    /// (theme swap, focus transition, selection change, etc.) can tell
+    /// the renderer "the whole grid needs to be re-shaped on the next
+    /// frame even though no cell content changed". This is the
+    /// foundation hook the upcoming RowCache will key off of.
+    ///
+    /// This is intentionally a no-bump operation: it does not advance
+    /// the revision counter because cell contents have not changed —
+    /// only the *presentation* invariant did.
+    #[inline]
+    pub fn mark_all_dirty(&mut self) {
+        self.mark_all();
+    }
+
+    /// Iterator over row indices currently marked dirty (i.e. the rows
+    /// the renderer must re-shape on the next frame). Useful for the
+    /// RowCache, for tests, and for tracing/diagnostic output.
+    ///
+    /// The iterator yields `usize` row indices in ascending order.
+    pub fn dirty_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.dirty_rows.iter().enumerate().filter_map(|(i, d)| if *d { Some(i) } else { None })
+    }
+
     #[inline]
     fn mark_range(&mut self, lo: u16, hi_inclusive: u16) {
         let lo = lo as usize;
