@@ -1116,6 +1116,12 @@ impl GpuRenderer {
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
+        // Advance the atlas frame counter so LRU eviction can
+        // distinguish glyphs touched this frame from cold ones. Cheap
+        // (one integer increment) and unconditional — even on a fully
+        // cached frame the bump is harmless and keeps the counter in
+        // step with wall-clock frames for diagnostic dumps.
+        self.glyph_atlas.tick_frame();
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
         // change — skip text shaping, quad rebuild and GPU submit.
