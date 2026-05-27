@@ -7,6 +7,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
+pub mod command_label;
 pub mod command_palette;
 pub mod config_watch;
 pub mod cursor;

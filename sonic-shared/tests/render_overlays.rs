@@ -50,8 +50,8 @@ fn palette_layout_appears_in_glyph_label_list_when_open() {
     p.open();
     let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("open");
     let joined = layout.row_labels.join("\n");
-    assert!(joined.contains("NewTab"));
-    assert!(joined.contains("CloseTab"));
+    assert!(joined.contains("New Tab"));
+    assert!(joined.contains("Close Tab"));
     // …and hides when closed.
     p.close();
     assert!(PaletteLayout::compute(&p, 1200.0, 800.0).is_none());
@@ -64,8 +64,8 @@ fn palette_layout_filters_with_query() {
     p.set_query("newtab");
     let layout = PaletteLayout::compute(&p, 1200.0, 800.0).expect("open");
     let joined = layout.row_labels.join("\n");
-    assert!(joined.contains("NewTab"));
-    assert!(!joined.contains("CloseTab"));
+    assert!(joined.contains("New Tab"));
+    assert!(!joined.contains("Close Tab"));
     // Query label echoes the typed string.
     assert!(layout.query_label.contains("newtab"));
 }
