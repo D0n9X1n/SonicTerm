@@ -29,7 +29,35 @@ fn click_inside_tab_returns_activate() {
 
 #[test]
 fn click_on_close_button_returns_close() {
-    let bar = bar_with(2);
+    let mut bar = bar_with(2);
+    // Close × only fires on the ACTIVE tab (Chrome/WezTerm semantics);
+    // clicking the × of an inactive tab activates it instead.
+    bar.activate(1);
+    let layout = TabBarLayout::compute(&bar, 800.0);
+    let t1 = layout.tabs[1];
+    let cx = t1.close.x + t1.close.w / 2.0;
+    let cy = t1.close.y + t1.close.h / 2.0;
+    assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(1)));
+}
+
+#[test]
+fn click_on_close_x_of_inactive_tab_activates_not_closes() {
+    // Reproduces the PR #107 regression: clicking the × on an inactive
+    // tab silently closed it instead of activating. Chrome/WezTerm
+    // semantics — the × is only an active-tab affordance.
+    let mut bar = bar_with(3);
+    bar.activate(2); // tab 2 active; tab 1 inactive
+    let layout = TabBarLayout::compute(&bar, 800.0);
+    let t1 = layout.tabs[1];
+    let cx = t1.close.x + t1.close.w / 2.0;
+    let cy = t1.close.y + t1.close.h / 2.0;
+    assert_eq!(layout.hit(cx, cy), Some(TabHit::Activate(1)));
+}
+
+#[test]
+fn click_on_close_x_of_active_tab_closes_it() {
+    let mut bar = bar_with(3);
+    bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
     let t1 = layout.tabs[1];
     let cx = t1.close.x + t1.close.w / 2.0;
