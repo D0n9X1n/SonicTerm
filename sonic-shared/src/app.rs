@@ -1493,15 +1493,18 @@ impl App {
                         .get(s.press_tab_index)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    // Chip is drawn through the renderer's LOGICAL
-                    // coordinate space (sw/sh in px_to_ndc were
-                    // normalized by PR #76). Feed it logical too.
-                    let chip_x = lx - 30.0;
-                    let chip_y = ly - 12.0;
-                    child.renderer.set_drag_chip(Some(crate::render::DragChipOverlay {
-                        top_left: (chip_x, chip_y),
-                        title,
-                    }));
+                    let session_snapshot = *s;
+                    let bar_width = child.renderer.width() as f32 / child.renderer.scale_factor();
+                    let layout = TabBarLayout::compute_with_height(
+                        &child.tabs,
+                        bar_width,
+                        child.renderer.tab_bar_logical_height(),
+                    )
+                    .with_top_offset(child.renderer.titlebar_inset())
+                    .with_visible(child.renderer.tab_bar_visible());
+                    let chip =
+                        crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
+                    child.renderer.set_drag_chip(chip);
                 }
                 // Cross-window drag-merge from child: when a tab in the
                 // child's bar is held, look for a destination on another
@@ -3023,15 +3026,26 @@ impl ApplicationHandler<UserEvent> for App {
                         .get(s.press_tab_index)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    // Chip position is in LOGICAL px (renderer
-                    // normalizes sw/sh by scale_factor — PR #76).
-                    let chip_x = lx - 30.0;
-                    let chip_y = ly - 12.0;
+                    let session_snapshot = *s;
+                    let window_width = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
+                        .unwrap_or(0.0);
+                    let (bar_h, top_off, visible) = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| {
+                            (r.tab_bar_logical_height(), r.titlebar_inset(), r.tab_bar_visible())
+                        })
+                        .unwrap_or((crate::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
+                    let layout = TabBarLayout::compute_with_height(&self.tabs, window_width, bar_h)
+                        .with_top_offset(top_off)
+                        .with_visible(visible);
+                    let chip =
+                        crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
                     if let Some(r) = self.renderer.as_mut() {
-                        r.set_drag_chip(Some(crate::render::DragChipOverlay {
-                            top_left: (chip_x, chip_y),
-                            title,
-                        }));
+                        r.set_drag_chip(chip);
                     }
                 }
                 // Cross-window drag-merge: if a tab is held, update the

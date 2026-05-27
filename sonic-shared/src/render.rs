@@ -186,6 +186,12 @@ pub struct GpuRenderer {
     palette_query_buffer: Buffer,
     palette_rows_buffer: Buffer,
     ime_buffer: Buffer,
+    /// Dedicated text buffer for the drag-chip title overlay.
+    drag_chip_buffer: Buffer,
+    /// Cached drag-chip rect from the last `render()` call (in logical
+    /// pixels). `None` when no chip was drawn. Test-only diagnostic
+    /// surfaced through [`Self::last_drag_chip_visual`].
+    drag_chip_visual: Option<DragChipVisual>,
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
@@ -224,6 +230,29 @@ pub struct DragChipOverlay {
     pub top_left: (f32, f32),
     /// Title text of the dragged tab.
     pub title: String,
+    /// When `Some`, draw a 2-3px vertical accent bar (the "drop line")
+    /// at this logical-pixel X coordinate, spanning the tab bar's
+    /// vertical range. This indicates the insertion slot the dragged
+    /// tab would land in if released right now. `None` when the cursor
+    /// has left the bar Y range (tear-out armed).
+    pub drop_line_x: Option<f32>,
+    /// Vertical span `(top, bottom)` of the drop-line accent in
+    /// logical pixels — matches the tab bar's Y range so the line is
+    /// flush with the bar chrome.
+    pub drop_line_y: (f32, f32),
+    /// Multiplicative scale applied to the chip when rendered, used to
+    /// give a subtle 1.0 → 1.02 ease on tear-out arm. `1.0` is the
+    /// in-bar resting state; the renderer interpolates around this.
+    pub scale: f32,
+}
+
+/// Diagnostic snapshot of the most recently rendered drag chip.
+/// Production code must not depend on it; tests read it via
+/// [`GpuRenderer::last_drag_chip_visual`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragChipVisual {
+    pub top_left: (f32, f32),
+    pub size: (f32, f32),
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -450,6 +479,9 @@ impl GpuRenderer {
         let ime_metrics = Metrics::new(font_size, font_size * 1.25);
         let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
         ime_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
+        let drag_chip_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
+        let mut drag_chip_buffer = Buffer::new(&mut font_system, drag_chip_metrics);
+        drag_chip_buffer.set_size(&mut font_system, Some(220.0), Some(font_size * 1.5));
 
         Ok(Self {
             instance,
@@ -509,6 +541,8 @@ impl GpuRenderer {
             palette_query_buffer,
             palette_rows_buffer,
             ime_buffer,
+            drag_chip_buffer,
+            drag_chip_visual: None,
             last_frame_key: None,
             skipped_frames: 0,
             tab_bar_visible: true,
@@ -821,6 +855,19 @@ impl GpuRenderer {
         // Bust the frame-key cache so a new chip position is actually
         // drawn — otherwise the no-change fast path would short-circuit.
         self.last_frame_key = None;
+    }
+
+    /// Active drag chip overlay (if any). Read-only accessor used by
+    /// tests and the app event loop to inspect the live chip state.
+    pub fn drag_chip(&self) -> Option<&DragChipOverlay> {
+        self.drag_chip.as_ref()
+    }
+
+    /// Diagnostic — visual rect of the most recently rendered drag
+    /// chip, or `None` if no chip was drawn. Test-only.
+    #[doc(hidden)]
+    pub fn last_drag_chip_visual(&self) -> Option<DragChipVisual> {
+        self.drag_chip_visual
     }
 
     /// Update the renderer's view of where the cursor is, in LOGICAL
@@ -2011,30 +2058,74 @@ impl GpuRenderer {
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
-            // Subtle drop-shadow, then the chip on top.
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    chip.top_left.0 + 2.0,
-                    chip.top_left.1 + 2.0,
-                    CHIP_W,
-                    CHIP_H,
-                    sw,
-                    sh,
-                ),
-                color: [0.0, 0.0, 0.0, 0.25],
-            });
+            let scale = chip.scale.clamp(0.5, 2.0);
+            let w = CHIP_W * scale;
+            let h = CHIP_H * scale;
+            // Re-center the scaled chip so growth is centered around
+            // the original anchor point (cursor-relative offset is
+            // preserved by the caller in `top_left`).
+            let cx = chip.top_left.0 + CHIP_W * 0.5;
+            let cy = chip.top_left.1 + CHIP_H * 0.5;
+            let x0 = cx - w * 0.5;
+            let y0 = cy - h * 0.5;
+
+            // Soft drop shadow: stack two dimmer quads with growing
+            // offset to fake an 8px blur without a fragment shader.
+            for (off, alpha) in [(2.0_f32, 0.18_f32), (4.0_f32, 0.10_f32), (8.0_f32, 0.05_f32)] {
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(x0 + off, y0 + off, w, h, sw, sh),
+                    color: [0.0, 0.0, 0.0, alpha],
+                });
+            }
+
+            // Drop-line indicator (in-bar reorder cue). Drawn BEFORE
+            // the chip so the chip floats on top if they overlap.
+            if let Some(lx) = chip.drop_line_x {
+                let (ly0, ly1) = chip.drop_line_y;
+                let lh = (ly1 - ly0).max(2.0);
+                // Gold/active accent — match the active-tab bg color
+                // so it reads as "this slot is the target".
+                let mut line_color = self.tab_active_bg;
+                line_color[3] = 0.95;
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
+                    color: line_color,
+                });
+            }
+
+            // Ghost body — semi-transparent (alpha 0.7 per spec) copy
+            // of the active-tab style.
             let mut chip_color = self.tab_active_bg;
-            chip_color[3] = 0.85;
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(chip.top_left.0, chip.top_left.1, CHIP_W, CHIP_H, sw, sh),
-                color: chip_color,
-            });
-            // Title is intentionally not drawn here — wiring a new
-            // glyphon buffer for the chip would conflict with the
-            // existing single-pass text shaping. The translucent quad
-            // alone is the v1 visual; title rendering can land as a
-            // small follow-up against the overlay text pipeline.
-            let _ = chip.title;
+            chip_color[3] = 0.7;
+            quads_overlay
+                .push(QuadInstance { rect: px_to_ndc(x0, y0, w, h, sw, sh), color: chip_color });
+
+            // Title text via glyphon: shape into the dedicated
+            // drag-chip buffer so it composites on top of the ghost
+            // body. Clipping is handled by TextBounds below.
+            if !chip.title.is_empty() {
+                let attrs =
+                    Attrs::new().family(Family::Name(&self.font_family)).color(self.tab_active_fg);
+                self.drag_chip_buffer.set_text(
+                    &mut self.font_system,
+                    &chip.title,
+                    &attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+                self.drag_chip_buffer.shape_until_scroll(&mut self.font_system, false);
+            } else {
+                self.drag_chip_buffer.set_text(
+                    &mut self.font_system,
+                    "",
+                    &Attrs::new(),
+                    Shaping::Advanced,
+                    None,
+                );
+            }
+            self.drag_chip_visual = Some(DragChipVisual { top_left: (x0, y0), size: (w, h) });
+        } else {
+            self.drag_chip_visual = None;
         }
 
         // Glyphon converts TextArea pixel positions to NDC using the
@@ -2183,6 +2274,25 @@ impl GpuRenderer {
         }
         if let Some(a) = ime_area {
             overlay_areas.push(a);
+        }
+        // Drag-chip title: render in the overlay text pass so it sits
+        // above terminal glyphs and tab chrome. Mirrors the chip rect
+        // computed in the overlay quad block above.
+        if let Some(v) = self.drag_chip_visual {
+            overlay_areas.push(TextArea {
+                buffer: &self.drag_chip_buffer,
+                left: v.top_left.0 + 6.0,
+                top: v.top_left.1 + (v.size.1 - self.font_size * 0.85 * 1.2).max(0.0) * 0.5,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: (v.top_left.0 + 4.0) as i32,
+                    top: v.top_left.1 as i32,
+                    right: (v.top_left.0 + v.size.0 - 4.0) as i32,
+                    bottom: (v.top_left.1 + v.size.1) as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
         }
 
         // B3: push any new glyph tiles to the GPU texture before any
