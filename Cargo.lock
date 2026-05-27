@@ -4112,34 +4112,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonic-cfg"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "pretty_assertions",
+ "serde",
+ "serde_plain",
+ "sonic-types",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "sonic-core"
+version = "0.3.0"
+dependencies = [
+ "crossbeam-channel",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sonic-cfg",
+ "sonic-grid",
+ "sonic-io",
+ "sonic-types",
+ "sonic-vt",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
+name = "sonic-grid"
+version = "0.3.0"
+dependencies = [
+ "sonic-types",
+ "unicode-width",
+]
+
+[[package]]
+name = "sonic-io"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bitflags 2.11.1",
- "bytemuck",
  "bytes",
  "crossbeam-channel",
  "libproc",
- "memchr",
- "notify",
  "parking_lot",
  "portable-pty",
- "pretty_assertions",
  "russh",
- "serde",
- "serde_json",
- "serde_plain",
  "sonic-types",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml 1.1.2+spec-1.1.0",
  "tracing",
- "unicode-segmentation",
- "unicode-width",
- "vte",
  "windows 0.62.2",
 ]
 
@@ -4219,6 +4245,17 @@ dependencies = [
  "bitflags 2.11.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sonic-vt"
+version = "0.3.0"
+dependencies = [
+ "crossbeam-channel",
+ "memchr",
+ "sonic-grid",
+ "sonic-types",
+ "vte",
 ]
 
 [[package]]

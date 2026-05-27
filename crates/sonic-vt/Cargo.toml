@@ -1,0 +1,19 @@
+[package]
+name = "sonic-vt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — VT/ANSI parser (Performer that drives sonic-grid)"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonic-types.workspace = true
+sonic-grid.workspace = true
+vte.workspace = true
+crossbeam-channel.workspace = true
+memchr = "2"
