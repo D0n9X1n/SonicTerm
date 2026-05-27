@@ -475,12 +475,16 @@ impl GpuRenderer {
             Some(size.width as f32),
             Some(font_size * 1.25),
         );
-        // Rows buffer: use the palette row stride (40px) as the line height
-        // so each row's text aligns with its row background rect. The
-        // default monospace line height (~22px) caused the labels to be
-        // vertically compressed, with multiple labels sitting inside a
-        // single row's background quad. See PR #116 Haiku findings.
-        let palette_rows_metrics = Metrics::new(font_size, crate::overlays::PALETTE_ROW_HEIGHT);
+        // Rows buffer: line height MUST equal the full row stride
+        // (PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP), not just the row
+        // background height. Otherwise the Nth label drifts upward by
+        // N * PALETTE_ROW_GAP px relative to its background rect — at
+        // row 6 the text sits a full row above the highlight, producing
+        // the "selection highlights an empty slot" bug from live testing.
+        let palette_rows_metrics = Metrics::new(
+            font_size,
+            crate::overlays::PALETTE_ROW_HEIGHT + crate::overlays::PALETTE_ROW_GAP,
+        );
         let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
         palette_rows_buffer.set_size(
             &mut font_system,
@@ -1759,7 +1763,8 @@ impl GpuRenderer {
             let bar_bg = tok::BG_BASE();
             let active_bg = tok::BG_ELEVATED();
             let hover_bg = tok::BG_HOVER();
-            let accent_blue = tok::ACCENT_BLUE();
+            // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
+            let accent_blue = crate::ui_tokens::UiPalette::from_theme(theme).accent;
             let separator = tok::BORDER_SUBTLE();
             let border_subtle = tok::BORDER_SUBTLE();
             let muted = tok::TEXT_MUTED();
@@ -1853,30 +1858,20 @@ impl GpuRenderer {
                     let inset = (t.close.w - 8.0) * 0.5;
                     let glyph = (t.close.w - inset * 2.0).max(1.0);
                     let thick = 1.5_f32;
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(
-                            cx + inset,
-                            cy + t.close.h * 0.5 - thick / 2.0,
-                            glyph,
-                            thick,
-                            sw,
-                            sh,
-                        ),
-                        color: close_color,
-                        ..Default::default()
-                    });
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(
-                            cx + t.close.w * 0.5 - thick / 2.0,
-                            cy + inset,
-                            thick,
-                            glyph,
-                            sw,
-                            sh,
-                        ),
-                        color: close_color,
-                        ..Default::default()
-                    });
+                    // Diagonal × built from a stair-step of small squares
+                    // along both diagonals (the wgpu quad pipeline has no
+                    // rotation; PR #117 emitted a horizontal+vertical pair
+                    // which read as a `+`, not a close icon — fixed here).
+                    build_close_x_quads(
+                        cx + inset,
+                        cy + inset,
+                        glyph,
+                        thick,
+                        close_color,
+                        sw,
+                        sh,
+                        &mut quads,
+                    );
                 }
             }
             // `+` new-tab button — 28×28, radius 8 pill, hover BG.
@@ -2273,9 +2268,8 @@ impl GpuRenderer {
             if let Some(lx) = chip.drop_line_x {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0);
-                // Drop-line accent — ACCENT_BLUE per issue #112 R3
-                // (was tab_active_bg/gold). Stays 3px wide.
-                let mut line_color = crate::ui_tokens::color::ACCENT_BLUE();
+                // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
+                let mut line_color = crate::ui_tokens::UiPalette::from_theme(theme).accent;
                 line_color[3] = 0.95;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
@@ -2420,10 +2414,17 @@ impl GpuRenderer {
             } else {
                 return None;
             };
+            // Vertically center the row text within its 40 px background
+            // rect (was `row_y + 2` which sat the text at the top of the
+            // row with ~18 px of dead space below — the bug from live
+            // testing). glyphon places the baseline ~0.8 × font_size
+            // below `top`, so centering by line-box height suffices.
+            let text_top_offset =
+                ((crate::overlays::PALETTE_ROW_HEIGHT - self.font_size) * 0.5).max(0.0);
             Some(TextArea {
                 buffer: &self.palette_rows_buffer,
                 left: row_x + 4.0,
-                top: row_y + 2.0,
+                top: row_y + text_top_offset,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: layout.bg.x as i32,
@@ -3336,6 +3337,51 @@ pub fn build_new_tab_button_quads(
         color: plus_color,
         ..Default::default()
     });
+}
+
+/// Emit the diagonal × glyph for a tab's close button.
+///
+/// `x`, `y` is the top-left of the glyph's bounding box; `glyph` is the
+/// side length in physical px; `thick` is the stroke thickness.
+///
+/// Returns nothing; pushes ~`ceil(glyph/thick)*2` axis-aligned squares
+/// stair-stepped along the ╲ and ╱ diagonals. Each emitted quad sits
+/// strictly inside `[x, x+glyph] × [y, y+glyph]`.
+///
+/// The wgpu quad pipeline does not support rotation, and PR #117
+/// emitted a horizontal+vertical pair that read as `+` instead of `×`.
+/// Stair-stepping a small SDF-free square per step is the
+/// simplest and least-invasive fix; visually indistinguishable from a
+/// rotated line at 14×14 px.
+#[allow(clippy::too_many_arguments)]
+pub fn build_close_x_quads(
+    x: f32,
+    y: f32,
+    glyph: f32,
+    thick: f32,
+    color: [f32; 4],
+    sw: f32,
+    sh: f32,
+    out: &mut Vec<QuadInstance>,
+) {
+    let steps = ((glyph / thick).ceil() as usize).max(2);
+    let dot = thick;
+    for s in 0..steps {
+        let t_frac = (s as f32) / ((steps - 1) as f32);
+        let along = t_frac * (glyph - dot);
+        // ╲ diagonal: top-left → bottom-right
+        out.push(QuadInstance {
+            rect: px_to_ndc(x + along, y + along, dot, dot, sw, sh),
+            color,
+            ..Default::default()
+        });
+        // ╱ diagonal: top-right → bottom-left
+        out.push(QuadInstance {
+            rect: px_to_ndc(x + (glyph - dot - along), y + along, dot, dot, sw, sh),
+            color,
+            ..Default::default()
+        });
+    }
 }
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink

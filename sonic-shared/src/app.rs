@@ -2277,6 +2277,14 @@ impl App {
         let now_open = self.command_palette.toggle();
         tracing::info!(open = now_open, "command palette toggled");
         self.draw_command_palette_overlay();
+        // Synchronous redraw request so the palette appears on the very
+        // next frame instead of waiting for the next pty/timer event.
+        // Without this, ⌘⇧P / Ctrl+Shift+P has a noticeable visible
+        // delay on an otherwise-idle terminal because no other event
+        // wakes the event loop.
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 
     /// Visual overlay rendering for the command palette is intentionally
