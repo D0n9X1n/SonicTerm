@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonic-core", "crates/sonic-shared", "crates/sonic-mac", "crates/sonic-windows", "crates/sonic-mux"]
+members = ["crates/sonic-types", "crates/sonic-core", "crates/sonic-shared", "crates/sonic-mac", "crates/sonic-windows", "crates/sonic-mux"]
 default-members = ["crates/sonic-core", "crates/sonic-shared"]
 
 [workspace.package]
@@ -15,6 +15,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Internal
+sonic-types = { path = "crates/sonic-types", version = "0.3.0" }
 sonic-core = { path = "crates/sonic-core", version = "0.3.0" }
 sonic-shared = { path = "crates/sonic-shared", version = "0.3.0" }
 
