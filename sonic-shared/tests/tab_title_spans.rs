@@ -84,17 +84,44 @@ fn inactive_tab_span_uses_inactive_fg() {
 }
 
 #[test]
-fn separator_span_always_uses_inactive_fg_even_next_to_active_tab() {
+fn no_text_separator_between_inactive_and_active_tab() {
+    // WezTerm parity: no separator at all in a gap that borders the
+    // active tab. The 1px quad separator handles the inactive↔inactive
+    // case in the renderer; the text path no longer emits `│ ` (which
+    // previously stacked with the quad and produced a doubled
+    // `| │` glyph between adjacent inactive tabs).
     let inputs = [
         TabSpanInput { index: 0, title: "#1 shell", title_x: 0.0, title_w: 80.0, is_active: false },
         TabSpanInput { index: 1, title: "#2 nvim", title_x: 90.0, title_w: 80.0, is_active: true },
     ];
-    let (_text, spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
-    // Spans: [inactive title #1, inactive separator, active title #2]
-    assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0].1, INACTIVE, "tab 1 title");
-    assert_eq!(spans[1].1, INACTIVE, "separator must stay dim");
-    assert_eq!(spans[2].1, ACTIVE, "tab 2 title gold");
+    let (text, spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
+    // Only title spans now: [inactive #1, active #2]. No separator span.
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].1, INACTIVE);
+    assert_eq!(spans[1].1, ACTIVE);
+    assert!(!text.contains('\u{2502}'), "must not emit `│` text separator");
+}
+
+#[test]
+fn three_inactive_no_double_separator() {
+    // Reproduces the user-visible regression: with three inactive tabs
+    // followed by an active one, the OLD code emitted `│ ` text prefix
+    // on every tab past the first AND the renderer painted a quad
+    // separator in the inactive↔inactive gaps, producing `| │` doubled
+    // bars. After the fix the text path is silent and only the quad
+    // separator survives.
+    let inputs = [
+        TabSpanInput { index: 0, title: "#1 a", title_x: 0.0, title_w: 80.0, is_active: false },
+        TabSpanInput { index: 1, title: "#2 b", title_x: 90.0, title_w: 80.0, is_active: false },
+        TabSpanInput { index: 2, title: "#3 c", title_x: 180.0, title_w: 80.0, is_active: false },
+        TabSpanInput { index: 3, title: "#4 d", title_x: 270.0, title_w: 80.0, is_active: true },
+    ];
+    let (text, _spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
+    assert_eq!(
+        text.matches('\u{2502}').count(),
+        0,
+        "no `│` glyphs — quad pipeline owns the separator now"
+    );
 }
 
 #[test]

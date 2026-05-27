@@ -2988,7 +2988,7 @@ pub fn build_tab_title_spans(
 ) -> (String, Vec<(std::ops::Range<usize>, GColor)>) {
     let mut title_text = String::new();
     let mut spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
-    for t in tabs {
+    for (i, t) in tabs.iter().enumerate() {
         let color = if t.is_active { active_fg } else { inactive_fg };
         // Reserve TAB_TITLE_PADDING_PX on each side before clipping.
         let usable_w = (t.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
@@ -3032,12 +3032,13 @@ pub fn build_tab_title_spans(
         while title_text.chars().count() < anchor_col {
             title_text.push(' ');
         }
-        if t.index > 0 {
-            let sep_start = title_text.len();
-            title_text.push_str(crate::tab_title::TAB_SEPARATOR_PREFIX);
-            let sep_end = title_text.len();
-            spans.push((sep_start..sep_end, inactive_fg));
-        }
+        // WezTerm-parity separator: the 1px vertical separator between
+        // adjacent INACTIVE tabs is painted by the quad pipeline (see
+        // the `tab_separator` block in `compute_quads`) — we MUST NOT
+        // also inject a `│ ` text glyph here, or the user sees `| │`
+        // doubled between every pair of inactive tabs. The quad alone
+        // is the source of truth for tab separators.
+        let _ = i;
         let start = title_text.len();
         title_text.push_str(&raw);
         let end = title_text.len();
