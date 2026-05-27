@@ -42,7 +42,63 @@ use std::collections::HashMap;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 
-use crate::glyph_atlas::{RasterTile, Rasterizer};
+use crate::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer};
+
+/// Unicode ranges whose glyphs we eagerly bake into the atlas at font
+/// load. These are the codepoints terminal users hit on first paint of
+/// any TUI (htop, btop, vim splits, fzf, tmux status, powerline prompts)
+/// — pre-warming them means the *first* frame after launch doesn't pay
+/// the font-fallback charmap-walk + swash outline-scale cost for each.
+///
+/// - `0x2500..=0x259F` — Box Drawing + Block Elements. Covered by the
+///   primary Recursive Mono family, so resolution stops at slot 0.
+/// - `0xE0A0..=0xE0D7` — Powerline PUA. The bundled Symbols Nerd Font
+///   Mono carries these; resolution typically lands a few slots in.
+///
+/// Codepoints the font chain lacks (returns no glyph) are silently
+/// skipped — no atlas entry is created, so a later real use still goes
+/// through the regular fallback path. The two ranges combined are ~250
+/// codepoints, comfortably under the 16k-tile atlas budget even at 2×.
+pub const PREBAKE_RANGES: &[std::ops::RangeInclusive<u32>] = &[0x2500..=0x259F, 0xE0A0..=0xE0D7];
+
+/// Eagerly rasterize every codepoint in [`PREBAKE_RANGES`] into `atlas`
+/// using `rasterizer`'s configured family/size. Returns the number of
+/// glyphs that were successfully inserted (i.e. the font chain resolved
+/// the codepoint and the atlas accepted the tile).
+///
+/// Why this exists: TUIs draw a wall of box-drawing characters on first
+/// paint. Without prebake the renderer pays one charmap-walk + outline
+/// scale per unique glyph in the first frame, which is the visible
+/// "stutter on launch" WezTerm avoids by baking these at font load.
+///
+/// The atlas's LRU may eventually evict these tiles if the user opens a
+/// session with extreme glyph diversity; that's fine — they'll be
+/// re-rasterized lazily like any other glyph. The win is the *first*
+/// frame, which is exactly when the cost is most visible.
+pub fn prebake_box_and_powerline(
+    rasterizer: &mut SwashRasterizer<'_>,
+    atlas: &mut GlyphAtlas,
+) -> usize {
+    let mut inserted = 0usize;
+    for range in PREBAKE_RANGES {
+        for cp in range.clone() {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            // Skip codepoints the chain can't satisfy — `resolve_slot`
+            // returns None and we leave the atlas untouched. A later
+            // real use will still fall back through the normal path.
+            let Some(slot) = rasterizer.resolve_slot(ch, false, false) else { continue };
+            let key = GlyphKey::with_slot(ch, slot, false, false);
+            if let Some(info) = atlas.get_or_insert(key, rasterizer) {
+                // Zero-area UV means rasterizer-miss sentinel; don't
+                // count those as a real prebake hit.
+                if info.px_size[0] != 0 && info.px_size[1] != 0 {
+                    inserted += 1;
+                }
+            }
+        }
+    }
+    inserted
+}
 
 /// In-place convert a buffer of straight-alpha RGBA pixels (the format
 /// swash returns for `Content::Color` strikes) into premultiplied BGRA

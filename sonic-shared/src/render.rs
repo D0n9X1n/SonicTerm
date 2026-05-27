@@ -35,7 +35,7 @@ use crate::{
     search::SearchState,
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
-    swash_rasterizer::SwashRasterizer,
+    swash_rasterizer::{self, SwashRasterizer},
     tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT, TAB_GAP},
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
@@ -412,9 +412,19 @@ impl GpuRenderer {
         // atlas up front so the first frame can stream tiles into it.
         // On HiDPI displays we bump the atlas so a 2× tile set fits
         // without thrashing the shelf-packer.
-        let glyph_atlas =
+        let mut glyph_atlas =
             GlyphAtlas::new(atlas_dim_for_scale(scale_factor), atlas_dim_for_scale(scale_factor));
         let text_pipeline = TextPipeline::new(&device, format, 4096);
+        // Pre-bake box-drawing + Powerline glyphs into the atlas before
+        // the first frame so TUIs that draw a wall of │ ─ ┌ ┐ chars on
+        // launch don't pay the font-fallback charmap-walk cost per cell
+        // in the first paint. See `swash_rasterizer::prebake_box_and_powerline`.
+        {
+            let mut prebake_raster =
+                SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
+            let _inserted =
+                swash_rasterizer::prebake_box_and_powerline(&mut prebake_raster, &mut glyph_atlas);
+        }
         let glyph_upload =
             AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
 
