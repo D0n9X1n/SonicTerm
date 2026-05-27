@@ -163,7 +163,20 @@ impl App {
                     let cursor_rc = {
                         // CLAUDE.md §4 land-mine: render path must not block on
                         // the parser lock, or VT bursts can AB-BA deadlock the UI.
+                        // Issue #175: if the VT thread is mid-parse and we
+                        // bail out, we MUST reschedule the redraw — otherwise
+                        // the parsed bytes sit in the grid unrendered until
+                        // some unrelated event (e.g. user Ctrl+C) wakes the
+                        // loop. That was the "PTY hangs / output disappears
+                        // on multi-round prompts" bug: a single contended
+                        // try_lock during the input→output transition of a
+                        // device-code prompt dropped the trailing redraw
+                        // silently. Mark pending_redraw so about_to_wait
+                        // schedules a WaitUntil at the next vsync boundary,
+                        // and roll back the burst snapshot so the deferred
+                        // redraw correctly bypasses the coalescing gate.
                         let Some(mut grid) = pane.parser.try_lock() else {
+                            self.defer_redraw_on_lock_contention(was_dirty);
                             return;
                         };
                         // Wezterm-style tab title: `#N icon parent/leaf`.

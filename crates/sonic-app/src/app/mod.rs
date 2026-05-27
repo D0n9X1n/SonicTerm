@@ -771,6 +771,47 @@ impl App {
         self.last_render = t;
     }
 
+    /// Test-only accessor: returns the current `pending_redraw` flag.
+    /// Used by the Issue #175 regression test to verify that a
+    /// lock-contention bail-out during `RedrawRequested` correctly
+    /// schedules a follow-up vsync-paced redraw rather than dropping
+    /// the request silently.
+    #[doc(hidden)]
+    pub fn pending_redraw_for_test(&self) -> bool {
+        self.pending_redraw
+    }
+
+    /// Test-only setter for `pending_redraw`.
+    #[doc(hidden)]
+    pub fn set_pending_redraw_for_test(&mut self, v: bool) {
+        self.pending_redraw = v;
+    }
+
+    /// Test-only accessor for the `input_dirty` flag.
+    #[doc(hidden)]
+    pub fn input_dirty_for_test(&self) -> bool {
+        self.input_dirty
+    }
+
+    /// Called from the `RedrawRequested` handler when the active pane's
+    /// parser lock is contended (held by the VT thread mid-parse).
+    /// Marks `pending_redraw` so `about_to_wait` schedules a
+    /// `WaitUntil` at the next vsync boundary, and preserves the
+    /// `input_dirty` flag captured at the start of the handler so the
+    /// rescheduled redraw still bypasses the vsync coalescing gate.
+    ///
+    /// Without this, a single contended `try_lock` during the
+    /// input→output transition of a multi-round prompt (e.g.
+    /// `gh auth login`'s device-code flow, Issue #175) would silently
+    /// drop the redraw request — the parsed bytes sat in the grid
+    /// unrendered until an unrelated event (Ctrl+C, mouse move) woke
+    /// the loop and triggered a fresh `RedrawRequested`.
+    #[doc(hidden)]
+    pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
+        self.pending_redraw = true;
+        self.input_dirty = was_dirty;
+    }
+
     /// Install a one-shot callback fired at the top of the first
     /// `ApplicationHandler::resumed` tick. macOS uses this to install
     /// the native NSMenu after winit has built the AppKit event loop —
