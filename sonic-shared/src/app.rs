@@ -510,6 +510,16 @@ pub struct App {
     /// the pending request onto the next vsync tick rather than
     /// burning a frame.
     pending_redraw: bool,
+    /// Set true whenever a user-driven event (keyboard, mouse click,
+    /// cursor move while dragging, resize, IME, modifier change) or a
+    /// live-reload of theme/font/keymap occurs. The next
+    /// `WindowEvent::RedrawRequested` will bypass the vsync coalescing
+    /// gate so the first frame after input is immediate (zero added
+    /// latency). Subsequent redraws driven purely by streaming PTY
+    /// bytes within the same `frame_period` still coalesce onto the
+    /// next vsync boundary via `pending_redraw`. Cleared on every
+    /// frame we actually render. See PR #132 Haiku review.
+    input_dirty: bool,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     i18n: crate::i18n::I18n,
@@ -592,11 +602,34 @@ impl App {
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
             pending_redraw: false,
+            input_dirty: false,
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
             on_resumed: None,
         }
+    }
+
+    /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
+    /// right now would be coalesced (deferred to the next vsync boundary)
+    /// or `false` if it would render immediately. Mirrors the exact
+    /// predicate used in the `WindowEvent::RedrawRequested` arm.
+    #[doc(hidden)]
+    pub fn would_coalesce_redraw(&self) -> bool {
+        !self.input_dirty && self.last_render.elapsed() < self.frame_period
+    }
+
+    /// Test-only setter for the input-dirty flag.
+    #[doc(hidden)]
+    pub fn mark_input_dirty_for_test(&mut self) {
+        self.input_dirty = true;
+    }
+
+    /// Test-only setter for `last_render` so tests can simulate "we
+    /// just rendered" without driving an actual frame.
+    #[doc(hidden)]
+    pub fn set_last_render_for_test(&mut self, t: Instant) {
+        self.last_render = t;
     }
 
     /// Install a one-shot callback fired at the top of the first
@@ -1886,6 +1919,9 @@ impl App {
     /// invalidated), keymap reload. Always replaces `self.config` last
     /// so observers see a consistent snapshot.
     fn apply_new_config(&mut self, new_cfg: Config) {
+        // PR #132: any live-reload (theme/font/keymap) is user-driven
+        // and must render immediately, not at the next vsync deadline.
+        self.input_dirty = true;
         let assets = crate::asset_dir();
 
         // Theme
@@ -2977,6 +3013,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
+        // PR #132: mark any user-driven event so the next
+        // RedrawRequested bypasses the vsync coalescing gate. This
+        // covers main, prefs, and child windows uniformly. PTY-byte
+        // redraws (the high-volume path) arrive as RedrawRequested
+        // with this flag still false and continue to coalesce.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::Ime(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+        ) {
+            self.input_dirty = true;
+        }
         // Drain any pending sonic.toml live-reload deliveries before
         // dispatching the event — guarantees font/theme/keymap swaps
         // land on the same redraw tick they were detected on.
@@ -3017,11 +3074,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // then re-requests the redraw. Net effect: bursty PTY
                 // output coalesces into one frame per vsync instead of
                 // burning the GPU at the VT thread's 16ms tick rate.
-                if self.last_render.elapsed() < self.frame_period {
+                // PR #132 review: input-driven redraws must be
+                // immediate — gating them on the vsync deadline adds
+                // perceptible latency to typing/resize/theme changes.
+                // Only redraws that arrive purely from streaming PTY
+                // bytes (input_dirty stays false) get coalesced.
+                if !self.input_dirty && self.last_render.elapsed() < self.frame_period {
                     self.pending_redraw = true;
                     return;
                 }
                 self.pending_redraw = false;
+                self.input_dirty = false;
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
                 // the focused pane). The active pane's grid is rendered into
