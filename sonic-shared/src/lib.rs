@@ -19,6 +19,7 @@ pub mod os_drag;
 pub mod overlays;
 pub mod pane;
 pub mod prefs;
+pub mod prefs_renderer;
 pub mod quad;
 pub mod render;
 pub mod search;
