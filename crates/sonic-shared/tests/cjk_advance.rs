@@ -1,6 +1,7 @@
 //! Regression tests for the v0.6.x CJK + emoji rendering bug.
 //!
 //! Symptoms in production (caught visually in /tmp/parity-now.png):
+#![allow(dead_code, unused_imports)]
 //!   - `echo 中文测试 🎉` rendered with the Latin shell-prompt text
 //!     OVERLAPPING horizontally with the CJK glyphs; characters
 //!     collided rather than sitting in clean monospace cells.

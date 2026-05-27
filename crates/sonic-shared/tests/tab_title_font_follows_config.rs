@@ -35,6 +35,6 @@ fn tab_title_attrs_follow_configured_family() {
 fn tab_title_attrs_follow_default_st_helens_family() {
     let font = FontConfig::default();
     let tab_attrs = terminal_font_attrs(&font.family);
-    let expected = Family::Name("St Helens");
+    let expected = Family::Name("Rec Mono St.Helens");
     assert_eq!(format!("{:?}", tab_attrs.family), format!("{:?}", expected));
 }

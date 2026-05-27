@@ -35,8 +35,7 @@ use sonic_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
 
 use windows::core::{implement, w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL, HANDLE, HWND, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
-    WPARAM,
+    DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL, HWND, OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{
     IDataObject, IDataObject_Impl, IEnumFORMATETC, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
@@ -51,7 +50,7 @@ use windows::Win32::System::Ole::{
     OleUninitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP, DROPEFFECT,
     DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 // ---- Custom clipboard format -------------------------------------------------
@@ -95,6 +94,7 @@ fn file_drop_sink() -> &'static Mutex<Option<FileDropSink>> {
 /// Sonic window. The string passed in is already shell-quoted (POSIX
 /// rules — Windows `cmd.exe` users typically run under a POSIX-ish
 /// shell inside Sonic, mirroring the macOS behavior).
+#[allow(dead_code)]
 pub fn install_file_drop_sink<F: Fn(String) + Send + Sync + 'static>(f: F) {
     *file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(f));
 }
@@ -170,7 +170,7 @@ impl IDataObject_Impl for SonicDataObject_Impl {
             }
         }
         let mut medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, ..Default::default() };
-        medium.u.hGlobal = HANDLE(hglobal.0);
+        medium.u.hGlobal = hglobal;
         Ok(medium)
     }
 
@@ -343,7 +343,7 @@ impl DropTarget {
         if has_format(data, cf_sonic_tab(), TYMED_HGLOBAL.0 as u32) {
             return DROPEFFECT_MOVE;
         }
-        if has_format(data, CF_HDROP.0 as u16, TYMED_HGLOBAL.0 as u32) {
+        if has_format(data, CF_HDROP.0, TYMED_HGLOBAL.0 as u32) {
             return DROPEFFECT_COPY;
         }
         DROPEFFECT_NONE
@@ -356,7 +356,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
         _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &POINT,
+        _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
@@ -373,7 +373,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
     fn DragOver(
         &self,
         _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &POINT,
+        _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         // Keep whatever DragEnter chose — the cursor will reflect it.
@@ -394,7 +394,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
         _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &POINT,
+        _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
@@ -503,7 +503,7 @@ fn read_hglobal_utf8(data: &IDataObject, cf: u16) -> Option<String> {
 /// Pull file paths out of an `HDROP` (`CF_HDROP`) payload.
 fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
     let fmt = FORMATETC {
-        cfFormat: CF_HDROP.0 as u16,
+        cfFormat: CF_HDROP.0,
         ptd: std::ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
@@ -587,6 +587,7 @@ pub unsafe fn register_for_window(hwnd: HWND) {
 /// # Safety
 ///
 /// Caller must ensure the HWND is still valid.
+#[allow(dead_code)]
 pub unsafe fn unregister_for_window(hwnd: HWND) {
     // SAFETY: contract above.
     let hr = unsafe { RevokeDragDrop(hwnd) };

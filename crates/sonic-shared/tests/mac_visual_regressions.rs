@@ -299,7 +299,10 @@ fn palette_text_top_offset_centers_line_box_inside_row() {
 /// refactor moves the calls back to the wrong order, the test fires.
 #[test]
 fn prefs_create_installs_renderer_before_first_request_redraw() {
-    let src = include_str!("../../sonic-app/src/app/prefs_window.rs");
+    let raw = include_str!("../../sonic-app/src/app/prefs_window.rs");
+    // Normalize CRLF → LF so the substring search works regardless of
+    // the platform's git autocrlf setting.
+    let src = raw.replace("\r\n", "\n");
     let create_fn_start = src.find("fn create_prefs_window").expect("function present");
     let create_fn_end = src[create_fn_start..]
         .find("\n    }\n")

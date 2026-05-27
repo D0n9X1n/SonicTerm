@@ -136,15 +136,18 @@ impl Default for Config {
     }
 }
 
-/// Default font family. "St Helens" is the brand default the project ships
-/// with; it is NOT bundled in `assets/fonts/` (no SIL OFL / Apache-licensed
-/// variant is available as of this writing) so end users must install it
-/// system-wide for it to apply. When the family is missing the renderer
-/// falls through to the system mono chain — `JetBrainsMono Nerd Font` is
-/// bundled in `assets/fonts/` and serves as the implicit fallback. Users
-/// can override via `[font] family = "..."` in `sonic.toml` or via the
-/// Font tab of the prefs window.
-pub const DEFAULT_FONT_FAMILY: &str = "St Helens";
+/// Default font family. "Rec Mono St.Helens" is the brand default the project
+/// ships with. As of the Windows-build-unblock PR, all four variants
+/// (Regular, Italic, Bold, BoldItalic) are bundled in `assets/fonts/` as
+/// `RecMonoSt.Helens-*.ttf`, built from MOSconfig/recursive-code-config
+/// v1.2.2 and distributed under the SIL Open Font License 1.1. The
+/// font-family string registered by fontdb is `"Rec Mono St.Helens"`
+/// (with the dot) — that's the exact name to use here. When the family is
+/// missing the renderer falls through to the system mono chain;
+/// `JetBrainsMono Nerd Font` is also bundled and serves as the implicit
+/// fallback. Users can override via `[font] family = "..."` in `sonic.toml`
+/// or via the Font tab of the prefs window.
+pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
     fn default() -> Self {
