@@ -23,3 +23,8 @@ pub use state::{PrefsHit, PrefsState};
 /// Logical (DPI-independent) size of the preferences window.
 pub const PREFS_WIN_W: f32 = 760.0;
 pub const PREFS_WIN_H: f32 = 600.0;
+/// Minimum logical size enforced by both the winit window builder
+/// (`with_min_inner_size`) and [`layout::PrefsLayout::new`]. Must match
+/// the clamp values inside `layout.rs`.
+pub const PREFS_MIN_W: f32 = 680.0;
+pub const PREFS_MIN_H: f32 = 520.0;

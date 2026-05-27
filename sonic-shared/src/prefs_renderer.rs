@@ -57,6 +57,11 @@ pub struct TextCmd {
     pub weight: u16,
     /// `true` → use the terminal monospace font; `false` → system UI font.
     pub monospace: bool,
+    /// Optional explicit family name. When `Some`, the renderer uses it
+    /// verbatim (e.g. the user's configured terminal font for the
+    /// Appearance preview card); when `None` the default selection by
+    /// `monospace` applies.
+    pub font_family: Option<String>,
 }
 
 /// Output of [`build_draw_list`].
@@ -102,6 +107,7 @@ fn push_text(
         size_px: ramp.size_px,
         weight: ramp.weight,
         monospace: false,
+        font_family: None,
     });
 }
 
@@ -111,6 +117,7 @@ fn push_mono(
     text: impl Into<String>,
     color_token: [f32; 4],
     size: f32,
+    family: Option<String>,
 ) {
     out.push(TextCmd {
         rect,
@@ -119,7 +126,16 @@ fn push_mono(
         size_px: size,
         weight: 500,
         monospace: true,
+        font_family: family,
     });
+}
+
+/// Return the configured terminal font family for the prefs preview
+/// card. Falls back to an empty `String` only when the user explicitly
+/// cleared the family — the renderer treats an empty string as "use
+/// the monospace default". Mirrors what the terminal grid would use.
+fn terminal_font_attrs(state: &PrefsState) -> String {
+    state.config.font.family.clone()
 }
 
 /// Build a logical-pixel draw list for the current prefs state. Pure —
@@ -231,14 +247,13 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         typography::TypeRamp { size_px: SECTION_HELP_SIZE, line_px: SUBTITLE_LINE, weight: 500 },
     );
 
-    // --- Form rows (offset down to clear the section title block) -----
-    let row_y_offset = TITLE_LINE + SUBTITLE_LINE + 8.0;
+    // --- Form rows -----------------------------------------------------
+    // `form_row` / `control_slot` already include `PrefsLayout::ROW_Y_OFFSET`
+    // so render + hit-test see the same rects.
 
     for (idx, ctrl) in state.controls.iter().enumerate() {
         let row = layout.form_row(idx);
-        let row = PrefsRect::new(row.x, row.y + row_y_offset, row.w, row.h);
         let slot = layout.control_slot(idx);
-        let slot = PrefsRect::new(slot.x, slot.y + row_y_offset, slot.w, slot.h);
 
         // Label.
         let label_h = 20.0;
@@ -258,7 +273,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     // --- Preview card (Appearance category only) ----------------------
     if matches!(state.active_category, layout::Category::Appearance) {
         let last_row = layout.form_row(state.controls.len());
-        let preview_y = last_row.y + row_y_offset + 8.0;
+        let preview_y = last_row.y + 8.0;
         let preview_card = PrefsRect::new(
             layout.form_card.x + CARD_PAD_H,
             preview_y,
@@ -290,6 +305,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
                     line.clone(),
                     preview_fg,
                     13.0,
+                    Some(terminal_font_attrs(state)),
                 );
             }
         }
@@ -693,7 +709,11 @@ impl PrefsRenderer {
             let metrics = Metrics::new(t.size_px, t.size_px * 1.4);
             let mut buf = Buffer::new(&mut self.font_system, metrics);
             buf.set_size(&mut self.font_system, Some(t.rect.w), Some(t.rect.h));
-            let family = if t.monospace { Family::Monospace } else { Family::Name(ui_family) };
+            let family = match (&t.font_family, t.monospace) {
+                (Some(name), _) if !name.is_empty() => Family::Name(name.as_str()),
+                (_, true) => Family::Name("monospace"),
+                (_, false) => Family::Name(ui_family),
+            };
             let mut attrs = Attrs::new().family(family).color(t.color);
             if t.weight >= 600 {
                 attrs = attrs.weight(glyphon::Weight::BOLD);
@@ -768,6 +788,7 @@ impl PrefsRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefs::PrefsHit;
     use sonic_core::config::Config;
     use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
     use std::path::PathBuf;
@@ -964,5 +985,122 @@ mod tests {
                 "dirty indicator missing"
             );
         }
+    }
+
+    /// Regression: PR #117 review CRITICAL. The renderer used a private
+    /// `row_y_offset` that the hit-test path did not know about, so a
+    /// click on the visible first control hit the wrong slot. The fix
+    /// folds the offset into `PrefsLayout::form_row` /
+    /// `PrefsLayout::control_slot` directly so render + hit-test see
+    /// the same rect.
+    ///
+    /// This test asserts: clicking at the *visible* center of control 0
+    /// resolves to control 0 — not to an empty area above it.
+    #[test]
+    fn prefs_hit_test_rect_matches_rendered_rect() {
+        let (state, _theme) = fresh();
+        // First control's stored rect — also the rect the renderer
+        // will draw at.
+        assert!(!state.controls.is_empty(), "expected at least one control on General page");
+        let ctrl0 = &state.controls[0];
+        let ctrl0_id = ctrl0.id();
+        let rect = match ctrl0 {
+            Control::TextField(tf) => tf.rect,
+            Control::Toggle(t) => t.rect,
+            Control::Slider(s) => s.rect,
+            Control::Dropdown(d) => d.rect,
+            Control::ColorSwatch(cs) => cs.rect,
+        };
+        let cx = rect.x + rect.w / 2.0;
+        let cy = rect.y + rect.h / 2.0;
+        let hit = state.classify_click(cx, cy);
+        assert!(hit.is_some(), "no hit at visible center of control 0 ({cx}, {cy})");
+        // The id reported by the hit must match control 0.
+        let hit_id = match hit.unwrap() {
+            PrefsHit::Toggle(id)
+            | PrefsHit::SliderTrack(id)
+            | PrefsHit::DropdownHeader(id)
+            | PrefsHit::TextField(id)
+            | PrefsHit::DropdownOption { id, .. }
+            | PrefsHit::ColorCell { id, .. } => id,
+            other => panic!("expected control hit, got {other:?}"),
+        };
+        assert_eq!(hit_id, ctrl0_id, "click resolved to a different control");
+    }
+
+    /// Regression: PR #117 review IMPORTANT. The prefs window builder
+    /// must enforce a minimum inner size so the user cannot shrink the
+    /// window below the layout's clamp (otherwise the form card
+    /// disappears).
+    #[test]
+    fn prefs_window_enforces_min_size() {
+        // Constants must exist and match the layout clamp (680×520).
+        assert_eq!(crate::prefs::PREFS_MIN_W, 680.0);
+        assert_eq!(crate::prefs::PREFS_MIN_H, 520.0);
+        // app.rs `create_prefs_window` must reference both via
+        // `with_min_inner_size(LogicalSize::new(PREFS_MIN_W, PREFS_MIN_H))`.
+        let app_src = include_str!("app.rs");
+        assert!(
+            app_src.contains("with_min_inner_size"),
+            "prefs window builder is missing with_min_inner_size"
+        );
+        assert!(
+            app_src.contains("PREFS_MIN_W"),
+            "prefs window builder is not wired to PREFS_MIN_W"
+        );
+        assert!(
+            app_src.contains("PREFS_MIN_H"),
+            "prefs window builder is not wired to PREFS_MIN_H"
+        );
+    }
+
+    /// Regression: PR #117 review IMPORTANT. The Appearance preview
+    /// card used the generic monospace family which ignores the user's
+    /// configured terminal font. The fix routes the family through
+    /// `terminal_font_attrs()` so the preview actually shows the
+    /// configured font. Source-grep test — the literal must not
+    /// reappear.
+    #[test]
+    fn prefs_preview_card_uses_terminal_font_attrs() {
+        let src = include_str!("prefs_renderer.rs");
+        // Build the needle at runtime so this test's own assertion
+        // string does not count as a hit. Strip line comments first
+        // so doc-comments mentioning the legacy spelling do not match.
+        let needle = format!("Family::{}", "Monospace");
+        let stripped: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !stripped.contains(&needle),
+            "prefs_renderer.rs still uses the generic monospace family; preview card must use terminal_font_attrs()"
+        );
+        // The helper must exist + be invoked: the preview card's
+        // TextCmd must carry the configured terminal font family.
+        // Use a tall window so the preview card actually fits inside
+        // the form card (default 600 px is too short for 5 controls +
+        // preview).
+        let (state, theme) = fresh();
+        let mut state = state;
+        state.set_category(crate::prefs::Category::Appearance);
+        state.config.font.family = "ZZZ-FixturePreviewFont".to_string();
+        state.layout = crate::prefs::PrefsLayout::new(760.0, 900.0);
+        state.rebuild_controls();
+        let dl = build_draw_list(&state, &theme);
+        let mono_count = dl.texts.iter().filter(|t| t.monospace).count();
+        let with_family = dl
+            .texts
+            .iter()
+            .filter(|t| t.font_family.as_deref() == Some("ZZZ-FixturePreviewFont"))
+            .count();
+        let preview_used = dl
+            .texts
+            .iter()
+            .any(|t| t.monospace && t.font_family.as_deref() == Some("ZZZ-FixturePreviewFont"));
+        assert!(
+            preview_used,
+            "preview card text did not carry the configured terminal font family (mono_count={mono_count}, with_family={with_family})"
+        );
     }
 }

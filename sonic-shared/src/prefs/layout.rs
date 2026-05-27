@@ -231,13 +231,23 @@ impl PrefsLayout {
         None
     }
 
+    /// Vertical offset applied to every form row so they sit below the
+    /// section title + help block drawn inside the form card. This was
+    /// previously a private constant in the renderer, which caused the
+    /// rendered controls and the hit-test rects to drift apart — render
+    /// applied the offset, hit-test did not. Folding it into the layout
+    /// here is the single source of truth.
+    pub const ROW_Y_OFFSET: f32 = TITLE_LINE + SUBTITLE_LINE + 8.0;
+
     /// Row rect for the `n`th control inside the form card (0-based).
     /// Rows are stacked vertically inside the card with `CARD_PAD_V`
-    /// top padding and `CARD_PAD_H` horizontal padding.
+    /// top padding and `CARD_PAD_H` horizontal padding. The y position
+    /// also includes [`PrefsLayout::ROW_Y_OFFSET`] so callers do not
+    /// need to add it themselves (render + hit-test must agree).
     pub fn form_row(&self, n: usize) -> Rect {
         Rect::new(
             self.form_card.x + CARD_PAD_H,
-            self.form_card.y + CARD_PAD_V + n as f32 * ROW_H,
+            self.form_card.y + CARD_PAD_V + Self::ROW_Y_OFFSET + n as f32 * ROW_H,
             self.form_card.w - CARD_PAD_H * 2.0,
             ROW_H,
         )
