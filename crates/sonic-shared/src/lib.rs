@@ -8,17 +8,20 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
-pub mod atlas_upload;
 pub mod config_watch;
 pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;
 pub mod os_drag_bridge;
 pub mod prefs_renderer;
-pub mod quad;
 pub mod render;
 pub mod tab_drag;
-pub mod text_pipeline;
+
+// Re-exports from the extracted `sonic-gpu` crate (PR 7a of the workspace
+// refactor). `sonic-gpu` owns the wgpu/glyphon/cosmic-text-touching pipeline
+// primitives. Legacy `use sonic_shared::{quad, text_pipeline, atlas_upload};`
+// imports keep working through these re-exports.
+pub use sonic_gpu::{atlas_upload, quad, text_pipeline};
 
 // Re-exports from the extracted `sonic-ui` crate (PR-5 of the workspace
 // refactor, issue #121). `sonic-ui` owns pure UI state + layout with no

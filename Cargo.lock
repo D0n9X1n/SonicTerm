@@ -4143,6 +4143,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonic-gpu"
+version = "0.3.0"
+dependencies = [
+ "bytemuck",
+ "cosmic-text",
+ "glyphon",
+ "sonic-render-model",
+ "sonic-text",
+ "sonic-types",
+ "wgpu",
+]
+
+[[package]]
 name = "sonic-grid"
 version = "0.3.0"
 dependencies = [
@@ -4236,6 +4249,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonic-core",
+ "sonic-gpu",
  "sonic-text",
  "sonic-ui",
  "swash",
