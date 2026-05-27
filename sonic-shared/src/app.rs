@@ -2560,6 +2560,9 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
@@ -2613,6 +2616,9 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let Some(w) = self.prefs_window.as_ref() {
+                    w.request_redraw();
+                }
                 let Some(s) = self.prefs_state.as_mut() else { return };
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
@@ -2657,12 +2663,11 @@ impl App {
             }
             _ => {}
         }
-        // Any input may have mutated the edit buffer (toggle flip,
-        // typing, dropdown selection…). Request a redraw so the
-        // visible state reflects the change on the next vsync.
-        if let Some(w) = self.prefs_window.as_ref() {
-            w.request_redraw();
-        }
+        // NB: do NOT unconditionally request_redraw here — RedrawRequested
+        // itself flows through this handler, so a tail redraw creates an
+        // idle vsync feedback loop (CLAUDE.md §4 land-mine). Redraws are
+        // requested only inside the arms that actually mutate visible
+        // state (MouseInput, KeyboardInput, Resize, ScaleFactorChanged).
     }
 }
 
