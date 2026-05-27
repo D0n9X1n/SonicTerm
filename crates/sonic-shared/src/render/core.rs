@@ -3015,10 +3015,24 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
     let (r, g, b) = match cell.bg {
         Color::Default => return None,
         Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(i) => {
-            let gc = indexed(i, theme)?;
-            (gc.r(), gc.g(), gc.b())
-        }
+        Color::Indexed(i) => match i {
+            0..=15 => {
+                let gc = indexed(i, theme)?;
+                (gc.r(), gc.g(), gc.b())
+            }
+            16..=231 => {
+                let v = i - 16;
+                let r = v / 36;
+                let g = (v / 6) % 6;
+                let b = v % 6;
+                let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
+                (to8bit(r), to8bit(g), to8bit(b))
+            }
+            232..=255 => {
+                let g = (i - 232) * 10 + 8;
+                (g, g, g)
+            }
+        },
     };
     let lut = super::color::srgb_u8_to_linear_lut();
     Some([lut[r as usize], lut[g as usize], lut[b as usize], 1.0])

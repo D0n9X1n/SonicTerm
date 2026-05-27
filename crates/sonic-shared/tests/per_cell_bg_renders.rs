@@ -17,6 +17,7 @@
 use sonic_core::grid::{Cell, CellFlags, Color, Grid};
 use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonic_gpu::quad::QuadInstance;
+use sonic_shared::render::color::srgb_u8_to_linear_lut;
 use sonic_shared::render::emit_cell_bg_quads;
 
 fn theme_with_red_index1() -> Theme {
@@ -66,18 +67,22 @@ fn theme_with_red_index1() -> Theme {
     }
 }
 
-fn write_red_run(grid: &mut Grid, row: u16, start_col: u16, len: u16, ch: char) {
+fn write_indexed_run(grid: &mut Grid, row: u16, start_col: u16, len: u16, ch: char, index: u8) {
     let r = grid.row_mut(row);
     for i in 0..len {
         r[(start_col + i) as usize] = Cell {
             ch,
             fg: Color::Default,
-            bg: Color::Indexed(1), // ANSI red — what `\033[41m` sets
+            bg: Color::Indexed(index),
             flags: CellFlags::empty(),
             hyperlink: None,
             extras: None,
         };
     }
+}
+
+fn write_red_run(grid: &mut Grid, row: u16, start_col: u16, len: u16, ch: char) {
+    write_indexed_run(grid, row, start_col, len, ch, 1); // ANSI red — what `\033[41m` sets
 }
 
 fn run_emit(grid: &Grid, theme: &Theme) -> Vec<QuadInstance> {
@@ -177,4 +182,35 @@ fn rgb_bg_also_emits_quad() {
     assert_eq!(quads.len(), 1, "expected 1 RGB-bg quad, got {}", quads.len());
     let q = &quads[0];
     assert!(q.color[0] > q.color[1] && q.color[0] > q.color[2], "expected red-dominant color");
+}
+
+#[test]
+fn xterm_256_indexed_backgrounds_emit_expected_colors() {
+    // SGR 48;5;n maps to Color::Indexed(n). Indices beyond 15 must resolve
+    // through the xterm 256-color palette, not disappear as `None`.
+    let cases = [
+        (196, [255, 0, 0]),     // bright red from 6×6×6 cube
+        (46, [0, 255, 0]),      // bright green from 6×6×6 cube
+        (231, [255, 255, 255]), // white-ish cube endpoint
+        (240, [88, 88, 88]),    // 24-step grayscale ramp: (240 - 232) * 10 + 8
+    ];
+
+    let lut = srgb_u8_to_linear_lut();
+    for (col, (idx, expected)) in cases.into_iter().enumerate() {
+        let mut g = Grid::new(4, 1);
+        write_indexed_run(&mut g, 0, col as u16, 1, 'X', idx);
+        let quads = run_emit(&g, &theme_with_red_index1());
+        assert_eq!(quads.len(), 1, "expected one bg quad for indexed color {idx}");
+        let q = &quads[0];
+        let expected =
+            [lut[expected[0] as usize], lut[expected[1] as usize], lut[expected[2] as usize], 1.0];
+        for (component, expected_component) in expected.iter().enumerate() {
+            assert!(
+                (q.color[component] - expected_component).abs() < 1e-6,
+                "indexed color {idx} component {component}: expected {}, got {}",
+                expected_component,
+                q.color[component]
+            );
+        }
+    }
 }
