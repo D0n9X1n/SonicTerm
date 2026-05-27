@@ -139,7 +139,9 @@ impl App {
                     .filter(|(id, _)| *id != active_id)
                     .filter_map(|(id, rect)| {
                         let p = self.panes.get(id)?;
-                        let g = p.parser.lock();
+                        // CLAUDE.md §4 land-mine: render path must not block on
+                        // the parser lock, or VT bursts can AB-BA deadlock the UI.
+                        let g = p.parser.try_lock()?;
                         let grid = g.grid();
                         Some(sonic_shared::render::InactivePaneCursor {
                             row: grid.cursor.row,
@@ -155,17 +157,12 @@ impl App {
                 if let (Some(r), Some(pane)) =
                     (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
-                    // Block on the parser lock: the VT thread holds it only
-                    // for the duration of a single `Parser::advance` call,
-                    // which is sub-millisecond even on a `cat largefile`
-                    // burst. The old try_lock() path returned early on a
-                    // miss, which caused winit on macOS to immediately
-                    // re-fire RedrawRequested in a tight loop (silently
-                    // burning ~100% CPU as long as the VT thread had work
-                    // queued). Holding the lock briefly is strictly cheaper
-                    // than spinning the AppKit event loop.
                     let cursor_rc = {
-                        let mut grid = pane.parser.lock();
+                        // CLAUDE.md §4 land-mine: render path must not block on
+                        // the parser lock, or VT bursts can AB-BA deadlock the UI.
+                        let Some(mut grid) = pane.parser.try_lock() else {
+                            return;
+                        };
                         // Wezterm-style tab title: `#N icon parent/leaf`.
                         // Pull cwd from OSC 7, the foreground process from
                         // the pid probe (macOS only for now), and the OSC

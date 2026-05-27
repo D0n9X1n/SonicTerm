@@ -90,7 +90,11 @@ impl App {
                     .unwrap_or_default();
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
                 if let Some(pane) = child.panes.get(&active_id) {
-                    let mut grid = pane.parser.lock();
+                    // CLAUDE.md §4 land-mine: render path must not block on
+                    // the parser lock, or VT bursts can AB-BA deadlock the UI.
+                    let Some(mut grid) = pane.parser.try_lock() else {
+                        return;
+                    };
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                     {
