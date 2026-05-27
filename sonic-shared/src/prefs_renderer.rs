@@ -169,7 +169,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         if active {
             quads.push(QuadCmd { rect: row, color: color::BG_ACTIVE() });
             // Left accent bar.
-            quads.push(QuadCmd { rect: layout.category_accent(i), color: color::ACCENT_BLUE() });
+            quads.push(QuadCmd { rect: layout.category_accent(i), color: palette.accent });
         }
         // Icon slot placeholder (subtle pill) — keeps spacing predictable
         // without forcing us to ship an icon font in this PR.
@@ -181,7 +181,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             layout::SIDEBAR_ICON_SLOT,
         );
         let icon_color =
-            if active { color::ACCENT_BLUE() } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
+            if active { palette.accent } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
         quads.push(QuadCmd { rect: icon_rect, color: color::with_alpha(icon_color, 0.18) });
 
         // Label.
@@ -274,7 +274,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         );
 
         // Control.
-        draw_control(&mut quads, &mut texts, ctrl, slot, state);
+        draw_control(&mut quads, &mut texts, ctrl, slot, state, palette.accent);
     }
 
     // --- Preview card (Appearance category only) ----------------------
@@ -361,7 +361,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     // Apply button (primary accent).
     let apply_enabled = state.dirty;
     let (apply_bg, apply_fg) = if apply_enabled {
-        (color::ACCENT_BLUE(), color::hex("#0B1020"))
+        (palette.accent, color::hex("#0B1020"))
     } else {
         // Disabled state per spec.
         (color::hex("#2A3042"), color::TEXT_FAINT())
@@ -397,12 +397,13 @@ fn draw_control(
     ctrl: &Control,
     slot: PrefsRect,
     state: &PrefsState,
+    accent: [f32; 4],
 ) {
     match ctrl {
         Control::Toggle(t) => {
             let track_y = slot.y + (slot.h - TOGGLE_H) / 2.0;
             let track = PrefsRect::new(slot.x, track_y, TOGGLE_W, TOGGLE_H);
-            let on_color = color::ACCENT_BLUE();
+            let on_color = accent;
             let off_color = color::hex("#343A52FF");
             quads.push(QuadCmd { rect: track, color: if t.value { on_color } else { off_color } });
             let knob_x = if t.value {
@@ -424,7 +425,7 @@ fn draw_control(
             quads.push(QuadCmd { rect: track, color: color::hex("#343A52FF") });
             let frac = ((s.value - s.min) / (s.max - s.min)).clamp(0.0, 1.0);
             let fill = PrefsRect::new(track.x, track.y, track.w * frac, track.h);
-            quads.push(QuadCmd { rect: fill, color: color::ACCENT_BLUE() });
+            quads.push(QuadCmd { rect: fill, color: accent });
             // Thumb (16x16) — drawn as a square. The renderer doesn't
             // round corners yet; the spec calls for r=8.
             let thumb_x = track.x + (track.w * frac) - SLIDER_THUMB / 2.0;
@@ -501,10 +502,7 @@ fn draw_control(
                     let ring =
                         PrefsRect::new(x - 2.0, y - 2.0, SWATCH_SIZE + 4.0, SWATCH_SIZE + 4.0);
                     // Order matters: ring first (under), then redraw cell.
-                    quads.insert(
-                        quads.len() - 1,
-                        QuadCmd { rect: ring, color: color::ACCENT_BLUE() },
-                    );
+                    quads.insert(quads.len() - 1, QuadCmd { rect: ring, color: accent });
                 }
                 x += SWATCH_SIZE + SWATCH_GAP;
                 if x + SWATCH_SIZE > slot.x + slot.w {
@@ -842,7 +840,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_theme() -> Theme {
+        // Use a gruvbox-like palette so `tab.active_fg` (the chrome
+        // accent that UiPalette::from_theme reads) is visibly distinct
+        // from Tokyo Night blue (#7aa2f7 / color::ACCENT_BLUE). Without
+        // this distinction, a regression that hard-codes ACCENT_BLUE
+        // would silently pass on this fixture.
         let h = || Hex("#7aa2f7".to_string());
+        let accent = || Hex("#fabd2f".to_string()); // gruvbox bright yellow
         let ansi = || AnsiColors {
             black: h(),
             red: h(),
@@ -868,7 +872,7 @@ mod tests {
                 tab: TabColors {
                     bar_bg: h(),
                     active_bg: h(),
-                    active_fg: h(),
+                    active_fg: accent(),
                     inactive_bg: h(),
                     inactive_fg: h(),
                     hover_bg: h(),
@@ -979,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn prefs_primary_button_uses_accent_blue() {
+    fn prefs_primary_button_uses_theme_accent() {
         let (mut state, theme) = fresh();
         // Force dirty so the primary button shows its enabled colors.
         state.set_category(layout::Category::Appearance);
@@ -1018,15 +1022,132 @@ mod tests {
                 (q.rect.x - apply_rect.x).abs() < 0.01 && (q.rect.y - apply_rect.y).abs() < 0.01
             })
             .expect("apply button quad");
-        let accent = color::ACCENT_BLUE();
+        let accent = crate::ui_tokens::UiPalette::from_theme(&theme).accent;
+        // Sanity: theme accent (gruvbox gold) must differ from the
+        // legacy Tokyo Night blue ACCENT_BLUE, so this test actually
+        // catches the regression from PR #119's missed call sites.
+        #[allow(deprecated)]
+        let legacy_blue = color::ACCENT_BLUE();
+        assert!(
+            (accent[0] - legacy_blue[0]).abs() > 0.05
+                || (accent[1] - legacy_blue[1]).abs() > 0.05
+                || (accent[2] - legacy_blue[2]).abs() > 0.05,
+            "test fixture accent must differ from ACCENT_BLUE to detect regressions"
+        );
         for (i, &ac) in accent.iter().enumerate() {
             assert!(
                 (apply_quad.color[i] - ac).abs() < 1e-4,
-                "apply button channel {i} ≠ ACCENT_BLUE: got {} want {}",
+                "apply button channel {i} ≠ theme accent: got {} want {}",
                 apply_quad.color[i],
                 ac,
             );
         }
+    }
+
+    /// A toggle in the "on" position must paint its track with the
+    /// theme accent (e.g. gruvbox gold) — not the deprecated Tokyo
+    /// Night ACCENT_BLUE. Regression for PR #119 oversight.
+    #[test]
+    fn prefs_toggle_on_uses_theme_accent() {
+        let (mut state, theme) = fresh();
+        // Find any toggle and force it on.
+        let toggle = state.controls.iter().find_map(|c| {
+            if let Control::Toggle(t) = c {
+                Some((t.id, t.value))
+            } else {
+                None
+            }
+        });
+        let Some((id, initial)) = toggle else {
+            // No toggle on the default category — try every category.
+            for cat in [
+                layout::Category::Appearance,
+                layout::Category::Behavior,
+                layout::Category::Keymap,
+                layout::Category::Font,
+                layout::Category::General,
+            ] {
+                state.set_category(cat);
+                if let Some(t) = state.controls.iter().find_map(|c| {
+                    if let Control::Toggle(t) = c {
+                        Some(t.id)
+                    } else {
+                        None
+                    }
+                }) {
+                    if !state
+                        .controls
+                        .iter()
+                        .any(|c| matches!(c, Control::Toggle(tt) if tt.id == t && tt.value))
+                    {
+                        state.flip_toggle(t);
+                    }
+                    break;
+                }
+            }
+            return;
+        };
+        if !initial {
+            state.flip_toggle(id);
+        }
+        let dl = build_draw_list(&state, &theme);
+        let accent = crate::ui_tokens::UiPalette::from_theme(&theme).accent;
+        let found = dl.quads.iter().any(|q| {
+            (q.color[0] - accent[0]).abs() < 1e-4
+                && (q.color[1] - accent[1]).abs() < 1e-4
+                && (q.color[2] - accent[2]).abs() < 1e-4
+                && (q.rect.w - TOGGLE_W).abs() < 0.01
+                && (q.rect.h - TOGGLE_H).abs() < 0.01
+        });
+        assert!(found, "toggle 'on' track should use theme accent {accent:?}");
+    }
+
+    /// The active sidebar category strip must use the theme accent.
+    #[test]
+    fn prefs_sidebar_active_accent_uses_theme_accent() {
+        let (state, theme) = fresh();
+        let dl = build_draw_list(&state, &theme);
+        let accent_rect = state
+            .layout
+            .category_accent(CATEGORIES.iter().position(|c| *c == state.active_category).unwrap());
+        let accent = crate::ui_tokens::UiPalette::from_theme(&theme).accent;
+        let q = dl
+            .quads
+            .iter()
+            .find(|q| {
+                (q.rect.x - accent_rect.x).abs() < 0.01
+                    && (q.rect.y - accent_rect.y).abs() < 0.01
+                    && (q.rect.w - accent_rect.w).abs() < 0.01
+            })
+            .expect("sidebar accent strip quad");
+        for (i, &ac) in accent.iter().enumerate() {
+            assert!(
+                (q.color[i] - ac).abs() < 1e-4,
+                "sidebar accent channel {i} ≠ theme accent: got {} want {}",
+                q.color[i],
+                ac,
+            );
+        }
+    }
+
+    /// Source-grep guard. prefs_renderer.rs production code must not
+    /// call the deprecated `color::ACCENT_BLUE()` — chrome derives from
+    /// `UiPalette::from_theme(theme).accent`. Test code is allowed to
+    /// reference it for sanity comparisons.
+    #[test]
+    fn prefs_no_hardcoded_accent_blue() {
+        let src = include_str!("prefs_renderer.rs");
+        // Split on the test module marker; only scan the production
+        // portion above it.
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prefs_renderer.rs must have a production section");
+        assert!(
+            !prod.contains("ACCENT_BLUE"),
+            "production code in prefs_renderer.rs must not reference \
+             color::ACCENT_BLUE — use UiPalette::from_theme(theme).accent"
+        );
     }
 
     #[test]
