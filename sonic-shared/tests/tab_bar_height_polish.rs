@@ -80,10 +80,10 @@ fn tab_text_y_position_is_vertically_centered() {
 }
 
 #[test]
-fn tab_inner_padding_is_six_pixels() {
-    // WezTerm fancy-mode uses ~6px around the title block. Locking
-    // this so a future "looks the same" tweak doesn't silently drift.
-    assert_eq!(TAB_INNER_PAD, 6.0);
+fn tab_inner_padding_is_ten_pixels() {
+    // Issue #112 Round 3: bumped inner padding from 6 to 10 for the
+    // modern browser-style chrome breathing room.
+    assert_eq!(TAB_INNER_PAD, 10.0);
 }
 
 #[test]
@@ -91,11 +91,10 @@ fn compute_with_height_threads_height_through_layout() {
     let bar = bar_with(3);
     let layout = TabBarLayout::compute_with_height(&bar, 800.0, 32.0);
     assert_eq!(layout.bar.h, 32.0);
-    assert_eq!(layout.new_tab.h, 32.0);
     for t in &layout.tabs {
-        // Each tab inset 2px top + 2px bottom from the bar.
-        assert_eq!(t.bg.h, 32.0 - 4.0);
-        // Title rect starts 6px in from the tab's left edge.
+        // Each tab inset 4px top + 4px bottom from the bar (issue #112 R3).
+        assert_eq!(t.bg.h, 32.0 - 8.0);
+        // Title rect starts TAB_INNER_PAD in from the tab's left edge.
         assert!((t.title.x - (t.bg.x + TAB_INNER_PAD)).abs() < 0.01);
     }
 }

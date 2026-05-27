@@ -35,7 +35,7 @@ use crate::{
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
     swash_rasterizer::SwashRasterizer,
-    tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT},
+    tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT, TAB_GAP},
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
 };
@@ -1747,74 +1747,110 @@ impl GpuRenderer {
         if self.tab_bar_visible {
             let layout = TabBarLayout::compute_with_height(tabs, sw, self.tab_bar_logical_height())
                 .with_top_offset(self.titlebar_inset);
+            // Issue #112 Round 3 — premium browser-style chrome.
+            // The structural colors come from `ui_tokens`, decoupled from
+            // the terminal palette so every theme renders the same modern
+            // tab bar. The theme.tab.* colors remain authoritative for
+            // the title text (active vs inactive fg) so per-theme accents
+            // still read through.
+            use crate::tabbar_view::{ACTIVE_TOP_ACCENT_H, ACTIVE_TOP_ACCENT_INSET};
+            use crate::ui_tokens::color as tok;
+            let bar_bg = tok::BG_BASE();
+            let active_bg = tok::BG_ELEVATED();
+            let hover_bg = tok::BG_HOVER();
+            let accent_blue = tok::ACCENT_BLUE();
+            let separator = tok::BORDER_SUBTLE();
+            let border_subtle = tok::BORDER_SUBTLE();
+            let muted = tok::TEXT_MUTED();
+            let secondary = tok::TEXT_SECONDARY();
+            let primary = tok::TEXT_PRIMARY();
+            let danger = tok::DANGER();
+            // Bar background
             quads.push(QuadInstance {
                 rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
-                color: self.tab_bar_bg,
+                color: bar_bg,
+                ..Default::default()
+            });
+            // 1px bottom border across the whole bar.
+            quads.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.bar.x,
+                    layout.bar.y + layout.bar.h - 1.0,
+                    layout.bar.w,
+                    1.0,
+                    sw,
+                    sh,
+                ),
+                color: border_subtle,
                 ..Default::default()
             });
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);
-                let bg_color = if is_active { self.tab_active_bg } else { self.tab_inactive_bg };
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
-                    color: bg_color,
-                    ..Default::default()
-                });
-                // Wezterm-style vertical separator: a 1px dim-gray bar
-                // sitting in the gap to the right of each tab except the
-                // last one. Skipped when either side is the active tab so
-                // the active highlight stays clean.
+                let cursor_on_this_tab = hover_tab_idx == t.index as u32;
+                if is_active {
+                    // Elevated pill background.
+                    // TODO: switch to rounded quad after #116.
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                        color: active_bg,
+                        ..Default::default()
+                    });
+                    // 2px top accent bar, ACCENT_BLUE, inset on each side
+                    // by ACTIVE_TOP_ACCENT_INSET → width = tab_w - 12.
+                    let acc_x = t.bg.x + ACTIVE_TOP_ACCENT_INSET;
+                    let acc_w = (t.bg.w - 2.0 * ACTIVE_TOP_ACCENT_INSET).max(0.0);
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(acc_x, t.bg.y, acc_w, ACTIVE_TOP_ACCENT_H, sw, sh),
+                        color: accent_blue,
+                        ..Default::default()
+                    });
+                } else if cursor_on_this_tab {
+                    // Hover overlay on inactive tab — #FFFFFF/6%.
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                        color: hover_bg,
+                        ..Default::default()
+                    });
+                }
+                // 1px BORDER_SUBTLE separator between adjacent inactive
+                // tabs (PR #109 dedup) — height bar_h - 16, centered.
                 if t.index + 1 < tabs.tabs().len() {
                     let next_is_active = layout.active == Some(t.index + 1);
                     if !is_active && !next_is_active {
                         let sep_w = 1.0_f32;
-                        let sep_pad_y = 6.0_f32;
+                        let sep_h = (layout.bar.h - 16.0).max(1.0);
+                        let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
+                        let gap_mid = t.bg.x + t.bg.w + (TAB_GAP - sep_w) * 0.5;
                         quads.push(QuadInstance {
-                            rect: px_to_ndc(
-                                t.bg.x + t.bg.w + 0.5,
-                                t.bg.y + sep_pad_y,
-                                sep_w,
-                                (t.bg.h - sep_pad_y * 2.0).max(1.0),
-                                sw,
-                                sh,
-                            ),
-                            color: self.tab_separator,
+                            rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
+                            color: separator,
                             ..Default::default()
                         });
                     }
                 }
-                // Close button × — WezTerm fancy-mode parity:
-                //   * if user set `tab_close_button_color`, always shown
-                //     in that color;
-                //   * otherwise hidden until the cursor is over THIS
-                //     tab, drawn dim by default, brightened to the
-                //     active-tab fg when the cursor is over the × rect.
-                let cursor_on_this_tab = hover_tab_idx == t.index as u32;
+                // Close × — visible on hover of tab OR if user enabled
+                // an explicit close-button color override (PR #109 sem.).
                 let cursor_on_close = cursor_on_this_tab && hover_close_hit == 1;
                 let draw_close = self.tab_close_override.is_some() || cursor_on_this_tab;
                 if draw_close {
                     let close_color = if let Some(o) = self.tab_close_override {
                         o
                     } else if cursor_on_close {
-                        // Bright on glyph-hover — same path the title
-                        // takes (sRGB → linear so quads composite
-                        // identically to glyphon-rendered text).
-                        glyphon_color_to_linear_rgba(self.tab_active_fg)
+                        // The spec calls for DANGER on click-down; we
+                        // don't currently track button-down here, so
+                        // hover brightens to TEXT_PRIMARY. (DANGER is
+                        // still wired through the override path for
+                        // theme authors who want it.)
+                        let _ = danger;
+                        primary
                     } else {
-                        // Dim default — multiply the configured close-fg
-                        // alpha by 0.55 so the × is clearly subordinate
-                        // to the title. Keeps theme color intact.
-                        let mut c = self.tab_close_fg;
-                        c[3] *= 0.55;
-                        c
+                        muted
                     };
                     let cx = t.close.x;
                     let cy = t.close.y;
-                    // Slightly tighter glyph (~12px inside a 16px rect)
-                    // so it reads as a small, polished icon rather
-                    // than a heavy button face.
-                    let inset = t.close.w * 0.125;
-                    let glyph = t.close.w - inset * 2.0;
+                    // 14×14 hit, 8×8 glyph (inset 3px each side).
+                    let inset = (t.close.w - 8.0) * 0.5;
+                    let glyph = (t.close.w - inset * 2.0).max(1.0);
                     let thick = 1.5_f32;
                     quads.push(QuadInstance {
                         rect: px_to_ndc(
@@ -1842,36 +1878,21 @@ impl GpuRenderer {
                     });
                 }
             }
-            // `+` new-tab button
+            // `+` new-tab button — 28×28, radius 8 pill, hover BG.
             let nt = layout.new_tab;
-            let plus_thick = 2.0_f32;
-            let plus_len = nt.w.min(nt.h) * 0.4;
-            let pcx = nt.x + nt.w / 2.0;
-            let pcy = nt.y + nt.h / 2.0;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(
-                    pcx - plus_len / 2.0,
-                    pcy - plus_thick / 2.0,
-                    plus_len,
-                    plus_thick,
-                    sw,
-                    sh,
-                ),
-                color: self.tab_close_fg,
-                ..Default::default()
-            });
-            quads.push(QuadInstance {
-                rect: px_to_ndc(
-                    pcx - plus_thick / 2.0,
-                    pcy - plus_len / 2.0,
-                    plus_thick,
-                    plus_len,
-                    sw,
-                    sh,
-                ),
-                color: self.tab_close_fg,
-                ..Default::default()
-            });
+            // Hover detection: cursor inside the new-tab rect.
+            let nt_hover = self
+                .hover_cursor
+                .map(|(cx, cy)| cx >= nt.x && cx < nt.x + nt.w && cy >= nt.y && cy < nt.y + nt.h)
+                .unwrap_or(false);
+            build_new_tab_button_quads(
+                nt,
+                nt_hover,
+                NewTabButtonColors { hover_bg, primary, secondary },
+                sw,
+                sh,
+                &mut quads,
+            );
 
             // Tab titles: render as a single rich-text line where each tab title
             // is positioned by inserting padding spaces. This is approximate but
@@ -2246,9 +2267,9 @@ impl GpuRenderer {
             if let Some(lx) = chip.drop_line_x {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0);
-                // Gold/active accent — match the active-tab bg color
-                // so it reads as "this slot is the target".
-                let mut line_color = self.tab_active_bg;
+                // Drop-line accent — ACCENT_BLUE per issue #112 R3
+                // (was tab_active_bg/gold). Stays 3px wide.
+                let mut line_color = crate::ui_tokens::color::ACCENT_BLUE();
                 line_color[3] = 0.95;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
@@ -3259,6 +3280,56 @@ pub fn build_tab_title_spans(
         spans.push((start..end, color));
     }
     (title_text, spans)
+}
+
+/// Colors used when rendering the `+` new-tab button (extracted for testing).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct NewTabButtonColors {
+    pub hover_bg: [f32; 4],
+    pub primary: [f32; 4],
+    pub secondary: [f32; 4],
+}
+
+/// Emit the quads for the `+` new-tab button. When `hover` is true a
+/// rounded (radius 8) `hover_bg` background is drawn underneath the
+/// plus glyph and the glyph switches to `primary`; otherwise only the
+/// `secondary`-colored plus is drawn.
+///
+/// Exposed for unit tests in `tests/tab_new_tab_button.rs`.
+#[doc(hidden)]
+pub fn build_new_tab_button_quads(
+    nt: crate::tabbar_view::Rect,
+    hover: bool,
+    colors: NewTabButtonColors,
+    sw: f32,
+    sh: f32,
+    out: &mut Vec<QuadInstance>,
+) {
+    if hover {
+        out.push(QuadInstance {
+            rect: px_to_ndc(nt.x, nt.y, nt.w, nt.h, sw, sh),
+            color: colors.hover_bg,
+            size_px: [nt.w, nt.h],
+            radius_px: 8.0,
+            ..Default::default()
+        });
+    }
+    let plus_color = if hover { colors.primary } else { colors.secondary };
+    let plus_thick = 2.0_f32;
+    let plus_len = 12.0_f32;
+    let pcx = nt.x + nt.w / 2.0;
+    let pcy = nt.y + nt.h / 2.0;
+    out.push(QuadInstance {
+        rect: px_to_ndc(pcx - plus_len / 2.0, pcy - plus_thick / 2.0, plus_len, plus_thick, sw, sh),
+        color: plus_color,
+        ..Default::default()
+    });
+    out.push(QuadInstance {
+        rect: px_to_ndc(pcx - plus_thick / 2.0, pcy - plus_len / 2.0, plus_thick, plus_len, sw, sh),
+        color: plus_color,
+        ..Default::default()
+    });
 }
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink

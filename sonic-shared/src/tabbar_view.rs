@@ -26,28 +26,47 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
 }
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
-pub const TAB_MAX_WIDTH: f32 = 220.0;
+pub const TAB_MAX_WIDTH: f32 = 240.0;
 
 /// Minimum width of a single tab — below this we just clip the title.
-pub const TAB_MIN_WIDTH: f32 = 80.0;
+pub const TAB_MIN_WIDTH: f32 = 100.0;
 
 /// Width of the `+` new-tab button drawn after the last tab.
-pub const NEW_TAB_BUTTON_WIDTH: f32 = 32.0;
+/// Browser-style 28×28 hit/visual target with radius 8 (issue #112 Round 3).
+pub const NEW_TAB_BUTTON_WIDTH: f32 = 28.0;
+
+/// Height of the `+` new-tab button (square; centered vertically in bar).
+pub const NEW_TAB_BUTTON_HEIGHT: f32 = 28.0;
 
 /// Size of the close `×` square inside each tab.
-pub const CLOSE_BUTTON_SIZE: f32 = 16.0;
+pub const CLOSE_BUTTON_SIZE: f32 = 14.0;
 
 /// Inset between tabs and from the right edge before the `+` button.
-pub const TAB_GAP: f32 = 2.0;
+pub const TAB_GAP: f32 = 6.0;
 
 /// Padding on the left edge of the bar before the first tab.
-pub const BAR_LEFT_PAD: f32 = 4.0;
+pub const BAR_LEFT_PAD: f32 = 12.0;
 
 /// Internal horizontal padding inside each tab, between the edge of the tab
-/// rect and the start of the title / the close button. WezTerm fancy-mode
-/// uses roughly 6px around the icon + title block; matching that here keeps
-/// the visual rhythm consistent.
-pub const TAB_INNER_PAD: f32 = 6.0;
+/// rect and the start of the title / the close button. The modern browser-
+/// style chrome wants more breathing room around the title block.
+pub const TAB_INNER_PAD: f32 = 10.0;
+
+/// Vertical inset between the bar's top edge and the tab background rect
+/// (and equivalently the bottom edge). The tab rect is `bar_h - 2 *
+/// TAB_VERT_INSET` tall — leaving 4px of bar chrome above and below the
+/// pill so the active tab's elevated BG visibly floats on the bar.
+pub const TAB_VERT_INSET: f32 = 4.0;
+
+/// Corner radius of the tab background pill, in logical pixels.
+pub const TAB_CORNER_RADIUS: f32 = 8.0;
+
+/// Height of the 2px top accent bar drawn on the active tab.
+pub const ACTIVE_TOP_ACCENT_H: f32 = 2.0;
+
+/// Horizontal inset (each side) of the active-tab top accent bar relative
+/// to the tab background rect — so the accent is `tab_w - 2 * inset` wide.
+pub const ACTIVE_TOP_ACCENT_INSET: f32 = 6.0;
 
 /// Rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,12 +161,15 @@ impl TabBarLayout {
         let bar_h = bar_height.max(1.0);
         let bar_rect = Rect { x: 0.0, y: 0.0, w: window_width.max(0.0), h: bar_h };
 
-        let new_tab = Rect {
-            x: (window_width - NEW_TAB_BUTTON_WIDTH).max(0.0),
-            y: 0.0,
-            w: NEW_TAB_BUTTON_WIDTH.min(window_width),
-            h: bar_h,
-        };
+        // Browser-style `+` button: a 28x28 square hit target floated at
+        // the right edge of the bar, vertically centered. The hit region
+        // returned in the layout stays 28x28 so cursor-shape and click
+        // routing land exactly on the visual.
+        let nt_w = NEW_TAB_BUTTON_WIDTH.min(window_width.max(0.0));
+        let nt_h = NEW_TAB_BUTTON_HEIGHT.min(bar_h);
+        let nt_x = (window_width - nt_w - BAR_LEFT_PAD).max(0.0);
+        let nt_y = ((bar_h - nt_h) * 0.5).max(0.0);
+        let new_tab = Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h };
 
         let n = bar.len();
         let mut tabs: Vec<TabRect> = Vec::with_capacity(n);
@@ -157,15 +179,18 @@ impl TabBarLayout {
 
         // Region available for tabs is from BAR_LEFT_PAD to the left edge of
         // the new-tab button, minus a gap before the +.
-        let tabs_region = (window_width - BAR_LEFT_PAD - NEW_TAB_BUTTON_WIDTH - TAB_GAP).max(0.0);
+        let tabs_region =
+            (window_width - BAR_LEFT_PAD - NEW_TAB_BUTTON_WIDTH - BAR_LEFT_PAD - TAB_GAP).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         let per_tab = raw.min(TAB_MAX_WIDTH);
         let _ = TAB_MIN_WIDTH; // advisory; tabs shrink below this when many
 
+        let bg_y = TAB_VERT_INSET;
+        let bg_h = (bar_h - 2.0 * TAB_VERT_INSET).max(1.0);
         let mut x = BAR_LEFT_PAD;
         for index in 0..n {
-            let bg = Rect { x, y: 2.0, w: per_tab, h: bar_h - 4.0 };
+            let bg = Rect { x, y: bg_y, w: per_tab, h: bg_h };
             let close = Rect {
                 x: bg.x + bg.w - TAB_INNER_PAD - CLOSE_BUTTON_SIZE,
                 y: bg.y + (bg.h - CLOSE_BUTTON_SIZE) / 2.0,
