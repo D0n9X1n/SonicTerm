@@ -1,7 +1,7 @@
 //! Windows OLE drag-and-drop for Sonic.
 //!
 //! Implements both ends of the cross-process tab-drag wire defined in
-//! [`sonic_shared::os_drag`]:
+//! [`sonic_app::os_drag`]:
 //!
 //!   * **Source** ([`begin_tab_drag`] + [`WinOsDragSink`]): builds an
 //!     `IDataObject` that exposes the [`TabPayload`] JSON under the
@@ -31,7 +31,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sonic_shared::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
+use sonic_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
 
 use windows::core::{implement, w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
@@ -413,7 +413,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
                     // are observed — the legacy slot is only drained
                     // once at startup. See PR #139 review.
                     PENDING_PAYLOAD.put(p.clone());
-                    sonic_shared::os_drag_bridge::push_tab_payload(p);
+                    sonic_app::os_drag_bridge::push_tab_payload(p);
                     // SAFETY: OLE out-param.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };
                     return Ok(());
@@ -431,7 +431,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
             // installed for tests / future use.
             let pathbufs: Vec<std::path::PathBuf> =
                 paths.iter().map(std::path::PathBuf::from).collect();
-            sonic_shared::os_drag_bridge::push_files(pathbufs);
+            sonic_app::os_drag_bridge::push_files(pathbufs);
             if let Some(sink) = file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()).clone() {
                 let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
                 sink(quoted);

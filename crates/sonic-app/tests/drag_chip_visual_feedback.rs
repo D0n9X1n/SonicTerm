@@ -16,7 +16,7 @@
 //! (`drop_line_x`, `scale`) hinge on. The visual rendering is
 //! exercised by the existing GUI smoke flow described in CLAUDE.md.
 
-use sonic_shared::tab_drag::{
+use sonic_app::tab_drag::{
     build_drag_chip_overlay, drag_moved_enough, DragSession, DRAG_START_THRESHOLD_PX,
 };
 use sonic_shared::tabbar_view::TabBarLayout;

@@ -16,7 +16,7 @@
 
 #![cfg(windows)]
 
-use sonic_shared::os_drag::TabPayload;
+use sonic_app::os_drag::TabPayload;
 
 fn sample_payload() -> TabPayload {
     TabPayload {

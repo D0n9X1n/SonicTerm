@@ -109,18 +109,16 @@ pub fn integrated_titlebar_inset_px() -> u32 {
     }
 }
 
-use crate::{
-    command_palette::CommandPalette,
-    config_watch::ConfigWatcher,
-    ime::ImeState,
-    pane::PaneTree,
-    prefs::{PrefsHit, PrefsState},
-    render::GpuRenderer,
-    search::SearchState,
-    selection::Selection,
-    tabbar_view::{TabBarLayout, TabHit},
-    tabs::{Tab, TabBar},
-};
+use crate::config_watch::ConfigWatcher;
+use sonic_shared::render::GpuRenderer;
+use sonic_ui::command_palette::CommandPalette;
+use sonic_ui::ime::ImeState;
+use sonic_ui::pane::PaneTree;
+use sonic_ui::prefs::{PrefsHit, PrefsState};
+use sonic_ui::search::SearchState;
+use sonic_ui::selection::Selection;
+use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
+use sonic_ui::tabs::{Tab, TabBar};
 
 /// A child terminal window spawned by tearing a tab off the bar.
 ///
@@ -534,7 +532,7 @@ pub struct App {
     // v0.6: optional graphical preferences window.
     prefs_window: Option<Arc<Window>>,
     prefs_state: Option<PrefsState>,
-    prefs_renderer: Option<crate::prefs_renderer::PrefsRenderer>,
+    prefs_renderer: Option<sonic_shared::prefs_renderer::PrefsRenderer>,
     pending_prefs_open: bool,
     /// IME composition state for CJK / other multi-key input methods.
     ime: ImeState,
@@ -543,7 +541,7 @@ pub struct App {
     /// stderr fills with `IMKCFRunLoopWakeUpReliable` errors that users
     /// see as "Sonic is hanging". Only fire the winit call when the
     /// terminal cursor moves to a different cell.
-    ime_cursor_throttle: crate::ime::ImeCursorThrottle,
+    ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle,
     command_palette: CommandPalette,
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
@@ -605,7 +603,7 @@ pub struct App {
     input_dirty: bool,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
-    i18n: crate::i18n::I18n,
+    i18n: sonic_ui::i18n::I18n,
     /// Optional platform hook that takes a serialized tab payload and
     /// hands it off to the OS-level drag-and-drop system
     /// (`NSPasteboard` on macOS, OLE `DoDragDrop` on Windows). When
@@ -649,7 +647,7 @@ impl App {
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     ) -> Self {
-        let i18n = crate::i18n::I18n::new(if config.locale.is_empty() {
+        let i18n = sonic_ui::i18n::I18n::new(if config.locale.is_empty() {
             None
         } else {
             Some(config.locale.as_str())
@@ -677,7 +675,7 @@ impl App {
             prefs_renderer: None,
             pending_prefs_open: false,
             ime: ImeState::new(),
-            ime_cursor_throttle: crate::ime::ImeCursorThrottle::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
             pressed_tab: None,
             drag_session: None,
@@ -742,7 +740,7 @@ impl App {
         self.on_window_ready = Some(Box::new(hook));
     }
 
-    /// Translate a UI message id. See [`crate::i18n::I18n::t`]. Returns
+    /// Translate a UI message id. See [`sonic_ui::i18n::I18n::t`]. Returns
     /// the key itself if no bundle (active or English fallback) has it,
     /// so the UI never renders an empty label.
     pub fn t(&self, key: &str) -> String {
@@ -750,7 +748,7 @@ impl App {
     }
 
     /// Translate with `{ $name }` arguments. See
-    /// [`crate::i18n::I18n::t_args`].
+    /// [`sonic_ui::i18n::I18n::t_args`].
     pub fn t_args(&self, key: &str, args: &[(&str, &str)]) -> String {
         self.i18n.t_args(key, Some(args))
     }
@@ -766,7 +764,7 @@ impl App {
     pub fn set_locale(&mut self, requested: &str) {
         self.config.locale = requested.to_string();
         self.i18n =
-            crate::i18n::I18n::new(if requested.is_empty() { None } else { Some(requested) });
+            sonic_ui::i18n::I18n::new(if requested.is_empty() { None } else { Some(requested) });
     }
 
     /// Decide whether the event loop should exit. The app should keep
@@ -1180,7 +1178,7 @@ impl App {
                 .renderer
                 .as_ref()
                 .map(|r| r.tab_bar_logical_height())
-                .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT);
+                .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT);
             candidates.push((
                 main.id(),
                 geom,
@@ -1625,7 +1623,7 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 let tab_idx = child.tabs.active_index();
-                let pane_rects: Vec<(u64, crate::pane::Rect)> = child
+                let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = child
                     .tab_states
                     .get(tab_idx)
                     .map(|st| {
@@ -1634,7 +1632,7 @@ impl App {
                         let pl = child.renderer.padding_left();
                         let pr = child.renderer.padding_right();
                         let pb = child.renderer.padding_bottom();
-                        let outer = crate::pane::Rect::new(
+                        let outer = sonic_ui::pane::Rect::new(
                             pl,
                             top,
                             (w - pl - pr).max(0.0),
@@ -2023,7 +2021,7 @@ impl App {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
         // and must render immediately, not at the next vsync deadline.
         self.input_dirty = true;
-        let assets = crate::asset_dir();
+        let assets = sonic_shared::asset_dir();
 
         // Theme
         if new_cfg.theme != self.config.theme {
@@ -2759,12 +2757,12 @@ impl App {
             Window::default_attributes()
                 .with_title("Sonic Preferences")
                 .with_inner_size(winit::dpi::LogicalSize::new(
-                    crate::prefs::PREFS_WIN_W,
-                    crate::prefs::PREFS_WIN_H,
+                    sonic_ui::prefs::PREFS_WIN_W,
+                    sonic_ui::prefs::PREFS_WIN_H,
                 ))
                 .with_min_inner_size(winit::dpi::LogicalSize::new(
-                    crate::prefs::PREFS_MIN_W,
-                    crate::prefs::PREFS_MIN_H,
+                    sonic_ui::prefs::PREFS_MIN_W,
+                    sonic_ui::prefs::PREFS_MIN_H,
                 ))
                 .with_resizable(true),
         );
@@ -2795,7 +2793,7 @@ impl App {
         // is silently ignored and the prefs window stays blank until
         // an unrelated event happens to land in `handle_prefs_event`.
         self.prefs_window = Some(w.clone());
-        match crate::prefs_renderer::PrefsRenderer::new(w.clone(), el) {
+        match sonic_shared::prefs_renderer::PrefsRenderer::new(w.clone(), el) {
             Ok(mut r) => {
                 let real_sf = w.scale_factor() as f32;
                 r.force_rebuild_for_scale(real_sf);
@@ -2971,7 +2969,7 @@ impl App {
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
                         if let Some(id) = s.focused_field {
-                            let new_val = if let Some(crate::prefs::Control::TextField(tf)) =
+                            let new_val = if let Some(sonic_ui::prefs::Control::TextField(tf)) =
                                 s.controls.iter_mut().find(|c| c.id() == id)
                             {
                                 tf.pop_char();
@@ -3044,7 +3042,7 @@ impl ApplicationHandler<UserEvent> for App {
                     f32::from(rows) * (self.config.font.size * self.config.font.line_height)
                         + self.config.window.padding_top
                         + self.config.window.padding_bottom
-                        + crate::tabbar_view::TAB_BAR_HEIGHT,
+                        + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
                 )),
         );
         let window = Arc::new(el.create_window(attrs).expect("create window"));
@@ -3254,7 +3252,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // the focused pane). The active pane's grid is rendered into
                 // the full content area; per-pane Buffer rendering is v0.4.
                 let tab_idx = self.tabs.active_index();
-                let pane_rects: Vec<(u64, crate::pane::Rect)> = self
+                let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = self
                     .tab_states
                     .get(tab_idx)
                     .map(|st| {
@@ -3264,7 +3262,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let pl = r.padding_left();
                             let pr = r.padding_right();
                             let pb = r.padding_bottom();
-                            let outer = crate::pane::Rect::new(
+                            let outer = sonic_ui::pane::Rect::new(
                                 pl,
                                 top,
                                 (w - pl - pr).max(0.0),
@@ -3284,14 +3282,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // affordance. The active pane's cursor is rendered
                 // separately (filled or hollow depending on window
                 // focus). PR #81 review.
-                let inactive_cursors: Vec<crate::render::InactivePaneCursor> = pane_rects
+                let inactive_cursors: Vec<sonic_shared::render::InactivePaneCursor> = pane_rects
                     .iter()
                     .filter(|(id, _)| *id != active_id)
                     .filter_map(|(id, rect)| {
                         let p = self.panes.get(id)?;
                         let g = p.parser.lock();
                         let grid = g.grid();
-                        Some(crate::render::InactivePaneCursor {
+                        Some(sonic_shared::render::InactivePaneCursor {
                             row: grid.cursor.row,
                             col: grid.cursor.col,
                             rect: *rect,
@@ -3348,7 +3346,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone())
                         };
-                        let pretty = crate::tab_title::format_tab_title(
+                        let pretty = sonic_ui::tab_title::format_tab_title(
                             tab_idx,
                             cwd.as_deref(),
                             proc_name.as_deref(),
@@ -3541,7 +3539,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|r| {
                             (r.tab_bar_logical_height(), r.titlebar_inset(), r.tab_bar_visible())
                         })
-                        .unwrap_or((crate::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
+                        .unwrap_or((sonic_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
                     let layout = TabBarLayout::compute_with_height(&self.tabs, window_width, bar_h)
                         .with_top_offset(top_off)
                         .with_visible(visible);
@@ -3615,7 +3613,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.renderer
                             .as_ref()
                             .map(|r| r.tab_bar_logical_height())
-                            .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT),
+                            .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                     )
                     .with_top_offset(
                         self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
@@ -3706,7 +3704,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.renderer
                                 .as_ref()
                                 .map(|r| r.tab_bar_logical_height())
-                                .unwrap_or(crate::tabbar_view::TAB_BAR_HEIGHT),
+                                .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                         )
                         .with_top_offset(
                             self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),

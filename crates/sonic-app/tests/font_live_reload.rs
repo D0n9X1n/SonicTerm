@@ -26,10 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use sonic_app::app::{resize_all_panes, PaneState};
+use sonic_app::config_watch::ConfigWatcher;
 use sonic_core::grid::Grid;
 use sonic_core::vt::Parser;
-use sonic_shared::app::{resize_all_panes, PaneState};
-use sonic_shared::config_watch::ConfigWatcher;
 
 fn make_pane(cols: u16, rows: u16) -> PaneState {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));

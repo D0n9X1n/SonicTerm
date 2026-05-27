@@ -1,6 +1,6 @@
 //! Native Windows menubar via the `muda` crate.
 //!
-//! The shared blueprint ([`sonic_shared::menu::blueprint`]) is walked
+//! The shared blueprint ([`sonic_app::menu::blueprint`]) is walked
 //! and materialized into a `muda::Menu` attached to the main HWND.
 //! Click events arrive on `muda::MenuEvent::receiver()`; the winit
 //! event loop drains them once per frame (see `main.rs`).
@@ -22,8 +22,8 @@ use muda::{
 };
 use windows::Win32::Foundation::HWND;
 
+use sonic_app::menu::{self, Binding, Item, KeyMods, PlatformMenu, Sender, Submenu};
 use sonic_core::keymap::Action;
-use sonic_shared::menu::{self, Binding, Item, KeyMods, PlatformMenu, Sender, Submenu};
 
 /// What activating a `muda` item should do once the event reaches the
 /// winit loop. Mirrors `MenuEntry` on the macOS side.

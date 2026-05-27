@@ -12,7 +12,7 @@ use sonic_mac::menubar::{blueprint, dispatch_tag, Binding, Item, KeyMods, MenuEn
 #[test]
 fn menu_dispatch_new_tab_calls_action_new_tab() {
     // Drain any pre-existing queue residue first.
-    let _ = sonic_shared::menubar_bridge::__test_drain();
+    let _ = sonic_app::menubar_bridge::__test_drain();
 
     // Re-register the New Tab item and grab its tag through the same
     // path the AppKit installer uses: walk the blueprint, find the
@@ -26,7 +26,7 @@ fn menu_dispatch_new_tab_calls_action_new_tab() {
     // `false` in tests because no EventLoopProxy is installed — but
     // the action IS queued. We assert on the queue directly.
 
-    let drained = sonic_shared::menubar_bridge::__test_drain();
+    let drained = sonic_app::menubar_bridge::__test_drain();
     assert_eq!(drained.len(), 1, "exactly one action should be queued");
     assert!(
         matches!(drained[0], Action::NewTab),

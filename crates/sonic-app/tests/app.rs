@@ -1,6 +1,6 @@
 use winit::keyboard::SmolStr;
 
-use sonic_shared::app::{encode_logical, key_name, next_pane_id};
+use sonic_app::app::{encode_logical, key_name, next_pane_id};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[test]
@@ -102,19 +102,19 @@ fn modifier_aware_click_only_opens_with_super() {
 
 #[test]
 fn wrap_paste_raw_when_not_bracketed() {
-    let out = sonic_shared::app::wrap_paste("hello\nworld", false);
+    let out = sonic_app::app::wrap_paste("hello\nworld", false);
     assert_eq!(out, b"hello\nworld");
 }
 
 #[test]
 fn wrap_paste_brackets_when_enabled() {
-    let out = sonic_shared::app::wrap_paste("rm -rf /", true);
+    let out = sonic_app::app::wrap_paste("rm -rf /", true);
     assert_eq!(out, b"\x1b[200~rm -rf /\x1b[201~");
 }
 
 #[test]
 fn wrap_paste_empty_text_still_emits_brackets() {
-    let out = sonic_shared::app::wrap_paste("", true);
+    let out = sonic_app::app::wrap_paste("", true);
     assert_eq!(out, b"\x1b[200~\x1b[201~");
 }
 
@@ -127,10 +127,10 @@ fn pick_prompt_target_forward_and_back() {
     g.record_prompt_start();
     g.goto(5, 0);
     g.record_prompt_start();
-    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, true), Some(2));
-    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, false), Some(2));
-    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 5, true), None);
-    assert_eq!(sonic_shared::app::pick_prompt_target(&g, 0, false), None);
+    assert_eq!(sonic_app::app::pick_prompt_target(&g, 0, true), Some(2));
+    assert_eq!(sonic_app::app::pick_prompt_target(&g, 5, false), Some(2));
+    assert_eq!(sonic_app::app::pick_prompt_target(&g, 5, true), None);
+    assert_eq!(sonic_app::app::pick_prompt_target(&g, 0, false), None);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn scroll_to_prev_prompt_view_top_matches_prompt_row() {
     // pick_prompt_target from the live bottom should hop back to the
     // recorded prompt row.
     let cur = g.scrollback_len() as u64;
-    let target = sonic_shared::app::pick_prompt_target(&g, cur, false).expect("prev prompt");
+    let target = sonic_app::app::pick_prompt_target(&g, cur, false).expect("prev prompt");
     assert_eq!(target, prompt.start_row);
     // Now the renderer would view from `target`. The first visible row
     // returned by row_at_abs must be the prompt's start row, and it

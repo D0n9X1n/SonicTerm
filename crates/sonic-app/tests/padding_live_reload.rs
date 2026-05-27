@@ -28,9 +28,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use sonic_app::app::{resize_all_panes, PaneState};
 use sonic_core::grid::Grid;
 use sonic_core::vt::Parser;
-use sonic_shared::app::{resize_all_panes, PaneState};
 
 fn make_pane(cols: u16, rows: u16) -> PaneState {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));

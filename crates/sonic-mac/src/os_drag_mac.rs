@@ -1,4 +1,4 @@
-//! macOS implementation of [`sonic_shared::os_drag::OsDragSink`].
+//! macOS implementation of [`sonic_app::os_drag::OsDragSink`].
 //!
 //! ## What this does on real hardware
 //!
@@ -6,7 +6,7 @@
 //! every Sonic window, it calls [`MacOsDragSink::begin_drag`] with a
 //! serialized [`TabPayload`]. We write the JSON to the **general
 //! NSPasteboard** under the custom type
-//! [`sonic_shared::os_drag::PASTEBOARD_TYPE`] (`com.sonic-terminal.tab.v1`).
+//! [`sonic_app::os_drag::PASTEBOARD_TYPE`] (`com.sonic-terminal.tab.v1`).
 //!
 //! A second running `Sonic.app` instance polls the pasteboard on
 //! window focus (`NSApplicationDidBecomeActive`) and consumes any
@@ -42,7 +42,7 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSArray, NSString};
-use sonic_shared::os_drag::{DragAck, OsDragSink, TabPayload, PASTEBOARD_TYPE};
+use sonic_app::os_drag::{DragAck, OsDragSink, TabPayload, PASTEBOARD_TYPE};
 
 /// Sink that posts dragged-tab payloads to the macOS general
 /// pasteboard under [`PASTEBOARD_TYPE`].

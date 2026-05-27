@@ -27,13 +27,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use sonic_app::app::App;
+use sonic_app::os_drag::{DragAck, OsDragSink, TabPayload};
 use sonic_core::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonic_shared::app::App;
-use sonic_shared::os_drag::{DragAck, OsDragSink, TabPayload};
 
 fn synth_theme() -> Theme {
     let hex = || Hex("#000000".to_string());

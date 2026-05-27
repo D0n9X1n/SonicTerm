@@ -176,7 +176,8 @@ fn prefs_first_frame_emits_more_than_ten_commands() {
 // The handler MAY use `try_lock` (non-blocking) or hold no lock at all.
 #[test]
 fn prefs_event_handlers_use_no_blocking_locks() {
-    let app_src = std::fs::read_to_string("src/app.rs").expect("read sonic-shared/src/app.rs");
+    let app_src =
+        std::fs::read_to_string("../sonic-app/src/app.rs").expect("read sonic-app/src/app.rs");
     let prefs_renderer_src =
         std::fs::read_to_string("src/prefs_renderer.rs").expect("read prefs_renderer.rs");
 

@@ -7,12 +7,12 @@
 //! surface). Renderer side effects are already covered by the
 //! existing `font_live_reload.rs` + prefs/config-watch tests.
 
+use sonic_app::app::App;
 use sonic_core::{
     config::{Config, FontConfig},
     keymap::{Action, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonic_shared::app::App;
 
 fn hex() -> Hex {
     Hex("#000000".to_string())
@@ -183,5 +183,5 @@ fn tab_bar_top_inset_drops_bar_band_when_hidden() {
 /// ```
 #[test]
 fn menubar_dispatch_of_open_preferences_sets_pending_flag() {
-    assert!(sonic_shared::app::__test_menubar_dispatch_open_preferences_sets_pending());
+    assert!(sonic_app::app::__test_menubar_dispatch_open_preferences_sets_pending());
 }
