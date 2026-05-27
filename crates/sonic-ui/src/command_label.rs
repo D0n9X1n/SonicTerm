@@ -1,5 +1,5 @@
 //! Human-readable labels and keybinding hints for every
-//! [`sonic_core::keymap::Action`] variant.
+//! [`sonic_cfg::keymap::Action`] variant.
 //!
 //! Used by the command palette to render entries in a familiar
 //! "Verb Noun" style (e.g. "New Tab", "Split Pane Right") instead of
@@ -9,7 +9,7 @@
 //!
 //! Adding a new bindable action is a four-step process:
 //!
-//! 1. Add a variant to [`sonic_core::keymap::Action`].
+//! 1. Add a variant to [`sonic_cfg::keymap::Action`].
 //! 2. Add a match arm in [`label`] returning a `&'static str` or a
 //!    formatted `String`.
 //! 3. Add a discriminant entry in [`ALL_VARIANT_KINDS`] so the palette
@@ -20,7 +20,7 @@
 //! step 2 — the build breaks until every variant has a label. Step 3
 //! is covered by the `palette_lists_every_action_variant` test.
 
-use sonic_core::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonic_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 
 /// Stable identifier for each Action variant kind. Used to enumerate
 /// the universe of palette commands and to assert exhaustiveness.

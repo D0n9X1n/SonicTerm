@@ -4228,6 +4228,7 @@ dependencies = [
  "serde_json",
  "sonic-core",
  "sonic-text",
+ "sonic-ui",
  "swash",
  "sys-locale",
  "tempfile",
@@ -4258,6 +4259,25 @@ dependencies = [
  "bitflags 2.11.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sonic-ui"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "fluent-bundle",
+ "fluent-langneg",
+ "intl-memoizer",
+ "nucleo-matcher",
+ "regex",
+ "serde",
+ "sonic-cfg",
+ "sonic-grid",
+ "sonic-types",
+ "sys-locale",
+ "tempfile",
+ "unic-langid",
 ]
 
 [[package]]

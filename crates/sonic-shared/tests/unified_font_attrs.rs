@@ -110,7 +110,7 @@ fn render_source_has_no_hardcoded_font_name_literal() {
 fn no_attrs_new_family_outside_helper() {
     for (path, src) in [
         ("sonic-shared/src/render.rs", include_str!("../src/render.rs")),
-        ("sonic-shared/src/tabbar_view.rs", include_str!("../src/tabbar_view.rs")),
+        ("sonic-shared/src/tabbar_view.rs", include_str!("../../sonic-ui/src/tabbar_view.rs")),
         ("sonic-text/src/shape.rs", include_str!("../../sonic-text/src/shape.rs")),
     ] {
         let mut in_helper = false;

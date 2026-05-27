@@ -4,7 +4,7 @@
 //! region. The selection is anchored at `start` and extends to `end`; the
 //! pair may be in any order.
 
-use sonic_core::grid::{CellFlags, Grid};
+use sonic_grid::grid::{CellFlags, Grid};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {

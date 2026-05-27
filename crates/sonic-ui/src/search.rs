@@ -12,7 +12,7 @@
 //! callers that don't care about scrollback can ignore the distinction.
 
 use regex::Regex;
-use sonic_core::grid::{Cell, CellFlags, Grid, Row};
+use sonic_grid::grid::{Cell, CellFlags, Grid, Row};
 
 /// A single contiguous match on one row, in **absolute** row + visible
 /// column coordinates.

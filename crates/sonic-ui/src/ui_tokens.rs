@@ -14,7 +14,7 @@
 //! can be uploaded to wgpu without further conversion. The [`color::hex`]
 //! helper performs the sRGB→linear transform and the premultiply step.
 
-use sonic_core::theme::Theme;
+use sonic_cfg::theme::Theme;
 
 /// Theme-derived UI chrome palette. Built from a [`Theme`] via
 /// [`UiPalette::from_theme`]; every field is a linear-sRGB premultiplied
@@ -110,7 +110,7 @@ impl From<&Theme> for UiPalette {
     }
 }
 
-/// Extension trait wired into `sonic_core::theme::Theme` so call sites can
+/// Extension trait wired into `sonic_cfg::theme::Theme` so call sites can
 /// write `theme.ui_palette()`.
 pub trait ThemeUiPaletteExt {
     fn ui_palette(&self) -> UiPalette;
@@ -774,7 +774,7 @@ mod tests {
     }
 
     fn test_theme(active_fg: &str, bg: &str, fg: &str) -> Theme {
-        use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+        use sonic_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
         let h = |s: &str| Hex(s.to_string());
         Theme {
             name: "test".into(),

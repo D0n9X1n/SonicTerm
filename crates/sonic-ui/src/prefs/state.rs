@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use sonic_core::config::{Config, CursorShape};
-use sonic_core::theme::Theme;
+use sonic_cfg::config::{Config, CursorShape};
+use sonic_cfg::theme::Theme;
 
 use super::controls::{ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId};
 use super::layout::{Category, PrefsLayout};
@@ -65,7 +65,7 @@ pub const KNOWN_FONTS: &[&str] = &[
     "Source Code Pro",
     "Rec Mono Casual",
     // "St Helens" is the brand-default family (see
-    // `sonic_core::config::DEFAULT_FONT_FAMILY`). It is NOT bundled in
+    // `sonic_cfg::config::DEFAULT_FONT_FAMILY`). It is NOT bundled in
     // `assets/fonts/` — users must install it system-wide for it to
     // resolve. Listed last so existing test expectations against
     // `KNOWN_FONTS[1]` ("Fira Code") keep holding.
@@ -662,7 +662,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_theme() -> Theme {
-        use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme as T};
+        use sonic_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme as T};
         let h = |s: &str| Hex(s.to_string());
         T {
             name: "test".into(),

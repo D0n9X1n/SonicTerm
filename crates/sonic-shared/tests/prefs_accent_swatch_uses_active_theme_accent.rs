@@ -108,7 +108,7 @@ fn prefs_accent_swatch_uses_active_theme_accent() {
 /// catches the literal regardless of execution.
 #[test]
 fn prefs_state_source_has_no_tokyo_night_literal() {
-    let src = include_str!("../src/prefs/state.rs");
+    let src = include_str!("../../sonic-ui/src/prefs/state.rs");
     let needle = "0x7a, 0xa2, 0xf7";
     let matches = src.matches(needle).count();
     assert_eq!(
