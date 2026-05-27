@@ -220,6 +220,22 @@ pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     }
 }
 
+/// Mark every pane's grid fully dirty. Used by triggers that change
+/// the renderer's *presentation* invariant without mutating any cell
+/// content (theme swap, font swap, focus transition, selection change).
+/// This is the foundation hook the upcoming RowCache will use to know
+/// when its cached row data is stale even though grid revision did not
+/// bump.
+///
+/// `pub` + `#[doc(hidden)]` so integration tests can exercise the
+/// invariant on a synthetic pane map.
+#[doc(hidden)]
+pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
+    for pane in panes.values() {
+        pane.parser.lock().grid_mut().mark_all_dirty();
+    }
+}
+
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
@@ -1580,6 +1596,7 @@ impl App {
                     {
                         if let Some(sel) = child.selection.as_mut() {
                             sel.extend(row, col);
+                            mark_all_panes_dirty(&child.panes);
                             child.window.request_redraw();
                         }
                     }
@@ -1622,6 +1639,7 @@ impl App {
                         .pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
                     {
                         child.selection = Some(Selection::new(row, col));
+                        mark_all_panes_dirty(&child.panes);
                     }
                     child.window.request_redraw();
                 }
@@ -1634,6 +1652,7 @@ impl App {
                     if let Some(sel) = child.selection.as_ref() {
                         if sel.is_empty() {
                             child.selection = None;
+                            mark_all_panes_dirty(&child.panes);
                             child.window.request_redraw();
                         }
                     }
@@ -1695,6 +1714,7 @@ impl App {
                     }
                     if child.selection.is_some() {
                         child.selection = None;
+                        mark_all_panes_dirty(&child.panes);
                         child.window.request_redraw();
                     }
                 }
@@ -1861,6 +1881,13 @@ impl App {
                         r.set_theme(&t);
                     }
                     self.theme = t;
+                    // Theme swap changes presentation (colors) without
+                    // mutating cell contents — mark every pane dirty so
+                    // the renderer re-shapes with the new palette.
+                    mark_all_panes_dirty(&self.panes);
+                    for child in self.child_windows.values() {
+                        mark_all_panes_dirty(&child.panes);
+                    }
                 }
                 Err(e) => tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path),
             }
@@ -2116,6 +2143,13 @@ impl App {
         }
         self.theme = theme;
         self.config.theme = name.to_string();
+        // Theme swap changes presentation (colors) without mutating
+        // cell contents — mark every pane dirty so the renderer
+        // re-shapes with the new palette.
+        mark_all_panes_dirty(&self.panes);
+        for child in self.child_windows.values() {
+            mark_all_panes_dirty(&child.panes);
+        }
         // Keep the prefs surface (if open) in sync — the Appearance
         // Accent swatch and theme-derived chrome must follow live.
         if let Some(prefs) = self.prefs_state.as_mut() {
@@ -3106,6 +3140,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_window_focused(focused);
                 }
+                // Focus transition flips the cursor between filled and
+                // hollow — that's a presentation change only, so mark
+                // every pane dirty without bumping grid revision.
+                mark_all_panes_dirty(&self.panes);
                 // Forward focus in/out to the active pane if it asked for
                 // focus reporting via DECSET ?1004 (CSI ?1004h).
                 if let Some(pane) = self.active_pane() {
@@ -3251,6 +3289,7 @@ impl ApplicationHandler<UserEvent> for App {
                         {
                             if let Some(sel) = self.selection.as_mut() {
                                 sel.extend(row, col);
+                                mark_all_panes_dirty(&self.panes);
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
@@ -3357,6 +3396,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                             self.selection = Some(Selection::new(row, col));
+                            mark_all_panes_dirty(&self.panes);
                         }
                     }
                     if let Some(w) = &self.window {
@@ -3414,6 +3454,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;
+                            mark_all_panes_dirty(&self.panes);
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -3514,6 +3555,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.write_to_pty(bytes);
                     if self.selection.is_some() {
                         self.selection = None;
+                        mark_all_panes_dirty(&self.panes);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
