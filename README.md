@@ -60,8 +60,12 @@ platforms than three mediocre ones.
 - speak CJK as a first language and are tired of broken IME, mis-measured
   wide chars, and the wrong fallback font;
 - want a clean default that **works without configuration** — the
-  bundled keymap is WezTerm-compatible, the bundled font is JetBrains
-  Mono Nerd Font, the default theme is the WezTerm-style `wezterm` palette
+  bundled keymap is WezTerm-compatible, the brand-default font is
+  **St Helens** (not bundled — install system-wide; if missing, the
+  renderer falls through to system mono and `Rec Mono Casual` ships
+  under `assets/fonts/` as a guaranteed-present fallback). Override via
+  `[font] family = "..."` in `sonic.toml` or the prefs Font tab. The
+  default theme is the WezTerm-style `wezterm` palette
   (out-of-box visual parity with WezTerm);
 - hate when their idle terminal eats 5% of a CPU core just to blink a
   cursor;
