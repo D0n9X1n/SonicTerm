@@ -1796,6 +1796,14 @@ impl GpuRenderer {
                 color: border_subtle,
                 ..Default::default()
             });
+            // Win11-style caption buttons (─ □ ✕) — only painted when the
+            // integrated titlebar inset is non-zero (Windows). On macOS the
+            // inset is 0 and `paint_caption_buttons` early-returns, so this
+            // is a no-op there. See sonic-shared/src/quad.rs::paint_caption_buttons.
+            if crate::app::integrated_titlebar_inset_px() > 0 {
+                let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
+                crate::quad::paint_caption_buttons(&mut quads, &rects, (sw, sh), bar_bg);
+            }
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);
                 let cursor_on_this_tab = hover_tab_idx == t.index as u32;
