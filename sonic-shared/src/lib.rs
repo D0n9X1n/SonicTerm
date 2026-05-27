@@ -31,6 +31,7 @@ pub mod tab_title;
 pub mod tabbar_view;
 pub mod tabs;
 pub mod text_pipeline;
+pub mod ui_tokens;
 
 /// Re-exports for binary crates.
 pub use app::run;
