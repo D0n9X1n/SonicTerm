@@ -497,6 +497,19 @@ pub struct App {
     /// on `sonic.toml` changes. `None` in tests that construct `App`
     /// directly via [`App::new`] without a real event loop.
     event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    /// Minimum interval between two successive frames. Defaults to 1/60s
+    /// and is updated in `resumed` from the current monitor's reported
+    /// refresh rate. Used by the RedrawRequested handler to skip an
+    /// over-render and by `about_to_wait` to schedule the next vsync
+    /// boundary via `ControlFlow::WaitUntil`. See perf audit #9.
+    frame_period: Duration,
+    /// Set when a RedrawRequested arrives sooner than `frame_period`
+    /// after the previous render. `about_to_wait` schedules a
+    /// `WaitUntil(last_render + frame_period)` and `new_events`'
+    /// `ResumeTimeReached` arm calls `request_redraw()` so we coalesce
+    /// the pending request onto the next vsync tick rather than
+    /// burning a frame.
+    pending_redraw: bool,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     i18n: crate::i18n::I18n,
@@ -575,6 +588,10 @@ impl App {
             keymap_loader: None,
             config_watcher: None,
             event_loop_proxy,
+            // Default to 60 Hz until `resumed` probes the actual
+            // monitor refresh rate. ~16.667 ms = 1/60 s.
+            frame_period: Duration::from_micros(16_667),
+            pending_redraw: false,
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
@@ -2848,6 +2865,27 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_ime_allowed(true);
         self.scale_factor = window.scale_factor();
 
+        // Perf audit #9: gate redraws to the monitor's vsync cadence.
+        // `refresh_rate_millihertz` returns e.g. 60_000 for 60Hz,
+        // 120_000 for 120Hz ProMotion, etc. A zero or absent value
+        // means winit could not determine it (headless, virtual
+        // display) — fall back to the 60Hz default seeded by `new`.
+        if let Some(monitor) = window.current_monitor() {
+            if let Some(mhz) = monitor.refresh_rate_millihertz() {
+                if mhz > 0 {
+                    // period_us = 1_000_000_000 / mhz
+                    let period_us = 1_000_000_000u64 / u64::from(mhz);
+                    self.frame_period = Duration::from_micros(period_us);
+                    tracing::debug!(
+                        "vsync pacing: monitor reports {}.{:03} Hz, frame period {:?}",
+                        mhz / 1000,
+                        mhz % 1000,
+                        self.frame_period,
+                    );
+                }
+            }
+        }
+
         let mut renderer = GpuRenderer::new(
             window.clone(),
             el,
@@ -2970,6 +3008,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Perf audit #9: if we already rendered within the
+                // current vsync window, defer this redraw until the
+                // next monitor refresh boundary. `about_to_wait` will
+                // see `pending_redraw` and call
+                // `set_control_flow(WaitUntil(last_render +
+                // frame_period))`; `new_events`' ResumeTimeReached arm
+                // then re-requests the redraw. Net effect: bursty PTY
+                // output coalesces into one frame per vsync instead of
+                // burning the GPU at the VT thread's 16ms tick rate.
+                if self.last_render.elapsed() < self.frame_period {
+                    self.pending_redraw = true;
+                    return;
+                }
+                self.pending_redraw = false;
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
                 // the focused pane). The active pane's grid is rendered into
@@ -3572,6 +3624,10 @@ impl ApplicationHandler<UserEvent> for App {
         // `NewEvents(ResumeTimeReached)` and then nothing else unless
         // we explicitly ask. Request a redraw so the blink animation
         // actually advances to the next phase bucket. PR #81 review.
+        // Perf audit #9: this same wakeup also services a vsync-paced
+        // redraw deferred by the RedrawRequested handler — we clear
+        // `pending_redraw` here so the next render call services it
+        // and stale flags can't keep the loop hot.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -3592,9 +3648,22 @@ impl ApplicationHandler<UserEvent> for App {
         // 26Hz forever (regression: `scripts/bench_headless_gui.sh`
         // reported 17% idle CPU before this gate).
         let mut next: Option<std::time::Instant> = None;
+        // Perf audit #9: if a redraw was deferred for vsync pacing,
+        // schedule the next wake at the upcoming frame boundary. This
+        // takes priority over (and is bounded by) the blink deadline:
+        // typing latency must still feel instant, and a deferred
+        // redraw at frame_period in the future is the tightest budget
+        // that still preserves vsync alignment.
+        if self.pending_redraw {
+            next = Some(self.last_render + self.frame_period);
+        }
         if let Some(r) = self.renderer.as_ref() {
             if self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed) {
-                next = r.next_blink_redraw_at();
+                let blink = r.next_blink_redraw_at();
+                next = match (next, blink) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
             }
         }
         match next {
