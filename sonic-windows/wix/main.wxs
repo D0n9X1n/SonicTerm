@@ -1,0 +1,152 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  Sonic Terminal — Windows installer (cargo-wix / Wix3).
+
+  Builds an MSI that:
+    - installs sonic-windows.exe under "Program Files\Sonic\"
+    - bundles bundled assets (themes, keymaps, fonts, icons/exports) under
+      [INSTALLDIR]\assets\ so the app finds its defaults at runtime
+    - registers a Start-menu shortcut and an optional Desktop shortcut
+    - uses assets/icons/exports/sonic.ico as the Add/Remove Programs icon
+
+  Hand-edited from a `cargo wix init` template.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='Sonic Terminal'
+        UpgradeCode='B9F8C0F4-1F4F-4F2E-AE3C-7A9D7D6E3F11'
+        Manufacturer='Sonic Terminal'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='Sonic Terminal Installer'
+            Manufacturer='Sonic Terminal'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='Sonic Terminal Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='Sonic'>
+
+                    <Component Id='binary0' Guid='8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22' Win64='yes'>
+                        <File
+                            Id='exe0'
+                            Name='sonic-windows.exe'
+                            DiskId='1'
+                            Source='..\target\x86_64-pc-windows-msvc\release\sonic-windows.exe'
+                            KeyPath='yes'/>
+                    </Component>
+
+                    <Directory Id='AssetsDir' Name='assets'>
+                        <Directory Id='AssetsThemesDir' Name='themes'>
+                            <Component Id='asset_themes' Guid='C1A21A01-0000-0000-0000-000000000101' Win64='yes'>
+                                <File Id='theme_catppuccin' Name='catppuccin-mocha.toml' DiskId='1' Source='..\assets\themes\catppuccin-mocha.toml' KeyPath='yes'/>
+                                <File Id='theme_dracula'    Name='dracula.toml'          DiskId='1' Source='..\assets\themes\dracula.toml'/>
+                                <File Id='theme_gruvbox'    Name='gruvbox-dark-hard.toml' DiskId='1' Source='..\assets\themes\gruvbox-dark-hard.toml'/>
+                                <File Id='theme_nord'       Name='nord.toml'             DiskId='1' Source='..\assets\themes\nord.toml'/>
+                                <File Id='theme_tokyo'      Name='tokyo-night.toml'      DiskId='1' Source='..\assets\themes\tokyo-night.toml'/>
+                                <File Id='theme_wezterm'    Name='wezterm.toml'          DiskId='1' Source='..\assets\themes\wezterm.toml'/>
+                            </Component>
+                        </Directory>
+
+                        <Directory Id='AssetsKeymapsDir' Name='keymaps'>
+                            <Component Id='asset_keymaps' Guid='C1A21A01-0000-0000-0000-000000000102' Win64='yes'>
+                                <File Id='keymap_wezterm' Name='wezterm.toml' DiskId='1' Source='..\assets\keymaps\wezterm.toml' KeyPath='yes'/>
+                            </Component>
+                        </Directory>
+
+                        <Directory Id='AssetsFontsDir' Name='fonts'>
+                            <Component Id='asset_fonts' Guid='C1A21A01-0000-0000-0000-000000000103' Win64='yes'>
+                                <File Id='font_regular'    Name='RecMonoCasual-Regular-1.085.ttf'    DiskId='1' Source='..\assets\fonts\RecMonoCasual-Regular-1.085.ttf' KeyPath='yes'/>
+                                <File Id='font_bold'       Name='RecMonoCasual-Bold-1.085.ttf'       DiskId='1' Source='..\assets\fonts\RecMonoCasual-Bold-1.085.ttf'/>
+                                <File Id='font_italic'     Name='RecMonoCasual-Italic-1.085.ttf'     DiskId='1' Source='..\assets\fonts\RecMonoCasual-Italic-1.085.ttf'/>
+                                <File Id='font_bolditalic' Name='RecMonoCasual-BoldItalic-1.085.ttf' DiskId='1' Source='..\assets\fonts\RecMonoCasual-BoldItalic-1.085.ttf'/>
+                            </Component>
+                        </Directory>
+
+                        <Directory Id='AssetsIconsDir' Name='icons'>
+                            <Directory Id='AssetsIconsExportsDir' Name='exports'>
+                                <Component Id='asset_icons' Guid='C1A21A01-0000-0000-0000-000000000104' Win64='yes'>
+                                    <File Id='icon_ico'  Name='sonic.ico'  DiskId='1' Source='..\assets\icons\exports\sonic.ico' KeyPath='yes'/>
+                                    <File Id='icon_icns' Name='sonic.icns' DiskId='1' Source='..\assets\icons\exports\sonic.icns'/>
+                                </Component>
+                            </Directory>
+                        </Directory>
+                    </Directory>
+                </Directory>
+            </Directory>
+
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Sonic Terminal'>
+                    <Component Id='start_menu_shortcut' Guid='C1A21A01-0000-0000-0000-0000000000A1' Win64='yes'>
+                        <Shortcut Id='StartMenuShortcut'
+                            Name='Sonic Terminal'
+                            Description='GPU-accelerated cross-platform terminal'
+                            Target='[APPLICATIONFOLDER]sonic-windows.exe'
+                            WorkingDirectory='APPLICATIONFOLDER'
+                            Icon='ProductIcon'
+                            IconIndex='0'/>
+                        <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
+                        <RegistryValue Root='HKCU' Key='Software\Sonic\Sonic Terminal' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id='DesktopFolder' Name='Desktop'>
+                <Component Id='desktop_shortcut' Guid='C1A21A01-0000-0000-0000-0000000000A2' Win64='yes'>
+                    <Condition>INSTALLDESKTOPSHORTCUT=1</Condition>
+                    <Shortcut Id='DesktopShortcut'
+                        Name='Sonic Terminal'
+                        Description='GPU-accelerated cross-platform terminal'
+                        Target='[APPLICATIONFOLDER]sonic-windows.exe'
+                        WorkingDirectory='APPLICATIONFOLDER'
+                        Icon='ProductIcon'
+                        IconIndex='0'/>
+                    <RegistryValue Root='HKCU' Key='Software\Sonic\Sonic Terminal' Name='desktop_shortcut' Type='integer' Value='1' KeyPath='yes'/>
+                </Component>
+            </Directory>
+        </Directory>
+
+        <Feature Id='Binaries'
+            Title='Sonic Terminal'
+            Description='Installs all files.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+            <ComponentRef Id='asset_themes'/>
+            <ComponentRef Id='asset_keymaps'/>
+            <ComponentRef Id='asset_fonts'/>
+            <ComponentRef Id='asset_icons'/>
+            <ComponentRef Id='start_menu_shortcut'/>
+            <ComponentRef Id='desktop_shortcut'/>
+        </Feature>
+
+        <Property Id='INSTALLDESKTOPSHORTCUT' Value='1'/>
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <Icon Id='ProductIcon' SourceFile='..\assets\icons\exports\sonic.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductIcon'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/D0n9X1n/sonic'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+        </UI>
+    </Product>
+</Wix>
