@@ -106,6 +106,7 @@ fn live_language_switch_rebuilds_prefs_controls() {
     // new i18n bundle on the very next frame rather than waiting for
     // close+reopen of the prefs window.
     use sonic_core::config::Config;
+    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
     use sonic_shared::prefs::{Category, Control, PrefsState};
     use tempfile::TempDir;
 
@@ -114,7 +115,42 @@ fn live_language_switch_rebuilds_prefs_controls() {
 
     let dir = TempDir::new().unwrap();
     let config = Config { locale: "en".to_string(), ..Config::default() };
-    let mut state = PrefsState::new(config, dir.path().join("sonic.toml"));
+    let h = || Hex("#000000".to_string());
+    let ansi = || AnsiColors {
+        black: h(),
+        red: h(),
+        green: h(),
+        yellow: h(),
+        blue: h(),
+        magenta: h(),
+        cyan: h(),
+        white: h(),
+    };
+    let theme = Theme {
+        name: "test".into(),
+        appearance: Appearance::Dark,
+        colors: Palette {
+            background: h(),
+            foreground: h(),
+            cursor: h(),
+            cursor_text: h(),
+            selection_bg: h(),
+            selection_fg: h(),
+            ansi: ansi(),
+            bright: ansi(),
+            tab: TabColors {
+                bar_bg: h(),
+                active_bg: h(),
+                active_fg: h(),
+                inactive_bg: h(),
+                inactive_fg: h(),
+                hover_bg: h(),
+                hover_fg: h(),
+                close_button_fg: h(),
+            },
+        },
+    };
+    let mut state = PrefsState::new(config, dir.path().join("sonic.toml"), theme);
     state.set_category(Category::Appearance);
 
     // Snapshot the language dropdown label in English.

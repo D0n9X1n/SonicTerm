@@ -1,11 +1,11 @@
 use sonic_core::config::*;
 
 #[test]
-fn default_theme_is_wezterm() {
-    // Out-of-box visual parity with WezTerm — keep this in sync with the
-    // default keymap (also "wezterm").
+fn default_theme_is_gruvbox_dark_hard() {
+    // Default theme is gruvbox-dark-hard (per user direction). The default
+    // keymap remains "wezterm" — themes and keymaps are decoupled.
     let cfg = Config::default();
-    assert_eq!(cfg.theme, "wezterm");
+    assert_eq!(cfg.theme, "gruvbox-dark-hard");
     assert_eq!(cfg.keymap, "wezterm");
 }
 

@@ -127,7 +127,7 @@ impl Default for Config {
             font: FontConfig::default(),
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
-            theme: "wezterm".to_string(),
+            theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
             locale: String::new(),
             tab_close_button_color: None,
@@ -281,6 +281,12 @@ mod tests {
         assert_eq!(w.opacity, 1.0, "default opacity must be fully opaque (WezTerm parity)");
         assert!(!w.blur, "default macOS blur must be off (WezTerm parity)");
         assert!(w.decorations, "default decorations must be on (rounded corners + shadow)");
+    }
+
+    /// User direction: default theme is `gruvbox-dark-hard`.
+    #[test]
+    fn default_theme_is_gruvbox_dark_hard() {
+        assert_eq!(Config::default().theme, "gruvbox-dark-hard");
     }
 
     #[test]

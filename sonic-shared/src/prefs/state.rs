@@ -10,9 +10,23 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use sonic_core::config::{Config, CursorShape};
+use sonic_core::theme::Theme;
 
 use super::controls::{ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId};
 use super::layout::{Category, PrefsLayout};
+
+/// Resolve the swatch RGBA (`[u8; 4]`) for the active theme's accent.
+/// The swatch widget stores sRGB 8-bit channels, so we read the
+/// theme's accent hex (`tab.active_fg` — the same source
+/// `UiPalette::accent` uses) directly instead of round-tripping
+/// through the linear-sRGB premultiplied palette.
+fn accent_swatch_rgba(theme: &Theme) -> [u8; 4] {
+    // Neutral sentinel on parse failure — never bake a theme-specific default
+    // (a Tokyo-Night blue here used to leak through when a user-supplied theme
+    // had a malformed accent hex). The renderer overlays the active palette
+    // accent at draw time, so a transparent fallback is correct.
+    ColorSwatch::from_hex(&theme.colors.tab.active_fg.0).unwrap_or([0, 0, 0, 0])
+}
 
 /// Classified result of a pointer click inside the preferences window.
 /// Returned by [`PrefsState::classify_click`] so the host (app.rs) can
@@ -33,7 +47,7 @@ pub enum PrefsHit {
 /// Pre-canned theme list shown in the Appearance picker. Matches the
 /// themes bundled under `assets/themes/`.
 pub const KNOWN_THEMES: &[&str] =
-    &["wezterm", "gruvbox-dark-hard", "tokyo-night", "dracula", "nord", "catppuccin-mocha"];
+    &["gruvbox-dark-hard", "wezterm", "tokyo-night", "dracula", "nord", "catppuccin-mocha"];
 
 /// Pre-canned keymaps shown in the Keymap picker.
 pub const KNOWN_KEYMAPS: &[&str] = &["wezterm"];
@@ -74,11 +88,16 @@ pub struct PrefsState {
     /// Translation bundle used to localize widget labels. Rebuilt
     /// whenever the user picks a new locale in the Appearance category.
     pub i18n: crate::i18n::I18n,
+    /// Active terminal theme. Drives chrome-derived colors in the
+    /// preferences UI (e.g. the Accent swatch in Appearance).
+    pub theme: Theme,
 }
 
 impl PrefsState {
     /// Build a fresh edit buffer over `config` saving to `config_path`.
-    pub fn new(config: Config, config_path: PathBuf) -> Self {
+    /// `theme` is the currently-active terminal theme; the preferences
+    /// UI uses it to derive chrome colors (e.g. the Accent swatch).
+    pub fn new(config: Config, config_path: PathBuf, theme: Theme) -> Self {
         let layout = PrefsLayout::default_size();
         let i18n = crate::i18n::I18n::new(if config.locale.is_empty() {
             None
@@ -95,9 +114,19 @@ impl PrefsState {
             layout,
             focused_field: None,
             i18n,
+            theme,
         };
         s.rebuild_controls();
         s
+    }
+
+    /// Replace the active theme (e.g. when the user picks a new theme
+    /// from the Appearance dropdown live) and rebuild controls so the
+    /// accent swatch + any other theme-derived widgets pick up the
+    /// new palette.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.rebuild_controls();
     }
 
     /// Rebuild the [`Control`] list for the active category. Called any
@@ -169,7 +198,7 @@ impl PrefsState {
                     next_id(),
                     "Accent",
                     l.control_slot(3),
-                    [0x7a, 0xa2, 0xf7, 0xff],
+                    accent_swatch_rgba(&self.theme),
                 )));
                 // Language picker: "" = auto, then the three shipped
                 // locales in their native script. Order matches
@@ -620,10 +649,57 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_theme() -> Theme {
+        use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme as T};
+        let h = |s: &str| Hex(s.to_string());
+        T {
+            name: "test".into(),
+            appearance: Appearance::Dark,
+            colors: Palette {
+                background: h("#1d2021"),
+                foreground: h("#ebdbb2"),
+                cursor: h("#ebdbb2"),
+                cursor_text: h("#1d2021"),
+                selection_bg: h("#3c3836"),
+                selection_fg: h("#ebdbb2"),
+                ansi: AnsiColors {
+                    black: h("#000000"),
+                    red: h("#cc241d"),
+                    green: h("#98971a"),
+                    yellow: h("#d79921"),
+                    blue: h("#458588"),
+                    magenta: h("#b16286"),
+                    cyan: h("#689d6a"),
+                    white: h("#a89984"),
+                },
+                bright: AnsiColors {
+                    black: h("#928374"),
+                    red: h("#fb4934"),
+                    green: h("#b8bb26"),
+                    yellow: h("#fabd2f"),
+                    blue: h("#83a598"),
+                    magenta: h("#d3869b"),
+                    cyan: h("#8ec07c"),
+                    white: h("#ebdbb2"),
+                },
+                tab: TabColors {
+                    bar_bg: h("#1d2021"),
+                    active_bg: h("#3c3836"),
+                    active_fg: h("#fabd2f"),
+                    inactive_bg: h("#1d2021"),
+                    inactive_fg: h("#a89984"),
+                    hover_bg: h("#3c3836"),
+                    hover_fg: h("#d5c4a1"),
+                    close_button_fg: h("#a89984"),
+                },
+            },
+        }
+    }
+
     fn fresh() -> (PrefsState, TempDir) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("sonic.toml");
-        let state = PrefsState::new(Config::default(), path);
+        let state = PrefsState::new(Config::default(), path, test_theme());
         (state, dir)
     }
 
@@ -881,7 +957,7 @@ mod tests {
     fn apply_writes_atomically_to_nested_missing_dir() {
         let dir = TempDir::new().unwrap();
         let nested = dir.path().join("a/b/c/sonic.toml");
-        let mut s = PrefsState::new(Config::default(), nested.clone());
+        let mut s = PrefsState::new(Config::default(), nested.clone(), test_theme());
         // Make sure dirty so apply has work to do.
         let tid = s
             .controls

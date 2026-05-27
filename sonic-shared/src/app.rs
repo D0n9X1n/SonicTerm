@@ -2116,6 +2116,11 @@ impl App {
         }
         self.theme = theme;
         self.config.theme = name.to_string();
+        // Keep the prefs surface (if open) in sync — the Appearance
+        // Accent swatch and theme-derived chrome must follow live.
+        if let Some(prefs) = self.prefs_state.as_mut() {
+            prefs.set_theme(self.theme.clone());
+        }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -2543,7 +2548,7 @@ impl App {
         };
         let path = sonic_core::config::Config::default_path()
             .unwrap_or_else(|| std::path::PathBuf::from("sonic.toml"));
-        self.prefs_state = Some(PrefsState::new(self.config.clone(), path));
+        self.prefs_state = Some(PrefsState::new(self.config.clone(), path, self.theme.clone()));
         // Spin up a dedicated GPU renderer for the prefs surface.
         // Without this the window's wgpu surface is never drawn into,
         // which is what produced the "preferences window is solid

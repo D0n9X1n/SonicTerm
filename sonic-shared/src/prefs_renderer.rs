@@ -1,3 +1,8 @@
+// Pre-PR-#119 call sites still use the deprecated `color::*` helpers. The
+// theme-driven `UiPalette` (PR #119) is canonical at the entry point; the
+// remaining literal-color sites will be migrated in a follow-up.
+#![allow(deprecated)]
+
 //! GPU renderer for the preferences window — redesigned for issue #112 R2.
 //!
 //! The window paints, top-down:
@@ -146,7 +151,9 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let mut texts: Vec<TextCmd> = Vec::new();
 
     // --- Background ----------------------------------------------------
-    let bg_base = color::BG_BASE();
+    // Per PR #119: chrome derives from the active theme via UiPalette.
+    let palette = crate::ui_tokens::UiPalette::from_theme(theme);
+    let bg_base = palette.bg_base;
 
     // --- Sidebar -------------------------------------------------------
     quads.push(QuadCmd { rect: layout.sidebar, color: color::BG_ELEVATED() });
@@ -833,8 +840,9 @@ mod tests {
     }
 
     fn fresh() -> (PrefsState, Theme) {
-        let s = PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"));
-        (s, make_theme())
+        let theme = make_theme();
+        let s = PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"), theme.clone());
+        (s, theme)
     }
 
     #[test]
@@ -880,10 +888,11 @@ mod tests {
         let (state, theme) = fresh();
         let dl = build_draw_list(&state, &theme);
         assert!(dl.clear[3] > 0.99, "prefs background must be opaque");
-        // Should match BG_BASE (#0B0E14) — premultiplied linear.
-        let expected = color::BG_BASE();
+        // Should match UiPalette::from_theme(theme).bg_base — chrome
+        // follows the active theme (PR #119).
+        let expected = crate::ui_tokens::UiPalette::from_theme(&theme).bg_base;
         for (i, ex) in expected.iter().enumerate() {
-            assert!((dl.clear[i] - ex).abs() < 1e-4, "clear[{i}] ≠ BG_BASE");
+            assert!((dl.clear[i] - ex).abs() < 1e-4, "clear[{i}] ≠ palette.bg_base");
         }
     }
 
