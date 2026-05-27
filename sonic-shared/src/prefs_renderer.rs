@@ -274,7 +274,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         );
 
         // Control.
-        draw_control(&mut quads, &mut texts, ctrl, slot, state, palette.accent);
+        draw_control(&mut quads, &mut texts, ctrl, slot, state, &palette);
     }
 
     // --- Preview card (Appearance category only) ----------------------
@@ -363,8 +363,10 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let (apply_bg, apply_fg) = if apply_enabled {
         (palette.accent, color::hex("#0B1020"))
     } else {
-        // Disabled state per spec.
-        (color::hex("#2A3042"), color::TEXT_FAINT())
+        // Disabled state: theme-derived neutral fill (was hardcoded
+        // Tokyo Night #2A3042 — gave gruvbox users a purplish-blue
+        // disabled Apply button instead of a theme-consistent one).
+        (palette.bg_active, palette.text_faint)
     };
     quads.push(QuadCmd { rect: layout.apply_button, color: apply_bg });
     push_text(&mut texts, layout.apply_button, "Apply", apply_fg, typography::BODY_STRONG);
@@ -397,14 +399,19 @@ fn draw_control(
     ctrl: &Control,
     slot: PrefsRect,
     state: &PrefsState,
-    accent: [f32; 4],
+    palette: &crate::ui_tokens::UiPalette,
 ) {
+    let accent = palette.accent;
     match ctrl {
         Control::Toggle(t) => {
             let track_y = slot.y + (slot.h - TOGGLE_H) / 2.0;
             let track = PrefsRect::new(slot.x, track_y, TOGGLE_W, TOGGLE_H);
             let on_color = accent;
-            let off_color = color::hex("#343A52FF");
+            // Off track: theme-derived neutral fill (was hardcoded Tokyo
+            // Night #343A52FF — caused gruvbox toggles' off-state to look
+            // blue). bg_active = accent @ 14% alpha; under premultiplied
+            // blending this reads as a subdued tint of the active theme.
+            let off_color = palette.bg_active;
             quads.push(QuadCmd { rect: track, color: if t.value { on_color } else { off_color } });
             let knob_x = if t.value {
                 track.x + TOGGLE_W - TOGGLE_KNOB - TOGGLE_KNOB_MARGIN
@@ -413,8 +420,7 @@ fn draw_control(
             };
             let knob =
                 PrefsRect::new(knob_x, track.y + TOGGLE_KNOB_MARGIN, TOGGLE_KNOB, TOGGLE_KNOB);
-            let knob_color =
-                if t.value { color::hex("#FFFFFFFF") } else { color::TEXT_SECONDARY() };
+            let knob_color = if t.value { color::hex("#FFFFFFFF") } else { palette.text_secondary };
             quads.push(QuadCmd { rect: knob, color: knob_color });
         }
         Control::Slider(s) => {
@@ -422,7 +428,11 @@ fn draw_control(
             let track_w = (slot.w - readout_w - 12.0).max(40.0);
             let track_y = slot.y + (slot.h - SLIDER_TRACK_H) / 2.0;
             let track = PrefsRect::new(slot.x, track_y, track_w, SLIDER_TRACK_H);
-            quads.push(QuadCmd { rect: track, color: color::hex("#343A52FF") });
+            // Unfilled track: theme-derived neutral (was hardcoded
+            // Tokyo Night #343A52FF — that hardcode made the slider
+            // read as "blue" on gruvbox even though the fill itself
+            // was correctly using palette.accent).
+            quads.push(QuadCmd { rect: track, color: palette.bg_active });
             let frac = ((s.value - s.min) / (s.max - s.min)).clamp(0.0, 1.0);
             let fill = PrefsRect::new(track.x, track.y, track.w * frac, track.h);
             quads.push(QuadCmd { rect: fill, color: accent });
@@ -437,10 +447,10 @@ fn draw_control(
                 SLIDER_THUMB + 4.0,
                 SLIDER_THUMB + 4.0,
             );
-            quads.push(QuadCmd { rect: outer, color: color::BG_BASE() });
+            quads.push(QuadCmd { rect: outer, color: palette.bg_base });
             quads.push(QuadCmd {
                 rect: PrefsRect::new(thumb_x, thumb_y, SLIDER_THUMB, SLIDER_THUMB),
-                color: color::TEXT_PRIMARY(),
+                color: palette.text_primary,
             });
             // Numeric readout to the right.
             let readout = PrefsRect::new(track.x + track.w + 12.0, slot.y, readout_w, slot.h);
@@ -448,20 +458,22 @@ fn draw_control(
                 texts,
                 readout,
                 format!("{:.2}", s.value),
-                color::TEXT_MUTED(),
+                palette.text_muted,
                 typography::TypeRamp { size_px: 12.0, line_px: 18.0, weight: 500 },
             );
         }
         Control::Dropdown(d) => {
             let r = PrefsRect::new(slot.x, slot.y, slot.w.min(240.0), CONTROL_H);
-            quads.push(QuadCmd { rect: r, color: color::hex("#090C12FF") });
-            push_border(quads, r, color::with_alpha(color::hex("#FFFFFF"), 0.10));
+            // Theme-derived input bg (was hardcoded #090C12FF Tokyo
+            // Night near-black-blue).
+            quads.push(QuadCmd { rect: r, color: palette.bg_elevated });
+            push_border(quads, r, palette.border_subtle);
             let label = d.options.get(d.selected).cloned().unwrap_or_default();
             push_text(
                 texts,
                 PrefsRect::new(r.x + 10.0, r.y, r.w - 28.0, r.h),
                 label,
-                color::TEXT_PRIMARY(),
+                palette.text_primary,
                 typography::BODY,
             );
             // Chevron.
@@ -469,7 +481,7 @@ fn draw_control(
                 texts,
                 PrefsRect::new(r.x + r.w - 18.0, r.y, 16.0, r.h),
                 "▾",
-                color::TEXT_MUTED(),
+                palette.text_muted,
                 typography::BODY,
             );
             // (Open-dropdown menu rendering is out of scope for this PR.)
@@ -513,12 +525,8 @@ fn draw_control(
         Control::TextField(f) => {
             let focused = state.focused_field == Some(f.id);
             let r = PrefsRect::new(slot.x, slot.y, slot.w.min(280.0), CONTROL_H);
-            quads.push(QuadCmd { rect: r, color: color::hex("#090C12FF") });
-            let border = if focused {
-                color::BORDER_FOCUS()
-            } else {
-                color::with_alpha(color::hex("#FFFFFF"), 0.10)
-            };
+            quads.push(QuadCmd { rect: r, color: palette.bg_elevated });
+            let border = if focused { palette.border_focus } else { palette.border_subtle };
             push_border(quads, r, border);
             let display = if f.value.is_empty() && !focused {
                 "(default)".to_string()
@@ -526,9 +534,9 @@ fn draw_control(
                 f.value.clone()
             };
             let col = if f.value.is_empty() && !focused {
-                color::TEXT_FAINT()
+                palette.text_faint
             } else {
-                color::TEXT_PRIMARY()
+                palette.text_primary
             };
             push_text(
                 texts,
@@ -1130,6 +1138,213 @@ mod tests {
         }
     }
 
+    /// The slider's *filled* portion must paint with the theme accent
+    /// (gruvbox gold), not the legacy Tokyo Night blue. Regression for
+    /// PR #126 oversight: the fill code already used `accent`, but no
+    /// test exercised a control with `Control::Slider` so any future
+    /// refactor that swapped it back to a hardcoded constant would
+    /// have shipped silently.
+    #[test]
+    fn prefs_slider_fill_uses_theme_accent() {
+        let (mut state, theme) = fresh();
+        // Find any category that has a slider in its control set.
+        let mut slider_info: Option<(f32, f32, f32)> = None; // (x, y, w_at_full)
+        for cat in [
+            layout::Category::Appearance,
+            layout::Category::Behavior,
+            layout::Category::Keymap,
+            layout::Category::Font,
+            layout::Category::General,
+        ] {
+            state.set_category(cat);
+            let has_slider =
+                state.controls.iter().any(|c| matches!(c, crate::prefs::Control::Slider(_)));
+            if has_slider {
+                // Force every slider to its max so the fill spans the
+                // full track and is unambiguous to locate.
+                for c in state.controls.iter_mut() {
+                    if let crate::prefs::Control::Slider(s) = c {
+                        s.value = s.max;
+                    }
+                }
+                // Capture the first slider's slot rect for later lookup.
+                for (i, c) in state.controls.iter().enumerate() {
+                    if matches!(c, crate::prefs::Control::Slider(_)) {
+                        let slot = state.layout.control_slot(i);
+                        // Match draw geometry: readout_w=56, gap=12.
+                        let track_w = (slot.w - 56.0 - 12.0).max(40.0);
+                        slider_info = Some((slot.x, slot.y, track_w));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        let Some((sx, _sy, track_w)) = slider_info else {
+            panic!("expected at least one Slider control across categories");
+        };
+        let dl = build_draw_list(&state, &theme);
+        let accent = crate::ui_tokens::UiPalette::from_theme(&theme).accent;
+        // The fill quad: starts at slot.x, width = full track width when
+        // value == max, and its color must match the theme accent.
+        let fill = dl
+            .quads
+            .iter()
+            .find(|q| {
+                (q.rect.x - sx).abs() < 0.5
+                    && (q.rect.w - track_w).abs() < 0.5
+                    && (q.color[0] - accent[0]).abs() < 1e-4
+                    && (q.color[1] - accent[1]).abs() < 1e-4
+                    && (q.color[2] - accent[2]).abs() < 1e-4
+            })
+            .expect("slider fill quad with theme accent color not found");
+        // Sanity: this color is not the legacy ACCENT_BLUE.
+        #[allow(deprecated)]
+        let legacy_blue = color::ACCENT_BLUE();
+        assert!(
+            (fill.color[0] - legacy_blue[0]).abs() > 0.05
+                || (fill.color[1] - legacy_blue[1]).abs() > 0.05
+                || (fill.color[2] - legacy_blue[2]).abs() > 0.05,
+            "slider fill color matched the legacy Tokyo Night blue — \
+             the fixture accent does not differ from ACCENT_BLUE"
+        );
+    }
+
+    /// The slider's *unfilled* track must derive from the active theme
+    /// (specifically `palette.bg_active`), not the legacy hardcoded
+    /// Tokyo Night `#343A52FF`. This was the visual regression that
+    /// made the slider read as "blue" on gruvbox even after PR #126.
+    #[test]
+    fn prefs_slider_track_uses_theme_palette() {
+        let (mut state, theme) = fresh();
+        // Pin every slider to its minimum so the unfilled track quad
+        // covers the full track width and is unambiguous.
+        let mut slot_info: Option<(f32, f32)> = None;
+        for cat in [
+            layout::Category::Appearance,
+            layout::Category::Behavior,
+            layout::Category::Keymap,
+            layout::Category::Font,
+            layout::Category::General,
+        ] {
+            state.set_category(cat);
+            let has_slider =
+                state.controls.iter().any(|c| matches!(c, crate::prefs::Control::Slider(_)));
+            if has_slider {
+                for c in state.controls.iter_mut() {
+                    if let crate::prefs::Control::Slider(s) = c {
+                        s.value = s.min;
+                    }
+                }
+                for (i, c) in state.controls.iter().enumerate() {
+                    if matches!(c, crate::prefs::Control::Slider(_)) {
+                        let slot = state.layout.control_slot(i);
+                        let track_w = (slot.w - 56.0 - 12.0).max(40.0);
+                        slot_info = Some((slot.x, track_w));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        let Some((sx, track_w)) = slot_info else {
+            panic!("expected at least one Slider control across categories");
+        };
+        let dl = build_draw_list(&state, &theme);
+        let palette = crate::ui_tokens::UiPalette::from_theme(&theme);
+        let expected = palette.bg_active;
+        let track = dl.quads.iter().find(|q| {
+            (q.rect.x - sx).abs() < 0.5
+                && (q.rect.w - track_w).abs() < 0.5
+                && (q.color[0] - expected[0]).abs() < 1e-4
+                && (q.color[1] - expected[1]).abs() < 1e-4
+                && (q.color[2] - expected[2]).abs() < 1e-4
+                && (q.color[3] - expected[3]).abs() < 1e-4
+        });
+        assert!(
+            track.is_some(),
+            "slider unfilled track quad should use palette.bg_active ({expected:?}); \
+             present quads at slot.x={sx} w={track_w}: {:?}",
+            dl.quads
+                .iter()
+                .filter(|q| (q.rect.x - sx).abs() < 0.5)
+                .map(|q| (q.rect.w, q.color))
+                .collect::<Vec<_>>(),
+        );
+        // Regression: the old #343A52FF Tokyo Night literal must no
+        // longer appear at this rect.
+        let legacy_track = color::hex("#343A52FF");
+        let legacy_present = dl.quads.iter().any(|q| {
+            (q.rect.x - sx).abs() < 0.5
+                && (q.rect.w - track_w).abs() < 0.5
+                && (q.color[0] - legacy_track[0]).abs() < 1e-4
+                && (q.color[1] - legacy_track[1]).abs() < 1e-4
+                && (q.color[2] - legacy_track[2]).abs() < 1e-4
+        });
+        assert!(!legacy_present, "legacy Tokyo Night #343A52FF still rendered as slider track",);
+    }
+
+    /// Hardened spec for the Apply button: the *enabled* background
+    /// quad must exactly equal `palette.accent` (e.g. gruvbox gold),
+    /// AND the *disabled* state must not paint the legacy Tokyo Night
+    /// `#2A3042` constant. This is a more specific contract than the
+    /// pre-existing `prefs_primary_button_uses_theme_accent` test —
+    /// it explicitly forbids the regression PR #126 missed.
+    #[test]
+    fn prefs_apply_button_uses_theme_accent() {
+        let (mut state, theme) = fresh();
+        state.set_category(layout::Category::Appearance);
+        // Force dirty so we render the *enabled* path.
+        let toggle_id = state.controls.iter().find_map(|c| {
+            if let Control::Toggle(t) = c {
+                Some(t.id)
+            } else {
+                None
+            }
+        });
+        if let Some(id) = toggle_id {
+            state.flip_toggle(id);
+        } else {
+            // Mark dirty via any other control.
+            state.dirty = true;
+        }
+        assert!(state.dirty, "test setup failed: prefs must be dirty");
+        let dl = build_draw_list(&state, &theme);
+        let apply_rect = state.layout.apply_button;
+        let accent = crate::ui_tokens::UiPalette::from_theme(&theme).accent;
+        let apply_quad = dl
+            .quads
+            .iter()
+            .find(|q| {
+                (q.rect.x - apply_rect.x).abs() < 0.01 && (q.rect.y - apply_rect.y).abs() < 0.01
+            })
+            .expect("apply button quad");
+        for (i, &ac) in accent.iter().enumerate() {
+            assert!(
+                (apply_quad.color[i] - ac).abs() < 1e-4,
+                "apply (enabled) channel {i} ≠ theme accent: got {} want {}",
+                apply_quad.color[i],
+                ac,
+            );
+        }
+        // And: the legacy Tokyo Night disabled bg literal must not
+        // appear at the apply rect, even when re-rendered disabled.
+        state.dirty = false;
+        let dl2 = build_draw_list(&state, &theme);
+        let apply_quad2 = dl2
+            .quads
+            .iter()
+            .find(|q| {
+                (q.rect.x - apply_rect.x).abs() < 0.01 && (q.rect.y - apply_rect.y).abs() < 0.01
+            })
+            .expect("apply (disabled) quad");
+        let legacy_disabled = color::hex("#2A3042");
+        let matches_legacy = (apply_quad2.color[0] - legacy_disabled[0]).abs() < 1e-4
+            && (apply_quad2.color[1] - legacy_disabled[1]).abs() < 1e-4
+            && (apply_quad2.color[2] - legacy_disabled[2]).abs() < 1e-4;
+        assert!(!matches_legacy, "disabled Apply button still paints legacy Tokyo Night #2A3042",);
+    }
+
     /// Source-grep guard. prefs_renderer.rs production code must not
     /// call the deprecated `color::ACCENT_BLUE()` — chrome derives from
     /// `UiPalette::from_theme(theme).accent`. Test code is allowed to
@@ -1147,6 +1362,25 @@ mod tests {
             !prod.contains("ACCENT_BLUE"),
             "production code in prefs_renderer.rs must not reference \
              color::ACCENT_BLUE — use UiPalette::from_theme(theme).accent"
+        );
+        // PR fix(prefs): slider track + disabled Apply bg used to
+        // hardcode these Tokyo Night literals. Block re-introduction
+        // as call-site arguments (comments mentioning the legacy hex
+        // are fine — they document the regression).
+        assert!(
+            !prod.contains("color::hex(\"#343A52"),
+            "production code must not hardcode #343A52 — \
+             use palette.bg_active for chrome neutrals"
+        );
+        assert!(
+            !prod.contains("color::hex(\"#2A3042"),
+            "production code must not hardcode #2A3042 — \
+             use palette.bg_active for disabled chrome bg"
+        );
+        assert!(
+            !prod.contains("color::hex(\"#090C12"),
+            "production code must not hardcode #090C12 — \
+             use palette.bg_elevated for input bg"
         );
     }
 
