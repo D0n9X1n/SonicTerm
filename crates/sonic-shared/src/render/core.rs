@@ -1869,7 +1869,6 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            use crate::tabbar_view::{ACTIVE_TOP_ACCENT_H, ACTIVE_TOP_ACCENT_INSET};
             use crate::ui_tokens::color as tok;
             let bar_bg = tok::BG_BASE();
             let active_bg = tok::BG_ELEVATED();
@@ -1925,15 +1924,21 @@ impl GpuRenderer {
                         color: active_bg,
                         ..Default::default()
                     });
-                    // 2px top accent bar, ACCENT_BLUE, inset on each side
-                    // by ACTIVE_TOP_ACCENT_INSET → width = tab_w - 12.
-                    let acc_x = t.bg.x + ACTIVE_TOP_ACCENT_INSET;
-                    let acc_w = (t.bg.w - 2.0 * ACTIVE_TOP_ACCENT_INSET).max(0.0);
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(acc_x, t.bg.y, acc_w, ACTIVE_TOP_ACCENT_H, sw, sh),
-                        color: accent_blue,
-                        ..Default::default()
-                    });
+                    // 2px top accent bar, ACCENT_BLUE, anchored to the
+                    // active tab's own bg rect via `active_accent_rect()`.
+                    // Issue #171: the previous inline `t.bg.x + INSET`
+                    // math was correct in isolation but easy to drift
+                    // away from on future refactors; centralising the
+                    // computation in the layout keeps the regression
+                    // covered by the `crates/sonic-ui/tests/
+                    // tabbar_active_indicator.rs` unit tests.
+                    if let Some(acc) = layout.active_accent_rect() {
+                        quads.push(QuadInstance {
+                            rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
+                            color: accent_blue,
+                            ..Default::default()
+                        });
+                    }
                 } else if cursor_on_this_tab {
                     // Hover overlay on inactive tab — #FFFFFF/6%.
                     quads.push(QuadInstance {

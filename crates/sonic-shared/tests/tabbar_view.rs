@@ -236,8 +236,14 @@ fn tab_max_width_is_240() {
 }
 
 #[test]
-fn tab_min_width_is_100() {
-    assert_eq!(TAB_MIN_WIDTH, 100.0);
+fn tab_min_width_is_at_least_200() {
+    // Bumped from 100 -> 200 by issue #171 so common shell titles
+    // (`Administrator: cmd.exe`, `pwsh`, ...) stay legible in the
+    // common 2-4 tab case at 1000 px wide.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(TAB_MIN_WIDTH >= 200.0, "got {TAB_MIN_WIDTH}");
+    }
 }
 
 #[test]
