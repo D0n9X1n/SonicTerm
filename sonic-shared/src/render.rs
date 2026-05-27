@@ -384,7 +384,12 @@ impl GpuRenderer {
         // A second buffer is used for the tab-bar titles. Tab titles use a
         // tighter line height than the terminal grid; one buffer per bar
         // means we only re-shape titles when the tab set changes.
-        let tab_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
+        //
+        // Tab title size = body font size + 1pt so the bar reads slightly
+        // heavier than the grid below it (design polish per PR
+        // "tabbar: centered title with config font, larger size").
+        let tab_font_size = tab_title_font_size(font_size);
+        let tab_metrics = Metrics::new(tab_font_size, tab_font_size * 1.2);
         let mut tab_buffer = Buffer::new(&mut font_system, tab_metrics);
         let bar_h = tab_bar_height(font_size);
         tab_buffer.set_size(&mut font_system, Some(size.width as f32 / scale_factor), Some(bar_h));
@@ -1766,7 +1771,14 @@ impl GpuRenderer {
             // padding) drawn in `tab_inactive_fg` so a thin divider
             // appears between adjacent tab titles regardless of which
             // tab is active.
-            let avg_glyph_w = (self.cell_w * 0.85).max(1.0);
+            // Tab font is `font_size + 1.0` (see ctor); scale the
+            // approximate glyph width accordingly so the
+            // column-arithmetic in `build_tab_title_spans` lines up
+            // with where the shaped tab text actually lands.
+            let tab_font_size = tab_title_font_size(self.font_size);
+            let avg_glyph_w = (self.cell_w * (tab_font_size / self.font_size)).max(1.0);
+            let tab_family_name = self.font_family.clone();
+            let tab_family = Family::Name(tab_family_name.as_str());
             let tab_inputs: Vec<TabSpanInput> = layout
                 .tabs
                 .iter()
@@ -1790,25 +1802,25 @@ impl GpuRenderer {
                 if range.start > tcur {
                     spans2.push((
                         &title_text[tcur..range.start],
-                        Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                        Attrs::new().family(tab_family).color(self.tab_inactive_fg),
                     ));
                 }
                 spans2.push((
                     &title_text[range.start..range.end],
-                    Attrs::new().family(Family::Monospace).color(*color),
+                    Attrs::new().family(tab_family).color(*color),
                 ));
                 tcur = range.end;
             }
             if tcur < title_text.len() {
                 spans2.push((
                     &title_text[tcur..],
-                    Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                    Attrs::new().family(tab_family).color(self.tab_inactive_fg),
                 ));
             }
             self.tab_buffer.set_rich_text(
                 &mut self.font_system,
                 spans2,
-                &Attrs::new().family(Family::Monospace).color(self.tab_inactive_fg),
+                &Attrs::new().family(tab_family).color(self.tab_inactive_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2838,6 +2850,25 @@ pub struct TabSpanInput<'a> {
 /// Returns `(text, spans)` where each span is `(byte_range, color)`.
 /// Bytes between consecutive spans are filled by the caller with
 /// `inactive_fg`.
+/// Horizontal padding (in logical pixels) reserved on EACH side of a tab's
+/// title region before truncation kicks in. 6px on each side = 12px total
+/// of breathing room, matching the design polish requirement.
+#[doc(hidden)]
+pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
+
+/// Tab-title font size given the body terminal font size, in logical px.
+/// Tab titles render exactly 1.0 pt larger than the body — see PR
+/// "feat(tabbar): centered title with config font, larger size".
+/// Picked the additive `+ 1.0` form over `* 1.0625` because it scales
+/// consistently across user font-size choices (a hard-coded ratio
+/// quickly drifts at extreme sizes: a 10pt body would gain ~0.6pt,
+/// a 24pt body ~1.5pt, neither matching the user's intent of "one
+/// step up").
+#[must_use]
+pub fn tab_title_font_size(body_font_size: f32) -> f32 {
+    body_font_size + 1.0
+}
+
 #[doc(hidden)]
 pub fn build_tab_title_spans(
     tabs: &[TabSpanInput<'_>],
@@ -2849,10 +2880,46 @@ pub fn build_tab_title_spans(
     let mut spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
     for t in tabs {
         let color = if t.is_active { active_fg } else { inactive_fg };
-        let max_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(1);
-        let mut raw: String = t.title.chars().take(max_chars).collect();
-        let target_col = (t.title_x / avg_glyph_w).floor() as usize;
-        while title_text.chars().count() < target_col {
+        // Reserve TAB_TITLE_PADDING_PX on each side before clipping.
+        let usable_w = (t.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
+        let max_chars = ((usable_w / avg_glyph_w).floor() as usize).max(1);
+        let full_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(max_chars);
+
+        // Truncate with `…` if the title overflows usable width.
+        let title_chars: Vec<char> = t.title.chars().collect();
+        let body: String = if title_chars.len() > max_chars {
+            let keep = max_chars.saturating_sub(1);
+            let mut s: String = title_chars.iter().take(keep).collect();
+            s.push('…');
+            s
+        } else {
+            title_chars.iter().collect()
+        };
+        let body_chars = body.chars().count();
+
+        // Centering: text starts at title_x + (title_w - text_w)/2.
+        // For ACTIVE tabs the leading & trailing pad spaces stay INSIDE
+        // the colored span so the active tint covers the full rect
+        // (preserves the pre-centering invariant). For INACTIVE tabs the
+        // leading pad is plain prefix space — no need to tint empty cells.
+        let text_w = body_chars as f32 * avg_glyph_w;
+        let leading_px = t.title_x + ((t.title_w - text_w) / 2.0).max(0.0);
+        let rect_left_col = (t.title_x / avg_glyph_w).floor() as usize;
+        let center_col = (leading_px / avg_glyph_w).floor() as usize;
+        let leading_pad = center_col.saturating_sub(rect_left_col);
+        let trailing_pad = full_chars.saturating_sub(body_chars + leading_pad);
+
+        let (anchor_col, raw) = if t.is_active {
+            let mut s = String::with_capacity(leading_pad + body.len() + trailing_pad);
+            s.extend(std::iter::repeat_n(' ', leading_pad));
+            s.push_str(&body);
+            s.extend(std::iter::repeat_n(' ', trailing_pad));
+            (rect_left_col, s)
+        } else {
+            (center_col, body)
+        };
+
+        while title_text.chars().count() < anchor_col {
             title_text.push(' ');
         }
         if t.index > 0 {
@@ -2860,15 +2927,6 @@ pub fn build_tab_title_spans(
             title_text.push_str(crate::tab_title::TAB_SEPARATOR_PREFIX);
             let sep_end = title_text.len();
             spans.push((sep_start..sep_end, inactive_fg));
-        }
-        // Active-tab full-span gold: pad with trailing spaces so the
-        // colour span covers the entire tab rect, not just the icon/
-        // digit prefix glyphs.
-        if t.is_active {
-            let cur = raw.chars().count();
-            if cur < max_chars {
-                raw.extend(std::iter::repeat_n(' ', max_chars - cur));
-            }
         }
         let start = title_text.len();
         title_text.push_str(&raw);
