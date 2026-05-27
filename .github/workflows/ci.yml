@@ -49,3 +49,55 @@ jobs:
         with:
           command: check
           arguments: --all-features
+
+  wix-smoke:
+    name: cargo-wix smoke (windows MSI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Detect sonic-windows / packaging changes
+        id: changes
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            git fetch --no-tags --depth=50 origin "$BASE" "$HEAD" || true
+            CHANGED=$(git diff --name-only "$BASE" "$HEAD" || true)
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+          fi
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -E '^(sonic-windows/|\.github/workflows/(ci|release)\.yml$|assets/)' >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install rust toolchain
+        if: steps.changes.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.run == 'true'
+        with:
+          shared-key: wix-smoke
+
+      - name: Install cargo-wix
+        if: steps.changes.outputs.run == 'true'
+        run: cargo install cargo-wix --locked
+
+      - name: Build release binary
+        if: steps.changes.outputs.run == 'true'
+        run: cargo build --release --target x86_64-pc-windows-msvc -p sonic-windows
+
+      - name: cargo wix smoke
+        if: steps.changes.outputs.run == 'true'
+        shell: bash
+        run: |
+          cd sonic-windows
+          cargo wix --no-build --nocapture --output ../dist/
+          ls -la ../dist/

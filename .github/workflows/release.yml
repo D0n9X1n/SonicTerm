@@ -125,8 +125,8 @@ jobs:
       - name: Build .msi
         shell: bash
         run: |
-          cd crates/sonic-windows
-          cargo wix --no-build --nocapture --output ../../dist/
+          cd sonic-windows
+          cargo wix --no-build --nocapture --output ../dist/
 
       - name: Sign .msi (Azure Trusted Signing)
         if: env.AZURE_TENANT_ID != ''
