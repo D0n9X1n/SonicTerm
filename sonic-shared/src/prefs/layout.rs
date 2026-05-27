@@ -1,9 +1,10 @@
-//! Layout for the preferences window.
+//! Layout for the preferences window — redesign per issue #112 Round 2.
 //!
 //! Window is divided into:
-//! - A fixed-width left sidebar listing categories (vertical menu).
-//! - A right-hand form panel inset with padding, leaving space at the
-//!   bottom for the Apply / Cancel buttons.
+//! - A 188-px-wide left **sidebar** listing categories (nav rail).
+//! - A right-hand **content area** padded with 28t/32h, containing one or
+//!   more **cards** (radius 14, surface background, 1px subtle border).
+//! - A sticky 64-px **footer** with Apply / Cancel buttons.
 //!
 //! All numbers are in *logical* pixels — the renderer multiplies by the
 //! window's scale factor when emitting quads.
@@ -31,6 +32,17 @@ impl Category {
             Category::Behavior => "Behavior",
         }
     }
+
+    /// One-line subtitle shown beneath the page title.
+    pub fn description(self) -> &'static str {
+        match self {
+            Category::General => "Startup, working directory, shell behavior.",
+            Category::Appearance => "Theme, accent colors, opacity, and preview.",
+            Category::Font => "Font family, size, line height, and ligatures.",
+            Category::Keymap => "Keyboard shortcuts and modifier bindings.",
+            Category::Behavior => "Scrollback, bell, mouse, and confirm-quit.",
+        }
+    }
 }
 
 /// All categories in display order.
@@ -42,46 +54,144 @@ pub const CATEGORIES: &[Category] = &[
     Category::Behavior,
 ];
 
-/// Tunables — kept as `const` so layout is deterministic and testable.
-pub const SIDEBAR_W: f32 = 160.0;
-pub const SIDEBAR_ROW_H: f32 = 32.0;
-pub const SIDEBAR_PAD: f32 = 8.0;
-pub const FORM_PAD: f32 = 20.0;
-pub const FOOTER_H: f32 = 56.0;
-pub const BUTTON_W: f32 = 96.0;
-pub const BUTTON_H: f32 = 28.0;
-pub const ROW_H: f32 = 36.0;
-pub const LABEL_W: f32 = 140.0;
+// --- Tunables -----------------------------------------------------------
+// All values come straight from the issue #112 Round 2 spec.
 
-/// Pre-computed rectangles for the window's static chrome. The form's
-/// individual control rects are produced separately from this anchor.
+/// Sidebar (left nav rail).
+pub const SIDEBAR_W: f32 = 188.0;
+pub const SIDEBAR_PAD_H: f32 = 16.0;
+pub const SIDEBAR_PAD_T: f32 = 20.0;
+pub const SIDEBAR_ROW_H: f32 = 40.0;
+pub const SIDEBAR_ROW_GAP: f32 = 4.0;
+pub const SIDEBAR_ROW_RADIUS: f32 = 10.0;
+pub const SIDEBAR_ICON_SLOT: f32 = 16.0;
+pub const SIDEBAR_ICON_X: f32 = 12.0;
+pub const SIDEBAR_LABEL_X: f32 = 36.0;
+pub const SIDEBAR_ACCENT_W: f32 = 3.0;
+pub const SIDEBAR_ACCENT_RADIUS: f32 = 1.5;
+
+/// Content area / cards.
+pub const CONTENT_PAD_TOP: f32 = 28.0;
+pub const CONTENT_PAD_H: f32 = 32.0;
+pub const CARD_RADIUS: f32 = 14.0;
+pub const CARD_PAD_V: f32 = 18.0;
+pub const CARD_PAD_H: f32 = 20.0;
+pub const CARD_GAP: f32 = 16.0;
+
+/// Form rows.
+pub const ROW_H: f32 = 48.0;
+pub const LABEL_W: f32 = 168.0;
+
+/// Controls.
+pub const CONTROL_H: f32 = 32.0;
+pub const CONTROL_RADIUS: f32 = 8.0;
+pub const TOGGLE_W: f32 = 44.0;
+pub const TOGGLE_H: f32 = 24.0;
+pub const TOGGLE_KNOB: f32 = 20.0;
+pub const TOGGLE_KNOB_MARGIN: f32 = 2.0;
+pub const SLIDER_TRACK_H: f32 = 4.0;
+pub const SLIDER_THUMB: f32 = 16.0;
+pub const SWATCH_SIZE: f32 = 22.0;
+pub const SWATCH_GAP: f32 = 6.0;
+pub const SWATCH_RADIUS: f32 = 6.0;
+
+/// Footer.
+pub const FOOTER_H: f32 = 64.0;
+pub const BUTTON_H: f32 = 32.0;
+pub const BUTTON_RADIUS: f32 = 8.0;
+pub const PRIMARY_BUTTON_W: f32 = 112.0;
+pub const SECONDARY_BUTTON_W: f32 = 96.0;
+pub const BUTTON_GAP: f32 = 12.0;
+
+/// Preview card (Appearance).
+pub const PREVIEW_CARD_H: f32 = 156.0;
+pub const PREVIEW_PAD: f32 = 16.0;
+
+/// Title block.
+pub const TITLE_X: f32 = 28.0;
+pub const TITLE_Y: f32 = 24.0;
+pub const TITLE_SIZE: f32 = 20.0;
+pub const TITLE_LINE: f32 = 28.0;
+pub const SUBTITLE_SIZE: f32 = 12.0;
+pub const SUBTITLE_LINE: f32 = 18.0;
+pub const SUBTITLE_GAP: f32 = 4.0;
+
+/// Section title / help sizes inside cards.
+pub const SECTION_TITLE_SIZE: f32 = 13.0;
+pub const SECTION_HELP_SIZE: f32 = 12.0;
+pub const SECTION_HELP_MAX_W: f32 = 420.0;
+
+/// Pre-computed rectangles for the window's static chrome. Per-control
+/// rects are computed by [`PrefsLayout::form_row`] /
+/// [`PrefsLayout::control_slot`].
 #[derive(Debug, Clone, Copy)]
 pub struct PrefsLayout {
     pub width: f32,
     pub height: f32,
     pub sidebar: Rect,
-    pub form: Rect,
+    /// Vertical divider drawn on the sidebar's right edge.
+    pub sidebar_divider: Rect,
+    /// Outer content rect (right of sidebar, above footer).
+    pub content: Rect,
+    /// Title block rect (anchor for "Preferences" + subtitle).
+    pub title_block: Rect,
+    /// The "card" the form is drawn inside — first card, just below
+    /// the title block.
+    pub form_card: Rect,
     pub footer: Rect,
+    /// Top border line of the footer (1px high).
+    pub footer_divider: Rect,
     pub apply_button: Rect,
     pub cancel_button: Rect,
 }
 
 impl PrefsLayout {
-    /// Build a layout for the given window size (clamped to a sane minimum).
+    /// Build a layout for the given window size (clamped to the min
+    /// from the spec: 680 × 520).
     pub fn new(width: f32, height: f32) -> Self {
-        let width = width.max(SIDEBAR_W + 240.0);
-        let height = height.max(FOOTER_H + 240.0);
+        let width = width.max(680.0);
+        let height = height.max(520.0);
         let sidebar = Rect::new(0.0, 0.0, SIDEBAR_W, height);
-        let form_top = 0.0;
-        let form_h = height - FOOTER_H;
-        let form = Rect::new(SIDEBAR_W, form_top, width - SIDEBAR_W, form_h);
-        let footer = Rect::new(SIDEBAR_W, height - FOOTER_H, width - SIDEBAR_W, FOOTER_H);
+        let sidebar_divider = Rect::new(SIDEBAR_W - 1.0, 0.0, 1.0, height);
+        let content_x = SIDEBAR_W;
+        let content_w = width - SIDEBAR_W;
+        let content_h = height - FOOTER_H;
+        let content = Rect::new(content_x, 0.0, content_w, content_h);
+
+        // Title block — sized by typography ramps.
+        let title_h = TITLE_LINE + SUBTITLE_GAP + SUBTITLE_LINE;
+        let title_block =
+            Rect::new(content.x + TITLE_X, TITLE_Y, content.w - TITLE_X - CONTENT_PAD_H, title_h);
+
+        // First card sits below the title with CONTENT_PAD_TOP gap and
+        // extends to the bottom of the content area (minus a small
+        // breath).
+        let card_top = title_block.y + title_block.h + CONTENT_PAD_TOP - 8.0;
+        let card_x = content.x + CONTENT_PAD_H;
+        let card_w = content.w - CONTENT_PAD_H * 2.0;
+        let card_h = (content_h - card_top - CONTENT_PAD_TOP * 0.5).max(120.0);
+        let form_card = Rect::new(card_x, card_top, card_w, card_h);
+
+        let footer = Rect::new(0.0, height - FOOTER_H, width, FOOTER_H);
+        let footer_divider = Rect::new(0.0, footer.y, width, 1.0);
         let buttons_y = footer.y + (FOOTER_H - BUTTON_H) / 2.0;
-        let apply_x = footer.x + footer.w - BUTTON_W - FORM_PAD;
-        let cancel_x = apply_x - BUTTON_W - 12.0;
-        let apply_button = Rect::new(apply_x, buttons_y, BUTTON_W, BUTTON_H);
-        let cancel_button = Rect::new(cancel_x, buttons_y, BUTTON_W, BUTTON_H);
-        Self { width, height, sidebar, form, footer, apply_button, cancel_button }
+        let apply_x = footer.x + footer.w - PRIMARY_BUTTON_W - CONTENT_PAD_H;
+        let cancel_x = apply_x - SECONDARY_BUTTON_W - BUTTON_GAP;
+        let apply_button = Rect::new(apply_x, buttons_y, PRIMARY_BUTTON_W, BUTTON_H);
+        let cancel_button = Rect::new(cancel_x, buttons_y, SECONDARY_BUTTON_W, BUTTON_H);
+        Self {
+            width,
+            height,
+            sidebar,
+            sidebar_divider,
+            content,
+            title_block,
+            form_card,
+            footer,
+            footer_divider,
+            apply_button,
+            cancel_button,
+        }
     }
 
     /// Default-size layout (matches the values in [`PREFS_WIN_W`] / `_H`).
@@ -92,10 +202,22 @@ impl PrefsLayout {
     /// Row rect for a category in the sidebar (0-based).
     pub fn category_row(&self, index: usize) -> Rect {
         Rect::new(
-            self.sidebar.x + SIDEBAR_PAD,
-            self.sidebar.y + SIDEBAR_PAD + index as f32 * SIDEBAR_ROW_H,
-            self.sidebar.w - SIDEBAR_PAD * 2.0,
+            self.sidebar.x + SIDEBAR_PAD_H,
+            self.sidebar.y + SIDEBAR_PAD_T + index as f32 * (SIDEBAR_ROW_H + SIDEBAR_ROW_GAP),
+            self.sidebar.w - SIDEBAR_PAD_H * 2.0,
             SIDEBAR_ROW_H,
+        )
+    }
+
+    /// Left-accent bar rect for an active category row.
+    pub fn category_accent(&self, index: usize) -> Rect {
+        let row = self.category_row(index);
+        let bar_h = row.h - 12.0;
+        Rect::new(
+            row.x - SIDEBAR_PAD_H + 4.0,
+            row.y + (row.h - bar_h) / 2.0,
+            SIDEBAR_ACCENT_W,
+            bar_h,
         )
     }
 
@@ -109,13 +231,15 @@ impl PrefsLayout {
         None
     }
 
-    /// Row rect for the `n`th control inside the form (0-based).
+    /// Row rect for the `n`th control inside the form card (0-based).
+    /// Rows are stacked vertically inside the card with `CARD_PAD_V`
+    /// top padding and `CARD_PAD_H` horizontal padding.
     pub fn form_row(&self, n: usize) -> Rect {
         Rect::new(
-            self.form.x + FORM_PAD,
-            self.form.y + FORM_PAD + n as f32 * ROW_H,
-            self.form.w - FORM_PAD * 2.0,
-            ROW_H - 8.0,
+            self.form_card.x + CARD_PAD_H,
+            self.form_card.y + CARD_PAD_V + n as f32 * ROW_H,
+            self.form_card.w - CARD_PAD_H * 2.0,
+            ROW_H,
         )
     }
 
@@ -123,7 +247,15 @@ impl PrefsLayout {
     /// control widget is rendered.
     pub fn control_slot(&self, n: usize) -> Rect {
         let row = self.form_row(n);
-        Rect::new(row.x + LABEL_W, row.y, row.w - LABEL_W, row.h)
+        // Center a `CONTROL_H` tall slot inside the row.
+        let cy = row.y + (row.h - CONTROL_H) / 2.0;
+        Rect::new(row.x + LABEL_W, cy, row.w - LABEL_W, CONTROL_H)
+    }
+
+    /// Label rect for a form row (left-aligned, vertically centered).
+    pub fn label_slot(&self, n: usize) -> Rect {
+        let row = self.form_row(n);
+        Rect::new(row.x, row.y, LABEL_W, row.h)
     }
 }
 
@@ -139,10 +271,42 @@ mod tests {
     }
 
     #[test]
+    fn prefs_window_default_size_760x600() {
+        assert_eq!(PREFS_WIN_W, 760.0);
+        assert_eq!(PREFS_WIN_H, 600.0);
+    }
+
+    #[test]
+    fn prefs_sidebar_width_188() {
+        assert_eq!(SIDEBAR_W, 188.0);
+        let l = PrefsLayout::default_size();
+        assert_eq!(l.sidebar.w, 188.0);
+    }
+
+    #[test]
+    fn prefs_footer_height_64() {
+        assert_eq!(FOOTER_H, 64.0);
+        let l = PrefsLayout::default_size();
+        assert_eq!(l.footer.h, 64.0);
+    }
+
+    #[test]
+    fn prefs_card_radius_14() {
+        assert_eq!(CARD_RADIUS, 14.0);
+    }
+
+    #[test]
+    fn prefs_min_window_size_680x520() {
+        let l = PrefsLayout::new(100.0, 100.0);
+        assert_eq!(l.width, 680.0);
+        assert_eq!(l.height, 520.0);
+    }
+
+    #[test]
     fn layout_clamps_to_minimum() {
         let l = PrefsLayout::new(50.0, 50.0);
-        assert!(l.width > SIDEBAR_W);
-        assert!(l.height > FOOTER_H);
+        assert!(l.width >= 680.0);
+        assert!(l.height >= 520.0);
     }
 
     #[test]
@@ -154,43 +318,54 @@ mod tests {
     }
 
     #[test]
-    fn form_starts_right_of_sidebar() {
+    fn content_starts_right_of_sidebar() {
         let l = PrefsLayout::default_size();
-        assert_eq!(l.form.x, SIDEBAR_W);
-        assert_eq!(l.form.w, PREFS_WIN_W - SIDEBAR_W);
-        // Form ends where footer starts.
-        assert!((l.form.y + l.form.h - l.footer.y).abs() < 1e-5);
+        assert_eq!(l.content.x, SIDEBAR_W);
+        assert_eq!(l.content.w, PREFS_WIN_W - SIDEBAR_W);
     }
 
     #[test]
-    fn footer_sits_at_bottom() {
+    fn footer_sits_at_bottom_full_width() {
         let l = PrefsLayout::default_size();
         assert!((l.footer.y + l.footer.h - PREFS_WIN_H).abs() < 1e-5);
         assert_eq!(l.footer.h, FOOTER_H);
+        // Footer spans full window width (border crosses sidebar).
+        assert_eq!(l.footer.w, PREFS_WIN_W);
     }
 
     #[test]
-    fn apply_is_rightmost_button() {
+    fn apply_is_rightmost_button_and_wider_than_cancel() {
         let l = PrefsLayout::default_size();
         assert!(l.apply_button.x > l.cancel_button.x);
-        // Both within the footer horizontally.
+        assert_eq!(l.apply_button.w, PRIMARY_BUTTON_W);
+        assert_eq!(l.cancel_button.w, SECONDARY_BUTTON_W);
+        assert!(l.apply_button.w > l.cancel_button.w);
+        assert_eq!(l.apply_button.h, BUTTON_H);
         assert!(l.apply_button.x + l.apply_button.w <= l.footer.x + l.footer.w);
-        assert!(l.cancel_button.x >= l.footer.x);
     }
 
     #[test]
-    fn category_rows_stack_vertically_inside_sidebar() {
+    fn category_rows_have_correct_height_and_gap() {
         let l = PrefsLayout::default_size();
-        for (i, _) in CATEGORIES.iter().enumerate() {
-            let r = l.category_row(i);
-            assert!(r.x >= l.sidebar.x);
-            assert!(r.x + r.w <= l.sidebar.x + l.sidebar.w);
-            assert!(r.y >= l.sidebar.y);
-        }
-        // Rows do not overlap.
-        let a = l.category_row(0);
-        let b = l.category_row(1);
-        assert!(b.y >= a.y + a.h - 1e-5);
+        let r0 = l.category_row(0);
+        let r1 = l.category_row(1);
+        assert_eq!(r0.h, SIDEBAR_ROW_H);
+        // Vertical stride = row height + 4 px gap.
+        assert!((r1.y - r0.y - (SIDEBAR_ROW_H + SIDEBAR_ROW_GAP)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn prefs_active_category_row_has_left_accent() {
+        let l = PrefsLayout::default_size();
+        let row = l.category_row(0);
+        let accent = l.category_accent(0);
+        assert_eq!(accent.w, SIDEBAR_ACCENT_W);
+        // The accent bar sits to the LEFT of the row's text/icon area.
+        assert!(accent.x < row.x + SIDEBAR_LABEL_X);
+        // And is vertically centered within the row.
+        let row_mid = row.y + row.h / 2.0;
+        let acc_mid = accent.y + accent.h / 2.0;
+        assert!((row_mid - acc_mid).abs() < 1.0);
     }
 
     #[test]
@@ -200,7 +375,6 @@ mod tests {
         let r2 = l.category_row(2);
         assert_eq!(l.hit_category(r0.x + 1.0, r0.y + 1.0), Some(Category::General));
         assert_eq!(l.hit_category(r2.x + 1.0, r2.y + 1.0), Some(Category::Font));
-        // Click outside the sidebar rows returns None.
         assert_eq!(l.hit_category(500.0, 500.0), None);
     }
 
@@ -211,6 +385,7 @@ mod tests {
         let slot = l.control_slot(0);
         assert!((slot.x - (row.x + LABEL_W)).abs() < 1e-5);
         assert!(slot.w < row.w);
+        assert_eq!(slot.h, CONTROL_H);
     }
 
     #[test]
@@ -220,5 +395,20 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), labels.len());
+    }
+
+    #[test]
+    fn every_category_has_description() {
+        for c in CATEGORIES {
+            assert!(!c.description().is_empty(), "category {:?} missing description", c.label());
+        }
+    }
+
+    #[test]
+    fn form_card_fits_inside_content() {
+        let l = PrefsLayout::default_size();
+        assert!(l.form_card.x >= l.content.x);
+        assert!(l.form_card.x + l.form_card.w <= l.content.x + l.content.w + 1.0);
+        assert!(l.form_card.y + l.form_card.h <= l.footer.y + 1.0);
     }
 }
