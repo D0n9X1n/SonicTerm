@@ -21,6 +21,15 @@ use wgpu::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
+use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu};
+use super::cursor::{push_hollow_rect, recolor_cursor_glyphs, InactivePaneCursor};
+use super::drag_chip::{DragChipOverlay, DragChipVisual};
+use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
+use super::tab_spans::{
+    build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
+    TabTitleRichTextSpans,
+};
+
 use crate::{
     atlas_upload::AtlasUpload,
     command_palette::CommandPalette,
@@ -37,7 +46,7 @@ use crate::{
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
     swash_rasterizer::{self, SwashRasterizer},
-    tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT, TAB_GAP},
+    tabbar_view::{tab_bar_height, TabBarLayout, TAB_GAP},
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
 };
@@ -46,37 +55,6 @@ use crate::{
 // atlas does an O(1) lookup per cell, so the bookkeeping is wasted
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
 // millisecond on the renderer thread.)
-
-/// Pure helper computing the top inset reserved above the grid for both
-/// the OS titlebar band (when an integrated titlebar pushes the content
-/// view under the native chrome) and the tab bar. Returns the titlebar
-/// inset alone when the tab bar is hidden, so the grid recovers the row
-/// the bar used to take. Exposed so tests can validate visibility wiring
-/// without needing a live GPU context.
-pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
-    tab_bar_top_inset_with_titlebar(visible, padding, 0.0)
-}
-
-/// Same as [`tab_bar_top_inset`] but adds a reserved titlebar band on top.
-/// `titlebar_inset` is the height in logical pixels the OS reserves at the
-/// top of the content view (e.g. macOS traffic-lights strip when
-/// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
-/// our content below its chrome.
-pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
-    let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
-    titlebar_inset + bar
-}
-
-/// One inactive pane's cursor: the cell coordinates inside that pane
-/// plus the pane's rectangle in window pixels. Carried as a flat
-/// struct (rather than a tuple) so the renderer can extend the
-/// payload (e.g. with the pane's bg color) without ripple changes.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InactivePaneCursor {
-    pub row: u16,
-    pub col: u16,
-    pub rect: PaneRect,
-}
 
 #[allow(dead_code)]
 pub struct GpuRenderer {
@@ -238,38 +216,6 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
-}
-
-/// Translucent ~120x24 quad drawn at the cursor while a tab is held.
-#[derive(Debug, Clone)]
-pub struct DragChipOverlay {
-    /// Top-left of the chip rect in physical pixels.
-    pub top_left: (f32, f32),
-    /// Title text of the dragged tab.
-    pub title: String,
-    /// When `Some`, draw a 2-3px vertical accent bar (the "drop line")
-    /// at this logical-pixel X coordinate, spanning the tab bar's
-    /// vertical range. This indicates the insertion slot the dragged
-    /// tab would land in if released right now. `None` when the cursor
-    /// has left the bar Y range (tear-out armed).
-    pub drop_line_x: Option<f32>,
-    /// Vertical span `(top, bottom)` of the drop-line accent in
-    /// logical pixels — matches the tab bar's Y range so the line is
-    /// flush with the bar chrome.
-    pub drop_line_y: (f32, f32),
-    /// Multiplicative scale applied to the chip when rendered, used to
-    /// give a subtle 1.0 → 1.02 ease on tear-out arm. `1.0` is the
-    /// in-bar resting state; the renderer interpolates around this.
-    pub scale: f32,
-}
-
-/// Diagnostic snapshot of the most recently rendered drag chip.
-/// Production code must not depend on it; tests read it via
-/// [`GpuRenderer::last_drag_chip_visual`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DragChipVisual {
-    pub top_left: (f32, f32),
-    pub size: (f32, f32),
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -3003,50 +2949,6 @@ impl GpuRenderer {
     }
 }
 
-/// Convert an sRGB-encoded glyphon color into a linear-space `[r, g, b, a]`
-/// suitable for the body text pipeline.
-///
-/// The body glyph pass writes into a `Bgra8UnormSrgb` surface, which applies
-/// linear→sRGB encoding on store. The per-instance `color` therefore MUST be
-/// in linear space, mirroring `hex_to_rgba` used by the quad pipeline. Without
-/// linearization, raw sRGB bytes (e.g. wezterm foreground `#cfbc97`) are
-/// double-encoded on the way to the framebuffer and brighten to `#e9dfca` —
-/// the regression that motivated PR #92's follow-up.
-///
-/// glyphon's own text path is unaffected because cosmic-text + the glyphon
-/// atlas swizzle through their own gamma-aware blend (see comment on
-/// `hex_to_rgba`).
-#[inline]
-pub fn glyphon_color_to_linear_rgba(c: GColor) -> [f32; 4] {
-    // Use the 256-entry u8 LUT — every input here is already an 8-bit
-    // sRGB channel, and the per-glyph hot path called this once per
-    // visible cell per frame, paying for two `powf(2.4)` evaluations
-    // each time. The LUT collapses each conversion to a single load.
-    let t = srgb_u8_to_linear_lut();
-    [t[c.r() as usize], t[c.g() as usize], t[c.b() as usize], 1.0]
-}
-
-/// Borrow the process-wide sRGB→linear lookup table. Computed once on
-/// first use via a `OnceLock`; the table maps each of the 256 possible
-/// u8 sRGB channel values to its linear-light counterpart so the
-/// per-glyph hot path never has to evaluate `powf(2.4)`.
-///
-/// Bit-exact with `srgb_channel_to_linear(x as f64 / 255.0) as f32` for
-/// every `x in 0..=255` (verified by unit test).
-#[inline]
-pub fn srgb_u8_to_linear_lut() -> &'static [f32; 256] {
-    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| {
-        let mut t = [0f32; 256];
-        let mut i = 0usize;
-        while i < 256 {
-            t[i] = srgb_channel_to_linear(i as f64 / 255.0) as f32;
-            i += 1;
-        }
-        t
-    })
-}
-
 fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
     match cell.fg {
         Color::Default => default,
@@ -3089,263 +2991,6 @@ fn hex_to_glyphon(h: &str) -> GColor {
     }
 }
 
-/// Convert one sRGB-encoded channel (0..=1) to linear-light space.
-///
-/// Standard sRGB EOTF (IEC 61966-2-1). Used because our wgpu surface is
-/// `Bgra8UnormSrgb`, which performs linear→sRGB encoding on write — colors
-/// the shader / clear-color sees must therefore be in linear space, or the
-/// gamma is applied twice and the result looks washed out (e.g. Gruvbox Dark
-/// Hard `#1d2021` rendering as mid-gray `~#6e6e6e`).
-#[doc(hidden)]
-pub fn srgb_channel_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Parse a `#rrggbb` hex string into a `wgpu::Color` in **linear** space,
-/// suitable for use as a render-pass clear color on an sRGB surface format.
-///
-/// Alpha is left straight (no gamma curve applies to alpha).
-#[doc(hidden)]
-pub fn hex_to_wgpu(h: &str) -> wgpu::Color {
-    let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
-    if h.len() == 6 {
-        wgpu::Color {
-            r: srgb_channel_to_linear(parse(0)),
-            g: srgb_channel_to_linear(parse(2)),
-            b: srgb_channel_to_linear(parse(4)),
-            a: 1.0,
-        }
-    } else {
-        wgpu::Color::BLACK
-    }
-}
-
-/// Parse a `#rrggbb` hex string + alpha into a `[r, g, b, a]` array in
-/// **linear** RGB space, suitable for the quad pipeline which writes into
-/// the same `Bgra8UnormSrgb` surface as the clear color above.
-///
-/// Alpha is passed through unchanged.
-///
-/// Note: glyphon's text path uses a separate `hex_to_glyphon` helper that
-/// returns sRGB-encoded bytes, because glyphon / cosmic-text's atlas
-/// expects sRGB input — the wgpu surface format performs the sRGB→linear
-/// decode on sample, so glyph colors must NOT be pre-linearized.
-#[doc(hidden)]
-pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
-    let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as usize;
-    if h.len() == 6 {
-        let t = srgb_u8_to_linear_lut();
-        [t[parse(0)], t[parse(2)], t[parse(4)], alpha]
-    } else {
-        [0.0, 0.0, 0.0, alpha]
-    }
-}
-
-/// Atlas dimension to allocate for a given DPI scale. On 2× screens we
-/// roughly double-stack tiles, so a base 2048² atlas isn't enough room
-/// for the same working set. We use `max(2048, base * ceil(scale))` to
-/// keep the 1× footprint unchanged while reserving headroom on Retina.
-pub fn atlas_dim_for_scale(scale_factor: f32) -> u32 {
-    let base = crate::glyph_atlas::ATLAS_DIM;
-    let s = scale_factor.max(1.0).ceil() as u32;
-    base.saturating_mul(s).max(base)
-}
-
-fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f32, f32) {
-    let mut buf = Buffer::new(fs, Metrics::new(size, line_h));
-    buf.set_size(fs, Some(1000.0), Some(1000.0));
-    buf.set_text(fs, "M", &terminal_font_attrs(family), Shaping::Advanced, None);
-    buf.shape_until_scroll(fs, false);
-    let w =
-        buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.w)).unwrap_or(size * 0.6);
-    (w, line_h)
-}
-
-/// Compute the *natural* line height of `family` at `size` (logical px)
-/// using the actual font's intrinsic vertical metrics — `ascent`,
-/// `descent`, and `leading` (a.k.a. `line_gap`) — pulled from the
-/// font's hhea/OS-2 tables via cosmic-text → skrifa.
-///
-/// This is the value WezTerm multiplies by `line_height` to derive its
-/// cell pitch. Sonic prior to this change used `size * line_height`,
-/// which silently dropped the font's intrinsic line gap and produced
-/// cells that were ~88% of WezTerm's at otherwise-identical config
-/// (font_size=14, line_height=1.1 on a typical monospace).
-///
-/// Falls back to `size` if the font can't be resolved (e.g. user
-/// configured a family that isn't installed and we end up on a system
-/// fallback that doesn't shape `"M"`).
-pub fn natural_line_h_px(fs: &mut FontSystem, family: &str, size: f32) -> f32 {
-    let mut buf = Buffer::new(fs, Metrics::new(size, size));
-    buf.set_size(fs, Some(1000.0), Some(1000.0));
-    buf.set_text(fs, "M", &terminal_font_attrs(family), Shaping::Advanced, None);
-    buf.shape_until_scroll(fs, false);
-    let Some(font_id) = buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.font_id))
-    else {
-        return size;
-    };
-    // Default weight is fine — we only need vertical metrics, and these
-    // are essentially weight-invariant for the families we care about.
-    let Some(font) = fs.get_font(font_id, cosmic_text::fontdb::Weight::NORMAL) else {
-        return size;
-    };
-    let m = font.metrics();
-    let upem = f32::from(m.units_per_em).max(1.0);
-    // skrifa's descent is typically negative (below baseline); leading
-    // is the recommended gap between consecutive lines. Sum the
-    // magnitudes — this matches the OpenType "ascent + |descent| +
-    // line_gap" convention WezTerm uses.
-    let natural_units = m.ascent + m.descent.abs() + m.leading;
-    let natural_em = natural_units / upem;
-    (natural_em * size).max(size)
-}
-
-/// Recolor every glyph instance whose center falls inside the cursor
-/// cell to `bg_rgba`. Used to produce the wezterm-style "inverted"
-/// block cursor: the foreground glyph is painted in the theme
-/// background colour so it stays readable on top of the solid
-/// cursor accent quad.
-///
-/// Walks the already-emitted instance list and rewrites their `color`
-/// in place. Glyph rectangles are stored in NDC; we invert the
-/// [`crate::quad::px_to_ndc`] mapping to test cell containment in
-/// pixel space (cleaner than reasoning about NDC sign conventions).
-///
-/// O(N) over visible glyphs, with N being one frame's instance count.
-/// In practice the cursor cell holds one glyph, so this is effectively
-/// a single rewrite per frame.
-/// Push four thin quad rects forming the outline of `(cell_x, cell_y,
-/// cell_w, cell_h)` with thickness `t` in pixels. Used for the
-/// unfocused/inactive hollow cursor — the interior stays empty so the
-/// glyph underneath remains readable.
-#[allow(clippy::too_many_arguments)]
-#[doc(hidden)]
-pub fn push_hollow_rect(
-    quads: &mut Vec<QuadInstance>,
-    cell_x: f32,
-    cell_y: f32,
-    cell_w: f32,
-    cell_h: f32,
-    sw: f32,
-    sh: f32,
-    color: [f32; 4],
-    t: f32,
-) {
-    if sw <= 0.0 || sh <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
-        return;
-    }
-    let t = t.min(cell_w * 0.5).min(cell_h * 0.5);
-    // top
-    quads.push(QuadInstance {
-        rect: px_to_ndc(cell_x, cell_y, cell_w, t, sw, sh),
-        color,
-        ..Default::default()
-    });
-    // bottom
-    quads.push(QuadInstance {
-        rect: px_to_ndc(cell_x, cell_y + cell_h - t, cell_w, t, sw, sh),
-        color,
-        ..Default::default()
-    });
-    // left
-    quads.push(QuadInstance {
-        rect: px_to_ndc(cell_x, cell_y, t, cell_h, sw, sh),
-        color,
-        ..Default::default()
-    });
-    // right
-    quads.push(QuadInstance {
-        rect: px_to_ndc(cell_x + cell_w - t, cell_y, t, cell_h, sw, sh),
-        color,
-        ..Default::default()
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-#[doc(hidden)]
-pub fn recolor_cursor_glyphs(
-    glyphs: &mut [crate::text_pipeline::GlyphInstance],
-    cell_x: f32,
-    cell_y: f32,
-    cell_w: f32,
-    cell_h: f32,
-    sw: f32,
-    sh: f32,
-    bg_rgba: [f32; 4],
-) {
-    if sw <= 0.0 || sh <= 0.0 {
-        return;
-    }
-    let x_min = cell_x;
-    let x_max = cell_x + cell_w;
-    let y_min = cell_y;
-    let y_max = cell_y + cell_h;
-    for g in glyphs.iter_mut() {
-        let [gx, gy, gw, gh] = g.rect;
-        // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
-        // ny encodes the BOTTOM of the rect (after the +nh shift), so
-        // y_top_px = (1 - gy - gh) * sh / 2.
-        let px = (gx + 1.0) * sw * 0.5;
-        let pw = gw * sw * 0.5;
-        let py = (1.0 - gy - gh) * sh * 0.5;
-        let ph = gh * sh * 0.5;
-        let cx = px + pw * 0.5;
-        let cy = py + ph * 0.5;
-        if cx >= x_min && cx < x_max && cy >= y_min && cy < y_max {
-            g.color = bg_rgba;
-        }
-    }
-}
-
-/// Input describing one tab for [`build_tab_title_spans`]: which slot it
-/// occupies, its formatted title, its layout rect's x/width in logical
-/// pixels, and whether it is the active tab.
-#[doc(hidden)]
-pub struct TabSpanInput<'a> {
-    pub index: usize,
-    pub title: &'a str,
-    pub title_x: f32,
-    pub title_w: f32,
-    pub is_active: bool,
-}
-
-/// Build the rich-text title row for the tab bar — one rendered line per
-/// frame — assigning each character a colour: gold (`active_fg`) for the
-/// active tab's full visible region, dim (`inactive_fg`) for every
-/// inactive tab title and every separator. The active tab's region is
-/// padded with trailing spaces out to its full title-rect width so the
-/// colour span covers every character, not just the leading icon /
-/// `#N` digits. Pulled out of the render method so it can be unit-
-/// tested without standing up wgpu / cosmic-text.
-///
-/// Returns `(text, spans)` where each span is `(byte_range, color)`.
-/// Bytes between consecutive spans are filled by the caller with
-/// `inactive_fg`.
-/// Horizontal padding (in logical pixels) reserved on EACH side of a tab's
-/// title region before truncation kicks in. 6px on each side = 12px total
-/// of breathing room, matching the design polish requirement.
-#[doc(hidden)]
-pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
-
-/// Tab-title font size given the body terminal font size, in logical px.
-/// Tab titles render exactly 1.0 pt larger than the body — see PR
-/// "feat(tabbar): centered title with config font, larger size".
-/// Picked the additive `+ 1.0` form over `* 1.0625` because it scales
-/// consistently across user font-size choices (a hard-coded ratio
-/// quickly drifts at extreme sizes: a 10pt body would gain ~0.6pt,
-/// a 24pt body ~1.5pt, neither matching the user's intent of "one
-/// step up").
-#[must_use]
-pub fn tab_title_font_size(body_font_size: f32) -> f32 {
-    body_font_size + 1.0
-}
-
 /// Single source of truth for the [`Attrs`] used by every text-rendering
 /// site (terminal grid, tab titles, command palette, search status bar,
 /// IME pre-edit). Pass the user-configured `font.family` here so all UI
@@ -3358,113 +3003,6 @@ pub fn tab_title_font_size(body_font_size: f32) -> f32 {
 /// every existing `crate::render::terminal_font_attrs` call site keeps
 /// compiling unchanged.
 pub use sonic_text::terminal_font_attrs;
-
-#[doc(hidden)]
-pub struct TabTitleRichTextSpans<'a> {
-    pub spans: Vec<(&'a str, Attrs<'a>)>,
-    pub default_attrs: Attrs<'a>,
-}
-
-#[doc(hidden)]
-#[must_use]
-pub fn build_tab_title_rich_text_spans<'a>(
-    title_text: &'a str,
-    tab_spans: &[(std::ops::Range<usize>, GColor)],
-    font_family: &'a str,
-    inactive_fg: GColor,
-) -> TabTitleRichTextSpans<'a> {
-    let mut spans: Vec<(&str, Attrs<'_>)> = Vec::new();
-    let mut cursor = 0usize;
-    for (range, color) in tab_spans {
-        if range.start > cursor {
-            spans.push((
-                &title_text[cursor..range.start],
-                terminal_font_attrs(font_family).color(inactive_fg),
-            ));
-        }
-        spans.push((
-            &title_text[range.start..range.end],
-            terminal_font_attrs(font_family).color(*color),
-        ));
-        cursor = range.end;
-    }
-    if cursor < title_text.len() {
-        spans.push((&title_text[cursor..], terminal_font_attrs(font_family).color(inactive_fg)));
-    }
-
-    TabTitleRichTextSpans {
-        spans,
-        default_attrs: terminal_font_attrs(font_family).color(inactive_fg),
-    }
-}
-
-#[doc(hidden)]
-pub fn build_tab_title_spans(
-    tabs: &[TabSpanInput<'_>],
-    avg_glyph_w: f32,
-    active_fg: GColor,
-    inactive_fg: GColor,
-) -> (String, Vec<(std::ops::Range<usize>, GColor)>) {
-    let mut title_text = String::new();
-    let mut spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
-    for (i, t) in tabs.iter().enumerate() {
-        let color = if t.is_active { active_fg } else { inactive_fg };
-        // Reserve TAB_TITLE_PADDING_PX on each side before clipping.
-        let usable_w = (t.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
-        let max_chars = ((usable_w / avg_glyph_w).floor() as usize).max(1);
-        let full_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(max_chars);
-
-        // Truncate with `…` if the title overflows usable width.
-        let title_chars: Vec<char> = t.title.chars().collect();
-        let body: String = if title_chars.len() > max_chars {
-            let keep = max_chars.saturating_sub(1);
-            let mut s: String = title_chars.iter().take(keep).collect();
-            s.push('…');
-            s
-        } else {
-            title_chars.iter().collect()
-        };
-        let body_chars = body.chars().count();
-
-        // Centering: text starts at title_x + (title_w - text_w)/2.
-        // For ACTIVE tabs the leading & trailing pad spaces stay INSIDE
-        // the colored span so the active tint covers the full rect
-        // (preserves the pre-centering invariant). For INACTIVE tabs the
-        // leading pad is plain prefix space — no need to tint empty cells.
-        let text_w = body_chars as f32 * avg_glyph_w;
-        let leading_px = t.title_x + ((t.title_w - text_w) / 2.0).max(0.0);
-        let rect_left_col = (t.title_x / avg_glyph_w).floor() as usize;
-        let center_col = (leading_px / avg_glyph_w).floor() as usize;
-        let leading_pad = center_col.saturating_sub(rect_left_col);
-        let trailing_pad = full_chars.saturating_sub(body_chars + leading_pad);
-
-        let (anchor_col, raw) = if t.is_active {
-            let mut s = String::with_capacity(leading_pad + body.len() + trailing_pad);
-            s.extend(std::iter::repeat_n(' ', leading_pad));
-            s.push_str(&body);
-            s.extend(std::iter::repeat_n(' ', trailing_pad));
-            (rect_left_col, s)
-        } else {
-            (center_col, body)
-        };
-
-        while title_text.chars().count() < anchor_col {
-            title_text.push(' ');
-        }
-        // WezTerm-parity separator: the 1px vertical separator between
-        // adjacent INACTIVE tabs is painted by the quad pipeline (see
-        // the `tab_separator` block in `compute_quads`) — we MUST NOT
-        // also inject a `│ ` text glyph here, or the user sees `| │`
-        // doubled between every pair of inactive tabs. The quad alone
-        // is the source of truth for tab separators.
-        let _ = i;
-        let start = title_text.len();
-        title_text.push_str(&raw);
-        let end = title_text.len();
-        spans.push((start..end, color));
-    }
-    (title_text, spans)
-}
 
 /// Colors used when rendering the `+` new-tab button (extracted for testing).
 #[doc(hidden)]
