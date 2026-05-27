@@ -175,17 +175,23 @@ fn tab_min_width_is_at_least_200_px() {
 }
 
 #[test]
-fn tabs_never_shrink_below_min_width_even_when_many() {
-    // Many tabs at a moderate window width: under the old "advisory"
-    // semantics each tab shrank below 100 px and titles ellipsized
-    // to `#1 Administ…`. The bar must now hold the floor.
-    for n in 2..=12 {
+fn tabs_hold_min_width_when_room_allows() {
+    // Common case: 2–4 tabs at a 1000-px window. The equal-share per-tab
+    // width is comfortably ≥ TAB_MIN_WIDTH, so the preferred floor is
+    // honored and titles like `Administrator: cmd.exe` stay readable.
+    //
+    // Under the *soft*-floor semantics (PR #184 follow-up), if too many
+    // tabs would need to shrink below the floor to fit, the floor yields
+    // and the bar shares space evenly — that overflow-avoidance behavior
+    // is exercised separately by `tabbar_view::tab_widths_shrink_when_many_tabs`.
+    for n in 2..=4 {
         let bar = bar_with_active(n, 0);
         let layout = TabBarLayout::compute(&bar, 1000.0);
         for t in &layout.tabs {
             assert!(
                 t.bg.w >= TAB_MIN_WIDTH - 0.01,
-                "n={n}: tab {} width {} fell below TAB_MIN_WIDTH={}",
+                "n={n}: tab {} width {} fell below TAB_MIN_WIDTH={} \
+                 (window has room — floor must hold)",
                 t.index,
                 t.bg.w,
                 TAB_MIN_WIDTH,
