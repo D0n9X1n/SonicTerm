@@ -39,6 +39,8 @@ are procured.
   `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs`.
 - `#158` Extract `sonic-app` — winit ApplicationHandler + menu +
   os_drag + tab_drag + config_watch.
+- `#159` Auto-closed during rebase as scaffolding-only; the accepted
+  app-split content shipped via `#160`.
 - `#160` Split `sonic-app/src/app.rs` into 16 focused modules under
   `app/`: `mod`, `window_event`, `event_loop`, `spawn_pane`,
   `keymap_dispatch`, `key_encoding`, `input`, `redraw`, `overlays`,
@@ -47,6 +49,12 @@ are procured.
 
 ### 🐛 Fixed (correctness)
 
+- `#146` Regression tests cover user-reported palette, prefs, and font
+  bugs so the v1.0 fixes stay pinned.
+- `#149` Auto-closed during rebase; the palette/prefs fix shipped via
+  `#150`.
+- `#150` Palette highlight alignment, prefs blank-on-open, and prefs
+  click-freeze fixes landed together.
 - `#161` (spec) → `#163` (fix) **P0 — per-cell ANSI background colors
   now render.** Before #163, the text pipeline silently dropped the
   `bg` field on its way from `Cell` to glyphon — only fg + attrs
@@ -62,8 +70,15 @@ are procured.
   the last counter it drew and compares against the counter the PTY
   thread bumps, so the second burst can't be lost.
 
+### ⚡ Performance
+
+- `#164` Bypass the vsync gate on PTY bursts so fresh shell output can
+  present immediately; replaces the auto-closed `#162` approach.
+
 ### ✨ Added / changed
 
+- `#147` Auto-closed during rebase; the St Helens font and tab-title
+  config work shipped via `#148`.
 - `#148` Default font switched to **St Helens** (system-installed,
   not bundled). `Rec Mono Casual` remains in `assets/fonts/` as
   guaranteed-present fallback. Override via `[font] family = "..."`
