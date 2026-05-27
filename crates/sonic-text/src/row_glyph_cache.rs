@@ -41,9 +41,9 @@
 //! UV coordinates). Bounding the cache by visible row count keeps the
 //! memory cost trivial.
 
-use crate::text_pipeline::GlyphInstance;
+use crate::GlyphInstance;
 use glyphon::Color as GColor;
-use sonic_core::grid::Cell;
+use sonic_types::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -201,7 +201,7 @@ pub fn row_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sonic_core::grid::Cell;
+    use sonic_types::Cell;
 
     fn cells(n: usize) -> Vec<Cell> {
         (0..n)

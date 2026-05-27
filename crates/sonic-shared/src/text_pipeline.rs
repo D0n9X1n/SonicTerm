@@ -17,28 +17,10 @@ use wgpu::{
     VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
-/// One drawable glyph in NDC space with its atlas UV rect and color.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GlyphInstance {
-    /// `[x, y, w, h]` in NDC (–1..1). `w`/`h` are signed because the
-    /// Y axis flips between screen and NDC.
-    pub rect: [f32; 4],
-    /// `[u0, v0, u1, v1]` normalized atlas coordinates from
-    /// `GlyphInfo::uv`.
-    pub uv: [f32; 4],
-    /// `[r, g, b, a]` foreground color the alpha is modulated by.
-    /// For color glyphs (`flags.x >= 0.5`) this is ignored — the
-    /// fragment shader returns the premultiplied texture sample
-    /// directly so the emoji's own colors come through.
-    pub color: [f32; 4],
-    /// Per-instance flags packed into a vec4 to keep WGSL vertex
-    /// attribute slots simple. `flags.x` is the is-color toggle
-    /// (>= 0.5 → color glyph). The remaining components are reserved
-    /// for future use (e.g. signed-distance-field weight, oblique
-    /// shear) and currently always zero.
-    pub flags: [f32; 4],
-}
+// `GlyphInstance` moved to `sonic-text` (it's a pure bytemuck struct used by
+// the row-glyph cache, which lives below the GPU layer). Re-exported here so
+// `sonic_shared::text_pipeline::GlyphInstance` still resolves.
+pub use sonic_text::GlyphInstance;
 
 /// WGSL for the text pass. The vertex shader builds a quad from a
 /// triangle-strip's vertex_index, mapping (0,1,2,3) -> the four

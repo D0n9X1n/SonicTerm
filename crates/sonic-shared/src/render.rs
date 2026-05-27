@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use sonic_core::{
     grid::{Cell, CellFlags, Color, Grid},
@@ -22,9 +22,10 @@ use wgpu::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
+    atlas_upload::AtlasUpload,
     command_palette::CommandPalette,
     cursor::{self, CursorShape},
-    glyph_atlas::{AtlasUpload, GlyphAtlas},
+    glyph_atlas::GlyphAtlas,
     ime::ImeState,
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
@@ -3346,10 +3347,12 @@ pub fn tab_title_font_size(body_font_size: f32) -> f32 {
 /// chrome shares the EXACT same `Family::Name(...)` as grid cells —
 /// avoiding the historical bug where tab titles silently fell through
 /// to `Family::Monospace` and rendered with a different installed face.
-#[must_use]
-pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
-    Attrs::new().family(Family::Name(family))
-}
+///
+/// The implementation now lives in `sonic-text` so the shape layer can
+/// share it without a back-edge into `sonic-shared`. Re-exported here so
+/// every existing `crate::render::terminal_font_attrs` call site keeps
+/// compiling unchanged.
+pub use sonic_text::terminal_font_attrs;
 
 #[doc(hidden)]
 pub struct TabTitleRichTextSpans<'a> {

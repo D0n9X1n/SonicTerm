@@ -111,7 +111,7 @@ fn no_attrs_new_family_outside_helper() {
     for (path, src) in [
         ("sonic-shared/src/render.rs", include_str!("../src/render.rs")),
         ("sonic-shared/src/tabbar_view.rs", include_str!("../src/tabbar_view.rs")),
-        ("sonic-shared/src/shape.rs", include_str!("../src/shape.rs")),
+        ("sonic-text/src/shape.rs", include_str!("../../sonic-text/src/shape.rs")),
     ] {
         let mut in_helper = false;
         let mut helper_brace_depth = 0i32;

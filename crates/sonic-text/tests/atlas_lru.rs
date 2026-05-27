@@ -1,4 +1,4 @@
-//! LRU eviction tests for `sonic_shared::glyph_atlas::GlyphAtlas`.
+//! LRU eviction tests for `sonic_text::glyph_atlas::GlyphAtlas`.
 //!
 //! These cover the v0.7-era memory-bounding fix: when the shelf packer
 //! reports "full", the atlas must evict the bottom 25% of entries by
@@ -6,8 +6,8 @@
 //! between many fonts/themes used to grow the atlas unboundedly; now
 //! they cycle a fixed working set instead.
 
-use sonic_core::glyph_key::GlyphKey;
-use sonic_shared::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer, SyntheticRasterizer};
+use sonic_types::GlyphKey;
+use sonic_text::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer, SyntheticRasterizer};
 
 fn k(ch: char) -> GlyphKey {
     GlyphKey::new(ch, false, false)

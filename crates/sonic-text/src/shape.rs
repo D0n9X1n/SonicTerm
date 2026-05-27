@@ -50,10 +50,10 @@
 //! is a strict superset of the char-based path.
 
 use cosmic_text::{AttrsList, BufferLine, Ellipsize, Hinting, LineEnding, Shaping, Wrap};
-use sonic_core::grid::{Cell, CellFlags};
+use sonic_types::{Cell, CellFlags};
 
-use crate::render::terminal_font_attrs;
 use crate::swash_rasterizer::SwashRasterizer;
+use crate::terminal_font_attrs;
 
 /// Characters that commonly participate in programming ligatures across
 /// the fonts Sonic ships (Rec Mono Casual, JetBrains Mono). If a run
@@ -463,7 +463,7 @@ impl ShapeCache {
 mod tests {
     use super::*;
     use cosmic_text::FontSystem;
-    use sonic_core::grid::Cell;
+    use sonic_types::Cell;
 
     fn cell(ch: char) -> Cell {
         Cell { ch, ..Cell::default() }

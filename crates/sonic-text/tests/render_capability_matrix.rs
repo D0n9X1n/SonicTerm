@@ -34,8 +34,8 @@
 //!   shipped.
 
 use cosmic_text::FontSystem;
-use sonic_core::glyph_key::GlyphKey;
-use sonic_shared::{
+use sonic_types::GlyphKey;
+use sonic_text::{
     glyph_atlas::GlyphAtlas,
     swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
 };
