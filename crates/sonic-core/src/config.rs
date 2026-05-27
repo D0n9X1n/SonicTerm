@@ -136,10 +136,20 @@ impl Default for Config {
     }
 }
 
+/// Default font family. "St Helens" is the brand default the project ships
+/// with; it is NOT bundled in `assets/fonts/` (no SIL OFL / Apache-licensed
+/// variant is available as of this writing) so end users must install it
+/// system-wide for it to apply. When the family is missing the renderer
+/// falls through to the system mono chain — `JetBrainsMono Nerd Font` is
+/// bundled in `assets/fonts/` and serves as the implicit fallback. Users
+/// can override via `[font] family = "..."` in `sonic.toml` or via the
+/// Font tab of the prefs window.
+pub const DEFAULT_FONT_FAMILY: &str = "St Helens";
+
 impl Default for FontConfig {
     fn default() -> Self {
         // line_height 1.1 matches WezTerm's default (visual-parity target).
-        Self { family: "Rec Mono Casual".to_string(), size: 14.0, line_height: 1.1 }
+        Self { family: DEFAULT_FONT_FAMILY.to_string(), size: 14.0, line_height: 1.1 }
     }
 }
 
