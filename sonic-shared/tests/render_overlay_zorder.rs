@@ -86,18 +86,20 @@ fn overlay_areas_routed_to_overlay_text_renderer() {
 #[test]
 fn overlay_quad_pushes_go_to_overlay_vec_not_main_vec() {
     // The palette / search / IME backgrounds should push into
-    // `quads_overlay`, not `quads`. Spot-check the unique colour
-    // literals used by each overlay so we'd catch a future refactor
-    // that accidentally routed them back through the main vec.
+    // `quads_overlay`, not `quads`. Spot-check distinctive markers
+    // used by each overlay so we'd catch a future refactor that
+    // accidentally routed them back through the main vec.
     let src = fs::read_to_string(RENDER_RS).expect("read render.rs");
 
-    // The palette modal background uses a distinctive RGBA literal
-    // (#10131A at 92%, post-#112 Round 1 redesign).
-    let palette_bg = must_find(&src, "[0.063, 0.075, 0.102, 0.92]");
-    // The IME preedit background uses another distinctive literal.
+    // The palette modal background now sources its color from the
+    // theme-derived UiPalette (`palette_chrome.bg_elevated`), per
+    // PR #119 review fix. Match that marker instead of a hardcoded
+    // RGBA literal.
+    let palette_bg = must_find(&src, "color: palette_chrome.bg_elevated,");
+    // The IME preedit background still uses a distinctive literal.
     let ime_bg = must_find(&src, "[0.10, 0.11, 0.14, 0.95]");
 
-    // Walk backwards from each literal to the nearest `quads*.push(`
+    // Walk backwards from each marker to the nearest `quads*.push(`
     // and assert it is the overlay vec.
     for (label, pos) in [("palette", palette_bg), ("ime", ime_bg)] {
         let prefix = &src[..pos];

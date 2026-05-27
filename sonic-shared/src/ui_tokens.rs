@@ -756,12 +756,7 @@ mod tests {
         let base = color::hex("#1d2021");
         let same = color::hex_with_lightness_delta("#1d2021", 0.0);
         for (i, b) in base.iter().enumerate() {
-            assert!(
-                (b - same[i]).abs() < 1e-3,
-                "channel {i} drifted: base={} same={}",
-                b,
-                same[i]
-            );
+            assert!((b - same[i]).abs() < 1e-3, "channel {i} drifted: base={} same={}", b, same[i]);
         }
     }
 

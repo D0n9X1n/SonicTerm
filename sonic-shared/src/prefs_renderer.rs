@@ -1,3 +1,8 @@
+// Pre-PR-#119 call sites still use the deprecated `color::*` helpers. The
+// theme-driven `UiPalette` (PR #119) is canonical at the entry point; the
+// remaining literal-color sites will be migrated in a follow-up.
+#![allow(deprecated)]
+
 //! GPU renderer for the preferences window — redesigned for issue #112 R2.
 //!
 //! The window paints, top-down:
@@ -146,7 +151,9 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let mut texts: Vec<TextCmd> = Vec::new();
 
     // --- Background ----------------------------------------------------
-    let bg_base = color::BG_BASE();
+    // Per PR #119: chrome derives from the active theme via UiPalette.
+    let palette = crate::ui_tokens::UiPalette::from_theme(theme);
+    let bg_base = palette.bg_base;
 
     // --- Sidebar -------------------------------------------------------
     quads.push(QuadCmd { rect: layout.sidebar, color: color::BG_ELEVATED() });
@@ -833,8 +840,9 @@ mod tests {
     }
 
     fn fresh() -> (PrefsState, Theme) {
-        let s = PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"));
-        (s, make_theme())
+        let theme = make_theme();
+        let s = PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"), theme.clone());
+        (s, theme)
     }
 
     #[test]

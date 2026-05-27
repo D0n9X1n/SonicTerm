@@ -1,4 +1,5 @@
 //! GPU renderer for the terminal grid using wgpu 29 + glyphon 0.11.
+#![allow(deprecated)] // PR #119 deprecated literal `color::*` helpers — one residual site (drop-line indicator) pending migration.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -2055,8 +2056,13 @@ impl GpuRenderer {
         // -------- Command palette overlay ----------------------------------
         let palette_layout = palette.and_then(|p| PaletteLayout::compute(p, sw, sh));
         if let Some(layout) = &palette_layout {
-            // Full-window scrim — #05070D at 28% — sits below the modal
-            // so the underlying terminal recedes visually.
+            // Chrome colors are derived from the active theme so the palette
+            // tracks the user's chosen palette instead of hardcoded
+            // Tokyo Night literals (see UiPalette::from_theme).
+            let palette_chrome = crate::ui_tokens::UiPalette::from_theme(theme);
+            let accent_rgba = palette_chrome.accent;
+            // Full-window scrim — sits below the modal so the underlying
+            // terminal recedes visually.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
                     layout.scrim.x,
@@ -2066,12 +2072,12 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: [0.020, 0.027, 0.051, 0.28],
+                color: palette_chrome.scrim,
                 ..Default::default()
             });
-            // Outer 1px border (white at 10%). Rounded radius 16 per spec
-            // — the border sits 1px outside `bg`, so its radius equals the
-            // panel's plus the border thickness.
+            // Outer 1px border. Rounded radius 16 per spec — the border
+            // sits 1px outside `bg`, so its radius equals the panel's
+            // plus the border thickness.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
                     layout.border.x,
@@ -2081,21 +2087,21 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: [1.0, 1.0, 1.0, 0.10],
+                color: palette_chrome.border_subtle,
                 size_px: [layout.border.w, layout.border.h],
                 radius_px: PALETTE_PANEL_RADIUS + PALETTE_BORDER,
                 ..Default::default()
             });
-            // Modal background — #10131A at 92%. Rounded radius 16 per spec.
+            // Modal background. Rounded radius 16 per spec.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: [0.063, 0.075, 0.102, 0.92],
+                color: palette_chrome.bg_elevated,
                 size_px: [layout.bg.w, layout.bg.h],
                 radius_px: PALETTE_PANEL_RADIUS,
                 ..Default::default()
             });
-            // Query field background — #0B0E14 at 72%. Slightly smaller
-            // radius than the panel reads as nested chrome.
+            // Query field background. Slightly smaller radius than the
+            // panel reads as nested chrome.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
                     layout.query_row.x,
@@ -2105,40 +2111,40 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: [0.043, 0.055, 0.078, 0.72],
+                color: palette_chrome.bg_base,
                 size_px: [layout.query_row.w, layout.query_row.h],
                 radius_px: PALETTE_QUERY_RADIUS,
                 ..Default::default()
             });
-            // Selected row highlight — #7AA2F7 at 16%. Small radius (6).
+            // Selected row highlight — theme accent at low alpha.
             if let Some(sel) = layout.selected_row {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
-                        color: [0.478, 0.635, 0.969, 0.16],
+                        color: [accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16],
                         size_px: [row.rect.w, row.rect.h],
                         radius_px: PALETTE_ROW_RADIUS,
                         ..Default::default()
                     });
                 }
             }
-            // Selected row left accent strip — #7AA2F7 100%. 3px wide,
-            // rounded with a 1.5px radius so it reads as a pill.
+            // Selected row left accent strip — full-opacity theme accent.
+            // 3px wide, rounded with a 1.5px radius so it reads as a pill.
             if let Some(accent) = &layout.selected_accent {
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(accent.x, accent.y, accent.w, accent.h, sw, sh),
-                    color: [0.478, 0.635, 0.969, 1.0],
+                    color: accent_rgba,
                     size_px: [accent.w, accent.h],
                     radius_px: accent.w * 0.5,
                     ..Default::default()
                 });
             }
-            // Footer top border — #FFFFFF at 7% — 1px line at the top edge
-            // of the footer rect. Kept sharp; a 1px hairline doesn't
-            // benefit from SDF rounding.
+            // Footer top border — 1px line at the top edge of the footer
+            // rect. Kept sharp; a 1px hairline doesn't benefit from
+            // SDF rounding.
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
-                color: [1.0, 1.0, 1.0, 0.07],
+                color: palette_chrome.border_subtle,
                 ..Default::default()
             });
             // Shape the query row text. The renderer paints either the
@@ -2194,7 +2200,7 @@ impl GpuRenderer {
             self.palette_footer_buffer.set_text(
                 &mut self.font_system,
                 &layout.footer_label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
