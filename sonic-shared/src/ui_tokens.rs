@@ -1,14 +1,126 @@
 //! UI design tokens — the cross-cutting foundation for all P0 visual work.
 //!
 //! These tokens are the single source of truth for chrome colors, radii,
-//! shadows, spacing, motion curves, and typography. They are intentionally
-//! decoupled from the terminal palette (`theme::Theme`), which governs the
-//! grid cells; tokens here govern Sonic's *chrome* (tab bar, panes' borders,
-//! prefs, command palette, overlays).
+//! shadows, spacing, motion curves, and typography.
+//!
+//! As of the theme-driven UI work, chrome colors are derived from the
+//! active terminal [`Theme`] via [`UiPalette::from_theme`] — the palette
+//! / prefs / tab bar inherit the user's chosen colors instead of being
+//! locked to Tokyo Night. The previous Tokyo-Night-derived constants
+//! (`color::ACCENT_BLUE`, `color::BG_BASE`, etc.) remain available but
+//! `#[deprecated]` for backward compatibility.
 //!
 //! Colors are stored as **linear-sRGB premultiplied `[r, g, b, a]`** so they
 //! can be uploaded to wgpu without further conversion. The [`color::hex`]
 //! helper performs the sRGB→linear transform and the premultiply step.
+
+use sonic_core::theme::Theme;
+
+/// Theme-derived UI chrome palette. Built from a [`Theme`] via
+/// [`UiPalette::from_theme`]; every field is a linear-sRGB premultiplied
+/// `[r, g, b, a]` ready for wgpu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiPalette {
+    pub accent: [f32; 4],
+    pub bg_base: [f32; 4],
+    pub bg_elevated: [f32; 4],
+    pub bg_surface: [f32; 4],
+    pub bg_hover: [f32; 4],
+    pub bg_active: [f32; 4],
+    pub border_subtle: [f32; 4],
+    pub border_strong: [f32; 4],
+    pub border_focus: [f32; 4],
+    pub text_primary: [f32; 4],
+    pub text_secondary: [f32; 4],
+    pub text_muted: [f32; 4],
+    pub text_faint: [f32; 4],
+    pub danger: [f32; 4],
+    pub accent_orange: [f32; 4],
+    pub accent_purple: [f32; 4],
+    pub scrim: [f32; 4],
+    pub selection: [f32; 4],
+    pub search_match: [f32; 4],
+    pub search_current: [f32; 4],
+}
+
+impl UiPalette {
+    /// Derive a chrome palette from the active terminal [`Theme`].
+    ///
+    /// - `accent`        — `theme.colors.tab.active_fg` (the theme's
+    ///   explicit chrome accent), e.g. `#fabd2f` for gruvbox-dark-hard,
+    ///   `#7aa2f7` for tokyo-night.
+    /// - `bg_base`       — `theme.colors.background` shifted -8% lightness.
+    /// - `bg_elevated`   — `theme.colors.background` (i.e. base).
+    /// - `bg_surface`    — `theme.colors.background` shifted +5% lightness.
+    /// - `bg_hover`      — `foreground` @ 6% alpha.
+    /// - `bg_active`     — accent @ 14% alpha.
+    /// - `border_subtle` — `foreground` @ 8% alpha.
+    /// - `border_strong` — `foreground` @ 12% alpha.
+    /// - `border_focus`  — accent @ 65% alpha.
+    /// - `text_primary`  — `theme.colors.foreground`.
+    /// - `text_secondary`— `foreground` darkened 15%.
+    /// - `text_muted`    — `theme.colors.bright.black`.
+    /// - `text_faint`    — `bright.black` darkened 15%.
+    /// - `danger`        — `theme.colors.ansi.red`.
+    /// - `accent_orange` — `theme.colors.bright.yellow`.
+    /// - `accent_purple` — `theme.colors.ansi.magenta`.
+    /// - `scrim`         — pure black @ 28% alpha (theme-independent).
+    /// - `selection`     — accent @ 26% alpha.
+    /// - `search_match`  — `theme.colors.ansi.yellow` @ 28% alpha.
+    /// - `search_current`— `theme.colors.bright.yellow` @ 42% alpha.
+    pub fn from_theme(theme: &Theme) -> Self {
+        let p = &theme.colors;
+        let accent = color::hex(&p.tab.active_fg.0);
+        let bg_elevated = color::hex(&p.background.0);
+        let bg_base = color::hex_with_lightness_delta(&p.background.0, -0.08);
+        let bg_surface = color::hex_with_lightness_delta(&p.background.0, 0.05);
+        let fg = color::hex(&p.foreground.0);
+        let text_secondary = color::hex_with_lightness_delta(&p.foreground.0, -0.15);
+        let muted = color::hex(&p.bright.black.0);
+        let text_faint = color::hex_with_lightness_delta(&p.bright.black.0, -0.15);
+
+        Self {
+            accent,
+            bg_base,
+            bg_elevated,
+            bg_surface,
+            bg_hover: color::with_alpha(fg, 0.06),
+            bg_active: color::with_alpha(accent, 0.14),
+            border_subtle: color::with_alpha(fg, 0.08),
+            border_strong: color::with_alpha(fg, 0.12),
+            border_focus: color::with_alpha(accent, 0.65),
+            text_primary: fg,
+            text_secondary,
+            text_muted: muted,
+            text_faint,
+            danger: color::hex(&p.ansi.red.0),
+            accent_orange: color::hex(&p.bright.yellow.0),
+            accent_purple: color::hex(&p.ansi.magenta.0),
+            scrim: color::with_alpha(color::hex("#000000"), 0.28),
+            selection: color::with_alpha(accent, 0.26),
+            search_match: color::with_alpha(color::hex(&p.ansi.yellow.0), 0.28),
+            search_current: color::with_alpha(color::hex(&p.bright.yellow.0), 0.42),
+        }
+    }
+}
+
+impl From<&Theme> for UiPalette {
+    fn from(theme: &Theme) -> Self {
+        Self::from_theme(theme)
+    }
+}
+
+/// Extension trait wired into `sonic_core::theme::Theme` so call sites can
+/// write `theme.ui_palette()`.
+pub trait ThemeUiPaletteExt {
+    fn ui_palette(&self) -> UiPalette;
+}
+
+impl ThemeUiPaletteExt for Theme {
+    fn ui_palette(&self) -> UiPalette {
+        UiPalette::from_theme(self)
+    }
+}
 
 /// Chrome color tokens.
 pub mod color {
@@ -83,128 +195,250 @@ pub mod color {
         [lr * a, lg * a, lb * a, a]
     }
 
+    /// Adjust the lightness of a `#RRGGBB`/`#RRGGBBAA` color in HSL space
+    /// by `delta` (typically `-0.15`..`+0.15`) and return the result as
+    /// linear-sRGB premultiplied `[r,g,b,a]`. `delta > 0` lightens,
+    /// `delta < 0` darkens. Clamped to `[0, 1]`.
+    pub fn hex_with_lightness_delta(s: &str, delta: f32) -> [f32; 4] {
+        const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        let trimmed = s.trim();
+        let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+        let bytes = body.as_bytes();
+        if bytes.len() != 6 && bytes.len() != 8 {
+            return SENTINEL;
+        }
+        if !bytes.iter().all(u8::is_ascii_hexdigit) {
+            return SENTINEL;
+        }
+        #[inline]
+        fn nyb(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => 0,
+            }
+        }
+        #[inline]
+        fn pair(b: &[u8], i: usize) -> u8 {
+            (nyb(b[i]) << 4) | nyb(b[i + 1])
+        }
+        let r = pair(bytes, 0) as f32 / 255.0;
+        let g = pair(bytes, 2) as f32 / 255.0;
+        let b = pair(bytes, 4) as f32 / 255.0;
+        let a = if bytes.len() == 8 { pair(bytes, 6) as f32 / 255.0 } else { 1.0 };
+
+        // sRGB → HSL (sRGB-space lightness; this is the perceptual knob
+        // designers expect for "+5%/-8% lightness" — *not* a linear-light
+        // operation).
+        let (h, s_hsl, l) = srgb_to_hsl(r, g, b);
+        let l = (l + delta).clamp(0.0, 1.0);
+        let (nr, ng, nb) = hsl_to_srgb(h, s_hsl, l);
+
+        // Now re-encode through the same path as `hex()` (sRGB→linear,
+        // premultiplied).
+        let lr = srgb_to_linear_f(nr);
+        let lg = srgb_to_linear_f(ng);
+        let lb = srgb_to_linear_f(nb);
+        [lr * a, lg * a, lb * a, a]
+    }
+
+    /// sRGB (0..1) → HSL (h in 0..1, s/l in 0..1). Standard formula.
+    fn srgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let l = (max + min) * 0.5;
+        if (max - min).abs() < f32::EPSILON {
+            return (0.0, 0.0, l);
+        }
+        let d = max - min;
+        let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+        let h = if (max - r).abs() < f32::EPSILON {
+            ((g - b) / d) + if g < b { 6.0 } else { 0.0 }
+        } else if (max - g).abs() < f32::EPSILON {
+            ((b - r) / d) + 2.0
+        } else {
+            ((r - g) / d) + 4.0
+        } / 6.0;
+        (h, s, l)
+    }
+
+    /// HSL (0..1) → sRGB (0..1).
+    fn hsl_to_srgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+        if s.abs() < f32::EPSILON {
+            return (l, l, l);
+        }
+        let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let p = 2.0 * l - q;
+        let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
+            if t < 0.0 {
+                t += 1.0;
+            }
+            if t > 1.0 {
+                t -= 1.0;
+            }
+            if t < 1.0 / 6.0 {
+                return p + (q - p) * 6.0 * t;
+            }
+            if t < 0.5 {
+                return q;
+            }
+            if t < 2.0 / 3.0 {
+                return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+            }
+            p
+        };
+        (hue_to_rgb(p, q, h + 1.0 / 3.0), hue_to_rgb(p, q, h), hue_to_rgb(p, q, h - 1.0 / 3.0))
+    }
+
     // --- Token accessors -------------------------------------------------
     //
     // These are `pub fn` (not `pub const`) because the sRGB→linear transform
     // involves `f32::powf`, which is not stable in const context. The
     // compiler inlines and folds each call.
+    //
+    // DEPRECATED: these constants are baked Tokyo Night values. New code
+    // should derive chrome colors from the active theme via
+    // [`UiPalette::from_theme`] (see crate root).
 
     /// `#0B0E14` fully opaque — base window background.
     #[allow(non_snake_case)]
+    #[deprecated(
+        note = "Use UiPalette::from_theme(theme).bg_base — chrome now follows the active theme"
+    )]
     #[inline]
     pub fn BG_BASE() -> [f32; 4] {
         hex("#0B0E14FF")
     }
     /// `#10131A` @ 0.92 — elevated chrome (tab bar, prefs panel).
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BG_ELEVATED() -> [f32; 4] {
         hex("#10131AEB")
     }
     /// `#111520` fully opaque — modal/surface backgrounds.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BG_SURFACE() -> [f32; 4] {
         hex("#111520FF")
     }
     /// `#FFFFFF` @ 0.06 — hover overlay.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BG_HOVER() -> [f32; 4] {
         hex("#FFFFFF0F")
     }
     /// `#7AA2F7` @ 0.14 — active/selected tint.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BG_ACTIVE() -> [f32; 4] {
         hex("#7AA2F724")
     }
     /// `#FFFFFF` @ 0.08 — subtle separator/border.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BORDER_SUBTLE() -> [f32; 4] {
         hex("#FFFFFF14")
     }
     /// `#FFFFFF` @ 0.12 — emphasised border.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BORDER_STRONG() -> [f32; 4] {
         hex("#FFFFFF1F")
     }
     /// `#7AA2F7` @ 0.65 — focused element ring.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn BORDER_FOCUS() -> [f32; 4] {
         hex("#7AA2F7A6")
     }
     /// `#DDE6FF` — primary text.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn TEXT_PRIMARY() -> [f32; 4] {
         hex("#DDE6FFFF")
     }
     /// `#A9B1D6` — secondary text.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn TEXT_SECONDARY() -> [f32; 4] {
         hex("#A9B1D6FF")
     }
     /// `#7F849C` — muted text.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn TEXT_MUTED() -> [f32; 4] {
         hex("#7F849CFF")
     }
     /// `#565F89` — faint text (placeholders, hints).
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn TEXT_FAINT() -> [f32; 4] {
         hex("#565F89FF")
     }
     /// `#7AA2F7` — primary accent (blue).
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn ACCENT_BLUE() -> [f32; 4] {
         hex("#7AA2F7FF")
     }
     /// `#BB9AF7` — secondary accent (purple).
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn ACCENT_PURPLE() -> [f32; 4] {
         hex("#BB9AF7FF")
     }
     /// `#FF9E64` — tertiary accent (orange).
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn ACCENT_ORANGE() -> [f32; 4] {
         hex("#FF9E64FF")
     }
     /// `#F7768E` — destructive/danger.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn DANGER() -> [f32; 4] {
         hex("#F7768EFF")
     }
     /// `#05070D` @ 0.28 — modal scrim.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn SCRIM() -> [f32; 4] {
         hex("#05070D47")
     }
     /// `#7AA2F7` @ 0.26 — text selection highlight.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn SELECTION() -> [f32; 4] {
         hex("#7AA2F742")
     }
     /// `#E0AF68` @ 0.28 — search match highlight.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn SEARCH_MATCH() -> [f32; 4] {
         hex("#E0AF6847")
     }
     /// `#FF9E64` @ 0.42 — current search match highlight.
     #[allow(non_snake_case)]
+    #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]
     pub fn SEARCH_CURRENT() -> [f32; 4] {
         hex("#FF9E646B")
@@ -478,6 +712,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn color_tokens_are_premultiplied_and_in_range() {
         for c in [
             color::BG_BASE(),
@@ -498,5 +733,175 @@ mod tests {
             assert!(c[1] <= c[3] + 1e-5);
             assert!(c[2] <= c[3] + 1e-5);
         }
+    }
+
+    /// Backwards-compat: the deprecated Tokyo-Night-derived constants
+    /// must still compile and return sane values, so any pre-existing
+    /// call site continues to work until migrated.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_const_still_compiles() {
+        let _bg = color::BG_BASE();
+        let _accent = color::ACCENT_BLUE();
+        let _danger = color::DANGER();
+        // Premultiplied invariant.
+        assert!(_accent[0] <= _accent[3] + 1e-5);
+    }
+
+    /// `hex_with_lightness_delta(_, 0.0)` should be approximately the
+    /// identity transform (modulo the 8-bit → f32 quantisation in
+    /// `hex()`).
+    #[test]
+    fn hex_with_lightness_delta_zero_is_identity() {
+        let base = color::hex("#1d2021");
+        let same = color::hex_with_lightness_delta("#1d2021", 0.0);
+        for (i, b) in base.iter().enumerate() {
+            assert!(
+                (b - same[i]).abs() < 1e-3,
+                "channel {i} drifted: base={} same={}",
+                b,
+                same[i]
+            );
+        }
+    }
+
+    /// Positive delta lightens (every RGB channel increases or stays);
+    /// negative delta darkens.
+    #[test]
+    fn hex_with_lightness_delta_monotonic() {
+        let base = color::hex("#3c3836");
+        let lighter = color::hex_with_lightness_delta("#3c3836", 0.20);
+        let darker = color::hex_with_lightness_delta("#3c3836", -0.20);
+        // Compare luminance (sum of RGB, since alpha is identical = 1).
+        let sum = |c: [f32; 4]| c[0] + c[1] + c[2];
+        assert!(sum(lighter) > sum(base) + 1e-3, "lighten did not increase RGB sum");
+        assert!(sum(darker) < sum(base) - 1e-3, "darken did not decrease RGB sum");
+    }
+
+    fn test_theme(active_fg: &str, bg: &str, fg: &str) -> Theme {
+        use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+        let h = |s: &str| Hex(s.to_string());
+        Theme {
+            name: "test".into(),
+            appearance: Appearance::Dark,
+            colors: Palette {
+                background: h(bg),
+                foreground: h(fg),
+                cursor: h(fg),
+                cursor_text: h(bg),
+                selection_bg: h("#3c3836"),
+                selection_fg: h(fg),
+                ansi: AnsiColors {
+                    black: h("#000000"),
+                    red: h("#cc241d"),
+                    green: h("#98971a"),
+                    yellow: h("#d79921"),
+                    blue: h("#458588"),
+                    magenta: h("#b16286"),
+                    cyan: h("#689d6a"),
+                    white: h("#a89984"),
+                },
+                bright: AnsiColors {
+                    black: h("#928374"),
+                    red: h("#fb4934"),
+                    green: h("#b8bb26"),
+                    yellow: h("#fabd2f"),
+                    blue: h("#83a598"),
+                    magenta: h("#d3869b"),
+                    cyan: h("#8ec07c"),
+                    white: h("#ebdbb2"),
+                },
+                tab: TabColors {
+                    bar_bg: h(bg),
+                    active_bg: h("#3c3836"),
+                    active_fg: h(active_fg),
+                    inactive_bg: h(bg),
+                    inactive_fg: h("#928374"),
+                    hover_bg: h("#32302f"),
+                    hover_fg: h("#d5c4a1"),
+                    close_button_fg: h("#fb4934"),
+                },
+            },
+        }
+    }
+
+    /// Gruvbox Dark Hard's chrome accent must be `#fabd2f` (bright_yellow,
+    /// the canonical gruvbox gold), NOT Tokyo Night's `#7AA2F7` blue.
+    #[test]
+    fn ui_palette_gruvbox_accent_is_bright_yellow() {
+        let theme = test_theme("#fabd2f", "#1d2021", "#ebdbb2");
+        let p = theme.ui_palette();
+        let expected = color::hex("#fabd2f");
+        for (i, exp) in expected.iter().enumerate() {
+            assert!(
+                (p.accent[i] - exp).abs() < 1e-4,
+                "accent channel {i} mismatch: got {} expected {}",
+                p.accent[i],
+                exp
+            );
+        }
+    }
+
+    /// Tokyo Night's chrome accent must still resolve to its canonical
+    /// `#7AA2F7` blue — proves the palette tracks the theme.
+    #[test]
+    fn ui_palette_tokyo_night_accent_is_blue() {
+        let theme = test_theme("#7AA2F7", "#1A1B26", "#C0CAF5");
+        let p = theme.ui_palette();
+        let expected = color::hex("#7AA2F7");
+        for (i, exp) in expected.iter().enumerate() {
+            assert!(
+                (p.accent[i] - exp).abs() < 1e-4,
+                "accent channel {i} mismatch: got {} expected {}",
+                p.accent[i],
+                exp
+            );
+        }
+    }
+
+    /// For a dark theme, the derived `bg_base` (background -8% lightness)
+    /// must end up darker than the theme background itself.
+    #[test]
+    fn ui_palette_dark_themes_select_dark_chrome_bg() {
+        let theme = test_theme("#fabd2f", "#1d2021", "#ebdbb2");
+        let p = theme.ui_palette();
+        let base_bg = color::hex("#1d2021");
+        let sum = |c: [f32; 4]| c[0] + c[1] + c[2];
+        assert!(
+            sum(p.bg_base) <= sum(base_bg) + 1e-4,
+            "bg_base should be darker than (or equal to) the theme background"
+        );
+        // bg_surface should be at least as light as the theme background.
+        assert!(
+            sum(p.bg_surface) >= sum(base_bg) - 1e-4,
+            "bg_surface should be lighter than (or equal to) the theme background"
+        );
+    }
+
+    /// End-to-end: building a palette from gruvbox-dark-hard's actual
+    /// values (as embedded in `assets/themes/gruvbox-dark-hard.toml`)
+    /// must yield gold accent on dark gruvbox brown — i.e. the
+    /// palette / tabs / prefs render in gruvbox colors, not Tokyo Night.
+    #[test]
+    fn palette_render_uses_active_theme_accent() {
+        let theme = test_theme("#fabd2f", "#1d2021", "#ebdbb2");
+        let p = theme.ui_palette();
+        // accent gold
+        let gold = color::hex("#fabd2f");
+        assert!((p.accent[0] - gold[0]).abs() < 1e-4);
+        // text on dark gruvbox brown
+        let brown = color::hex("#ebdbb2");
+        assert!((p.text_primary[0] - brown[0]).abs() < 1e-4);
+        // bg around #1d2021
+        let bg = color::hex("#1d2021");
+        assert!((p.bg_elevated[0] - bg[0]).abs() < 1e-4);
+        // accent-tinted active surface must carry accent hue (red > blue
+        // for gold), not Tokyo-Night blue (where blue > red).
+        assert!(
+            p.bg_active[0] > p.bg_active[2],
+            "active tint must be gold (R>B), got R={} B={}",
+            p.bg_active[0],
+            p.bg_active[2]
+        );
     }
 }

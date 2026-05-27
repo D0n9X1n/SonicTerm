@@ -33,7 +33,7 @@ pub enum PrefsHit {
 /// Pre-canned theme list shown in the Appearance picker. Matches the
 /// themes bundled under `assets/themes/`.
 pub const KNOWN_THEMES: &[&str] =
-    &["wezterm", "gruvbox-dark-hard", "tokyo-night", "dracula", "nord", "catppuccin-mocha"];
+    &["gruvbox-dark-hard", "wezterm", "tokyo-night", "dracula", "nord", "catppuccin-mocha"];
 
 /// Pre-canned keymaps shown in the Keymap picker.
 pub const KNOWN_KEYMAPS: &[&str] = &["wezterm"];
