@@ -16,7 +16,7 @@ use sonic_shared::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
 /// borrows from it.
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     let entries =
         std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read assets/fonts ({dir:?}): {e}"));
     let mut loaded = 0;

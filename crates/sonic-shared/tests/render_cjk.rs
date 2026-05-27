@@ -32,7 +32,7 @@ use sonic_shared::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
 fn font_system_with_bundled_and_system() -> FontSystem {
     // `FontSystem::new()` already loads OS font sources on Mac/Win.
     let mut fs = FontSystem::new();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             let p = e.path();

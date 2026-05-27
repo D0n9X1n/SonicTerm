@@ -27,9 +27,9 @@ use unic_langid::{langid, LanguageIdentifier};
 
 type Bundle = FluentBundle<FluentResource, IntlLangMemoizer>;
 
-const EN_FTL: &str = include_str!("../../assets/i18n/en/messages.ftl");
-const ZH_CN_FTL: &str = include_str!("../../assets/i18n/zh-CN/messages.ftl");
-const JA_FTL: &str = include_str!("../../assets/i18n/ja/messages.ftl");
+const EN_FTL: &str = include_str!("../../../assets/i18n/en/messages.ftl");
+const ZH_CN_FTL: &str = include_str!("../../../assets/i18n/zh-CN/messages.ftl");
+const JA_FTL: &str = include_str!("../../../assets/i18n/ja/messages.ftl");
 
 /// The locales we ship FTL bundles for. Anything else negotiates to one of
 /// these (or falls back to English).

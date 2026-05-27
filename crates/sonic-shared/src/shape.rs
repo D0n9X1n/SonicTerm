@@ -471,7 +471,7 @@ mod tests {
 
     fn font_system_with_assets() -> FontSystem {
         let mut fs = FontSystem::new();
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let p = e.path();

@@ -3579,7 +3579,8 @@ fn load_bundled_fonts(fs: &mut FontSystem) {
             }
         }
     }
-    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts"));
+    candidates
+        .push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
 
     for dir in candidates {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };

@@ -33,7 +33,7 @@ use sonic_shared::{
 /// tests — keeps font-resolution behavior identical across the three.
 fn font_system() -> FontSystem {
     let mut fs = FontSystem::new();
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
         let p = e.path();
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());

@@ -58,5 +58,5 @@ pub fn asset_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
 }
