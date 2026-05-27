@@ -36,6 +36,7 @@ pollster.workspace = true
 arboard.workspace = true
 regex = { workspace = true }
 notify.workspace = true
+lru = "0.12"
 fluent-bundle = "0.15"
 fluent-langneg = "0.13"
 unic-langid = { version = "0.9", features = ["macros"] }
