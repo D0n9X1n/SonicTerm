@@ -649,3 +649,59 @@ fn zwj_codepoints_are_retained_as_cell_extras() {
         .sum();
     assert_eq!(zwjs, 2, "expected two ZWJ joiners attached as cell extras");
 }
+
+#[test]
+fn scroll_up_preserves_row_content_after_rotation() {
+    // VecDeque ring-rotation should be byte-identical to the old
+    // memmove implementation: row k after `scroll_up(n)` must equal
+    // row k+n before, for k+n < rows. The freshly-introduced bottom
+    // row(s) must be blank.
+    use sonic_core::grid::{CellFlags, Color, Grid};
+    let mut g = Grid::new(8, 5);
+    // Fill each row with a distinct letter so we can tell them apart.
+    for r in 0..5u16 {
+        g.goto(r, 0);
+        let ch = (b'A' + r as u8) as char;
+        for _ in 0..3 {
+            g.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    g.scroll_up(2);
+    // Row 0 was 'A', row 1 'B' → after scroll_up(2) row 0 should be 'C'.
+    assert_eq!(g.row(0)[0].ch, 'C');
+    assert_eq!(g.row(1)[0].ch, 'D');
+    assert_eq!(g.row(2)[0].ch, 'E');
+    // Bottom two rows are freshly blank.
+    assert_eq!(g.row(3)[0].ch, ' ');
+    assert_eq!(g.row(4)[0].ch, ' ');
+    // Popped rows landed in scrollback in order.
+    assert_eq!(g.scrollback_len(), 2);
+    assert_eq!(g.scrollback_row(0).unwrap()[0].ch, 'A');
+    assert_eq!(g.scrollback_row(1).unwrap()[0].ch, 'B');
+}
+
+#[test]
+fn scroll_up_recycles_oldest_scrollback_row_at_limit() {
+    // Once scrollback is at the limit, a further scroll should evict
+    // the oldest row AND reuse its buffer (no allocation, no row leak).
+    use sonic_core::grid::{CellFlags, Color, Grid};
+    let mut g = Grid::new(4, 3);
+    g.set_scrollback_limit(2);
+    for tag in [b'A', b'B', b'C', b'D', b'E'] {
+        g.goto(0, 0);
+        for _ in 0..2 {
+            g.put_char(tag as char, Color::Default, Color::Default, CellFlags::empty());
+        }
+        g.scroll_up(1);
+    }
+    // Limit is 2 — only the two newest scrollback entries survive.
+    assert_eq!(g.scrollback_len(), 2);
+    assert_eq!(g.scrollback_row(0).unwrap()[0].ch, 'D');
+    assert_eq!(g.scrollback_row(1).unwrap()[0].ch, 'E');
+    // The new blank row at the bottom is fully cleared (recycled
+    // buffer must not leak old 'A' cells).
+    let bottom = g.row(g.rows.saturating_sub(1));
+    for c in bottom {
+        assert_eq!(c.ch, ' ');
+    }
+}

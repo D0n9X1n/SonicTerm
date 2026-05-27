@@ -110,7 +110,14 @@ pub struct Grid {
     pub cols: u16,
     pub rows: u16,
     /// Visible region: `rows` rows of `cols` cells.
-    visible: Vec<Row>,
+    ///
+    /// `VecDeque` (rather than `Vec`) so that `scroll_up`/`scroll_down`
+    /// are O(1) amortized — a single `pop_front` + `push_back` rotates
+    /// the ring-buffer head rather than memmove-ing every row. At 200×
+    /// rows this turns a 200-row × N-cell memcpy into a pointer bump.
+    /// The indexing API is unchanged: `VecDeque` implements `Index<usize>`
+    /// and `IntoIterator`, so all existing callers compile untouched.
+    visible: VecDeque<Row>,
     /// Scrollback buffer (oldest at front).
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
@@ -259,8 +266,10 @@ impl Grid {
         }
         let cols = self.cols;
         let rows = self.rows;
-        let saved_visible =
-            std::mem::replace(&mut self.visible, (0..rows).map(|_| make_row(cols)).collect());
+        let saved_visible = std::mem::replace(
+            &mut self.visible,
+            (0..rows).map(|_| make_row(cols)).collect::<VecDeque<_>>(),
+        );
         let saved_scrollback = std::mem::take(&mut self.scrollback);
         let saved_cursor = self.cursor;
         self.cursor = Pos::default();
@@ -300,7 +309,7 @@ impl Grid {
             }
             if (rows as usize) > self.visible.len() {
                 while self.visible.len() < rows as usize {
-                    self.visible.push(make_row(cols));
+                    self.visible.push_back(make_row(cols));
                 }
             } else {
                 self.visible.truncate(rows as usize);
@@ -322,7 +331,7 @@ impl Grid {
         }
         if rows > self.rows {
             for _ in self.rows..rows {
-                self.visible.push(make_row(cols));
+                self.visible.push_back(make_row(cols));
             }
         } else {
             self.visible.truncate(rows as usize);
@@ -511,17 +520,49 @@ impl Grid {
 
     /// Scroll the visible region up by `n` lines, pushing the topmost rows
     /// into scrollback.
+    ///
+    /// This is O(n) in `n` (the number of lines scrolled) rather than
+    /// O(rows × cols) — a `pop_front` rotates the `VecDeque`'s ring head
+    /// rather than memmove-ing every row down by one. The popped row is
+    /// recycled in place: its cells are reset to `Cell::default()` and the
+    /// row buffer is pushed onto the back of the deque, avoiding a
+    /// per-scroll allocation for the new blank row.
     pub fn scroll_up(&mut self, n: u16) {
+        let cols = self.cols as usize;
         for _ in 0..n {
-            let row = self.visible.remove(0);
-            if self.scrollback.len() == self.scrollback_limit {
-                self.scrollback.pop_front();
+            let Some(mut row) = self.visible.pop_front() else {
+                break;
+            };
+            if self.scrollback_limit == 0 {
+                // Scrollback disabled — recycle the row straight back as
+                // the new blank line.
+                for cell in row.iter_mut() {
+                    *cell = Cell::default();
+                }
+                row.resize(cols, Cell::default());
+                self.visible.push_back(row);
+                continue;
             }
-            self.scrollback.push_back(row);
-            self.visible.push(make_row(self.cols));
+            if self.scrollback.len() == self.scrollback_limit {
+                // Reuse the oldest scrollback row as the new blank line
+                // (avoids both an allocation and a free).
+                let mut recycled = self.scrollback.pop_front().unwrap();
+                for cell in recycled.iter_mut() {
+                    *cell = Cell::default();
+                }
+                recycled.resize(cols, Cell::default());
+                self.scrollback.push_back(row);
+                self.visible.push_back(recycled);
+            } else {
+                self.scrollback.push_back(row);
+                self.visible.push_back(make_row(self.cols));
+            }
         }
         // Every row's content shifted up — the entire visible region
-        // changed identity, so every cached span set is stale.
+        // changed identity, so every cached span set is stale. The dirty
+        // bitset is keyed on visible-row index (0..rows), not by row
+        // identity, so a full mark_all is the simplest correct option
+        // and costs nothing at terminal row counts (~40).
         self.mark_all();
         self.bump();
     }
