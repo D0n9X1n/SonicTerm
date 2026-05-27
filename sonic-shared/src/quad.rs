@@ -101,7 +101,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let q = abs(in.local) - (half_size - vec2<f32>(r, r));
     let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
     // 1-pixel antialias band: alpha = 1 inside, 0 outside, smooth in between.
-    let aa = clamp(0.5 - d, 0.0, 1.0);
+    let w = fwidth(d);
+    let aa = 1.0 - smoothstep(-w, w, d);
     return vec4<f32>(in.color.rgb, in.color.a * aa);
 }
 "#;
