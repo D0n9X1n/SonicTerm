@@ -139,33 +139,32 @@ fn second_get_after_insert_does_not_call_rasterizer() {
 
 #[test]
 fn atlas_full_returns_none_gracefully() {
-    // Tiny atlas: 16x16. Synthetic tiles are >= 8x8. ~4 tiles max.
+    // With LRU eviction (added v0.7) a tiny atlas now recycles cold
+    // slots when full, so a 26-char sweep that used to overflow now
+    // succeeds — each new insert evicts the coldest 25%. To prove the
+    // legacy "None on overflow" path still works, we rasterize a tile
+    // LARGER than the atlas itself, which neither packing nor
+    // eviction can ever satisfy.
     let mut a = GlyphAtlas::new(16, 16);
-    struct Fixed;
-    impl Rasterizer for Fixed {
+    struct Oversize;
+    impl Rasterizer for Oversize {
         fn rasterize(&mut self, _: GlyphKey) -> Option<sonic_shared::glyph_atlas::RasterTile> {
             Some(sonic_shared::glyph_atlas::RasterTile {
-                width: 12,
-                height: 12,
+                width: 32,
+                height: 32,
                 offset_x: 0,
                 offset_y: 0,
-                advance: 12.0,
-                coverage: vec![255; 144],
+                advance: 32.0,
+                coverage: vec![255; 32 * 32],
                 is_color: false,
             })
         }
     }
-    let mut r = Fixed;
-    let mut filled = 0;
-    for c in 'a'..='z' {
-        if a.get_or_insert(k(c), &mut r).is_some() {
-            filled += 1;
-        } else {
-            break;
-        }
-    }
-    // At least 1 should fit, but not all 26 in 16×16.
-    assert!((1..26).contains(&filled));
+    let mut r = Oversize;
+    assert!(
+        a.get_or_insert(k('a'), &mut r).is_none(),
+        "tile bigger than atlas must return None even after eviction"
+    );
 }
 
 #[test]

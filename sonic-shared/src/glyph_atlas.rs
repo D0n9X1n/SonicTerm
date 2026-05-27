@@ -185,12 +185,32 @@ impl ShelfPacker {
 /// This split lets the bench harness, integration tests, and the
 /// production renderer share the same packing + lookup logic without
 /// pulling a GPU dependency into the bench.
+/// Per-glyph entry: the public `GlyphInfo` plus the bookkeeping the
+/// atlas needs for LRU eviction.
+///
+/// `rect` is `None` for zero-area entries (spaces, rasterizer-miss
+/// sentinels) — those occupy no atlas pixels and so contribute nothing
+/// to free-list reclamation when evicted. They still get evicted by
+/// LRU like any other entry; the only difference is no rect is pushed
+/// to `free_rects`.
+#[derive(Debug, Clone, Copy)]
+struct AtlasEntry {
+    info: GlyphInfo,
+    last_used_frame: u64,
+    rect: Option<(u32, u32, u32, u32)>,
+}
+
 pub struct GlyphAtlas {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
-    map: HashMap<GlyphKey, GlyphInfo>,
+    map: HashMap<GlyphKey, AtlasEntry>,
     packer: ShelfPacker,
+    /// Rectangles freed by LRU eviction. The allocator scans this
+    /// list (first-fit) before asking the shelf packer, so an atlas
+    /// that has cycled through eviction can keep reusing the same
+    /// region of pixels indefinitely without ever growing.
+    free_rects: Vec<(u32, u32, u32, u32)>,
     /// Each `get_or_insert` records which rect was just uploaded so a
     /// wrapping `AtlasUpload` can replay only the diff to the GPU,
     /// rather than re-uploading the whole texture every frame. Drained
@@ -199,6 +219,11 @@ pub struct GlyphAtlas {
     /// Counters for diagnostics + bench validation.
     hits: u64,
     misses: u64,
+    /// Monotonic frame counter. Bumped by `tick_frame()`; recorded on
+    /// every lookup/insert so LRU eviction can find the coldest entries.
+    current_frame: u64,
+    /// Cumulative eviction count for diagnostics.
+    evictions: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,9 +249,12 @@ impl GlyphAtlas {
             pixels: vec![0; (width * height * BYTES_PER_PIXEL) as usize],
             map: HashMap::new(),
             packer: ShelfPacker::new(width, height),
+            free_rects: Vec::new(),
             dirty: Vec::new(),
             hits: 0,
             misses: 0,
+            current_frame: 0,
+            evictions: 0,
         }
     }
 
@@ -262,6 +290,26 @@ impl GlyphAtlas {
         self.misses
     }
 
+    /// Cumulative number of glyph entries evicted by LRU since
+    /// construction. Diagnostic only — useful for verifying that long
+    /// sessions with diverse glyph sets are actually cycling memory
+    /// rather than monotonically growing.
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
+    /// Current frame counter. Bumped by `tick_frame()`.
+    pub fn current_frame(&self) -> u64 {
+        self.current_frame
+    }
+
+    /// Advance the frame counter. Call once per render frame so LRU
+    /// eviction can distinguish recently-used glyphs from cold ones.
+    /// Cheap (one integer increment); does not touch the atlas.
+    pub fn tick_frame(&mut self) {
+        self.current_frame = self.current_frame.wrapping_add(1);
+    }
+
     /// Borrow the CPU-side alpha buffer. Used by `AtlasUpload` to push
     /// the initial empty texture; the upload path normally uses
     /// `take_dirty_rects` + subregion writes.
@@ -278,17 +326,23 @@ impl GlyphAtlas {
 
     /// Look up the glyph for `key`, rasterizing + packing on miss.
     ///
-    /// Returns `None` only when the atlas is full and the new tile
-    /// won't fit. In v0.7 the renderer treats that as "draw a blank"
-    /// rather than crash; v0.8 will add LRU eviction.
+    /// On a hit, bumps the entry's `last_used_frame` to the current
+    /// frame so LRU eviction will spare it.
+    ///
+    /// On a miss where the new tile won't fit, attempts LRU eviction
+    /// (drops the coldest 25% of entries, returning their atlas rects
+    /// to a free-list) and retries once. Returns `None` only when even
+    /// after eviction the tile still won't fit — in v0.7 the renderer
+    /// treats that as "draw a blank" rather than crash.
     pub fn get_or_insert<R: Rasterizer>(
         &mut self,
         key: GlyphKey,
         rasterizer: &mut R,
     ) -> Option<GlyphInfo> {
-        if let Some(info) = self.map.get(&key) {
+        if let Some(entry) = self.map.get_mut(&key) {
+            entry.last_used_frame = self.current_frame;
             self.hits += 1;
-            return Some(*info);
+            return Some(entry.info);
         }
         self.misses += 1;
         // Rasterizer miss: cache a sentinel "blank" GlyphInfo so we don't
@@ -303,7 +357,8 @@ impl GlyphAtlas {
                 advance: 0.0,
                 is_color: false,
             };
-            self.map.insert(key, info);
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         };
         // Empty tile (space, etc.) — stash a zero-area UV; no upload
@@ -316,10 +371,19 @@ impl GlyphAtlas {
                 advance: tile.advance,
                 is_color: tile.is_color,
             };
-            self.map.insert(key, info);
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         }
-        let (x, y) = self.packer.alloc(tile.width, tile.height)?;
+        // Allocate: try free-list first (slots reclaimed by prior
+        // eviction), then the shelf packer, then evict-and-retry.
+        let (x, y) = match self.alloc_rect(tile.width, tile.height) {
+            Some(xy) => xy,
+            None => {
+                self.evict_lru_quartile();
+                self.alloc_rect(tile.width, tile.height)?
+            }
+        };
         // Blit rows into the CPU BGRA buffer. Monochrome tiles arrive
         // as `width*height` alpha bytes — replicate each into the four
         // BGRA channels so the shader can sample a single uniform
@@ -362,15 +426,76 @@ impl GlyphAtlas {
             advance: tile.advance,
             is_color: tile.is_color,
         };
-        self.map.insert(key, info);
+        self.map.insert(
+            key,
+            AtlasEntry {
+                info,
+                last_used_frame: self.current_frame,
+                rect: Some((x, y, tile.width, tile.height)),
+            },
+        );
         Some(info)
+    }
+
+    /// Try to allocate `(w, h)` from the free-list first, then the
+    /// shelf packer. Caller handles the eviction retry on `None`.
+    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        // First-fit on the free-list: any reclaimed rect at least as
+        // large as the request. Reuses the full slot (no splitting),
+        // which over-reserves vertically when the new tile is shorter
+        // than the old, but keeps the data structure simple and avoids
+        // fragmentation thrash. Monospace tiles are nearly uniform in
+        // size so the waste is bounded.
+        for i in 0..self.free_rects.len() {
+            let (_, _, fw, fh) = self.free_rects[i];
+            if fw >= w && fh >= h {
+                let (fx, fy, _, _) = self.free_rects.swap_remove(i);
+                return Some((fx, fy));
+            }
+        }
+        self.packer.alloc(w, h)
+    }
+
+    /// Drop the bottom 25% of entries by `last_used_frame`, returning
+    /// their atlas rects to the free-list. Entries with no rect
+    /// (zero-area sentinels) are evicted but contribute nothing to the
+    /// free-list. Called on pack failure; cheap relative to the cost
+    /// of growing the atlas (4 MiB+ reallocation).
+    fn evict_lru_quartile(&mut self) {
+        let total = self.map.len();
+        if total == 0 {
+            return;
+        }
+        // Evict at least 1 entry even when 25% rounds to 0 — otherwise
+        // a tiny atlas could deadlock here on a single hot-key miss.
+        let evict_n = (total / 4).max(1);
+        // Collect (last_used_frame, key) pairs and use a deterministic
+        // total ordering before taking the oldest quartile. The secondary
+        // key prevents equal timestamps from depending on HashMap iteration
+        // order or an unstable selection algorithm.
+        let mut ages: Vec<(u64, GlyphKey)> =
+            self.map.iter().map(|(k, e)| (e.last_used_frame, *k)).collect();
+        ages.sort_by_key(|(frame, key)| {
+            (*frame, u32::from(key.ch), key.font_slot, key.weight_bold, key.italic, key.glyph_id)
+        });
+        ages.truncate(evict_n);
+        for (_, k) in ages {
+            if let Some(entry) = self.map.remove(&k) {
+                if let Some(rect) = entry.rect {
+                    self.free_rects.push(rect);
+                }
+                self.evictions += 1;
+            }
+        }
     }
 
     /// Just-the-lookup variant — for cases where the caller already
     /// knows the glyph is resident (e.g. after a pre-pass). Returns
-    /// `None` on a miss without rasterizing.
+    /// `None` on a miss without rasterizing. Does NOT bump
+    /// `last_used_frame`; callers that want LRU credit should go
+    /// through `get_or_insert`.
     pub fn get(&self, key: GlyphKey) -> Option<GlyphInfo> {
-        self.map.get(&key).copied()
+        self.map.get(&key).map(|e| e.info)
     }
 
     /// Hit rate as a percentage (0..=100). Returns 0 when no lookups
