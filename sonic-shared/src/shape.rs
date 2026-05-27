@@ -49,11 +49,10 @@
 //! shaper-driven path is therefore safe to enable unconditionally: it
 //! is a strict superset of the char-based path.
 
-use cosmic_text::{
-    Attrs, AttrsList, BufferLine, Ellipsize, Family, Hinting, LineEnding, Shaping, Wrap,
-};
+use cosmic_text::{AttrsList, BufferLine, Ellipsize, Hinting, LineEnding, Shaping, Wrap};
 use sonic_core::grid::{Cell, CellFlags};
 
+use crate::render::terminal_font_attrs;
 use crate::swash_rasterizer::SwashRasterizer;
 
 /// Characters that commonly participate in programming ligatures across
@@ -191,7 +190,7 @@ pub fn shape_run(
 
     let weight = if style.bold { cosmic_text::Weight::BOLD } else { cosmic_text::Weight::NORMAL };
     let cstyle = if style.italic { cosmic_text::Style::Italic } else { cosmic_text::Style::Normal };
-    let attrs = Attrs::new().family(Family::Name(family)).weight(weight).style(cstyle);
+    let attrs = terminal_font_attrs(family).weight(weight).style(cstyle);
 
     // BufferLine + shape_in_buffer is the lowest-level shaping entry
     // point cosmic-text exposes that gives us LayoutGlyph back. We

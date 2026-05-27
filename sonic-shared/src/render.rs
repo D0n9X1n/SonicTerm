@@ -1829,7 +1829,6 @@ impl GpuRenderer {
             let tab_font_size = tab_title_font_size(self.font_size);
             let avg_glyph_w = (self.cell_w * (tab_font_size / self.font_size)).max(1.0);
             let tab_family_name = self.font_family.clone();
-            let tab_family = Family::Name(tab_family_name.as_str());
             let tab_inputs: Vec<TabSpanInput> = layout
                 .tabs
                 .iter()
@@ -1853,25 +1852,25 @@ impl GpuRenderer {
                 if range.start > tcur {
                     spans2.push((
                         &title_text[tcur..range.start],
-                        Attrs::new().family(tab_family).color(self.tab_inactive_fg),
+                        terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
                     ));
                 }
                 spans2.push((
                     &title_text[range.start..range.end],
-                    Attrs::new().family(tab_family).color(*color),
+                    terminal_font_attrs(tab_family_name.as_str()).color(*color),
                 ));
                 tcur = range.end;
             }
             if tcur < title_text.len() {
                 spans2.push((
                     &title_text[tcur..],
-                    Attrs::new().family(tab_family).color(self.tab_inactive_fg),
+                    terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
                 ));
             }
             self.tab_buffer.set_rich_text(
                 &mut self.font_system,
                 spans2,
-                &Attrs::new().family(tab_family).color(self.tab_inactive_fg),
+                &terminal_font_attrs(tab_family_name.as_str()).color(self.tab_inactive_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -1919,7 +1918,7 @@ impl GpuRenderer {
             self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -1953,7 +1952,7 @@ impl GpuRenderer {
             self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -1998,7 +1997,7 @@ impl GpuRenderer {
             self.palette_query_buffer.set_text(
                 &mut self.font_system,
                 &layout.query_label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2021,7 +2020,7 @@ impl GpuRenderer {
             self.palette_rows_buffer.set_text(
                 &mut self.font_system,
                 &rows_text,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2053,7 +2052,7 @@ impl GpuRenderer {
             self.ime_buffer.set_text(
                 &mut self.font_system,
                 state.preedit(),
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2112,8 +2111,7 @@ impl GpuRenderer {
             // drag-chip buffer so it composites on top of the ghost
             // body. Clipping is handled by TextBounds below.
             if !chip.title.is_empty() {
-                let attrs =
-                    Attrs::new().family(Family::Name(&self.font_family)).color(self.tab_active_fg);
+                let attrs = terminal_font_attrs(&self.font_family).color(self.tab_active_fg);
                 self.drag_chip_buffer.set_text(
                     &mut self.font_system,
                     &chip.title,
@@ -2821,7 +2819,7 @@ pub fn atlas_dim_for_scale(scale_factor: f32) -> u32 {
 fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f32, f32) {
     let mut buf = Buffer::new(fs, Metrics::new(size, line_h));
     buf.set_size(fs, Some(1000.0), Some(1000.0));
-    buf.set_text(fs, "M", &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+    buf.set_text(fs, "M", &terminal_font_attrs(family), Shaping::Advanced, None);
     buf.shape_until_scroll(fs, false);
     let w =
         buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.w)).unwrap_or(size * 0.6);
@@ -2845,7 +2843,7 @@ fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f
 pub fn natural_line_h_px(fs: &mut FontSystem, family: &str, size: f32) -> f32 {
     let mut buf = Buffer::new(fs, Metrics::new(size, size));
     buf.set_size(fs, Some(1000.0), Some(1000.0));
-    buf.set_text(fs, "M", &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+    buf.set_text(fs, "M", &terminal_font_attrs(family), Shaping::Advanced, None);
     buf.shape_until_scroll(fs, false);
     let Some(font_id) = buf.layout_runs().next().and_then(|r| r.glyphs.first().map(|g| g.font_id))
     else {
@@ -2995,6 +2993,17 @@ pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size + 1.0
+}
+
+/// Single source of truth for the [`Attrs`] used by every text-rendering
+/// site (terminal grid, tab titles, command palette, search status bar,
+/// IME pre-edit). Pass the user-configured `font.family` here so all UI
+/// chrome shares the EXACT same `Family::Name(...)` as grid cells —
+/// avoiding the historical bug where tab titles silently fell through
+/// to `Family::Monospace` and rendered with a different installed face.
+#[must_use]
+pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
+    Attrs::new().family(Family::Name(family))
 }
 
 #[doc(hidden)]
