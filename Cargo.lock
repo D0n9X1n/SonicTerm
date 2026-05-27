@@ -4122,6 +4122,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "libproc",
+ "memchr",
  "notify",
  "parking_lot",
  "portable-pty",
