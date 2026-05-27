@@ -1352,6 +1352,7 @@ impl GpuRenderer {
             let live_top_abs = grid.scrollback_len() as u64;
             let max_top_abs = live_top_abs; // never scroll below live
             let view_top_abs = viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
+            self.row_glyph_cache.resize(grid.rows);
             // Drop cache entries for every row the VT thread mutated
             // since the last frame. `grid.dirty_rows()` already covers
             // theme/font/resize/scroll/focus/selection changes via the

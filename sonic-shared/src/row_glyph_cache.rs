@@ -48,6 +48,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+const CACHE_HEADROOM_FACTOR: usize = 4;
+
 /// One cached row's render artefacts. Replayed verbatim into the
 /// frame's glyph_instances / underlines / missing_chars vectors when
 /// the cache hits.
@@ -74,15 +76,27 @@ pub struct RowGlyphCache {
     /// (abs_row, hash) -> cached artefacts.
     entries: HashMap<(u64, u64), CachedRow>,
     /// Soft cap so that long-running sessions with heavy scrollback
-    /// don't grow without bound. The renderer touches at most
-    /// `grid.rows` entries per frame; we keep ~4× headroom for scroll
-    /// jiggle and call it good.
+    /// don't grow without bound. The renderer calls `resize(grid.rows)`
+    /// each frame; we keep ~4× headroom for scroll jiggle and call it
+    /// good.
     cap: usize,
 }
 
 impl RowGlyphCache {
     pub fn new() -> Self {
-        Self { entries: HashMap::new(), cap: 1024 }
+        Self { entries: HashMap::new(), cap: 0 }
+    }
+
+    /// Resize the cache to match the current visible grid height. Cheap
+    /// no-op unless the row count changes; when it does, this updates the
+    /// soft cap and drops stale entries from the old viewport geometry.
+    #[inline]
+    pub fn resize(&mut self, rows: u16) {
+        let new_cap = usize::from(rows).saturating_mul(CACHE_HEADROOM_FACTOR).max(1);
+        if self.cap != new_cap {
+            self.cap = new_cap;
+            self.entries.clear();
+        }
     }
 
     /// Drop every cache entry. Called on font / theme / scale / resize
@@ -121,8 +135,8 @@ impl RowGlyphCache {
     /// Insert (or replace) a cached row. If the cache is at capacity,
     /// the entire cache is cleared first — terminal rows are
     /// homogeneous so an LRU buys little here and HashMap doesn't carry
-    /// insertion order natively. The cap is set high enough (1024)
-    /// that this only fires after a long scroll session.
+    /// insertion order natively. The cap tracks the visible grid height
+    /// via `resize` so this only fires after a long scroll session.
     pub fn insert(&mut self, abs_row: u64, hash: u64, row: CachedRow) {
         if self.entries.len() >= self.cap {
             self.entries.clear();
@@ -289,7 +303,8 @@ mod tests {
 
     #[test]
     fn cache_cap_resets_when_full() {
-        let mut cache = RowGlyphCache { entries: HashMap::new(), cap: 4 };
+        let mut cache = RowGlyphCache::new();
+        cache.resize(1);
         for i in 0..4 {
             cache.insert(i as u64, i as u64, CachedRow::default());
         }
@@ -299,5 +314,15 @@ mod tests {
         cache.insert(99, 99, CachedRow::default());
         assert_eq!(cache.len(), 1);
         assert!(cache.get(99, 99).is_some());
+    }
+
+    #[test]
+    fn resize_updates_cap_from_visible_rows() {
+        let mut cache = RowGlyphCache::new();
+        cache.resize(300);
+        for i in 0..1100 {
+            cache.insert(i, i, CachedRow::default());
+        }
+        assert_eq!(cache.len(), 1100);
     }
 }
