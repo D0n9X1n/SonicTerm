@@ -12,17 +12,17 @@ use crate::tabs::TabBar;
 /// [`tab_bar_height`] so the bar height scales with the user's configured
 /// font size — matching WezTerm fancy-mode's `window_frame.font_size × 2`
 /// rhythm.
-pub const TAB_BAR_HEIGHT: f32 = 34.0;
+pub const TAB_BAR_HEIGHT: f32 = 40.0;
 
-/// Compute the tab bar height for a given terminal font size, mirroring
-/// WezTerm fancy-mode (`window_frame.font_size × 2` + a couple of pixels
-/// of vertical breathing room above/below the glyph cap).
+/// Compute the tab bar height for a given terminal font size.
 ///
-/// At `font_size = 14` this returns `32.0`, matching the WezTerm chrome-style
-/// default. At `font_size = 15` it returns `34.0`, the historical Sonic
-/// constant. A small floor of `24.0` keeps the bar usable at tiny font sizes.
+/// Formula: `font_size * 2.0 + 12.0` clamped to a `36.0` floor so the bar
+/// always has 8px of vertical breathing room above and below the title
+/// text (text height is ~`font_size * 0.85 * 1.2`). At `font_size = 14`
+/// this returns `40.0`, matching the WezTerm fancy-mode roomier default.
+/// At `font_size = 15` it returns `42.0`.
 pub fn tab_bar_height(font_size: f32) -> f32 {
-    (font_size * 2.0 + 4.0).max(24.0)
+    (font_size * 2.0 + 12.0).max(36.0)
 }
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).

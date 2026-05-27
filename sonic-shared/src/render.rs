@@ -1919,7 +1919,7 @@ impl GpuRenderer {
             self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -1953,7 +1953,7 @@ impl GpuRenderer {
             self.search_buffer.set_text(
                 &mut self.font_system,
                 &label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -1998,7 +1998,7 @@ impl GpuRenderer {
             self.palette_query_buffer.set_text(
                 &mut self.font_system,
                 &layout.query_label,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2021,7 +2021,7 @@ impl GpuRenderer {
             self.palette_rows_buffer.set_text(
                 &mut self.font_system,
                 &rows_text,
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2053,7 +2053,7 @@ impl GpuRenderer {
             self.ime_buffer.set_text(
                 &mut self.font_system,
                 state.preedit(),
-                &Attrs::new().family(Family::Monospace).color(self.search_fg),
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
                 Shaping::Advanced,
                 None,
             );
@@ -2995,6 +2995,17 @@ pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size + 1.0
+}
+
+/// Single source of truth for the [`Attrs`] used by every text-rendering
+/// site (terminal grid, tab titles, command palette, search status bar,
+/// IME pre-edit). Pass the user-configured `font.family` here so all UI
+/// chrome shares the EXACT same `Family::Name(...)` as grid cells —
+/// avoiding the historical bug where tab titles silently fell through
+/// to `Family::Monospace` and rendered with a different installed face.
+#[must_use]
+pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
+    Attrs::new().family(Family::Name(family))
 }
 
 #[doc(hidden)]

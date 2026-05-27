@@ -15,27 +15,53 @@ fn bar_with(n: usize) -> TabBar {
 }
 
 #[test]
-fn tab_bar_height_at_font_size_14_is_about_32() {
+fn tab_bar_height_at_font_size_14_is_about_40() {
     let h = tab_bar_height(14.0);
-    // WezTerm fancy-mode default at font_size=14 → ~32 logical px
-    assert!((h - 32.0).abs() < 0.5, "expected ~32, got {h}");
+    // Roomier WezTerm-style default at font_size=14 → ~40 logical px,
+    // leaving 8px of breathing room above + below the title text.
+    assert!((h - 40.0).abs() < 0.5, "expected ~40, got {h}");
 }
 
 #[test]
 fn tab_bar_height_scales_with_font_size() {
-    // font_size * 2 + small breathing room
-    assert!(tab_bar_height(10.0) >= 24.0); // floor
+    // font_size * 2 + breathing room, clamped to 36.0 floor.
+    assert!(tab_bar_height(10.0) >= 36.0); // floor
     assert!(tab_bar_height(16.0) > tab_bar_height(12.0));
-    // Doubling font size roughly doubles bar height.
-    let small = tab_bar_height(10.0);
-    let big = tab_bar_height(20.0);
+    // Doubling font size roughly doubles bar height once above the floor.
+    let small = tab_bar_height(14.0);
+    let big = tab_bar_height(28.0);
     assert!(big > small * 1.5, "bar should scale: small={small}, big={big}");
 }
 
 #[test]
-fn tab_bar_height_default_constant_matches_font_size_15() {
-    // The historical default (34.0) corresponds to font_size = 15.
-    assert!((tab_bar_height(15.0) - TAB_BAR_HEIGHT).abs() < 0.5);
+fn tab_bar_height_default_constant_matches_font_size_14() {
+    // The default TAB_BAR_HEIGHT (40.0) corresponds to font_size = 14.
+    assert!((tab_bar_height(14.0) - TAB_BAR_HEIGHT).abs() < 0.5);
+}
+
+#[test]
+fn tab_bar_height_at_least_36() {
+    // Roomy floor — tab titles should never feel cramped.
+    for fs in [8.0, 10.0, 12.0, 14.0, 15.0, 16.0, 20.0] {
+        assert!(tab_bar_height(fs) >= 36.0, "fs={fs} gave {}", tab_bar_height(fs));
+    }
+    const _: () = assert!(TAB_BAR_HEIGHT >= 36.0);
+}
+
+#[test]
+fn tab_bar_height_constant_is_at_least_36_const() {
+    const _: () = assert!(TAB_BAR_HEIGHT >= 36.0);
+}
+
+#[test]
+fn tab_text_has_eight_px_breathing_room() {
+    // The title text (height ~= font_size * 0.85 * 1.2) should sit
+    // with ≥8 logical px of margin above AND below inside the bar.
+    let font_size = 14.0_f32;
+    let bar_h = tab_bar_height(font_size);
+    let text_h = font_size * 0.85 * 1.2;
+    let margin = (bar_h - text_h) / 2.0;
+    assert!(margin >= 8.0, "expected ≥8px margin, got {margin}");
 }
 
 #[test]
