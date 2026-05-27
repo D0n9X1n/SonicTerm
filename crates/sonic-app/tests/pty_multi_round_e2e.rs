@@ -37,6 +37,13 @@ fn drain_until(pty: &PtyHandle, parser: &mut Parser, needle: &str, total: Durati
     let deadline = Instant::now() + total;
     while Instant::now() < deadline {
         if let Ok(b) = pty.out_rx.recv_timeout(Duration::from_millis(25)) {
+            // ConPTY (Windows) opens with a Device Status Report (`\x1b[6n`)
+            // and won't relay child-stdout until it gets a cursor-position
+            // reply. Answer with row=1,col=1 so the helper's output starts
+            // flowing. Harmless on macOS / Linux PTYs (no DSR is sent).
+            if b.windows(3).any(|w| w == b"[6n") {
+                let _ = pty.in_tx.send(b"\x1b[1;1R".to_vec());
+            }
             parser.advance(&b);
         }
         if grid_contains(parser.grid(), needle) {
@@ -136,12 +143,6 @@ fn multi_round_pty_both_prompts_land_in_grid() {
     // Final invariant: both prompts must still be visible in the grid
     // at the end (no scrollback-eviction edge case clobbering them in
     // a small 24-row terminal).
-    assert!(
-        grid_contains(parser.grid(), "P1>"),
-        "P1> evicted from grid by end of test"
-    );
-    assert!(
-        grid_contains(parser.grid(), "P2>"),
-        "P2> evicted from grid by end of test"
-    );
+    assert!(grid_contains(parser.grid(), "P1>"), "P1> evicted from grid by end of test");
+    assert!(grid_contains(parser.grid(), "P2>"), "P2> evicted from grid by end of test");
 }
