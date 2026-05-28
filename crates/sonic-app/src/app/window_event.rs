@@ -531,11 +531,13 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
                         {
-                            // Cmd/Super-click on a hyperlink opens it. The
-                            // parser lock is released inside hyperlink_uri_at
-                            // before we ever call sonic_core::url_open::open,
+                            // Modifier-click on a hyperlink opens it.
+                            // On macOS the modifier is Cmd (super); on
+                            // Windows / Linux it's Ctrl. The parser lock
+                            // is released inside hyperlink_uri_at before
+                            // we ever call sonic_core::url_open::open,
                             // so no grid lock is held across the spawn.
-                            if self.modifiers.super_key() {
+                            if self.url_open_modifier_held() {
                                 if let Some(uri) = self.hyperlink_uri_at(row, col) {
                                     if let Err(e) = sonic_core::url_open::open(&uri) {
                                         tracing::warn!("url_open failed: {e}");
