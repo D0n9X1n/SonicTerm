@@ -92,6 +92,10 @@ action = "split_down"
 keys = "super+shift+w"
 action = "close_pane"
 
+[[binding]]
+keys = "super+shift+z"
+action = "toggle_pane_zoom"
+
 # --- Pane focus (vim-style) ---
 [[binding]]
 keys = "super+shift+h"
@@ -109,37 +113,22 @@ action = { focus_pane = "up" }
 keys = "super+shift+l"
 action = { focus_pane = "right" }
 
-# Arrow-key pane focus (the user's wezterm.lua and WezTerm's documented
-# default both use Ctrl+Shift+Arrows; on macOS our dispatcher folds
-# Ctrl into `super`, so super+shift+<arrow> is the canonical chord).
+# Arrow-key split resize: nudge the active divider by 5%.
 [[binding]]
 keys = "super+shift+left"
-action = { focus_pane = "left" }
+action = "resize_pane_left"
 
 [[binding]]
 keys = "super+shift+right"
-action = { focus_pane = "right" }
-
-# NB: super+shift+up / super+shift+down are claimed by OSC 133
-# prompt navigation below, which is the WezTerm-standard binding for
-# those arrows. Use super+shift+k / super+shift+j for vertical focus.
-
-# --- Pane resize (with arrow keys, plus alt) ---
-[[binding]]
-keys = "super+alt+left"
-action = { resize_pane = { dir = "left",  amount = 5 } }
+action = "resize_pane_right"
 
 [[binding]]
-keys = "super+alt+right"
-action = { resize_pane = { dir = "right", amount = 5 } }
+keys = "super+shift+up"
+action = "resize_pane_up"
 
 [[binding]]
-keys = "super+alt+up"
-action = { resize_pane = { dir = "up",    amount = 5 } }
-
-[[binding]]
-keys = "super+alt+down"
-action = { resize_pane = { dir = "down",  amount = 5 } }
+keys = "super+shift+down"
+action = "resize_pane_down"
 
 # --- Clipboard ---
 [[binding]]
@@ -249,15 +238,6 @@ action = "open_preferences"
 [[binding]]
 keys = "super+,"
 action = "open_preferences"
-
-# --- Shell integration (OSC 133) ---
-[[binding]]
-keys = "super+shift+up"
-action = "scroll_to_prev_prompt"
-
-[[binding]]
-keys = "super+shift+down"
-action = "scroll_to_next_prompt"
 
 # --- SSH client (example; uncomment + edit target to enable) ---
 # Requires building sonic with `--features sonic-core/ssh`.

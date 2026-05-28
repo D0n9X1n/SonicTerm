@@ -17,7 +17,7 @@ fn close_collapses_split() {
     t.split(1, Direction::Right, 2);
     t.close(2);
     assert_eq!(t.leaves(), vec![1]);
-    assert!(matches!(t, PaneTree::Leaf { id: 1 }));
+    assert!(matches!(t, PaneTree::Leaf { id: 1, .. }));
 }
 
 #[test]
