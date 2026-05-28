@@ -3302,6 +3302,11 @@ pub fn emit_cell_bg_quads(
                     // extend run
                 }
                 (Some(prev), _) => {
+                    // PANIC: safe — `run_color` and `run_start` are written
+                    // together (search this fn for `run_start = ` to see they
+                    // are always assigned in the same statement-pair). Matching
+                    // `run_color == Some(_)` therefore proves `run_start ==
+                    // Some(_)`. Hot per-frame path: no Result conversion.
                     let start = run_start.expect("run_start set when run_color is");
                     flush(start, col, prev, out);
                     run_start = bg.map(|_| col);

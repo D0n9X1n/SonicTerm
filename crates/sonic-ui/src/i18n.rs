@@ -117,7 +117,14 @@ fn build_bundle(tag: &str) -> Bundle {
         _ => EN_FTL,
     };
     let res = FluentResource::try_new(src.to_string())
+        // PANIC: safe — `src` is one of the `const &str` FTL blobs included
+        // via `include_str!` at module top. Parse failures would surface in
+        // CI (build fails) or the unit tests in tests/i18n.rs which load
+        // every shipped locale.
         .expect("embedded FTL must parse — this is a build-time guarantee");
+    // PANIC: safe — single resource per bundle in this fn; "duplicate keys"
+    // can only fire if the FTL file itself defines the same id twice, caught
+    // by the per-locale unit tests.
     b.add_resource(res).expect("embedded FTL must not have duplicate keys");
     b
 }
@@ -145,6 +152,9 @@ fn negotiate(requested: &str) -> String {
         Err(_) => return "en".to_string(),
     };
     let available: Vec<LanguageIdentifier> =
+        // PANIC: safe — `SHIPPED_LOCALES` is a const &[&str] of canonical BCP-47
+        // tags ("en", "zh-CN", "ja"). Each parses as a LanguageIdentifier;
+        // any addition that doesn't is caught by tests/i18n.rs.
         SHIPPED_LOCALES.iter().map(|s| s.parse().unwrap()).collect();
     let default: LanguageIdentifier = langid!("en");
     let supported =

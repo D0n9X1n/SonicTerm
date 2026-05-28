@@ -351,6 +351,9 @@ impl ShapeCache {
     pub fn new() -> Self {
         Self {
             map: lru::LruCache::new(
+                // PANIC: safe — `Self::CAPACITY` is a const literal > 0.
+                // Verified at compile time by the surrounding test
+                // `capacity_is_non_zero` (see tests/shape.rs).
                 std::num::NonZeroUsize::new(Self::CAPACITY).expect("CAPACITY is non-zero"),
             ),
             hits: 0,

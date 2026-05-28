@@ -134,6 +134,10 @@ impl App {
                     let active_pos = guards
                         .iter()
                         .position(|(id, _, _)| *id == active_id)
+                        // PANIC: safe — `guards` is populated immediately
+                        // above in the same fn from the same `child.panes`
+                        // map keyed by `active_id`, so a guard with this id
+                        // must exist. Render hot path: no Result conversion.
                         .expect("active pane guard collected above");
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -516,6 +520,8 @@ impl App {
                             }
                         }
                     })
+                    // PANIC: thread spawn at pane init — see sonic-io/pty.rs
+                    // rationale. Unrecoverable OS-level failure.
                     .expect("spawn vt reply forwarder (child)");
                 std::thread::Builder::new()
                     .name("sonic-vt-loop-child".into())
@@ -543,6 +549,8 @@ impl App {
                             }
                         }
                     })
+                    // PANIC: thread spawn at pane init — see sonic-io/pty.rs
+                    // rationale. Unrecoverable OS-level failure.
                     .expect("spawn vt loop (child)");
                 Some(pty)
             }
