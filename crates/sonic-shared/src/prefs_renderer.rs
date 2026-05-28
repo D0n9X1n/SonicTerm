@@ -32,7 +32,7 @@ use wgpu::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use crate::prefs::controls::{Button, Control, InteractionState, Rect as PrefsRect};
+use crate::prefs::controls::{Button, Control, InteractionState, Rect as PrefsRect, Toggle};
 use crate::prefs::layout::{
     self, BUTTON_RADIUS, CARD_PAD_H, CARD_PAD_V, CATEGORIES, CONTROL_H, CONTROL_RADIUS, LABEL_W,
     PREVIEW_CARD_H, PREVIEW_PAD, SECTION_HELP_SIZE, SECTION_TITLE_SIZE, SIDEBAR_LABEL_X,
@@ -416,6 +416,58 @@ fn button_bg(base: [f32; 4], i: InteractionState) -> [f32; 4] {
     ]
 }
 
+/// Render the redesigned (issue #173 slice-2c) [`Toggle`] primitive.
+///
+/// The track is a rounded pill (radius = `TOGGLE_H / 2`, which equals
+/// [`CONTROL_RADIUS`] for the current 24px track height — keeping the
+/// constant explicit means a future TOGGLE_H change won't silently
+/// desync from the layout). The thumb slides from the off- to the
+/// on-position over [`Toggle::ANIM_MS`] using
+/// [`Toggle::knob_x_animated`] for the interpolation; once the
+/// animation completes the helper returns the snapped end position so
+/// the thumb is pixel-stable.
+///
+/// Hover/press feedback comes from the toggle's [`InteractionState`]
+/// (mirrors the Button slice-2a pattern: the renderer tints, the
+/// pointer plumbing is a separate concern).
+fn draw_toggle(
+    quads: &mut Vec<QuadCmd>,
+    t: &Toggle,
+    slot: PrefsRect,
+    palette: &crate::ui_tokens::UiPalette,
+) {
+    let accent = palette.accent;
+    let track_y = slot.y + (slot.h - TOGGLE_H) / 2.0;
+    let track = PrefsRect::new(slot.x, track_y, TOGGLE_W, TOGGLE_H);
+    // Off track: theme-derived neutral fill (was hardcoded Tokyo
+    // Night #343A52FF — caused gruvbox toggles' off-state to look
+    // blue). bg_active = accent @ 14% alpha; under premultiplied
+    // blending this reads as a subdued tint of the active theme.
+    let track_base = if t.value { accent } else { palette.bg_active };
+    let track_color = button_bg(track_base, t.interaction);
+    // Pill radius: half the track height so both ends round into
+    // perfect semicircles. For the current 24px track this matches
+    // the shared `CONTROL_RADIUS` (10) ± half a pixel; we keep
+    // `TOGGLE_H / 2` rather than the literal constant so the radius
+    // stays correct if `TOGGLE_H` is ever bumped.
+    let track_radius = TOGGLE_H / 2.0;
+    quads.push(QuadCmd::rounded(track, track_color, track_radius));
+
+    // Sliding thumb. `knob_x_animated` lerps between the previous
+    // snapped position and the new one over `Toggle::ANIM_MS` from
+    // the most recent flip; once `t == 1` it returns the snapped
+    // value so the thumb does not drift.
+    let knob_x = t.knob_x_animated(std::time::Instant::now(), TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let knob = PrefsRect::new(knob_x, track.y + TOGGLE_KNOB_MARGIN, TOGGLE_KNOB, TOGGLE_KNOB);
+    // Thumb fill follows the slice-2c spec: theme.accent when on,
+    // theme.surface (bg_elevated) when off. The accent-on-accent
+    // case is visually distinguished by the white inner ring shadow
+    // baked into the surface palette and the small (2px) margin
+    // around the thumb that exposes the track edge.
+    let knob_color = if t.value { accent } else { palette.bg_elevated };
+    quads.push(QuadCmd::rounded(knob, knob_color, TOGGLE_KNOB / 2.0));
+}
+
 /// Emit a centered text run for a [`Button`] primitive. The text's
 /// horizontal center is anchored at `button.text_center().0` (fixes
 /// issue #169 where Apply was left-aligned). `glyphon` itself paints
@@ -470,24 +522,7 @@ fn draw_control(
     let accent = palette.accent;
     match ctrl {
         Control::Toggle(t) => {
-            let track_y = slot.y + (slot.h - TOGGLE_H) / 2.0;
-            let track = PrefsRect::new(slot.x, track_y, TOGGLE_W, TOGGLE_H);
-            let on_color = accent;
-            // Off track: theme-derived neutral fill (was hardcoded Tokyo
-            // Night #343A52FF — caused gruvbox toggles' off-state to look
-            // blue). bg_active = accent @ 14% alpha; under premultiplied
-            // blending this reads as a subdued tint of the active theme.
-            let off_color = palette.bg_active;
-            quads.push(QuadCmd::sharp(track, if t.value { on_color } else { off_color }));
-            let knob_x = if t.value {
-                track.x + TOGGLE_W - TOGGLE_KNOB - TOGGLE_KNOB_MARGIN
-            } else {
-                track.x + TOGGLE_KNOB_MARGIN
-            };
-            let knob =
-                PrefsRect::new(knob_x, track.y + TOGGLE_KNOB_MARGIN, TOGGLE_KNOB, TOGGLE_KNOB);
-            let knob_color = if t.value { color::hex("#FFFFFFFF") } else { palette.text_secondary };
-            quads.push(QuadCmd::sharp(knob, knob_color));
+            draw_toggle(quads, t, slot, palette);
         }
         Control::Slider(s) => {
             let readout_w = 56.0;
