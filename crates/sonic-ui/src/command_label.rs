@@ -38,7 +38,12 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "SplitRight",
     "SplitDown",
     "ClosePane",
+    "TogglePaneZoom",
     "FocusPane",
+    "ResizePaneLeft",
+    "ResizePaneRight",
+    "ResizePaneUp",
+    "ResizePaneDown",
     "ResizePane",
     "CopyToClipboard",
     "PasteFromClipboard",
@@ -75,7 +80,12 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::SplitRight => "SplitRight",
         Action::SplitDown => "SplitDown",
         Action::ClosePane => "ClosePane",
+        Action::TogglePaneZoom => "TogglePaneZoom",
         Action::FocusPane(_) => "FocusPane",
+        Action::ResizePaneLeft => "ResizePaneLeft",
+        Action::ResizePaneRight => "ResizePaneRight",
+        Action::ResizePaneUp => "ResizePaneUp",
+        Action::ResizePaneDown => "ResizePaneDown",
         Action::ResizePane { .. } => "ResizePane",
         Action::CopyToClipboard => "CopyToClipboard",
         Action::PasteFromClipboard => "PasteFromClipboard",
@@ -113,7 +123,12 @@ pub fn label(a: &Action) -> String {
         Action::SplitRight => "Split Pane Right".into(),
         Action::SplitDown => "Split Pane Down".into(),
         Action::ClosePane => "Close Pane".into(),
+        Action::TogglePaneZoom => "Toggle Pane Zoom".into(),
         Action::FocusPane(d) => format!("Focus Pane {}", dir_human(*d)),
+        Action::ResizePaneLeft => "Resize Pane Left".into(),
+        Action::ResizePaneRight => "Resize Pane Right".into(),
+        Action::ResizePaneUp => "Resize Pane Up".into(),
+        Action::ResizePaneDown => "Resize Pane Down".into(),
         Action::ResizePane { dir, amount } => {
             format!("Resize Pane {} by {amount}", dir_human(*dir))
         }
@@ -159,8 +174,13 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         Action::SplitRight => &["pane", "vertical", "vsplit"],
         Action::SplitDown => &["pane", "horizontal", "hsplit"],
         Action::ClosePane => &["kill", "x"],
+        Action::TogglePaneZoom => &["pane", "maximize", "unzoom"],
         Action::FocusPane(_) => &["move", "switch", "navigate"],
-        Action::ResizePane { .. } => &["grow", "shrink"],
+        Action::ResizePaneLeft
+        | Action::ResizePaneRight
+        | Action::ResizePaneUp
+        | Action::ResizePaneDown
+        | Action::ResizePane { .. } => &["grow", "shrink", "nudge", "divider"],
         Action::CopyToClipboard => &["yank"],
         Action::PasteFromClipboard => &["yank"],
         Action::IncreaseFontSize => &["bigger", "zoom in", "larger"],

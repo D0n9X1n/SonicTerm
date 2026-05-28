@@ -65,8 +65,18 @@ pub enum Action {
     SplitDown,
     /// Close the active pane.
     ClosePane,
+    /// Temporarily make the active pane fill the tab area.
+    TogglePaneZoom,
     /// Move focus to the pane in the given direction.
     FocusPane(Direction),
+    /// Nudge the active split divider left.
+    ResizePaneLeft,
+    /// Nudge the active split divider right.
+    ResizePaneRight,
+    /// Nudge the active split divider up.
+    ResizePaneUp,
+    /// Nudge the active split divider down.
+    ResizePaneDown,
     /// Resize the active pane.
     ResizePane {
         /// Direction to resize toward.

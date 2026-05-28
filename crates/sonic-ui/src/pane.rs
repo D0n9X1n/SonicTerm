@@ -2,6 +2,8 @@
 
 use sonic_cfg::keymap::Direction;
 
+pub type PaneId = u64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitAxis {
     Horizontal, // children stacked top↔bottom
@@ -11,13 +13,15 @@ pub enum SplitAxis {
 #[derive(Debug, Clone)]
 pub enum PaneTree {
     Leaf {
-        id: u64,
+        id: PaneId,
+        zoomed_pane_id: Option<PaneId>,
     },
     Split {
         axis: SplitAxis,
         ratio: f32, // 0..1, share for the first child
         first: Box<PaneTree>,
         second: Box<PaneTree>,
+        zoomed_pane_id: Option<PaneId>,
     },
 }
 
@@ -41,29 +45,70 @@ impl Rect {
 }
 
 impl PaneTree {
-    pub fn leaf(id: u64) -> Self {
-        PaneTree::Leaf { id }
+    pub fn leaf(id: PaneId) -> Self {
+        PaneTree::Leaf { id, zoomed_pane_id: None }
+    }
+
+    pub fn zoomed_pane_id(&self) -> Option<PaneId> {
+        match self {
+            PaneTree::Leaf { zoomed_pane_id, .. } | PaneTree::Split { zoomed_pane_id, .. } => {
+                *zoomed_pane_id
+            }
+        }
+    }
+
+    fn set_zoomed_pane_id(&mut self, next: Option<PaneId>) {
+        match self {
+            PaneTree::Leaf { zoomed_pane_id, .. } | PaneTree::Split { zoomed_pane_id, .. } => {
+                *zoomed_pane_id = next;
+            }
+        }
+    }
+
+    pub fn toggle_zoom(&mut self, active_pane: PaneId) -> bool {
+        if self.zoomed_pane_id() == Some(active_pane) {
+            self.set_zoomed_pane_id(None);
+            return true;
+        }
+
+        if self.contains_leaf(active_pane) {
+            self.set_zoomed_pane_id(Some(active_pane));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn contains_leaf(&self, needle: PaneId) -> bool {
+        match self {
+            PaneTree::Leaf { id, .. } => *id == needle,
+            PaneTree::Split { first, second, .. } => {
+                first.contains_leaf(needle) || second.contains_leaf(needle)
+            }
+        }
     }
 
     /// Split the focused leaf in `dir`, returning the id of the new pane.
-    pub fn split(&mut self, focus: u64, dir: Direction, new_id: u64) -> bool {
+    pub fn split(&mut self, focus: PaneId, dir: Direction, new_id: PaneId) -> bool {
         let axis = match dir {
             Direction::Left | Direction::Right => SplitAxis::Vertical,
             Direction::Up | Direction::Down => SplitAxis::Horizontal,
         };
         let put_new_first = matches!(dir, Direction::Left | Direction::Up);
-        self.split_recursive(focus, axis, put_new_first, new_id)
+        let zoomed = self.zoomed_pane_id();
+        self.split_recursive(focus, axis, put_new_first, new_id, zoomed)
     }
 
     fn split_recursive(
         &mut self,
-        focus: u64,
+        focus: PaneId,
         axis: SplitAxis,
         new_first: bool,
-        new_id: u64,
+        new_id: PaneId,
+        zoomed_pane_id: Option<PaneId>,
     ) -> bool {
         match self {
-            PaneTree::Leaf { id } if *id == focus => {
+            PaneTree::Leaf { id, .. } if *id == focus => {
                 let existing = PaneTree::leaf(*id);
                 let new_leaf = PaneTree::leaf(new_id);
                 let (first, second) =
@@ -73,27 +118,71 @@ impl PaneTree {
                     ratio: 0.5,
                     first: Box::new(first),
                     second: Box::new(second),
+                    zoomed_pane_id,
                 };
                 true
             }
             PaneTree::Leaf { .. } => false,
             PaneTree::Split { first, second, .. } => {
-                first.split_recursive(focus, axis, new_first, new_id)
-                    || second.split_recursive(focus, axis, new_first, new_id)
+                first.split_recursive(focus, axis, new_first, new_id, zoomed_pane_id)
+                    || second.split_recursive(focus, axis, new_first, new_id, zoomed_pane_id)
+            }
+        }
+    }
+
+    /// Resize the split divider that directly owns `active_pane`.
+    ///
+    /// Vertical splits respond to left/right directions; horizontal splits
+    /// respond to up/down directions. The divider ratio is clamped to keep both
+    /// children visible.
+    pub fn resize_split(
+        &mut self,
+        active_pane: PaneId,
+        dir: Direction,
+        delta_fraction: f32,
+    ) -> bool {
+        let delta = match dir {
+            Direction::Left | Direction::Up => -delta_fraction,
+            Direction::Right | Direction::Down => delta_fraction,
+        };
+        self.resize_split_recursive(active_pane, dir, delta)
+    }
+
+    fn resize_split_recursive(&mut self, active_pane: PaneId, dir: Direction, delta: f32) -> bool {
+        match self {
+            PaneTree::Leaf { .. } => false,
+            PaneTree::Split { axis, ratio, first, second, .. } => {
+                let directly_owns_active = matches!(first.as_ref(), PaneTree::Leaf { id, .. } if *id == active_pane)
+                    || matches!(second.as_ref(), PaneTree::Leaf { id, .. } if *id == active_pane);
+                if directly_owns_active {
+                    let axis_matches = matches!(
+                        (*axis, dir),
+                        (SplitAxis::Vertical, Direction::Left | Direction::Right)
+                            | (SplitAxis::Horizontal, Direction::Up | Direction::Down)
+                    );
+                    if axis_matches {
+                        *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                        return true;
+                    }
+                    return false;
+                }
+
+                first.resize_split_recursive(active_pane, dir, delta)
+                    || second.resize_split_recursive(active_pane, dir, delta)
             }
         }
     }
 
     /// Collect leaf ids in left-to-right, top-to-bottom order.
-    pub fn leaves(&self) -> Vec<u64> {
+    pub fn leaves(&self) -> Vec<PaneId> {
         let mut out = Vec::new();
         self.collect(&mut out);
         out
     }
 
-    fn collect(&self, out: &mut Vec<u64>) {
+    fn collect(&self, out: &mut Vec<PaneId>) {
         match self {
-            PaneTree::Leaf { id } => out.push(*id),
+            PaneTree::Leaf { id, .. } => out.push(*id),
             PaneTree::Split { first, second, .. } => {
                 first.collect(out);
                 second.collect(out);
@@ -103,23 +192,26 @@ impl PaneTree {
 
     /// Remove the leaf with `id`. If a Split ends up with one child, it
     /// collapses to that child. Returns true if anything was removed.
-    pub fn close(&mut self, id: u64) -> bool {
-        if let PaneTree::Leaf { id: leaf } = self {
+    pub fn close(&mut self, id: PaneId) -> bool {
+        if let PaneTree::Leaf { id: leaf, .. } = self {
             return *leaf == id;
         }
+        let zoomed = self.zoomed_pane_id().filter(|zoomed| *zoomed != id);
         let mut surviving: Option<PaneTree> = None;
         if let PaneTree::Split { first, second, .. } = self {
-            let first_is = matches!(first.as_ref(), PaneTree::Leaf { id: l } if *l == id);
-            let second_is = matches!(second.as_ref(), PaneTree::Leaf { id: l } if *l == id);
+            let first_is = matches!(first.as_ref(), PaneTree::Leaf { id: l, .. } if *l == id);
+            let second_is = matches!(second.as_ref(), PaneTree::Leaf { id: l, .. } if *l == id);
             if first_is {
                 surviving = Some(std::mem::replace(second.as_mut(), PaneTree::leaf(0)));
             } else if second_is {
                 surviving = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
             } else if first.close(id) || second.close(id) {
+                self.set_zoomed_pane_id(zoomed);
                 return true;
             }
         }
-        if let Some(t) = surviving {
+        if let Some(mut t) = surviving {
+            t.set_zoomed_pane_id(zoomed);
             *self = t;
             true
         } else {
@@ -127,26 +219,32 @@ impl PaneTree {
         }
     }
 
-    /// Recursively compute each leaf's rectangle inside `outer`.
-    pub fn layout(&self, outer: Rect) -> Vec<(u64, Rect)> {
+    /// Recursively compute each visible leaf's rectangle inside `outer`.
+    pub fn layout(&self, outer: Rect) -> Vec<(PaneId, Rect)> {
+        if let Some(id) = self.zoomed_pane_id() {
+            if self.contains_leaf(id) {
+                return vec![(id, outer)];
+            }
+        }
+
         let mut out = Vec::new();
         self.layout_into(outer, &mut out);
         out
     }
 
-    fn layout_into(&self, outer: Rect, out: &mut Vec<(u64, Rect)>) {
+    fn layout_into(&self, outer: Rect, out: &mut Vec<(PaneId, Rect)>) {
         match self {
-            PaneTree::Leaf { id } => out.push((*id, outer)),
-            PaneTree::Split { axis, ratio, first, second } => match axis {
+            PaneTree::Leaf { id, .. } => out.push((*id, outer)),
+            PaneTree::Split { axis, ratio, first, second, .. } => match axis {
                 SplitAxis::Vertical => {
-                    let w1 = outer.w * ratio;
+                    let w1 = outer.w * *ratio;
                     let r1 = Rect::new(outer.x, outer.y, w1, outer.h);
                     let r2 = Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h);
                     first.layout_into(r1, out);
                     second.layout_into(r2, out);
                 }
                 SplitAxis::Horizontal => {
-                    let h1 = outer.h * ratio;
+                    let h1 = outer.h * *ratio;
                     let r1 = Rect::new(outer.x, outer.y, outer.w, h1);
                     let r2 = Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1);
                     first.layout_into(r1, out);
@@ -159,13 +257,13 @@ impl PaneTree {
     /// Find the leaf whose rectangle is the closest spatial neighbour of
     /// `focus` in direction `dir`. Returns `None` when nothing lies in that
     /// direction (focus is on the edge).
-    pub fn focus_neighbor(&self, focus: u64, dir: Direction) -> Option<u64> {
+    pub fn focus_neighbor(&self, focus: PaneId, dir: Direction) -> Option<PaneId> {
         // Unit reference frame — direction-independent of window size.
         let panes = self.layout(Rect::new(0.0, 0.0, 1.0, 1.0));
         let me = panes.iter().find(|(id, _)| *id == focus)?.1;
         let (mx, my) = me.center();
 
-        let mut best: Option<(f32, u64)> = None;
+        let mut best: Option<(f32, PaneId)> = None;
         for (id, r) in &panes {
             if *id == focus {
                 continue;

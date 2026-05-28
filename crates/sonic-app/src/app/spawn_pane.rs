@@ -215,7 +215,7 @@ impl App {
         let i = self.tabs.active_index();
         let Some(st) = self.tab_states.get_mut(i) else { return };
         let focus = st.active_pane;
-        if matches!(st.tree, PaneTree::Leaf { id } if id == focus) {
+        if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
             self.close_tab_at(i);
             return;
         }
@@ -230,6 +230,36 @@ impl App {
         let Some(st) = self.tab_states.get_mut(i) else { return };
         if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
             st.active_pane = next;
+        }
+    }
+
+    pub(super) fn toggle_active_pane_zoom(&mut self) {
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get_mut(i) else { return };
+        if st.tree.toggle_zoom(st.active_pane) {
+            self.resize_visible_panes();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    pub(super) fn resize_active_split(&mut self, dir: Direction) {
+        let i = self.tabs.active_index();
+        let Some(st) = self.tab_states.get_mut(i) else { return };
+        if st.tree.resize_split(st.active_pane, dir, 0.05) {
+            self.resize_visible_panes();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn resize_visible_panes(&mut self) {
+        let rects = self.compute_active_pane_rects();
+        if let Some(r) = self.renderer.as_ref() {
+            let (cw, ch) = r.cell_size();
+            crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }
     }
 }

@@ -255,7 +255,12 @@ pub fn action_display_name(a: &Action) -> String {
         Action::SplitRight => "SplitRight".into(),
         Action::SplitDown => "SplitDown".into(),
         Action::ClosePane => "ClosePane".into(),
+        Action::TogglePaneZoom => "TogglePaneZoom".into(),
         Action::FocusPane(d) => format!("FocusPane({})", dir_name(*d)),
+        Action::ResizePaneLeft => "ResizePaneLeft".into(),
+        Action::ResizePaneRight => "ResizePaneRight".into(),
+        Action::ResizePaneUp => "ResizePaneUp".into(),
+        Action::ResizePaneDown => "ResizePaneDown".into(),
         Action::ResizePane { dir, amount } => {
             format!("ResizePane({}, {amount})", dir_name(*dir))
         }
@@ -318,10 +323,15 @@ pub fn all_actions() -> Vec<Action> {
         Action::SplitRight,
         Action::SplitDown,
         Action::ClosePane,
+        Action::TogglePaneZoom,
         Action::FocusPane(Direction::Left),
         Action::FocusPane(Direction::Right),
         Action::FocusPane(Direction::Up),
         Action::FocusPane(Direction::Down),
+        Action::ResizePaneLeft,
+        Action::ResizePaneRight,
+        Action::ResizePaneUp,
+        Action::ResizePaneDown,
         Action::ResizePane { dir: Direction::Left, amount: 1 },
         Action::ResizePane { dir: Direction::Right, amount: 1 },
         Action::ResizePane { dir: Direction::Up, amount: 1 },
