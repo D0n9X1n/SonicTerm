@@ -58,6 +58,10 @@ impl App {
                 };
             }
         }
+        if self.prefs_toggle_anim_in_flight() {
+            let frame = Instant::now() + Duration::from_millis(16);
+            next = Some(next.map_or(frame, |at| at.min(frame)));
+        }
         match next {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
@@ -76,6 +80,11 @@ impl App {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             if let Some(w) = &self.window {
                 w.request_redraw();
+            }
+            if self.prefs_toggle_anim_in_flight() {
+                if let Some(w) = &self.prefs_window {
+                    w.request_redraw();
+                }
             }
         }
     }

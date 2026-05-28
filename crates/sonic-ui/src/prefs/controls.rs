@@ -10,6 +10,7 @@
 //! text via the standard [`crate::render::GpuRenderer`].
 
 use std::fmt;
+use std::time::Instant;
 
 /// Stable id used by [`super::state::PrefsState`] to dispatch events to
 /// the right control without holding a `&mut` to the whole form.
@@ -64,6 +65,14 @@ impl InteractionState {
 /// a 44×24 pill with a 20px sliding thumb; the active fill comes from
 /// `theme.accent`. The struct itself only carries data — the renderer
 /// reads `value`, `interaction`, and the layout's `TOGGLE_*` constants.
+///
+/// `knob_anim_start` records the `Instant` at which the most recent
+/// state flip happened (set by [`Toggle::toggle`] and [`Toggle::set`]
+/// when the value actually changes). The renderer interpolates the
+/// thumb between the off- and on-position over [`Toggle::ANIM_MS`]
+/// using [`Toggle::knob_x_animated`]. Call
+/// [`Toggle::clear_anim_if_done`] after reading the animated position so
+/// completed animations are not needlessly re-interpolated every frame.
 #[derive(Debug, Clone)]
 pub struct Toggle {
     pub id: WidgetId,
@@ -71,11 +80,28 @@ pub struct Toggle {
     pub rect: Rect,
     pub value: bool,
     pub interaction: InteractionState,
+    /// Timestamp of the last state flip, used by the renderer to lerp
+    /// the sliding thumb position. `None` means "no animation in
+    /// flight; render the snapped end position".
+    pub knob_anim_start: Option<Instant>,
 }
 
 impl Toggle {
+    /// Duration of the sliding-thumb animation in milliseconds.
+    /// Matches the figma spec for issue #173 slice-2c — short enough
+    /// to feel snappy, long enough to read as movement (vs. an
+    /// instantaneous jump).
+    pub const ANIM_MS: u64 = 120;
+
     pub fn new(id: WidgetId, label: impl Into<String>, rect: Rect, value: bool) -> Self {
-        Self { id, label: label.into(), rect, value, interaction: InteractionState::new() }
+        Self {
+            id,
+            label: label.into(),
+            rect,
+            value,
+            interaction: InteractionState::new(),
+            knob_anim_start: None,
+        }
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
@@ -84,10 +110,14 @@ impl Toggle {
 
     pub fn toggle(&mut self) -> bool {
         self.value = !self.value;
+        self.knob_anim_start = Some(Instant::now());
         self.value
     }
 
     pub fn set(&mut self, v: bool) {
+        if self.value != v {
+            self.knob_anim_start = Some(Instant::now());
+        }
         self.value = v;
     }
 
@@ -97,12 +127,67 @@ impl Toggle {
 
     /// X coordinate of the sliding thumb's left edge for a given track
     /// rect, honoring `TOGGLE_KNOB` + `TOGGLE_KNOB_MARGIN` from the layout.
-    /// Pure math so the renderer and tests agree.
+    /// Pure math so the renderer and tests agree. Returns the *snapped*
+    /// position — use [`Toggle::knob_x_animated`] for the in-flight
+    /// interpolated value.
     pub fn knob_x(&self, knob_size: f32, margin: f32) -> f32 {
         if self.value {
             self.rect.x + self.rect.w - knob_size - margin
         } else {
             self.rect.x + margin
+        }
+    }
+
+    /// X coordinate of the sliding thumb's left edge at time `now`,
+    /// linearly interpolating between the previous end and the new
+    /// end over [`Toggle::ANIM_MS`] milliseconds since
+    /// [`Toggle::knob_anim_start`].
+    ///
+    /// * If `knob_anim_start` is `None`, returns the snapped position.
+    /// * If `now - start >= ANIM_MS`, returns the snapped position.
+    /// * Otherwise returns `lerp(start_pos, end_pos, t)` where
+    ///   `t = elapsed / ANIM_MS` and `start_pos` is the position
+    ///   the toggle was in *before* the most recent flip
+    ///   (i.e. the opposite of the current `value`).
+    ///
+    /// Pure math + a single `now.duration_since(start)` read, so tests
+    /// can inject any `now` and assert mid-animation behavior.
+    pub fn knob_x_animated(&self, now: Instant, knob_size: f32, margin: f32) -> f32 {
+        let (x, _) = self.knob_x_animated_with_done(now, knob_size, margin);
+        x
+    }
+
+    /// Same as [`Self::knob_x_animated`], plus a completion flag the
+    /// renderer can use to clear [`Self::knob_anim_start`] after the
+    /// final snapped frame has been computed.
+    pub fn knob_x_animated_with_done(
+        &self,
+        now: Instant,
+        knob_size: f32,
+        margin: f32,
+    ) -> (f32, bool) {
+        let end = self.knob_x(knob_size, margin);
+        let Some(start) = self.knob_anim_start else {
+            return (end, false);
+        };
+        let elapsed_ms = now.saturating_duration_since(start).as_millis() as u64;
+        if elapsed_ms >= Self::ANIM_MS {
+            return (end, true);
+        }
+        // start_pos == the snapped position of the *previous* value,
+        // which is `!self.value`.
+        let start_pos = if !self.value {
+            self.rect.x + self.rect.w - knob_size - margin
+        } else {
+            self.rect.x + margin
+        };
+        let t = elapsed_ms as f32 / Self::ANIM_MS as f32;
+        (start_pos + (end - start_pos) * t, false)
+    }
+
+    pub fn clear_anim_if_done(&mut self, done: bool) {
+        if done {
+            self.knob_anim_start = None;
         }
     }
 }
