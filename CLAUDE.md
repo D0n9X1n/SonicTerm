@@ -144,7 +144,12 @@ cargo build --release -p sonic-mac                             # confirms fat-LT
 
 ## 5. Coding conventions
 
-- **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files. **New tests follow this pattern.** The `sonic-ui/src/prefs/` subsystem (layout / controls / state) still has inline `#[cfg(test)] mod tests {}` blocks from v0.6 and is the known exception — migrate them when you next touch that area; not blocking.
+- **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files; issue #190 finished the workspace migration. **New tests follow this pattern.** Documented exceptions (kept inline with a `// NOTE (CLAUDE.md §5):` comment naming the blocker):
+  - `sonic-ui/src/prefs/{layout,controls,state}.rs` — PR-D will rewrite.
+  - `sonic-shared/src/prefs_renderer.rs` — pokes wide crate-private surface and `include_str!`s itself.
+  - `sonic-windows/src/os_drag_win.rs` — bin-only crate (no `lib.rs`), no `tests/` route.
+  - `sonic-mac/src/menubar.rs` — small macOS-only surface, private `register`/`lookup`/`scan_themes`.
+  - `sonic-io/src/foreground_proc.rs` — private `snapshot_processes`/`resolve_process_name`/`ProcEntry`.
 - **Test-only items that must remain accessible to integration tests stay `pub` with `#[doc(hidden)]`.** No `__test_support` shim modules — that pattern was explicitly removed.
 - **Public API for actions**: adding a new bindable user action means adding a variant to `sonic_cfg::keymap::Action` AND a match arm in `sonic_app::app::App` (via `keymap_dispatch.rs`).
 - **Conventional Commits** with scope: `feat(v1.0): ...`, `fix(vt): ...`, `chore(deps): ...`, `docs: ...`, `refactor(crates): ...`.

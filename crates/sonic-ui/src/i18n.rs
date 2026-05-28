@@ -152,11 +152,4 @@ fn negotiate(requested: &str) -> String {
     supported.first().map(|id| id.to_string()).unwrap_or_else(|| "en".to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    // Inline smoke tests live in `tests/i18n.rs`.
-    #[test]
-    fn module_loads() {
-        let _ = super::I18n::new(Some("en"));
-    }
-}
+// Unit tests live in `tests/src_i18n.rs`.

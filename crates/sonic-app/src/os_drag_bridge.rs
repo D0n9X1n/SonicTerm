@@ -114,46 +114,4 @@ pub fn __test_drain_files() -> Vec<Vec<PathBuf>> {
     drain_file_drops()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mk(pid: i32) -> TabPayload {
-        TabPayload {
-            pty_pid: pid,
-            tab_title: String::new(),
-            scrollback_b64: String::new(),
-            cwd: String::new(),
-            cmd: String::new(),
-            env: vec![],
-        }
-    }
-
-    #[test]
-    fn tab_queue_drains_in_fifo_order() {
-        // Pre-drain in case other tests in the same binary left items.
-        let _ = drain_tab_payloads();
-        push_tab_payload(mk(1));
-        push_tab_payload(mk(2));
-        let out = drain_tab_payloads();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].pty_pid, 1);
-        assert_eq!(out[1].pty_pid, 2);
-        // Drain is one-shot.
-        assert!(drain_tab_payloads().is_empty());
-    }
-
-    #[test]
-    fn file_queue_drops_empty_and_drains_in_order() {
-        let _ = drain_file_drops();
-        // Empty input is rejected and does not wake.
-        assert!(!push_files(vec![]));
-        push_files(vec![PathBuf::from("/a"), PathBuf::from("/b c")]);
-        push_files(vec![PathBuf::from("/d")]);
-        let out = drain_file_drops();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].len(), 2);
-        assert_eq!(out[1][0], PathBuf::from("/d"));
-        assert!(drain_file_drops().is_empty());
-    }
-}
+// Unit tests live in `tests/os_drag_bridge.rs`.

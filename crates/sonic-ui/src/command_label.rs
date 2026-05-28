@@ -224,7 +224,8 @@ pub fn keybinding_hint(km: &Keymap, action: &Action) -> Option<String> {
 /// Tidy a raw `super+shift+p` keymap string into `⌘⇧P` style for
 /// display alongside the palette entry. Falls back to the raw string
 /// for unknown tokens so we never lose information.
-fn pretty_keys(raw: &str) -> String {
+#[doc(hidden)]
+pub fn pretty_keys(raw: &str) -> String {
     raw.split('+')
         .map(|tok| match tok.to_ascii_lowercase().as_str() {
             "super" | "cmd" | "command" => "⌘".to_string(),
@@ -244,66 +245,4 @@ fn pretty_keys(raw: &str) -> String {
         .join("")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn variant_kind_covers_every_action() {
-        // Cheap exhaustiveness: build representative instances and
-        // verify each one maps to a kind in ALL_VARIANT_KINDS.
-        let samples: Vec<Action> = vec![
-            Action::NewTab,
-            Action::CloseTab,
-            Action::NextTab,
-            Action::PrevTab,
-            Action::ActivateTab(1),
-            Action::ActivateLastTab,
-            Action::SplitRight,
-            Action::SplitDown,
-            Action::ClosePane,
-            Action::FocusPane(Direction::Left),
-            Action::ResizePane { dir: Direction::Left, amount: 1 },
-            Action::CopyToClipboard,
-            Action::PasteFromClipboard,
-            Action::IncreaseFontSize,
-            Action::DecreaseFontSize,
-            Action::ResetFontSize,
-            Action::ApplyTheme("dracula".into()),
-            Action::ToggleTabBar,
-            Action::NewWindow,
-            Action::ToggleFullscreen,
-            Action::OpenSearch,
-            Action::OpenCommandPalette,
-            Action::OpenPreferences,
-            Action::Scroll(ScrollAction::PageUp),
-            Action::ScrollToPrevPrompt,
-            Action::ScrollToNextPrompt,
-            Action::ReloadConfig,
-            Action::OpenSshPane("user@host".into()),
-        ];
-        assert_eq!(samples.len(), ALL_VARIANT_KINDS.len(), "samples must cover every variant kind");
-        for s in &samples {
-            let k = variant_kind(s);
-            assert!(
-                ALL_VARIANT_KINDS.contains(&k),
-                "variant_kind({s:?}) = {k} not in ALL_VARIANT_KINDS"
-            );
-        }
-    }
-
-    #[test]
-    fn labels_are_human_readable_verb_noun() {
-        assert_eq!(label(&Action::NewTab), "New Tab");
-        assert_eq!(label(&Action::SplitRight), "Split Pane Right");
-        assert_eq!(label(&Action::OpenPreferences), "Open Preferences");
-        assert_eq!(label(&Action::ReloadConfig), "Reload Config");
-    }
-
-    #[test]
-    fn pretty_keys_translates_modifiers() {
-        assert_eq!(pretty_keys("super+t"), "⌘T");
-        assert_eq!(pretty_keys("super+shift+p"), "⌘⇧P");
-        assert_eq!(pretty_keys("ctrl+alt+enter"), "⌃⌥Enter");
-    }
-}
+// Unit tests live in `tests/src_command_label.rs`.

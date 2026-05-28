@@ -245,20 +245,4 @@ pub fn blueprint() -> MenuBlueprint {
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blueprint_top_level_order_is_canonical() {
-        let bp = blueprint();
-        let titles: Vec<&str> = bp.iter().map(|s| s.title).collect();
-        assert_eq!(titles, vec!["Sonic", "Shell", "Edit", "View", "Help"]);
-    }
-
-    #[test]
-    fn sender_is_clone_send_sync() {
-        fn assert_traits<T: Clone + Send + Sync>() {}
-        assert_traits::<Sender>();
-    }
-}
+// Unit tests live in `tests/menu.rs`.

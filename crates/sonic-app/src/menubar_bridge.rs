@@ -72,22 +72,4 @@ pub fn __test_drain() -> Vec<Action> {
     drain()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn push_then_drain_preserves_order() {
-        // Clear leftovers from any other test in the same process.
-        let _ = drain();
-        push_action(Action::NewTab);
-        push_action(Action::CloseTab);
-        push_action(Action::OpenPreferences);
-        let drained = drain();
-        assert_eq!(drained.len(), 3);
-        assert!(matches!(drained[0], Action::NewTab));
-        assert!(matches!(drained[1], Action::CloseTab));
-        assert!(matches!(drained[2], Action::OpenPreferences));
-        assert!(drain().is_empty());
-    }
-}
+// Unit tests live in `tests/menubar_bridge.rs`.

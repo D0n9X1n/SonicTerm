@@ -232,6 +232,11 @@ fn resolve_process_name(pid: u32) -> Option<String> {
     Some(String::from_utf16_lossy(slice))
 }
 
+// NOTE (CLAUDE.md §5): Tests stay inline. They reach into the
+// crate-private `snapshot_processes`, `resolve_process_name`, and
+// `ProcEntry` (none of which are part of the public Windows
+// foreground-process API). Migrating would require bumping all three
+// to `pub` purely for tests.
 #[cfg(test)]
 mod tests {
     use super::*;

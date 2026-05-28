@@ -93,27 +93,4 @@ mod macos {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::normalize_proc_name;
-
-    #[test]
-    fn strips_login_dash_prefix() {
-        assert_eq!(normalize_proc_name("-zsh"), "zsh");
-    }
-
-    #[test]
-    fn extracts_basename_from_path() {
-        assert_eq!(normalize_proc_name("/usr/local/bin/nvim"), "nvim");
-    }
-
-    #[test]
-    fn lowercases() {
-        assert_eq!(normalize_proc_name("Python"), "python");
-    }
-
-    #[test]
-    fn handles_plain_name() {
-        assert_eq!(normalize_proc_name("bash"), "bash");
-    }
-}
+// Unit tests for `normalize_proc_name` live in `tests/proc_info.rs`.
