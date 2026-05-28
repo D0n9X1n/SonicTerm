@@ -2,7 +2,7 @@
 //!
 //! Migrated from inline `#[cfg(test)] mod tests` in `src/command_label.rs`.
 
-use sonic_cfg::keymap::{Action, Direction, ScrollAction};
+use sonic_cfg::keymap::{Action, BroadcastScope, Direction, ScrollAction};
 use sonic_ui::command_label::{label, pretty_keys, variant_kind, ALL_VARIANT_KINDS};
 
 #[test]
@@ -18,6 +18,7 @@ fn variant_kind_covers_every_action() {
         Action::SplitDown,
         Action::ClosePane,
         Action::TogglePaneZoom,
+        Action::ToggleBroadcast { scope: BroadcastScope::Tab },
         Action::FocusPane(Direction::Left),
         Action::ResizePaneLeft,
         Action::ResizePaneRight,

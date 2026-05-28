@@ -62,9 +62,17 @@ pub fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
 }
 
 pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String> {
+    key_to_string(&event.logical_key, mods)
+}
+
+#[doc(hidden)]
+pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if mods.super_key() || mods.control_key() {
+    if mods.super_key() {
         parts.push("super".into());
+    }
+    if mods.control_key() {
+        parts.push("ctrl".into());
     }
     if mods.alt_key() {
         parts.push("alt".into());
@@ -72,7 +80,7 @@ pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Opt
     if mods.shift_key() {
         parts.push("shift".into());
     }
-    let name = key_name(&event.logical_key)?;
+    let name = key_name(key)?;
     parts.push(name.as_str().to_string());
     Some(parts.join("+").to_ascii_lowercase())
 }

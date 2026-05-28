@@ -256,6 +256,9 @@ pub fn action_display_name(a: &Action) -> String {
         Action::SplitDown => "SplitDown".into(),
         Action::ClosePane => "ClosePane".into(),
         Action::TogglePaneZoom => "TogglePaneZoom".into(),
+        Action::ToggleBroadcast { scope } => {
+            format!("ToggleBroadcast({})", broadcast_scope_name(*scope))
+        }
         Action::FocusPane(d) => format!("FocusPane({})", dir_name(*d)),
         Action::ResizePaneLeft => "ResizePaneLeft".into(),
         Action::ResizePaneRight => "ResizePaneRight".into(),
@@ -282,6 +285,13 @@ pub fn action_display_name(a: &Action) -> String {
         Action::OpenSshPane(t) => format!("OpenSshPane({t})"),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
+    }
+}
+
+fn broadcast_scope_name(scope: sonic_cfg::keymap::BroadcastScope) -> &'static str {
+    match scope {
+        sonic_cfg::keymap::BroadcastScope::Tab => "Tab",
+        sonic_cfg::keymap::BroadcastScope::AllTabs => "AllTabs",
     }
 }
 
@@ -324,6 +334,8 @@ pub fn all_actions() -> Vec<Action> {
         Action::SplitDown,
         Action::ClosePane,
         Action::TogglePaneZoom,
+        Action::ToggleBroadcast { scope: sonic_cfg::keymap::BroadcastScope::Tab },
+        Action::ToggleBroadcast { scope: sonic_cfg::keymap::BroadcastScope::AllTabs },
         Action::FocusPane(Direction::Left),
         Action::FocusPane(Direction::Right),
         Action::FocusPane(Direction::Up),

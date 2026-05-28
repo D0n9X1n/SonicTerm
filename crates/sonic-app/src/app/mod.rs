@@ -106,6 +106,7 @@ pub fn integrated_titlebar_inset_px() -> u32 {
 
 use crate::config_watch::ConfigWatcher;
 use sonic_shared::render::GpuRenderer;
+use sonic_ui::broadcast::BroadcastState;
 use sonic_ui::cheatsheet::CheatsheetState;
 use sonic_ui::command_palette::CommandPalette;
 use sonic_ui::ime::ImeState;
@@ -506,7 +507,7 @@ mod tab_state;
 mod tear_out;
 mod window_event;
 pub use config_apply::config_diff_needs_font_apply;
-pub use key_encoding::{encode_logical, key_name, KeyName};
+pub use key_encoding::{encode_logical, key_name, key_to_string, KeyName};
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -693,6 +694,9 @@ pub struct App {
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
     /// + hit-test code can read it on each frame.
     pub(super) tab_bar_visible: bool,
+    /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
+    /// are mirrored into matching receiver panes after the source PTY write.
+    pub(super) broadcast: BroadcastState,
     /// One-shot hook fired the first time the winit `ApplicationHandler::
     /// resumed` callback runs — i.e. when NSApp / the platform event
     /// loop is fully initialized but BEFORE we hand control back to
@@ -708,6 +712,12 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+}
+
+impl sonic_ui::broadcast::BroadcastTab for TabState {
+    fn pane_tree(&self) -> &PaneTree {
+        &self.tree
+    }
 }
 
 impl App {
@@ -812,6 +822,7 @@ impl App {
             i18n,
             os_drag_sink: None,
             tab_bar_visible: true,
+            broadcast: BroadcastState::Off,
             on_resumed: None,
             on_window_ready: None,
         }
@@ -1031,11 +1042,32 @@ impl App {
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
-        if let Some(p) = self.active_pane() {
+        let Some(active_id) = self.active_pane_id() else { return };
+        self.write_to_pane(active_id, bytes.clone());
+        self.broadcast_from(active_id, bytes);
+    }
+
+    fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
+        if let Some(p) = self.panes.get(&pane_id) {
             if let Some(pty) = p.pty.as_ref() {
                 let _ = pty.in_tx.send(bytes);
             }
         }
+    }
+
+    fn broadcast_from(&self, active_id: u64, bytes: Vec<u8>) {
+        let BroadcastState::On { source_pane, .. } = self.broadcast else { return };
+        if active_id != source_pane {
+            return;
+        }
+        let receivers = self.broadcast_receivers();
+        for pane_id in receivers {
+            self.write_to_pane(pane_id, bytes.clone());
+        }
+    }
+
+    pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
+        self.broadcast.receiving_panes(&self.tab_states, self.tabs.active_index())
     }
 
     /// Test-only: how many tabs the named child window currently owns.

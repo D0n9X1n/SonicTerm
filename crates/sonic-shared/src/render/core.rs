@@ -307,6 +307,8 @@ pub struct GpuRenderer {
     cheatsheet_rows_buffer: Buffer,
     cheatsheet_footer_buffer: Buffer,
     ime_buffer: Buffer,
+    /// Dedicated text buffer for broadcast-warning pane strips.
+    broadcast_buffer: Buffer,
     /// Dedicated text buffer for the drag-chip title overlay.
     drag_chip_buffer: Buffer,
     /// Cached drag-chip rect from the last `render()` call (in logical
@@ -415,6 +417,7 @@ struct FrameKey {
     /// Folded in so toggling the config option live invalidates the
     /// frame cache.
     close_override: u8,
+    broadcast_receivers_hash: u64,
 }
 
 impl GpuRenderer {
@@ -645,6 +648,9 @@ impl GpuRenderer {
         let ime_metrics = Metrics::new(font_size, font_size * 1.25);
         let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
         ime_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
+        let broadcast_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
+        let mut broadcast_buffer = Buffer::new(&mut font_system, broadcast_metrics);
+        broadcast_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
         let drag_chip_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
         let mut drag_chip_buffer = Buffer::new(&mut font_system, drag_chip_metrics);
         drag_chip_buffer.set_size(&mut font_system, Some(220.0), Some(font_size * 1.5));
@@ -711,6 +717,7 @@ impl GpuRenderer {
             cheatsheet_rows_buffer,
             cheatsheet_footer_buffer,
             ime_buffer,
+            broadcast_buffer,
             drag_chip_buffer,
             drag_chip_visual: None,
             last_frame_key: None,
@@ -1382,6 +1389,8 @@ impl GpuRenderer {
             })
             .collect();
         let pane_rects = pane_rects.as_slice();
+        let broadcast_receiver_ids: Vec<u64> =
+            panes.iter().filter(|p| p.is_broadcast_receiver).map(|p| p.id).collect();
         // Part B step 3 (Fix 2): collect immutable per-pane views for ALL
         // panes so the cell-emission body below can iterate per-pane. The
         // grid is borrowed shared (`&Grid`) — every read in the loop
@@ -1496,6 +1505,13 @@ impl GpuRenderer {
             }
             h.finish()
         };
+        let broadcast_receivers_hash: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            broadcast_receiver_ids.hash(&mut h);
+            h.finish()
+        };
         // Hash pane rects so split geometry changes invalidate the frame
         // even when the active pane id is unchanged.
         let pane_rect_hash: u64 = {
@@ -1576,6 +1592,7 @@ impl GpuRenderer {
             hover_tab: hover_tab_idx,
             hover_close: hover_close_hit,
             close_override: u8::from(self.tab_close_override.is_some()),
+            broadcast_receivers_hash,
         };
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -2155,21 +2172,28 @@ impl GpuRenderer {
             });
         }
 
-        // -------- Pane split borders ---------------------------------------
+        // -------- Pane split borders + broadcast safety chrome --------------
         // Each pane in the tab gets a thin border outlining its rectangle so
-        // splits are visible; the FOCUSED pane gets the theme accent color
-        // (gold on tokyo-night, orange on gruvbox, etc.) so the user can
-        // tell at a glance which pane has keyboard focus. Inactive panes
-        // get a dim version of the same accent — still readable as a split
-        // boundary but visually subordinate.
-        if pane_rects.len() > 1 {
+        // splits are visible; the FOCUSED pane gets the theme accent color.
+        // Broadcast receivers override that chrome with an unmistakable red
+        // 2px border plus a warning strip so users do not accidentally leave
+        // mirrored input enabled.
+        if pane_rects.len() > 1 || !broadcast_receiver_ids.is_empty() {
             let accent = crate::ui_tokens::UiPalette::from_theme(theme).accent;
             let focus_border = accent;
             let border = [accent[0] * 0.35, accent[1] * 0.35, accent[2] * 0.35, accent[3]];
+            let warning = hex_to_rgba(theme.colors.bright.red.0.as_str(), 1.0);
             for (id, r) in pane_rects {
+                let is_receiver = broadcast_receiver_ids.contains(id);
                 let is_active = *id == active_pane;
-                let color = if is_active { focus_border } else { border };
-                let t = if is_active { 2.0_f32 } else { 1.0_f32 };
+                let color = if is_receiver {
+                    warning
+                } else if is_active {
+                    focus_border
+                } else {
+                    border
+                };
+                let t = if is_active || is_receiver { 2.0_f32 } else { 1.0_f32 };
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
                     color,
@@ -2190,6 +2214,23 @@ impl GpuRenderer {
                     color,
                     ..Default::default()
                 });
+                if is_receiver {
+                    let strip_h = (self.font_size * 1.45).max(20.0).min(r.h.max(0.0));
+                    let mut strip = warning;
+                    strip[3] = 0.92;
+                    quads_overlay.push(QuadInstance {
+                        rect: px_to_ndc(
+                            r.x + t,
+                            r.y + t,
+                            (r.w - t * 2.0).max(0.0),
+                            strip_h,
+                            sw,
+                            sh,
+                        ),
+                        color: strip,
+                        ..Default::default()
+                    });
+                }
             }
         }
 
@@ -2786,6 +2827,43 @@ impl GpuRenderer {
         // Drag-chip overlay: translucent ~120×24 quad that follows the
         // cursor while a tab is held. Drawn AFTER ime/search so it
         // sits on top of everything.
+        let broadcast_label_rects: Vec<PaneRect> = pane_rects
+            .iter()
+            .filter(|(id, _)| broadcast_receiver_ids.contains(id))
+            .map(|(_, r)| *r)
+            .collect();
+        if !broadcast_label_rects.is_empty() {
+            let label = (0..broadcast_label_rects.len())
+                .map(|_| "⚠ BROADCAST")
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.broadcast_buffer.set_size(
+                &mut self.font_system,
+                Some(self.config.width as f32),
+                Some(
+                    (self.font_size * 1.5 * broadcast_label_rects.len() as f32)
+                        .max(self.font_size * 1.5),
+                ),
+            );
+            self.broadcast_buffer.set_text(
+                &mut self.font_system,
+                &label,
+                &terminal_font_attrs(&self.font_family)
+                    .color(hex_to_glyphon(theme.colors.bright.yellow.0.as_str())),
+                Shaping::Advanced,
+                None,
+            );
+            self.broadcast_buffer.shape_until_scroll(&mut self.font_system, false);
+        } else {
+            self.broadcast_buffer.set_text(
+                &mut self.font_system,
+                "",
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
+        }
+
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
@@ -3113,6 +3191,23 @@ impl GpuRenderer {
         }
         if let Some(a) = ime_area {
             overlay_areas.push(a);
+        }
+        for (idx, rect) in broadcast_label_rects.iter().enumerate() {
+            let line_h = self.font_size * 0.85 * 1.2;
+            overlay_areas.push(TextArea {
+                buffer: &self.broadcast_buffer,
+                left: rect.x + 10.0,
+                top: rect.y + 4.0 - idx as f32 * line_h,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + (self.font_size * 1.45).max(20.0)) as i32,
+                },
+                default_color: hex_to_glyphon(theme.colors.bright.yellow.0.as_str()),
+                custom_glyphs: &[],
+            });
         }
         // Drag-chip title: render in the overlay text pass so it sits
         // above terminal glyphs and tab chrome. Mirrors the chip rect

@@ -76,6 +76,7 @@ impl App {
             Action::SplitDown => self.split_active(Direction::Down),
             Action::ClosePane => self.close_active_pane(),
             Action::TogglePaneZoom => self.toggle_active_pane_zoom(),
+            Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
             Action::FocusPane(d) => self.focus_pane_dir(*d),
             Action::ResizePaneLeft => self.resize_active_split(Direction::Left),
             Action::ResizePaneRight => self.resize_active_split(Direction::Right),
