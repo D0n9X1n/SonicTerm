@@ -4384,6 +4384,7 @@ name = "sonic-render-model"
 version = "0.3.0"
 dependencies = [
  "sonic-cfg",
+ "sonic-grid",
  "sonic-text",
  "sonic-types",
 ]

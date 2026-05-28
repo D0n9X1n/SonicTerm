@@ -7,7 +7,9 @@
 pub mod geometry;
 pub mod inputs;
 pub mod painter;
+pub mod pane_render;
 
 pub use geometry::*;
 pub use inputs::*;
 pub use painter::*;
+pub use pane_render::{CursorStyle, PaneId, PaneRender};

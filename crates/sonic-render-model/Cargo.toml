@@ -8,3 +8,4 @@ license = "MIT OR Apache-2.0"
 sonic-types = { workspace = true }
 sonic-text = { workspace = true }
 sonic-cfg = { workspace = true }
+sonic-grid = { workspace = true }
