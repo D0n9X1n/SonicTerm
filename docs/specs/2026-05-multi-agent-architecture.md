@@ -174,7 +174,15 @@ A concrete playbook for adding e.g. a 4th `dev-mac-2` or a brand-new `dev-linux`
 
 **Caveat:** with `ccache` or `sccache` pre-warmed (shared across agents on the same host), first build drops to ~15 min. Cold first-time on a fresh host is the bottleneck — budget the full 2 hours unless cache is shared.
 
-**Multi-agent-per-platform labeling:** when 2+ agents share a platform, EXTEND `dev:*` with a suffix: `dev:mac-1`, `dev:mac-2`, etc. The base `dev:mac` label may also be applied as a group identifier. The first agent on a platform uses the base label (`dev:mac`); second onward uses suffixed (`dev:mac-2`, `dev:mac-3`). Update §15 of CLAUDE.md to reflect this convention (do NOT update §15 in this PR; tracked as follow-up issue per §G Q9).
+**Revised labeling rule** (replaces ambiguous wording — the bare `dev:mac` cannot serve as both an individual identifier AND a group filter without losing the ability to distinguish them):
+
+- **Single-agent platform (default)**: use bare `dev:mac` / `dev:windows` / `dev:linux`.
+- **Multi-agent platform**: introduce `dev:<platform>-<n>` for EVERY agent including the first. So when a 2nd mac PM joins, the existing `dev:mac` PRs are bulk-relabeled to `dev:mac-1` (or `dev:mac-primary`), and the new agent uses `dev:mac-2`. No agent ever uses bare `dev:mac` once the platform has multiple PMs.
+- **Group filter**: use `dev:mac*` glob in `gh pr list --search 'label:dev:mac OR label:dev:mac-1 OR label:dev:mac-2 ...'` OR (cleaner) introduce a SEPARATE meta-label `platform-dev-team:mac` that all mac PMs apply alongside their personal `dev:mac-N`. Then `gh pr list --label platform-dev-team:mac` returns the whole team's PRs unambiguously.
+
+The clean version uses `platform-dev-team:<plat>` as the group label and `dev:<plat>-<n>` (or bare `dev:<plat>` for first/single agent) as the individual label.
+
+Migration: when a 2nd agent joins, PM runs `scripts/relabel-on-multi-agent.sh <platform>` (new tool, follow-up issue) which bulk-relabels existing `dev:<plat>` PRs to `dev:<plat>-1` and applies `platform-dev-team:<plat>` to all of them. Update §15 of CLAUDE.md to reflect this convention (do NOT update §15 in this PR; tracked as follow-up issue per §G Q9).
 
 **Provisioning checklist (PM does this once per new agent):**
 
@@ -279,7 +287,15 @@ QA must not silently miss bugs. The §C.3 roster on its own is necessary but not
    - net diff ≤ 5 LOC AND no `.rs` file modified
    - label `trivial` applied by PM with a justification comment
 
-   PM must NOT apply `trivial` for behavior changes, default-value changes, or anything in the CLAUDE.md §0 "Trivial-NOT-applies" list.
+   PM must NOT apply `trivial` for any of:
+   - changes to runtime defaults (config values, feature flags)
+   - changes to authentication, security, or secrets handling
+   - changes to persistence (DB schema, file formats, migrations)
+   - changes to public API contracts (CLI flags, library exports, IPC)
+   - changes to deploy / CI / release behavior
+   - any change where a 1-line wrong value reaches production
+
+   When in doubt → DO NOT mark trivial; route through full QA.
 
 5. **QA escalation on disagreement:** if 2 QAs disagree (one APPROVED, one CHANGES REQUESTED), PM reads both reports and breaks the tie — OR dispatches a **3rd Haiku** with both prior verdicts as input ("here is verdict A, here is verdict B, you arbitrate"). Tiebreaker verdict is binding. **Maximum 3 Haiku dispatches per PR for tiebreaking; on the 3rd disagreement, PM auto-decides and documents the rationale in a PR comment.**
 
@@ -413,4 +429,5 @@ QA must not silently miss bugs. The §C.3 roster on its own is necessary but not
    Opus dispatch dominates; QA is a rounding error. Acceptable?
 7. **Two-PM commit attribution.** Same `Co-Authored-By: Claude Opus 4` trailer across both, or separate "PM-mac" / "PM-windows" attribution? Audit / blame implications.
 8. **`onboard-dev-agent.sh` location.** **DECIDED:** `scripts/` (alongside other dispatch helpers like `scripts/check-deny.sh`), per existing repo convention. No `tooling/` directory will be introduced.
-9. **Multi-agent-per-platform labeling convention.** Approve the `dev:mac-N` / `dev:windows-N` suffix scheme from §C.5? Alternative: drop the suffix and use GitHub assignee (`@bot-mac-2`) as the disambiguator instead of a label. Either choice requires a one-line update to CLAUDE.md §15.
+9. **Multi-agent-per-platform labeling convention.** Approve the revised scheme from §C.5: `platform-dev-team:<plat>` as the group label (unambiguous `gh pr list` filter), with `dev:<plat>-<n>` as the per-agent individual label (or bare `dev:<plat>` only while a single agent owns the platform). Migration on 2nd-agent onboarding via `scripts/relabel-on-multi-agent.sh`. Alternative: drop the group meta-label and use GitHub assignee (`@bot-mac-2`) as the disambiguator instead. Either choice requires a one-line update to CLAUDE.md §15.
+10. **CLAUDE.md as the permanent home for the `trivial` NOT-applies criteria.** Should the 6-bullet list inlined in §C.6.4 also live in CLAUDE.md (e.g. as a new §0 sub-section) so future agents can find it without reading this spec? Yes = single source of truth, spec links to CLAUDE.md; No = spec is canonical, agents read both.
