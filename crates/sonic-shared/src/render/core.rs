@@ -71,6 +71,12 @@ use crate::{
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
 // millisecond on the renderer thread.)
 
+// GpuRenderer holds several wgpu / cosmic-text resources (`instance`,
+// `font_system`, etc.) that exist purely to keep their owned allocations
+// alive for the lifetime of the renderer — they're never read after
+// construction. `#[allow(dead_code)]` documents that intent at the struct
+// level; removing it would force per-field `_` prefixing which obscures
+// what each handle is.
 #[allow(dead_code)]
 pub struct GpuRenderer {
     instance: wgpu::Instance,
@@ -1116,6 +1122,12 @@ impl GpuRenderer {
         Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
     }
 
+    // `render` threads 11 distinct slices of borrowed app state through
+    // wgpu submission. A parameter struct would either need 11 separate
+    // borrow fields (no win over positional args) or force the App layer
+    // to construct an interior-mutable wrapper around its own state —
+    // both worse than the current shape. Suppression stays with this
+    // explanatory comment per issue #143 review.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1992,13 +2004,15 @@ impl GpuRenderer {
                     // rotation; PR #117 emitted a horizontal+vertical pair
                     // which read as a `+`, not a close icon — fixed here).
                     build_close_x_quads(
-                        cx + inset,
-                        cy + inset,
-                        glyph,
-                        thick,
-                        close_color,
-                        sw,
-                        sh,
+                        CloseXQuadParams {
+                            x: cx + inset,
+                            y: cy + inset,
+                            glyph,
+                            thick,
+                            color: close_color,
+                            sw,
+                            sh,
+                        },
                         &mut quads,
                     );
                 }
@@ -2766,6 +2780,12 @@ impl GpuRenderer {
     /// readable; otherwise it would inline ~80 lines of placement +
     /// fallback handling four times (run start, mid-row flush, end of
     /// row, etc.).
+    // Hot inner-loop helper called per shaped run per row. Every
+    // argument is an exclusive `&mut` borrow of a *different* field of
+    // `GpuRenderer` (atlas, rasterizer, shape cache, instance buffers,
+    // missing-glyph trackers) — bundling them into a struct would force
+    // a single `&mut Ctx` that conflicts with the surrounding loop's
+    // own borrows. Suppression stays with this explanatory comment.
     #[allow(clippy::too_many_arguments)]
     fn flush_shape_run(
         glyph_atlas: &mut GlyphAtlas,
@@ -3216,29 +3236,40 @@ pub fn build_new_tab_button_quads(
 
 /// Emit the diagonal × glyph for a tab's close button.
 ///
-/// `x`, `y` is the top-left of the glyph's bounding box; `glyph` is the
-/// side length in physical px; `thick` is the stroke thickness.
+/// Parameters for [`build_close_x_quads`]. Grouping these in a struct
+/// avoids the 8-positional-argument footgun where adjacent `f32`s could be
+/// swapped silently. All units are physical pixels except `color` (linear
+/// RGBA) and `sw`/`sh` (surface dimensions used by `px_to_ndc`).
+#[derive(Clone, Copy)]
+pub struct CloseXQuadParams {
+    /// Top-left x of the glyph's bounding box, in physical px.
+    pub x: f32,
+    /// Top-left y of the glyph's bounding box, in physical px.
+    pub y: f32,
+    /// Side length of the (square) glyph bounding box, in physical px.
+    pub glyph: f32,
+    /// Stroke thickness in physical px.
+    pub thick: f32,
+    /// Linear-space RGBA colour for every emitted quad.
+    pub color: [f32; 4],
+    /// Surface width in physical px (passed through to `px_to_ndc`).
+    pub sw: f32,
+    /// Surface height in physical px (passed through to `px_to_ndc`).
+    pub sh: f32,
+}
+
+/// Push the quads that draw a small × close-button glyph into `out`.
 ///
-/// Returns nothing; pushes ~`ceil(glyph/thick)*2` axis-aligned squares
-/// stair-stepped along the ╲ and ╱ diagonals. Each emitted quad sits
-/// strictly inside `[x, x+glyph] × [y, y+glyph]`.
+/// See [`CloseXQuadParams`] for the geometry. Pushes ~`ceil(glyph/thick)*2`
+/// axis-aligned squares stair-stepped along the ╲ and ╱ diagonals; every
+/// emitted quad sits strictly inside `[x, x+glyph] × [y, y+glyph]`.
 ///
-/// The wgpu quad pipeline does not support rotation, and PR #117
-/// emitted a horizontal+vertical pair that read as `+` instead of `×`.
-/// Stair-stepping a small SDF-free square per step is the
-/// simplest and least-invasive fix; visually indistinguishable from a
-/// rotated line at 14×14 px.
-#[allow(clippy::too_many_arguments)]
-pub fn build_close_x_quads(
-    x: f32,
-    y: f32,
-    glyph: f32,
-    thick: f32,
-    color: [f32; 4],
-    sw: f32,
-    sh: f32,
-    out: &mut Vec<QuadInstance>,
-) {
+/// The wgpu quad pipeline does not support rotation, and PR #117 emitted a
+/// horizontal+vertical pair that read as `+` instead of `×`. Stair-stepping
+/// a small SDF-free square per step is the simplest and least-invasive fix;
+/// visually indistinguishable from a rotated line at 14×14 px.
+pub fn build_close_x_quads(params: CloseXQuadParams, out: &mut Vec<QuadInstance>) {
+    let CloseXQuadParams { x, y, glyph, thick, color, sw, sh } = params;
     let steps = ((glyph / thick).ceil() as usize).max(2);
     let dot = thick;
     for s in 0..steps {
