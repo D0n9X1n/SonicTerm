@@ -28,6 +28,8 @@ pub struct DragChipOverlay {
 /// [`crate::render::GpuRenderer::last_drag_chip_visual`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DragChipVisual {
+    /// Top-left of the chip in physical pixels.
     pub top_left: (f32, f32),
+    /// Chip `(width, height)` in physical pixels.
     pub size: (f32, f32),
 }

@@ -78,6 +78,9 @@ use crate::{
 // level; removing it would force per-field `_` prefixing which obscures
 // what each handle is.
 #[allow(dead_code)]
+/// Top-level GPU-backed terminal renderer. Owns the wgpu surface, the
+/// text + quad pipelines, the glyph atlas, font/shape caches, and all
+/// per-frame layout / cursor / overlay state. One per OS window.
 pub struct GpuRenderer {
     instance: wgpu::Instance,
     device: wgpu::Device,
@@ -121,7 +124,9 @@ pub struct GpuRenderer {
     /// pixels so grid layout doesn't reflow when the user drags the window
     /// between displays of different DPIs.
     scale_factor: f32,
+    /// Logical cell width in pixels (one terminal column).
     pub cell_w: f32,
+    /// Logical cell height in pixels (one terminal row).
     pub cell_h: f32,
     padding_left: f32,
     padding_right: f32,
@@ -289,6 +294,10 @@ struct FrameKey {
 }
 
 impl GpuRenderer {
+    /// Build a renderer bound to `window`. Creates the wgpu surface +
+    /// device + pipelines, the cosmic-text font system, the glyph atlas,
+    /// and seeds the initial cell metrics from `theme`'s configured
+    /// font family / size / line height.
     pub fn new(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -571,6 +580,9 @@ impl GpuRenderer {
         })
     }
 
+    /// Reconfigure the surface for a new physical window size in
+    /// pixels. Clamps each dimension to ≥ 1 to keep wgpu happy on
+    /// minimize. Forces the next frame to render fresh.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
@@ -759,10 +771,12 @@ impl GpuRenderer {
         }
     }
 
+    /// Current physical surface width in pixels.
     pub fn width(&self) -> u32 {
         self.config.width
     }
 
+    /// Current physical surface height in pixels.
     pub fn height(&self) -> u32 {
         self.config.height
     }
@@ -774,15 +788,19 @@ impl GpuRenderer {
         self.padding_left
     }
 
+    /// Left padding in logical pixels.
     pub fn padding_left(&self) -> f32 {
         self.padding_left
     }
+    /// Right padding in logical pixels.
     pub fn padding_right(&self) -> f32 {
         self.padding_right
     }
+    /// Top padding in logical pixels (above any tab bar / titlebar inset).
     pub fn padding_top(&self) -> f32 {
         self.padding_top
     }
+    /// Bottom padding in logical pixels.
     pub fn padding_bottom(&self) -> f32 {
         self.padding_bottom
     }
@@ -834,6 +852,9 @@ impl GpuRenderer {
         &self.last_missing_chars
     }
 
+    /// Current grid dimensions in `(cols, rows)`. Computed from the
+    /// LOGICAL surface size divided by the LOGICAL cell pitch so the
+    /// result matches what the user actually sees on Retina.
     pub fn cells(&self) -> (u16, u16) {
         // Convert physical surface dims back to LOGICAL before dividing
         // by logical cell metrics; otherwise a 2× display would report
@@ -1103,6 +1124,9 @@ impl GpuRenderer {
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
+    /// Translate physical-pixel `(px, py)` (as winit reports) into a
+    /// `(col, row)` cell address inside the grid, or `None` if the point
+    /// falls outside the grid (in the tab bar, padding, etc.).
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         // Winit reports cursor positions in PHYSICAL pixels; our cell
         // grid is in LOGICAL pixels. Normalize at the boundary so click
@@ -1128,6 +1152,10 @@ impl GpuRenderer {
     // to construct an interior-mutable wrapper around its own state —
     // both worse than the current shape. Suppression stays with this
     // explanatory comment per issue #143 review.
+    /// Render one frame: terminal grid + cursor + selection + overlays
+    /// (tab bar, search, command palette, IME preedit). Submits to the
+    /// wgpu queue and presents the surface. See the parameter comments
+    /// above for the lifetime / borrow rationale.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
