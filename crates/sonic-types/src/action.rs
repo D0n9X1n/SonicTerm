@@ -103,6 +103,8 @@ pub enum Action {
     // Clipboard
     /// Copy current selection to the system clipboard.
     CopyToClipboard,
+    /// Enter keyboard-driven copy mode.
+    EnterCopyMode,
     /// Paste from the system clipboard into the active pane.
     PasteFromClipboard,
 

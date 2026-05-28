@@ -49,6 +49,7 @@ use crate::{
     atlas_upload::AtlasUpload,
     cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
+    copy_mode::CopyModeState,
     cursor::{self, CursorShape},
     glyph_atlas::GlyphAtlas,
     ime::ImeState,
@@ -377,6 +378,7 @@ struct FrameKey {
     /// is unchanged.
     pane_revs: Vec<(u64, u64)>,
     selection: Option<Selection>,
+    copy_mode: Option<CopyModeState>,
     cursor_visible: bool,
     tab: u64,
     pane: u64,
@@ -1345,6 +1347,7 @@ impl GpuRenderer {
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
+        copy_mode: Option<&CopyModeState>,
         tabs: &TabBar,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
@@ -1565,6 +1568,7 @@ impl GpuRenderer {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
             selection: selection.copied(),
+            copy_mode: copy_mode.copied(),
             cursor_visible,
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
             pane: active_pane,
@@ -1929,6 +1933,54 @@ impl GpuRenderer {
             }
         }
 
+        if let Some(copy_mode) = copy_mode {
+            if let Some((start, end)) = copy_mode.selected_range() {
+                let last_row = end.1.min(grid.rows.saturating_sub(1) as usize);
+                for r in start.1..=last_row {
+                    let col_a = if r == start.1 { start.0 } else { 0 }.min(grid.cols as usize);
+                    let col_b = if r == end.1 {
+                        end.0.min(grid.cols.saturating_sub(1) as usize)
+                    } else {
+                        grid.cols.saturating_sub(1) as usize
+                    };
+                    if col_b < col_a {
+                        continue;
+                    }
+                    let x = active_origin_x + col_a as f32 * self.cell_w;
+                    let y = active_origin_y + r as f32 * self.cell_h;
+                    let w = (col_b - col_a + 1) as f32 * self.cell_w;
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                        color: self.selection_color,
+                        ..Default::default()
+                    });
+                }
+            }
+
+            let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
+            let copy_row = copy_mode.cursor.1.min(grid.rows.saturating_sub(1) as usize);
+            let cx = active_origin_x + copy_col as f32 * self.cell_w;
+            let cy = active_origin_y + copy_row as f32 * self.cell_h;
+            quads.push(QuadInstance {
+                rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
+                color: self.cursor_color,
+                ..Default::default()
+            });
+            let mut bg = self.bg_rgba;
+            bg[0] *= bg[3];
+            bg[1] *= bg[3];
+            bg[2] *= bg[3];
+            recolor_cursor_glyphs(
+                &mut glyph_instances,
+                cx,
+                cy,
+                self.cell_w,
+                self.cell_h,
+                sw,
+                sh,
+                bg,
+            );
+        }
         if cursor_visible {
             // Hide the cursor when the viewport is scrolled away from the
             // live region — its absolute row is `scrollback_len + cursor.row`,

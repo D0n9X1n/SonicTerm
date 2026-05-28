@@ -169,6 +169,7 @@ impl App {
                         &theme,
                         child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                         child.selection.as_ref(),
+                        child.copy_mode.as_ref(),
                         &child.tabs,
                         search,
                         None, // command palette: not exposed in child window yet

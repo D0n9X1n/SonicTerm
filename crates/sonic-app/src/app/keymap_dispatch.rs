@@ -43,6 +43,7 @@ impl App {
     pub fn run_action(&mut self, action: &Action) -> bool {
         match action {
             Action::CopyToClipboard => self.copy_selection(),
+            Action::EnterCopyMode => self.enter_copy_mode(),
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
