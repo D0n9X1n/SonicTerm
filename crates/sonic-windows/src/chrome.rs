@@ -20,8 +20,9 @@ use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, WM_DWMCOMPOSITIONCHANGED,
-    WM_NCCALCSIZE, WM_NCHITTEST,
+    GetWindowLongPtrW, PostMessageW, GWL_STYLE, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
+    HTMINBUTTON, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, WM_DWMCOMPOSITIONCHANGED,
+    WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SYSCOMMAND, WS_MAXIMIZE,
 };
 
 const SUBCLASS_ID: usize = 0x5071_C001;
@@ -90,6 +91,36 @@ unsafe extern "system" fn subclass_proc(
         }
         WM_DWMCOMPOSITIONCHANGED => {
             unsafe { extend_frame(hwnd) };
+            LRESULT(0)
+        }
+        // Intercept NC button DOWN on caption buttons so the OS doesn't enter
+        // its default caption-button capture loop (which on a custom-frame
+        // window with NCCALCSIZE-zeroed non-client area silently swallows the
+        // matching UP and never fires SC_MINIMIZE/SC_MAXIMIZE/SC_CLOSE).
+        // Returning 0 marks the message handled; the real action is fired on
+        // the UP message below, matching Win11 caption-button semantics
+        // (action commits on release, not press).
+        WM_NCLBUTTONDOWN if matches!(wparam.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) => {
+            LRESULT(0)
+        }
+        WM_NCLBUTTONUP if matches!(wparam.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) => {
+            let cmd: usize = match wparam.0 as u32 {
+                HTMINBUTTON => SC_MINIMIZE as usize,
+                HTMAXBUTTON => {
+                    // Toggle restore vs. maximize based on current style.
+                    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+                    if style & WS_MAXIMIZE.0 != 0 {
+                        SC_RESTORE as usize
+                    } else {
+                        SC_MAXIMIZE as usize
+                    }
+                }
+                HTCLOSE => SC_CLOSE as usize,
+                _ => return LRESULT(0),
+            };
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(cmd), LPARAM(0));
+            }
             LRESULT(0)
         }
         _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },

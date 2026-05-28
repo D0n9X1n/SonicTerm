@@ -172,9 +172,16 @@ impl TabBarLayout {
         // the right edge of the bar, vertically centered. The hit region
         // returned in the layout stays 28x28 so cursor-shape and click
         // routing land exactly on the visual.
+        //
+        // On Windows, the integrated titlebar paints three caption buttons
+        // (min/max/close, 46x32 logical px each = 138 px total) anchored
+        // to the right edge of the bar. The `+` button must sit to the
+        // LEFT of the caption-button strip, otherwise it overlaps them
+        // and either click target swallows the other (issue #189).
         let nt_w = NEW_TAB_BUTTON_WIDTH.min(window_width.max(0.0));
         let nt_h = NEW_TAB_BUTTON_HEIGHT.min(bar_h);
-        let nt_x = (window_width - nt_w - BAR_LEFT_PAD).max(0.0);
+        let right_reserved = caption_strip_reserved_width();
+        let nt_x = (window_width - nt_w - BAR_LEFT_PAD - right_reserved).max(0.0);
         let nt_y = ((bar_h - nt_h) * 0.5).max(0.0);
         let new_tab = Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h };
 
@@ -185,9 +192,16 @@ impl TabBarLayout {
         }
 
         // Region available for tabs is from BAR_LEFT_PAD to the left edge of
-        // the new-tab button, minus a gap before the +.
-        let tabs_region =
-            (window_width - BAR_LEFT_PAD - NEW_TAB_BUTTON_WIDTH - BAR_LEFT_PAD - TAB_GAP).max(0.0);
+        // the new-tab button, minus a gap before the +. On Windows we also
+        // subtract the caption-button strip width reserved on the right
+        // (see new_tab.x computation above).
+        let tabs_region = (window_width
+            - BAR_LEFT_PAD
+            - NEW_TAB_BUTTON_WIDTH
+            - BAR_LEFT_PAD
+            - TAB_GAP
+            - caption_strip_reserved_width())
+        .max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
@@ -401,6 +415,24 @@ pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 /// [`crate::app::WINDOWS_INTEGRATED_TITLEBAR_INSET`].
 pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
 
+/// Logical-pixel width reserved on the right edge of the tab bar for the
+/// integrated Win11 caption-button strip (min + max + close = 3 * 46 px).
+/// Returns 0.0 on non-Windows platforms, where the tab bar extends to the
+/// right edge of the window. Used by [`TabBarLayout::compute_with_height`]
+/// to place the `+` new-tab button to the LEFT of the caption buttons so
+/// they never overlap (issue #189).
+#[must_use]
+pub fn caption_strip_reserved_width() -> f32 {
+    #[cfg(target_os = "windows")]
+    {
+        CAPTION_BUTTON_WIDTH * 3.0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0.0
+    }
+}
+
 /// Returns the [min, max, close] caption-button rects, in **physical
 /// pixels**, anchored to the right edge of a window of the given width.
 ///
@@ -438,5 +470,37 @@ mod caption_tests {
         let [min, _, close] = caption_button_rects(2000, 2.0);
         assert_eq!(min.w, CAPTION_BUTTON_WIDTH * 2.0);
         assert_eq!(close.x + close.w, 2000.0);
+    }
+
+    #[test]
+    fn new_tab_button_does_not_overlap_caption_buttons() {
+        use crate::tabs::{Tab, TabBar};
+        let mut bar = TabBar::new();
+        bar.push(Tab::new("one"));
+        let layout = TabBarLayout::compute(&bar, 1000.0);
+        let [min, _, _] = caption_button_rects(1000, 1.0);
+        let nt_right = layout.new_tab.x + layout.new_tab.w;
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows the `+` must sit strictly left of the caption strip.
+            assert!(
+                nt_right <= min.x,
+                "new-tab button (right edge {nt_right}) overlaps caption buttons (min.x = {})",
+                min.x,
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On non-Windows there is no caption strip, so the new-tab button
+            // hugs the right edge of the bar (modulo BAR_LEFT_PAD).
+            assert!(
+                (nt_right - (1000.0 - BAR_LEFT_PAD)).abs() < 0.5,
+                "new-tab button right edge {nt_right} not at expected right edge {}",
+                1000.0 - BAR_LEFT_PAD,
+            );
+            // `min` is still meaningful as a coordinate even if unused on
+            // non-Windows; reference it to avoid an unused-binding warning.
+            let _ = min;
+        }
     }
 }
