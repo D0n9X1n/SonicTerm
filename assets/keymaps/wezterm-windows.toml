@@ -11,12 +11,6 @@ version = "1.0"
 keys = "ctrl+shift+t"
 action = "new_tab"
 
-# WezTerm's Windows/Linux SpawnTab chord — also bound on macOS so the
-# same muscle memory works whichever OS the keyboard came from.
-[[binding]]
-keys = "ctrl+shift+t"
-action = "new_tab"
-
 [[binding]]
 keys = "ctrl+shift+?"
 action = "show_keymap_cheatsheet"
@@ -25,23 +19,22 @@ action = "show_keymap_cheatsheet"
 keys = "ctrl+shift+w"
 action = "close_tab"
 
+# Windows-native tab navigation alternatives avoid arrow/resize/scroll chords.
 [[binding]]
-keys = "ctrl+shift+]"
+keys = "ctrl+pagedown"
 action = "next_tab"
 
 [[binding]]
-keys = "ctrl+shift+["
-action = "prev_tab"
-
-# Cmd+Left / Cmd+Right — common user override (matches the user's
-# personal wezterm.lua and macOS document-tab convention).
-[[binding]]
-keys = "ctrl+shift+left"
+keys = "ctrl+pageup"
 action = "prev_tab"
 
 [[binding]]
-keys = "ctrl+shift+right"
+keys = "ctrl+tab"
 action = "next_tab"
+
+[[binding]]
+keys = "ctrl+shift+tab"
+action = "prev_tab"
 
 [[binding]]
 keys = "ctrl+shift+1"
@@ -85,11 +78,11 @@ keys = "ctrl+shift+d"
 action = "split_right"
 
 [[binding]]
-keys = "ctrl+shift+d"
+keys = "ctrl+alt+shift+d"
 action = "split_down"
 
 [[binding]]
-keys = "ctrl+shift+w"
+keys = "ctrl+alt+shift+w"
 action = "close_pane"
 
 [[binding]]
@@ -101,7 +94,7 @@ keys = "ctrl+shift+b"
 action = { toggle_broadcast = { scope = "tab" } }
 
 [[binding]]
-keys = "ctrl+shift+b"
+keys = "ctrl+alt+shift+b"
 action = { toggle_broadcast = { scope = "all_tabs" } }
 
 # --- Pane focus (vim-style) ---
@@ -123,25 +116,26 @@ action = { focus_pane = "right" }
 
 # Arrow-key split resize: nudge the active divider by 5%.
 [[binding]]
-keys = "ctrl+shift+left"
+keys = "ctrl+alt+shift+left"
 action = "resize_pane_left"
 
 [[binding]]
-keys = "ctrl+shift+right"
+keys = "ctrl+alt+shift+right"
 action = "resize_pane_right"
 
 [[binding]]
-keys = "ctrl+shift+up"
+keys = "ctrl+alt+shift+up"
 action = "resize_pane_up"
 
 [[binding]]
-keys = "ctrl+shift+down"
+keys = "ctrl+alt+shift+down"
 action = "resize_pane_down"
 
 # --- Clipboard ---
 [[binding]]
 keys = "ctrl+shift+["
 action = "enter_copy_mode"
+
 [[binding]]
 keys = "ctrl+shift+c"
 action = "copy_to_clipboard"
@@ -155,12 +149,8 @@ action = "paste_from_clipboard"
 keys = "ctrl+shift+="
 action = "increase_font_size"
 
-# Some keyboards/layouts deliver `+` as the character on Shift+= — bind
+# Some keyboards/layouts deliver `+` as the character on Shift+= - bind
 # both so font-zoom-in works regardless of which the OS surfaces.
-[[binding]]
-keys = "ctrl+shift+="
-action = "increase_font_size"
-
 [[binding]]
 keys = "ctrl+shift++"
 action = "increase_font_size"
@@ -179,11 +169,11 @@ keys = "ctrl+shift+n"
 action = "new_window"
 
 [[binding]]
-keys = "ctrl+shift+f"
+keys = "f11"
 action = "toggle_fullscreen"
 
 # WezTerm's macOS default for full-screen toggle (mirrors the system
-# View → Enter Full Screen shortcut).
+# View -> Enter Full Screen shortcut).
 [[binding]]
 keys = "ctrl+shift+enter"
 action = "toggle_fullscreen"
@@ -228,12 +218,6 @@ keys = "ctrl+shift+end"
 action = { scroll = "to_bottom" }
 
 # --- Reload config ---
-[[binding]]
-keys = "ctrl+shift+r"
-action = "reload_config"
-
-# Bare ctrl+shift+r is the spec'd WezTerm chord — added as an alias so users
-# coming from WezTerm don't need to remember the Shift modifier.
 [[binding]]
 keys = "ctrl+shift+r"
 action = "reload_config"
