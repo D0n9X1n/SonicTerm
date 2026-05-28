@@ -130,14 +130,10 @@ mod tests {
     #[test]
     fn modifier_click_on_url_cell_calls_opener() {
         let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
-        let out = dispatch_modifier_click(
-            true,
-            Some("https://example.com".to_string()),
-            |u| {
-                captured.borrow_mut().push(u.to_string());
-                Ok(())
-            },
-        );
+        let out = dispatch_modifier_click(true, Some("https://example.com".to_string()), |u| {
+            captured.borrow_mut().push(u.to_string());
+            Ok(())
+        });
         assert_eq!(out.as_deref(), Some("https://example.com"));
         assert_eq!(*captured.borrow(), vec!["https://example.com".to_string()]);
     }
@@ -145,14 +141,10 @@ mod tests {
     #[test]
     fn click_without_modifier_does_not_call_opener() {
         let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
-        let out = dispatch_modifier_click(
-            false,
-            Some("https://example.com".to_string()),
-            |u| {
-                captured.borrow_mut().push(u.to_string());
-                Ok(())
-            },
-        );
+        let out = dispatch_modifier_click(false, Some("https://example.com".to_string()), |u| {
+            captured.borrow_mut().push(u.to_string());
+            Ok(())
+        });
         assert!(out.is_none(), "no opener invocation expected without modifier");
         assert!(captured.borrow().is_empty(), "opener must not be called: {:?}", captured.borrow());
     }
@@ -173,11 +165,9 @@ mod tests {
         // If the opener spawn fails (e.g. no `xdg-open` available),
         // the click is still consumed — the user clearly intended
         // to open the link, not start a selection. Caller logs.
-        let out = dispatch_modifier_click(
-            true,
-            Some("https://example.com".to_string()),
-            |_| Err(io::Error::other("simulated spawn failure")),
-        );
+        let out = dispatch_modifier_click(true, Some("https://example.com".to_string()), |_| {
+            Err(io::Error::other("simulated spawn failure"))
+        });
         assert_eq!(out.as_deref(), Some("https://example.com"));
     }
 }
