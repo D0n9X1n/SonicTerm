@@ -605,6 +605,9 @@ fn _suppress() {
     let _ = PCWSTR::null();
 }
 
+// NOTE (CLAUDE.md §5): Tests stay inline. `sonic-windows` is a `[[bin]]`
+// crate (no `lib.rs`), so integration tests under `tests/` cannot
+// reference the bin's items by path.
 #[cfg(test)]
 mod tests {
     use super::*;

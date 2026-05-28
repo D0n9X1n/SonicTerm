@@ -861,6 +861,12 @@ impl PrefsRenderer {
     }
 }
 
+// NOTE (CLAUDE.md §5): Tests stay inline here. They poke at many
+// crate-private items (`crate::prefs::PREFS_MIN_W/H`, `crate::prefs::
+// PrefsLayout::new`, `state.layout`/`state.config`, `crate::ui_tokens`,
+// `crate::prefs::Control`/`PrefsHit`/`Category`) and source-grep
+// `include_str!("prefs_renderer.rs")` itself. Migrating would require
+// bumping a wide private surface to pub.
 #[cfg(test)]
 mod tests {
     use super::*;
