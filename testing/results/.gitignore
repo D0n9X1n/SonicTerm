@@ -1,0 +1,7 @@
+# By default, ignore everything in this results tree...
+*
+# ...except this README and explicitly-committed reference shots.
+!.gitignore
+!README.md
+!reference/
+!reference/**

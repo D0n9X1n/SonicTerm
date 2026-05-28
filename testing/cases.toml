@@ -1,0 +1,1346 @@
+[meta]
+schema_version = 1
+description = "Sonic visual test cases. Single source of truth for mac.sh + windows.ps1."
+
+# Schema:
+#   [[case]]
+#   id              kebab-case unique identifier
+#   section         matches docs/RELEASE_TESTING.md section (1..37)
+#   title           human-readable
+#   applies_to      ["mac"] | ["windows"] | ["mac","windows"] | ["mac-manual"] | ["windows-manual"]
+#   covers_bugs     ["#196", ...]   — issues/PRs this case guards
+#   covers_landmines ["try-lock-no-deadlock", ...]  — ids from CLAUDE.md §4
+#   setup           array of step strings: "open-3-tabs", "clear", "type:echo hi", "enter", "wait:0.3"
+#   keystrokes      array of {kind="key"|"text"|"wait", ...}
+#   expect          array of {kind="tab-count"|"pane-count"|"text-in-region"|"pixel-near"|"process-count"|"screenshot"|"exit-code", ...}
+#   fail_on         free-text description of visible failure
+
+# ==========================================================================
+# §1 Rendering baseline
+# ==========================================================================
+
+[[case]]
+id = "render-baseline-cells-cursor-cjk-emoji-bg"
+section = 1
+title = "Cells render with cursor, RED-BG, CJK, emoji, theme bg match"
+applies_to = ["mac", "windows"]
+covers_bugs = ["#161", "#163", "#42"]
+covers_landmines = ["set-rich-text-shaping"]
+setup = ["clear", "wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[41mRED-BG\\033[0m echo 中文 🎉 sonic\\n' && date" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+  { kind = "text-in-region", region = "body", value = "中文" },
+  { kind = "text-in-region", region = "body", value = "RED-BG" },
+  { kind = "pixel-near", x = 100, y = 200, rgba = [220, 50, 47, 255], tolerance = 40, note = "RED-BG cell background" },
+]
+fail_on = "Tofu boxes, missing cursor, RED-BG cells render with theme bg instead of red, theme bg gamma-washed"
+
+# ==========================================================================
+# §2 Tabs  (covers #196 #197 #200 #201)
+# ==========================================================================
+
+[[case]]
+id = "tab-open-cmd-t"
+section = 2
+title = "Cmd+T opens additional tabs"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count", value = 3 },
+  { kind = "screenshot", region = "tabbar" },
+]
+fail_on = "Tab count != 3 after two cmd+T presses"
+
+[[case]]
+id = "tab-close-ctrl-w-single-press"
+section = 2
+title = "Cmd+W closes ONE tab per press (not two)"
+applies_to = ["mac"]
+covers_bugs = ["#200"]
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "key", value = "cmd+w" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count", value = 2 },
+]
+fail_on = "Tab count drops by 2 (double-fire regression #200)"
+
+[[case]]
+id = "tab-close-x-on-active"
+section = 2
+title = "Close X on active tab closes that tab"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "click-region", region = "tab-active-close" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count", value = 2 },
+]
+fail_on = "Active tab × doesn't close, or closes wrong tab"
+
+[[case]]
+id = "tab-close-x-on-inactive"
+section = 2
+title = "Close X on inactive tab closes that tab"
+applies_to = ["mac"]
+covers_bugs = ["#196"]
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "click-region", region = "tab-inactive-close" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count", value = 2 },
+]
+fail_on = "Inactive × is a no-op (#196 regression)"
+
+[[case]]
+id = "tab-activate-by-body-click"
+section = 2
+title = "Click on inactive tab body activates it (not just the title text)"
+applies_to = ["mac"]
+covers_bugs = ["#201"]
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "click-region", region = "tab-inactive-body" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "tabbar" },
+  { kind = "text-in-region", region = "tab-active-title", value = "" },
+]
+fail_on = "Body click is a no-op when target is the inactive tab plate (#201)"
+
+[[case]]
+id = "tab-rightmost-far-right-edge-click"
+section = 2
+title = "Click on the far-right edge of the rightmost tab still hits that tab"
+applies_to = ["mac"]
+covers_bugs = ["#197"]
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "click-region", region = "tab-rightmost-edge" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "tabbar" },
+]
+fail_on = "Hit-test misses the last pixel column (#197)"
+
+# ==========================================================================
+# §3 Panes (covers #199 #209)
+# ==========================================================================
+
+[[case]]
+id = "split-right-cmd-d"
+section = 3
+title = "Cmd+D splits current pane vertically"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+d" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "pane-count", value = 2 },
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Split fails or pane count wrong"
+
+[[case]]
+id = "split-content-no-overflow"
+section = 3
+title = "Content of each pane stays within its bounds"
+applies_to = ["mac"]
+covers_bugs = ["#199"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear && echo LEFT_PANE_TOKEN" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+d" },
+  { kind = "wait", value = 0.5 },
+  { kind = "text", value = "clear && echo RIGHT_PANE_TOKEN" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "text-in-region", region = "pane-left", value = "LEFT_PANE_TOKEN" },
+  { kind = "text-in-region", region = "pane-right", value = "RIGHT_PANE_TOKEN" },
+]
+fail_on = "Text from one pane bleeds into the other (#199 overflow regression)"
+
+[[case]]
+id = "pane-click-to-focus"
+section = 3
+title = "Clicking a pane moves focus (cursor) there"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["split-right"]
+keystrokes = [
+  { kind = "click-region", region = "pane-left" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "echo IN_LEFT" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "text-in-region", region = "pane-left", value = "IN_LEFT" },
+]
+fail_on = "Click does not move focus"
+
+[[case]]
+id = "pane-close-restores-sibling"
+section = 3
+title = "Closing a pane returns the tab to a single pane"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["split-right"]
+keystrokes = [
+  { kind = "key", value = "cmd+w" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "pane-count", value = 1 },
+]
+fail_on = "Pane count != 1 after close, or whole tab closed"
+
+[[case]]
+id = "pane-focus-border-themed"
+section = 3
+title = "Focused pane border uses theme accent color"
+applies_to = ["mac"]
+covers_bugs = ["#209"]
+covers_landmines = []
+setup = ["split-right"]
+keystrokes = [
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "pixel-near", x = 500, y = 400, rgba = [125, 207, 255, 255], tolerance = 60, note = "Focused-pane border accent" },
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Border missing or wrong color (#209)"
+
+# ==========================================================================
+# §4 Command palette (covers #198)
+# ==========================================================================
+
+[[case]]
+id = "palette-opens-super-p"
+section = 4
+title = "Cmd+Shift+P opens the command palette"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+shift+p" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "palette" },
+]
+fail_on = "Palette does not appear"
+
+[[case]]
+id = "palette-text-padding"
+section = 4
+title = "Palette text begins ≥8px from the rounded edge"
+applies_to = ["mac"]
+covers_bugs = ["#198"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+shift+p" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "palette" },
+  { kind = "padding-min", region = "palette-input", min_px = 8 },
+  { kind = "padding-min", region = "palette-row-first", min_px = 8 },
+]
+fail_on = "Glyphs touch the rounded border (#198)"
+
+[[case]]
+id = "palette-arrow-navigates-selection"
+section = 4
+title = "Down/Up arrows move the highlight"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+shift+p" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "down" },
+  { kind = "wait", value = 0.2 },
+  { kind = "key", value = "down" },
+  { kind = "wait", value = 0.2 },
+]
+expect = [
+  { kind = "screenshot", region = "palette" },
+]
+fail_on = "Highlight does not move"
+
+[[case]]
+id = "palette-enter-runs-action"
+section = 4
+title = "Enter runs the selected palette action"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+shift+p" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "new tab" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count", value = 2 },
+]
+fail_on = "Enter does not dispatch action"
+
+[[case]]
+id = "palette-esc-closes"
+section = 4
+title = "Esc dismisses the palette"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+shift+p" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "escape" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+  { kind = "not-text-in-region", region = "body", value = "Command Palette" },
+]
+fail_on = "Palette remains visible"
+
+# ==========================================================================
+# §5 Preferences
+# ==========================================================================
+
+[[case]]
+id = "prefs-opens-super-comma"
+section = 5
+title = "Cmd+, opens the preferences window"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+," },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "screenshot", region = "prefs-window" },
+  { kind = "window-count", value = 2 },
+]
+fail_on = "Prefs window does not open"
+
+[[case]]
+id = "prefs-sidebar-navigate"
+section = 5
+title = "Clicking sidebar entries swaps the content pane"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-prefs"]
+keystrokes = [
+  { kind = "click-region", region = "prefs-sidebar-font" },
+  { kind = "wait", value = 0.3 },
+  { kind = "click-region", region = "prefs-sidebar-theme" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "prefs-window" },
+]
+fail_on = "Sidebar click is a no-op or content stays the same"
+
+[[case]]
+id = "prefs-apply-without-restart"
+section = 5
+title = "Theme change in prefs applies without restart"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-prefs"]
+keystrokes = [
+  { kind = "click-region", region = "prefs-sidebar-theme" },
+  { kind = "wait", value = 0.3 },
+  { kind = "click-region", region = "prefs-theme-dracula" },
+  { kind = "wait", value = 0.8 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+  { kind = "pixel-near", x = 100, y = 300, rgba = [40, 42, 54, 255], tolerance = 30, note = "dracula bg" },
+]
+fail_on = "Theme change requires restart"
+
+# ==========================================================================
+# §6 Tear-out
+# ==========================================================================
+
+[[case]]
+id = "tab-drag-out-creates-new-window"
+section = 6
+title = "Dragging a tab off the bar creates a new window"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "drag", from_region = "tab-2", to_screen = [800, 600] },
+  { kind = "wait", value = 0.8 },
+]
+expect = [
+  { kind = "window-count", value = 2 },
+]
+fail_on = "Drag did nothing or app crashed"
+
+[[case]]
+id = "new-window-cmd-t-opens-there"
+section = 6
+title = "Cmd+T in a non-main window opens its tab in that window"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-second-window"]
+keystrokes = [
+  { kind = "focus-window", index = 2 },
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "tab-count-in-window", index = 2, value = 2 },
+]
+fail_on = "Tab opens in window 1 instead of focused window"
+
+# ==========================================================================
+# §7 Big-file nvim (covers #194 #195)
+# ==========================================================================
+
+[[case]]
+id = "nvim-50mb-scroll-no-crash"
+section = 7
+title = "nvim on 50MB file, Ctrl+D x 30 — no crash"
+applies_to = ["mac"]
+covers_bugs = ["#194"]
+covers_landmines = ["try-lock-no-deadlock"]
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "yes 'the quick brown fox' | head -c 50000000 > /tmp/big.txt && nvim /tmp/big.txt" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 2.0 },
+  { kind = "key-repeat", value = "ctrl+d", count = 30, delay = 0.1 },
+  { kind = "wait", value = 1.0 },
+  { kind = "key", value = "escape" },
+  { kind = "text", value = ":q!" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "Sonic crashes or hangs (#194)"
+
+[[case]]
+id = "nvim-massive-substitute"
+section = 7
+title = "nvim :%s/the/THE/g on 50MB file completes without hang"
+applies_to = ["mac"]
+covers_bugs = ["#195"]
+covers_landmines = ["pty-coalesce-burst", "try-lock-no-deadlock"]
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "yes 'the quick brown fox' | head -c 50000000 > /tmp/big.txt && nvim /tmp/big.txt" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 2.0 },
+  { kind = "text", value = ":%s/the/THE/g" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 8.0 },
+  { kind = "key", value = "escape" },
+  { kind = "text", value = ":q!" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "Sonic hangs or crashes during burst output (#195)"
+
+# ==========================================================================
+# §8 ANSI / colors (covers #161 #163)
+# ==========================================================================
+
+[[case]]
+id = "per-cell-bg-color-renders"
+section = 8
+title = "Per-cell ANSI background color reaches the GPU"
+applies_to = ["mac", "windows"]
+covers_bugs = ["#161", "#163"]
+covers_landmines = ["set-rich-text-shaping"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[41mRED-BG\\033[0m\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "pixel-near", x = 100, y = 200, rgba = [220, 50, 47, 255], tolerance = 40, note = "RED-BG cell red, not theme bg" },
+]
+fail_on = "Bg silently dropped — cell rendered with theme background (#163)"
+
+[[case]]
+id = "256-color-palette-renders"
+section = 8
+title = "256-color palette renders all swatches distinctly"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "for i in {0..255}; do printf '\\033[48;5;%dm  \\033[0m' \"$i\"; done; printf '\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Palette swatches missing or all rendered with same color"
+
+[[case]]
+id = "truecolor-rgb-renders"
+section = 8
+title = "Truecolor 24-bit RGB sequence renders the requested color"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[48;2;120;200;80mTRUECOLOR\\033[0m\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "pixel-near", x = 100, y = 200, rgba = [120, 200, 80, 255], tolerance = 30, note = "Truecolor bg" },
+]
+fail_on = "Truecolor falls back to palette or wrong color"
+
+[[case]]
+id = "bold-italic-underline-attrs"
+section = 8
+title = "Bold + italic + underline render distinctly"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["set-rich-text-shaping"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[1mBOLD\\033[0m \\033[3mITAL\\033[0m \\033[4mUNDR\\033[0m\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "BOLD" },
+  { kind = "text-in-region", region = "body", value = "ITAL" },
+  { kind = "text-in-region", region = "body", value = "UNDR" },
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Attributes dropped or rendered the same"
+
+# ==========================================================================
+# §9 URLs (covers CLAUDE.md §4 url_open::validate)
+# ==========================================================================
+
+[[case]]
+id = "osc8-https-cmd-click-opens-browser"
+section = 9
+title = "OSC 8 https hyperlink + cmd-click opens the default browser"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["url-validate-allowlist"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033]8;;https://example.com\\033\\\\link\\033]8;;\\033\\\\\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "cmd-click-region", region = "first-hyperlink" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "process-spawned", program = "open", since = "case-start" },
+]
+fail_on = "Cmd-click does not launch the browser"
+
+[[case]]
+id = "osc8-javascript-scheme-rejected"
+section = 9
+title = "OSC 8 javascript: scheme is rejected by url_open::validate"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["url-validate-allowlist"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033]8;;javascript:alert(1)\\033\\\\BAD\\033]8;;\\033\\\\\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "cmd-click-region", region = "first-hyperlink" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "process-not-spawned", program = "open", since = "case-start" },
+  { kind = "process-not-spawned", program = "osascript", since = "case-start" },
+]
+fail_on = "Anything is spawned for a non-allowlist scheme"
+
+[[case]]
+id = "osc8-shell-metachar-rejected"
+section = 9
+title = "OSC 8 URI containing shell metacharacters is rejected"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["url-validate-allowlist"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033]8;;https://example.com/$(touch /tmp/sonic-pwned)\\033\\\\BAD\\033]8;;\\033\\\\\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "cmd-click-region", region = "first-hyperlink" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "file-absent", path = "/tmp/sonic-pwned" },
+]
+fail_on = "Metachar payload reaches the shell"
+
+# ==========================================================================
+# §10 IME (manual-only)
+# ==========================================================================
+
+[[case]]
+id = "ime-japanese-kotoeri-roundtrip"
+section = 10
+title = "Japanese IME (Kotoeri) preedit + commit round-trip"
+applies_to = ["mac-manual"]
+covers_bugs = []
+covers_landmines = []
+setup = ["manual-set-input-source:com.apple.inputmethod.Kotoeri.Japanese"]
+keystrokes = []
+expect = []
+fail_on = "Preedit underline missing, commit drops to wrong column, ghost preedit remains"
+
+# ==========================================================================
+# §11 Multi-window
+# ==========================================================================
+
+[[case]]
+id = "multi-window-cmd-n-spawns-independent"
+section = 11
+title = "Cmd+N opens three independent windows"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+n" },
+  { kind = "wait", value = 0.5 },
+  { kind = "key", value = "cmd+n" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "window-count", value = 3 },
+]
+fail_on = "Window count != 3 or windows share PTY state"
+
+# ==========================================================================
+# §12 Idle
+# ==========================================================================
+
+[[case]]
+id = "idle-cpu-under-one-percent"
+section = 12
+title = "Idle 30s — CPU under 1%"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "wait", value = 30.0 },
+]
+expect = [
+  { kind = "process-cpu-max", program = "sonic-mac", max_pct = 1.0 },
+]
+fail_on = "Idle CPU >= 1% (busy-loop regression)"
+
+# ==========================================================================
+# §13 Perf bench
+# ==========================================================================
+
+[[case]]
+id = "perf-bench-script-passes"
+section = 13
+title = "bash scripts/bench.sh exits 0"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = []
+keystrokes = []
+expect = [
+  { kind = "exit-code", cmd = "bash scripts/bench.sh", value = 0 },
+]
+fail_on = "Bench script reports failure"
+
+# ==========================================================================
+# §14 Drag-drop file (manual-only)
+# ==========================================================================
+
+[[case]]
+id = "finder-drag-drop-file-inserts-path"
+section = 14
+title = "Finder file drag-drop inserts the file path at the cursor"
+applies_to = ["mac-manual"]
+covers_bugs = []
+covers_landmines = []
+setup = []
+keystrokes = []
+expect = []
+fail_on = "Path not inserted, or special chars not quoted"
+
+# ==========================================================================
+# §15 Quit
+# ==========================================================================
+
+[[case]]
+id = "cmd-q-leaves-no-orphan-shells"
+section = 15
+title = "Cmd+Q quit leaves no orphan shell children"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "key", value = "cmd+q" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", max = 0 },
+  { kind = "no-orphan-shells", parent = "sonic-mac" },
+]
+fail_on = "Orphan zsh/bash remain"
+
+# ==========================================================================
+# §16-§36 — additional coverage from docs/RELEASE_TESTING.md
+# ==========================================================================
+
+[[case]]
+id = "scrollback-10k-lines-no-loss"
+section = 16
+title = "seq 1 10000 — scrollback retains all lines"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "seq 1 10000" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 2.0 },
+]
+expect = [
+  { kind = "scrollback-min-lines", value = 10000 },
+]
+fail_on = "Scrollback truncated below 10k"
+
+[[case]]
+id = "search-overlay-find-next-prev"
+section = 17
+title = "Search overlay opens, finds matches, next/prev cycle"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "seq 1 200" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+  { kind = "key", value = "cmd+f" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "42" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Search overlay missing or finds 0 matches"
+
+[[case]]
+id = "resize-many-times-no-wgpu-panic"
+section = 18
+title = "Drag-resize the window many times — no wgpu panic"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["suboptimal-drop-before-configure"]
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "resize-window", sequence = [[800, 600], [400, 300], [1200, 900], [600, 700], [1000, 500], [800, 800]] },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "wgpu panic 'texture still alive' or crash"
+
+[[case]]
+id = "hidpi-retina-no-blur"
+section = 19
+title = "Retina HiDPI — text remains sharp (no upscale blur)"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "echo HIDPI_SAMPLE" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-text", region = "body", value = "HIDPI_SAMPLE" },
+]
+fail_on = "OCR fails to read text (blur)"
+
+[[case]]
+id = "live-config-reload-on-save"
+section = 20
+title = "Saving sonic.toml triggers live reload"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "shell-cmd", value = "sed -i '' 's/^theme.*/theme = \"dracula\"/' ~/Library/Application\\ Support/Sonic/sonic.toml || true" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "pixel-near", x = 100, y = 300, rgba = [40, 42, 54, 255], tolerance = 30, note = "Dracula bg after reload" },
+]
+fail_on = "Theme did not reload"
+
+[[case]]
+id = "ctrl-letter-keys-deliver-control-codes"
+section = 21
+title = "Ctrl-C / Ctrl-Z / Ctrl-D deliver control codes to the shell"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "cat" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "ctrl+c" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "cat does not interrupt"
+
+[[case]]
+id = "alt-screen-vim-less-roundtrip"
+section = 22
+title = "vim entry/exit preserves the main screen (alt-screen handling)"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["dec-1049h-no-clobber", "csi-j-mode-preserves-above"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "echo BEFORE_VIM_TOKEN" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "vim" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 1.0 },
+  { kind = "text", value = ":q" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "BEFORE_VIM_TOKEN" },
+]
+fail_on = "Main screen wiped by vim exit"
+
+[[case]]
+id = "mouse-modes-sgr-reporting"
+section = 23
+title = "SGR mouse reporting (1006) delivers click coords to the shell"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[?1006h\\033[?1002h' && cat -v" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "click-region", region = "body-center" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "ctrl+c" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "M" },
+]
+fail_on = "No SGR-mouse byte sequence echoed"
+
+[[case]]
+id = "wide-chars-cjk-spans-two-cells"
+section = 24
+title = "CJK wide chars span two cells (no overlap with next column)"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '中X\\n国Y\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "text-in-region", region = "body", value = "中X" },
+]
+fail_on = "X overlaps the CJK glyph"
+
+[[case]]
+id = "emoji-zwj-family-renders-single-glyph"
+section = 25
+title = "Emoji ZWJ family sequence renders as one glyph"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\xf0\\x9f\\x91\\xa8\\xe2\\x80\\x8d\\xf0\\x9f\\x91\\xa9\\xe2\\x80\\x8d\\xf0\\x9f\\x91\\xa7 ZWJ\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "ZWJ family rendered as four separate emojis"
+
+[[case]]
+id = "grapheme-clusters-flag-renders"
+section = 26
+title = "Regional-indicator flag pair renders as a flag glyph"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\xf0\\x9f\\x87\\xaf\\xf0\\x9f\\x87\\xb5 jp\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "Flag rendered as 🇯🇵 split into two regional letters"
+
+[[case]]
+id = "cursor-styles-block-beam-underline-bar"
+section = 27
+title = "DECSCUSR cursor-style escape changes the cursor shape"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[5 q'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "Cursor remains block when blinking-beam was requested"
+
+[[case]]
+id = "kill-9-leaves-no-orphan-shells"
+section = 28
+title = "kill -9 sonic-mac leaves no orphan shells"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "shell-cmd", value = "pkill -9 -f sonic-mac" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "no-orphan-shells", parent = "sonic-mac" },
+]
+fail_on = "Orphan zsh/bash remain after SIGKILL"
+
+[[case]]
+id = "config-validation-bad-toml-falls-back"
+section = 29
+title = "Malformed sonic.toml falls back to defaults, no crash"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = []
+setup = []
+keystrokes = [
+  { kind = "shell-cmd", value = "echo 'this = is { not valid toml' > /tmp/bad-sonic.toml" },
+  { kind = "shell-cmd", value = "SONIC_CONFIG=/tmp/bad-sonic.toml ./target/release/sonic-mac &" },
+  { kind = "wait", value = 2.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "Sonic refuses to launch on bad config"
+
+[[case]]
+id = "config-watch-invalid-edit-keeps-current"
+section = 30
+title = "Saving an invalid edit to sonic.toml keeps the current config (no crash)"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "shell-cmd", value = "echo 'broken =' >> ~/Library/Application\\ Support/Sonic/sonic.toml" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "Sonic crashes on hot-reload of bad toml"
+
+[[case]]
+id = "selection-mouse-drag-highlights"
+section = 31
+title = "Mouse drag highlights a region for copy"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "echo SELECT_ME_PLEASE" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "drag", from_region = "body-line-2-start", to_region = "body-line-2-end" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "Selection highlight missing"
+
+[[case]]
+id = "copy-paste-roundtrip"
+section = 32
+title = "Cmd+C / Cmd+V round-trips through the clipboard"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "shell-cmd", value = "echo CLIPBOARD_TOKEN | pbcopy" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+v" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "CLIPBOARD_TOKEN" },
+]
+fail_on = "Paste does not reach the shell"
+
+[[case]]
+id = "hyperlink-tint-on-hover"
+section = 33
+title = "Hovering an OSC8 link tints it"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033]8;;https://example.com\\033\\\\link\\033]8;;\\033\\\\\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "hover-region", region = "first-hyperlink" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+]
+fail_on = "No tint applied"
+
+[[case]]
+id = "tabbar-overflow-many-tabs-scroll"
+section = 34
+title = "Many tabs (>20) — tabbar handles overflow without breaking layout"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = []
+keystrokes = [
+  { kind = "key-repeat", value = "cmd+t", count = 20, delay = 0.05 },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "tab-count", value = 21 },
+  { kind = "screenshot", region = "tabbar" },
+]
+fail_on = "Layout breaks or app crashes"
+
+[[case]]
+id = "fontsize-cmd-plus-minus-zoom"
+section = 35
+title = "Cmd+= / Cmd+- changes font size at runtime"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["clear"]
+keystrokes = [
+  { kind = "key", value = "cmd+plus" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+plus" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+minus" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Font size does not change or app crashes"
+
+[[case]]
+id = "fullscreen-toggle"
+section = 36
+title = "Cmd+Ctrl+F toggles fullscreen"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "key", value = "cmd+ctrl+f" },
+  { kind = "wait", value = 1.0 },
+  { kind = "key", value = "cmd+ctrl+f" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "Fullscreen toggle crashes"
+
+# ==========================================================================
+# §37 Land-mines (CLAUDE.md §4 — explicit regression-guards)
+# ==========================================================================
+
+[[case]]
+id = "landmine-try-lock-no-deadlock"
+section = 37
+title = "Burst PTY output during startup does not deadlock the main thread"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["try-lock-no-deadlock"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "yes 'burst' | head -n 500000" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 4.0 },
+  { kind = "key", value = "ctrl+c" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "responsive-within", seconds = 1.0 },
+]
+fail_on = "App becomes unresponsive (beachball) — try_lock regressed"
+
+[[case]]
+id = "landmine-pty-coalesce-burst"
+section = 37
+title = "Huge cat does not mark app unresponsive (PTY-thread coalescing intact)"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["pty-coalesce-burst"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "shell-cmd", value = "head -c 20000000 /dev/urandom | base64 > /tmp/big-coalesce.txt" },
+  { kind = "text", value = "cat /tmp/big-coalesce.txt" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 6.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "responsive-within", seconds = 1.0 },
+]
+fail_on = "Beachball or 'app not responding' indicator"
+
+[[case]]
+id = "landmine-csi-j-mode-preserves-above"
+section = 37
+title = "CSI J0/J1/J2 modes honored — shell prompt redraw does not wipe scrollback above"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["csi-j-mode-preserves-above"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "echo ABOVE_CURSOR_TOKEN && echo ABOVE2" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "clear" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "page-up" },
+  { kind = "wait", value = 0.3 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "ABOVE_CURSOR_TOKEN" },
+]
+fail_on = "Above-cursor scrollback wiped (CSI J regression)"
+
+[[case]]
+id = "landmine-dec-1049h-no-clobber"
+section = 37
+title = "Repeated DEC ?1049h does not clobber saved_cursor"
+applies_to = ["mac", "windows"]
+covers_bugs = []
+covers_landmines = ["dec-1049h-no-clobber"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "echo MAIN_SCREEN_TOKEN" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "vim -c 'enew' -c 'startinsert'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 1.0 },
+  { kind = "key", value = "escape" },
+  { kind = "text", value = ":q!" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "text-in-region", region = "body", value = "MAIN_SCREEN_TOKEN" },
+]
+fail_on = "saved_cursor clobbered, main-screen content lost"
+
+[[case]]
+id = "landmine-pty-drop-kills-child"
+section = 37
+title = "Closing a tab kills its child shell (Drop impl actually fires)"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["wait:0.5"]
+keystrokes = [
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.5 },
+  { kind = "key", value = "cmd+w" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "no-orphan-shells", parent = "sonic-mac" },
+]
+fail_on = "Orphan shell remains after tab close"
+
+[[case]]
+id = "landmine-suboptimal-drop-before-configure"
+section = 37
+title = "Many rapid resizes — Suboptimal SurfaceTexture is dropped before reconfigure"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = ["suboptimal-drop-before-configure"]
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "resize-window", sequence = [[800, 600], [400, 300], [1200, 900], [600, 700], [1000, 500], [800, 800], [500, 500], [1100, 800]] },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", min = 1 },
+]
+fail_on = "wgpu panic 'texture still alive'"
+
+[[case]]
+id = "landmine-set-rich-text-shaping"
+section = 37
+title = "set_rich_text path produces per-cell color + weight + style correctly"
+applies_to = ["mac", "windows"]
+covers_bugs = ["#161", "#163"]
+covers_landmines = ["set-rich-text-shaping"]
+setup = ["clear"]
+keystrokes = [
+  { kind = "text", value = "printf '\\033[1;31mBR\\033[0m \\033[3;34mIB\\033[0m \\033[4;32mUG\\033[0m\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.5 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "text-in-region", region = "body", value = "BR" },
+]
+fail_on = "Color, weight, or style dropped"
+
+[[case]]
+id = "landmine-pty-drop-kills-child-cmd-q-no-orphan"
+section = 37
+title = "Cmd+Q with multiple tabs: PtyHandle::Drop kills every child shell (no orphans)"
+applies_to = ["mac"]
+covers_bugs = ["#213"]
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["wait:0.5"]
+keystrokes = [
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "echo HELLO_TAB2" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.5 },
+  { kind = "snapshot-sonic-shells" },
+  { kind = "key", value = "cmd+q" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", max = 0 },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
+]
+fail_on = "any PID that was a shell descendant of the sonic-mac PID before cmd+q is still alive 1s after cmd+q (became orphan adopted by launchd)"
