@@ -117,6 +117,23 @@ impl TabBar {
     pub fn close(&mut self, id: TabId) {
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
             self.tabs.remove(pos);
+            // Three cases for adjusting `active` after removing `pos`:
+            //  - pos < active: every index above `pos` shifts down by 1,
+            //    so the originally-active tab is now at `active - 1`.
+            //  - pos == active: the active tab itself was just closed.
+            //    Stay at the same numeric index (which now points at the
+            //    next tab to the right). Clamp below if it was the last
+            //    tab in the vec.
+            //  - pos > active: the active tab kept its index — no change.
+            //
+            // Pre-fix, this only clamped on overflow, which silently
+            // shifted focus to the wrong tab when closing any inactive
+            // tab to the LEFT of the active one (e.g. close tab #0 with
+            // tab #1 active → vec shrinks so old-tab-#2 becomes the new
+            // tab #1, but `active` stayed at 1 — user lost their place).
+            if pos < self.active {
+                self.active -= 1;
+            }
             if self.active >= self.tabs.len() {
                 self.active = self.tabs.len().saturating_sub(1);
             }
