@@ -91,12 +91,11 @@ impl App {
                         // request_redraw() calls must respect the same
                         // min_interval the loop enforces; CLAUDE.md §4.
                         let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
-                        // 4ms is small enough to stay below one frame even
-                        // when a key triggers an echo immediately. Keeps the
-                        // CPU-spin guard for bursty output (cat largefile,
-                        // shell startup banner) while making typing feel
-                        // instant.
-                        let min_interval = Duration::from_millis(4);
+                        // 16ms min interval keeps the OS from marking the app
+                        // unresponsive under bursty pty output (cat largefile,
+                        // shell startup banner) while staying within one vsync
+                        // frame at 60Hz. See CLAUDE.md §4.
+                        let min_interval = Duration::from_millis(16);
                         loop {
                             // Try to drain quickly; if nothing comes for
                             // ~min_interval and we have a pending redraw,
