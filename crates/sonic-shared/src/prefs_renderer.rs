@@ -92,11 +92,24 @@ pub struct TextCmd {
 }
 
 /// Output of [`build_draw_list`].
+///
+/// Rendering happens in two phases so combobox popovers ALWAYS win
+/// z-order against base content (Haiku review of PR #210). The base
+/// phase paints `quads` then `texts`; the popover phase paints
+/// `popover_quads` then `popover_texts`. Without the split, a text
+/// run emitted earlier in `texts` (e.g. a label above an open
+/// dropdown) would still draw on top of the popover quads because
+/// the renderer runs ALL quads first, then ALL texts.
 #[derive(Debug, Clone, Default)]
 pub struct DrawList {
     pub clear: [f32; 4],
     pub quads: Vec<QuadCmd>,
     pub texts: Vec<TextCmd>,
+    /// Popover-layer quads. Drawn AFTER `texts` so they overlay every
+    /// base widget regardless of base text emission order.
+    pub popover_quads: Vec<QuadCmd>,
+    /// Popover-layer text. Drawn AFTER `popover_quads`.
+    pub popover_texts: Vec<TextCmd>,
 }
 
 /// Convert a `[f32; 4]` premultiplied linear-sRGB token into a glyphon
@@ -395,10 +408,14 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     push_button_text(&mut texts, apply, "Apply", apply_fg, typography::BODY_STRONG);
 
     // --- Open dropdown popovers (issue #173 slice-2b) -----------------
-    // Rendered LAST so they overlay every other widget, footer, and
-    // chrome. Each open `Dropdown` paints a popover anchored directly
-    // below its header rect. Row height matches the header height so
-    // the hit-test (`Dropdown::hit_option`) and the rendered rows agree.
+    // Routed into `popover_quads` / `popover_texts` so the renderer can
+    // draw them in a SECOND pass (quad-then-text) AFTER the base pass.
+    // Putting them at the end of the shared `quads` / `texts` vectors
+    // is not sufficient: `PrefsRenderer::render` draws all quads first
+    // then all text, so base text emitted earlier (labels, footer)
+    // would still overdraw the popover. Haiku review of PR #210.
+    let mut popover_quads: Vec<QuadCmd> = Vec::new();
+    let mut popover_texts: Vec<TextCmd> = Vec::new();
     for ctrl in &state.controls {
         if let Control::Dropdown(d) = ctrl {
             if !d.open || d.options.is_empty() {
@@ -408,15 +425,15 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             let row_h = d.rect.h;
             let pop_h = row_h * d.options.len() as f32;
             let popover = PrefsRect::new(d.rect.x, top, d.rect.w, pop_h);
-            quads.push(QuadCmd::rounded(popover, palette.bg_surface, CONTROL_RADIUS));
-            push_border(&mut quads, popover, palette.border_strong);
+            popover_quads.push(QuadCmd::rounded(popover, palette.bg_surface, CONTROL_RADIUS));
+            push_border(&mut popover_quads, popover, palette.border_strong);
             for (i, opt) in d.options.iter().enumerate() {
                 let row = PrefsRect::new(popover.x, top + row_h * i as f32, popover.w, row_h);
                 if i == d.selected {
-                    quads.push(QuadCmd::sharp(row, palette.bg_hover));
+                    popover_quads.push(QuadCmd::sharp(row, palette.bg_hover));
                 }
                 push_text(
-                    &mut texts,
+                    &mut popover_texts,
                     PrefsRect::new(row.x + 10.0, row.y, row.w - 20.0, row.h),
                     opt.clone(),
                     palette.text_primary,
@@ -426,7 +443,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         }
     }
 
-    DrawList { clear: bg_base, quads, texts }
+    DrawList { clear: bg_base, quads, texts, popover_quads, popover_texts }
 }
 
 /// Tint a base button color by the current [`InteractionState`]. Hover
@@ -681,7 +698,16 @@ pub struct PrefsRenderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    /// Separate TextRenderer for the popover phase. Glyphon's
+    /// `TextRenderer::prepare` overwrites the previous prepare's
+    /// state, so we need an independent instance to keep base-phase
+    /// glyphs available across the popover render pass.
+    popover_text_renderer: TextRenderer,
     quad: QuadPipeline,
+    /// Separate QuadPipeline for the popover phase so a second
+    /// `draw(&[QuadInstance])` does not clobber the base pipeline's
+    /// per-frame instance buffer mid-encoder.
+    popover_quad: QuadPipeline,
     cell_w: f32,
     window: Arc<Window>,
 }
@@ -738,8 +764,11 @@ impl PrefsRenderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let popover_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
         let quad = QuadPipeline::new(&device, format);
+        let popover_quad = QuadPipeline::new(&device, format);
 
         Ok(Self {
             surface,
@@ -754,7 +783,9 @@ impl PrefsRenderer {
             viewport,
             atlas,
             text_renderer,
+            popover_text_renderer,
             quad,
+            popover_quad,
             cell_w: scale_factor * BASE_CELL_W,
             window,
         })
@@ -789,8 +820,11 @@ impl PrefsRenderer {
         let mut atlas = TextAtlas::new(&self.device, &self.queue, &self.cache, self.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &self.device, MultisampleState::default(), None);
+        let popover_text_renderer =
+            TextRenderer::new(&mut atlas, &self.device, MultisampleState::default(), None);
         self.atlas = atlas;
         self.text_renderer = text_renderer;
+        self.popover_text_renderer = popover_text_renderer;
         // The window may have been moved between displays of different
         // densities. Pick up the current physical size and re-configure.
         let phys = self.window.inner_size();
@@ -867,70 +901,91 @@ impl PrefsRenderer {
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
         let sf = self.scale_factor;
-        let quads: Vec<QuadInstance> = draw
-            .quads
-            .iter()
-            .map(|q| {
-                let rect_ndc =
-                    px_to_ndc(q.rect.x * sf, q.rect.y * sf, q.rect.w * sf, q.rect.h * sf, sw, sh);
-                if q.radius_px > 0.0 {
-                    QuadInstance::rounded(
-                        rect_ndc,
-                        q.color,
-                        [q.rect.w * sf, q.rect.h * sf],
-                        q.radius_px * sf,
-                    )
-                } else {
-                    QuadInstance::sharp(rect_ndc, q.color)
-                }
-            })
-            .collect();
+        let to_quads = |src: &[QuadCmd]| -> Vec<QuadInstance> {
+            src.iter()
+                .map(|q| {
+                    let rect_ndc = px_to_ndc(
+                        q.rect.x * sf,
+                        q.rect.y * sf,
+                        q.rect.w * sf,
+                        q.rect.h * sf,
+                        sw,
+                        sh,
+                    );
+                    if q.radius_px > 0.0 {
+                        QuadInstance::rounded(
+                            rect_ndc,
+                            q.color,
+                            [q.rect.w * sf, q.rect.h * sf],
+                            q.radius_px * sf,
+                        )
+                    } else {
+                        QuadInstance::sharp(rect_ndc, q.color)
+                    }
+                })
+                .collect()
+        };
+        let base_quads = to_quads(&draw.quads);
+        let popover_quads = to_quads(&draw.popover_quads);
 
         let ui_family = typography::system_ui_family();
-        let mut buffers: Vec<(Buffer, PrefsRect)> = Vec::with_capacity(draw.texts.len());
-        for t in &draw.texts {
-            let metrics = Metrics::new(t.size_px, t.size_px * 1.4);
-            let mut buf = Buffer::new(&mut self.font_system, metrics);
-            buf.set_size(&mut self.font_system, Some(t.rect.w), Some(t.rect.h));
-            let family = match (&t.font_family, t.monospace) {
-                (Some(name), _) if !name.is_empty() => Family::Name(name.as_str()),
-                (_, true) => Family::Name("monospace"),
-                (_, false) => Family::Name(ui_family),
-            };
-            let mut attrs = Attrs::new().family(family).color(t.color);
-            if t.weight >= 600 {
-                attrs = attrs.weight(glyphon::Weight::BOLD);
-            } else if t.weight >= 550 {
-                attrs = attrs.weight(glyphon::Weight::SEMIBOLD);
+        let build_buffers = |texts: &[TextCmd], font_system: &mut FontSystem| {
+            let mut buffers: Vec<(Buffer, PrefsRect)> = Vec::with_capacity(texts.len());
+            for t in texts {
+                let metrics = Metrics::new(t.size_px, t.size_px * 1.4);
+                let mut buf = Buffer::new(font_system, metrics);
+                buf.set_size(font_system, Some(t.rect.w), Some(t.rect.h));
+                let family = match (&t.font_family, t.monospace) {
+                    (Some(name), _) if !name.is_empty() => Family::Name(name.as_str()),
+                    (_, true) => Family::Name("monospace"),
+                    (_, false) => Family::Name(ui_family),
+                };
+                let mut attrs = Attrs::new().family(family).color(t.color);
+                if t.weight >= 600 {
+                    attrs = attrs.weight(glyphon::Weight::BOLD);
+                } else if t.weight >= 550 {
+                    attrs = attrs.weight(glyphon::Weight::SEMIBOLD);
+                }
+                buf.set_text(font_system, &t.text, &attrs, Shaping::Advanced, None);
+                buf.shape_until_scroll(font_system, false);
+                buffers.push((buf, t.rect));
             }
-            buf.set_text(&mut self.font_system, &t.text, &attrs, Shaping::Advanced, None);
-            buf.shape_until_scroll(&mut self.font_system, false);
-            buffers.push((buf, t.rect));
-        }
+            buffers
+        };
+        let base_buffers = build_buffers(&draw.texts, &mut self.font_system);
+        let popover_buffers = build_buffers(&draw.popover_texts, &mut self.font_system);
 
         self.viewport.update(
             &self.queue,
             Resolution { width: self.config.width, height: self.config.height },
         );
-        let areas: Vec<TextArea> = draw
-            .texts
-            .iter()
-            .zip(buffers.iter())
-            .map(|(t, (buf, _))| TextArea {
-                buffer: buf,
-                left: t.rect.x * sf,
-                top: t.rect.y * sf,
-                scale: sf,
-                bounds: TextBounds {
-                    left: (t.rect.x * sf) as i32,
-                    top: (t.rect.y * sf) as i32,
-                    right: ((t.rect.x + t.rect.w) * sf) as i32,
-                    bottom: ((t.rect.y + t.rect.h) * sf) as i32,
-                },
-                default_color: t.color,
-                custom_glyphs: &[],
-            })
-            .collect();
+        fn to_areas<'a>(
+            texts: &'a [TextCmd],
+            buffers: &'a [(Buffer, PrefsRect)],
+            sf: f32,
+        ) -> Vec<TextArea<'a>> {
+            texts
+                .iter()
+                .zip(buffers.iter())
+                .map(|(t, (buf, _))| TextArea {
+                    buffer: buf,
+                    left: t.rect.x * sf,
+                    top: t.rect.y * sf,
+                    scale: sf,
+                    bounds: TextBounds {
+                        left: (t.rect.x * sf) as i32,
+                        top: (t.rect.y * sf) as i32,
+                        right: ((t.rect.x + t.rect.w) * sf) as i32,
+                        bottom: ((t.rect.y + t.rect.h) * sf) as i32,
+                    },
+                    default_color: t.color,
+                    custom_glyphs: &[],
+                })
+                .collect()
+        }
+        // Base-phase prepare + render. Popover phase uses a separate
+        // TextRenderer + pass so its glyphs aren't clobbered.
+        let base_areas = to_areas(&draw.texts, &base_buffers, sf);
         self.text_renderer
             .prepare(
                 &self.device,
@@ -938,10 +993,25 @@ impl PrefsRenderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                areas,
+                base_areas,
                 &mut self.swash_cache,
             )
             .map_err(|e| anyhow!("prefs text prepare: {e:?}"))?;
+        let has_popover = !draw.popover_quads.is_empty() || !draw.popover_texts.is_empty();
+        if has_popover {
+            let popover_areas = to_areas(&draw.popover_texts, &popover_buffers, sf);
+            self.popover_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    popover_areas,
+                    &mut self.swash_cache,
+                )
+                .map_err(|e| anyhow!("prefs popover text prepare: {e:?}"))?;
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -957,10 +1027,34 @@ impl PrefsRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.quad.draw(&self.device, &self.queue, &mut pass, &quads);
+            // Phase 1: base quads then base text.
+            self.quad.draw(&self.device, &self.queue, &mut pass, &base_quads);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .map_err(|e| anyhow!("prefs text render: {e:?}"))?;
+        }
+        if has_popover {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("prefs-popover-pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations { load: LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // Phase 2: popover quads then popover text. This guarantees
+            // popovers overlay ALL base content (both quads AND text)
+            // regardless of base emission order — the fix for Haiku's
+            // review finding on PR #210.
+            self.popover_quad.draw(&self.device, &self.queue, &mut pass, &popover_quads);
+            self.popover_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .map_err(|e| anyhow!("prefs popover text render: {e:?}"))?;
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
