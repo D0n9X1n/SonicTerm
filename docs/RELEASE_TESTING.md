@@ -1036,7 +1036,7 @@ those rely on the automated test alone — that's noted in the row.
 | 4 | Repeated DEC `?1049h` is a no-op when already in alt screen (don't clobber `saved_cursor`) | Sec 7 (vim re-entry) | `crates/sonic-core/tests/vt.rs::dec_1049h_repeated_does_not_clobber_saved_cursor` |
 | 5 | `wgpu::CurrentSurfaceTexture::Suboptimal(frame)` — drop SurfaceTexture BEFORE `surface.configure(...)` (wgpu 29 panic otherwise) | Sec 1 + window-resize-many (code-internal; manual repro is "resize the window 20× rapidly, no panic") | `crates/sonic-shared/tests/suboptimal_drop_ordering.rs` (landed in #206 — source-level guard that fails if `drop(frame)` is reordered after `surface.configure(...)`) |
 | 6 | `set_rich_text` vs `set_text` — per-cell color/weight/style needs `Shaping::Advanced` (cosmic-text 0.18 API) | Sec 8 (per-cell colored bold/italic + per-cell bg) | `crates/sonic-shared/tests/per_cell_bg_renders.rs` + `crates/sonic-shared/tests/unified_font_attrs.rs` + `crates/sonic-shared/tests/user_regressions.rs` (build_tab_title_rich_text_spans) |
-| 7 | `PtyHandle::Drop` kills child explicitly (no orphans) | Sec 15 (Cmd+Q leaves no shell PIDs) | **[ ] needs-test** — see TODO at bottom; today covered only by Sec 15 manual gate + `impl Drop` source invariant in `crates/sonic-io/src/pty.rs` (no automated regression asserting the child PID is reaped on drop) |
+| 7 | `PtyHandle::Drop` kills child explicitly (no orphans) | Sec 15 (Cmd+Q leaves no shell PIDs) | `crates/sonic-io/tests/pty_drop_kills_child.rs::pty_drop_kills_child` (merged in #213) |
 | 8 | `sonic_cfg::url_open::validate()` rejects shell-metachar / non-allowlisted scheme URIs | Sec 9 (OSC 8 hostile URL is silently rejected) | `crates/sonic-cfg/tests/*` (url_open allow/deny matrix) |
 
 **Sign-off rule:** every row above must have BOTH the manual section
@@ -1045,20 +1045,6 @@ includes them in the standard floor). If a row is marked
 `[ ] needs-test`, the release is blocked until the TODO is closed.
 
 - [ ] All 8 rows of the §4 land-mine table verified (manual section + automated test).
-
-### TODO: automated test gaps
-
-The following land-mines have no dedicated automated regression test and
-are covered only by manual checklist + source-comment + GUI smoke. File
-a follow-up to add them before tagging the next major release:
-
-- [ ] **Row 7 — `PtyHandle::Drop` reaps child:** add an integration test
-  under `crates/sonic-io/tests/` that spawns a real PTY with a known
-  shell PID, drops the `PtyHandle`, then asserts (via `kill(pid, 0)` or
-  platform equivalent) that the child has exited within a short
-  timeout. Today the invariant lives only in the `impl Drop` source in
-  `crates/sonic-io/src/pty.rs` and is checked manually via Sec 15
-  ("Cmd+Q leaves no orphan shell PIDs").
 
 ---
 
