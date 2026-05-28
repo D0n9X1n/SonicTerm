@@ -131,9 +131,11 @@ impl App {
         }
     }
     pub(super) fn drain_menubar_actions(&mut self, el: &ActiveEventLoop) {
+        let mut ran_any = false;
         for action in crate::menubar_bridge::drain() {
             tracing::debug!("menubar action: {action:?}");
             self.run_action(&action);
+            ran_any = true;
         }
         // Menubar dispatch can set window-creation flags (e.g.
         // `pending_prefs_open` via OpenPreferences). The KeyboardInput
@@ -144,6 +146,21 @@ impl App {
         // Funnel through the single drain helper so every dispatch
         // site is covered. See `drain_pending_window_creates`.
         self.drain_pending_window_creates(el);
+        // Request a redraw if any action ran. On macOS, NSMenu intercepts
+        // chords like ⌘W and ⌘T before winit sees them and dispatches the
+        // bound `Action` via this bridge instead of the KeyboardInput arm
+        // in `window_event`. The KeyboardInput arm always follows
+        // `run_action` with `window.request_redraw()`; this path used to
+        // not, so a ⌘W "close tab" mutated state but left the tab bar
+        // looking unchanged on screen until the *next* unrelated event
+        // (a second ⌘W, a mouse move, or PTY output) finally repainted.
+        // Users perceived this as "Ctrl/Cmd+W needs two presses." Mirror
+        // the keyboard path so the first press is visible immediately.
+        if ran_any {
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
     }
     pub(super) fn drain_os_drag(&mut self) {
         for payload in crate::os_drag_bridge::drain_tab_payloads() {
