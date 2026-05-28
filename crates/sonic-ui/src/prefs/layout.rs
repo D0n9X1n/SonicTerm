@@ -102,9 +102,10 @@ pub const CARD_GAP: f32 = 16.0;
 pub const ROW_H: f32 = 48.0;
 pub const LABEL_W: f32 = 168.0;
 
-/// Controls.
+/// Controls. The redesigned (issue #173 slice-2) primitives use a 32 px
+/// height with a 10 px corner radius for both buttons and comboboxes.
 pub const CONTROL_H: f32 = 32.0;
-pub const CONTROL_RADIUS: f32 = 8.0;
+pub const CONTROL_RADIUS: f32 = 10.0;
 pub const TOGGLE_W: f32 = 44.0;
 pub const TOGGLE_H: f32 = 24.0;
 pub const TOGGLE_KNOB: f32 = 20.0;
@@ -115,10 +116,18 @@ pub const SWATCH_SIZE: f32 = 22.0;
 pub const SWATCH_GAP: f32 = 6.0;
 pub const SWATCH_RADIUS: f32 = 6.0;
 
+/// Focus halo painted around any control with `interaction.focused == true`.
+/// Halo extends `FOCUS_RING_HALO` px outside the control rect and is drawn
+/// with `theme.accent` at reduced alpha. See issue #173 slice-2 visual spec.
+pub const FOCUS_RING_HALO: f32 = 4.0;
+pub const FOCUS_RING_THICKNESS: f32 = 2.0;
+
 /// Footer.
 pub const FOOTER_H: f32 = 64.0;
 pub const BUTTON_H: f32 = 32.0;
-pub const BUTTON_RADIUS: f32 = 8.0;
+/// Pill button corner radius — matches `CONTROL_RADIUS` so buttons and
+/// comboboxes appear from the same family (fixes issue #169).
+pub const BUTTON_RADIUS: f32 = 10.0;
 pub const PRIMARY_BUTTON_W: f32 = 112.0;
 pub const SECONDARY_BUTTON_W: f32 = 96.0;
 pub const BUTTON_GAP: f32 = 12.0;

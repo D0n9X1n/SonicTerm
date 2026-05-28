@@ -4,7 +4,8 @@
 //! workspace refactor (issue #121) per CLAUDE.md §5.
 
 use sonic_ui::prefs::controls::{
-    ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId,
+    Button, ButtonKind, ColorSwatch, Control, Dropdown, InteractionState, Rect, Slider, TextField,
+    Toggle, WidgetId,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -204,4 +205,74 @@ fn control_enum_dispatches_hit_test_and_id() {
 #[test]
 fn widget_id_displays() {
     assert_eq!(format!("{}", WidgetId(42)), "w42");
+}
+
+// ---- Issue #173 slice-2 redesign: Button + interaction state ----
+
+#[test]
+fn button_text_is_horizontally_centered_in_pill() {
+    // Fixes #169: Apply button text used to be left-aligned.
+    let b = Button::new(WidgetId(20), "Apply", r(100.0, 50.0, 112.0, 32.0), ButtonKind::Primary);
+    let (cx, cy) = b.text_center();
+    assert!((cx - (100.0 + 112.0 / 2.0)).abs() < 1e-5, "text x-center should sit in the middle");
+    assert!((cy - (50.0 + 32.0 / 2.0)).abs() < 1e-5, "text y-center should sit in the middle");
+}
+
+#[test]
+fn combobox_open_close_state_transitions() {
+    // Fixes #166 / #168: popover opens on click, click on a row closes.
+    let mut d = Dropdown::new(
+        WidgetId(21),
+        "theme",
+        r(0.0, 0.0, 200.0, 32.0),
+        vec!["a".into(), "b".into()],
+        0,
+    );
+    assert!(!d.open, "starts closed");
+    d.toggle_open();
+    assert!(d.open, "opens on toggle (click)");
+    d.close();
+    assert!(!d.open, "closes on outside click");
+    d.toggle_open();
+    assert!(d.open);
+    assert!(d.select(1));
+    assert!(!d.open, "selecting closes the popover");
+    // Visible chevron column is reserved on the right edge.
+    let chev = d.chevron_rect();
+    assert_eq!(chev.x, 200.0 - Dropdown::CHEVRON_W);
+    assert_eq!(chev.h, 32.0);
+}
+
+#[test]
+fn toggle_thumb_slides_with_value() {
+    let mut t = Toggle::new(WidgetId(22), "blink", r(10.0, 10.0, 44.0, 24.0), false);
+    let knob = 20.0_f32;
+    let margin = 2.0_f32;
+    let off_x = t.knob_x(knob, margin);
+    assert!((off_x - (10.0 + margin)).abs() < 1e-5, "off → thumb on the left");
+    t.set(true);
+    let on_x = t.knob_x(knob, margin);
+    assert!((on_x - (10.0 + 44.0 - knob - margin)).abs() < 1e-5, "on → thumb slid to the right");
+    assert!(on_x > off_x, "on knob is right of off knob");
+}
+
+#[test]
+fn interaction_state_hover_press_focus_independent() {
+    // Hover / press / focus are independent dimensions per issue #173 spec.
+    let s = InteractionState::new();
+    assert!(!s.hovered && !s.pressed && !s.focused);
+    let h = InteractionState { hovered: true, ..InteractionState::new() };
+    assert!(h.hovered && !h.pressed && !h.focused);
+    let f = InteractionState { focused: true, pressed: true, hovered: false };
+    assert!(f.focused && f.pressed && !f.hovered);
+}
+
+#[test]
+fn button_hit_test_respects_pill_rect() {
+    let b = Button::new(WidgetId(23), "Cancel", r(50.0, 100.0, 96.0, 32.0), ButtonKind::Secondary);
+    assert!(b.hit_test(50.0, 100.0));
+    assert!(b.hit_test(145.9, 131.9));
+    assert!(!b.hit_test(146.0, 100.0));
+    assert!(!b.hit_test(49.9, 100.0));
+    assert_eq!(b.kind, ButtonKind::Secondary);
 }

@@ -177,3 +177,46 @@ fn form_card_fits_inside_content() {
     assert!(l.form_card.x + l.form_card.w <= l.content.x + l.content.w + 1.0);
     assert!(l.form_card.y + l.form_card.h <= l.footer.y + 1.0);
 }
+
+// ---- Issue #173 slice-2 redesign: two-pane geometry + restyled controls ----
+
+#[test]
+fn two_pane_layout_sidebar_and_content_tile_with_no_gap() {
+    // Slice-2 spec: sidebar.x + sidebar.w == content.x — the two panes
+    // tile edge-to-edge with no gap and no overlap.
+    let l = PrefsLayout::default_size();
+    assert!(
+        (l.sidebar.x + l.sidebar.w - l.content.x).abs() < 1e-5,
+        "sidebar.x ({}) + sidebar.w ({}) must equal content.x ({})",
+        l.sidebar.x,
+        l.sidebar.w,
+        l.content.x,
+    );
+    // And the union must span the full window width.
+    assert!((l.sidebar.w + l.content.w - PREFS_WIN_W).abs() < 1e-5);
+    // Same property must hold at minimum size.
+    let l2 = PrefsLayout::new(680.0, 520.0);
+    assert!((l2.sidebar.x + l2.sidebar.w - l2.content.x).abs() < 1e-5);
+}
+
+#[test]
+fn redesigned_control_radius_is_ten_for_pill_family() {
+    // Slice-2 spec: button + combobox share radius 10 (issue #169).
+    use sonic_ui::prefs::layout::{BUTTON_RADIUS, CONTROL_RADIUS};
+    assert_eq!(CONTROL_RADIUS, 10.0);
+    assert_eq!(BUTTON_RADIUS, 10.0);
+    assert_eq!(BUTTON_RADIUS, CONTROL_RADIUS, "button and combobox share the pill radius");
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn focus_ring_constants_present_for_halo() {
+    // Slice-2 spec: every focusable control gets a 4-6 px theme.accent halo.
+    use sonic_ui::prefs::layout::{FOCUS_RING_HALO, FOCUS_RING_THICKNESS};
+    assert!(
+        (4.0..=6.0).contains(&FOCUS_RING_HALO),
+        "focus halo {} px should be in spec range 4–6",
+        FOCUS_RING_HALO
+    );
+    assert!(FOCUS_RING_THICKNESS > 0.0, "thickness {FOCUS_RING_THICKNESS} must be positive");
+}
