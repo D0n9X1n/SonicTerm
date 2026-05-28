@@ -895,21 +895,26 @@ pub fn poll_command_events_for_tab_state(
 ) {
     let Some(tab_state) = tab_states.get_mut(tab_idx) else { return };
     let pane_ids = tab_state.tree.leaves();
-    let mut latest = None;
+    let mut events = Vec::new();
     for pane_id in pane_ids {
         if let Some(pane) = panes.get(&pane_id) {
             let mut q = pane.command_events.lock();
-            latest = q.drain(..).next_back().or(latest);
+            events.extend(q.drain(..));
         }
     }
-    let Some(ev) = latest else { return };
-    match ev.event {
-        CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
-        CommandEvent::CmdEnd(exit) => {
-            tab_state.command = CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
-            maybe_notify_long_command(config, ev.duration, exit);
+    if events.is_empty() {
+        return;
+    }
+    for ev in events {
+        match ev.event {
+            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
+            CommandEvent::CmdEnd(exit) => {
+                tab_state.command =
+                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
+                maybe_notify_long_command(config, ev.duration, exit);
+            }
+            CommandEvent::PromptStart => {}
         }
-        CommandEvent::PromptStart => {}
     }
     if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
         tabs.set_command_status(tab_idx, t);
@@ -945,15 +950,45 @@ fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: 
     notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
 }
 
+static TEST_COMMAND_NOTIFICATIONS: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
+#[doc(hidden)]
+pub fn __test_capture_command_notifications() {
+    *TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned") = Some(Vec::new());
+}
+
+#[doc(hidden)]
+pub fn __test_drain_command_notifications() -> Vec<String> {
+    TEST_COMMAND_NOTIFICATIONS
+        .lock()
+        .expect("test notification lock poisoned")
+        .take()
+        .unwrap_or_default()
+}
+
+fn record_test_command_notification(body: &str) -> bool {
+    let mut notifications =
+        TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned");
+    let Some(notifications) = notifications.as_mut() else { return false };
+    notifications.push(body.to_string());
+    true
+}
+
 #[cfg(target_os = "windows")]
 fn notify_command_done(body: String) {
+    if record_test_command_notification(&body) {
+        return;
+    }
     if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
         tracing::debug!(?err, "desktop notification failed");
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn notify_command_done(_body: String) {}
+fn notify_command_done(body: String) {
+    record_test_command_notification(&body);
+}
 
 impl App {
     /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
