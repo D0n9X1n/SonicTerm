@@ -28,4 +28,14 @@ fn keymap_default_windows_uses_ctrl_shift() {
             .any(|binding| binding.keys.to_ascii_lowercase().starts_with("ctrl+shift+")),
         "Windows keymap should use Ctrl+Shift chords"
     );
+
+    assert!(
+        keymap.bindings.iter().all(|binding| {
+            let keys = binding.keys.to_ascii_lowercase();
+            !keys.contains("shift+shift")
+                && !keys.contains("ctrl+ctrl")
+                && !keys.contains("alt+alt")
+        }),
+        "Windows keymap must not contain duplicate modifiers matching (shift|ctrl|alt)+\\1"
+    );
 }
