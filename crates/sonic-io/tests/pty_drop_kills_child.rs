@@ -29,6 +29,22 @@ fn pty_drop_kills_child() {
     let pid = handle.pid().expect("portable-pty must expose a child pid on unix") as i32;
     assert!(pid > 1, "implausible pid {pid}");
 
+    // Cleanup guard: if any assertion below panics, ensure the spawned child
+    // is killed during unwind so the test never leaks a real process. When
+    // the bug under test is absent the pid is already dead by the time the
+    // guard runs and SIGKILL just returns ESRCH — harmless.
+    struct PidGuard(i32);
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            if self.0 > 1 {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let _guard = PidGuard(pid);
+
     // Sanity: the child is alive right now.
     // `kill(pid, 0)` is the canonical "does this pid exist & am I allowed to
     // signal it" probe — no signal is actually delivered.
