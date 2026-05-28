@@ -4334,6 +4334,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "crossbeam-channel",
+ "libc",
  "libproc",
  "parking_lot",
  "portable-pty",
