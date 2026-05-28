@@ -54,17 +54,30 @@ fi
 
 pkill -9 -f "sonic-mac" 2>/dev/null || true
 sleep 0.4
+# `disown` the backgrounded child so bash does not write its own
+# "Terminated: 15" job-notification text to stderr when we later signal
+# the process during the cleanup phase. The harness's status parser
+# was previously misreading that bash-emitted notification as a test
+# failure even though the case itself had completed cleanly. We still
+# track the PID explicitly via $SONIC_PID for kill/wait below.
 "$SONIC_BIN" > "$CASE_OUT/sonic.log" 2>&1 &
 SONIC_PID=$!
+disown "$SONIC_PID" 2>/dev/null || true
 log "spawned sonic-mac pid=$SONIC_PID"
 
-# Wait for window
+# Wait for window — poll until AppleScript reports a window count > 0.
+WINDOW_READY=0
 for _ in $(seq 1 40); do
-  if osascript -e 'tell application "System Events" to tell process "sonic-mac" to get id of window 1' >/dev/null 2>&1; then
+  count=$(osascript -e 'tell application "System Events" to count windows of (first process whose name is "sonic-mac")' 2>/dev/null || echo 0)
+  if [[ "${count:-0}" -gt 0 ]]; then
+    WINDOW_READY=1
     break
   fi
   sleep 0.1
 done
+if [[ $WINDOW_READY -ne 1 ]]; then
+  log "WARN: sonic-mac window did not appear within 4s — case may be flaky"
+fi
 
 osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
@@ -425,10 +438,28 @@ PY
 expect_rc=$?
 
 # ------------------------------------------------------------------
-# Cleanup app
+# Cleanup app — graceful Cmd+Q first, then SIGTERM grace, then SIGKILL.
+# The aggressive pkill -9 in older versions raced with cases that were
+# still finishing their last keystroke, producing spurious
+# "Terminated: 15" entries that the harness counted as failures.
 # ------------------------------------------------------------------
-kill -TERM "$SONIC_PID" 2>/dev/null || true
-sleep 0.3
+osascript -e 'tell application "sonic-mac" to quit' >/dev/null 2>&1 || true
+for _ in $(seq 1 10); do
+  kill -0 "$SONIC_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$SONIC_PID" 2>/dev/null; then
+  kill -TERM "$SONIC_PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    kill -0 "$SONIC_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+fi
+kill -9 "$SONIC_PID" 2>/dev/null || true
+wait "$SONIC_PID" 2>/dev/null || true
+# Belt-and-suspenders: any orphans from setup steps that spawned extra
+# windows should also be reaped, but quietly — we don't want their
+# termination signals to leak into the next case's capture.
 pkill -9 -f "sonic-mac" 2>/dev/null || true
 
 if [[ $expect_rc -eq 0 ]]; then

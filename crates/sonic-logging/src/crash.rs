@@ -1,7 +1,7 @@
 //! Crash-dump capture.
 //!
 //! A custom [`tracing_subscriber::Layer`] keeps a fixed-size ring of
-//! the last 200 events; on panic, the installed hook serialises the
+//! the last 50 events; on panic, the installed hook serialises the
 //! ring + the panic message + a backtrace into
 //! `crashes/crash-<utc-iso8601>.log`.
 //!
@@ -20,7 +20,11 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 /// Maximum number of tracing events retained for the crash dump.
-pub const RING_CAPACITY: usize = 200;
+/// Was 200 pre-v0.8.1; lowered to 50 to claw back ~30 MB of steady-state
+/// RSS that the larger ring kept allocated for the lifetime of the
+/// process. 50 events is still enough context for the post-mortem of
+/// nearly every observed Sonic panic.
+pub const RING_CAPACITY: usize = 50;
 
 /// Captured rendering of a single tracing event.
 #[derive(Debug, Clone)]
