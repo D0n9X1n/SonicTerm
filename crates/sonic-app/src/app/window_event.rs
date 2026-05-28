@@ -334,13 +334,16 @@ impl App {
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
-                    let (cols, rows) = r.cells();
-                    for pane in self.panes.values() {
-                        pane.parser.lock().grid_mut().resize(cols, rows);
-                        if let Some(pty) = pane.pty.as_ref() {
-                            (pty.resize)(cols, rows);
-                        }
-                    }
+                }
+                // Per-pane sizing: each pane's grid + PTY is resized to
+                // its own PaneRect within the (new) window content area,
+                // not the whole window's (cols, rows). Pre-fix, inactive
+                // panes thought they were full-window-wide and TUIs drew
+                // past their visible border. See docs/specs/per-pane-grids.md.
+                let rects = self.compute_active_pane_rects();
+                if let Some(r) = self.renderer.as_ref() {
+                    let (cw, ch) = r.cell_size();
+                    crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
                 }
                 // Cell geometry changed — force the next render to
                 // re-publish the IME cursor area even if (row, col) is

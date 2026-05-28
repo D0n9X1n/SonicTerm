@@ -869,6 +869,17 @@ impl GpuRenderer {
         (cols.max(1), rows.max(1))
     }
 
+    /// Logical cell metrics (width, height) in CSS pixels. Pair with a
+    /// `sonic_ui::pane::Rect` from `PaneTree::layout` to compute how many
+    /// cells fit in that rect: `cols = (rect.w / cell_w).floor()`,
+    /// similarly rows.
+    ///
+    /// Returned values are positive (the renderer asserts a positive glyph
+    /// advance at font load).
+    pub fn cell_size(&self) -> (f32, f32) {
+        (self.cell_w, self.cell_h)
+    }
+
     /// Current font family in effect. Test-only inspector for the
     /// live-reload path; production code reads font fields directly.
     #[doc(hidden)]
