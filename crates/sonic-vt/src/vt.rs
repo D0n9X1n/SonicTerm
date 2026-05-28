@@ -25,14 +25,25 @@ pub const SONIC_VERSION: &str = "Sonic 0.7";
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
 pub enum VtEvent {
+    /// OSC 0/2 — shell asked the terminal to update the window title.
     SetTitle(String),
+    /// BEL (0x07) — audible/visual bell request from the shell.
     Bell,
+    /// OSC 8 — enter (or exit, when `uri` is empty) a hyperlink span; cells
+    /// emitted while active carry the interned id so the renderer can underline
+    /// them and the input layer can resolve clicks back to a URI.
     Hyperlink {
+        /// Optional `id=…` parameter so multiple discontiguous runs can share
+        /// one logical link target.
         id: Option<String>,
+        /// The target URI; empty string terminates the currently-active link.
         uri: String,
     },
+    /// OSC 52 — shell requested clipboard read/write on the named selection.
     Clipboard {
+        /// Selection target byte (`c` = clipboard, `p` = primary, etc.).
         selection: char,
+        /// Base64-encoded payload as received from the shell.
         data: String,
     },
     /// DEC private mode ?25 — host should show/hide the cursor.
@@ -47,6 +58,8 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// Build a parser bound to `grid`, with no upstream reply channel — DSR /
+    /// XTVERSION queries will be silently dropped.
     pub fn new(grid: Grid) -> Self {
         Self { inner: vte::Parser::new(), performer: Performer::new(grid, None) }
     }
@@ -135,10 +148,13 @@ impl Parser {
         std::mem::take(&mut self.performer.events)
     }
 
+    /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
     pub fn grid(&self) -> &Grid {
         &self.performer.grid
     }
 
+    /// Mutably borrow the [`Grid`] — used by the host on resize, scrollback
+    /// scroll, and selection clears.
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.performer.grid
     }
