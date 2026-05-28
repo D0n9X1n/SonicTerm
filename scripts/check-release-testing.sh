@@ -7,7 +7,7 @@
 # Exhausts the WHOLE document on every run so the maintainer sees the
 # complete gap in one shot — not just the first failure. Reports:
 #   * Every `- [ ]` unchecked checklist item (with line numbers).
-#   * Every `needs-test` marker in a §37 table row (with line numbers).
+#   * Every `needs-test` marker in a §49 table row (with line numbers).
 #     (The TODO list at the bottom intentionally tracks the same gaps as
 #      regular `- [ ]` boxes; those are counted under "unchecked items".)
 #
@@ -33,7 +33,7 @@ else
   unchecked_count=0
 fi
 
-# --- Scan 2: `needs-test` markers in §37 table rows -------------------------
+# --- Scan 2: `needs-test` markers in §49 table rows -------------------------
 # Table rows contain `|` separators. The TODO bullets do not — they're
 # `- [ ]` checklist items already counted by Scan 1.
 needs_test=$(grep -nE 'needs-test' "$DOC" | grep -E '\|' || true)
@@ -53,7 +53,7 @@ if [[ $unchecked_count -gt 0 ]]; then
   printf '%s\n' "$unchecked" | sed 's/^/  /'
 fi
 echo ""
-echo "needs-test gaps (§37 table): $needs_test_count"
+echo "needs-test gaps (§49 table): $needs_test_count"
 if [[ $needs_test_count -gt 0 ]]; then
   printf '%s\n' "$needs_test" | sed 's/^/  /'
 fi

@@ -1200,7 +1200,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 | macOS | Windows |
 |---|---|
-| Press `Cmd+D` for a split, then `Cmd+Shift+B` to toggle broadcast. | Press `Ctrl+Shift+D` for a split, then `Ctrl+Shift+Alt+B` (or the final non-collision binding) to toggle broadcast. |
+| Press `Cmd+D` for a split, then `Cmd+Shift+B` to toggle broadcast. | Press `Ctrl+Shift+D` for a split, then `Ctrl+Shift+B` to toggle tab broadcast; press `Ctrl+Shift+B` again to toggle off. For all-tabs broadcast, use `Ctrl+Alt+Shift+B`. |
 | Type `echo BROADCAST-OK` and press Enter. | Type `echo BROADCAST-OK` and press Enter. |
 | Toggle broadcast off; type `echo SOLO-OK` in the active pane. | Toggle broadcast off; type `echo SOLO-OK` in the active pane. |
 
@@ -1224,7 +1224,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 | macOS | Windows |
 |---|---|
-| Use `Cmd+D` and `Cmd+Shift+D` to make 2×2; press `Cmd+Shift+Z`. | Use `Ctrl+Shift+D` and the Windows down-split binding to make 2×2; press `Ctrl+Shift+Z`. |
+| Use `Cmd+D` and `Cmd+Shift+D` to make 2×2; press `Cmd+Shift+Z`. | Use `Ctrl+D` and `Ctrl+Shift+D` to make 2×2; press `Ctrl+Shift+Z`. |
 | Press the zoom chord again to restore. | Press the zoom chord again to restore. |
 | Use `Cmd+Shift+←/→/↑/↓` to nudge split dividers repeatedly. | Use `Ctrl+Shift+←/→/↑/↓` to nudge split dividers repeatedly. |
 
