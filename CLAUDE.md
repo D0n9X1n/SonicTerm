@@ -71,6 +71,7 @@ cargo test --workspace
 cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
 cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK
 cargo build --release -p sonic-mac                             # confirms fat-LTO build works
+bash scripts/bench.sh                                          # perf-bench subset vs baseline.json; warns locally, exits 1 in CI
 ```
 
 `cargo-deny` runs in CI on Ubuntu (`cargo install cargo-deny --locked` + `cargo deny check` locally if you touched any dep). CI matrix is `macos-14` + `windows-latest` only.
@@ -371,3 +372,16 @@ If any of those fail, the PR is not ready. Include the screenshot path AND a 1-l
 We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows Sonic **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
 
 **Rule:** do not describe perf work as "done" in commit messages or PR bodies. Phase E (perf parity) is ongoing. Concrete remaining items live in the v1.x section of `docs/ROADMAP.md`.
+
+### Perf-bench gate (`scripts/bench.sh` + `baseline.json`)
+
+Because perf has shipped regressions silently (e.g. PR #161's dropped per-cell bg), we now run a small bench subset on every render-touching PR and compare against `baseline.json` at the repo root. The gate:
+
+- **Local** (`bash scripts/bench.sh`): prints a table, warns on any metric that regresses by more than `_regression_threshold_pct` (default 20 %), **exits 0** so a dev iterating on perf can re-run cheaply.
+- **CI** (`bash scripts/bench.sh --ci`, or with `CI=1`): same table, but **exits 1** on a >20 % regression. The CI job (`perf-bench` in `.github/workflows/ci.yml`) is paths-filtered to perf-sensitive crates (`sonic-vt`, `sonic-grid`, `sonic-text`, `sonic-gpu`, `sonic-shared/src/render/`, `sonic-app/`, `baseline.json`, `scripts/bench.sh`).
+- **Intentional perf change** (`bash scripts/bench.sh --record`): re-measures and overwrites `baseline.json`. Commit the diff alongside the change so the regression bar tracks reality.
+- **Testing the gate itself** (`BENCH_SKIP_MEASURE=1 bash scripts/bench.sh [--ci]`): skips the measurement step and reuses the existing `current.json` as-is, so you can inject a synthetic regression into `current.json` (e.g. `jq '.metrics.cat_10mb_ascii_sec = 0.30' current.json > tmp && mv tmp current.json`) and confirm the comparison step fails in CI mode / warns in local mode. Without this flag every invocation re-measures and would overwrite the injected values before comparing.
+
+Subset measured always: `cat_10mb_ascii_sec`, `cat_4mb_ansi_sec`, `idle_cpu_pct`, `rss_mb`. The three `vtebench_*` metrics are run **only if `vtebench` is on PATH**; if absent they're emitted as `null` and skipped from the diff so a missing tool never fails the gate. CI's Linux runner tries `cargo install vtebench --locked`; if install fails (e.g. transient registry issue) the job still passes on the subset rather than blocking unrelated work.
+
+A criterion microbench lives at `crates/sonic-shared/benches/render_throughput.rs` (run with `cargo bench -p sonic-shared --bench render_throughput`). It covers the hot pure-CPU helpers (`hex_to_rgba`, `srgb_u8_to_linear_lut`) the render pipeline calls per-cell so algorithmic regressions in those show up without a GPU surface. Add a new bench function when you add a new hot pure-CPU helper.
