@@ -1,3 +1,5 @@
+//! Integration test pinning the public API shape of `sonic-render-model`.
+
 use sonic_render_model::*;
 
 #[test]

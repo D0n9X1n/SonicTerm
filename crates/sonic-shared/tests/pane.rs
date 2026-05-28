@@ -1,3 +1,5 @@
+//! Integration tests for pane.
+
 use sonic_core::keymap::Direction;
 use sonic_shared::pane::*;
 

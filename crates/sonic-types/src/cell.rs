@@ -7,22 +7,34 @@ use crate::hyperlink_id::HyperlinkId;
 /// 24-bit RGB color or an indexed palette slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Color {
+    /// The terminal's default foreground or background color.
     #[default]
     Default,
+    /// An indexed palette slot (0–255 ANSI/xterm palette).
     Indexed(u8),
+    /// A 24-bit truecolor RGB triple.
     Rgb(u8, u8, u8),
 }
 
 bitflags::bitflags! {
+    /// SGR-derived attribute flags carried per cell.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct CellFlags: u16 {
+        /// Bold weight.
         const BOLD          = 1 << 0;
+        /// Italic style.
         const ITALIC        = 1 << 1;
+        /// Underline decoration.
         const UNDERLINE     = 1 << 2;
+        /// Strike-through decoration.
         const STRIKETHROUGH = 1 << 3;
+        /// Swap foreground and background.
         const INVERSE       = 1 << 4;
+        /// Dim / faint intensity.
         const DIM           = 1 << 5;
+        /// Hidden / concealed.
         const HIDDEN        = 1 << 6;
+        /// Blinking text.
         const BLINK         = 1 << 7;
         /// Wide cell (occupies 2 columns)
         const WIDE          = 1 << 8;
@@ -45,10 +57,15 @@ bitflags::bitflags! {
 /// the 24-byte footprint of an inline `Vec<char>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
+    /// The lead character rendered in this cell.
     pub ch: char,
+    /// Foreground color.
     pub fg: Color,
+    /// Background color.
     pub bg: Color,
+    /// SGR attribute flags (bold, italic, wide, …).
     pub flags: CellFlags,
+    /// Optional OSC-8 hyperlink id this cell belongs to.
     pub hyperlink: Option<HyperlinkId>,
     /// Trailing zero-width codepoints (ZWJ, combining marks) that
     /// belong to this cluster, encoded as UTF-8. `None` for the

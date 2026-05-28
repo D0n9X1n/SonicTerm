@@ -35,8 +35,11 @@ type Incoming = Bytes;
 /// (e.g. on `Action::ClosePane`) would leave the shell as an orphan
 /// connected to a closed pty until the OS reaps it.
 pub struct PtyHandle {
+    /// Channel of byte chunks read from the child's stdout/stderr.
     pub out_rx: Receiver<Incoming>,
+    /// Channel for bytes / control messages to send to the child.
     pub in_tx: Sender<Outgoing>,
+    /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }

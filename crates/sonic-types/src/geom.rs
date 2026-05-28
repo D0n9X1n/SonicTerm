@@ -5,6 +5,8 @@
 /// (row, col) position. (0, 0) is top-left of the visible region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pos {
+    /// Row index (0 is the top of the visible region).
     pub row: u16,
+    /// Column index (0 is the left edge of the visible region).
     pub col: u16,
 }

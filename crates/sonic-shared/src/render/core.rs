@@ -71,7 +71,16 @@ use crate::{
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
 // millisecond on the renderer thread.)
 
+// GpuRenderer holds several wgpu / cosmic-text resources (`instance`,
+// `font_system`, etc.) that exist purely to keep their owned allocations
+// alive for the lifetime of the renderer — they're never read after
+// construction. `#[allow(dead_code)]` documents that intent at the struct
+// level; removing it would force per-field `_` prefixing which obscures
+// what each handle is.
 #[allow(dead_code)]
+/// Top-level GPU-backed terminal renderer. Owns the wgpu surface, the
+/// text + quad pipelines, the glyph atlas, font/shape caches, and all
+/// per-frame layout / cursor / overlay state. One per OS window.
 pub struct GpuRenderer {
     instance: wgpu::Instance,
     device: wgpu::Device,
@@ -115,7 +124,9 @@ pub struct GpuRenderer {
     /// pixels so grid layout doesn't reflow when the user drags the window
     /// between displays of different DPIs.
     scale_factor: f32,
+    /// Logical cell width in pixels (one terminal column).
     pub cell_w: f32,
+    /// Logical cell height in pixels (one terminal row).
     pub cell_h: f32,
     padding_left: f32,
     padding_right: f32,
@@ -283,6 +294,10 @@ struct FrameKey {
 }
 
 impl GpuRenderer {
+    /// Build a renderer bound to `window`. Creates the wgpu surface +
+    /// device + pipelines, the cosmic-text font system, the glyph atlas,
+    /// and seeds the initial cell metrics from `theme`'s configured
+    /// font family / size / line height.
     pub fn new(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -565,6 +580,9 @@ impl GpuRenderer {
         })
     }
 
+    /// Reconfigure the surface for a new physical window size in
+    /// pixels. Clamps each dimension to ≥ 1 to keep wgpu happy on
+    /// minimize. Forces the next frame to render fresh.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
@@ -753,10 +771,12 @@ impl GpuRenderer {
         }
     }
 
+    /// Current physical surface width in pixels.
     pub fn width(&self) -> u32 {
         self.config.width
     }
 
+    /// Current physical surface height in pixels.
     pub fn height(&self) -> u32 {
         self.config.height
     }
@@ -768,15 +788,19 @@ impl GpuRenderer {
         self.padding_left
     }
 
+    /// Left padding in logical pixels.
     pub fn padding_left(&self) -> f32 {
         self.padding_left
     }
+    /// Right padding in logical pixels.
     pub fn padding_right(&self) -> f32 {
         self.padding_right
     }
+    /// Top padding in logical pixels (above any tab bar / titlebar inset).
     pub fn padding_top(&self) -> f32 {
         self.padding_top
     }
+    /// Bottom padding in logical pixels.
     pub fn padding_bottom(&self) -> f32 {
         self.padding_bottom
     }
@@ -828,6 +852,9 @@ impl GpuRenderer {
         &self.last_missing_chars
     }
 
+    /// Current grid dimensions in `(cols, rows)`. Computed from the
+    /// LOGICAL surface size divided by the LOGICAL cell pitch so the
+    /// result matches what the user actually sees on Retina.
     pub fn cells(&self) -> (u16, u16) {
         // Convert physical surface dims back to LOGICAL before dividing
         // by logical cell metrics; otherwise a 2× display would report
@@ -1097,6 +1124,9 @@ impl GpuRenderer {
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
+    /// Translate physical-pixel `(px, py)` (as winit reports) into a
+    /// `(col, row)` cell address inside the grid, or `None` if the point
+    /// falls outside the grid (in the tab bar, padding, etc.).
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         // Winit reports cursor positions in PHYSICAL pixels; our cell
         // grid is in LOGICAL pixels. Normalize at the boundary so click
@@ -1116,6 +1146,16 @@ impl GpuRenderer {
         Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
     }
 
+    // `render` threads 11 distinct slices of borrowed app state through
+    // wgpu submission. A parameter struct would either need 11 separate
+    // borrow fields (no win over positional args) or force the App layer
+    // to construct an interior-mutable wrapper around its own state —
+    // both worse than the current shape. Suppression stays with this
+    // explanatory comment per issue #143 review.
+    /// Render one frame: terminal grid + cursor + selection + overlays
+    /// (tab bar, search, command palette, IME preedit). Submits to the
+    /// wgpu queue and presents the surface. See the parameter comments
+    /// above for the lifetime / borrow rationale.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1992,13 +2032,15 @@ impl GpuRenderer {
                     // rotation; PR #117 emitted a horizontal+vertical pair
                     // which read as a `+`, not a close icon — fixed here).
                     build_close_x_quads(
-                        cx + inset,
-                        cy + inset,
-                        glyph,
-                        thick,
-                        close_color,
-                        sw,
-                        sh,
+                        CloseXQuadParams {
+                            x: cx + inset,
+                            y: cy + inset,
+                            glyph,
+                            thick,
+                            color: close_color,
+                            sw,
+                            sh,
+                        },
                         &mut quads,
                     );
                 }
@@ -2769,6 +2811,12 @@ impl GpuRenderer {
     /// readable; otherwise it would inline ~80 lines of placement +
     /// fallback handling four times (run start, mid-row flush, end of
     /// row, etc.).
+    // Hot inner-loop helper called per shaped run per row. Every
+    // argument is an exclusive `&mut` borrow of a *different* field of
+    // `GpuRenderer` (atlas, rasterizer, shape cache, instance buffers,
+    // missing-glyph trackers) — bundling them into a struct would force
+    // a single `&mut Ctx` that conflicts with the surrounding loop's
+    // own borrows. Suppression stays with this explanatory comment.
     #[allow(clippy::too_many_arguments)]
     fn flush_shape_run(
         glyph_atlas: &mut GlyphAtlas,
@@ -3219,29 +3267,40 @@ pub fn build_new_tab_button_quads(
 
 /// Emit the diagonal × glyph for a tab's close button.
 ///
-/// `x`, `y` is the top-left of the glyph's bounding box; `glyph` is the
-/// side length in physical px; `thick` is the stroke thickness.
+/// Parameters for [`build_close_x_quads`]. Grouping these in a struct
+/// avoids the 8-positional-argument footgun where adjacent `f32`s could be
+/// swapped silently. All units are physical pixels except `color` (linear
+/// RGBA) and `sw`/`sh` (surface dimensions used by `px_to_ndc`).
+#[derive(Clone, Copy)]
+pub struct CloseXQuadParams {
+    /// Top-left x of the glyph's bounding box, in physical px.
+    pub x: f32,
+    /// Top-left y of the glyph's bounding box, in physical px.
+    pub y: f32,
+    /// Side length of the (square) glyph bounding box, in physical px.
+    pub glyph: f32,
+    /// Stroke thickness in physical px.
+    pub thick: f32,
+    /// Linear-space RGBA colour for every emitted quad.
+    pub color: [f32; 4],
+    /// Surface width in physical px (passed through to `px_to_ndc`).
+    pub sw: f32,
+    /// Surface height in physical px (passed through to `px_to_ndc`).
+    pub sh: f32,
+}
+
+/// Push the quads that draw a small × close-button glyph into `out`.
 ///
-/// Returns nothing; pushes ~`ceil(glyph/thick)*2` axis-aligned squares
-/// stair-stepped along the ╲ and ╱ diagonals. Each emitted quad sits
-/// strictly inside `[x, x+glyph] × [y, y+glyph]`.
+/// See [`CloseXQuadParams`] for the geometry. Pushes ~`ceil(glyph/thick)*2`
+/// axis-aligned squares stair-stepped along the ╲ and ╱ diagonals; every
+/// emitted quad sits strictly inside `[x, x+glyph] × [y, y+glyph]`.
 ///
-/// The wgpu quad pipeline does not support rotation, and PR #117
-/// emitted a horizontal+vertical pair that read as `+` instead of `×`.
-/// Stair-stepping a small SDF-free square per step is the
-/// simplest and least-invasive fix; visually indistinguishable from a
-/// rotated line at 14×14 px.
-#[allow(clippy::too_many_arguments)]
-pub fn build_close_x_quads(
-    x: f32,
-    y: f32,
-    glyph: f32,
-    thick: f32,
-    color: [f32; 4],
-    sw: f32,
-    sh: f32,
-    out: &mut Vec<QuadInstance>,
-) {
+/// The wgpu quad pipeline does not support rotation, and PR #117 emitted a
+/// horizontal+vertical pair that read as `+` instead of `×`. Stair-stepping
+/// a small SDF-free square per step is the simplest and least-invasive fix;
+/// visually indistinguishable from a rotated line at 14×14 px.
+pub fn build_close_x_quads(params: CloseXQuadParams, out: &mut Vec<QuadInstance>) {
+    let CloseXQuadParams { x, y, glyph, thick, color, sw, sh } = params;
     let steps = ((glyph / thick).ceil() as usize).max(2);
     let dot = thick;
     for s in 0..steps {

@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core hyperlink re-exports.
+
 use sonic_core::hyperlink::*;
 
 #[test]

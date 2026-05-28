@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core url_open re-exports.
+
 use std::process::Command;
 
 use sonic_core::url_open::build_command;

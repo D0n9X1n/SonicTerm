@@ -1,3 +1,5 @@
+//! Integration tests for sonic-shared render.
+
 use sonic_core::{
     grid::{Cell, CellFlags, Color, Grid},
     hyperlink::HyperlinkId,

@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core theme re-exports.
+
 use sonic_core::theme::*;
 
 fn bundled(name: &str) -> std::path::PathBuf {

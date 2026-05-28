@@ -14,7 +14,7 @@ use sonic_shared::overlays::{PaletteLayout, PALETTE_ROW_HEIGHT};
 use sonic_shared::prefs::PrefsState;
 use sonic_shared::prefs_renderer::build_draw_list;
 use sonic_shared::quad::QuadInstance;
-use sonic_shared::render::build_close_x_quads;
+use sonic_shared::render::{build_close_x_quads, CloseXQuadParams};
 use std::path::PathBuf;
 
 fn test_theme() -> Theme {
@@ -182,7 +182,18 @@ fn palette_row_height_matches_layout_stride() {
 fn tab_close_button_renders_as_x_not_plus() {
     let mut quads: Vec<QuadInstance> = Vec::new();
     // 8px glyph at (10, 20), 1.5px stroke, on a 200x200 surface.
-    build_close_x_quads(10.0, 20.0, 8.0, 1.5, [1.0, 1.0, 1.0, 1.0], 200.0, 200.0, &mut quads);
+    build_close_x_quads(
+        CloseXQuadParams {
+            x: 10.0,
+            y: 20.0,
+            glyph: 8.0,
+            thick: 1.5,
+            color: [1.0, 1.0, 1.0, 1.0],
+            sw: 200.0,
+            sh: 200.0,
+        },
+        &mut quads,
+    );
     assert!(quads.len() >= 4, "× must emit ≥4 step quads (got {})", quads.len());
 
     // For a `×` glyph, NO quad should sit exactly on the glyph's

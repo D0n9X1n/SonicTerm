@@ -20,6 +20,8 @@
 //! - `ime.rs` is moved here too (the plan didn't list it explicitly,
 //!   but it has zero external deps and `overlays.rs` requires it).
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod command_label;

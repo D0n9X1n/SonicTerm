@@ -5,13 +5,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Light vs dark theme appearance hint, used to pick OS-level chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
+    /// Light appearance.
     Light,
+    /// Dark appearance.
     Dark,
 }
 
+/// Hex color string in `#rrggbb` form, as written in theme TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Hex(pub String);
@@ -30,28 +34,46 @@ impl Hex {
     }
 }
 
+/// One of the eight standard ANSI palette colors (normal or bright).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnsiColors {
+    /// ANSI color 0 / 8.
     pub black: Hex,
+    /// ANSI color 1 / 9.
     pub red: Hex,
+    /// ANSI color 2 / 10.
     pub green: Hex,
+    /// ANSI color 3 / 11.
     pub yellow: Hex,
+    /// ANSI color 4 / 12.
     pub blue: Hex,
+    /// ANSI color 5 / 13.
     pub magenta: Hex,
+    /// ANSI color 6 / 14.
     pub cyan: Hex,
+    /// ANSI color 7 / 15.
     pub white: Hex,
 }
 
+/// Tab-bar color slots.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TabColors {
+    /// Background for the tab-bar chrome itself.
     pub bar_bg: Hex,
+    /// Background for the active tab.
     pub active_bg: Hex,
+    /// Foreground for the active tab label.
     pub active_fg: Hex,
+    /// Background for inactive tabs.
     pub inactive_bg: Hex,
+    /// Foreground for inactive tab labels.
     pub inactive_fg: Hex,
+    /// Background for the tab under the mouse cursor.
     pub hover_bg: Hex,
+    /// Foreground for the tab under the mouse cursor.
     #[serde(default = "default_hover_fg")]
     pub hover_fg: Hex,
+    /// Foreground for the per-tab close (×) button.
     pub close_button_fg: Hex,
 }
 
@@ -59,27 +81,42 @@ fn default_hover_fg() -> Hex {
     Hex("#d5c4a1".to_string())
 }
 
+/// Full color palette used by a theme.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Palette {
+    /// Default terminal background.
     pub background: Hex,
+    /// Default terminal foreground.
     pub foreground: Hex,
+    /// Cursor block color.
     pub cursor: Hex,
+    /// Foreground color used for the character under the cursor.
     pub cursor_text: Hex,
+    /// Selection background.
     pub selection_bg: Hex,
+    /// Selection foreground.
     pub selection_fg: Hex,
+    /// Normal-intensity ANSI palette.
     pub ansi: AnsiColors,
+    /// Bright-intensity ANSI palette.
     pub bright: AnsiColors,
+    /// Tab-bar palette.
     pub tab: TabColors,
 }
 
+/// A complete loadable theme.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Theme {
+    /// Human-readable theme name.
     pub name: String,
+    /// Light/dark hint.
     pub appearance: Appearance,
+    /// Color slots.
     pub colors: Palette,
 }
 
 impl Theme {
+    /// Load a theme from a TOML file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         let t: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;

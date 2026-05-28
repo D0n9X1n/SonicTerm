@@ -37,8 +37,11 @@ use std::fmt;
 /// Parsed SSH target — `user@host[:port]`. Default port is 22.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTarget {
+    /// Remote username.
     pub user: String,
+    /// Remote host (hostname or IP).
     pub host: String,
+    /// TCP port; defaults to 22.
     pub port: u16,
 }
 
@@ -127,14 +130,18 @@ pub fn validate_user(user: &str) -> Result<(), SshError> {
 /// connect path (only built with `feature = "ssh"`).
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
+    /// Failed to parse a `user@host[:port]` target string.
     #[error("invalid SSH target: {0}")]
     ParseTarget(String),
+    /// TCP / SSH handshake failure.
     #[cfg(feature = "ssh")]
     #[error("ssh connection failed: {0}")]
     Connect(String),
+    /// All authentication methods were tried and failed.
     #[cfg(feature = "ssh")]
     #[error("ssh authentication failed: all methods exhausted")]
     AuthExhausted,
+    /// Underlying I/O error.
     #[cfg(feature = "ssh")]
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -129,7 +129,9 @@ pub struct ShapedGlyph {
 /// not per-glyph, so it's not part of the style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunStyle {
+    /// True if the run is bold.
     pub bold: bool,
+    /// True if the run is italic.
     pub italic: bool,
 }
 
@@ -345,6 +347,7 @@ impl ShapeCache {
     /// headroom for scrollback-driven churn.
     pub const CAPACITY: usize = 4096;
 
+    /// Construct an empty cache pre-sized to [`Self::CAPACITY`] entries.
     pub fn new() -> Self {
         Self {
             map: lru::LruCache::new(
@@ -355,18 +358,22 @@ impl ShapeCache {
         }
     }
 
+    /// Cumulative cache-hit count.
     pub fn hits(&self) -> u64 {
         self.hits
     }
 
+    /// Cumulative cache-miss count.
     pub fn misses(&self) -> u64 {
         self.misses
     }
 
+    /// Number of cached entries.
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    /// True when the cache has no entries.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -454,6 +461,7 @@ impl ShapeCache {
         shaped
     }
 
+    /// Drop every cached entry.
     pub fn clear(&mut self) {
         self.map.clear();
     }

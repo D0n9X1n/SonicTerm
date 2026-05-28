@@ -107,6 +107,12 @@ fn snapshot_processes() -> Option<Vec<ProcEntry>> {
     let mut buf: Vec<u8> = vec![0u8; 1024 * 1024];
     for _attempt in 0..MAX_RETRIES {
         let mut return_length: u32 = 0;
+        // SAFETY: `buf` is a live, mutable, zero-initialized allocation of
+        // `buf.len()` bytes; we pass its pointer + length together so ntdll
+        // cannot write past the end. `return_length` is a valid &mut u32 for
+        // the duration of the call. The class id is the documented
+        // SystemProcessInformation = 5. On error we discard `buf`'s contents
+        // and either grow + retry or bail.
         let status: NTSTATUS = unsafe {
             NtQuerySystemInformation(
                 windows::Wdk::System::SystemInformation::SYSTEM_INFORMATION_CLASS(
@@ -144,10 +150,21 @@ fn parse_snapshot(buf: &[u8]) -> Vec<ProcEntry> {
     while offset + std::mem::size_of::<SystemProcessInformation>() <= buf.len() {
         // Read the record at this offset. The kernel guarantees alignment
         // for SYSTEM_PROCESS_INFORMATION inside its packed list.
+        // SAFETY: `offset + size_of::<SystemProcessInformation>() <= buf.len()`
+        // is checked by the while-condition above, so `buf.as_ptr().add(offset)`
+        // stays within the allocation. The kernel guarantees natural alignment
+        // for SYSTEM_PROCESS_INFORMATION inside its packed list.
         let record_ptr = unsafe { buf.as_ptr().add(offset) as *const SystemProcessInformation };
+        // SAFETY: `record_ptr` was just bounds-checked to point at a complete
+        // SystemProcessInformation record inside `buf`; reading the prefix
+        // fields (whose offsets are stable since NT 4) is well-defined.
         let next = unsafe { (*record_ptr).next_entry_offset } as usize;
+        // SAFETY: same as above — `record_ptr` is a valid pointer to a fully
+        // contained SystemProcessInformation record.
         let pid = unsafe { (*record_ptr).unique_process_id } as u32;
+        // SAFETY: same as above.
         let parent = unsafe { (*record_ptr).inherited_from_unique_process_id } as u32;
+        // SAFETY: same as above.
         let create_time = unsafe { (*record_ptr).create_time };
         out.push(ProcEntry { pid, parent, create_time });
         if next == 0 {
@@ -211,10 +228,17 @@ fn resolve_process_name(pid: u32) -> Option<String> {
     // PROCESS_QUERY_LIMITED_INFORMATION works against protected processes
     // and across UAC boundaries where the heavier query-information right
     // would be denied.
+    // SAFETY: `OpenProcess` is a documented Win32 entry point that takes a
+    // by-value access-mask + BOOL + pid; no pointer arguments. The returned
+    // HANDLE is owned by us and closed below via `CloseHandle`.
     let handle: HANDLE =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buf: [MaybeUninit<u16>; 1024] = [MaybeUninit::uninit(); 1024];
     let mut size: u32 = buf.len() as u32;
+    // SAFETY: `handle` is a valid process handle we just opened. `buf` is a
+    // live stack allocation of `buf.len()` u16s; we pass that length via
+    // `size` so the kernel cannot overrun it. On return `size` holds the
+    // number of u16 code units actually written, which we use below.
     let result = unsafe {
         QueryFullProcessImageNameW(
             handle,
@@ -223,6 +247,8 @@ fn resolve_process_name(pid: u32) -> Option<String> {
             &mut size as *mut u32,
         )
     };
+    // SAFETY: `handle` is the still-live handle returned by OpenProcess and
+    // has not been closed elsewhere.
     let _ = unsafe { CloseHandle(handle) };
     if result.is_err() || size == 0 {
         return None;

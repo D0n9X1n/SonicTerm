@@ -10,8 +10,13 @@ use crate::text_pipeline::GlyphInstance;
 /// payload (e.g. with the pane's bg color) without ripple changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InactivePaneCursor {
+    /// Row (within the pane's grid) where the inactive cursor sits.
     pub row: u16,
+    /// Column (within the pane's grid) where the inactive cursor sits.
     pub col: u16,
+    /// The pane's rectangle in window pixels — used to translate the
+    /// `(row, col)` cell address into the parent window's coordinate
+    /// space for drawing.
     pub rect: PaneRect,
 }
 

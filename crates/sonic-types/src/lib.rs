@@ -8,6 +8,8 @@
 //! All previous import paths in `sonic-core` etc. continue to work via
 //! `pub use` re-exports, so this is a zero-behavior-change move.
 
+#![deny(missing_docs)]
+
 pub mod action;
 pub mod cell;
 pub mod geom;

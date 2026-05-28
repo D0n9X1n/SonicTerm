@@ -14,6 +14,7 @@ static NEXT_HYPERLINK_ID: AtomicU64 = AtomicU64::new(1);
 pub struct HyperlinkId(pub u64);
 
 impl HyperlinkId {
+    /// Allocate a new globally-unique `HyperlinkId`.
     pub fn next() -> Self {
         Self(NEXT_HYPERLINK_ID.fetch_add(1, Ordering::Relaxed))
     }

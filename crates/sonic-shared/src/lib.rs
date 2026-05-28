@@ -12,6 +12,8 @@
 //! and are re-exported here so legacy imports of the form
 //! `use sonic_shared::tabs::TabBar;` continue to work unchanged.
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod prefs_renderer;

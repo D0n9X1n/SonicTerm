@@ -5,6 +5,8 @@
 //!
 //! Depends on `sonic-grid` for the `Grid` mutated by the `Performer`.
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod vt;

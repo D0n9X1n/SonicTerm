@@ -7,11 +7,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+/// Top-level user configuration loaded from `sonic.toml`.
 pub struct Config {
+    /// Font selection and metrics.
     pub font: FontConfig,
+    /// Window geometry and chrome.
     pub window: WindowConfig,
+    /// Terminal-engine knobs (shell, scrollback, cursor).
     pub terminal: TerminalConfig,
+    /// Name of the active theme (looked up in `assets/themes/`).
     pub theme: String,
+    /// Name of the active keymap (looked up in `assets/keymaps/`).
     pub keymap: String,
     /// User-selected UI locale (e.g. `"en"`, `"zh-CN"`, `"ja"`). Empty
     /// string (the default) means "negotiate from OS locale".
@@ -35,16 +41,23 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+/// Font selection and rendering metrics.
 pub struct FontConfig {
+    /// Font family name (resolved by fontdb).
     pub family: String,
+    /// Font size in points.
     pub size: f32,
+    /// Line height multiplier applied to the metric ascent+descent.
     pub line_height: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+/// Window geometry, padding, and chrome settings.
 pub struct WindowConfig {
+    /// Initial column count.
     pub cols: u16,
+    /// Initial row count.
     pub rows: u16,
     /// Legacy single-value padding (logical px). When non-`None` on load,
     /// it is splatted onto all four per-side fields below as a backward-
@@ -56,12 +69,19 @@ pub struct WindowConfig {
     /// Per-side window padding (logical px), matching WezTerm's
     /// `window_padding = { left, right, top, bottom }` knob. Defaults are
     /// cribbed from the user's `wezterm.lua` (8 px on every side).
+    /// Logical-pixel padding on the left edge.
     pub padding_left: f32,
+    /// Logical-pixel padding on the right edge.
     pub padding_right: f32,
+    /// Logical-pixel padding on the top edge.
     pub padding_top: f32,
+    /// Logical-pixel padding on the bottom edge.
     pub padding_bottom: f32,
+    /// Whether to draw native window decorations (titlebar + traffic lights).
     pub decorations: bool,
+    /// Window background opacity, 0.0–1.0.
     pub opacity: f32,
+    /// Enable the macOS background blur effect (no-op on other platforms).
     pub blur: bool,
 }
 
@@ -82,10 +102,15 @@ impl WindowConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+/// Terminal engine settings.
 pub struct TerminalConfig {
+    /// Shell to spawn (defaults to `$SHELL` / `cmd.exe` when `None`).
     pub shell: Option<String>,
+    /// Scrollback buffer depth, in rows.
     pub scrollback: usize,
+    /// Blink the cursor.
     pub cursor_blink: bool,
+    /// Cursor shape.
     pub cursor_shape: CursorShape,
 }
 
@@ -93,16 +118,21 @@ pub struct TerminalConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorShape {
+    /// Solid block cursor.
     #[default]
     Block,
+    /// Vertical bar / beam cursor.
     Bar,
+    /// Horizontal underline cursor.
     Underline,
 }
 
 impl CursorShape {
+    /// All cursor-shape variants, useful for menu/preference iteration.
     pub const ALL: &'static [CursorShape] =
         &[CursorShape::Block, CursorShape::Bar, CursorShape::Underline];
 
+    /// Lowercase string name matching the TOML serialization.
     pub fn as_str(self) -> &'static str {
         match self {
             CursorShape::Block => "block",
@@ -111,6 +141,8 @@ impl CursorShape {
         }
     }
 
+    /// Parse a cursor-shape name case-insensitively. Returns `None` for
+    /// unrecognized values.
     pub fn from_str_ci(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "block" => Some(CursorShape::Block),

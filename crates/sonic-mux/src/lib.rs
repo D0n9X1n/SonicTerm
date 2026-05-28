@@ -9,6 +9,9 @@
 //! replay (not just a byte ring), multi-client fanout, auto-reconnect on
 //! the client side, authentication on the socket.
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
+
 pub mod frame;
 pub mod proto;
 pub mod server;

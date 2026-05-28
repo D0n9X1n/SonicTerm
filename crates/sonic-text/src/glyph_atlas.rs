@@ -70,11 +70,15 @@ pub struct GlyphInfo {
 /// to build the `GlyphInfo`.
 #[derive(Debug, Clone)]
 pub struct RasterTile {
+    /// Glyph tile width in pixels.
     pub width: u32,
+    /// Glyph tile height in pixels.
     pub height: u32,
     /// Top-left offset of the visible pixels relative to the cell box.
     pub offset_x: i32,
+    /// Top-left vertical offset of the visible pixels relative to the cell box.
     pub offset_y: i32,
+    /// Horizontal advance after drawing this glyph, in pixels.
     pub advance: f32,
     /// When `is_color == false`: `width * height` bytes of 8-bit
     /// coverage, row-major (the legacy alpha-mask format).
@@ -104,6 +108,8 @@ impl RasterTile {
 /// and tracks the miss so callers can log it. Implementors must NOT
 /// panic on unknown keys.
 pub trait Rasterizer {
+    /// Rasterize the glyph identified by `key`, or return `None` if the
+    /// glyph cannot be produced.
     fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile>;
 }
 
@@ -200,6 +206,7 @@ struct AtlasEntry {
     rect: Option<(u32, u32, u32, u32)>,
 }
 
+/// CPU-side BGRA8 glyph atlas with shelf-packed allocation and LRU eviction.
 pub struct GlyphAtlas {
     width: u32,
     height: u32,
@@ -226,11 +233,16 @@ pub struct GlyphAtlas {
     evictions: u64,
 }
 
+/// A rectangle of the atlas that has been written since the last drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
+    /// X position in pixels.
     pub x: u32,
+    /// Y position in pixels.
     pub y: u32,
+    /// Width in pixels.
     pub w: u32,
+    /// Height in pixels.
     pub h: u32,
 }
 
@@ -263,10 +275,12 @@ impl GlyphAtlas {
         Self::new(ATLAS_DIM, ATLAS_DIM)
     }
 
+    /// Atlas width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Atlas height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
@@ -276,6 +290,7 @@ impl GlyphAtlas {
         self.map.len()
     }
 
+    /// True when the atlas has no resident glyphs.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -529,6 +544,7 @@ impl GlyphAtlas {
 /// coverage patterns (exercising key separation).
 #[derive(Default)]
 pub struct SyntheticRasterizer {
+    /// Cumulative number of `rasterize` calls; useful for assertions.
     pub calls: u64,
 }
 

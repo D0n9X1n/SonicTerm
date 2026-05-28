@@ -7,6 +7,8 @@
 //! `render.rs`. All public symbols are re-exported below so existing
 //! `use sonic_shared::render::*` call sites keep working unchanged.
 
+#![deny(missing_docs)]
+
 mod core;
 
 pub mod color;

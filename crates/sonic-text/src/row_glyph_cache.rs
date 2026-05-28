@@ -55,6 +55,7 @@ const CACHE_HEADROOM_FACTOR: usize = 4;
 /// the cache hits.
 #[derive(Clone, Default, Debug)]
 pub struct CachedRow {
+    /// Glyph instances composing the row.
     pub glyphs: Vec<GlyphInstance>,
     /// Underline runs for this row, stored as `(start_col, end_col)` —
     /// the row index is implied by the key.
@@ -83,6 +84,7 @@ pub struct RowGlyphCache {
 }
 
 impl RowGlyphCache {
+    /// Construct an empty cache. Call [`resize`](Self::resize) before use.
     pub fn new() -> Self {
         Self { entries: HashMap::new(), cap: 0 }
     }
@@ -121,6 +123,7 @@ impl RowGlyphCache {
         self.entries.len()
     }
 
+    /// True when no rows are cached.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
