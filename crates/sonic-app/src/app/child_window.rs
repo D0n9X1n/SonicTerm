@@ -89,45 +89,73 @@ impl App {
                     })
                     .unwrap_or_default();
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                // PR #199 Fix 1: try_lock EVERY pane in this child window's
+                // tab and pass them all through to the renderer. Mirrors
+                // the main-window path in window_event.rs.
+                let parser_arcs: Vec<(
+                    u64,
+                    std::sync::Arc<parking_lot::Mutex<sonic_core::vt::Parser>>,
+                    sonic_ui::pane::Rect,
+                )> = pane_rects
+                    .iter()
+                    .filter_map(|(id, rect)| {
+                        child.panes.get(id).map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
+                    })
+                    .collect();
+                let mut guards: Vec<(
+                    u64,
+                    parking_lot::MutexGuard<'_, sonic_core::vt::Parser>,
+                    sonic_ui::pane::Rect,
+                )> = Vec::with_capacity(parser_arcs.len());
+                let mut all_locked = true;
+                for (id, arc, rect) in &parser_arcs {
+                    match arc.try_lock() {
+                        Some(g) => {
+                            // SAFETY: `parser_arcs` outlives `guards`; see
+                            // window_event.rs Fix 1 for the full lifetime
+                            // argument.
+                            let g_ext: parking_lot::MutexGuard<'_, sonic_core::vt::Parser> =
+                                unsafe { std::mem::transmute(g) };
+                            guards.push((*id, g_ext, *rect));
+                        }
+                        None => {
+                            all_locked = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_locked {
+                    drop(guards);
+                    drop(parser_arcs);
+                    child.window.request_redraw();
+                    return;
+                }
                 if let Some(pane) = child.panes.get(&active_id) {
-                    // CLAUDE.md §4 land-mine: render path must not block on
-                    // the parser lock, or VT bursts can AB-BA deadlock the UI.
-                    // Issue #175: lock-contention bail must also reschedule
-                    // a redraw, or the next prompt frame is lost until an
-                    // unrelated event wakes the loop. Same fix as the main
-                    // window's RedrawRequested arm.
-                    let Some(mut grid) = pane.parser.try_lock() else {
-                        child.window.request_redraw();
-                        return;
-                    };
+                    let active_pos = guards
+                        .iter()
+                        .position(|(id, _, _)| *id == active_id)
+                        .expect("active pane guard collected above");
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                     {
-                        search.maybe_refresh_for_revision(grid.grid_mut());
+                        search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
-                    let active_rect_px = pane_rects
-                        .iter()
-                        .find(|(id, _)| *id == active_id)
-                        .map(|(_, r)| sonic_render_model::geometry::PixelRect {
-                            x: r.x as i32,
-                            y: r.y as i32,
-                            w: r.w as u32,
-                            h: r.h as u32,
+                    let mut panes_slice: Vec<sonic_render_model::PaneRender<'_>> = guards
+                        .iter_mut()
+                        .map(|(id, g, rect)| sonic_render_model::PaneRender {
+                            id: *id,
+                            rect_px: sonic_render_model::geometry::PixelRect {
+                                x: rect.x as i32,
+                                y: rect.y as i32,
+                                w: rect.w as u32,
+                                h: rect.h as u32,
+                            },
+                            grid: g.grid_mut(),
+                            is_active: *id == active_id,
+                            cursor_style: sonic_render_model::CursorStyle::default(),
                         })
-                        .unwrap_or(sonic_render_model::geometry::PixelRect {
-                            x: 0,
-                            y: 0,
-                            w: 0,
-                            h: 0,
-                        });
-                    let mut panes_slice = [sonic_render_model::PaneRender {
-                        id: active_id,
-                        rect_px: active_rect_px,
-                        grid: grid.grid_mut(),
-                        is_active: true,
-                        cursor_style: sonic_render_model::CursorStyle::default(),
-                    }];
+                        .collect();
                     if let Err(e) = child.renderer.render(
                         &mut panes_slice,
                         &theme,

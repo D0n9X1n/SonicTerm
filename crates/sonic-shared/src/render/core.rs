@@ -826,6 +826,16 @@ impl GpuRenderer {
         self.last_emit_origins.clone()
     }
 
+    /// PR #199 Fix 1 test hook: number of panes the most recent
+    /// `render()` call received in its slice. The integration test
+    /// asserts this equals the active tab's pane count so a regression
+    /// to a single-element slice (the original bug) is caught
+    /// mechanically. Production code must not depend on this.
+    #[doc(hidden)]
+    pub fn last_panes_received(&self) -> usize {
+        self.last_emit_origins.len()
+    }
+
     /// Update all four padding values at once (used by the live config
     /// reload path so editing `sonic.toml` takes effect without restart).
     /// Invalidates the cached frame so the next render relays out.
@@ -1238,39 +1248,44 @@ impl GpuRenderer {
             })
             .collect();
         let pane_rects = pane_rects.as_slice();
-        // Part B step 3: collect raw pointers + per-pane geometry for ALL
-        // panes so the cell-emission body below can iterate per-pane. Each
-        // grid pointer is unique because `panes: &mut [PaneRender]` already
-        // guarantees disjoint &mut Grid via the slice. `panes` is not used
-        // again in this function after this point; pane_views owns all the
-        // data we need.
-        struct PaneView {
-            grid: *mut Grid,
+        // Part B step 3 (Fix 2): collect immutable per-pane views for ALL
+        // panes so the cell-emission body below can iterate per-pane. The
+        // grid is borrowed shared (`&Grid`) — every read in the loop
+        // (`scrollback_len`, `dirty_rows`, `row_at_abs`, `rows`, `cursor`,
+        // `prompts`) is immutable, so we don't need `&mut Grid` and we
+        // don't need raw pointers. This eliminates the overlapping
+        // `&mut Grid` UB risk Haiku flagged.
+        struct PaneView<'g> {
+            grid: &'g Grid,
             pane_id: u64,
             origin_x: f32,
             origin_y: f32,
             is_active: bool,
         }
-        let pane_views: Vec<PaneView> = panes
-            .iter_mut()
+        let pane_views: Vec<PaneView<'_>> = panes
+            .iter()
             .map(|p| PaneView {
-                grid: p.grid as *mut Grid,
+                grid: &*p.grid,
                 pane_id: p.id,
                 origin_x: p.rect_px.x as f32,
                 origin_y: p.rect_px.y as f32,
                 is_active: p.is_active,
             })
             .collect();
-        // Pre-compute pane revisions for FrameKey while the ptrs are fresh.
+        // Pre-compute pane revisions for FrameKey from the safe borrows.
         let pane_revs_vec: Vec<(u64, u64)> =
-            pane_views.iter().map(|pv| (pv.pane_id, unsafe { (*pv.grid).revision() })).collect();
-        // Active pane's grid + origin. Selection / cursor / overlays anchor
-        // to this — they apply only to the focused pane (Part B step 4).
+            pane_views.iter().map(|pv| (pv.pane_id, pv.grid.revision())).collect();
+        // Active pane's origin. Selection / cursor / overlays anchor to
+        // this — they apply only to the focused pane (Part B step 4 /
+        // Fix 3). Lifting these out as plain `f32` makes the overlay
+        // sites below borrow-free.
         let active_view_idx = pane_views.iter().position(|p| p.is_active).unwrap_or(0);
         let active_origin_x: f32 = pane_views[active_view_idx].origin_x;
         let active_origin_y: f32 = pane_views[active_view_idx].origin_y;
-        let active_grid_ptr: *mut Grid = pane_views[active_view_idx].grid;
-        let grid: &mut Grid = unsafe { &mut *active_grid_ptr };
+        // Active grid borrow — shared, used by overlays that read the
+        // active pane's cursor/scrollback/prompts. Disjoint from the
+        // per-pane loop (which uses its own per-iteration borrow).
+        let grid: &Grid = pane_views[active_view_idx].grid;
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
         // (one integer increment) and unconditional — even on a fully
@@ -1486,7 +1501,7 @@ impl GpuRenderer {
             // pane_id into the row_glyph_cache so split panes don't
             // collide on absolute-row keys (PR #208 prereq).
             for pv in &pane_views {
-                let grid: &mut Grid = unsafe { &mut *pv.grid };
+                let grid: &Grid = pv.grid;
                 let pane_id: crate::row_glyph_cache::PaneId = pv.pane_id;
                 let pad = pv.origin_x;
                 let top_inset = pv.origin_y;
@@ -1700,7 +1715,7 @@ impl GpuRenderer {
         // Part B step 3: emit bg quads for EVERY pane using each pane's
         // own origin, not just the active pane.
         for pv in &pane_views {
-            let pv_grid: &Grid = unsafe { &*pv.grid };
+            let pv_grid: &Grid = pv.grid;
             emit_cell_bg_quads(
                 pv_grid,
                 {
@@ -1906,9 +1921,9 @@ impl GpuRenderer {
                 .collect()
         };
         for row in prompt_rows {
-            let mx = (self.padding_left - marker_w - 1.0).max(0.0);
+            let mx = (active_origin_x - marker_w - 1.0).max(0.0);
             let my =
-                self.top_inset() + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
+                active_origin_y + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
             quads.push(QuadInstance {
                 rect: px_to_ndc(mx, my, marker_w, marker_h, sw, sh),
                 color: marker_color,
@@ -1922,8 +1937,8 @@ impl GpuRenderer {
         let hl_runs = collect_hyperlink_runs(grid);
         let hl_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &hl_runs {
-            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
-            let y = self.top_inset() + f32::from(*row) * self.cell_h;
+            let x = active_origin_x + f32::from(*col_a) * self.cell_w;
+            let y = active_origin_y + f32::from(*row) * self.cell_h;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
@@ -1943,9 +1958,9 @@ impl GpuRenderer {
         let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &underlines {
-            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
-            let y = self.top_inset() + f32::from(*row) * self.cell_h + self.cell_h
-                - underline_thickness;
+            let x = active_origin_x + f32::from(*col_a) * self.cell_w;
+            let y =
+                active_origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
@@ -2252,8 +2267,8 @@ impl GpuRenderer {
                 if visible_row >= grid.rows || m.col_end <= m.col_start {
                     continue;
                 }
-                let x = self.padding_left + f32::from(m.col_start) * self.cell_w;
-                let y = self.top_inset() + f32::from(visible_row) * self.cell_h;
+                let x = active_origin_x + f32::from(m.col_start) * self.cell_w;
+                let y = active_origin_y + f32::from(visible_row) * self.cell_h;
                 let w = f32::from(m.col_end - m.col_start) * self.cell_w;
                 let color = if Some(i) == cur_idx {
                     self.search_highlight_current
@@ -2488,8 +2503,8 @@ impl GpuRenderer {
 
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
-            let cursor_x = self.padding_left + f32::from(grid.cursor.col) * self.cell_w;
-            let cursor_y = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
+            let cursor_x = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
+            let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
             ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
         });
         if let (Some(state), Some(layout)) = (ime, &ime_layout) {
@@ -2924,11 +2939,17 @@ impl GpuRenderer {
         // wakes us exactly at the next bucket boundary instead.
         // B2: the renderer has now consumed every dirty row's contents
         // into either the GPU pipeline or the row_cache. Clear the
-        // bitset so the next frame can re-use cached spans for the
-        // (likely many) rows that didn't change. clear_dirty does NOT
-        // bump grid.revision, so the FrameKey fast-path above still
-        // works for truly unchanged frames.
-        grid.clear_dirty();
+        // bitset on EVERY pane so the next frame can re-use cached
+        // spans for the (likely many) rows that didn't change.
+        // clear_dirty does NOT bump grid.revision, so the FrameKey
+        // fast-path above still works for truly unchanged frames.
+        // PR #199 Fix 2: this is the only mutation of any grid in this
+        // function — done via the original `panes: &mut [PaneRender]`
+        // borrow, which is now reborrowed once `pane_views` (immutable)
+        // is no longer live.
+        for p in panes.iter_mut() {
+            p.grid.clear_dirty();
+        }
         Ok(())
     }
 

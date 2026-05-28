@@ -7,6 +7,7 @@
 //! you add a new hot pure-CPU helper under `sonic_shared::render::*`.
 //!
 //! Run with: `cargo bench -p sonic-shared --bench render_throughput`.
+#![allow(missing_docs)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sonic_shared::render::color::{hex_to_rgba, hex_to_wgpu, srgb_u8_to_linear_lut};

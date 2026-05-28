@@ -131,26 +131,75 @@ impl App {
                     .unwrap_or_default();
                 let active_id = self.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
 
-                // Collect cursor positions for every INACTIVE pane in
-                // the current tab so the renderer can draw a hollow
-                // outline at each — wezterm-style multi-cursor split
-                // affordance. The active pane's cursor is rendered
-                // separately (filled or hollow depending on window
-                // focus). PR #81 review.
-                let inactive_cursors: Vec<sonic_shared::render::InactivePaneCursor> = pane_rects
+                // PR #199 Fix 1: try_lock EVERY pane in the tab and pass
+                // them ALL through to the renderer. The previous single-
+                // element slice meant the per-pane loop inside
+                // `GpuRenderer::render` never iterated inactive panes in
+                // production frames — that was the visible "right pane
+                // empty after split" bug.
+                //
+                // Strategy: clone every pane's parser Arc, try to lock
+                // all of them in one pass. If ANY lock fails, defer the
+                // redraw (§4 land-mine) and bail — partial frames are
+                // not allowed because the renderer needs a coherent
+                // multi-pane view, and a re-locked sub-pane would
+                // produce torn output. Order is pane_rects order;
+                // active position is recorded separately.
+                let parser_arcs: Vec<(
+                    u64,
+                    std::sync::Arc<parking_lot::Mutex<sonic_core::vt::Parser>>,
+                    sonic_ui::pane::Rect,
+                )> = pane_rects
                     .iter()
-                    .filter(|(id, _)| *id != active_id)
                     .filter_map(|(id, rect)| {
-                        let p = self.panes.get(id)?;
-                        // CLAUDE.md §4 land-mine: render path must not block on
-                        // the parser lock, or VT bursts can AB-BA deadlock the UI.
-                        let g = p.parser.try_lock()?;
+                        self.panes.get(id).map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
+                    })
+                    .collect();
+                let mut guards: Vec<(
+                    u64,
+                    parking_lot::MutexGuard<'_, sonic_core::vt::Parser>,
+                    sonic_ui::pane::Rect,
+                )> = Vec::with_capacity(parser_arcs.len());
+                let mut all_locked = true;
+                for (id, arc, rect) in &parser_arcs {
+                    match arc.try_lock() {
+                        Some(g) => {
+                            // SAFETY: extending the guard's lifetime to
+                            // the outer scope. `arc` lives in `parser_arcs`
+                            // which is dropped strictly after `guards`, so
+                            // the underlying Mutex outlives every guard.
+                            // parking_lot guards carry a `*const Mutex`
+                            // internally and no `'a` tied to `arc`.
+                            let g_ext: parking_lot::MutexGuard<'_, sonic_core::vt::Parser> =
+                                unsafe { std::mem::transmute(g) };
+                            guards.push((*id, g_ext, *rect));
+                        }
+                        None => {
+                            all_locked = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_locked {
+                    drop(guards);
+                    drop(parser_arcs);
+                    self.defer_redraw_on_lock_contention(was_dirty);
+                    return;
+                }
+
+                // Inactive-pane cursor outlines come from the same guard set
+                // (no extra lock pass — PR #81's separate try_lock loop is
+                // subsumed by the global pass above).
+                let inactive_cursors: Vec<sonic_shared::render::InactivePaneCursor> = guards
+                    .iter()
+                    .filter(|(id, _, _)| *id != active_id)
+                    .map(|(_, g, rect)| {
                         let grid = g.grid();
-                        Some(sonic_shared::render::InactivePaneCursor {
+                        sonic_shared::render::InactivePaneCursor {
                             row: grid.cursor.row,
                             col: grid.cursor.col,
                             rect: *rect,
-                        })
+                        }
                     })
                     .collect();
                 if let Some(r) = self.renderer.as_mut() {
@@ -161,31 +210,24 @@ impl App {
                     (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
                     let cursor_rc = {
-                        // CLAUDE.md §4 land-mine: render path must not block on
-                        // the parser lock, or VT bursts can AB-BA deadlock the UI.
-                        // Issue #175: if the VT thread is mid-parse and we
-                        // bail out, we MUST reschedule the redraw — otherwise
-                        // the parsed bytes sit in the grid unrendered until
-                        // some unrelated event (e.g. user Ctrl+C) wakes the
-                        // loop. That was the "PTY hangs / output disappears
-                        // on multi-round prompts" bug: a single contended
-                        // try_lock during the input→output transition of a
-                        // device-code prompt dropped the trailing redraw
-                        // silently. Mark pending_redraw so about_to_wait
-                        // schedules a WaitUntil at the next vsync boundary,
-                        // and roll back the burst snapshot so the deferred
-                        // redraw correctly bypasses the coalescing gate.
-                        let Some(mut grid) = pane.parser.try_lock() else {
-                            self.defer_redraw_on_lock_contention(was_dirty);
-                            return;
-                        };
+                        // PR #199 Fix 1: the active pane's parser guard is
+                        // already in `guards` from the global try_lock pass
+                        // above; locking it again here would AB-BA deadlock
+                        // (we already hold it). Find the active guard via
+                        // a mut borrow over `guards`.
+                        let active_pos = guards
+                            .iter()
+                            .position(|(id, _, _)| *id == active_id)
+                            .expect("active pane guard collected above");
                         // Wezterm-style tab title: `#N icon parent/leaf`.
                         // Pull cwd from OSC 7, the foreground process from
                         // the pid probe (macOS only for now), and the OSC
                         // 0/2 title as the last-resort body (so `ssh
                         // user@host` still labels itself).
-                        let cwd = grid.cwd().map(str::to_string);
-                        let raw_title = grid.title().map(str::to_string);
+                        let (cwd, raw_title) = {
+                            let g = &guards[active_pos].1;
+                            (g.cwd().map(str::to_string), g.title().map(str::to_string))
+                        };
                         let proc_name = {
                             // TTL-cache the foreground-process probe: it
                             // walks the entire macOS process table (~600
@@ -224,36 +266,29 @@ impl App {
                         if let Some(search) =
                             self.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                         {
-                            search.maybe_refresh_for_revision(grid.grid_mut());
+                            search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                         }
                         let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
-                        // Part B step 6: build a single-pane slice for now.
-                        // The full multi-pane collection (try_lock every pane,
-                        // skip frame on contention, build PaneRender per pane)
-                        // is tracked separately and will replace this once the
-                        // body of render() iterates the slice.
-                        let active_rect_px = pane_rects
-                            .iter()
-                            .find(|(id, _)| *id == active_id)
-                            .map(|(_, r)| sonic_render_model::geometry::PixelRect {
-                                x: r.x as i32,
-                                y: r.y as i32,
-                                w: r.w as u32,
-                                h: r.h as u32,
+                        // PR #199 Fix 1: build the slice from ALL panes
+                        // (was previously a single-element slice for the
+                        // active pane only). The renderer's per-pane loop
+                        // now actually iterates every pane in production
+                        // frames, so split panes paint.
+                        let mut panes_slice: Vec<sonic_render_model::PaneRender<'_>> = guards
+                            .iter_mut()
+                            .map(|(id, g, rect)| sonic_render_model::PaneRender {
+                                id: *id,
+                                rect_px: sonic_render_model::geometry::PixelRect {
+                                    x: rect.x as i32,
+                                    y: rect.y as i32,
+                                    w: rect.w as u32,
+                                    h: rect.h as u32,
+                                },
+                                grid: g.grid_mut(),
+                                is_active: *id == active_id,
+                                cursor_style: sonic_render_model::CursorStyle::default(),
                             })
-                            .unwrap_or(sonic_render_model::geometry::PixelRect {
-                                x: 0,
-                                y: 0,
-                                w: 0,
-                                h: 0,
-                            });
-                        let mut panes_slice = [sonic_render_model::PaneRender {
-                            id: active_id,
-                            rect_px: active_rect_px,
-                            grid: grid.grid_mut(),
-                            is_active: true,
-                            cursor_style: sonic_render_model::CursorStyle::default(),
-                        }];
+                            .collect();
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &self.theme,
@@ -275,7 +310,7 @@ impl App {
                         // next redraw bypasses the vsync gate.
                         self.last_seen_burst_gen = pty_burst_snapshot;
                         self.last_render = Instant::now();
-                        let g = grid.grid_mut();
+                        let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };
                     // Tell the OS where the active text cursor lives so the
