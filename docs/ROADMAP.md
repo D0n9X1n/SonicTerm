@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-27 (v1.0-RC — 29+ PRs this session: crate decomposition #145/#151–#160, render+app module split #157/#160, Windows MVP #133–#139, perf pass #129–#142, P0 ANSI-bg fix #163, UX release-testing checklist gate `docs/RELEASE_TESTING.md` (36-section sweep) + `scripts/check-release-testing.sh` wired into `.github/workflows/release.yml` — **v0.8.1 is the first tag to ship after a full checklist run-through**. Release notes in [`CHANGELOG.md`](../CHANGELOG.md); tag pending operational cert procurement and honest perf-parity sign-off; see [`RELEASE.md`](../RELEASE.md))
+Last updated: 2026-05-27 (v1.0-RC — 29+ PRs this session: crate decomposition #145/#151–#160, render+app module split #157/#160, Windows MVP #133–#139, perf pass #129–#142, P0 ANSI-bg fix #163, UX release-testing checklist gate `docs/RELEASE_TESTING.md` (49-section sweep) + `scripts/check-release-testing.sh` wired into `.github/workflows/release.yml` — **v0.8.1 is the first tag to ship after a full checklist run-through**. Release notes in [`CHANGELOG.md`](../CHANGELOG.md); tag pending operational cert procurement and honest perf-parity sign-off; see [`RELEASE.md`](../RELEASE.md))
 
 ---
 

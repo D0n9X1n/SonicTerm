@@ -266,7 +266,7 @@ git tag v1.0.0 && git push origin v1.0.0
 
 triggers `.github/workflows/release.yml` → first runs the `release-gate` job (which re-runs `scripts/check-release-testing.sh`) + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
 
-The checklist itself (`docs/RELEASE_TESTING.md`) is a **36-section** sweep covering tab/pane/palette/prefs/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, and config validation — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
+The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/prefs/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
 `crates/sonic-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 
@@ -510,7 +510,7 @@ described above.
 
 ### Release tagging
 
-One PM owns each release tag end-to-end: runs the full 36-section
+One PM owns each release tag end-to-end: runs the full 49-section
 `docs/RELEASE_TESTING.md` checklist, runs `bash scripts/bench.sh`,
 runs signing pipeline, pushes the tag. Tag ownership rotates per
 release. The tag owner is the sole writer of CLAUDE.md / ROADMAP /

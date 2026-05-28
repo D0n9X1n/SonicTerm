@@ -76,7 +76,19 @@ How to use:
 34. [Long-running (1 hour) stability](#34-long-running-1-hour-stability)
 35. [Drag-drop edge cases](#35-drag-drop-edge-cases)
 36. [Config validation](#36-config-validation)
-37. [CLAUDE.md §4 land-mine coverage](#37-claudemd-4-land-mine-coverage)
+37. [Tab bar caption strip (per-OS chrome parity)](#37-tab-bar-caption-strip-per-os-chrome-parity)
+38. [Tab bar `+` new-tab button](#38-tab-bar--new-tab-button)
+39. [Tab title slack-distribution](#39-tab-title-slack-distribution)
+40. [Cell grid padding](#40-cell-grid-padding)
+41. [Per-OS default keymap chord prefix](#41-per-os-default-keymap-chord-prefix)
+42. [Cheatsheet overlay](#42-cheatsheet-overlay)
+43. [Copy mode + quick select](#43-copy-mode--quick-select)
+44. [Broadcast input](#44-broadcast-input)
+45. [Pane zoom + keyboard split-resize](#45-pane-zoom--keyboard-split-resize)
+46. [Accessibility modes](#46-accessibility-modes)
+47. [Theme import/export](#47-theme-importexport)
+48. [OSC 133 + command badge + notifications](#48-osc-133--command-badge--notifications)
+49. [CLAUDE.md §4 land-mine coverage](#49-claudemd-4-land-mine-coverage)
 
 ---
 
@@ -1016,7 +1028,291 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 ---
 
-## 37. CLAUDE.md §4 land-mine coverage
+## 37. Tab bar caption strip (per-OS chrome parity)
+
+**Setup:** launch Sonic in a fresh window and keep an OS-level process/window inspector ready (`ps` + Accessibility Inspector on macOS; Task Manager/Spy++ or PowerShell on Windows).
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Verify NSWindow traffic-light buttons at top-left: Close (red), Minimize (yellow), Maximize/Zoom (green). | Verify app-painted `—` / `▢` / `✕` caption buttons at top-right. |
+| Hover each traffic light, then click yellow; restore from Dock; click green; click red last. | Hover each button; close hover bg must be `#E81123`; click `—`, restore from taskbar; click `▢`, then `✕` last. |
+| Confirm minimize via Dock state, zoom via window frame change, close via process/window exit. | Confirm minimize with `IsIconic`, maximize with `IsZoomed`, close via process/window exit. |
+
+**Expected outcome:**
+
+- [ ] All three caption actions are visible in their platform-canonical location and never overlap the tab strip.
+- [ ] Hovering each button shows a visible hover background; Windows close hover is `#E81123`.
+- [ ] Minimize, maximize/zoom, and close each trigger exactly the expected OS action.
+- [ ] Tab content and PTY survive minimize/restore and maximize/restore.
+
+**FAIL → block release.** Any button missing, no hover state, wrong hover color on Windows close, or click no-op.
+
+---
+
+## 38. Tab bar `+` new-tab button
+
+**Setup:** launch Sonic with one tab; make the window narrow, then wide.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Hover the `+` at the right edge of the tab strip, then click it three times. | Hover the `+` before the caption strip, then click it three times. |
+| Resize the window narrower and wider; repeat one click. | Resize narrower and wider; confirm it never overlaps `—` / `▢` / `✕`; repeat one click. |
+| Use `Cmd+T` once as a keyboard cross-check. | Use `Ctrl+Shift+T` once as a keyboard cross-check. |
+
+**Expected outcome:**
+
+- [ ] `+` is visible at the tab strip right edge (before caption buttons on Windows, before nothing on macOS).
+- [ ] Hover feedback appears before click.
+- [ ] Each click spawns exactly one new tab and focuses it.
+- [ ] Windows: `+` never overlaps caption buttons (#189 regression-guard).
+- [ ] Keyboard new-tab and mouse new-tab produce identical tab state.
+
+**FAIL → block release.** Missing `+`, no hover state, no new tab, double-spawn, or Windows overlap.
+
+---
+
+## 39. Tab title slack-distribution
+
+**Setup:** launch with exactly one tab, maximize/zoom on a wide monitor, and set a long shell title.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Run `printf '\e]0;dotan@host: ~/very/long/project/path\a'` and zoom the window with green button. | Run `title Administrator: C:\Windows\system32\cmd.exe` in cmd.exe or emit OSC title from PowerShell, then maximize. |
+| Shrink to medium width, then grow back to wide. | Shrink to medium width, then grow back to wide. |
+| Open a second tab and close it, returning to one tab. | Open a second tab and close it, returning to one tab. |
+
+**Expected outcome:**
+
+- [ ] With one tab on a wide window, the title consumes available slack and shows the full shell title, not ellipsis (#238 regression-guard).
+- [ ] Ellipsis appears only when the actual width is insufficient.
+- [ ] Returning to one tab restores slack distribution.
+- [ ] Caption strip / window chrome remains separate from title area on both OSes.
+
+**FAIL → block release.** Full title ellipsizes while visible slack exists, or title overlaps chrome.
+
+---
+
+## 40. Cell grid padding
+
+**Setup:** default config; launch a fresh window with one tab and one pane. Use a screenshot tool that can sample pixels.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Run `printf 'PAD-CHECK\n'`; take `/tmp/rel-vX.Y.Z-40-padding-mac.png`. | Run `echo PAD-CHECK`; take `%TEMP%\rel-vX.Y.Z-40-padding-win.png`. |
+| Sample the first non-background pixel of `P` relative to the window content left/top edges. | Sample the first non-background pixel of `P` relative to the window content left/top edges. |
+| Resize smaller/larger and sample again. | Resize smaller/larger and sample again. |
+
+**Expected outcome:**
+
+- [ ] Text has at least 8 px padding between cell column 0 and the window left edge (#237 regression-guard).
+- [ ] Top, right, and bottom terminal content padding are equivalent and visually balanced.
+- [ ] Padding remains stable after resize and does not clip cursor, selection, or glyph descenders.
+- [ ] The measurement method and pixel offsets are recorded with the screenshot.
+
+**FAIL → block release.** Any edge has < 8 px padding or content clips into chrome/border.
+
+---
+
+## 41. Per-OS default keymap chord prefix
+
+**Setup:** remove or back up user config so defaults apply; launch fresh. Also open the active config/log to confirm loaded keymap name.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Confirm default keymap is `wezterm`; press `Cmd+T`. | Confirm default keymap is `wezterm-windows`; press `Ctrl+Shift+T`. |
+| Press another primary default chord such as `Cmd+D` for split. | Press another primary default chord such as `Ctrl+Shift+D` for split. |
+| Verify Linux remains documented as `wezterm` with Super=Meta; no macOS run required. | Press common Win-key chords (for example `Win+T`, `Win+D`) and confirm Sonic does not bind or swallow them. |
+
+**Expected outcome:**
+
+- [ ] macOS default keymap is `wezterm`, and `Cmd+...` chords trigger default actions.
+- [ ] Windows default keymap is `wezterm-windows`, and `Ctrl+Shift+...` chords trigger the same actions.
+- [ ] Windows default bindings do not use Win-key chords that collide with the OS shell (#236 guard).
+- [ ] Linux default remains `wezterm` with Super=Meta documented for release notes.
+
+**FAIL → block release.** Wrong default keymap, wrong chord prefix, or OS-reserved chord captured by Sonic.
+
+---
+
+## 42. Cheatsheet overlay
+
+**Setup:** fresh launch with default keymap; open at least two tabs so multiple actions are relevant.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Press `Cmd+Shift+?` to open cheatsheet. | Press `Ctrl+Shift+?` to open cheatsheet. |
+| Type `tab`, then `TAB`, confirming case-insensitive filtering. | Type `tab`, then `TAB`, confirming case-insensitive filtering. |
+| Press `↓`, `↓`, `↑`, `Enter`; reopen and press `Esc`. | Press `↓`, `↓`, `↑`, `Enter`; reopen and press `Esc`. |
+
+**Expected outcome:**
+
+- [ ] Modal overlay appears and lists every active binding with its action name (#177).
+- [ ] Filter is a case-insensitive substring match.
+- [ ] Arrow keys move selection without sending bytes to the shell.
+- [ ] `Enter` executes selected action; `Esc` dismisses without action.
+- [ ] Overlay rendering and dismissal are identical quality on macOS and Windows.
+
+**FAIL → block release.** Missing bindings, broken filter, shell input leakage, or non-dismissible modal.
+
+---
+
+## 43. Copy mode + quick select
+
+**Setup:** fresh launch; generate scrollback with `seq 1 3000` plus visible URLs (`https://example.com/a`, `https://example.com/b`).
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Press `Cmd+[` to enter copy mode; navigate with `h/j/k/l` and arrow keys. | Press `Ctrl+Shift+[` to enter copy mode; navigate with `h/j/k/l` and arrow keys. |
+| Press `v`, extend selection, then `y`; repeat with `Enter`; use `Esc` to cancel. | Press `v`, extend selection, then `y`; repeat with `Enter`; use `Esc` to cancel. |
+| Press `Cmd+Shift+Space` for quick select; press a URL hint letter. | Press `Ctrl+Shift+Space` for quick select; press a URL hint letter. |
+
+**Expected outcome:**
+
+- [ ] Copy mode opens on the visible grid and can address scrollback (#178).
+- [ ] `h/j/k/l` and arrow navigation move the copy cursor consistently.
+- [ ] `v` starts selection; `y` or `Enter` copies selected text and exits; `Esc` cancels without copying.
+- [ ] Quick select marks visible URLs with hint letters; pressing a hint copies exactly that URL.
+- [ ] Clipboard contents match selected text/URL exactly on both OSes.
+
+**FAIL → block release.** Copy mode cannot enter/exit, navigation broken, wrong clipboard text, or quick select misses visible URLs.
+
+---
+
+## 44. Broadcast input
+
+**Setup:** fresh launch; split into at least two panes and keep each pane at a shell prompt.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Press `Cmd+D` for a split, then `Cmd+Shift+B` to toggle broadcast. | Press `Ctrl+Shift+D` for a split, then `Ctrl+Shift+Alt+B` (or the final non-collision binding) to toggle broadcast. |
+| Type `echo BROADCAST-OK` and press Enter. | Type `echo BROADCAST-OK` and press Enter. |
+| Toggle broadcast off; type `echo SOLO-OK` in the active pane. | Toggle broadcast off; type `echo SOLO-OK` in the active pane. |
+
+**Expected outcome:**
+
+- [ ] While enabled, typed keystrokes mirror to all receiving panes (#179).
+- [ ] Receiving panes show a red 2 px border and `BROADCAST` label.
+- [ ] Active pane remains distinguishable from receiving panes.
+- [ ] Toggle off removes border/label and subsequent keystrokes go only to the active pane.
+- [ ] No pane receives duplicated characters.
+
+**FAIL → block release.** Broadcast no-op, missing indicator, duplicated input, or broadcast continues after toggle-off.
+
+---
+
+## 45. Pane zoom + keyboard split-resize
+
+**Setup:** fresh launch; create a 2×2 pane grid with distinct prompt text in each pane.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Use `Cmd+D` and `Cmd+Shift+D` to make 2×2; press `Cmd+Shift+Z`. | Use `Ctrl+Shift+D` and the Windows down-split binding to make 2×2; press `Ctrl+Shift+Z`. |
+| Press the zoom chord again to restore. | Press the zoom chord again to restore. |
+| Use `Cmd+Shift+←/→/↑/↓` to nudge split dividers repeatedly. | Use `Ctrl+Shift+←/→/↑/↓` to nudge split dividers repeatedly. |
+
+**Expected outcome:**
+
+- [ ] Zoom toggle makes the active pane fill the tab area and hides siblings (#180).
+- [ ] Toggling again restores the exact prior 2×2 layout and pane contents.
+- [ ] Keyboard resize nudges the nearest split divider by 5% per keypress.
+- [ ] Divider ratios clamp to `[0.1, 0.9]`; panes never collapse to zero.
+- [ ] Resize indicators and focus borders remain aligned after every nudge.
+
+**FAIL → block release.** Lost layout, hidden pane state reset, wrong nudge size, or unclamped divider.
+
+---
+
+## 46. Accessibility modes
+
+**Setup:** back up config. Add an `[accessibility]` table, then test each mode independently and together.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Set `high_contrast = true`; launch, then switch themes from prefs/config. | Set `high_contrast = true`; launch, then switch themes from prefs/config. |
+| Set `reduced_motion = true`; toggle overlays, pane zoom, and search. | Set `reduced_motion = true`; toggle overlays, pane zoom, and search. |
+| Set `strong_focus = true`; move focus across tabs/panes. | Set `strong_focus = true`; move focus across tabs/panes. |
+
+**Expected outcome:**
+
+- [ ] High contrast forces pure white foreground and pure black background on both OSes (#181).
+- [ ] High contrast persists across theme changes until disabled.
+- [ ] Reduced motion makes toggles/overlays snap with no interpolation.
+- [ ] Strong focus renders focus rings at 2× normal thickness.
+- [ ] Combining all three modes remains legible and does not crash.
+
+**FAIL → block release.** Any mode ignored, theme overrides high contrast, or accessibility mode causes unreadable UI.
+
+---
+
+## 47. Theme import/export
+
+**Setup:** identify the user theme dir and keep a copy of one foreign theme TOML (or bundled `solarized-dark`, `monokai-pro`, `one-dark`).
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Copy the TOML into `~/Library/Application Support/Sonic/themes/`; select it from prefs/config. | Copy the TOML into `%APPDATA%\Sonic\themes\`; select it from prefs/config. |
+| Export the current theme to `/tmp/rel-theme-export.toml`. | Export the current theme to `%TEMP%\rel-theme-export.toml`. |
+| Re-import the exported TOML under a new name and switch to it. | Re-import the exported TOML under a new name and switch to it. |
+
+**Expected outcome:**
+
+- [ ] Imported foreign/bundled theme loads and renders without restart (#182).
+- [ ] Background, foreground, cursor, selection, and ANSI colors visibly change to the selected theme.
+- [ ] Exported TOML is valid and contains all required theme fields.
+- [ ] Re-import/export round-trip is identical after normalizing name/order/comments.
+- [ ] Invalid theme TOML is rejected with a clear error and previous theme remains active.
+
+**FAIL → block release.** Theme not discoverable, render mismatch, invalid export, or failed round-trip.
+
+---
+
+## 48. OSC 133 + command badge + notifications
+
+**Setup:** enable shell integration that emits OSC 133 prompt/command sequences. Enable `notifications.long_command = true`; grant notification permission if prompted.
+
+**Keystrokes / actions:**
+
+| macOS | Windows |
+|---|---|
+| Install/use the zsh or fish hook, open a background tab, run `sleep 6; true`. | Use a cmd.exe/PowerShell wrapper that emits OSC 133, open a background tab, run `timeout /t 6` or equivalent success command. |
+| Keep another tab active; wait 5 s, then observe the background tab badge. | Keep another tab active; wait 5 s, then observe the background tab badge. |
+| Run one exit-0 and one exit-nonzero command; then run a >10 s command. | Run one exit-0 and one exit-nonzero command; then run a >10 s command. |
+
+**Expected outcome:**
+
+- [ ] OSC 133 prompt/command sequences are parsed without visible escape garbage (#183).
+- [ ] Long-running command in a background tab shows a badge after 5 s.
+- [ ] Exit 0 shows `✓` for 3 s; nonzero exit shows `✗` for 3 s.
+- [ ] With `notifications.long_command = true`, commands longer than 10 s fire a desktop notification on completion.
+- [ ] Foreground tab state remains correct; badges clear after their timeout.
+
+**FAIL → block release.** Visible OSC garbage, missing/incorrect badge, no notification, or stale badge.
+
+---
+
+## 49. CLAUDE.md §4 land-mine coverage
 
 Each row in this table maps a CLAUDE.md §4 land-mine to (a) the manual UX
 section in this checklist that exercises it end-to-end, and (b) the
@@ -1055,4 +1351,4 @@ Run by: `___________`
 Date: `___________`
 Platform: `___________` (macOS 14.x / Windows 11 23H2)
 
-All 37 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.
+All 49 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.
