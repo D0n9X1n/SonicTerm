@@ -66,6 +66,9 @@ pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Opt
     if mods.super_key() || mods.control_key() {
         parts.push("super".into());
     }
+    if mods.super_key() && mods.control_key() {
+        parts.push("ctrl".into());
+    }
     if mods.alt_key() {
         parts.push("alt".into());
     }

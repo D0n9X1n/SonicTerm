@@ -244,6 +244,14 @@ impl App {
         }
     }
 
+    pub(super) fn toggle_broadcast(&mut self, scope: sonic_core::keymap::BroadcastScope) {
+        let Some(source_pane) = self.active_pane_id() else { return };
+        self.broadcast = self.broadcast.toggled(scope, source_pane);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn resize_active_split(&mut self, dir: Direction) {
         let i = self.tabs.active_index();
         let Some(st) = self.tab_states.get_mut(i) else { return };

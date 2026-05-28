@@ -22,6 +22,16 @@ pub enum Direction {
     Down,
 }
 
+/// Broadcast input target scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastScope {
+    /// Broadcast only to panes in the active tab.
+    Tab,
+    /// Broadcast to panes in every tab.
+    AllTabs,
+}
+
 /// Scroll target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +77,11 @@ pub enum Action {
     ClosePane,
     /// Temporarily make the active pane fill the tab area.
     TogglePaneZoom,
+    /// Toggle broadcast input from the active pane to other panes.
+    ToggleBroadcast {
+        /// Which panes should receive mirrored input.
+        scope: BroadcastScope,
+    },
     /// Move focus to the pane in the given direction.
     FocusPane(Direction),
     /// Nudge the active split divider left.

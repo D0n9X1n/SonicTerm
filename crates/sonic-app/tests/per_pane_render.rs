@@ -39,6 +39,7 @@ fn split_right_yields_two_pane_origins_with_distinct_x() {
             rect_px: rect_a,
             is_active: true,
             cursor_style: CursorStyle::default(),
+            is_broadcast_receiver: false,
         },
         PaneRender {
             id: 2,
@@ -46,6 +47,7 @@ fn split_right_yields_two_pane_origins_with_distinct_x() {
             rect_px: rect_b,
             is_active: false,
             cursor_style: CursorStyle::default(),
+            is_broadcast_receiver: false,
         },
     ];
 
@@ -126,6 +128,7 @@ fn last_panes_received_matches_slice_length() {
             rect_px: PixelRect { x: 0, y: 0, w: 333, h: 700 },
             is_active: true,
             cursor_style: CursorStyle::default(),
+            is_broadcast_receiver: false,
         },
         PaneRender {
             id: 2,
@@ -133,6 +136,7 @@ fn last_panes_received_matches_slice_length() {
             rect_px: PixelRect { x: 333, y: 0, w: 333, h: 700 },
             is_active: false,
             cursor_style: CursorStyle::default(),
+            is_broadcast_receiver: false,
         },
         PaneRender {
             id: 3,
@@ -140,6 +144,7 @@ fn last_panes_received_matches_slice_length() {
             rect_px: PixelRect { x: 666, y: 0, w: 334, h: 700 },
             is_active: false,
             cursor_style: CursorStyle::default(),
+            is_broadcast_receiver: false,
         },
     ];
     // Same projection `GpuRenderer::render()` performs to populate

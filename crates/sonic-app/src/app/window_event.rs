@@ -130,6 +130,7 @@ impl App {
                     })
                     .unwrap_or_default();
                 let active_id = self.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                let broadcast_receivers = self.broadcast_receivers();
 
                 // PR #199 Fix 1: try_lock EVERY pane in the tab and pass
                 // them ALL through to the renderer. The previous single-
@@ -295,6 +296,7 @@ impl App {
                                 grid: g.grid_mut(),
                                 is_active: *id == active_id,
                                 cursor_style: sonic_render_model::CursorStyle::default(),
+                                is_broadcast_receiver: broadcast_receivers.contains(id),
                             })
                             .collect();
                         if let Err(e) = r.render(

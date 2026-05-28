@@ -39,6 +39,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "SplitDown",
     "ClosePane",
     "TogglePaneZoom",
+    "ToggleBroadcast",
     "FocusPane",
     "ResizePaneLeft",
     "ResizePaneRight",
@@ -81,6 +82,7 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::SplitDown => "SplitDown",
         Action::ClosePane => "ClosePane",
         Action::TogglePaneZoom => "TogglePaneZoom",
+        Action::ToggleBroadcast { .. } => "ToggleBroadcast",
         Action::FocusPane(_) => "FocusPane",
         Action::ResizePaneLeft => "ResizePaneLeft",
         Action::ResizePaneRight => "ResizePaneRight",
@@ -124,6 +126,9 @@ pub fn label(a: &Action) -> String {
         Action::SplitDown => "Split Pane Down".into(),
         Action::ClosePane => "Close Pane".into(),
         Action::TogglePaneZoom => "Toggle Pane Zoom".into(),
+        Action::ToggleBroadcast { scope } => {
+            format!("Toggle Broadcast {}", broadcast_scope_human(*scope))
+        }
         Action::FocusPane(d) => format!("Focus Pane {}", dir_human(*d)),
         Action::ResizePaneLeft => "Resize Pane Left".into(),
         Action::ResizePaneRight => "Resize Pane Right".into(),
@@ -175,6 +180,9 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         Action::SplitDown => &["pane", "horizontal", "hsplit"],
         Action::ClosePane => &["kill", "x"],
         Action::TogglePaneZoom => &["pane", "maximize", "unzoom"],
+        Action::ToggleBroadcast { .. } => {
+            &["broadcast", "input", "mirror", "all panes", "all tabs"]
+        }
         Action::FocusPane(_) => &["move", "switch", "navigate"],
         Action::ResizePaneLeft
         | Action::ResizePaneRight
@@ -215,6 +223,13 @@ pub fn search_haystack(a: &Action) -> String {
         s.push_str(kw);
     }
     s
+}
+
+fn broadcast_scope_human(scope: sonic_cfg::keymap::BroadcastScope) -> &'static str {
+    match scope {
+        sonic_cfg::keymap::BroadcastScope::Tab => "Tab",
+        sonic_cfg::keymap::BroadcastScope::AllTabs => "All Tabs",
+    }
 }
 
 fn dir_human(d: Direction) -> &'static str {

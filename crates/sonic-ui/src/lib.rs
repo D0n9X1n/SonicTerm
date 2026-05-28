@@ -24,6 +24,7 @@
 #![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod broadcast;
 pub mod cheatsheet;
 pub mod command_label;
 pub mod command_palette;

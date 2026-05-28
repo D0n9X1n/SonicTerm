@@ -41,6 +41,9 @@ pub struct PaneRender<'a> {
     /// Cursor presentation style for this pane (block / bar / underline +
     /// blink). The renderer paints the cursor only on the active pane.
     pub cursor_style: CursorStyle,
+    /// True when this pane is receiving mirrored broadcast input from the
+    /// active/source pane and therefore needs prominent safety chrome.
+    pub is_broadcast_receiver: bool,
 }
 
 /// Cursor presentation style. Mirrors the legacy enum in `sonic-ui::cursor`

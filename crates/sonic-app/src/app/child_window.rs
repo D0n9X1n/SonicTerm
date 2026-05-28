@@ -158,6 +158,7 @@ impl App {
                             grid: g.grid_mut(),
                             is_active: *id == active_id,
                             cursor_style: sonic_render_model::CursorStyle::default(),
+                            is_broadcast_receiver: false,
                         })
                         .collect();
                     if let Err(e) = child.renderer.render(

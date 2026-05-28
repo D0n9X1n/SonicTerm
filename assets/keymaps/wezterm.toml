@@ -96,6 +96,14 @@ action = "close_pane"
 keys = "super+shift+z"
 action = "toggle_pane_zoom"
 
+[[binding]]
+keys = "super+shift+b"
+action = { toggle_broadcast = { scope = "tab" } }
+
+[[binding]]
+keys = "super+ctrl+shift+b"
+action = { toggle_broadcast = { scope = "all_tabs" } }
+
 # --- Pane focus (vim-style) ---
 [[binding]]
 keys = "super+shift+h"

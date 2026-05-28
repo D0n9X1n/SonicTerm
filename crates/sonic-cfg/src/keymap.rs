@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 // crate can match on an Action without pulling in toml/notify/etc. Re-exported
 // for source compatibility: every existing
 // `use sonic_core::keymap::{Action, Direction, ScrollAction}` keeps compiling.
-pub use sonic_types::{Action, Direction, ScrollAction};
+pub use sonic_types::{Action, BroadcastScope, Direction, ScrollAction};
 
 impl<'de> Deserialize<'de> for ActionWrapper {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
