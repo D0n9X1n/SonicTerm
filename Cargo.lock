@@ -4181,6 +4181,7 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "glyphon",
+ "pollster",
  "sonic-render-model",
  "sonic-text",
  "sonic-types",

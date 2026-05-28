@@ -10,7 +10,6 @@
 //! `size_px = [0, 0]` and the shader skips the SDF math.
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
@@ -175,12 +174,27 @@ impl QuadPipeline {
             return;
         }
         if instances.len() as u64 > self.capacity {
-            self.capacity = (instances.len() as u64).next_power_of_two();
-            self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            // Power-of-two grow. Allocate the FULL capacity in bytes — not
+            // just enough for the live prefix — otherwise a later draw with
+            // needed <= self.capacity but > current_instance_count would
+            // overrun the actual buffer size on write_buffer and trip wgpu
+            // validation. (This was the P0 vim-scroll crash: the previous
+            // code used `create_buffer_init(contents: instances)` which
+            // sizes the buffer to instances.len(), then the next draw with
+            // a few more instances slipped past the bounds check.)
+            let mut cap = self.capacity.max(1);
+            while cap < instances.len() as u64 {
+                cap *= 2;
+            }
+            let stride = std::mem::size_of::<QuadInstance>() as u64;
+            self.instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sonic-quad-instances"),
-                contents: bytemuck::cast_slice(instances),
+                size: cap * stride,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+            self.capacity = cap;
+            queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         } else {
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         }

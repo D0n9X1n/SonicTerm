@@ -18,3 +18,6 @@ wgpu.workspace = true
 glyphon.workspace = true
 cosmic-text.workspace = true
 bytemuck.workspace = true
+
+[dev-dependencies]
+pollster = "0.4"
