@@ -3,7 +3,7 @@
 //! This crate is infrastructure only: it wires up [`tracing`] with two
 //! sinks (stderr at WARN+ and a rolling file at INFO+ by default),
 //! enforces a hard disk-usage budget via [`cleanup`], and installs a
-//! panic hook that dumps the last ~200 tracing events plus a backtrace
+//! panic hook that dumps the last ~50 tracing events plus a backtrace
 //! into `crashes/crash-<utc-iso8601>.log` for post-mortem debugging.
 //!
 //! ## Usage
@@ -29,7 +29,7 @@
 //! ## Retention
 //!
 //! See [`LoggingConfig`] for the five knobs that bound disk usage.
-//! Defaults cap total disk usage at roughly 60 MB plus crash dumps.
+//! Defaults cap total disk usage at roughly 40 MB plus crash dumps.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -59,9 +59,13 @@ pub struct LoggingGuard {
 }
 
 /// The default per-target filter applied when neither `RUST_LOG` nor
-/// `LoggingConfig::level` is set.
+/// `LoggingConfig::level` is set. Top-level `sonic` floor is WARN so the
+/// shipped build doesn't accumulate steady-state INFO chatter into the
+/// rolling file (was INFO pre-v0.8.1; bumped to WARN as part of the
+/// release-blocker triage that brought RSS regression back under
+/// control).
 pub const DEFAULT_FILTER: &str =
-    "sonic=info,sonic_vt=warn,sonic_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
+    "sonic=warn,sonic_vt=warn,sonic_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).

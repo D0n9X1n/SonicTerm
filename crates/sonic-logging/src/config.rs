@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Total disk usage is bounded by
 /// `max_file_size_mb * (max_rotated_files + 1)` for log files plus
 /// `~max_crash_dumps * <avg crash dump size>` for crash dumps. The
-/// shipped defaults yield ≈ 60 MB of logs + ≈ 10 small crash dumps.
+/// shipped defaults yield ≈ 40 MB of logs + ≈ 10 small crash dumps.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -19,7 +19,7 @@ pub struct LoggingConfig {
     pub max_file_size_mb: u64,
     /// Maximum number of *rotated* (non-active) log files to keep on
     /// disk. The active `sonic.log` is never counted or deleted by
-    /// cleanup. Default: 5.
+    /// cleanup. Default: 3.
     pub max_rotated_files: usize,
     /// Delete rotated log files whose mtime is older than this many
     /// days. Set to `0` to disable age-based eviction. Default: 14.
@@ -42,7 +42,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             max_file_size_mb: 10,
-            max_rotated_files: 5,
+            max_rotated_files: 3,
             max_age_days: 14,
             max_crash_dumps: 10,
             max_crash_age_days: 30,
