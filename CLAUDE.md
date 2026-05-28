@@ -441,6 +441,17 @@ that authored it:
 - `dev:windows` — opened from the Windows PM session
 - `dev:linux` — opened from the Linux PM session (future)
 
+The `dev:*` label applies to **both PRs and issues**:
+
+- On a PR: identifies which PM authored it.
+- On a new issue: identifies which PM is the **primary owner**
+  (typically the PM who filed it, OR the PM whose platform is affected).
+- For issues affecting multiple platforms, use BOTH `dev:mac` AND
+  `dev:windows` if both PMs are expected to contribute. Otherwise pick
+  one based on who's leading.
+- When triaging an existing issue without a `dev:*` label, the first PM
+  to commit to working on it claims it by adding their `dev:*` label.
+
 This is set IMMEDIATELY after `gh pr create`, e.g.:
 
     PR_URL=$(gh pr create --title "..." --body "..." | tail -1)
