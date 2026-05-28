@@ -68,13 +68,14 @@ See **`docs/ARCHITECTURE.md`** for the full dep graph.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+bash scripts/check-deny.sh                                     # supply-chain gate (advisories + licenses + bans + sources)
 cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
 cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK
 cargo build --release -p sonic-mac                             # confirms fat-LTO build works
 bash scripts/bench.sh                                          # perf-bench subset vs baseline.json; warns locally, exits 1 in CI
 ```
 
-`cargo-deny` runs in CI on Ubuntu (`cargo install cargo-deny --locked` + `cargo deny check` locally if you touched any dep). CI matrix is `macos-14` + `windows-latest` only.
+`cargo-deny` is wired into the local gate via `scripts/check-deny.sh` (install with `cargo install cargo-deny --locked`). The policy lives in `deny.toml` at the repo root — advisories deny-on-warn, licenses are an explicit allowlist, duplicate versions warn, and only crates.io is an allowed source. CI wiring lands in a follow-up PR after the in-flight workflow refactor; until then the local gate is authoritative. CI matrix is `macos-14` + `windows-latest` only.
 
 **Test floor: never let workspace test count regress. Current floor = 878** (post-#143 quality polish + per-pane resize regression tests in `crates/sonic-app/tests/per_pane_resize.rs`; was 824 at #160 split, 171 at v0.6). Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
 
