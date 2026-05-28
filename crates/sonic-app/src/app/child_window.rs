@@ -106,14 +106,34 @@ impl App {
                         search.maybe_refresh_for_revision(grid.grid_mut());
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                    let active_rect_px = pane_rects
+                        .iter()
+                        .find(|(id, _)| *id == active_id)
+                        .map(|(_, r)| sonic_render_model::geometry::PixelRect {
+                            x: r.x as i32,
+                            y: r.y as i32,
+                            w: r.w as u32,
+                            h: r.h as u32,
+                        })
+                        .unwrap_or(sonic_render_model::geometry::PixelRect {
+                            x: 0,
+                            y: 0,
+                            w: 0,
+                            h: 0,
+                        });
+                    let mut panes_slice = [sonic_render_model::PaneRender {
+                        id: active_id,
+                        rect_px: active_rect_px,
+                        grid: grid.grid_mut(),
+                        is_active: true,
+                        cursor_style: sonic_render_model::CursorStyle::default(),
+                    }];
                     if let Err(e) = child.renderer.render(
-                        grid.grid_mut(),
+                        &mut panes_slice,
                         &theme,
                         child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                         child.selection.as_ref(),
                         &child.tabs,
-                        &pane_rects,
-                        active_id,
                         search,
                         None, // command palette: not exposed in child window yet
                         None, // ime preedit: not exposed in child window yet

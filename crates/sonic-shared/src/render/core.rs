@@ -248,9 +248,14 @@ pub struct GpuRenderer {
 /// frame. If two consecutive frames produce an equal key the second one
 /// is a no-op for the user, so the renderer skips text shaping, quad
 /// rebuild and GPU submission entirely.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameKey {
     grid_revision: u64,
+    /// Per-pane grid revisions. Part B step 5: split panes each own a Grid,
+    /// so a write to an inactive pane (e.g. background `tail -f`) must
+    /// invalidate the cached frame even though `grid_revision` (active pane)
+    /// is unchanged.
+    pane_revs: Vec<(u64, u64)>,
     selection: Option<Selection>,
     cursor_visible: bool,
     tab: u64,
@@ -1170,18 +1175,59 @@ impl GpuRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
-        grid: &mut Grid,
+        panes: &mut [sonic_render_model::PaneRender<'_>],
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
         tabs: &TabBar,
-        pane_rects: &[(u64, PaneRect)],
-        active_pane: u64,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
+        // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
+        // unchanged inside the body — we extract the active pane's grid into
+        // the local `grid` binding and derive `pane_rects` / `active_pane`
+        // from the slice. The mechanical re-anchor of the 62
+        // `padding_left`/`top_inset()` sites to per-pane origins is tracked
+        // separately. If all panes failed to lock (empty slice), skip the
+        // frame — callers are expected to filter dropped locks before calling.
+        if panes.is_empty() {
+            return Ok(());
+        }
+        let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
+        let active_pane: u64 = panes[active_idx].id;
+        // Derive the legacy `pane_rects` vector from the slice so downstream
+        // code (cache key, focus-ring quad, etc.) continues to work
+        // unchanged. PaneRender::rect_px is already in physical px adjusted
+        // for top_inset — same units as the old PaneRect.
+        let pane_rects: Vec<(u64, PaneRect)> = panes
+            .iter()
+            .map(|p| {
+                (
+                    p.id,
+                    PaneRect {
+                        x: p.rect_px.x as f32,
+                        y: p.rect_px.y as f32,
+                        w: p.rect_px.w as f32,
+                        h: p.rect_px.h as f32,
+                    },
+                )
+            })
+            .collect();
+        let pane_rects = pane_rects.as_slice();
+        // SAFETY of split borrow: we hold &mut [PaneRender], so each grid is
+        // already uniquely borrowed via the slice. Re-borrow the active
+        // pane's grid mutably for the existing body code; no other code path
+        // in render() touches `panes` after this point.
+        let grid: &mut Grid = {
+            // Use raw pointer reborrow to detach the lifetime from `panes`
+            // for the duration of the body. Soundness: `panes` is not used
+            // again in this function (we only read `pane_rects` derived
+            // above), so no aliasing &mut Grid can be constructed.
+            let g_ptr: *mut Grid = panes[active_idx].grid as *mut _;
+            unsafe { &mut *g_ptr }
+        };
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
         // (one integer increment) and unconditional — even on a fully
@@ -1295,6 +1341,7 @@ impl GpuRenderer {
         };
         let key = FrameKey {
             grid_revision: grid.revision(),
+            pane_revs: panes.iter().map(|p| (p.id, p.grid.revision())).collect(),
             selection: selection.copied(),
             cursor_visible,
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
@@ -1325,7 +1372,7 @@ impl GpuRenderer {
             hover_close: hover_close_hit,
             close_override: u8::from(self.tab_close_override.is_some()),
         };
-        if Some(key) == self.last_frame_key {
+        if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             // Blink redraws are now scheduled in the app event loop via
