@@ -507,7 +507,7 @@ mod tab_state;
 mod tear_out;
 mod window_event;
 pub use config_apply::config_diff_needs_font_apply;
-pub use key_encoding::{encode_logical, key_name, KeyName};
+pub use key_encoding::{encode_logical, key_name, key_to_string, KeyName};
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
