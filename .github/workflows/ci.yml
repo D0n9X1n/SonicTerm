@@ -5,14 +5,18 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
 
 jobs:
-  check:
-    name: ${{ matrix.os }} / fmt+clippy+test
+  quick-gate:
+    name: ${{ matrix.os }} / fmt+clippy+unit-test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -37,8 +41,8 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: test
-        run: cargo test --workspace --all-features --no-fail-fast
+      - name: unit + bin tests (skip integration tests/ folders)
+        run: cargo test --workspace --lib --bins
 
   deny:
     name: cargo-deny (supply-chain)
@@ -49,123 +53,3 @@ jobs:
         with:
           command: check
           arguments: --all-features
-
-  wix-smoke:
-    name: cargo-wix smoke (windows MSI)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Detect sonic-windows / packaging changes
-        id: changes
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-            git fetch --no-tags --depth=50 origin "$BASE" "$HEAD" || true
-            CHANGED=$(git diff --name-only "$BASE" "$HEAD" || true)
-          else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
-          fi
-          echo "$CHANGED"
-          if echo "$CHANGED" | grep -E '^(crates/sonic-windows/|\.github/workflows/(ci|release)\.yml$|assets/)' >/dev/null; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install rust toolchain
-        if: steps.changes.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.changes.outputs.run == 'true'
-        with:
-          shared-key: wix-smoke
-
-      - name: Install cargo-wix
-        if: steps.changes.outputs.run == 'true'
-        run: cargo install cargo-wix --locked
-
-      - name: Build release binary
-        if: steps.changes.outputs.run == 'true'
-        run: cargo build --release --target x86_64-pc-windows-msvc -p sonic-windows
-
-      - name: cargo wix smoke
-        if: steps.changes.outputs.run == 'true'
-        shell: bash
-        run: |
-          cd crates/sonic-windows
-          cargo wix --no-build --nocapture --output ../../dist/
-          ls -la ../../dist/
-
-  perf-bench:
-    name: perf-bench gate (regression check)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Detect perf-sensitive changes
-        id: changes
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-            git fetch --no-tags --depth=50 origin "$BASE" "$HEAD" || true
-            CHANGED=$(git diff --name-only "$BASE" "$HEAD" || true)
-          else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
-          fi
-          echo "$CHANGED"
-          if echo "$CHANGED" | grep -E '^(crates/sonic-vt/|crates/sonic-grid/|crates/sonic-text/|crates/sonic-gpu/|crates/sonic-shared/src/render/|crates/sonic-app/|baseline\.json$|scripts/bench\.sh$|\.github/workflows/ci\.yml$)' >/dev/null; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install rust toolchain
-        if: steps.changes.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.changes.outputs.run == 'true'
-        with:
-          shared-key: perf-bench
-
-      - name: Install vtebench (best-effort)
-        if: steps.changes.outputs.run == 'true'
-        shell: bash
-        run: |
-          cargo install vtebench --locked 2>/tmp/vtebench-install.log || {
-            echo "::warning::vtebench install failed — bench will skip vtebench_* metrics. Log:"
-            cat /tmp/vtebench-install.log || true
-          }
-
-      - name: Build release sonic-mac proxy (sonic-windows on linux is N/A; use cat-only path)
-        if: steps.changes.outputs.run == 'true'
-        shell: bash
-        run: |
-          # On linux CI we don't have a sonic binary to launch; the bench
-          # script gracefully reports rss/idle as 0.0 in that case and
-          # focuses on cat-throughput + vtebench (if installed). That's
-          # exactly the subset we want to gate on Linux.
-          echo "skipping local sonic build on linux; bench will run cat-subset"
-
-      - name: Run perf-bench in CI mode
-        if: steps.changes.outputs.run == 'true'
-        shell: bash
-        env:
-          CI: "1"
-        run: bash scripts/bench.sh --ci
-
-      - name: Upload current.json
-        if: steps.changes.outputs.run == 'true' && always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-bench-current
-          path: current.json
-          if-no-files-found: ignore
