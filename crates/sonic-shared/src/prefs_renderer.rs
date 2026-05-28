@@ -187,7 +187,10 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
 
     // --- Background ----------------------------------------------------
     // Per PR #119: chrome derives from the active theme via UiPalette.
-    let palette = crate::ui_tokens::UiPalette::from_theme(theme);
+    let palette = crate::ui_tokens::UiPalette::from_theme_with_strong_focus(
+        theme,
+        state.config.accessibility.strong_focus,
+    );
     let bg_base = palette.bg_base;
 
     // --- Sidebar -------------------------------------------------------
@@ -484,6 +487,7 @@ fn draw_toggle(
     t: &Toggle,
     slot: PrefsRect,
     palette: &crate::ui_tokens::UiPalette,
+    reduced_motion: bool,
 ) {
     let accent = palette.accent;
     let track_y = slot.y + (slot.h - TOGGLE_H) / 2.0;
@@ -506,7 +510,12 @@ fn draw_toggle(
     // snapped position and the new one over `Toggle::ANIM_MS` from
     // the most recent flip; once `t == 1` it returns the snapped
     // value so the thumb does not drift.
-    let knob_x = t.knob_x_animated(std::time::Instant::now(), TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let knob_x = t.knob_x_animated(
+        std::time::Instant::now(),
+        TOGGLE_KNOB,
+        TOGGLE_KNOB_MARGIN,
+        reduced_motion,
+    );
     let knob = PrefsRect::new(knob_x, track.y + TOGGLE_KNOB_MARGIN, TOGGLE_KNOB, TOGGLE_KNOB);
     // Thumb fill follows the slice-2c spec: theme.accent when on,
     // theme.surface (bg_elevated) when off. The accent-on-accent
@@ -553,7 +562,11 @@ fn hex_to_token(s: &str) -> [f32; 4] {
 }
 
 fn push_border(out: &mut Vec<QuadCmd>, r: PrefsRect, c: [f32; 4]) {
-    let t = 1.0;
+    push_border_with_thickness(out, r, c, 1.0);
+}
+
+fn push_border_with_thickness(out: &mut Vec<QuadCmd>, r: PrefsRect, c: [f32; 4], thickness: f32) {
+    let t = thickness.max(1.0);
     out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y, r.w, t), c));
     out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y + r.h - t, r.w, t), c));
     out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y, t, r.h), c));
@@ -571,7 +584,7 @@ fn draw_control(
     let accent = palette.accent;
     match ctrl {
         Control::Toggle(t) => {
-            draw_toggle(quads, t, slot, palette);
+            draw_toggle(quads, t, slot, palette, state.config.accessibility.reduced_motion);
         }
         Control::Slider(s) => {
             let readout_w = 56.0;
@@ -685,7 +698,9 @@ fn draw_control(
             let r = PrefsRect::new(slot.x, slot.y, slot.w.min(280.0), CONTROL_H);
             quads.push(QuadCmd::sharp(r, palette.bg_elevated));
             let border = if focused { palette.border_focus } else { palette.border_subtle };
-            push_border(quads, r, border);
+            let thickness =
+                if focused && state.config.accessibility.strong_focus { 2.0 } else { 1.0 };
+            push_border_with_thickness(quads, r, border, thickness);
             let display = if f.value.is_empty() && !focused {
                 "(default)".to_string()
             } else {

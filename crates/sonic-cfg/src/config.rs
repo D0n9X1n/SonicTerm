@@ -23,6 +23,10 @@ pub struct Config {
     /// [`sonic_logging::LoggingConfig`]).
     #[serde(default)]
     pub logging: sonic_logging::LoggingConfig,
+    /// Accessibility presentation modes. Config-only for now; prefs UI
+    /// controls are deferred.
+    #[serde(default)]
+    pub accessibility: AccessibilityConfig,
     /// User-selected UI locale (e.g. `"en"`, `"zh-CN"`, `"ja"`). Empty
     /// string (the default) means "negotiate from OS locale".
     #[serde(default)]
@@ -104,6 +108,21 @@ impl WindowConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+/// Accessibility presentation modes.
+pub struct AccessibilityConfig {
+    /// Force terminal foreground/background to pure white-on-black.
+    #[serde(default)]
+    pub high_contrast: bool,
+    /// Disable UI animation interpolation; snap controls to end states.
+    #[serde(default)]
+    pub reduced_motion: bool,
+    /// Draw stronger focus indicators.
+    #[serde(default)]
+    pub strong_focus: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Terminal engine settings.
@@ -166,6 +185,7 @@ impl Default for Config {
             theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
             logging: sonic_logging::LoggingConfig::default(),
+            accessibility: AccessibilityConfig::default(),
             locale: String::new(),
             tab_close_button_color: None,
             extra: toml::Table::new(),

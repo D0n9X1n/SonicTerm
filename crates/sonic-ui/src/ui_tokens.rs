@@ -69,8 +69,18 @@ impl UiPalette {
     /// - `search_match`  — `theme.colors.ansi.yellow` @ 28% alpha.
     /// - `search_current`— `theme.colors.bright.yellow` @ 42% alpha.
     pub fn from_theme(theme: &Theme) -> Self {
+        Self::from_theme_with_strong_focus(theme, false)
+    }
+
+    /// Derive a chrome palette and optionally boost focus/accent affordances
+    /// for the `accessibility.strong_focus` mode.
+    pub fn from_theme_with_strong_focus(theme: &Theme, strong_focus: bool) -> Self {
         let p = &theme.colors;
-        let accent = color::hex(&p.tab.active_fg.0);
+        let accent = if strong_focus {
+            color::double_saturate_hex(&p.tab.active_fg.0)
+        } else {
+            color::hex(&p.tab.active_fg.0)
+        };
         let bg_elevated = color::hex(&p.background.0);
         let bg_base = color::hex_with_lightness_delta(&p.background.0, -0.08);
         let bg_surface = color::hex_with_lightness_delta(&p.background.0, 0.05);
@@ -195,11 +205,20 @@ pub mod color {
         [lr * a, lg * a, lb * a, a]
     }
 
+    /// Double HSL saturation for an accent color, preserving lightness and alpha.
+    pub fn double_saturate_hex(s: &str) -> [f32; 4] {
+        adjust_hsl(s, 0.0, Some(2.0))
+    }
+
     /// Adjust the lightness of a `#RRGGBB`/`#RRGGBBAA` color in HSL space
     /// by `delta` (typically `-0.15`..`+0.15`) and return the result as
     /// linear-sRGB premultiplied `[r,g,b,a]`. `delta > 0` lightens,
     /// `delta < 0` darkens. Clamped to `[0, 1]`.
     pub fn hex_with_lightness_delta(s: &str, delta: f32) -> [f32; 4] {
+        adjust_hsl(s, delta, None)
+    }
+
+    fn adjust_hsl(s: &str, lightness_delta: f32, saturation_scale: Option<f32>) -> [f32; 4] {
         const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         let trimmed = s.trim();
         let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
@@ -232,7 +251,8 @@ pub mod color {
         // designers expect for "+5%/-8% lightness" — *not* a linear-light
         // operation).
         let (h, s_hsl, l) = srgb_to_hsl(r, g, b);
-        let l = (l + delta).clamp(0.0, 1.0);
+        let s_hsl = saturation_scale.map_or(s_hsl, |scale| (s_hsl * scale).clamp(0.0, 1.0));
+        let l = (l + lightness_delta).clamp(0.0, 1.0);
         let (nr, ng, nb) = hsl_to_srgb(h, s_hsl, l);
 
         // Now re-encode through the same path as `hex()` (sRGB→linear,

@@ -21,6 +21,7 @@ fn save_load_roundtrip_preserves_all_fields() {
             cursor_shape: CursorShape::Bar,
         },
         extra: toml::Table::new(),
+        accessibility: Default::default(),
         locale: String::new(),
         tab_close_button_color: Some("#ff5555".to_string()),
         logging: sonic_cfg::LoggingConfig::default(),

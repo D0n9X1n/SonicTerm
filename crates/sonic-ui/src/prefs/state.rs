@@ -495,6 +495,7 @@ impl PrefsState {
                     now,
                     super::layout::TOGGLE_KNOB,
                     super::layout::TOGGLE_KNOB_MARGIN,
+                    self.config.accessibility.reduced_motion,
                 );
                 t.clear_anim_if_done(done);
             }
