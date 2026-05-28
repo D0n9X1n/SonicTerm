@@ -4261,6 +4261,7 @@ dependencies = [
  "serde_json",
  "sonic-core",
  "sonic-gpu",
+ "sonic-render-model",
  "sonic-shared",
  "sonic-text",
  "sonic-ui",
@@ -4384,6 +4385,7 @@ name = "sonic-render-model"
 version = "0.3.0"
 dependencies = [
  "sonic-cfg",
+ "sonic-grid",
  "sonic-text",
  "sonic-types",
 ]
@@ -4416,6 +4418,8 @@ dependencies = [
  "serde_json",
  "sonic-core",
  "sonic-gpu",
+ "sonic-grid",
+ "sonic-render-model",
  "sonic-text",
  "sonic-ui",
  "swash",

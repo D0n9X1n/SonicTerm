@@ -32,9 +32,9 @@ use winit::{
 
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
-    mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, PaneState, TabState,
-    UserEvent,
+    mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_panes_to_rects,
+    shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow,
+    PaneState, TabState, UserEvent,
 };
 use crate::app::integrated_titlebar_inset;
 use sonic_ui::prefs::PrefsHit;
@@ -92,15 +92,14 @@ impl App {
         if font_changed {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
-                // Cell metrics changed → the renderer now fits a
-                // different (cols, rows) inside the same window
-                // pixels. Resize every pane's grid + PTY so the shell
-                // and parser agree with what we'll actually draw.
-                // Without this, the grid keeps drawing at the old
-                // dimensions and `stty size` inside the shell reports
-                // stale values until the user drags the window edge.
-                let (cols, rows) = r.cells();
-                resize_all_panes(&self.panes, cols, rows);
+            }
+            // Cell metrics changed → resize each pane to its own PaneRect.
+            // See docs/specs/per-pane-grids.md for why this is per-pane,
+            // not whole-window.
+            let rects = self.compute_active_pane_rects();
+            if let Some(r) = self.renderer.as_ref() {
+                let (cw, ch) = r.cell_size();
+                resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
             // Apply the same swap to every torn-out child window. Each
             // child owns its own GpuRenderer, so it needs the font
@@ -112,8 +111,9 @@ impl App {
                     new_cfg.font.size,
                     new_cfg.font.line_height,
                 );
-                let (cols, rows) = child.renderer.cells();
-                resize_all_panes(&child.panes, cols, rows);
+                let rects = App::compute_pane_rects_for(child);
+                let (cw, ch) = child.renderer.cell_size();
+                resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -158,13 +158,17 @@ impl App {
             ];
             if let Some(r) = self.renderer.as_mut() {
                 r.set_padding(pad);
-                let (cols, rows) = r.cells();
-                resize_all_panes(&self.panes, cols, rows);
+            }
+            let rects = self.compute_active_pane_rects();
+            if let Some(r) = self.renderer.as_ref() {
+                let (cw, ch) = r.cell_size();
+                resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
             for child in self.child_windows.values_mut() {
                 child.renderer.set_padding(pad);
-                let (cols, rows) = child.renderer.cells();
-                resize_all_panes(&child.panes, cols, rows);
+                let rects = App::compute_pane_rects_for(child);
+                let (cw, ch) = child.renderer.cell_size();
+                resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
             tracing::info!(
                 "live-reload: padding -> l={} r={} t={} b={}",
@@ -283,13 +287,17 @@ impl App {
         let line_h = self.config.font.line_height;
         if let Some(r) = self.renderer.as_mut() {
             r.set_font(&family, size, line_h);
-            let (cols, rows) = r.cells();
-            resize_all_panes(&self.panes, cols, rows);
+        }
+        let rects = self.compute_active_pane_rects();
+        if let Some(r) = self.renderer.as_ref() {
+            let (cw, ch) = r.cell_size();
+            resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }
         for child in self.child_windows.values_mut() {
             child.renderer.set_font(&family, size, line_h);
-            let (cols, rows) = child.renderer.cells();
-            resize_all_panes(&child.panes, cols, rows);
+            let rects = App::compute_pane_rects_for(child);
+            let (cw, ch) = child.renderer.cell_size();
+            resize_panes_to_rects(&child.panes, &rects, cw, ch);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -303,16 +311,23 @@ impl App {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
-        if let Some(r) = self.renderer.as_mut() {
-            if r.set_tab_bar_visible(visible) {
-                let (cols, rows) = r.cells();
-                resize_all_panes(&self.panes, cols, rows);
+        let main_changed = if let Some(r) = self.renderer.as_mut() {
+            r.set_tab_bar_visible(visible)
+        } else {
+            false
+        };
+        if main_changed {
+            let rects = self.compute_active_pane_rects();
+            if let Some(r) = self.renderer.as_ref() {
+                let (cw, ch) = r.cell_size();
+                resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
         }
         for child in self.child_windows.values_mut() {
             if child.renderer.set_tab_bar_visible(visible) {
-                let (cols, rows) = child.renderer.cells();
-                resize_all_panes(&child.panes, cols, rows);
+                let rects = App::compute_pane_rects_for(child);
+                let (cw, ch) = child.renderer.cell_size();
+                resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
         }
         if let Some(w) = self.window.as_ref() {

@@ -256,6 +256,48 @@ pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     }
 }
 
+/// Resize each pane in `panes` to the cells that fit inside its own
+/// `sonic_ui::pane::Rect` (window-pixel logical rect produced by
+/// `PaneTree::layout`). `cell_w` / `cell_h` are the logical cell metrics
+/// from the renderer (`Renderer::cell_size()`).
+///
+/// This is the per-pane sizing counterpart to [`resize_all_panes`]: the
+/// older helper sized every pane to the same whole-window `(cols, rows)`,
+/// which is wrong as soon as a tab has more than one pane (an inactive
+/// pane's grid then thinks it has more columns than it actually shows,
+/// so TUIs like vim/htop draw past their visible border and the wrap
+/// column is wrong on resize).
+///
+/// CLAUDE.md §4: uses `parser.lock()` (NOT `try_lock`) — same as
+/// `resize_all_panes`. Call sites are app-thread (WindowEvent::Resized
+/// and config-live-reload), not the render hot path, so the lock is
+/// safe and a dropped resize would leave the grid wrong-sized for the
+/// next burst of pty output.
+///
+/// `rects` whose `id` is missing from `panes` are silently skipped
+/// (covers the brief window during tab close where the layout list
+/// includes a pane that was just removed).
+///
+/// `pub` + `#[doc(hidden)]` so integration tests can drive it without a
+/// live wgpu surface; no `__test_support` shim (CLAUDE.md §5).
+#[doc(hidden)]
+pub fn resize_panes_to_rects(
+    panes: &HashMap<u64, PaneState>,
+    rects: &[(u64, sonic_ui::pane::Rect)],
+    cell_w: f32,
+    cell_h: f32,
+) {
+    for (id, rect) in rects {
+        let Some(pane) = panes.get(id) else { continue };
+        let cols = ((rect.w / cell_w).floor() as i32).max(1) as u16;
+        let rows = ((rect.h / cell_h).floor() as i32).max(1) as u16;
+        pane.parser.lock().grid_mut().resize(cols, rows);
+        if let Some(pty) = pane.pty.as_ref() {
+            (pty.resize)(cols, rows);
+        }
+    }
+}
+
 /// Mark every pane's grid fully dirty. Used by triggers that change
 /// the renderer's *presentation* invariant without mutating any cell
 /// content (theme swap, font swap, focus transition, selection change).
@@ -665,6 +707,42 @@ pub struct App {
 }
 
 impl App {
+    /// Compute window-pixel rects for every pane in the active tab,
+    /// using the main window renderer's logical size + insets + padding.
+    /// Returns an empty Vec if there is no renderer yet (pre-Resumed) or
+    /// no active tab. Mirrors the inline computation in
+    /// `window_event.rs` (~line 110); factored so resize/config-reload
+    /// call sites stay one-liners.
+    pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonic_ui::pane::Rect)> {
+        let tab_idx = self.tabs.active_index();
+        let Some(st) = self.tab_states.get(tab_idx) else { return Vec::new() };
+        let Some(r) = self.renderer.as_ref() else { return Vec::new() };
+        let (w, h) = r.logical_size();
+        let top = r.top_inset();
+        let pl = r.padding_left();
+        let pr = r.padding_right();
+        let pb = r.padding_bottom();
+        let outer =
+            sonic_ui::pane::Rect::new(pl, top, (w - pl - pr).max(0.0), (h - top - pb).max(0.0));
+        st.tree.layout(outer)
+    }
+
+    /// Same as [`Self::compute_active_pane_rects`] but for a torn-out
+    /// child window (its own renderer + tab_states).
+    pub(crate) fn compute_pane_rects_for(child: &ChildWindow) -> Vec<(u64, sonic_ui::pane::Rect)> {
+        let tab_idx = child.tabs.active_index();
+        let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
+        let r = &child.renderer;
+        let (w, h) = r.logical_size();
+        let top = r.top_inset();
+        let pl = r.padding_left();
+        let pr = r.padding_right();
+        let pb = r.padding_bottom();
+        let outer =
+            sonic_ui::pane::Rect::new(pl, top, (w - pl - pr).max(0.0), (h - top - pb).max(0.0));
+        st.tree.layout(outer)
+    }
+
     #[doc(hidden)]
     pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
         Self::new_with_proxy(theme, config, keymap, None)

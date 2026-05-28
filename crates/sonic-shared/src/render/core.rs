@@ -235,6 +235,13 @@ pub struct GpuRenderer {
     /// changed splices its cached output straight into the frame and
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: crate::row_glyph_cache::RowGlyphCache,
+    /// Per-pane origins recorded on the most recent `render()` call.
+    /// `(pane_id, [origin_x_px, origin_y_px])` for every pane in the
+    /// frame's pane slice. Test-only diagnostic surfaced through
+    /// [`Self::last_emitted_origins`]; production code must not rely
+    /// on it. Part B step 7 hook for the per-pane render integration
+    /// test.
+    last_emit_origins: Vec<(u64, [f32; 2])>,
     /// Monotonic counter bumped on theme / default-fg / default-bg
     /// changes. Folded into every `row_hash` so palette swaps
     /// invalidate cached colours without iterating the cache.
@@ -248,9 +255,14 @@ pub struct GpuRenderer {
 /// frame. If two consecutive frames produce an equal key the second one
 /// is a no-op for the user, so the renderer skips text shaping, quad
 /// rebuild and GPU submission entirely.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameKey {
     grid_revision: u64,
+    /// Per-pane grid revisions. Part B step 5: split panes each own a Grid,
+    /// so a write to an inactive pane (e.g. background `tail -f`) must
+    /// invalidate the cached frame even though `grid_revision` (active pane)
+    /// is unchanged.
+    pane_revs: Vec<(u64, u64)>,
     selection: Option<Selection>,
     cursor_visible: bool,
     tab: u64,
@@ -575,6 +587,7 @@ impl GpuRenderer {
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
             row_glyph_cache: crate::row_glyph_cache::RowGlyphCache::new(),
+            last_emit_origins: Vec::new(),
             style_rev: 0,
             drag_chip: None,
         })
@@ -804,6 +817,24 @@ impl GpuRenderer {
     pub fn padding_bottom(&self) -> f32 {
         self.padding_bottom
     }
+    /// Per-pane origins recorded by the most recent `render()` call, as
+    /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
+    /// Part B step 7 per-pane render integration test. Production code
+    /// must not depend on this.
+    #[doc(hidden)]
+    pub fn last_emitted_origins(&self) -> Vec<(u64, [f32; 2])> {
+        self.last_emit_origins.clone()
+    }
+
+    /// PR #199 Fix 1 test hook: number of panes the most recent
+    /// `render()` call received in its slice. The integration test
+    /// asserts this equals the active tab's pane count so a regression
+    /// to a single-element slice (the original bug) is caught
+    /// mechanically. Production code must not depend on this.
+    #[doc(hidden)]
+    pub fn last_panes_received(&self) -> usize {
+        self.last_emit_origins.len()
+    }
 
     /// Update all four padding values at once (used by the live config
     /// reload path so editing `sonic.toml` takes effect without restart).
@@ -867,6 +898,17 @@ impl GpuRenderer {
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
         (cols.max(1), rows.max(1))
+    }
+
+    /// Logical cell metrics (width, height) in CSS pixels. Pair with a
+    /// `sonic_ui::pane::Rect` from `PaneTree::layout` to compute how many
+    /// cells fit in that rect: `cols = (rect.w / cell_w).floor()`,
+    /// similarly rows.
+    ///
+    /// Returned values are positive (the renderer asserts a positive glyph
+    /// advance at font load).
+    pub fn cell_size(&self) -> (f32, f32) {
+        (self.cell_w, self.cell_h)
     }
 
     /// Current font family in effect. Test-only inspector for the
@@ -1159,18 +1201,91 @@ impl GpuRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
-        grid: &mut Grid,
+        panes: &mut [sonic_render_model::PaneRender<'_>],
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
         tabs: &TabBar,
-        pane_rects: &[(u64, PaneRect)],
-        active_pane: u64,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
+        // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
+        // unchanged inside the body — we extract the active pane's grid into
+        // the local `grid` binding and derive `pane_rects` / `active_pane`
+        // from the slice. The mechanical re-anchor of the 62
+        // `padding_left`/`top_inset()` sites to per-pane origins is tracked
+        // separately. If all panes failed to lock (empty slice), skip the
+        // frame — callers are expected to filter dropped locks before calling.
+        if panes.is_empty() {
+            return Ok(());
+        }
+        // Part B step 7: record per-pane origins for the integration test
+        // hook. Populated unconditionally on every render() call so the
+        // test can assert that all panes' origins reach the renderer with
+        // the expected x/y in physical pixels.
+        self.last_emit_origins =
+            panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
+        let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
+        let active_pane: u64 = panes[active_idx].id;
+        // Derive the legacy `pane_rects` vector from the slice so downstream
+        // code (cache key, focus-ring quad, etc.) continues to work
+        // unchanged. PaneRender::rect_px is already in physical px adjusted
+        // for top_inset — same units as the old PaneRect.
+        let pane_rects: Vec<(u64, PaneRect)> = panes
+            .iter()
+            .map(|p| {
+                (
+                    p.id,
+                    PaneRect {
+                        x: p.rect_px.x as f32,
+                        y: p.rect_px.y as f32,
+                        w: p.rect_px.w as f32,
+                        h: p.rect_px.h as f32,
+                    },
+                )
+            })
+            .collect();
+        let pane_rects = pane_rects.as_slice();
+        // Part B step 3 (Fix 2): collect immutable per-pane views for ALL
+        // panes so the cell-emission body below can iterate per-pane. The
+        // grid is borrowed shared (`&Grid`) — every read in the loop
+        // (`scrollback_len`, `dirty_rows`, `row_at_abs`, `rows`, `cursor`,
+        // `prompts`) is immutable, so we don't need `&mut Grid` and we
+        // don't need raw pointers. This eliminates the overlapping
+        // `&mut Grid` UB risk Haiku flagged.
+        struct PaneView<'g> {
+            grid: &'g Grid,
+            pane_id: u64,
+            origin_x: f32,
+            origin_y: f32,
+            is_active: bool,
+        }
+        let pane_views: Vec<PaneView<'_>> = panes
+            .iter()
+            .map(|p| PaneView {
+                grid: &*p.grid,
+                pane_id: p.id,
+                origin_x: p.rect_px.x as f32,
+                origin_y: p.rect_px.y as f32,
+                is_active: p.is_active,
+            })
+            .collect();
+        // Pre-compute pane revisions for FrameKey from the safe borrows.
+        let pane_revs_vec: Vec<(u64, u64)> =
+            pane_views.iter().map(|pv| (pv.pane_id, pv.grid.revision())).collect();
+        // Active pane's origin. Selection / cursor / overlays anchor to
+        // this — they apply only to the focused pane (Part B step 4 /
+        // Fix 3). Lifting these out as plain `f32` makes the overlay
+        // sites below borrow-free.
+        let active_view_idx = pane_views.iter().position(|p| p.is_active).unwrap_or(0);
+        let active_origin_x: f32 = pane_views[active_view_idx].origin_x;
+        let active_origin_y: f32 = pane_views[active_view_idx].origin_y;
+        // Active grid borrow — shared, used by overlays that read the
+        // active pane's cursor/scrollback/prompts. Disjoint from the
+        // per-pane loop (which uses its own per-iteration borrow).
+        let grid: &Grid = pane_views[active_view_idx].grid;
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
         // (one integer increment) and unconditional — even on a fully
@@ -1284,6 +1399,7 @@ impl GpuRenderer {
         };
         let key = FrameKey {
             grid_revision: grid.revision(),
+            pane_revs: pane_revs_vec,
             selection: selection.copied(),
             cursor_visible,
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
@@ -1314,7 +1430,7 @@ impl GpuRenderer {
             hover_close: hover_close_hit,
             close_override: u8::from(self.tab_close_override.is_some()),
         };
-        if Some(key) == self.last_frame_key {
+        if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             // Blink redraws are now scheduled in the app event loop via
@@ -1335,7 +1451,13 @@ impl GpuRenderer {
         // swash rasterizer + atlas. No per-row cache, no rich-text
         // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
-        let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
+        // Underline runs collected per pane. We record (origin_x, origin_y, row,
+        // col_a, col_b) where origin_{x,y} is the PANE's origin (pad / top_inset)
+        // captured at insert time. Pre-fix this was (row, col_a, col_b) and the
+        // emit loop used `active_origin_x/y` for every entry — that placed
+        // inactive-pane underlines under the active pane's coordinates (Haiku
+        // round-3 finding on PR #199).
+        let mut underlines: Vec<(f32, f32, u16, u16, u16)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Missing-glyph "tofu" outlines collected during the cell walk.
@@ -1360,8 +1482,8 @@ impl GpuRenderer {
         // `sonic-shared/tests/hidpi2.rs::glyph_rect_scales_with_dpi`.
         let sw = self.config.width as f32 / self.scale_factor;
         let sh = self.config.height as f32 / self.scale_factor;
-        let top_inset = self.top_inset();
-        let pad = self.padding_left;
+        // Note: window-level `pad` / `top_inset` no longer cached here;
+        // each pane uses its own origin via PaneView (Part B step 3).
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         // Baseline offset inside the cell box. swash returns
@@ -1378,195 +1500,208 @@ impl GpuRenderer {
                 &self.font_family,
                 self.font_size * self.scale_factor,
             );
-            // Resolve which absolute row sits at the top of the rendered
-            // viewport. When the user hasn't scrolled (or hasn't scrolled
-            // past the visible bottom), this is the live-buffer top, i.e.
-            // `scrollback_len()`. Otherwise it's the explicit absolute
-            // index requested by the scroll action (e.g. a prompt row).
-            let live_top_abs = grid.scrollback_len() as u64;
-            let max_top_abs = live_top_abs; // never scroll below live
-            let view_top_abs = viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
-            self.row_glyph_cache.resize(grid.rows);
-            // Drop cache entries for every row the VT thread mutated
-            // since the last frame. `grid.dirty_rows()` already covers
-            // theme/font/resize/scroll/focus/selection changes via the
-            // PR #130 invalidation hooks; renderer-side state changes
-            // (font/theme/scale/resize) already cleared the cache
-            // wholesale above. Translating dirty row indices to
-            // absolute rows uses the current view top — the same key
-            // we'll look up by below.
-            // Placeholder pane id until #199's per-pane render loop
-            // threads real pane identifiers through. Single-pane today
-            // means a single id is correct.
-            let pane_id: crate::row_glyph_cache::PaneId = 0;
-            for r in grid.dirty_rows() {
-                self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
-            }
-            // Normalise selection once outside the loop so we hash a
-            // canonical bbox per row.
-            let sel_bbox: Option<(u16, u16, u16, u16)> = selection.map(|s| {
-                let (a, b) = s.normalized();
-                (a.0, a.1, b.0, b.1)
-            });
-            for r in 0..grid.rows {
-                let row_abs = view_top_abs + r as u64;
-                let Some(row) = grid.row_at_abs(row_abs) else {
-                    continue;
-                };
-                // ------ Cache lookup ------
-                let key = crate::row_glyph_cache::row_hash(
-                    view_top_abs,
-                    r as usize,
-                    row,
-                    self.style_rev,
-                    cell_w,
-                    cell_h,
-                    self.scale_factor,
-                    sel_bbox,
-                );
-                if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
-                    glyph_instances.extend_from_slice(&cached.glyphs);
-                    for (s, e) in &cached.underlines {
-                        underlines.push((r, *s, *e));
-                    }
-                    for t in &cached.tofu {
-                        missing_tofu.push(*t);
-                    }
-                    missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
-                    continue;
+            // Part B step 3: iterate every pane. Each iteration rebinds
+            // `grid` to that pane's Grid (via the raw pointer collected
+            // into pane_views above), uses the pane's own origin instead
+            // of the window-level padding/inset, and threads its own
+            // pane_id into the row_glyph_cache so split panes don't
+            // collide on absolute-row keys (PR #208 prereq).
+            for pv in &pane_views {
+                let grid: &Grid = pv.grid;
+                let pane_id: crate::row_glyph_cache::PaneId = pv.pane_id;
+                let pad = pv.origin_x;
+                let top_inset = pv.origin_y;
+                // Resolve which absolute row sits at the top of the rendered
+                // viewport. When the user hasn't scrolled (or hasn't scrolled
+                // past the visible bottom), this is the live-buffer top, i.e.
+                // `scrollback_len()`. Otherwise it's the explicit absolute
+                // index requested by the scroll action (e.g. a prompt row).
+                // viewport. When the user hasn't scrolled (or hasn't scrolled
+                // past the visible bottom), this is the live-buffer top, i.e.
+                // `scrollback_len()`. Otherwise it's the explicit absolute
+                // index requested by the scroll action (e.g. a prompt row).
+                let live_top_abs = grid.scrollback_len() as u64;
+                let max_top_abs = live_top_abs; // never scroll below live
+                let view_top_abs =
+                    viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
+                self.row_glyph_cache.resize(grid.rows);
+                // Drop cache entries for every row the VT thread mutated
+                // since the last frame. `grid.dirty_rows()` already covers
+                // theme/font/resize/scroll/focus/selection changes via the
+                // PR #130 invalidation hooks; renderer-side state changes
+                // (font/theme/scale/resize) already cleared the cache
+                // wholesale above. Translating dirty row indices to
+                // absolute rows uses the current view top — the same key
+                // we'll look up by below.
+                for r in grid.dirty_rows() {
+                    self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
                 }
-                // ------ Miss: shape into row-local buffers, then
-                // splice into the frame buffers AND insert into the
-                // cache. Keeping the per-row work in local Vecs is
-                // what lets us cache without scanning the frame
-                // buffers after the fact. ------
-                let glyph_base = glyph_instances.len();
-                let tofu_base = missing_tofu.len();
-                let miss_base = missing_chars_this_frame.len();
-                let mut row_underlines: Vec<(u16, u16)> = Vec::new();
-                let mut ul_start: Option<u16> = None;
-                let mut last_visible_col: u16 = 0;
-                // First pass: per-cell underline coalescing (unchanged
-                // — underlines are a cell-level decoration, independent
-                // of shaping).
-                for (col, cell) in row.iter().enumerate() {
-                    if cell.flags.contains(CellFlags::WIDE_CONT) {
+                // Normalise selection once outside the loop so we hash a
+                // canonical bbox per row.
+                let sel_bbox: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+                    let (a, b) = s.normalized();
+                    (a.0, a.1, b.0, b.1)
+                });
+                for r in 0..grid.rows {
+                    let row_abs = view_top_abs + r as u64;
+                    let Some(row) = grid.row_at_abs(row_abs) else {
                         continue;
-                    }
-                    last_visible_col = col as u16;
-                    if cell.flags.contains(CellFlags::UNDERLINE) {
-                        if ul_start.is_none() {
-                            ul_start = Some(col as u16);
-                        }
-                    } else if let Some(s) = ul_start.take() {
-                        let end = (col as u16).saturating_sub(1);
-                        row_underlines.push((s, end));
-                        underlines.push((r, s, end));
-                    }
-                }
-                if let Some(s) = ul_start.take() {
-                    row_underlines.push((s, last_visible_col));
-                    underlines.push((r, s, last_visible_col));
-                }
-
-                // Second pass: group cells into style runs and shape
-                // each run through cosmic-text. The shaper composes
-                // ZWJ sequences and ligatures into single glyphs when
-                // the font supports them; otherwise it produces 1:1
-                // output identical to the old char-based path.
-                let mut run_cells: Vec<(u16, Cell)> = Vec::new();
-                let mut run_style: Option<RunStyle> = None;
-                let mut run_first_col: u16 = 0;
-                for (col, cell) in row.iter().enumerate() {
-                    if cell.flags.contains(CellFlags::WIDE_CONT) {
-                        continue;
-                    }
-                    let style = RunStyle::from_cell(cell);
-                    match run_style {
-                        None => {
-                            run_style = Some(style);
-                            run_first_col = col as u16;
-                            run_cells.push((col as u16, cell.clone()));
-                        }
-                        Some(s) if s == style => {
-                            run_cells.push((col as u16, cell.clone()));
-                        }
-                        Some(s) => {
-                            Self::flush_shape_run(
-                                &mut self.glyph_atlas,
-                                &self.font_family,
-                                self.font_size * self.scale_factor,
-                                self.scale_factor,
-                                &mut rasterizer,
-                                &mut self.shape_cache,
-                                &mut glyph_instances,
-                                &mut missing_tofu,
-                                &mut missing_chars_this_frame,
-                                r,
-                                run_first_col,
-                                s,
-                                &run_cells,
-                                theme,
-                                fg_default,
-                                cell_w,
-                                cell_h,
-                                top_inset,
-                                pad,
-                                sw,
-                                sh,
-                                baseline_y_in_cell,
-                            );
-                            run_cells.clear();
-                            run_style = Some(style);
-                            run_first_col = col as u16;
-                            run_cells.push((col as u16, cell.clone()));
-                        }
-                    }
-                }
-                if let Some(s) = run_style {
-                    Self::flush_shape_run(
-                        &mut self.glyph_atlas,
-                        &self.font_family,
-                        self.font_size * self.scale_factor,
-                        self.scale_factor,
-                        &mut rasterizer,
-                        &mut self.shape_cache,
-                        &mut glyph_instances,
-                        &mut missing_tofu,
-                        &mut missing_chars_this_frame,
-                        r,
-                        run_first_col,
-                        s,
-                        &run_cells,
-                        theme,
-                        fg_default,
+                    };
+                    // ------ Cache lookup ------
+                    let key = crate::row_glyph_cache::row_hash(
+                        view_top_abs,
+                        r as usize,
+                        row,
+                        self.style_rev,
                         cell_w,
                         cell_h,
-                        top_inset,
-                        pad,
-                        sw,
-                        sh,
-                        baseline_y_in_cell,
+                        self.scale_factor,
+                        sel_bbox,
+                    );
+                    if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
+                        glyph_instances.extend_from_slice(&cached.glyphs);
+                        for (s, e) in &cached.underlines {
+                            underlines.push((pad, top_inset, r, *s, *e));
+                        }
+                        for t in &cached.tofu {
+                            missing_tofu.push(*t);
+                        }
+                        missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
+                        continue;
+                    }
+                    // ------ Miss: shape into row-local buffers, then
+                    // splice into the frame buffers AND insert into the
+                    // cache. Keeping the per-row work in local Vecs is
+                    // what lets us cache without scanning the frame
+                    // buffers after the fact. ------
+                    let glyph_base = glyph_instances.len();
+                    let tofu_base = missing_tofu.len();
+                    let miss_base = missing_chars_this_frame.len();
+                    let mut row_underlines: Vec<(u16, u16)> = Vec::new();
+                    let mut ul_start: Option<u16> = None;
+                    let mut last_visible_col: u16 = 0;
+                    // First pass: per-cell underline coalescing (unchanged
+                    // — underlines are a cell-level decoration, independent
+                    // of shaping).
+                    for (col, cell) in row.iter().enumerate() {
+                        if cell.flags.contains(CellFlags::WIDE_CONT) {
+                            continue;
+                        }
+                        last_visible_col = col as u16;
+                        if cell.flags.contains(CellFlags::UNDERLINE) {
+                            if ul_start.is_none() {
+                                ul_start = Some(col as u16);
+                            }
+                        } else if let Some(s) = ul_start.take() {
+                            let end = (col as u16).saturating_sub(1);
+                            row_underlines.push((s, end));
+                            underlines.push((pad, top_inset, r, s, end));
+                        }
+                    }
+                    if let Some(s) = ul_start.take() {
+                        row_underlines.push((s, last_visible_col));
+                        underlines.push((pad, top_inset, r, s, last_visible_col));
+                    }
+
+                    // Second pass: group cells into style runs and shape
+                    // each run through cosmic-text. The shaper composes
+                    // ZWJ sequences and ligatures into single glyphs when
+                    // the font supports them; otherwise it produces 1:1
+                    // output identical to the old char-based path.
+                    let mut run_cells: Vec<(u16, Cell)> = Vec::new();
+                    let mut run_style: Option<RunStyle> = None;
+                    let mut run_first_col: u16 = 0;
+                    for (col, cell) in row.iter().enumerate() {
+                        if cell.flags.contains(CellFlags::WIDE_CONT) {
+                            continue;
+                        }
+                        let style = RunStyle::from_cell(cell);
+                        match run_style {
+                            None => {
+                                run_style = Some(style);
+                                run_first_col = col as u16;
+                                run_cells.push((col as u16, cell.clone()));
+                            }
+                            Some(s) if s == style => {
+                                run_cells.push((col as u16, cell.clone()));
+                            }
+                            Some(s) => {
+                                Self::flush_shape_run(
+                                    &mut self.glyph_atlas,
+                                    &self.font_family,
+                                    self.font_size * self.scale_factor,
+                                    self.scale_factor,
+                                    &mut rasterizer,
+                                    &mut self.shape_cache,
+                                    &mut glyph_instances,
+                                    &mut missing_tofu,
+                                    &mut missing_chars_this_frame,
+                                    r,
+                                    run_first_col,
+                                    s,
+                                    &run_cells,
+                                    theme,
+                                    fg_default,
+                                    cell_w,
+                                    cell_h,
+                                    top_inset,
+                                    pad,
+                                    sw,
+                                    sh,
+                                    baseline_y_in_cell,
+                                );
+                                run_cells.clear();
+                                run_style = Some(style);
+                                run_first_col = col as u16;
+                                run_cells.push((col as u16, cell.clone()));
+                            }
+                        }
+                    }
+                    if let Some(s) = run_style {
+                        Self::flush_shape_run(
+                            &mut self.glyph_atlas,
+                            &self.font_family,
+                            self.font_size * self.scale_factor,
+                            self.scale_factor,
+                            &mut rasterizer,
+                            &mut self.shape_cache,
+                            &mut glyph_instances,
+                            &mut missing_tofu,
+                            &mut missing_chars_this_frame,
+                            r,
+                            run_first_col,
+                            s,
+                            &run_cells,
+                            theme,
+                            fg_default,
+                            cell_w,
+                            cell_h,
+                            top_inset,
+                            pad,
+                            sw,
+                            sh,
+                            baseline_y_in_cell,
+                        );
+                    }
+                    // Capture this row's contributions and insert into
+                    // the cache so subsequent unchanged frames replay
+                    // without shaping.
+                    let row_glyphs = glyph_instances[glyph_base..].to_vec();
+                    let row_tofu = missing_tofu[tofu_base..].to_vec();
+                    let row_missing = missing_chars_this_frame[miss_base..].to_vec();
+                    self.row_glyph_cache.insert(
+                        pane_id,
+                        row_abs,
+                        key,
+                        crate::row_glyph_cache::CachedRow {
+                            glyphs: row_glyphs,
+                            underlines: row_underlines,
+                            tofu: row_tofu,
+                            missing_chars: row_missing,
+                        },
                     );
                 }
-                // Capture this row's contributions and insert into
-                // the cache so subsequent unchanged frames replay
-                // without shaping.
-                let row_glyphs = glyph_instances[glyph_base..].to_vec();
-                let row_tofu = missing_tofu[tofu_base..].to_vec();
-                let row_missing = missing_chars_this_frame[miss_base..].to_vec();
-                self.row_glyph_cache.insert(
-                    pane_id,
-                    row_abs,
-                    key,
-                    crate::row_glyph_cache::CachedRow {
-                        glyphs: row_glyphs,
-                        underlines: row_underlines,
-                        tofu: row_tofu,
-                        missing_chars: row_missing,
-                    },
-                );
-            }
+            } // end per-pane loop (Part B step 3)
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
@@ -1583,21 +1718,26 @@ impl GpuRenderer {
         // wide quad (an 80-col `\033[41m` fill becomes 1 quad, not 80).
         // Cells whose bg resolves to the theme default are skipped: the
         // surface `LoadOp::Clear(self.bg)` already covers that area.
-        emit_cell_bg_quads(
-            grid,
-            {
-                let live_top_abs = grid.scrollback_len() as u64;
-                viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
-            },
-            theme,
-            pad,
-            top_inset,
-            cell_w,
-            cell_h,
-            sw,
-            sh,
-            &mut quads,
-        );
+        // Part B step 3: emit bg quads for EVERY pane using each pane's
+        // own origin, not just the active pane.
+        for pv in &pane_views {
+            let pv_grid: &Grid = pv.grid;
+            emit_cell_bg_quads(
+                pv_grid,
+                {
+                    let live_top_abs = pv_grid.scrollback_len() as u64;
+                    viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+                },
+                theme,
+                pv.origin_x,
+                pv.origin_y,
+                cell_w,
+                cell_h,
+                sw,
+                sh,
+                &mut quads,
+            );
+        }
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
@@ -1611,8 +1751,8 @@ impl GpuRenderer {
                     if col_b < col_a {
                         continue;
                     }
-                    let x = self.padding_left + f32::from(col_a) * self.cell_w;
-                    let y = self.top_inset() + f32::from(r) * self.cell_h;
+                    let x = active_origin_x + f32::from(col_a) * self.cell_w;
+                    let y = active_origin_y + f32::from(r) * self.cell_h;
                     let w = f32::from(col_b - col_a + 1) * self.cell_w;
                     quads.push(QuadInstance {
                         rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
@@ -1630,8 +1770,8 @@ impl GpuRenderer {
             let live_top = grid.scrollback_len() as u64;
             let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
             if view_top == live_top {
-                let cx = self.padding_left + f32::from(grid.cursor.col) * self.cell_w;
-                let cy = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
+                let cx = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
+                let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
                 // Modulate the cursor accent with the current blink alpha.
                 // The base color is opaque (set at theme load) so we can
                 // dim through the full range without losing chroma — that
@@ -1787,9 +1927,9 @@ impl GpuRenderer {
                 .collect()
         };
         for row in prompt_rows {
-            let mx = (self.padding_left - marker_w - 1.0).max(0.0);
+            let mx = (active_origin_x - marker_w - 1.0).max(0.0);
             let my =
-                self.top_inset() + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
+                active_origin_y + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
             quads.push(QuadInstance {
                 rect: px_to_ndc(mx, my, marker_w, marker_h, sw, sh),
                 color: marker_color,
@@ -1803,8 +1943,8 @@ impl GpuRenderer {
         let hl_runs = collect_hyperlink_runs(grid);
         let hl_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &hl_runs {
-            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
-            let y = self.top_inset() + f32::from(*row) * self.cell_h;
+            let x = active_origin_x + f32::from(*col_a) * self.cell_w;
+            let y = active_origin_y + f32::from(*row) * self.cell_h;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
@@ -1823,10 +1963,9 @@ impl GpuRenderer {
         // surface format doesn't double-encode (matches the body glyph path).
         let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
-        for (row, col_a, col_b) in &underlines {
-            let x = self.padding_left + f32::from(*col_a) * self.cell_w;
-            let y = self.top_inset() + f32::from(*row) * self.cell_h + self.cell_h
-                - underline_thickness;
+        for (origin_x, origin_y, row, col_a, col_b) in &underlines {
+            let x = *origin_x + f32::from(*col_a) * self.cell_w;
+            let y = *origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
@@ -2133,8 +2272,8 @@ impl GpuRenderer {
                 if visible_row >= grid.rows || m.col_end <= m.col_start {
                     continue;
                 }
-                let x = self.padding_left + f32::from(m.col_start) * self.cell_w;
-                let y = self.top_inset() + f32::from(visible_row) * self.cell_h;
+                let x = active_origin_x + f32::from(m.col_start) * self.cell_w;
+                let y = active_origin_y + f32::from(visible_row) * self.cell_h;
                 let w = f32::from(m.col_end - m.col_start) * self.cell_w;
                 let color = if Some(i) == cur_idx {
                     self.search_highlight_current
@@ -2369,8 +2508,8 @@ impl GpuRenderer {
 
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
-            let cursor_x = self.padding_left + f32::from(grid.cursor.col) * self.cell_w;
-            let cursor_y = self.top_inset() + f32::from(grid.cursor.row) * self.cell_h;
+            let cursor_x = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
+            let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
             ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
         });
         if let (Some(state), Some(layout)) = (ime, &ime_layout) {
@@ -2805,11 +2944,17 @@ impl GpuRenderer {
         // wakes us exactly at the next bucket boundary instead.
         // B2: the renderer has now consumed every dirty row's contents
         // into either the GPU pipeline or the row_cache. Clear the
-        // bitset so the next frame can re-use cached spans for the
-        // (likely many) rows that didn't change. clear_dirty does NOT
-        // bump grid.revision, so the FrameKey fast-path above still
-        // works for truly unchanged frames.
-        grid.clear_dirty();
+        // bitset on EVERY pane so the next frame can re-use cached
+        // spans for the (likely many) rows that didn't change.
+        // clear_dirty does NOT bump grid.revision, so the FrameKey
+        // fast-path above still works for truly unchanged frames.
+        // PR #199 Fix 2: this is the only mutation of any grid in this
+        // function — done via the original `panes: &mut [PaneRender]`
+        // borrow, which is now reborrowed once `pane_views` (immutable)
+        // is no longer live.
+        for p in panes.iter_mut() {
+            p.grid.clear_dirty();
+        }
         Ok(())
     }
 
