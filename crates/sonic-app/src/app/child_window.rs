@@ -643,7 +643,7 @@ fn child_copy_mode_handle_key(child: &mut ChildWindow, event: &KeyEvent) {
 
     let tab_idx = child.tabs.active_index();
     let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
-    if let Some(pane) = child.panes.get(&active_id) {
+    if let Some(pane) = child.panes.get_mut(&active_id) {
         let guard = pane.parser.lock();
         let grid = guard.grid();
         if let Some(quick_select) = state.quick_select.as_ref() {
@@ -684,6 +684,9 @@ fn child_copy_mode_handle_key(child: &mut ChildWindow, event: &KeyEvent) {
             if should_copy {
                 copied_text = child_copy_mode_selected_text(&state, grid);
                 should_exit = true;
+            } else {
+                pane.viewport_top_abs =
+                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
             }
         }
     }

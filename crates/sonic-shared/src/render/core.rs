@@ -978,6 +978,104 @@ impl GpuRenderer {
         self.last_emit_origins.clone()
     }
 
+    /// Translate a scrollback-absolute row into the row index visible in the
+    /// current viewport. Returns `None` when the row lies above or below the
+    /// rendered viewport.
+    #[doc(hidden)]
+    pub fn viewport_relative_row(
+        absolute_row: usize,
+        view_top_abs: u64,
+        visible_rows: u16,
+    ) -> Option<u16> {
+        let visible_row = absolute_row as i128 - i128::from(view_top_abs);
+        (0..i128::from(visible_rows)).contains(&visible_row).then_some(visible_row as u16)
+    }
+
+    /// Resolve the viewport top used by the renderer after clamping explicit
+    /// scrollback requests to the live bottom.
+    #[doc(hidden)]
+    pub fn resolved_view_top_abs(grid: &Grid, viewport_top_abs: Option<u64>) -> u64 {
+        let live_top_abs = grid.scrollback_len() as u64;
+        viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+    }
+
+    /// Adjust a viewport after copy-mode movement so the scrollback-absolute
+    /// copy-mode cursor remains visible.
+    #[doc(hidden)]
+    pub fn copy_mode_view_top_after_move(
+        copy_mode: &CopyModeState,
+        grid: &Grid,
+        viewport_top_abs: Option<u64>,
+    ) -> Option<u64> {
+        let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+        let cursor_row = copy_mode.cursor.1 as u64;
+        let viewport_height = u64::from(grid.rows);
+        if cursor_row < view_top_abs {
+            Some(cursor_row)
+        } else if cursor_row >= view_top_abs.saturating_add(viewport_height) {
+            Some(cursor_row.saturating_add(1).saturating_sub(viewport_height))
+        } else {
+            viewport_top_abs
+        }
+    }
+
+    /// Emit copy-mode selection and cursor quads using scrollback-absolute
+    /// copy-mode coordinates translated into viewport-relative rows.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_copy_mode_quads(
+        copy_mode: &CopyModeState,
+        grid: &Grid,
+        view_top_abs: u64,
+        origin_x: f32,
+        origin_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        sw: f32,
+        sh: f32,
+        selection_color: [f32; 4],
+        cursor_color: [f32; 4],
+        quads: &mut Vec<QuadInstance>,
+    ) -> Option<(f32, f32)> {
+        if let Some((start, end)) = copy_mode.selected_range() {
+            for row_abs in start.1..=end.1 {
+                let Some(visible_row) =
+                    Self::viewport_relative_row(row_abs, view_top_abs, grid.rows)
+                else {
+                    continue;
+                };
+                let col_a = if row_abs == start.1 { start.0 } else { 0 }.min(grid.cols as usize);
+                let col_b = if row_abs == end.1 {
+                    end.0.min(grid.cols.saturating_sub(1) as usize)
+                } else {
+                    grid.cols.saturating_sub(1) as usize
+                };
+                if col_b < col_a {
+                    continue;
+                }
+                let x = origin_x + col_a as f32 * cell_w;
+                let y = origin_y + f32::from(visible_row) * cell_h;
+                let w = (col_b - col_a + 1) as f32 * cell_w;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(x, y, w, cell_h, sw, sh),
+                    color: selection_color,
+                    ..Default::default()
+                });
+            }
+        }
+
+        let visible_row = Self::viewport_relative_row(copy_mode.cursor.1, view_top_abs, grid.rows)?;
+        let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
+        let cx = origin_x + copy_col as f32 * cell_w;
+        let cy = origin_y + f32::from(visible_row) * cell_h;
+        quads.push(QuadInstance {
+            rect: px_to_ndc(cx, cy, cell_w, cell_h, sw, sh),
+            color: cursor_color,
+            ..Default::default()
+        });
+        Some((cx, cy))
+    }
+
     /// PR #199 Fix 1 test hook: number of panes the most recent
     /// `render()` call received in its slice. The integration test
     /// asserts this equals the active tab's pane count so a regression
@@ -1704,10 +1802,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                let live_top_abs = grid.scrollback_len() as u64;
-                let max_top_abs = live_top_abs; // never scroll below live
-                let view_top_abs =
-                    viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
+                let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
                 self.row_glyph_cache.resize(grid.rows);
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
@@ -1908,10 +2003,7 @@ impl GpuRenderer {
             let pv_grid: &Grid = pv.grid;
             emit_cell_bg_quads(
                 pv_grid,
-                {
-                    let live_top_abs = pv_grid.scrollback_len() as u64;
-                    viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
-                },
+                Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
                 theme,
                 pv.origin_x,
                 pv.origin_y,
@@ -1961,52 +2053,36 @@ impl GpuRenderer {
                     &mut quads_overlay,
                 );
             }
-            if let Some((start, end)) = copy_mode.selected_range() {
-                let last_row = end.1.min(grid.rows.saturating_sub(1) as usize);
-                for r in start.1..=last_row {
-                    let col_a = if r == start.1 { start.0 } else { 0 }.min(grid.cols as usize);
-                    let col_b = if r == end.1 {
-                        end.0.min(grid.cols.saturating_sub(1) as usize)
-                    } else {
-                        grid.cols.saturating_sub(1) as usize
-                    };
-                    if col_b < col_a {
-                        continue;
-                    }
-                    let x = active_origin_x + col_a as f32 * self.cell_w;
-                    let y = active_origin_y + r as f32 * self.cell_h;
-                    let w = (col_b - col_a + 1) as f32 * self.cell_w;
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
-                        color: self.selection_color,
-                        ..Default::default()
-                    });
-                }
-            }
-
-            let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
-            let copy_row = copy_mode.cursor.1.min(grid.rows.saturating_sub(1) as usize);
-            let cx = active_origin_x + copy_col as f32 * self.cell_w;
-            let cy = active_origin_y + copy_row as f32 * self.cell_h;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
-                color: self.cursor_color,
-                ..Default::default()
-            });
-            let mut bg = self.bg_rgba;
-            bg[0] *= bg[3];
-            bg[1] *= bg[3];
-            bg[2] *= bg[3];
-            recolor_cursor_glyphs(
-                &mut glyph_instances,
-                cx,
-                cy,
+            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            if let Some((cx, cy)) = Self::emit_copy_mode_quads(
+                copy_mode,
+                grid,
+                view_top_abs,
+                active_origin_x,
+                active_origin_y,
                 self.cell_w,
                 self.cell_h,
                 sw,
                 sh,
-                bg,
-            );
+                self.selection_color,
+                self.cursor_color,
+                &mut quads,
+            ) {
+                let mut bg = self.bg_rgba;
+                bg[0] *= bg[3];
+                bg[1] *= bg[3];
+                bg[2] *= bg[3];
+                recolor_cursor_glyphs(
+                    &mut glyph_instances,
+                    cx,
+                    cy,
+                    self.cell_w,
+                    self.cell_h,
+                    sw,
+                    sh,
+                    bg,
+                );
+            }
         }
         if cursor_visible {
             // Hide the cursor when the viewport is scrolled away from the

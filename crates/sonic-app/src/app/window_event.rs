@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sonic_core::{grid::Grid, keymap::Action};
+use sonic_shared::render::GpuRenderer;
 use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -894,7 +895,8 @@ impl App {
         let mut should_copy = false;
         let mut should_exit = false;
 
-        if let Some(pane) = self.active_pane() {
+        let active_pane_id = self.active_pane_id();
+        if let Some(pane) = active_pane_id.and_then(|id| self.panes.get(&id)) {
             let guard = pane.parser.lock();
             let grid = guard.grid();
             if let Some(quick_select) = state.quick_select.as_ref() {
@@ -949,6 +951,15 @@ impl App {
                     self.set_clipboard_text(text);
                 }
                 should_exit = true;
+            } else {
+                let new_view_top =
+                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
+                drop(guard);
+                if let Some(id) = active_pane_id {
+                    if let Some(pane) = self.panes.get_mut(&id) {
+                        pane.viewport_top_abs = new_view_top;
+                    }
+                }
             }
         }
 
