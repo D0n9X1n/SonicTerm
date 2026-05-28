@@ -23,6 +23,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         extra: toml::Table::new(),
         locale: String::new(),
         tab_close_button_color: Some("#ff5555".to_string()),
+        logging: sonic_cfg::LoggingConfig::default(),
     };
     cfg.save(&path).unwrap();
     let reloaded = Config::load_or_default(&path).unwrap();
