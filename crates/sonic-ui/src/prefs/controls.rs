@@ -143,6 +143,7 @@ impl Toggle {
     /// end over [`Toggle::ANIM_MS`] milliseconds since
     /// [`Toggle::knob_anim_start`].
     ///
+    /// * If `reduced_motion` is true, returns the snapped position.
     /// * If `knob_anim_start` is `None`, returns the snapped position.
     /// * If `now - start >= ANIM_MS`, returns the snapped position.
     /// * Otherwise returns `lerp(start_pos, end_pos, t)` where
@@ -152,8 +153,14 @@ impl Toggle {
     ///
     /// Pure math + a single `now.duration_since(start)` read, so tests
     /// can inject any `now` and assert mid-animation behavior.
-    pub fn knob_x_animated(&self, now: Instant, knob_size: f32, margin: f32) -> f32 {
-        let (x, _) = self.knob_x_animated_with_done(now, knob_size, margin);
+    pub fn knob_x_animated(
+        &self,
+        now: Instant,
+        knob_size: f32,
+        margin: f32,
+        reduced_motion: bool,
+    ) -> f32 {
+        let (x, _) = self.knob_x_animated_with_done(now, knob_size, margin, reduced_motion);
         x
     }
 
@@ -165,8 +172,12 @@ impl Toggle {
         now: Instant,
         knob_size: f32,
         margin: f32,
+        reduced_motion: bool,
     ) -> (f32, bool) {
         let end = self.knob_x(knob_size, margin);
+        if reduced_motion {
+            return (end, self.knob_anim_start.is_some());
+        }
         let Some(start) = self.knob_anim_start else {
             return (end, false);
         };

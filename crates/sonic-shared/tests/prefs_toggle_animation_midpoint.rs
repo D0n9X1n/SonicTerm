@@ -35,7 +35,7 @@ fn toggle_knob_x_animated_midpoint_is_between_ends() {
     let start = toggle.knob_anim_start.expect("toggle() must stamp knob_anim_start");
     let now = start + Duration::from_millis(Toggle::ANIM_MS / 2);
 
-    let mid = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let mid = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, false);
     assert!(
         mid > off_pos && mid < on_pos,
         "at the 60ms midpoint the thumb must be between off-pos ({off_pos}) and on-pos ({on_pos}); got {mid}"
@@ -61,7 +61,7 @@ fn toggle_knob_x_animated_snaps_after_anim_completes() {
     let start = toggle.knob_anim_start.unwrap();
     let now = start + Duration::from_millis(Toggle::ANIM_MS + 50);
 
-    let pos = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let pos = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, false);
     assert!(
         (pos - on_pos).abs() < 1e-4,
         "after ANIM_MS has elapsed, knob must snap to on-pos ({on_pos}); got {pos}"
@@ -76,6 +76,6 @@ fn toggle_knob_x_animated_no_animation_returns_snapped() {
     // No flip has happened => knob_anim_start is None => the helper
     // returns the snapped end position regardless of `now`.
     let on_pos = toggle.knob_x(TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
-    let pos = toggle.knob_x_animated(Instant::now(), TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let pos = toggle.knob_x_animated(Instant::now(), TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, false);
     assert!((pos - on_pos).abs() < 1e-4);
 }

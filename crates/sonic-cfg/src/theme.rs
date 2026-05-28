@@ -5,6 +5,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config::AccessibilityConfig;
+
 /// Light vs dark theme appearance hint, used to pick OS-level chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,6 +118,15 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Apply config-only accessibility presentation overrides after theme
+    /// resolution and before renderers derive their cached colors.
+    pub fn apply_accessibility(&mut self, a: &AccessibilityConfig) {
+        if a.high_contrast {
+            self.colors.foreground = Hex("#ffffff".to_string());
+            self.colors.background = Hex("#000000".to_string());
+        }
+    }
+
     /// Load a theme from a TOML file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;

@@ -754,11 +754,12 @@ impl App {
 
     #[doc(hidden)]
     pub fn new_with_proxy(
-        theme: Theme,
+        mut theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     ) -> Self {
+        theme.apply_accessibility(&config.accessibility);
         let i18n = sonic_ui::i18n::I18n::new(if config.locale.is_empty() {
             None
         } else {
@@ -1231,6 +1232,12 @@ impl App {
     #[doc(hidden)]
     pub fn theme_name_for_test(&self) -> &str {
         &self.theme.name
+    }
+
+    /// Test-only accessor: live theme.
+    #[doc(hidden)]
+    pub fn theme_for_test(&self) -> &sonic_core::theme::Theme {
+        &self.theme
     }
 
     /// Test-only accessor: snapshot of the live `Config`.

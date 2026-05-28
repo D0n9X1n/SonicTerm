@@ -12,8 +12,8 @@ fn toggle_animation_clears_after_done_frame() {
     let start = toggle.knob_anim_start.expect("toggle starts animation");
     let now = start + Duration::from_millis(Toggle::ANIM_MS + 1);
 
-    let _x = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
-    let (_, done) = toggle.knob_x_animated_with_done(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN);
+    let _x = toggle.knob_x_animated(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, false);
+    let (_, done) = toggle.knob_x_animated_with_done(now, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, false);
     toggle.clear_anim_if_done(done);
 
     assert!(toggle.knob_anim_start.is_none(), "completed toggle animation must be cleared");

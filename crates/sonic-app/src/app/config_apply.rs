@@ -69,10 +69,14 @@ impl App {
         if new_cfg.theme != self.config.theme {
             let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
             match Theme::load(&theme_path) {
-                Ok(t) => {
+                Ok(mut t) => {
+                    t.apply_accessibility(&new_cfg.accessibility);
                     tracing::info!("live-reload: theme -> {}", t.name);
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_theme(&t);
+                    }
+                    for child in self.child_windows.values_mut() {
+                        child.renderer.set_theme(&t);
                     }
                     self.theme = t;
                     // Theme swap changes presentation (colors) without
@@ -85,6 +89,35 @@ impl App {
                 }
                 Err(e) => tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path),
             }
+        }
+
+        if new_cfg.theme == self.config.theme
+            && new_cfg.accessibility.high_contrast != self.config.accessibility.high_contrast
+        {
+            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            let mut t = match Theme::load(&theme_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path);
+                    self.theme.clone()
+                }
+            };
+            t.apply_accessibility(&new_cfg.accessibility);
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_theme(&t);
+            }
+            for child in self.child_windows.values_mut() {
+                child.renderer.set_theme(&t);
+            }
+            self.theme = t;
+            mark_all_panes_dirty(&self.panes);
+            for child in self.child_windows.values() {
+                mark_all_panes_dirty(&child.panes);
+            }
+            tracing::info!(
+                "live-reload: accessibility.high_contrast -> {}",
+                new_cfg.accessibility.high_contrast
+            );
         }
 
         // Font
@@ -196,6 +229,19 @@ impl App {
             );
         }
 
+        if new_cfg.accessibility.reduced_motion != self.config.accessibility.reduced_motion
+            || new_cfg.accessibility.strong_focus != self.config.accessibility.strong_focus
+        {
+            if let Some(w) = self.prefs_window.as_ref() {
+                w.request_redraw();
+            }
+            tracing::info!(
+                "live-reload: accessibility reduced_motion={} strong_focus={}",
+                new_cfg.accessibility.reduced_motion,
+                new_cfg.accessibility.strong_focus
+            );
+        }
+
         // Keymap
         if new_cfg.keymap != self.config.keymap {
             let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
@@ -231,13 +277,14 @@ impl App {
             tracing::warn!("ApplyTheme({name}): no theme_loader installed; ignoring");
             return;
         };
-        let theme = match loader(name) {
+        let mut theme = match loader(name) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("ApplyTheme({name}): load failed: {e:#}");
                 return;
             }
         };
+        theme.apply_accessibility(&self.config.accessibility);
         if let Some(r) = self.renderer.as_mut() {
             r.set_theme(&theme);
         }
