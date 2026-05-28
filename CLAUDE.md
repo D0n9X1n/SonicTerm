@@ -171,7 +171,7 @@ This repo uses an **agent-driven PR pipeline**. The PM agent (you, in a Claude C
 |---|---|---|
 | PM | foreground Claude | Picks scope, dispatches workers, merges, fixes rebase conflicts, talks to user |
 | Implementer | `opus` sub-agent | Writes the feature on its own branch + opens the PR |
-| Reviewer | `haiku` sub-agent | Reviews PR diff + pulls + runs tests + posts `APPROVED` / `CHANGES REQUESTED` PR comment |
+| Reviewer | `haiku` sub-agent | Reviews PR diff + pulls + runs tests + posts `APPROVED` / `CHANGES REQUESTED` PR comment (per-PM — no cross-PM review, see §15) |
 
 ### Per-PR loop
 
@@ -365,6 +365,10 @@ If any of those fail, the PR is not ready. Include the screenshot path AND a 1-l
 
 **For background agents:** the same gate applies — every agent dispatch for a render/input/VT PR must include the GUI smoke as a numbered step in the prompt, and the agent must paste the screenshot path + observation list in its reply. If the agent has no display (CI / sandbox), it MUST flag that fact explicitly and the PM (you) runs the smoke locally before merging.
 
+Per §15, the other-platform PM runs §13 for their platform on
+cross-platform render/input PRs. Merge requires both smoke
+comments present.
+
 ---
 
 ## 14. Honest perf status (v1.0-RC)
@@ -385,3 +389,81 @@ Because perf has shipped regressions silently (e.g. PR #161's dropped per-cell b
 Subset measured always: `cat_10mb_ascii_sec`, `cat_4mb_ansi_sec`, `idle_cpu_pct`, `rss_mb`. The three `vtebench_*` metrics are run **only if `vtebench` is on PATH**; if absent they're emitted as `null` and skipped from the diff so a missing tool never fails the gate. CI's Linux runner tries `cargo install vtebench --locked`; if install fails (e.g. transient registry issue) the job still passes on the subset rather than blocking unrelated work.
 
 A criterion microbench lives at `crates/sonic-shared/benches/render_throughput.rs` (run with `cargo bench -p sonic-shared --bench render_throughput`). It covers the hot pure-CPU helpers (`hex_to_rgba`, `srgb_u8_to_linear_lut`) the render pipeline calls per-cell so algorithmic regressions in those show up without a GPU surface. Add a new bench function when you add a new hot pure-CPU helper.
+
+---
+
+## 15. Multi-agent coordination (PM ↔ PM)
+
+This repo is staffed by multiple Claude PM sessions in parallel. At
+time of writing: one on macOS, one on Windows. The split is
+**platform-primary** — the Windows PM owns everything that only
+Windows can verify, the macOS PM owns everything that only macOS
+can verify. Cross-platform work goes to whoever claims it first.
+
+### Ownership
+
+| Domain | Owner | Why |
+|---|---|---|
+| `crates/sonic-mac/` + macOS-only paths (NSMenu, libproc) | mac-PM | only Mac can §13 |
+| `crates/sonic-windows/` + Windows-only paths (ConPTY, muda, Mica, OLE drag) | win-PM | only Win can §13 |
+| Cross-platform hot files: `render/core.rs`, `app/*.rs`, `keymap.rs`, `vt.rs`, `grid.rs` | first to claim, blocks the other | high merge-conflict risk |
+| Cross-platform pure-data: `sonic-vt/`, `sonic-grid/`, `sonic-cfg/theme.rs`, `assets/themes/*.toml`, `docs/specs/` | either, coordinate via touches: line | safe parallel |
+| `CLAUDE.md`, `docs/ROADMAP.md`, `docs/RELEASE_TESTING.md`, `CHANGELOG.md` | current release-tag owner | one writer per release window |
+
+### Mandatory touches: line
+
+Every PR body MUST start with a single line listing the files/crates
+touched:
+
+    touches: crates/sonic-app/src/app/window_event.rs, crates/sonic-shared/src/render/core.rs
+
+Before opening a PR on a hot file, run:
+
+    gh pr list -R D0n9X1n/sonic --state open --json headRefName,body \
+      --jq '.[] | select(.body | test("touches:.*<your-file>"))'
+
+If a hit comes back, the other PM already reserved it — wait or
+coordinate via a comment on their PR. Don't race.
+
+### Per-platform GUI smoke
+
+Render/input/VT/window-state PRs need §13 smoke on BOTH platforms
+before merge.
+
+- Originating PM runs §13 on their own platform.
+- The other-platform PM runs §13 for the platform they own and posts
+  the screenshot path + outcome as a PR comment. **This is the only
+  cross-PM interaction required.**
+- Merge requires BOTH smoke results recorded.
+
+### No cross-PM PR review
+
+Each PM is responsible for their own PRs end-to-end:
+- They dispatch their own Haiku/Sonnet reviewer.
+- They address review findings.
+- They merge their own PR (with `--admin` per §6).
+
+The other PM **does not review, comment, or merge** the first PM's
+PRs unless explicitly @-mentioned. This avoids dead-locking waiting
+for cross-PM availability and keeps each PM's loop self-contained.
+The only cross-PM channel is the per-platform GUI smoke comment
+described above.
+
+### Release tagging
+
+One PM owns each release tag end-to-end: runs the full 36-section
+`docs/RELEASE_TESTING.md` checklist, runs `bash scripts/bench.sh`,
+runs signing pipeline, pushes the tag. Tag ownership rotates per
+release. The tag owner is the sole writer of CLAUDE.md / ROADMAP /
+CHANGELOG during their release window.
+
+### Issue / label hygiene
+
+At triage:
+- `platform:mac` / `platform:windows` / `platform:both` on every
+  issue so the right PM picks it up.
+- `hot-file` on any issue whose fix will touch render/app/keymap/vt/grid
+  — flag for coordination.
+
+The non-owning PM may file issues / open PRs on the owner's platform
+but does NOT commit on the owner's open branches without invitation.
