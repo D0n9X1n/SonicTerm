@@ -1355,6 +1355,7 @@ impl GpuRenderer {
         if panes.is_empty() {
             return Ok(());
         }
+        let now = Instant::now();
         // Part B step 7: record per-pane origins for the integration test
         // hook. Populated unconditionally on every render() call so the
         // test can assert that all panes' origins reach the renderer with
@@ -1493,7 +1494,7 @@ impl GpuRenderer {
             for t in tabs.tabs() {
                 t.id.0.hash(&mut h);
                 t.title.hash(&mut h);
-                command_status_hash(&t.command).hash(&mut h);
+                command_status_hash(&t.command, now).hash(&mut h);
             }
             h.finish()
         };
@@ -2384,7 +2385,7 @@ impl GpuRenderer {
                     badge: tabs.tabs()[t.index]
                         .command
                         .clone()
-                        .badge(std::time::Instant::now(), layout.active == Some(t.index)),
+                        .badge(now, layout.active == Some(t.index)),
                 })
                 .collect();
             let (title_text, tab_spans) = build_tab_title_spans(
@@ -3869,12 +3870,19 @@ fn load_bundled_fonts(fs: &mut FontSystem) {
     }
 }
 
-fn command_status_hash(status: &sonic_ui::tabs::CommandStatus) -> u64 {
+/// Stable fingerprint for command badges, including wall-clock buckets that
+/// change when badge visibility can transition without a tab model mutation.
+#[doc(hidden)]
+pub fn command_status_hash(status: &sonic_ui::tabs::CommandStatus, now: Instant) -> u64 {
     match status {
         sonic_ui::tabs::CommandStatus::Idle => 0,
-        sonic_ui::tabs::CommandStatus::Running(_) => 1,
-        sonic_ui::tabs::CommandStatus::Done { exit, until: _ } => {
-            2 + u64::from(exit.unwrap_or(255))
+        sonic_ui::tabs::CommandStatus::Running(started_at) => {
+            let elapsed_secs = now.duration_since(*started_at).as_secs().min(5);
+            1 | (elapsed_secs << 32)
+        }
+        sonic_ui::tabs::CommandStatus::Done { exit, until } => {
+            let is_past_expiry = u64::from(now >= *until);
+            2 | (u64::from(exit.unwrap_or(255)) << 8) | (is_past_expiry << 32)
         }
     }
 }
