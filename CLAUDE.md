@@ -145,7 +145,7 @@ cargo build --release -p sonic-mac                             # confirms fat-LT
 ## 5. Coding conventions
 
 - **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files; issue #190 finished the workspace migration. **New tests follow this pattern.** Documented exceptions (kept inline with a `// NOTE (CLAUDE.md §5):` comment naming the blocker):
-  - `sonic-ui/src/prefs/{layout,controls,state}.rs` — PR-D will rewrite.
+  - `sonic-ui/src/prefs/state.rs` — PR-D will rewrite.
   - `sonic-shared/src/prefs_renderer.rs` — pokes wide crate-private surface and `include_str!`s itself.
   - `sonic-windows/src/os_drag_win.rs` — bin-only crate (no `lib.rs`), no `tests/` route.
   - `sonic-mac/src/menubar.rs` — small macOS-only surface, private `register`/`lookup`/`scan_themes`.
