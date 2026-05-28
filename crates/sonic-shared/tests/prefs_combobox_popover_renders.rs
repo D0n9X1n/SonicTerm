@@ -164,4 +164,3 @@ fn closed_combobox_does_not_emit_selected_row_highlight() {
         "closed dropdown should not emit popover selected-row highlight in popover_quads"
     );
 }
-
