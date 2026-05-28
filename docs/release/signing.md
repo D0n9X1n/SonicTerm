@@ -1,4 +1,10 @@
-# Code Signing & Notarization
+# Code Signing & Notarization — DEFERRED
+
+> **Status: DEFERRED past v1.0.** Cert procurement (Apple Developer ID,
+> Azure Trusted Signing) has not happened. The active release pipeline
+> ships UNSIGNED artifacts (see `docs/RELEASE.md`). The text below is
+> retained as a historical reference for whoever revives this work; it
+> does NOT reflect the current workflow.
 
 This document describes how to flip on signing for Sonic's release pipeline once
 the appropriate certificates are in hand. The release workflow

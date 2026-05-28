@@ -190,9 +190,11 @@ jobs:
           else
             echo "Initial Sonic Terminal release." > body.md
           fi
-          echo "" >> body.md
-          echo "" >> body.md
-          echo "_Note: this release ships UNSIGNED on both platforms. Code-signing pipelines are wired but disabled pending cert procurement._" >> body.md
+          {
+            echo ""
+            echo ""
+            echo "_Note: this release ships UNSIGNED on both platforms. Code-signing is deferred past v1.0 pending cert procurement._"
+          } >> body.md
           cat body.md
 
       - uses: softprops/action-gh-release@v2

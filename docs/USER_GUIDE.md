@@ -350,16 +350,13 @@ Implementation notes:
 
 ## Code signing
 
-Code signing is **infrastructure-only** right now: the release workflow
-has codesign + notarize (macOS) and signtool (Windows) steps that are
-gated on the corresponding secrets. The secrets aren't configured yet, so
-release artifacts are currently unsigned.
+Code signing is **DEFERRED past v1.0** — cert procurement (Apple
+Developer ID, Azure Trusted Signing) has not happened. Release artifacts
+are currently unsigned. On first launch macOS users may need to
+right-click → Open, and Windows users may need to accept SmartScreen.
 
-The macOS PFX (Windows) cleanup runs in a `try/finally`, so no certificate
-material lingers in the runner workspace after a build, signed or not.
-
-See [`release/signing.md`](release/signing.md) for the exact secret names
-and how to provision them.
+See [`release/signing.md`](release/signing.md) (historical) for the
+procedure if/when this work is revived.
 
 ---
 
