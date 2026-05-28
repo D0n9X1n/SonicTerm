@@ -55,10 +55,5 @@ fn bench_srgb_lut(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_hex_to_rgba,
-    bench_hex_to_wgpu,
-    bench_srgb_lut
-);
+criterion_group!(benches, bench_hex_to_rgba, bench_hex_to_wgpu, bench_srgb_lut);
 criterion_main!(benches);
