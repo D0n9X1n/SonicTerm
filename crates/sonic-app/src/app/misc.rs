@@ -47,10 +47,36 @@ impl App {
         if row >= grid.rows || col >= grid.cols {
             return None;
         }
-        let hid = grid.row(row)[col as usize].hyperlink?;
-        let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
+        let r = grid.row(row);
+        // First: OSC 8 hyperlink interned on the cell itself.
+        if let Some(hid) = r[col as usize].hyperlink {
+            let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
+            drop(guard);
+            return uri;
+        }
+        // Second: plain-text URL detection over the row's character
+        // content. We render each cell as one column character, so the
+        // column index maps 1-to-1 onto a `chars()` position in the
+        // reconstructed row string. (Wide chars occupy two columns —
+        // the trailing column is `' '` in the grid so it falls outside
+        // a URL body match, which is the behavior we want: clicking the
+        // right half of a CJK glyph won't accidentally pick up an
+        // adjacent URL.)
+        let mut row_text = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            row_text.push(r[i as usize].ch);
+        }
         drop(guard);
-        uri
+        sonic_core::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
+    }
+    /// True iff the platform "open this in the browser" modifier is held.
+    /// macOS: Cmd (super). Windows / Linux: Ctrl.
+    pub(super) fn url_open_modifier_held(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        }
     }
     pub(super) fn open_ssh_pane(&mut self, target: &str) {
         match sonic_core::ssh::parse_target(target) {

@@ -20,6 +20,7 @@ pub use sonic_cfg::config;
 pub use sonic_cfg::keymap;
 pub use sonic_cfg::theme;
 pub use sonic_cfg::url_open;
+pub use sonic_cfg::url_scan;
 pub use sonic_grid::grid;
 pub use sonic_grid::hyperlink;
 pub use sonic_io::proc_info;

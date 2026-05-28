@@ -584,18 +584,30 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
                         {
-                            // Cmd/Super-click on a hyperlink opens it. The
-                            // parser lock is released inside hyperlink_uri_at
-                            // before we ever call sonic_core::url_open::open,
+                            // Modifier-click on a hyperlink opens it.
+                            // On macOS the modifier is Cmd (super); on
+                            // Windows / Linux it's Ctrl. The parser lock
+                            // is released inside hyperlink_uri_at before
+                            // we ever call sonic_core::url_open::open,
                             // so no grid lock is held across the spawn.
-                            if self.modifiers.super_key() {
-                                if let Some(uri) = self.hyperlink_uri_at(row, col) {
-                                    if let Err(e) = sonic_core::url_open::open(&uri) {
+                            // Dispatch decision lives in the pure
+                            // `dispatch_modifier_click` helper so it can
+                            // be unit-tested without a real winit mouse
+                            // event (see its tests in sonic-cfg).
+                            let opened = sonic_core::url_open::dispatch_modifier_click(
+                                self.url_open_modifier_held(),
+                                self.hyperlink_uri_at(row, col),
+                                |uri| {
+                                    let r = sonic_core::url_open::open(uri);
+                                    if let Err(ref e) = r {
                                         tracing::warn!("url_open failed: {e}");
                                     }
-                                    self.mouse_down = false;
-                                    return;
-                                }
+                                    r
+                                },
+                            );
+                            if opened.is_some() {
+                                self.mouse_down = false;
+                                return;
                             }
                             self.selection = Some(Selection::new(row, col));
                             mark_all_panes_dirty(&self.panes);

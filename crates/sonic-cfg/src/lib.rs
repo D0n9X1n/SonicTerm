@@ -9,3 +9,4 @@ pub mod config;
 pub mod keymap;
 pub mod theme;
 pub mod url_open;
+pub mod url_scan;
