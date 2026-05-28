@@ -31,6 +31,9 @@ pub struct Config {
     /// string (the default) means "negotiate from OS locale".
     #[serde(default)]
     pub locale: String,
+    /// Desktop notification settings.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     /// Optional override for the tab close `×` button color. When set
     /// (e.g. `"#ff5555"`), the close button is always visible in this
     /// color, matching WezTerm's `tab_close_button_color` setting.
@@ -137,6 +140,35 @@ pub struct TerminalConfig {
     pub cursor_shape: CursorShape,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+/// Desktop notification settings.
+pub struct NotificationsConfig {
+    /// Notify when a long-running command completes.
+    #[serde(default = "default_notifications_enabled")]
+    pub long_command: bool,
+    /// Minimum command duration, in seconds, before completion can notify.
+    #[serde(default = "default_threshold_secs")]
+    pub threshold_secs: u64,
+}
+
+fn default_notifications_enabled() -> bool {
+    false
+}
+
+fn default_threshold_secs() -> u64 {
+    10
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            long_command: default_notifications_enabled(),
+            threshold_secs: default_threshold_secs(),
+        }
+    }
+}
+
 /// Visual cursor shape. Mirrors the DECSCUSR set.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -187,6 +219,7 @@ impl Default for Config {
             logging: sonic_logging::LoggingConfig::default(),
             accessibility: AccessibilityConfig::default(),
             locale: String::new(),
+            notifications: NotificationsConfig::default(),
             tab_close_button_color: None,
             extra: toml::Table::new(),
         }

@@ -2,7 +2,9 @@
 //!
 //! Migrated from inline `#[cfg(test)] mod tests` in `src/config.rs`.
 
-use sonic_cfg::config::{Config, CursorShape, FontConfig, TerminalConfig, WindowConfig};
+use sonic_cfg::config::{
+    Config, CursorShape, FontConfig, NotificationsConfig, TerminalConfig, WindowConfig,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -23,6 +25,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         extra: toml::Table::new(),
         accessibility: Default::default(),
         locale: String::new(),
+        notifications: NotificationsConfig::default(),
         tab_close_button_color: Some("#ff5555".to_string()),
         logging: sonic_cfg::LoggingConfig::default(),
     };

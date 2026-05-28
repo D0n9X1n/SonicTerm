@@ -259,6 +259,7 @@ fn tab_title_uses_config_font_family_not_hardcoded() {
                 title_x: 0.0,
                 title_w: 80.0,
                 is_active: false,
+                badge: None,
             },
             TabSpanInput {
                 index: 1,
@@ -266,6 +267,7 @@ fn tab_title_uses_config_font_family_not_hardcoded() {
                 title_x: 110.0,
                 title_w: 110.0,
                 is_active: true,
+                badge: None,
             },
         ],
         10.0,

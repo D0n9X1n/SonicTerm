@@ -19,7 +19,8 @@ fn active_tab_span_covers_full_title_rect_width() {
     let title = "#1 X"; // 4 chars / 4 bytes (ASCII for test determinism)
     let avg_glyph_w = 10.0_f32;
     let title_w = 400.0_f32; // → full_chars = 40, max_chars = 38
-    let inputs = [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: true }];
+    let inputs =
+        [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: true, badge: None }];
     let (text, spans) = build_tab_title_spans(&inputs, avg_glyph_w, ACTIVE, INACTIVE);
 
     assert_eq!(spans.len(), 1);
@@ -51,7 +52,8 @@ fn every_char_in_active_span_is_gold() {
     let title = "#2 nvim editor";
     let avg_glyph_w = 8.0_f32;
     let title_w = 160.0_f32; // → full_chars = 20
-    let inputs = [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: true }];
+    let inputs =
+        [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: true, badge: None }];
     let (text, spans) = build_tab_title_spans(&inputs, avg_glyph_w, ACTIVE, INACTIVE);
 
     let mut per_byte = vec![INACTIVE; text.len()];
@@ -77,6 +79,7 @@ fn inactive_tab_span_uses_inactive_fg() {
         title_x: 0.0,
         title_w: 80.0,
         is_active: false,
+        badge: None,
     }];
     let (_text, spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
     assert_eq!(spans.len(), 1);
@@ -91,8 +94,22 @@ fn no_text_separator_between_inactive_and_active_tab() {
     // previously stacked with the quad and produced a doubled
     // `| │` glyph between adjacent inactive tabs).
     let inputs = [
-        TabSpanInput { index: 0, title: "#1 shell", title_x: 0.0, title_w: 80.0, is_active: false },
-        TabSpanInput { index: 1, title: "#2 nvim", title_x: 90.0, title_w: 80.0, is_active: true },
+        TabSpanInput {
+            index: 0,
+            title: "#1 shell",
+            title_x: 0.0,
+            title_w: 80.0,
+            is_active: false,
+            badge: None,
+        },
+        TabSpanInput {
+            index: 1,
+            title: "#2 nvim",
+            title_x: 90.0,
+            title_w: 80.0,
+            is_active: true,
+            badge: None,
+        },
     ];
     let (text, spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
     // Only title spans now: [inactive #1, active #2]. No separator span.
@@ -111,10 +128,38 @@ fn three_inactive_no_double_separator() {
     // bars. After the fix the text path is silent and only the quad
     // separator survives.
     let inputs = [
-        TabSpanInput { index: 0, title: "#1 a", title_x: 0.0, title_w: 80.0, is_active: false },
-        TabSpanInput { index: 1, title: "#2 b", title_x: 90.0, title_w: 80.0, is_active: false },
-        TabSpanInput { index: 2, title: "#3 c", title_x: 180.0, title_w: 80.0, is_active: false },
-        TabSpanInput { index: 3, title: "#4 d", title_x: 270.0, title_w: 80.0, is_active: true },
+        TabSpanInput {
+            index: 0,
+            title: "#1 a",
+            title_x: 0.0,
+            title_w: 80.0,
+            is_active: false,
+            badge: None,
+        },
+        TabSpanInput {
+            index: 1,
+            title: "#2 b",
+            title_x: 90.0,
+            title_w: 80.0,
+            is_active: false,
+            badge: None,
+        },
+        TabSpanInput {
+            index: 2,
+            title: "#3 c",
+            title_x: 180.0,
+            title_w: 80.0,
+            is_active: false,
+            badge: None,
+        },
+        TabSpanInput {
+            index: 3,
+            title: "#4 d",
+            title_x: 270.0,
+            title_w: 80.0,
+            is_active: true,
+            badge: None,
+        },
     ];
     let (text, _spans) = build_tab_title_spans(&inputs, 10.0, ACTIVE, INACTIVE);
     assert_eq!(
@@ -132,7 +177,8 @@ fn tab_title_centered_within_rect() {
     let avg_glyph_w = 10.0_f32;
     let title_x = 100.0_f32;
     let title_w = 100.0_f32; // rect spans x=100..200
-    let inputs = [TabSpanInput { index: 0, title, title_x, title_w, is_active: false }];
+    let inputs =
+        [TabSpanInput { index: 0, title, title_x, title_w, is_active: false, badge: None }];
     let (text, spans) = build_tab_title_spans(&inputs, avg_glyph_w, ACTIVE, INACTIVE);
     let (range, _) = &spans[0];
     let body = &text[range.clone()];
@@ -157,7 +203,8 @@ fn tab_title_truncates_with_ellipsis_when_overflow() {
     let avg_glyph_w = 10.0_f32;
     // Rect = 100px; usable after 6px×2 padding = 88px → max_chars=8.
     let title_w = 100.0_f32;
-    let inputs = [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: false }];
+    let inputs =
+        [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: false, badge: None }];
     let (text, spans) = build_tab_title_spans(&inputs, avg_glyph_w, ACTIVE, INACTIVE);
     let body = &text[spans[0].0.clone()];
     assert!(body.ends_with('…'), "truncated title must end with `…`, got: {body:?}");
@@ -170,7 +217,8 @@ fn tab_title_no_truncation_when_fits() {
     let title = "#1 ok";
     let avg_glyph_w = 10.0_f32;
     let title_w = 200.0_f32;
-    let inputs = [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: false }];
+    let inputs =
+        [TabSpanInput { index: 0, title, title_x: 0.0, title_w, is_active: false, badge: None }];
     let (text, spans) = build_tab_title_spans(&inputs, avg_glyph_w, ACTIVE, INACTIVE);
     let body = &text[spans[0].0.clone()];
     assert!(!body.contains('…'));

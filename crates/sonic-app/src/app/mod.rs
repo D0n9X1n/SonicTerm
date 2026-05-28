@@ -15,7 +15,12 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonic_core::{
-    config::Config, grid::Grid, keymap::Keymap, pty::PtyHandle, theme::Theme, vt::Parser,
+    config::Config,
+    grid::Grid,
+    keymap::Keymap,
+    pty::PtyHandle,
+    theme::Theme,
+    vt::{CommandEvent, Parser},
 };
 use winit::{
     application::ApplicationHandler,
@@ -113,7 +118,7 @@ use sonic_ui::pane::PaneTree;
 use sonic_ui::prefs::PrefsState;
 use sonic_ui::search::SearchState;
 use sonic_ui::selection::Selection;
-use sonic_ui::tabs::{Tab, TabBar};
+use sonic_ui::tabs::{CommandStatus, Tab, TabBar};
 
 /// A child terminal window spawned by tearing a tab off the bar.
 ///
@@ -540,6 +545,16 @@ pub struct PaneState {
     /// `scripts/bench_headless_gui.sh`). TTL is short enough that
     /// `nvim foo` still flips the tab title quickly.
     pub fg_proc_cache: Option<(std::time::Instant, Option<String>)>,
+    /// Cross-thread queue populated by the VT loop when OSC 133 command
+    /// lifecycle markers are parsed for this pane.
+    pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneCommandEvent {
+    pub event: CommandEvent,
+    pub at: Instant,
+    pub duration: Option<Duration>,
 }
 
 impl PaneState {
@@ -551,6 +566,7 @@ impl PaneState {
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
             fg_proc_cache: None,
+            command_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -561,6 +577,13 @@ pub struct TabState {
     pub tree: PaneTree,
     pub active_pane: u64,
     pub search: Option<SearchState>,
+    pub command: CommandStatus,
+}
+
+impl TabState {
+    fn new(tree: PaneTree, active_pane: u64) -> Self {
+        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
+    }
 }
 
 #[doc(hidden)]
@@ -817,6 +840,59 @@ impl App {
         }
     }
 
+    pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
+        let Some(tab_state) = self.tab_states.get_mut(tab_idx) else { return };
+        let pane_ids = tab_state.tree.leaves();
+        let mut latest = None;
+        for pane_id in pane_ids {
+            if let Some(pane) = self.panes.get(&pane_id) {
+                let mut q = pane.command_events.lock();
+                latest = q.drain(..).next_back().or(latest);
+            }
+        }
+        let Some(ev) = latest else { return };
+        match ev.event {
+            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
+            CommandEvent::CmdEnd(exit) => {
+                tab_state.command =
+                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
+                maybe_notify_long_command(&self.config, ev.duration, exit);
+            }
+            CommandEvent::PromptStart => {}
+        }
+        if let Some(t) = self.tab_states.get(tab_idx).map(|st| st.command.clone()) {
+            self.tabs.set_command_status(tab_idx, t);
+        }
+    }
+}
+
+fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
+    let Some(duration) = duration else { return };
+    if !config.notifications.long_command {
+        return;
+    }
+    if duration.as_secs() <= config.notifications.threshold_secs {
+        return;
+    }
+    let result = match exit {
+        Some(0) => "completed successfully",
+        Some(code) => return notify_command_done(format!("Command failed with exit code {code}")),
+        None => "completed",
+    };
+    notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
+}
+
+#[cfg(target_os = "windows")]
+fn notify_command_done(body: String) {
+    if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
+        tracing::debug!(?err, "desktop notification failed");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn notify_command_done(_body: String) {}
+
+impl App {
     /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
     /// right now would be coalesced (deferred to the next vsync boundary)
     /// or `false` if it would render immediately. Mirrors the exact
@@ -1103,11 +1179,7 @@ impl App {
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
         self.panes.insert(pane_id, PaneState::new(parser, None));
         self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState {
-            tree: PaneTree::leaf(pane_id),
-            active_pane: pane_id,
-            search: None,
-        });
+        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         pane_id
     }
 

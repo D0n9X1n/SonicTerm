@@ -1493,6 +1493,7 @@ impl GpuRenderer {
             for t in tabs.tabs() {
                 t.id.0.hash(&mut h);
                 t.title.hash(&mut h);
+                command_status_hash(&t.command).hash(&mut h);
             }
             h.finish()
         };
@@ -2380,6 +2381,10 @@ impl GpuRenderer {
                     title_x: t.title.x,
                     title_w: t.title.w,
                     is_active: layout.active == Some(t.index),
+                    badge: tabs.tabs()[t.index]
+                        .command
+                        .clone()
+                        .badge(std::time::Instant::now(), layout.active == Some(t.index)),
                 })
                 .collect();
             let (title_text, tab_spans) = build_tab_title_spans(
@@ -3860,6 +3865,16 @@ fn load_bundled_fonts(fs: &mut FontSystem) {
         if n > 0 {
             tracing::info!("loaded {n} bundled font(s) from {dir:?}");
             return; // first dir that produced fonts wins
+        }
+    }
+}
+
+fn command_status_hash(status: &sonic_ui::tabs::CommandStatus) -> u64 {
+    match status {
+        sonic_ui::tabs::CommandStatus::Idle => 0,
+        sonic_ui::tabs::CommandStatus::Running(_) => 1,
+        sonic_ui::tabs::CommandStatus::Done { exit, until: _ } => {
+            2 + u64::from(exit.unwrap_or(255))
         }
     }
 }

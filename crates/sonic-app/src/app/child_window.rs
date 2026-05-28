@@ -573,11 +573,7 @@ impl App {
         child.panes.insert(pane_id, pane_state);
         let n = child.tabs.len() + 1;
         child.tabs.push(Tab::new(format!("shell {n}")));
-        child.tab_states.push(TabState {
-            tree: PaneTree::leaf(pane_id),
-            active_pane: pane_id,
-            search: None,
-        });
+        child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
         child.window.request_redraw();

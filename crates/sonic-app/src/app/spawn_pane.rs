@@ -16,7 +16,7 @@ use sonic_core::{
     keymap::{Action, Direction, Keymap, ScrollAction},
     pty::PtyHandle,
     theme::Theme,
-    vt::{Parser, VtEvent},
+    vt::{CommandEvent, Parser, VtEvent},
 };
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::pane::PaneTree;
@@ -50,6 +50,8 @@ impl App {
         // thread re-targets without restarting.
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
             Arc::new(Mutex::new(self.window.clone()));
+        let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
@@ -58,6 +60,7 @@ impl App {
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = self.cursor_visible.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
+                let command_events_thread = command_events.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -96,6 +99,7 @@ impl App {
                         // shell startup banner) while staying within one vsync
                         // frame at 60Hz. See CLAUDE.md §4.
                         let min_interval = Duration::from_millis(16);
+                        let mut command_started: Option<Instant> = None;
                         loop {
                             // Try to drain quickly; if nothing comes for
                             // ~min_interval and we have a pending redraw,
@@ -135,6 +139,7 @@ impl App {
                                     // calls outside the parser critical
                                     // section as a defence-in-depth rule.
                                     let mut new_title: Option<String> = None;
+                                    let mut command_side_effects = Vec::new();
                                     {
                                         let mut p = parser_clone.lock();
                                         for ev in p.advance(&bytes) {
@@ -148,9 +153,50 @@ impl App {
                                                         std::sync::atomic::Ordering::Relaxed,
                                                     );
                                                 }
+                                                VtEvent::Command(event) => {
+                                                    let now = Instant::now();
+                                                    match event {
+                                                        CommandEvent::CmdStart => {
+                                                            command_started = Some(now);
+                                                            command_side_effects.push(
+                                                                super::PaneCommandEvent {
+                                                                    event,
+                                                                    at: now,
+                                                                    duration: None,
+                                                                },
+                                                            );
+                                                        }
+                                                        CommandEvent::CmdEnd(_) => {
+                                                            let duration = command_started
+                                                                .take()
+                                                                .map(|start| {
+                                                                    now.duration_since(start)
+                                                                });
+                                                            command_side_effects.push(
+                                                                super::PaneCommandEvent {
+                                                                    event,
+                                                                    at: now,
+                                                                    duration,
+                                                                },
+                                                            );
+                                                        }
+                                                        CommandEvent::PromptStart => {
+                                                            command_side_effects.push(
+                                                                super::PaneCommandEvent {
+                                                                    event,
+                                                                    at: now,
+                                                                    duration: None,
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                                 _ => {}
                                             }
                                         }
+                                    }
+                                    if !command_side_effects.is_empty() {
+                                        command_events_thread.lock().extend(command_side_effects);
                                     }
                                     if let Some(t) = new_title {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
@@ -195,6 +241,7 @@ impl App {
         };
         let mut state = PaneState::new(parser, pty);
         state.redraw_target = redraw_target;
+        state.command_events = command_events;
         state
     }
 }

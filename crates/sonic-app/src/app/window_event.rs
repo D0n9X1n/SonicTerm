@@ -102,11 +102,13 @@ impl App {
                     return;
                 }
                 self.pending_redraw = false;
+                self.tabs.clear_expired_command_badges(Instant::now());
+                let tab_idx = self.tabs.active_index();
+                self.poll_command_events_for_tab(tab_idx);
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
                 // the focused pane). The active pane's grid is rendered into
                 // the full content area; per-pane Buffer rendering is v0.4.
-                let tab_idx = self.tabs.active_index();
                 let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = self
                     .tab_states
                     .get(tab_idx)
