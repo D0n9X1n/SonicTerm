@@ -34,8 +34,6 @@ fn click_inside_tab_returns_activate() {
 #[test]
 fn click_on_close_button_returns_close() {
     let mut bar = bar_with(2);
-    // Close × only fires on the ACTIVE tab (Chrome/WezTerm semantics);
-    // clicking the × of an inactive tab activates it instead.
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
     let t1 = layout.tabs[1];
@@ -45,17 +43,32 @@ fn click_on_close_button_returns_close() {
 }
 
 #[test]
-fn click_on_close_x_of_inactive_tab_activates_not_closes() {
-    // Reproduces the PR #107 regression: clicking the × on an inactive
-    // tab silently closed it instead of activating. Chrome/WezTerm
-    // semantics — the × is only an active-tab affordance.
+fn click_on_close_x_of_inactive_tab_closes_it() {
+    // Regression: with multiple tabs, the close button on inactive
+    // tabs is visually painted (the renderer draws × on hover of any
+    // tab) but historically the hit() returned Activate, leaving a
+    // visible button that did nothing. Now matches Chrome/Firefox:
+    // clicking × on an inactive tab closes it directly.
     let mut bar = bar_with(3);
-    bar.activate(2); // tab 2 active; tab 1 inactive
+    bar.activate(2); // tab 2 active; tab 1 inactive but × is visible on hover
     let layout = TabBarLayout::compute(&bar, 800.0);
     let t1 = layout.tabs[1];
     let cx = t1.close.x + t1.close.w / 2.0;
     let cy = t1.close.y + t1.close.h / 2.0;
-    assert_eq!(layout.hit(cx, cy), Some(TabHit::Activate(1)));
+    assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(1)));
+}
+
+#[test]
+fn click_on_close_x_of_first_tab_closes_it_when_third_active() {
+    // Specific user-reported repro: 3 tabs, last is active, click ×
+    // on tab #0. Before the fix this returned Activate(0); now Close(0).
+    let mut bar = bar_with(3);
+    bar.activate(2);
+    let layout = TabBarLayout::compute(&bar, 1200.0);
+    let t0 = layout.tabs[0];
+    let cx = t0.close.x + t0.close.w / 2.0;
+    let cy = t0.close.y + t0.close.h / 2.0;
+    assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(0)));
 }
 
 #[test]
