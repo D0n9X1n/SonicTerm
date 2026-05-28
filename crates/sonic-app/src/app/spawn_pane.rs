@@ -87,12 +87,15 @@ impl App {
                         // after the prompt redraw was dropped silently).
                         let mut last_request = Instant::now() - Duration::from_secs(1);
                         let mut pending = false;
-                        // 4ms is small enough to stay below one frame even
-                        // when a key triggers an echo immediately. Keeps the
-                        // CPU-spin guard for bursty output (cat largefile,
-                        // shell startup banner) while making typing feel
-                        // instant.
-                        let min_interval = Duration::from_millis(4);
+                        // Debug-only invariant probe: consecutive
+                        // request_redraw() calls must respect the same
+                        // min_interval the loop enforces; CLAUDE.md §4.
+                        let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
+                        // 16ms min interval keeps the OS from marking the app
+                        // unresponsive under bursty pty output (cat largefile,
+                        // shell startup banner) while staying within one vsync
+                        // frame at 60Hz. See CLAUDE.md §4.
+                        let min_interval = Duration::from_millis(16);
                         loop {
                             // Try to drain quickly; if nothing comes for
                             // ~min_interval and we have a pending redraw,
@@ -109,7 +112,11 @@ impl App {
                                     // bool) so a burst arriving during
                                     // render is not erased on completion.
                                     if !bytes.is_empty() {
-                                        pty_burst_gen.fetch_add(1, Ordering::Release);
+                                        let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
+                                        crate::app::invariants::debug_assert_burst_gen_monotonic(
+                                            prev,
+                                            prev.wrapping_add(1),
+                                        );
                                     }
                                     // Collect side-effects under the parser
                                     // lock, then DROP it before touching winit.
@@ -154,6 +161,7 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
+                                        redraw_probe.note_redraw(min_interval);
                                         last_request = Instant::now();
                                         pending = false;
                                     } else {
@@ -166,6 +174,7 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
+                                        redraw_probe.note_redraw(min_interval);
                                         last_request = Instant::now();
                                         pending = false;
                                     }

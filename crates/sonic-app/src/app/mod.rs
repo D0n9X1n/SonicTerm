@@ -493,6 +493,7 @@ pub fn run_with_os_drag_pending_and_window_hook(
 mod child_window;
 mod config_apply;
 mod event_loop;
+pub mod invariants;
 mod key_encoding;
 mod keymap_dispatch;
 mod misc;
@@ -838,7 +839,8 @@ impl App {
     /// when it processes a non-empty byte chunk.
     #[doc(hidden)]
     pub fn mark_pty_burst_for_test(&self) {
-        self.pty_burst_gen.fetch_add(1, Ordering::Release);
+        let prev = self.pty_burst_gen.fetch_add(1, Ordering::Release);
+        crate::app::invariants::debug_assert_burst_gen_monotonic(prev, prev.wrapping_add(1));
     }
 
     /// Test-only marker for render completing after sampling a PTY-burst
