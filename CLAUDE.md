@@ -257,10 +257,17 @@ Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The ke
 ## 9. Release
 
 ```bash
+# 1. Run the full UX release-testing checklist (docs/RELEASE_TESTING.md)
+#    on a freshly built release binary; tick every box.
+bash scripts/check-release-testing.sh   # MUST exit 0 — gates the tag.
+
+# 2. Tag + push (CI also runs the gate before building).
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-triggers `.github/workflows/release.yml` → runs the quick gate + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
+triggers `.github/workflows/release.yml` → first runs the `release-gate` job (which re-runs `scripts/check-release-testing.sh`) + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
+
+The checklist itself (`docs/RELEASE_TESTING.md`) covers tab/pane/palette/prefs/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
 `crates/sonic-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 
