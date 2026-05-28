@@ -1334,12 +1334,13 @@ keystrokes = [
   { kind = "key", value = "enter" },
   { kind = "wait", value = 0.3 },
   { kind = "key", value = "cmd+t" },
-  { kind = "wait", value = 0.3 },
+  { kind = "wait", value = 0.5 },
+  { kind = "snapshot-sonic-shells" },
   { kind = "key", value = "cmd+q" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
   { kind = "process-count", program = "sonic-mac", max = 0 },
-  { kind = "no-orphan-shells", parent = "sonic-mac" },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
-fail_on = "After Cmd+Q, any zsh/bash/sh descendant of the killed sonic process remains alive (PtyHandle::Drop did not fire)"
+fail_on = "any PID that was a shell descendant of the sonic-mac PID before cmd+q is still alive 1s after cmd+q (became orphan adopted by launchd)"

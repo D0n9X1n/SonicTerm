@@ -232,6 +232,11 @@ for k in c.get('keystrokes', []):
             out.append(f"sleep {delay}")
     elif kind == 'shell-cmd':
         out.append(k['value'])
+    elif kind == 'snapshot-sonic-shells':
+        # Snapshot every shell descendant of the live sonic-mac process.
+        # Used by orphan-shells-from-sonic expect kind to verify
+        # PtyHandle::Drop actually kills children on Cmd+Q.
+        out.append('bash testing/workflows/check_orphans.sh snapshot "$SONIC_PID" "$CASE_OUT/sonic-shells.txt" 2>>"$LOG" || true')
     elif kind == 'click-region':
         out.append("log " + shlex.quote(f"TODO click-region: {k.get('region')}"))
     elif kind == 'cmd-click-region':
@@ -349,6 +354,31 @@ for e in expectations:
         r = subprocess.run(['pgrep', '-a', 'sonic-mac'], capture_output=True, text=True)
         ok = (not r.stdout.strip())  # sonic-mac is gone -> children should be too
         reason = f"sonic-mac live? '{r.stdout.strip()}'"
+    elif kind == 'orphan-shells-from-sonic':
+        # Real check: read the pre-Cmd+Q snapshot of sonic-mac's shell
+        # descendants, then verify each is dead. Snapshot is produced by
+        # the 'snapshot-sonic-shells' keystroke kind. Without that snapshot
+        # the case authoring is wrong; treat as FAIL so a mis-authored
+        # case can't masquerade as passing.
+        snap = os.path.join(case_out, 'sonic-shells.txt')
+        expected = int(e.get('expected', 0))
+        if not os.path.exists(snap):
+            ok = False
+            reason = f"snapshot missing — case must include a 'snapshot-sonic-shells' keystroke before the kill step ({snap})"
+        else:
+            r = subprocess.run(['bash', 'testing/workflows/check_orphans.sh', 'check', snap],
+                               capture_output=True, text=True)
+            # last stdout line is `orphans=<N>`
+            n = -1
+            for line in r.stdout.strip().splitlines():
+                if line.startswith('orphans='):
+                    try:
+                        n = int(line.split('=', 1)[1])
+                    except ValueError:
+                        n = -1
+            ok = (n == expected)
+            stderr_tail = r.stderr.strip().replace('\n', ' | ')[:300]
+            reason = f"orphans={n} expected={expected} snap={snap} stderr='{stderr_tail}'"
     elif kind == 'responsive-within':
         # Heuristic: confirm sonic-mac process exists and is not zombie.
         n = proc_count('sonic-mac')
