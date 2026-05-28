@@ -36,3 +36,6 @@ libproc = "0.14"
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
