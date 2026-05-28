@@ -42,6 +42,11 @@ pub enum MenuEntry {
     Act(Action),
     /// Open `url` via `NSWorkspace::openURL:` from the AppKit thread.
     Url(String),
+    /// Reveal the Sonic log directory in Finder.
+    ShowLogsInFinder,
+    /// Run the aggressive "clear all rotated logs + crashes" pass and
+    /// show an AppKit alert with the count and bytes freed.
+    ClearOldLogs,
 }
 
 static ENTRIES: Mutex<Vec<MenuEntry>> = Mutex::new(Vec::new());
@@ -91,6 +96,26 @@ pub fn dispatch_tag(tag: isize) -> bool {
         }
         MenuEntry::Url(url) => {
             open_url(&url);
+            true
+        }
+        MenuEntry::ShowLogsInFinder => {
+            let dir = sonic_logging::log_dir();
+            // Use file:// URL so NSWorkspace opens the dir in Finder.
+            let url = format!("file://{}", dir.display());
+            open_url(&url);
+            true
+        }
+        MenuEntry::ClearOldLogs => {
+            let dir = sonic_logging::log_dir();
+            let (n, bytes) = sonic_logging::clear_all_rotated(&dir);
+            let mb = (bytes as f64) / (1024.0 * 1024.0);
+            tracing::info!(files = n, mb, "menubar: cleared old logs");
+            // Best-effort native notification: a banner via osascript
+            // so we don't add a heavyweight NSAlert dependency.
+            let body = format!("Cleared {n} files ({mb:.2} MB) from Sonic logs.");
+            let script =
+                format!("display notification \"{}\" with title \"Sonic\"", body.replace('"', ""));
+            let _ = std::process::Command::new("osascript").arg("-e").arg(&script).spawn();
             true
         }
     }
@@ -247,7 +272,26 @@ impl PlatformMenu for MacMenu {
 
         let main = NSMenu::new(mtm);
         for sm in &self.blueprint {
-            main.addItem(&build_submenu(mtm, sm, &target));
+            let item = build_submenu(mtm, sm, &target);
+            // Append the logging affordances to the Help submenu.
+            if sm.title == "Help" {
+                if let Some(menu) = item.submenu() {
+                    menu.addItem(&NSMenuItem::separatorItem(mtm));
+                    menu.addItem(&build_custom_item(
+                        mtm,
+                        "Show Logs in Finder",
+                        MenuEntry::ShowLogsInFinder,
+                        &target,
+                    ));
+                    menu.addItem(&build_custom_item(
+                        mtm,
+                        "Clear Old Logs",
+                        MenuEntry::ClearOldLogs,
+                        &target,
+                    ));
+                }
+            }
+            main.addItem(&item);
         }
         app.setMainMenu(Some(&main));
 
@@ -258,6 +302,23 @@ impl PlatformMenu for MacMenu {
         tracing::info!("macOS native menubar installed");
         Ok(())
     }
+}
+
+fn build_custom_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    entry: MenuEntry,
+    target: &MenuTarget,
+) -> Retained<NSMenuItem> {
+    let nsi = NSMenuItem::new(mtm);
+    nsi.setTitle(&ns(title));
+    let tag = register(entry);
+    unsafe {
+        nsi.setTag(tag);
+        nsi.setTarget(Some(target));
+        nsi.setAction(Some(sel!(dispatch:)));
+    }
+    nsi
 }
 
 /// Install the Sonic NSMenu as the application's main menu. The

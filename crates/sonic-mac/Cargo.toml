@@ -15,6 +15,7 @@ sonic-core.workspace = true
 sonic-shared.workspace = true
 sonic-app.workspace = true
 sonic-ui.workspace = true
+sonic-logging.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 

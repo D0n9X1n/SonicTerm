@@ -10,3 +10,8 @@ pub mod keymap;
 pub mod theme;
 pub mod url_open;
 pub mod url_scan;
+
+/// Re-export of [`sonic_logging::LoggingConfig`] so downstream
+/// consumers can construct the field through the `sonic_cfg` facade
+/// without taking a direct dep on `sonic-logging`.
+pub use sonic_logging::LoggingConfig;

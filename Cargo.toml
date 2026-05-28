@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonic-types", "crates/sonic-vt", "crates/sonic-grid", "crates/sonic-cfg", "crates/sonic-io", "crates/sonic-core", "crates/sonic-text", "crates/sonic-ui", "crates/sonic-render-model", "crates/sonic-gpu", "crates/sonic-shared", "crates/sonic-app", "crates/sonic-mac", "crates/sonic-windows", "crates/sonic-mux"]
+members = ["crates/sonic-types", "crates/sonic-vt", "crates/sonic-grid", "crates/sonic-cfg", "crates/sonic-io", "crates/sonic-core", "crates/sonic-text", "crates/sonic-ui", "crates/sonic-render-model", "crates/sonic-gpu", "crates/sonic-shared", "crates/sonic-app", "crates/sonic-mac", "crates/sonic-windows", "crates/sonic-mux", "crates/sonic-logging"]
 default-members = ["crates/sonic-core", "crates/sonic-shared"]
 
 [workspace.package]
@@ -27,6 +27,7 @@ sonic-render-model = { path = "crates/sonic-render-model", version = "0.3.0" }
 sonic-gpu = { path = "crates/sonic-gpu", version = "0.3.0" }
 sonic-shared = { path = "crates/sonic-shared", version = "0.3.0" }
 sonic-app = { path = "crates/sonic-app", version = "0.3.0" }
+sonic-logging = { path = "crates/sonic-logging", version = "0.3.0" }
 
 # Core terminal
 vte = "0.15"

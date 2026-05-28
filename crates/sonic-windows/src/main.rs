@@ -19,6 +19,12 @@ mod menubar;
 mod os_drag_win;
 
 fn main() -> Result<()> {
+    let bootstrap_cfg = sonic_logging::LoggingConfig::default();
+    let _log_guard = sonic_logging::init(&bootstrap_cfg).ok();
+    sonic_logging::install_panic_hook(sonic_logging::log_dir());
+    sonic_logging::cleanup_old_files_async(sonic_logging::log_dir(), &bootstrap_cfg);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
+
     let config = load_config()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;

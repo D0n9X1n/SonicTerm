@@ -19,6 +19,10 @@ pub struct Config {
     pub theme: String,
     /// Name of the active keymap (looked up in `assets/keymaps/`).
     pub keymap: String,
+    /// Logging subsystem retention + level knobs (see
+    /// [`sonic_logging::LoggingConfig`]).
+    #[serde(default)]
+    pub logging: sonic_logging::LoggingConfig,
     /// User-selected UI locale (e.g. `"en"`, `"zh-CN"`, `"ja"`). Empty
     /// string (the default) means "negotiate from OS locale".
     #[serde(default)]
@@ -161,6 +165,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             theme: "gruvbox-dark-hard".to_string(),
             keymap: "wezterm".to_string(),
+            logging: sonic_logging::LoggingConfig::default(),
             locale: String::new(),
             tab_close_button_color: None,
             extra: toml::Table::new(),

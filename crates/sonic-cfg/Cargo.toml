@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 sonic-types.workspace = true
+sonic-logging.workspace = true
 serde.workspace = true
 toml.workspace = true
 serde_plain.workspace = true

@@ -262,6 +262,8 @@ git tag v1.0.0 && git push origin v1.0.0
 
 triggers `.github/workflows/release.yml` → runs the quick gate + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
 
+`crates/sonic-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
+
 ---
 
 ## 10. When you're stuck
@@ -470,3 +472,14 @@ At triage:
 
 The non-owning PM may file issues / open PRs on the owner's platform
 but does NOT commit on the owner's open branches without invitation.
+
+---
+
+## 15. Filing bugs against Sonic
+
+When filing a bug, attach the last 200 lines of the most recent log file:
+
+- macOS: `tail -200 ~/Library/Logs/Sonic/sonic.log.*`
+- Windows: `Get-Content "$env:LOCALAPPDATA\Sonic\Logs\sonic.log.*" -Tail 200`
+
+If the bug crashed the app, include the matching `crashes/crash-*.log` from the same directory. If logs are gone (auto-cleaned by the 14-day / 5-rotated-file retention policy), say roughly when the bug happened so we can correlate. Full retention + level docs live in `docs/LOGGING.md`.
