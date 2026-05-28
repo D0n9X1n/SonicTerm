@@ -1318,3 +1318,28 @@ expect = [
   { kind = "text-in-region", region = "body", value = "BR" },
 ]
 fail_on = "Color, weight, or style dropped"
+
+[[case]]
+id = "landmine-pty-drop-kills-child-cmd-q-no-orphan"
+section = 37
+title = "Cmd+Q with multiple tabs: PtyHandle::Drop kills every child shell (no orphans)"
+applies_to = ["mac"]
+covers_bugs = ["#213"]
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["wait:0.5"]
+keystrokes = [
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "echo HELLO_TAB2" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+t" },
+  { kind = "wait", value = 0.3 },
+  { kind = "key", value = "cmd+q" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonic-mac", max = 0 },
+  { kind = "no-orphan-shells", parent = "sonic-mac" },
+]
+fail_on = "After Cmd+Q, any zsh/bash/sh descendant of the killed sonic process remains alive (PtyHandle::Drop did not fire)"
