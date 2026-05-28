@@ -20,10 +20,15 @@
 //! `sonic-render-model` only. It must NOT depend on `sonic-ui` or `sonic-shared`
 //! — those depend on `sonic-gpu`, so a back-edge would create a cycle.
 
-// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
-#![allow(missing_docs)]
+#![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// wgpu-side wrapper around `sonic_text::glyph_atlas` — owns the texture,
+/// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
+/// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
+/// rounded chrome, underlines, focus borders.
 pub mod quad;
+/// Instanced text pipeline consuming `sonic_text::GlyphInstance` and
+/// sampling the GPU glyph atlas.
 pub mod text_pipeline;

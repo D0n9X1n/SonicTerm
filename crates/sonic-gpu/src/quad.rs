@@ -11,10 +11,15 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// One quad instance — what the vertex stage reads per draw — packing a
+/// rectangle, color, and optional rounded-rect SDF parameters into the layout
+/// the WGSL shader expects.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct QuadInstance {
-    pub rect: [f32; 4], // x, y, w, h in NDC ([-1,1])
+    /// Rectangle as `[x, y, w, h]` in NDC ([-1, 1]).
+    pub rect: [f32; 4],
+    /// Premultiplied-alpha RGBA fill color in linear space.
     pub color: [f32; 4],
     /// Rectangle width/height in physical pixels (used by the SDF path).
     /// `[0.0, 0.0]` (the default) keeps the sharp-rect path.
@@ -47,6 +52,8 @@ impl QuadInstance {
     }
 }
 
+/// wgpu render pipeline + a growable instance buffer for `QuadInstance`s.
+/// Constructed once at GPU init, drawn one `draw()` call per frame.
 pub struct QuadPipeline {
     pipeline: wgpu::RenderPipeline,
     instance_buf: wgpu::Buffer,
@@ -107,6 +114,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 impl QuadPipeline {
+    /// Build the pipeline against the swapchain `format` — call once at GPU
+    /// init. The initial instance buffer holds 64 quads and grows on demand.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sonic-quad-shader"),
@@ -163,6 +172,8 @@ impl QuadPipeline {
         Self { pipeline, instance_buf, capacity }
     }
 
+    /// Upload `instances` (growing the GPU buffer if needed) and emit one
+    /// instanced triangle-strip draw covering all of them in the given pass.
     pub fn draw<'a>(
         &'a mut self,
         device: &wgpu::Device,

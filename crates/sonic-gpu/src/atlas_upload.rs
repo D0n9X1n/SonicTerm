@@ -145,14 +145,17 @@ impl AtlasUpload {
         }
     }
 
+    /// Bind group exposing the atlas texture + sampler to the text pipeline.
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
     }
 
+    /// Atlas texture width in pixels — matches the CPU `GlyphAtlas`.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Atlas texture height in pixels — matches the CPU `GlyphAtlas`.
     pub fn height(&self) -> u32 {
         self.height
     }

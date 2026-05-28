@@ -90,6 +90,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// single `draw(0..4, 0..N)`.
 pub struct TextPipeline {
     pipeline: RenderPipeline,
+    /// Bind group layout the caller uses to construct the atlas bind group
+    /// passed to `draw()` — slot 0 = atlas texture, slot 1 = sampler.
     pub bind_group_layout: BindGroupLayout,
     instances: Buffer,
     capacity: u64,
