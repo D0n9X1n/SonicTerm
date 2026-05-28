@@ -13,7 +13,9 @@ pub use sonic_types::HyperlinkId;
 /// A parsed OSC 8 hyperlink: optional client-supplied id + uri.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hyperlink {
+    /// Optional client-supplied id, used to group multi-cell hyperlinks.
     pub id: Option<String>,
+    /// Target URI string (validated by the application before opening).
     pub uri: String,
 }
 
@@ -25,6 +27,7 @@ pub struct HyperlinkRegistry {
 }
 
 impl HyperlinkRegistry {
+    /// Construct an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -42,14 +45,17 @@ impl HyperlinkRegistry {
         hid
     }
 
+    /// Resolve `hid` back to the interned `Hyperlink`.
     pub fn lookup(&self, hid: HyperlinkId) -> Option<&Hyperlink> {
         self.by_id.get(&hid)
     }
 
+    /// Number of interned hyperlinks.
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
 
+    /// True when the registry has no interned hyperlinks.
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }

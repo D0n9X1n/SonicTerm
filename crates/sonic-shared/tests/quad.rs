@@ -1,3 +1,5 @@
+//! Integration tests for sonic-shared quad.
+
 use sonic_shared::quad::*;
 
 #[test]

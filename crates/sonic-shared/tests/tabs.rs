@@ -1,3 +1,5 @@
+//! Integration tests for tabs.
+
 use sonic_shared::tabs::*;
 
 #[test]

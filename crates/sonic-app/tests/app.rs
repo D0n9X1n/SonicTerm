@@ -1,3 +1,5 @@
+//! Integration tests for app.
+
 use winit::keyboard::SmolStr;
 
 use sonic_app::app::{encode_logical, key_name, next_pane_id};

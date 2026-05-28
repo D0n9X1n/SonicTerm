@@ -1,3 +1,5 @@
+//! Integration tests for sonic-shared search.
+
 use sonic_core::grid::{CellFlags, Color, Grid};
 use sonic_shared::search::*;
 

@@ -36,7 +36,9 @@ pub const PROMPT_REGION_LIMIT: usize = 256;
 /// Terminal grid with scrollback.
 #[derive(Debug)]
 pub struct Grid {
+    /// Number of columns in the visible region.
     pub cols: u16,
+    /// Number of rows in the visible region.
     pub rows: u16,
     /// Visible region: `rows` rows of `cols` cells.
     ///
@@ -71,6 +73,7 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Create a new grid with the given column/row count and default settings.
     pub fn new(cols: u16, rows: u16) -> Self {
         let visible = (0..rows).map(|_| make_row(cols)).collect();
         Self {
@@ -250,6 +253,8 @@ impl Grid {
         self.bump();
     }
 
+    /// Resize the grid to `cols × rows`. Existing rows are clipped or
+    /// padded with default cells.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
             return;
@@ -409,6 +414,7 @@ impl Grid {
         self.bump();
     }
 
+    /// Move the cursor to column 0 of the current row.
     pub fn carriage_return(&mut self) {
         self.cursor.col = 0;
         let r = self.cursor.row;
@@ -416,6 +422,7 @@ impl Grid {
         self.bump();
     }
 
+    /// Advance the cursor one row, scrolling the visible region if needed.
     pub fn linefeed(&mut self) {
         let old = self.cursor.row;
         if self.cursor.row + 1 >= self.rows {
@@ -432,6 +439,7 @@ impl Grid {
         self.bump();
     }
 
+    /// Move the cursor one column to the left (does not erase).
     pub fn backspace(&mut self) {
         self.cursor.col = self.cursor.col.saturating_sub(1);
         let r = self.cursor.row;
@@ -439,6 +447,7 @@ impl Grid {
         self.bump();
     }
 
+    /// Advance the cursor to the next tab stop (8-column tabs).
     pub fn tab(&mut self) {
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
@@ -580,6 +589,7 @@ impl Grid {
         self.bump();
     }
 
+    /// Number of rows currently stored in the scrollback buffer.
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }

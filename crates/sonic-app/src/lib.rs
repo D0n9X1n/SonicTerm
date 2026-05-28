@@ -7,6 +7,8 @@
 //! `sonic_shared::config_watch` import paths are preserved as re-exports
 //! from `sonic-shared` for backwards compatibility.
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;

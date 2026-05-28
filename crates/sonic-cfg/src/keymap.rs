@@ -35,25 +35,35 @@ impl<'de> Deserialize<'de> for ActionWrapper {
 pub struct ActionWrapper(pub Action);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// A single key binding: keystroke string → action.
 pub struct Binding {
+    /// Keystroke specification, e.g. `"super+t"`.
     pub keys: String,
+    /// Action to dispatch when the keystroke fires.
     pub action: ActionWrapper,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// A loaded keymap document.
 pub struct Keymap {
+    /// Metadata block (`[meta]` in the TOML).
     pub meta: Meta,
+    /// All `[[binding]]` entries.
     #[serde(default, rename = "binding")]
     pub bindings: Vec<Binding>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Keymap metadata block.
 pub struct Meta {
+    /// Keymap name.
     pub name: String,
+    /// Keymap schema version.
     pub version: String,
 }
 
 impl Keymap {
+    /// Load a keymap from a TOML file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         let km: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;

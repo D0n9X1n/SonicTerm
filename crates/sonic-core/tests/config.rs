@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core config re-exports.
+
 use sonic_core::config::*;
 
 #[test]

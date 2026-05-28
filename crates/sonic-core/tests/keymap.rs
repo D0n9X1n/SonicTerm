@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core keymap re-exports.
+
 use sonic_core::keymap::*;
 
 #[test]

@@ -1,3 +1,5 @@
+//! Integration tests for the sonic-core grid re-exports.
+
 use sonic_core::grid::*;
 
 #[test]

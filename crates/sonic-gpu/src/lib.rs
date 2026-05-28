@@ -20,6 +20,8 @@
 //! `sonic-render-model` only. It must NOT depend on `sonic-ui` or `sonic-shared`
 //! — those depend on `sonic-gpu`, so a back-edge would create a cycle.
 
+// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+#![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod atlas_upload;
