@@ -1395,8 +1395,12 @@ impl GpuRenderer {
             // wholesale above. Translating dirty row indices to
             // absolute rows uses the current view top — the same key
             // we'll look up by below.
+            // Placeholder pane id until #199's per-pane render loop
+            // threads real pane identifiers through. Single-pane today
+            // means a single id is correct.
+            let pane_id: crate::row_glyph_cache::PaneId = 0;
             for r in grid.dirty_rows() {
-                self.row_glyph_cache.invalidate_row_abs(view_top_abs + r as u64);
+                self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
             }
             // Normalise selection once outside the loop so we hash a
             // canonical bbox per row.
@@ -1420,7 +1424,7 @@ impl GpuRenderer {
                     self.scale_factor,
                     sel_bbox,
                 );
-                if let Some(cached) = self.row_glyph_cache.get(row_abs, key) {
+                if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                     glyph_instances.extend_from_slice(&cached.glyphs);
                     for (s, e) in &cached.underlines {
                         underlines.push((r, *s, *e));
@@ -1552,6 +1556,7 @@ impl GpuRenderer {
                 let row_tofu = missing_tofu[tofu_base..].to_vec();
                 let row_missing = missing_chars_this_frame[miss_base..].to_vec();
                 self.row_glyph_cache.insert(
+                    pane_id,
                     row_abs,
                     key,
                     crate::row_glyph_cache::CachedRow {
