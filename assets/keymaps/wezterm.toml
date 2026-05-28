@@ -18,7 +18,7 @@ keys = "super+shift+t"
 action = "new_tab"
 
 [[binding]]
-keys = "super+?"
+keys = "super+shift+?"
 action = "show_keymap_cheatsheet"
 
 [[binding]]
