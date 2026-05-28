@@ -68,7 +68,7 @@ fn open_combobox_popover_is_emitted_below_header() {
     let theme = test_theme();
     let mut s =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
-    s.set_category(Category::Appearance);
+    s.set_category(Category::Theme);
 
     // Find the theme dropdown, open it, then re-snapshot rect + options.
     let id = s
@@ -136,7 +136,7 @@ fn closed_combobox_does_not_emit_selected_row_highlight() {
     let theme = test_theme();
     let mut s =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
-    s.set_category(Category::Appearance);
+    s.set_category(Category::Theme);
     let rect = s
         .controls
         .iter()

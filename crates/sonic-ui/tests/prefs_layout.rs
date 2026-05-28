@@ -116,8 +116,8 @@ fn hit_category_finds_clicked_row() {
     let l = PrefsLayout::default_size();
     let r0 = l.category_row(0);
     let r2 = l.category_row(2);
-    assert_eq!(l.hit_category(r0.x + 1.0, r0.y + 1.0), Some(Category::General));
-    assert_eq!(l.hit_category(r2.x + 1.0, r2.y + 1.0), Some(Category::Font));
+    assert_eq!(l.hit_category(r0.x + 1.0, r0.y + 1.0), Some(Category::Font));
+    assert_eq!(l.hit_category(r2.x + 1.0, r2.y + 1.0), Some(Category::Keymap));
     assert_eq!(l.hit_category(500.0, 500.0), None);
 }
 

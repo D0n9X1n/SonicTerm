@@ -414,6 +414,8 @@ pub enum ButtonKind {
     Primary,
     /// Outlined / subtle fill, theme.fg text.
     Secondary,
+    /// Text-only footer action.
+    Link,
 }
 
 #[derive(Debug, Clone)]

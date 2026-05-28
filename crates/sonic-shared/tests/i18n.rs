@@ -151,12 +151,12 @@ fn live_language_switch_rebuilds_prefs_controls() {
         },
     };
     let mut state = PrefsState::new(config, dir.path().join("sonic.toml"), theme);
-    state.set_category(Category::Appearance);
+    state.set_category(Category::Advanced);
 
     // Snapshot the language dropdown label in English.
-    let lang_ctrl_en = match &state.controls[4] {
+    let lang_ctrl_en = match &state.controls[2] {
         Control::Dropdown(d) => d.clone(),
-        other => panic!("expected Appearance[4] to be the language dropdown, got {other:?}"),
+        other => panic!("expected Advanced[2] to be the language dropdown, got {other:?}"),
     };
     assert_eq!(lang_ctrl_en.label, "Language");
 
@@ -172,10 +172,10 @@ fn live_language_switch_rebuilds_prefs_controls() {
 
     // After live-apply, the control list must have been rebuilt with
     // the new i18n bundle — the same dropdown's label is now zh-CN.
-    let lang_ctrl_zh = match &state.controls[4] {
+    let lang_ctrl_zh = match &state.controls[2] {
         Control::Dropdown(d) => d,
         other => {
-            panic!("expected Appearance[4] to be the language dropdown post-switch, got {other:?}")
+            panic!("expected Advanced[2] to be the language dropdown post-switch, got {other:?}")
         }
     };
     assert_eq!(

@@ -67,7 +67,7 @@ fn outside_click_far_away_closes_open_dropdown() {
     let mut s =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
     // Appearance category is the canonical one with a theme combobox.
-    s.set_category(Category::Appearance);
+    s.set_category(Category::Theme);
     let id = first_dropdown_id(&s);
 
     // Open the combobox.
@@ -110,7 +110,7 @@ fn outside_click_on_option_row_does_not_close() {
     let theme = test_theme();
     let mut s =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
-    s.set_category(Category::Appearance);
+    s.set_category(Category::Theme);
     let id = first_dropdown_id(&s);
     s.toggle_dropdown(id);
 
@@ -131,6 +131,6 @@ fn close_dropdowns_outside_click_is_noop_when_none_open() {
     let theme = test_theme();
     let mut s =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
-    s.set_category(Category::Appearance);
+    s.set_category(Category::Theme);
     assert!(!s.close_dropdowns_outside_click(2.0, 2.0));
 }

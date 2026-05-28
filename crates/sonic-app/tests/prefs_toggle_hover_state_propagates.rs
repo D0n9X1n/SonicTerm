@@ -60,7 +60,9 @@ fn empty_keymap() -> Keymap {
 fn prefs_toggle_hover_state_propagates_to_toggle_interaction() {
     let theme = synth_theme();
     let config = Config::default();
-    let prefs = PrefsState::new(config.clone(), PathBuf::from("sonic-test.toml"), theme.clone());
+    let mut prefs =
+        PrefsState::new(config.clone(), PathBuf::from("sonic-test.toml"), theme.clone());
+    prefs.set_category(sonic_ui::prefs::Category::Window);
 
     let (toggle_id, x, y) = prefs
         .controls
@@ -69,7 +71,7 @@ fn prefs_toggle_hover_state_propagates_to_toggle_interaction() {
             Control::Toggle(t) => Some((t.id, t.rect.x + 1.0, t.rect.y + 1.0)),
             _ => None,
         })
-        .expect("general prefs view includes a toggle");
+        .expect("window prefs view includes a toggle");
 
     let mut app = App::new(theme, config, empty_keymap());
     app.install_prefs_state_for_test(prefs);

@@ -65,13 +65,9 @@ fn state_with_toggle() -> (PrefsState, Theme) {
     let theme = test_theme();
     let mut state =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-test.toml"), theme.clone());
-    for cat in [
-        Category::General,
-        Category::Appearance,
-        Category::Behavior,
-        Category::Keymap,
-        Category::Font,
-    ] {
+    for cat in
+        [Category::Advanced, Category::Theme, Category::Cursor, Category::Keymap, Category::Font]
+    {
         state.set_category(cat);
         if state.controls.iter().any(|c| matches!(c, Control::Toggle(_))) {
             return (state, theme);
