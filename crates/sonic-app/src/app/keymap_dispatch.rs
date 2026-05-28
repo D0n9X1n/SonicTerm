@@ -44,6 +44,7 @@ impl App {
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::EnterCopyMode => self.enter_copy_mode(),
+            Action::EnterQuickSelect => self.enter_quick_select(),
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {

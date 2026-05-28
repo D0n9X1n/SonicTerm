@@ -104,9 +104,22 @@ impl App {
         let cursor = {
             let guard = pane.parser.lock();
             let grid = guard.grid();
-            (grid.cursor.col as usize, grid.cursor.row as usize)
+            (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
         self.copy_mode = Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor));
+        mark_all_panes_dirty(&self.panes);
+    }
+
+    pub(super) fn enter_quick_select(&mut self) {
+        let Some(pane) = self.active_pane() else { return };
+        let state = {
+            let guard = pane.parser.lock();
+            let grid = guard.grid();
+            let mut state = sonic_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
+            state.quick_select = Some(sonic_ui::copy_mode::QuickSelectState::from_grid(grid));
+            state
+        };
+        self.copy_mode = Some(state);
         mark_all_panes_dirty(&self.panes);
     }
 

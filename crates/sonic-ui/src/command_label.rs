@@ -92,6 +92,7 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::ResizePane { .. } => "ResizePane",
         Action::CopyToClipboard => "CopyToClipboard",
         Action::EnterCopyMode => "EnterCopyMode",
+        Action::EnterQuickSelect => "EnterQuickSelect",
         Action::PasteFromClipboard => "PasteFromClipboard",
         Action::IncreaseFontSize => "IncreaseFontSize",
         Action::DecreaseFontSize => "DecreaseFontSize",
@@ -141,6 +142,7 @@ pub fn label(a: &Action) -> String {
         }
         Action::CopyToClipboard => "Copy to Clipboard".into(),
         Action::EnterCopyMode => "Enter Copy Mode".into(),
+        Action::EnterQuickSelect => "Enter Quick Select".into(),
         Action::PasteFromClipboard => "Paste from Clipboard".into(),
         Action::IncreaseFontSize => "Increase Font Size".into(),
         Action::DecreaseFontSize => "Decrease Font Size".into(),
@@ -194,6 +196,7 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         | Action::ResizePane { .. } => &["grow", "shrink", "nudge", "divider"],
         Action::CopyToClipboard => &["yank"],
         Action::EnterCopyMode => &["keyboard", "selection", "yank", "vim"],
+        Action::EnterQuickSelect => &["url", "hint", "keyboard", "yank"],
         Action::PasteFromClipboard => &["yank"],
         Action::IncreaseFontSize => &["bigger", "zoom in", "larger"],
         Action::DecreaseFontSize => &["smaller", "zoom out"],

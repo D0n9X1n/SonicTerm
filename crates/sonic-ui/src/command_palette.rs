@@ -269,6 +269,7 @@ pub fn action_display_name(a: &Action) -> String {
         }
         Action::CopyToClipboard => "CopyToClipboard".into(),
         Action::EnterCopyMode => "EnterCopyMode".into(),
+        Action::EnterQuickSelect => "EnterQuickSelect".into(),
         Action::PasteFromClipboard => "PasteFromClipboard".into(),
         Action::IncreaseFontSize => "IncreaseFontSize".into(),
         Action::DecreaseFontSize => "DecreaseFontSize".into(),

@@ -197,10 +197,10 @@ action = "open_search"
 keys = "super+shift+p"
 action = "open_command_palette"
 
-# WezTerm's other common palette chord — Cmd+Shift+Space.
+# Quick select URL hints.
 [[binding]]
 keys = "super+shift+space"
-action = "open_command_palette"
+action = "enter_quick_select"
 
 # --- Scrolling ---
 [[binding]]

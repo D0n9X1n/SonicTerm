@@ -49,7 +49,7 @@ use crate::{
     atlas_upload::AtlasUpload,
     cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
-    copy_mode::CopyModeState,
+    copy_mode::{CopyModeState, QuickSelectState},
     cursor::{self, CursorShape},
     glyph_atlas::GlyphAtlas,
     ime::ImeState,
@@ -301,6 +301,7 @@ pub struct GpuRenderer {
     search_fg: GColor,
     search_bg: [f32; 4],
     search_buffer: Buffer,
+    quick_select_buffer: Buffer,
     palette_query_buffer: Buffer,
     palette_rows_buffer: Buffer,
     palette_footer_buffer: Buffer,
@@ -379,6 +380,7 @@ struct FrameKey {
     pane_revs: Vec<(u64, u64)>,
     selection: Option<Selection>,
     copy_mode: Option<CopyModeState>,
+    quick_select_hint_count: u32,
     cursor_visible: bool,
     tab: u64,
     pane: u64,
@@ -591,6 +593,12 @@ impl GpuRenderer {
             Some(size.width as f32),
             Some(font_size * 0.85 * 1.2),
         );
+        let mut quick_select_buffer = Buffer::new(&mut font_system, search_metrics);
+        quick_select_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
 
         // Overlay text buffers. Sized lazily inside render() since palette
         // and ime geometry depend on state. They start out at window
@@ -712,6 +720,7 @@ impl GpuRenderer {
             search_fg,
             search_bg,
             search_buffer,
+            quick_select_buffer,
             palette_query_buffer,
             palette_rows_buffer,
             palette_footer_buffer,
@@ -760,6 +769,7 @@ impl GpuRenderer {
             Some(logical_w),
             Some(self.font_size * 0.85 * 1.2),
         );
+        self.quick_select_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
         self.palette_query_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
@@ -1564,11 +1574,15 @@ impl GpuRenderer {
             }
             (idx, on_close)
         };
+        let quick_select_hint_count = copy_mode
+            .and_then(|state| state.quick_select.as_ref())
+            .map_or(0, |quick| quick.hints.len() as u32);
         let key = FrameKey {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
             selection: selection.copied(),
-            copy_mode: copy_mode.copied(),
+            copy_mode: copy_mode.cloned(),
+            quick_select_hint_count,
             cursor_visible,
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
             pane: active_pane,
@@ -1934,6 +1948,19 @@ impl GpuRenderer {
         }
 
         if let Some(copy_mode) = copy_mode {
+            if let Some(quick_select) = copy_mode.quick_select.as_ref() {
+                self.prepare_quick_select_overlay(
+                    quick_select,
+                    active_origin_x,
+                    active_origin_y,
+                    grid.scrollback_len(),
+                    grid.rows as usize,
+                    theme,
+                    sw,
+                    sh,
+                    &mut quads_overlay,
+                );
+            }
             if let Some((start, end)) = copy_mode.selected_range() {
                 let last_row = end.1.min(grid.rows.saturating_sub(1) as usize);
                 for r in start.1..=last_row {
@@ -3267,6 +3294,22 @@ impl GpuRenderer {
                 custom_glyphs: &[],
             });
         }
+        if quick_select_hint_count > 0 {
+            overlay_areas.push(TextArea {
+                buffer: &self.quick_select_buffer,
+                left: 0.0,
+                top: 0.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
+        }
         // Drag-chip title: render in the overlay text pass so it sits
         // above terminal glyphs and tab chrome. Mirrors the chip rect
         // computed in the overlay quad block above.
@@ -3410,6 +3453,49 @@ impl GpuRenderer {
             p.grid.clear_dirty();
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_quick_select_overlay(
+        &mut self,
+        quick_select: &QuickSelectState,
+        origin_x: f32,
+        origin_y: f32,
+        scrollback_len: usize,
+        visible_rows: usize,
+        theme: &Theme,
+        sw: f32,
+        sh: f32,
+        quads_overlay: &mut Vec<QuadInstance>,
+    ) {
+        let mut overlay = String::new();
+        for hint in &quick_select.hints {
+            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else { continue };
+            if visible_row >= visible_rows {
+                continue;
+            }
+            let x = origin_x + hint.col_start as f32 * self.cell_w;
+            let y = origin_y + visible_row as f32 * self.cell_h;
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(x, y, self.cell_w, self.cell_h, sw, sh),
+                color: self.cursor_color,
+                ..Default::default()
+            });
+            for _ in 0..hint.col_start {
+                overlay.push(' ');
+            }
+            overlay.push(hint.hint);
+            overlay.push('\n');
+        }
+        self.quick_select_buffer.set_text(
+            &mut self.font_system,
+            &overlay,
+            &terminal_font_attrs(&self.font_family)
+                .color(hex_to_glyphon(theme.colors.background.0.as_str())),
+            Shaping::Advanced,
+            None,
+        );
+        self.quick_select_buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Shape a single style-run worth of cells and append the

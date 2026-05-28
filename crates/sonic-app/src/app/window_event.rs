@@ -890,13 +890,37 @@ impl App {
 }
 impl App {
     fn copy_mode_handle_key(&mut self, event: &KeyEvent) {
-        let Some(mut state) = self.copy_mode else { return };
+        let Some(mut state) = self.copy_mode.take() else { return };
         let mut should_copy = false;
         let mut should_exit = false;
 
         if let Some(pane) = self.active_pane() {
             let guard = pane.parser.lock();
             let grid = guard.grid();
+            if let Some(quick_select) = state.quick_select.as_ref() {
+                let mut copied_text = None;
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => should_exit = true,
+                    Key::Character(s) => {
+                        if let Some(ch) = s.chars().next() {
+                            if let Some(text) = quick_select.text_for_hint(ch) {
+                                copied_text = Some(text.to_string());
+                                should_exit = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                drop(guard);
+                if let Some(text) = copied_text {
+                    self.set_clipboard_text(text);
+                }
+                if !should_exit {
+                    self.copy_mode = Some(state);
+                }
+                mark_all_panes_dirty(&self.panes);
+                return;
+            }
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
                 Key::Named(NamedKey::Enter) => should_copy = true,
@@ -943,9 +967,9 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
         return None;
     }
     let mut out = String::new();
-    let last_row = end.1.min(grid.rows.saturating_sub(1) as usize);
+    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
     for row_idx in start.1..=last_row {
-        let row = grid.row(row_idx as u16);
+        let Some(row) = copy_mode_row(grid, row_idx) else { break };
         let col_start = if row_idx == start.1 { start.0 } else { 0 };
         let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
         let mut line = String::new();
@@ -961,4 +985,14 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
         }
     }
     (!out.is_empty()).then_some(out)
+}
+
+fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonic_core::grid::Row> {
+    let sb = grid.scrollback_len();
+    if row_idx < sb {
+        grid.scrollback_row(row_idx)
+    } else {
+        let live = row_idx - sb;
+        (live < grid.rows as usize).then(|| grid.row(live as u16))
+    }
 }
