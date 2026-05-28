@@ -267,7 +267,6 @@ impl App {
                         ) {
                             tracing::warn!("render error: {e}");
                         }
-                        drop(panes_slice);
                         self.input_dirty = false;
                         // PR #162: mark only the generation sampled at
                         // the start of this RedrawRequested as seen.

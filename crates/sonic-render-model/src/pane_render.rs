@@ -44,18 +44,13 @@ pub struct PaneRender<'a> {
 
 /// Cursor presentation style. Mirrors the legacy enum in `sonic-ui::cursor`
 /// but kept here to avoid pulling sonic-ui into sonic-render-model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorStyle {
     BlockSteady,
+    #[default]
     BlockBlink,
     BarSteady,
     BarBlink,
     UnderlineSteady,
     UnderlineBlink,
-}
-
-impl Default for CursorStyle {
-    fn default() -> Self {
-        Self::BlockBlink
-    }
 }
