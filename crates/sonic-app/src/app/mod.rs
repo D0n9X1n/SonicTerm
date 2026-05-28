@@ -15,7 +15,12 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonic_core::{
-    config::Config, grid::Grid, keymap::Keymap, pty::PtyHandle, theme::Theme, vt::Parser,
+    config::Config,
+    grid::Grid,
+    keymap::Keymap,
+    pty::PtyHandle,
+    theme::Theme,
+    vt::{CommandEvent, Parser},
 };
 use winit::{
     application::ApplicationHandler,
@@ -114,7 +119,7 @@ use sonic_ui::pane::PaneTree;
 use sonic_ui::prefs::PrefsState;
 use sonic_ui::search::SearchState;
 use sonic_ui::selection::Selection;
-use sonic_ui::tabs::{Tab, TabBar};
+use sonic_ui::tabs::{CommandStatus, Tab, TabBar};
 
 /// A child terminal window spawned by tearing a tab off the bar.
 ///
@@ -541,6 +546,16 @@ pub struct PaneState {
     /// `scripts/bench_headless_gui.sh`). TTL is short enough that
     /// `nvim foo` still flips the tab title quickly.
     pub fg_proc_cache: Option<(std::time::Instant, Option<String>)>,
+    /// Cross-thread queue populated by the VT loop when OSC 133 command
+    /// lifecycle markers are parsed for this pane.
+    pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneCommandEvent {
+    pub event: CommandEvent,
+    pub at: Instant,
+    pub duration: Option<Duration>,
 }
 
 impl PaneState {
@@ -552,6 +567,7 @@ impl PaneState {
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
             fg_proc_cache: None,
+            command_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -562,6 +578,14 @@ pub struct TabState {
     pub tree: PaneTree,
     pub active_pane: u64,
     pub search: Option<SearchState>,
+    pub command: CommandStatus,
+}
+
+impl TabState {
+    #[doc(hidden)]
+    pub fn new(tree: PaneTree, active_pane: u64) -> Self {
+        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
+    }
 }
 
 #[doc(hidden)]
@@ -828,6 +852,156 @@ impl App {
         }
     }
 
+    #[doc(hidden)]
+    pub fn poll_command_events_for_all_tabs(&mut self) {
+        for tab_idx in 0..self.tab_states.len() {
+            self.poll_command_events_for_tab(tab_idx);
+        }
+    }
+
+    pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
+        poll_command_events_for_tab_state(
+            &self.panes,
+            &mut self.tab_states,
+            &mut self.tabs,
+            &self.config,
+            tab_idx,
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn __test_push_pane_command_event(
+        &mut self,
+        pane_id: u64,
+        event: CommandEvent,
+        at: Instant,
+        duration: Option<Duration>,
+    ) {
+        if let Some(pane) = self.panes.get(&pane_id) {
+            pane.command_events.lock().push(PaneCommandEvent { event, at, duration });
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
+        self.tab_states.get(tab_idx).map(|st| st.command.clone())
+    }
+
+    #[doc(hidden)]
+    pub fn __test_tab_badge(&self, tab_idx: usize, now: Instant) -> Option<&'static str> {
+        self.tabs
+            .tabs()
+            .get(tab_idx)
+            .and_then(|tab| tab.command.clone().badge(now, tab_idx == self.tabs.active_index()))
+    }
+}
+
+#[doc(hidden)]
+pub fn poll_command_events_for_tab_state(
+    panes: &HashMap<u64, PaneState>,
+    tab_states: &mut [TabState],
+    tabs: &mut TabBar,
+    config: &Config,
+    tab_idx: usize,
+) {
+    let Some(tab_state) = tab_states.get_mut(tab_idx) else { return };
+    let pane_ids = tab_state.tree.leaves();
+    let mut events = Vec::new();
+    for pane_id in pane_ids {
+        if let Some(pane) = panes.get(&pane_id) {
+            let mut q = pane.command_events.lock();
+            events.extend(q.drain(..));
+        }
+    }
+    if events.is_empty() {
+        return;
+    }
+    for ev in events {
+        match ev.event {
+            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
+            CommandEvent::CmdEnd(exit) => {
+                tab_state.command =
+                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
+                maybe_notify_long_command(config, ev.duration, exit);
+            }
+            CommandEvent::PromptStart => {}
+        }
+    }
+    if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
+        tabs.set_command_status(tab_idx, t);
+    }
+}
+
+#[doc(hidden)]
+pub fn poll_command_events_for_child_window(child: &mut ChildWindow, config: &Config) {
+    for tab_idx in 0..child.tab_states.len() {
+        poll_command_events_for_tab_state(
+            &child.panes,
+            &mut child.tab_states,
+            &mut child.tabs,
+            config,
+            tab_idx,
+        );
+    }
+}
+
+fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
+    let Some(duration) = duration else { return };
+    if !config.notifications.long_command {
+        return;
+    }
+    if duration.as_secs() <= config.notifications.threshold_secs {
+        return;
+    }
+    let result = match exit {
+        Some(0) => "completed successfully",
+        Some(code) => return notify_command_done(format!("Command failed with exit code {code}")),
+        None => "completed",
+    };
+    notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
+}
+
+static TEST_COMMAND_NOTIFICATIONS: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
+#[doc(hidden)]
+pub fn __test_capture_command_notifications() {
+    *TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned") = Some(Vec::new());
+}
+
+#[doc(hidden)]
+pub fn __test_drain_command_notifications() -> Vec<String> {
+    TEST_COMMAND_NOTIFICATIONS
+        .lock()
+        .expect("test notification lock poisoned")
+        .take()
+        .unwrap_or_default()
+}
+
+fn record_test_command_notification(body: &str) -> bool {
+    let mut notifications =
+        TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned");
+    let Some(notifications) = notifications.as_mut() else { return false };
+    notifications.push(body.to_string());
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn notify_command_done(body: String) {
+    if record_test_command_notification(&body) {
+        return;
+    }
+    if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
+        tracing::debug!(?err, "desktop notification failed");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn notify_command_done(body: String) {
+    record_test_command_notification(&body);
+}
+
+impl App {
     /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
     /// right now would be coalesced (deferred to the next vsync boundary)
     /// or `false` if it would render immediately. Mirrors the exact
@@ -1135,11 +1309,7 @@ impl App {
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
         self.panes.insert(pane_id, PaneState::new(parser, None));
         self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState {
-            tree: PaneTree::leaf(pane_id),
-            active_pane: pane_id,
-            search: None,
-        });
+        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         pane_id
     }
 

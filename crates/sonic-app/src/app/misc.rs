@@ -219,11 +219,7 @@ impl App {
         let pane = self.spawn_pane();
         self.panes.insert(pane_id, pane);
         self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState {
-            tree: PaneTree::leaf(pane_id),
-            active_pane: pane_id,
-            search: None,
-        });
+        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
         if index >= self.tab_states.len() {

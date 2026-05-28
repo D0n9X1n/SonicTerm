@@ -153,7 +153,12 @@ impl App {
             window: window.clone(),
             renderer,
             tabs: child_tabs,
-            tab_states: vec![TabState { tree: state.tree, active_pane, search: state.search }],
+            tab_states: vec![TabState {
+                tree: state.tree,
+                active_pane,
+                search: state.search,
+                command: state.command,
+            }],
             panes,
             cursor_pos: (0.0, 0.0),
             mouse_down: false,

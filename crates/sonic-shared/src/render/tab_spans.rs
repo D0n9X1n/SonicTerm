@@ -13,6 +13,7 @@ pub struct TabSpanInput<'a> {
     pub title_x: f32,
     pub title_w: f32,
     pub is_active: bool,
+    pub badge: Option<&'a str>,
 }
 
 /// Horizontal padding (in logical pixels) reserved on EACH side of a tab's
@@ -90,7 +91,14 @@ pub fn build_tab_title_spans(
         let full_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(max_chars);
 
         // Truncate with `…` if the title overflows usable width.
-        let title_chars: Vec<char> = t.title.chars().collect();
+        let display_title;
+        let title = if let Some(badge) = t.badge {
+            display_title = format!("{badge} {}", t.title);
+            display_title.as_str()
+        } else {
+            t.title
+        };
+        let title_chars: Vec<char> = title.chars().collect();
         let body: String = if title_chars.len() > max_chars {
             let keep = max_chars.saturating_sub(1);
             let mut s: String = title_chars.iter().take(keep).collect();

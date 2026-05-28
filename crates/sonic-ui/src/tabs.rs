@@ -1,6 +1,9 @@
 //! Browser-style tab model.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -13,10 +16,35 @@ impl TabId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CommandStatus {
+    #[default]
+    Idle,
+    Running(Instant),
+    Done {
+        exit: Option<u8>,
+        until: Instant,
+    },
+}
+
+impl CommandStatus {
+    pub fn badge(self, now: Instant, is_active: bool) -> Option<&'static str> {
+        match self {
+            Self::Running(started) if !is_active && now.duration_since(started).as_secs() > 5 => {
+                Some("…")
+            }
+            Self::Done { exit: Some(0), until } if now < until => Some("✓"),
+            Self::Done { exit: _, until } if now < until => Some("✗"),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tab {
     pub id: TabId,
     pub title: String,
+    pub command: CommandStatus,
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
     pub icon_hint: Option<String>,
@@ -24,7 +52,12 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(title: impl Into<String>) -> Self {
-        Self { id: TabId::next(), title: title.into(), icon_hint: None }
+        Self {
+            id: TabId::next(),
+            title: title.into(),
+            command: CommandStatus::default(),
+            icon_hint: None,
+        }
     }
 }
 
@@ -70,6 +103,20 @@ impl TabBar {
     pub fn set_active_title(&mut self, title: impl Into<String>) {
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.title = title.into();
+        }
+    }
+
+    pub fn set_command_status(&mut self, index: usize, status: CommandStatus) {
+        if let Some(t) = self.tabs.get_mut(index) {
+            t.command = status;
+        }
+    }
+
+    pub fn clear_expired_command_badges(&mut self, now: Instant) {
+        for tab in &mut self.tabs {
+            if matches!(tab.command, CommandStatus::Done { until, .. } if now >= until) {
+                tab.command = CommandStatus::Idle;
+            }
         }
     }
 

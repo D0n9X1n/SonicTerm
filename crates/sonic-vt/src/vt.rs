@@ -25,6 +25,8 @@ pub const SONIC_VERSION: &str = "Sonic 0.7";
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
 pub enum VtEvent {
+    /// OSC 133 — shell integration command lifecycle marker.
+    Command(CommandEvent),
     /// OSC 0/2 — shell asked the terminal to update the window title.
     SetTitle(String),
     /// BEL (0x07) — audible/visual bell request from the shell.
@@ -48,6 +50,17 @@ pub enum VtEvent {
     },
     /// DEC private mode ?25 — host should show/hide the cursor.
     CursorVisibility(bool),
+}
+
+/// Command lifecycle events surfaced from OSC 133 shell-integration markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEvent {
+    /// Prompt started (`OSC 133 ; A`).
+    PromptStart,
+    /// Command started (`OSC 133 ; B` or `OSC 133 ; C`).
+    CmdStart,
+    /// Command ended, optionally with an exit code (`OSC 133 ; D ; <code>`).
+    CmdEnd(Option<u8>),
 }
 
 /// Streaming parser wrapping `vte::Parser` and a [`Performer`] that owns the
@@ -575,21 +588,27 @@ impl Perform for Performer {
                 // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
                 // integration. Kinds:
                 //   A → prompt start
-                //   B → prompt end (= command-line edit start)
+                //   B → command-line edit start / command start in Sonic
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|s| s.first().copied());
                 match kind {
-                    Some(b'A') => self.grid.record_prompt_start(),
+                    Some(b'A') => {
+                        self.grid.record_prompt_start();
+                        self.events.push(VtEvent::Command(CommandEvent::PromptStart));
+                    }
+                    Some(b'B') | Some(b'C') => {
+                        self.events.push(VtEvent::Command(CommandEvent::CmdStart));
+                    }
                     Some(b'D') => {
-                        let exit = params
+                        let exit_i32 = params
                             .get(2)
                             .and_then(|s| std::str::from_utf8(s).ok())
                             .and_then(|s| s.parse::<i32>().ok());
-                        self.grid.record_prompt_end(exit);
+                        self.grid.record_prompt_end(exit_i32);
+                        let exit = exit_i32.and_then(|n| u8::try_from(n).ok());
+                        self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
                     }
-                    // B / C are tracked implicitly via cursor position at the
-                    // time A and D fire; no extra state needed for now.
                     _ => {}
                 }
             }
