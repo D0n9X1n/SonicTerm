@@ -262,42 +262,17 @@ impl App {
         if !s.is_dirty() {
             return;
         }
-        // Snapshot fields that drive live-apply BEFORE apply() resets
-        // the original snapshot (which is what we'd otherwise diff).
-        let new_theme_name = s.config.theme.clone();
-        let new_keymap_name = s.config.keymap.clone();
-        let old_theme_name = self.config.theme.clone();
-        let old_keymap_name = self.config.keymap.clone();
         if let Err(e) = s.apply() {
             tracing::error!("prefs apply failed: {e}");
             return;
         }
-        // Mirror the saved config into the live App config so any new
-        // panes / windows pick up the change.
-        self.config = s.config.clone();
-        // Live theme apply.
-        if new_theme_name != old_theme_name {
-            if let Some(loader) = self.theme_loader.as_ref() {
-                match loader(&new_theme_name) {
-                    Ok(t) => {
-                        self.theme = t;
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    Err(e) => tracing::warn!("live theme reload '{new_theme_name}' failed: {e}"),
-                }
-            }
-        }
-        // Live keymap apply.
-        if new_keymap_name != old_keymap_name {
-            if let Some(loader) = self.keymap_loader.as_ref() {
-                match loader(&new_keymap_name) {
-                    Ok(k) => self.keymap = k,
-                    Err(e) => tracing::warn!("live keymap reload '{new_keymap_name}' failed: {e}"),
-                }
-            }
-        }
+        // Route every prefs edit through the canonical live-apply
+        // path so the renderer sees font / padding / cursor / theme
+        // / keymap changes immediately (issue #167). `apply_new_config`
+        // diffs against the *current* `self.config` before assigning
+        // the new one, so we must call it before mirroring.
+        let new_cfg = s.config.clone();
+        self.apply_new_config(new_cfg);
     }
     pub(super) fn open_preferences(&mut self) {
         // Already open → just re-focus.
