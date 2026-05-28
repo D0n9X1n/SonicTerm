@@ -1,14 +1,27 @@
 //! Crash-dump capture tests — push synthetic events into the ring,
 //! invoke the dump writer, and assert content + location.
+//!
+//! The ring buffer is a process-global `static`; both tests in this
+//! file mutate it. Cargo runs integration tests in a binary
+//! concurrently by default, which pre-v0.8.1 caused
+//! `dump_includes_ring_events_and_message` to flake when
+//! `ring_caps_at_capacity` evicted the `alpha`/`beta` entries before
+//! the former finished reading. Each test now takes the
+//! `__test_serial` guard and `__test_reset`s the ring at entry to
+//! keep assertions deterministic.
 
 use std::fs;
 
-use sonic_logging::crash::{__test_push, __test_write_dump, RING_CAPACITY};
+use sonic_logging::crash::{
+    __test_push, __test_reset, __test_serial, __test_write_dump, RING_CAPACITY,
+};
 use tempfile::tempdir;
 use tracing::Level;
 
 #[test]
 fn dump_includes_ring_events_and_message() {
+    let _serial = __test_serial();
+    __test_reset();
     let dir = tempdir().unwrap();
     __test_push(Level::INFO, "sonic_test", "alpha event");
     __test_push(Level::WARN, "sonic_test", "beta event");
@@ -25,6 +38,8 @@ fn dump_includes_ring_events_and_message() {
 
 #[test]
 fn ring_caps_at_capacity() {
+    let _serial = __test_serial();
+    __test_reset();
     // Push more than RING_CAPACITY events; oldest must be evicted.
     for i in 0..(RING_CAPACITY + 50) {
         __test_push(Level::INFO, "sonic_test_cap", &format!("evt-{i}"));
