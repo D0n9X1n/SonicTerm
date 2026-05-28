@@ -52,6 +52,9 @@ pub struct SubscriberSink {
 }
 
 impl SubscriberSink {
+    /// Wrap a paired `tx`/`rx` into a subscriber sink. Both halves reference
+    /// the same crossbeam MPMC channel so `send_drop_oldest` can pop from the
+    /// front before retrying a push.
     pub fn new(tx: Sender<ServerMsg>, rx: Receiver<ServerMsg>) -> Self {
         Self { tx, rx }
     }
@@ -118,6 +121,8 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Build an empty server state wrapped in an `Arc` ready for sharing across
+    /// the connection handler and per-pane reader/writer threads.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             next_session: AtomicU64::new(1),
@@ -174,6 +179,8 @@ impl ServerState {
         Ok(infos)
     }
 
+    /// Drop the current attachment: clear each pane's subscriber slot so live
+    /// output again only accumulates into the replay ring.
     pub fn detach(&self) {
         let attached = self.attached.lock().take();
         if let Some(sid) = attached {
@@ -202,6 +209,8 @@ impl ServerState {
         }
     }
 
+    /// Forward client-side keystrokes / paste bytes to the named pane's PTY
+    /// writer thread. Errors if the pane is unknown or already torn down.
     pub fn input(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
         let sessions = self.sessions.lock();
         let pane = find_pane(&sessions, pane_id)?;
@@ -209,6 +218,8 @@ impl ServerState {
         Ok(())
     }
 
+    /// Propagate a client-side resize to the pane's PTY via `TIOCSWINSZ`
+    /// (or the Windows equivalent).
     pub fn resize(&self, pane_id: PaneId, cols: u16, rows: u16) -> Result<()> {
         let sessions = self.sessions.lock();
         let pane = find_pane(&sessions, pane_id)?;
@@ -216,6 +227,8 @@ impl ServerState {
         Ok(())
     }
 
+    /// Remove a pane from its session and SIGKILL its child. Errors if no
+    /// session contains a pane with that id.
     pub fn kill_pane(&self, pane_id: PaneId) -> Result<()> {
         let mut sessions = self.sessions.lock();
         for session in sessions.values_mut() {

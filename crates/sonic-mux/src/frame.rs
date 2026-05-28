@@ -8,6 +8,8 @@ use serde::{de::DeserializeOwned, Serialize};
 /// malicious unbounded allocations on a corrupted stream.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
+/// Serialize `msg` with bincode and write it as a 4-byte big-endian
+/// length prefix followed by the payload, then flush the stream.
 pub fn write_frame<W: Write, M: Serialize>(w: &mut W, msg: &M) -> io::Result<()> {
     let bytes = bincode::serialize(msg).map_err(|e| io::Error::other(e.to_string()))?;
     if bytes.len() > MAX_FRAME {
@@ -20,6 +22,9 @@ pub fn write_frame<W: Write, M: Serialize>(w: &mut W, msg: &M) -> io::Result<()>
     Ok(())
 }
 
+/// Read a 4-byte big-endian length prefix and the following payload, then
+/// deserialize it with bincode. Returns an error if the declared length
+/// exceeds `MAX_FRAME` so a corrupt stream can't trigger a huge allocation.
 pub fn read_frame<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
