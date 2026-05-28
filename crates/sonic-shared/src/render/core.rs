@@ -2506,7 +2506,9 @@ impl GpuRenderer {
 
         let palette_query_area = palette_layout.as_ref().map(|layout| TextArea {
             buffer: &self.palette_query_buffer,
-            left: layout.query_row.x + 4.0,
+            // Left padding inside the query field — matches PALETTE_ROW_PAD_X so the
+            // placeholder/typed text doesn't hug the rounded left edge.
+            left: layout.query_row.x + crate::overlays::PALETTE_ROW_PAD_X,
             top: layout.query_row.y + 2.0,
             scale: 1.0,
             bounds: TextBounds {
@@ -2548,7 +2550,8 @@ impl GpuRenderer {
             let text_top_offset = (crate::overlays::PALETTE_ROW_HEIGHT - line_height) * 0.5;
             Some(TextArea {
                 buffer: &self.palette_rows_buffer,
-                left: row_x + 4.0,
+                // Match PALETTE_ROW_PAD_X — 4px hugged the rounded highlight edge.
+                left: row_x + crate::overlays::PALETTE_ROW_PAD_X,
                 top: row_y + text_top_offset,
                 scale: 1.0,
                 bounds: TextBounds {
