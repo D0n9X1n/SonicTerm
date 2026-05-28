@@ -77,6 +77,8 @@ bash scripts/bench.sh                                          # perf-bench subs
 
 `cargo-deny` is wired into the local gate via `scripts/check-deny.sh` (install with `cargo install cargo-deny --locked`). The policy lives in `deny.toml` at the repo root — advisories deny-on-warn, licenses are an explicit allowlist, duplicate versions warn, and only crates.io is an allowed source. CI wiring lands in a follow-up PR after the in-flight workflow refactor; until then the local gate is authoritative. CI matrix is `macos-14` + `windows-latest` only.
 
+**Two-tier CI** (PR #N): the **PR/main quick gate** runs `fmt + clippy + cargo test --workspace --lib --bins` (unit + bin tests only — integration tests under each crate's `tests/` folder are skipped for speed, ~2-3 min target). The **release gate** runs on `v*` tag push only and adds full `cargo test --workspace` (incl. integration), both `pty_dump` e2e examples, `scripts/bench.sh` in CI mode, and the unsigned `.dmg` + `.msi` build/publish. Integration tests must therefore be exercised locally before tagging a release (the pre-commit gate in this section still requires `cargo test --workspace`).
+
 **Test floor: never let workspace test count regress. Current floor = 878** (post-#143 quality polish + per-pane resize regression tests in `crates/sonic-app/tests/per_pane_resize.rs`; was 824 at #160 split, 171 at v0.6). Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
 
 ### E2E binaries (use these to verify, not just unit tests)
@@ -258,7 +260,7 @@ Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The ke
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-triggers `.github/workflows/release.yml` → produces a universal macOS `.dmg` + x64 Windows `.msi`. Signing pipeline is wired (Azure Trusted Signing for Windows in #128, Developer ID notarization for macOS in #39 + #128) but **certs are still pending procurement** — the v1.0 tag will ship unsigned until that operational step lands. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
+triggers `.github/workflows/release.yml` → runs the quick gate + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
 
 ---
 
