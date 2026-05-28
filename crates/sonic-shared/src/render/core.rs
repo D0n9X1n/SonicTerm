@@ -1871,12 +1871,15 @@ impl GpuRenderer {
 
         // -------- Pane split borders ---------------------------------------
         // Each pane in the tab gets a thin border outlining its rectangle so
-        // splits are visible; the focused pane gets a brighter, thicker one.
-        // v0.3d only renders the active pane's grid (above) inside the full
-        // content rect — per-pane glyphon Buffer rendering is v0.4 work.
+        // splits are visible; the FOCUSED pane gets the theme accent color
+        // (gold on tokyo-night, orange on gruvbox, etc.) so the user can
+        // tell at a glance which pane has keyboard focus. Inactive panes
+        // get a dim version of the same accent — still readable as a split
+        // boundary but visually subordinate.
         if pane_rects.len() > 1 {
-            let focus_border = glyphon_color_to_linear_rgba(self.fg_default);
-            let border = [focus_border[0] * 0.5, focus_border[1] * 0.5, focus_border[2] * 0.5, 1.0];
+            let accent = crate::ui_tokens::UiPalette::from_theme(theme).accent;
+            let focus_border = accent;
+            let border = [accent[0] * 0.35, accent[1] * 0.35, accent[2] * 0.35, accent[3]];
             for (id, r) in pane_rects {
                 let is_active = *id == active_pane;
                 let color = if is_active { focus_border } else { border };
