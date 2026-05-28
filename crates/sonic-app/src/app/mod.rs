@@ -581,7 +581,8 @@ pub struct TabState {
 }
 
 impl TabState {
-    fn new(tree: PaneTree, active_pane: u64) -> Self {
+    #[doc(hidden)]
+    pub fn new(tree: PaneTree, active_pane: u64) -> Self {
         Self { tree, active_pane, search: None, command: CommandStatus::Idle }
     }
 }
@@ -840,29 +841,91 @@ impl App {
         }
     }
 
+    #[doc(hidden)]
+    pub fn poll_command_events_for_all_tabs(&mut self) {
+        for tab_idx in 0..self.tab_states.len() {
+            self.poll_command_events_for_tab(tab_idx);
+        }
+    }
+
     pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
-        let Some(tab_state) = self.tab_states.get_mut(tab_idx) else { return };
-        let pane_ids = tab_state.tree.leaves();
-        let mut latest = None;
-        for pane_id in pane_ids {
-            if let Some(pane) = self.panes.get(&pane_id) {
-                let mut q = pane.command_events.lock();
-                latest = q.drain(..).next_back().or(latest);
-            }
+        poll_command_events_for_tab_state(
+            &self.panes,
+            &mut self.tab_states,
+            &mut self.tabs,
+            &self.config,
+            tab_idx,
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn __test_push_pane_command_event(
+        &mut self,
+        pane_id: u64,
+        event: CommandEvent,
+        at: Instant,
+        duration: Option<Duration>,
+    ) {
+        if let Some(pane) = self.panes.get(&pane_id) {
+            pane.command_events.lock().push(PaneCommandEvent { event, at, duration });
         }
-        let Some(ev) = latest else { return };
-        match ev.event {
-            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
-            CommandEvent::CmdEnd(exit) => {
-                tab_state.command =
-                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
-                maybe_notify_long_command(&self.config, ev.duration, exit);
-            }
-            CommandEvent::PromptStart => {}
+    }
+
+    #[doc(hidden)]
+    pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
+        self.tab_states.get(tab_idx).map(|st| st.command.clone())
+    }
+
+    #[doc(hidden)]
+    pub fn __test_tab_badge(&self, tab_idx: usize, now: Instant) -> Option<&'static str> {
+        self.tabs
+            .tabs()
+            .get(tab_idx)
+            .and_then(|tab| tab.command.clone().badge(now, tab_idx == self.tabs.active_index()))
+    }
+}
+
+#[doc(hidden)]
+pub fn poll_command_events_for_tab_state(
+    panes: &HashMap<u64, PaneState>,
+    tab_states: &mut [TabState],
+    tabs: &mut TabBar,
+    config: &Config,
+    tab_idx: usize,
+) {
+    let Some(tab_state) = tab_states.get_mut(tab_idx) else { return };
+    let pane_ids = tab_state.tree.leaves();
+    let mut latest = None;
+    for pane_id in pane_ids {
+        if let Some(pane) = panes.get(&pane_id) {
+            let mut q = pane.command_events.lock();
+            latest = q.drain(..).next_back().or(latest);
         }
-        if let Some(t) = self.tab_states.get(tab_idx).map(|st| st.command.clone()) {
-            self.tabs.set_command_status(tab_idx, t);
+    }
+    let Some(ev) = latest else { return };
+    match ev.event {
+        CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
+        CommandEvent::CmdEnd(exit) => {
+            tab_state.command = CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
+            maybe_notify_long_command(config, ev.duration, exit);
         }
+        CommandEvent::PromptStart => {}
+    }
+    if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
+        tabs.set_command_status(tab_idx, t);
+    }
+}
+
+#[doc(hidden)]
+pub fn poll_command_events_for_child_window(child: &mut ChildWindow, config: &Config) {
+    for tab_idx in 0..child.tab_states.len() {
+        poll_command_events_for_tab_state(
+            &child.panes,
+            &mut child.tab_states,
+            &mut child.tabs,
+            config,
+            tab_idx,
+        );
     }
 }
 

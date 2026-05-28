@@ -32,9 +32,9 @@ use winit::{
 
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
-    mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, PaneState, TabState,
-    UserEvent,
+    mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
+    resize_all_panes, shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App,
+    ChildWindow, PaneState, TabState, UserEvent,
 };
 use crate::app::integrated_titlebar_inset;
 use sonic_ui::prefs::PrefsHit;
@@ -47,6 +47,7 @@ impl App {
         event: WindowEvent,
     ) {
         let theme = self.theme.clone();
+        let config = self.config.clone();
         let Some(child) = self.child_windows.get_mut(&win_id) else { return };
         match event {
             WindowEvent::CloseRequested => {
@@ -69,6 +70,8 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                child.tabs.clear_expired_command_badges(Instant::now());
+                poll_command_events_for_child_window(child, &config);
                 let tab_idx = child.tabs.active_index();
                 let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = child
                     .tab_states
