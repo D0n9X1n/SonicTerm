@@ -4,12 +4,18 @@
 # Usage:
 #   bash scripts/check-release-testing.sh
 #
-# Exits 0 only when every `[ ]` in docs/RELEASE_TESTING.md has been ticked
-# to `[x]` (or `[X]`). Exits 1 listing the unchecked items otherwise.
+# Exhausts the WHOLE document on every run so the maintainer sees the
+# complete gap in one shot — not just the first failure. Reports:
+#   * Every `- [ ]` unchecked checklist item (with line numbers).
+#   * Every `needs-test` marker in a §37 table row (with line numbers).
+#     (The TODO list at the bottom intentionally tracks the same gaps as
+#      regular `- [ ]` boxes; those are counted under "unchecked items".)
+#
+# Exit 0 only when BOTH counts are zero. Exit 1 otherwise.
 #
 # Also enforced in CI on tag-push via .github/workflows/release.yml.
 
-set -euo pipefail
+set -uo pipefail
 
 DOC="docs/RELEASE_TESTING.md"
 
@@ -18,39 +24,45 @@ if [[ ! -f "$DOC" ]]; then
   exit 1
 fi
 
-# Find every unchecked checkbox line: leading whitespace, "- [ ]", space, text.
-# `grep -n` so we can report line numbers; `|| true` because grep exits 1 on no-match.
+# --- Scan 1: unchecked checklist boxes --------------------------------------
+# Match leading whitespace, "- [ ]", required space, text.
 unchecked=$(grep -nE '^[[:space:]]*-[[:space:]]+\[[[:space:]]\][[:space:]]' "$DOC" || true)
-
-# Section 37 (CLAUDE.md §4 land-mine coverage) MUST have no `needs-test`
-# markers in its table rows — those flag missing automated regression
-# tests for the §4 land-mines and block release until closed. The TODO
-# section at the bottom of the doc explains each gap and is itself a
-# checklist box that must be ticked, so we only fail on raw `needs-test`
-# table cells (not the TODO heading).
-needs_test=$(grep -nE 'needs-test' "$DOC" | grep -vE '^[^:]*:[[:space:]]*#|TODO:' || true)
-# Filter out lines inside the TODO list (those are tracking the gaps,
-# not asserting coverage). Table cells contain ` | ` separators; TODO
-# bullets begin with `- [ ]`.
-needs_test_table=$(printf '%s\n' "$needs_test" | grep -E '\| ' || true)
-if [[ -n "$needs_test_table" ]]; then
-  echo "FAIL: Section 37 has 'needs-test' row(s) in $DOC — automated test gap:" >&2
-  printf '%s\n' "$needs_test_table" >&2
-  echo "" >&2
-  echo "Add the missing automated regression test(s) before tagging." >&2
-  exit 1
+if [[ -n "$unchecked" ]]; then
+  unchecked_count=$(printf '%s\n' "$unchecked" | wc -l | tr -d ' ')
+else
+  unchecked_count=0
 fi
 
-if [[ -z "$unchecked" ]]; then
-  total=$(grep -cE '^[[:space:]]*-[[:space:]]+\[[xX]\][[:space:]]' "$DOC" || echo 0)
-  echo "OK: all $total checklist items in $DOC are checked."
+# --- Scan 2: `needs-test` markers in §37 table rows -------------------------
+# Table rows contain `|` separators. The TODO bullets do not — they're
+# `- [ ]` checklist items already counted by Scan 1.
+needs_test=$(grep -nE 'needs-test' "$DOC" | grep -E '\|' || true)
+if [[ -n "$needs_test" ]]; then
+  needs_test_count=$(printf '%s\n' "$needs_test" | wc -l | tr -d ' ')
+else
+  needs_test_count=0
+fi
+
+# --- Report -----------------------------------------------------------------
+checked_total=$(grep -cE '^[[:space:]]*-[[:space:]]+\[[xX]\][[:space:]]' "$DOC" || true)
+
+echo "Release-testing gap report for $DOC"
+echo "-------------------------------------------------------------"
+echo "Unchecked items: $unchecked_count   (checked: $checked_total)"
+if [[ $unchecked_count -gt 0 ]]; then
+  printf '%s\n' "$unchecked" | sed 's/^/  /'
+fi
+echo ""
+echo "needs-test gaps (§37 table): $needs_test_count"
+if [[ $needs_test_count -gt 0 ]]; then
+  printf '%s\n' "$needs_test" | sed 's/^/  /'
+fi
+echo "-------------------------------------------------------------"
+
+if [[ $unchecked_count -eq 0 && $needs_test_count -eq 0 ]]; then
+  echo "OK: all $checked_total checklist items checked and no needs-test gaps."
   exit 0
 fi
 
-count=$(printf '%s\n' "$unchecked" | wc -l | tr -d ' ')
-echo "FAIL: $count unchecked item(s) in $DOC:" >&2
-printf '%s\n' "$unchecked" >&2
-echo "" >&2
-echo "Run the checklist locally on a freshly built release binary," >&2
-echo "tick every box, commit, and re-run this script before tagging." >&2
+echo "FAIL: tick remaining boxes and close needs-test gaps before tagging." >&2
 exit 1
