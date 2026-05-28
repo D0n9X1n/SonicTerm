@@ -3878,7 +3878,8 @@ pub fn command_status_hash(status: &sonic_ui::tabs::CommandStatus, now: Instant)
         sonic_ui::tabs::CommandStatus::Idle => 0,
         sonic_ui::tabs::CommandStatus::Running(started_at) => {
             let elapsed_secs = now.duration_since(*started_at).as_secs().min(5);
-            1 | (elapsed_secs << 32)
+            let badge_visible = u64::from(now.duration_since(*started_at).as_secs() > 5);
+            1 | (elapsed_secs << 32) | (badge_visible << 40)
         }
         sonic_ui::tabs::CommandStatus::Done { exit, until } => {
             let is_past_expiry = u64::from(now >= *until);
