@@ -15,6 +15,15 @@
 #   bash scripts/bench.sh --record    # Update baseline.json from a fresh run.
 #                                       Intended for intentional perf changes.
 #
+# Env vars:
+#   BENCH_SKIP_MEASURE=1  Skip the measurement step entirely and reuse the
+#                         existing current.json as-is. Used to test the gate
+#                         itself (e.g. inject a synthetic regression into
+#                         current.json, then run with this flag to confirm the
+#                         comparison step fails as expected). Without this
+#                         flag, each invocation re-measures and would
+#                         overwrite any injected values before comparison.
+#
 # Subset (local, always run):
 #   - cat_10mb_ascii_sec : `cat` a 10MB ASCII file into a headless PTY consumer,
 #                          wall-clock seconds.
@@ -145,6 +154,14 @@ run_vtebench() {
 # ---------- collect -----------------------------------------------------------
 
 echo "[bench] mode=$MODE threshold=${THRESHOLD_PCT}%"
+
+if [[ "${BENCH_SKIP_MEASURE:-}" == "1" ]]; then
+  if [[ ! -f "$CURRENT" ]]; then
+    echo "[bench] BENCH_SKIP_MEASURE=1 but $CURRENT does not exist; nothing to compare." >&2
+    exit 2
+  fi
+  echo "[bench] BENCH_SKIP_MEASURE=1 — reusing existing $CURRENT (skipping measurement)."
+else
 echo "[bench] preparing payloads…"
 make_payloads
 
@@ -175,6 +192,7 @@ cat > "$CURRENT" <<JSON
 }
 JSON
 echo "[bench] wrote $CURRENT"
+fi  # end BENCH_SKIP_MEASURE guard
 
 if [[ $RECORD -eq 1 ]]; then
   python3 - "$BASELINE" "$CURRENT" <<'PY'

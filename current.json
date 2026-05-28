@@ -1,0 +1,11 @@
+{
+  "metrics": {
+    "vtebench_dense_cells_ms": null,
+    "vtebench_scrolling_ms": null,
+    "vtebench_unicode_ms": null,
+    "cat_10mb_ascii_sec": 0.30,
+    "cat_4mb_ansi_sec": 0.0223,
+    "rss_mb": 0.0,
+    "idle_cpu_pct": 0.0
+  }
+}
