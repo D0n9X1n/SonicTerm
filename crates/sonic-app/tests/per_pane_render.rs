@@ -151,3 +151,54 @@ fn last_panes_received_matches_slice_length() {
         panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
     assert_eq!(received.len(), 3, "all 3 panes must reach the renderer");
 }
+
+/// PR #199 round-3 Haiku finding: underline runs from inactive panes
+/// were collected without the pane origin and emitted at
+/// `active_origin_{x,y}`, mis-placing underlined text in inactive
+/// panes onto the active pane's coordinate frame.
+///
+/// The fix changes the `underlines` Vec entry type from
+/// `(row, col_a, col_b)` to `(origin_x, origin_y, row, col_a, col_b)`
+/// where origin is captured FROM THE CURRENT PANE at insert time, then
+/// the emit loop uses `origin_{x,y}` instead of `active_origin_{x,y}`.
+///
+/// We assert this at the source-text level (same approach as
+/// `production_callers_build_slice_from_all_panes` above): the emit
+/// loop must NOT reference `active_origin_x` / `active_origin_y` when
+/// computing per-underline x/y.
+#[test]
+fn underline_emit_uses_recorded_pane_origin_not_active() {
+    use std::fs;
+    let core = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sonic-shared/src/render/core.rs"
+    ))
+    .expect("read sonic-shared render/core.rs");
+
+    // The underline emit loop is identifiable by `underline_thickness`
+    // followed shortly by the for loop over `&underlines`. Extract the
+    // ~12 lines of that block and confirm it does NOT reference
+    // active_origin_x/y, and DOES use origin_x/origin_y bindings.
+    let loop_start = core
+        .find("for (origin_x, origin_y, row, col_a, col_b) in &underlines")
+        .expect("underline emit loop must destructure (origin_x, origin_y, row, col_a, col_b)");
+    let tail = &core[loop_start..loop_start + 400];
+    assert!(
+        !tail.contains("active_origin_x") && !tail.contains("active_origin_y"),
+        "underline emit loop must NOT reference active_origin_{{x,y}} (Haiku round-3 finding):\n{tail}"
+    );
+    assert!(
+        tail.contains("*origin_x +") && tail.contains("*origin_y +"),
+        "underline emit loop must use per-entry origin_x / origin_y bindings"
+    );
+
+    // Insert sites: every `underlines.push((` must carry origin_x/origin_y
+    // (pad / top_inset) as the first two fields, NOT just `(r, s, e)`.
+    for (idx, _) in core.match_indices("underlines.push((") {
+        let snippet = &core[idx..idx + 120];
+        assert!(
+            snippet.contains("pad, top_inset") || snippet.contains("origin_x, origin_y"),
+            "underlines.push site missing pane origin (pad, top_inset) prefix:\n{snippet}"
+        );
+    }
+}

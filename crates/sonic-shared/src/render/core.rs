@@ -1451,7 +1451,13 @@ impl GpuRenderer {
         // swash rasterizer + atlas. No per-row cache, no rich-text
         // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
-        let mut underlines: Vec<(u16, u16, u16)> = Vec::new();
+        // Underline runs collected per pane. We record (origin_x, origin_y, row,
+        // col_a, col_b) where origin_{x,y} is the PANE's origin (pad / top_inset)
+        // captured at insert time. Pre-fix this was (row, col_a, col_b) and the
+        // emit loop used `active_origin_x/y` for every entry — that placed
+        // inactive-pane underlines under the active pane's coordinates (Haiku
+        // round-3 finding on PR #199).
+        let mut underlines: Vec<(f32, f32, u16, u16, u16)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Missing-glyph "tofu" outlines collected during the cell walk.
@@ -1555,7 +1561,7 @@ impl GpuRenderer {
                     if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for (s, e) in &cached.underlines {
-                            underlines.push((r, *s, *e));
+                            underlines.push((pad, top_inset, r, *s, *e));
                         }
                         for t in &cached.tofu {
                             missing_tofu.push(*t);
@@ -1589,12 +1595,12 @@ impl GpuRenderer {
                         } else if let Some(s) = ul_start.take() {
                             let end = (col as u16).saturating_sub(1);
                             row_underlines.push((s, end));
-                            underlines.push((r, s, end));
+                            underlines.push((pad, top_inset, r, s, end));
                         }
                     }
                     if let Some(s) = ul_start.take() {
                         row_underlines.push((s, last_visible_col));
-                        underlines.push((r, s, last_visible_col));
+                        underlines.push((pad, top_inset, r, s, last_visible_col));
                     }
 
                     // Second pass: group cells into style runs and shape
@@ -1957,10 +1963,9 @@ impl GpuRenderer {
         // surface format doesn't double-encode (matches the body glyph path).
         let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
-        for (row, col_a, col_b) in &underlines {
-            let x = active_origin_x + f32::from(*col_a) * self.cell_w;
-            let y =
-                active_origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
+        for (origin_x, origin_y, row, col_a, col_b) in &underlines {
+            let x = *origin_x + f32::from(*col_a) * self.cell_w;
+            let y = *origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
