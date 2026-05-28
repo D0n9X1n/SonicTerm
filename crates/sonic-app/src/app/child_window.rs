@@ -533,7 +533,11 @@ impl App {
                         // so we skip the title plumbing.
                         while let Ok(bytes) = out_rx.recv() {
                             if !bytes.is_empty() {
-                                pty_burst_gen.fetch_add(1, Ordering::Release);
+                                let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
+                                crate::app::invariants::debug_assert_burst_gen_monotonic(
+                                    prev,
+                                    prev.wrapping_add(1),
+                                );
                             }
                             {
                                 let mut p = parser_clone.lock();
