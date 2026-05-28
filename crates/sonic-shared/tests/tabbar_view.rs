@@ -253,12 +253,12 @@ fn hit_test_blank_area_of_tab_activates_it() {
 // ------------------ Issue #112 Round 3 spec tests ------------------
 
 #[test]
-fn tab_max_width_is_240() {
-    assert_eq!(TAB_MAX_WIDTH, 240.0);
+fn tab_max_width_is_400() {
+    assert_eq!(TAB_MAX_WIDTH, 400.0);
     // And a single tab in a wide window clamps to it.
     let bar = bar_with(1);
     let layout = TabBarLayout::compute(&bar, 4000.0);
-    assert!((layout.tabs[0].bg.w - 240.0).abs() < 0.5);
+    assert!((layout.tabs[0].bg.w - 400.0).abs() < 0.5);
 }
 
 #[test]

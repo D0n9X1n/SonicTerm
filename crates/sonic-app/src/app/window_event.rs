@@ -588,8 +588,7 @@ impl App {
                             }
                             TabHit::Close(i) => self.close_tab_at(i),
                             TabHit::NewTab => {
-                                let n = self.tabs.len() + 1;
-                                self.new_tab(format!("shell {n}"));
+                                self.run_action(&Action::NewTab);
                             }
                         }
                         if self.tabs.is_empty() {

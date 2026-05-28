@@ -43,16 +43,15 @@ fn inner_logical_size(
 }
 
 #[test]
-fn default_window_padding_matches_user_wezterm_lua() {
-    // The user's wezterm.lua sets
-    // `window_padding = { left = 8, right = 8, top = 8, bottom = 8 }`.
-    // Out-of-box Sonic should reproduce that, not regress to 0 or a
-    // single scalar of a different value.
+fn default_window_padding_keeps_text_off_window_edge() {
+    // Out-of-box Sonic should not regress to 0 padding: left/right need
+    // enough room to keep text off the window edge, with slimmer vertical
+    // padding to preserve rows.
     let w = WindowConfig::default();
-    assert_eq!(w.padding_left, 8.0);
-    assert_eq!(w.padding_right, 8.0);
-    assert_eq!(w.padding_top, 8.0);
-    assert_eq!(w.padding_bottom, 8.0);
+    assert_eq!(w.padding_left, 12.0);
+    assert_eq!(w.padding_right, 12.0);
+    assert_eq!(w.padding_top, 4.0);
+    assert_eq!(w.padding_bottom, 4.0);
 }
 
 #[test]

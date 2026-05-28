@@ -78,8 +78,8 @@ pub struct WindowConfig {
     #[serde(default, skip_serializing)]
     pub padding: Option<f32>,
     /// Per-side window padding (logical px), matching WezTerm's
-    /// `window_padding = { left, right, top, bottom }` knob. Defaults are
-    /// cribbed from the user's `wezterm.lua` (8 px on every side).
+    /// `window_padding = { left, right, top, bottom }` knob. Defaults give
+    /// the grid breathing room on Windows instead of touching the window edge.
     /// Logical-pixel padding on the left edge.
     pub padding_left: f32,
     /// Logical-pixel padding on the right edge.
@@ -252,10 +252,10 @@ impl Default for WindowConfig {
             cols: 100,
             rows: 30,
             padding: None,
-            padding_left: 8.0,
-            padding_right: 8.0,
-            padding_top: 8.0,
-            padding_bottom: 8.0,
+            padding_left: 12.0,
+            padding_right: 12.0,
+            padding_top: 4.0,
+            padding_bottom: 4.0,
             decorations: true,
             opacity: 1.0,
             blur: false,

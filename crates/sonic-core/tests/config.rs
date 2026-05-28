@@ -56,8 +56,8 @@ fn unknown_keys_survive_load_save_roundtrip() {
 
 #[test]
 fn defaults_match_wezterm_visual_parity() {
-    // Regression: visual-parity targets cribbed from the user's wezterm.lua.
-    // If you change these, update docs/ROADMAP.md and confirm with the user.
+    // Regression: visual-parity targets cribbed from the user's wezterm.lua,
+    // with Windows edge-touching fixed by using asymmetric default padding.
     let font = FontConfig::default();
     let window = WindowConfig::default();
     assert!(
@@ -65,16 +65,13 @@ fn defaults_match_wezterm_visual_parity() {
         "wezterm parity: line_height must be 1.1, got {}",
         font.line_height
     );
-    for (name, got) in [
-        ("padding_left", window.padding_left),
-        ("padding_right", window.padding_right),
-        ("padding_top", window.padding_top),
-        ("padding_bottom", window.padding_bottom),
+    for (name, got, want) in [
+        ("padding_left", window.padding_left, 12.0),
+        ("padding_right", window.padding_right, 12.0),
+        ("padding_top", window.padding_top, 4.0),
+        ("padding_bottom", window.padding_bottom, 4.0),
     ] {
-        assert!(
-            (got - 8.0).abs() < f32::EPSILON,
-            "wezterm parity: window {name} must be 8.0, got {got}"
-        );
+        assert!((got - want).abs() < f32::EPSILON, "window {name} must be {want}, got {got}");
     }
 }
 

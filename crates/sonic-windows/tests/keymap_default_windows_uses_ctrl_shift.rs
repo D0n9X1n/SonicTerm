@@ -1,0 +1,31 @@
+use sonic_core::{
+    config::Config,
+    keymap::{Action, Keymap},
+};
+
+fn windows_default_config_for_test() -> Config {
+    Config { keymap: "wezterm-windows".to_string(), ..Config::default() }
+}
+
+#[test]
+fn keymap_default_windows_uses_ctrl_shift() {
+    let cfg = windows_default_config_for_test();
+    assert_eq!(cfg.keymap, "wezterm-windows");
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/keymaps/wezterm-windows.toml");
+    let keymap = Keymap::load(&path).expect("load Windows default keymap");
+
+    assert!(
+        keymap.bindings.iter().all(|binding| !binding.keys.to_ascii_lowercase().contains("super")),
+        "Windows keymap must not contain super bindings"
+    );
+    assert_eq!(keymap.lookup("ctrl+shift+t"), Some(&Action::NewTab));
+    assert!(
+        keymap
+            .bindings
+            .iter()
+            .any(|binding| binding.keys.to_ascii_lowercase().starts_with("ctrl+shift+")),
+        "Windows keymap should use Ctrl+Shift chords"
+    );
+}
