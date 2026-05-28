@@ -394,6 +394,38 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     quads.push(QuadCmd::rounded(apply.rect, apply_bg, BUTTON_RADIUS));
     push_button_text(&mut texts, apply, "Apply", apply_fg, typography::BODY_STRONG);
 
+    // --- Open dropdown popovers (issue #173 slice-2b) -----------------
+    // Rendered LAST so they overlay every other widget, footer, and
+    // chrome. Each open `Dropdown` paints a popover anchored directly
+    // below its header rect. Row height matches the header height so
+    // the hit-test (`Dropdown::hit_option`) and the rendered rows agree.
+    for ctrl in &state.controls {
+        if let Control::Dropdown(d) = ctrl {
+            if !d.open || d.options.is_empty() {
+                continue;
+            }
+            let top = d.rect.y + d.rect.h;
+            let row_h = d.rect.h;
+            let pop_h = row_h * d.options.len() as f32;
+            let popover = PrefsRect::new(d.rect.x, top, d.rect.w, pop_h);
+            quads.push(QuadCmd::rounded(popover, palette.bg_surface, CONTROL_RADIUS));
+            push_border(&mut quads, popover, palette.border_strong);
+            for (i, opt) in d.options.iter().enumerate() {
+                let row = PrefsRect::new(popover.x, top + row_h * i as f32, popover.w, row_h);
+                if i == d.selected {
+                    quads.push(QuadCmd::sharp(row, palette.bg_hover));
+                }
+                push_text(
+                    &mut texts,
+                    PrefsRect::new(row.x + 10.0, row.y, row.w - 20.0, row.h),
+                    opt.clone(),
+                    palette.text_primary,
+                    typography::BODY,
+                );
+            }
+        }
+    }
+
     DrawList { clear: bg_base, quads, texts }
 }
 
@@ -529,29 +561,37 @@ fn draw_control(
             );
         }
         Control::Dropdown(d) => {
-            let r = PrefsRect::new(slot.x, slot.y, slot.w.min(240.0), CONTROL_H);
-            // Theme-derived input bg (was hardcoded #090C12FF Tokyo
-            // Night near-black-blue).
-            quads.push(QuadCmd::sharp(r, palette.bg_elevated));
+            // Issue #173 slice-2b: route the Combobox primitive through
+            // the rounded-rect path so it matches Button / Toggle visual
+            // language. The popover (when `d.open`) is intentionally
+            // rendered at the END of `build_draw_list` so it overlays
+            // every other widget (fixes issues #166 / #168 where the
+            // dropdown could not open at all).
+            //
+            // Hit-test uses `d.rect`, so we render at `d.rect` to keep
+            // the visible chevron column inside the clickable area
+            // computed by `Dropdown::chevron_rect`.
+            let r = d.rect;
+            quads.push(QuadCmd::rounded(r, palette.bg_elevated, CONTROL_RADIUS));
             push_border(quads, r, palette.border_subtle);
             let label = d.options.get(d.selected).cloned().unwrap_or_default();
+            let chev = d.chevron_rect();
             push_text(
                 texts,
-                PrefsRect::new(r.x + 10.0, r.y, r.w - 28.0, r.h),
+                PrefsRect::new(r.x + 10.0, r.y, r.w - chev.w - 10.0, r.h),
                 label,
                 palette.text_primary,
                 typography::BODY,
             );
-            // Chevron.
+            // Chevron glyph anchored inside `chevron_rect` so the
+            // visual cue matches the hit-test region.
             push_text(
                 texts,
-                PrefsRect::new(r.x + r.w - 18.0, r.y, 16.0, r.h),
+                PrefsRect::new(chev.x + (chev.w - 16.0) / 2.0, chev.y, 16.0, chev.h),
                 "▾",
                 palette.text_muted,
                 typography::BODY,
             );
-            // (Open-dropdown menu rendering is out of scope for this PR.)
-            let _ = CONTROL_RADIUS;
         }
         Control::ColorSwatch(c) => {
             let mut x = slot.x;

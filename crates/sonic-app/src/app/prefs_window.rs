@@ -87,6 +87,16 @@ impl App {
                     s.apply_button.interaction.pressed = s.apply_button.hit_test(x, y);
                     s.cancel_button.interaction.pressed = s.cancel_button.hit_test(x, y);
                 }
+                // Issue #173 slice-2b: dismiss any open combobox
+                // popover whose header / option-list does NOT contain
+                // the click, BEFORE normal hit dispatch. This must run
+                // before `classify_click` so a click that lands on
+                // another widget still both (a) closes the open
+                // popover and (b) actions the new widget on the same
+                // tick.
+                if let Some(s) = self.prefs_state.as_mut() {
+                    let _ = s.close_dropdowns_outside_click(x, y);
+                }
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
                     Some(PrefsHit::Apply) => {
