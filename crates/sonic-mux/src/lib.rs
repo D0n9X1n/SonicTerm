@@ -9,11 +9,13 @@
 //! replay (not just a byte ring), multi-client fanout, auto-reconnect on
 //! the client side, authentication on the socket.
 
-// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
-#![allow(missing_docs)]
+#![deny(missing_docs)]
 
+/// Length-prefixed JSON framing over the mux socket (`read_frame`/`write_frame`).
 pub mod frame;
+/// Wire types — `ClientMsg`, `ServerMsg`, and the id/info structs they carry.
 pub mod proto;
+/// Server-side state machine: sessions, panes, replay rings, subscriber fanout.
 pub mod server;
 
 pub use proto::{ClientMsg, PaneId, PaneInfo, ServerMsg, SessionId, SessionInfo};

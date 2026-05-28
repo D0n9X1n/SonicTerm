@@ -27,6 +27,7 @@ pub type PaneId = u64;
 /// - `'a` — borrow of the parser's grid; lives as long as the parser guard
 ///   the caller holds.
 pub struct PaneRender<'a> {
+    /// Stable id used to look this pane up in the app's pane registry.
     pub id: PaneId,
     /// Pixel rect of this pane within the window content area, already
     /// adjusted for `top_inset()` / tab bar / titlebar.
@@ -46,11 +47,17 @@ pub struct PaneRender<'a> {
 /// but kept here to avoid pulling sonic-ui into sonic-render-model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorStyle {
+    /// Solid filled block, no blink (DECSCUSR 2).
     BlockSteady,
+    /// Solid filled block with blink (DECSCUSR 1, default).
     #[default]
     BlockBlink,
+    /// Vertical bar (I-beam) without blink (DECSCUSR 6).
     BarSteady,
+    /// Vertical bar (I-beam) with blink (DECSCUSR 5).
     BarBlink,
+    /// Underline under the cell without blink (DECSCUSR 4).
     UnderlineSteady,
+    /// Underline under the cell with blink (DECSCUSR 3).
     UnderlineBlink,
 }
