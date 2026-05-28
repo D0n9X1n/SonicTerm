@@ -76,3 +76,27 @@ fn cleanup_never_deletes_active_sonic_log() {
     cleanup_old_files(dir.path(), &cfg);
     assert!(dir.path().join("sonic.log").exists(), "active log was wrongly deleted");
 }
+
+#[test]
+fn cleanup_caps_crash_dump_count() {
+    // Need SONIC_LOG_DIR to point at our tempdir so the helper that
+    // resolves the crash subdir lands inside it.
+    let dir = tempdir().unwrap();
+    std::env::set_var("SONIC_LOG_DIR", dir.path());
+    let crashes = dir.path().join("crashes");
+    fs::create_dir_all(&crashes).unwrap();
+    for d in 1..=7 {
+        touch(&crashes.join(format!("crash-2026-01-{d:02}.log")), d);
+    }
+    let cfg = LoggingConfig {
+        max_crash_dumps: 2,
+        max_crash_age_days: 0,
+        max_rotated_files: 100,
+        max_age_days: 0,
+        ..LoggingConfig::default()
+    };
+    cleanup_old_files(dir.path(), &cfg);
+    let remaining: Vec<_> = fs::read_dir(&crashes).unwrap().flatten().collect();
+    assert_eq!(remaining.len(), 2, "expected 2 crash survivors, got {}", remaining.len());
+    std::env::remove_var("SONIC_LOG_DIR");
+}
