@@ -51,12 +51,13 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(r), Some(s)) =
-                    (self.prefs_renderer.as_mut(), self.prefs_state.as_ref())
+                    (self.prefs_renderer.as_mut(), self.prefs_state.as_mut())
                 {
                     if let Err(e) = r.render(s, &self.theme) {
                         tracing::warn!("prefs render failed: {e}");
                     }
                 }
+                self.request_prefs_toggle_anim_redraw_if_needed();
             }
             WindowEvent::Resized(sz) => {
                 if let Some(r) = self.prefs_renderer.as_mut() {
@@ -86,6 +87,7 @@ impl App {
                 if let Some(s) = self.prefs_state.as_mut() {
                     s.apply_button.interaction.pressed = s.apply_button.hit_test(x, y);
                     s.cancel_button.interaction.pressed = s.cancel_button.hit_test(x, y);
+                    Self::set_toggle_pressed(s, x, y);
                 }
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
@@ -110,6 +112,7 @@ impl App {
                             Some(PrefsHit::Toggle(id)) => {
                                 s.blur_text_fields();
                                 let _ = s.flip_toggle(id);
+                                self.pending_redraw = true;
                             }
                             Some(PrefsHit::SliderTrack(id)) => {
                                 s.blur_text_fields();
@@ -198,10 +201,12 @@ impl App {
                 // Clear Button pressed flag on mouse-up. The hover flag
                 // is independent and is maintained by CursorMoved.
                 if let Some(s) = self.prefs_state.as_mut() {
-                    let was_pressed =
-                        s.apply_button.interaction.pressed || s.cancel_button.interaction.pressed;
+                    let was_pressed = s.apply_button.interaction.pressed
+                        || s.cancel_button.interaction.pressed
+                        || Self::any_toggle_pressed(s);
                     s.apply_button.interaction.pressed = false;
                     s.cancel_button.interaction.pressed = false;
+                    Self::clear_toggle_pressed(s);
                     if was_pressed {
                         if let Some(w) = self.prefs_window.as_ref() {
                             w.request_redraw();
@@ -221,8 +226,10 @@ impl App {
                     let (x, y) = (position.x as f32, position.y as f32);
                     let new_apply = s.apply_button.hit_test(x, y);
                     let new_cancel = s.cancel_button.hit_test(x, y);
+                    let toggles_changed = Self::set_toggle_hovered(s, x, y);
                     let changed = s.apply_button.interaction.hovered != new_apply
-                        || s.cancel_button.interaction.hovered != new_cancel;
+                        || s.cancel_button.interaction.hovered != new_cancel
+                        || toggles_changed;
                     s.apply_button.interaction.hovered = new_apply;
                     s.cancel_button.interaction.hovered = new_cancel;
                     if changed {
@@ -243,6 +250,75 @@ impl App {
 }
 
 impl App {
+    #[doc(hidden)]
+    pub fn prefs_toggle_anim_in_flight(&self) -> bool {
+        self.prefs_state.as_ref().is_some_and(|s| {
+            s.controls.iter().any(
+                |c| matches!(c, sonic_ui::prefs::Control::Toggle(t) if t.knob_anim_start.is_some()),
+            )
+        })
+    }
+
+    fn request_prefs_toggle_anim_redraw_if_needed(&mut self) {
+        let Some(s) = self.prefs_state.as_ref() else { return };
+        if s.controls.iter().any(
+            |c| matches!(c, sonic_ui::prefs::Control::Toggle(t) if t.knob_anim_start.is_some()),
+        ) {
+            self.pending_redraw = true;
+        }
+    }
+
+    fn set_toggle_hovered(s: &mut PrefsState, x: f32, y: f32) -> bool {
+        let mut changed = false;
+        for c in &mut s.controls {
+            if let sonic_ui::prefs::Control::Toggle(t) = c {
+                let hovered = t.hit_test(x, y);
+                changed |= t.interaction.hovered != hovered;
+                t.interaction.hovered = hovered;
+            }
+        }
+        changed
+    }
+
+    fn set_toggle_pressed(s: &mut PrefsState, x: f32, y: f32) {
+        for c in &mut s.controls {
+            if let sonic_ui::prefs::Control::Toggle(t) = c {
+                t.interaction.pressed = t.hit_test(x, y);
+            }
+        }
+    }
+
+    fn any_toggle_pressed(s: &PrefsState) -> bool {
+        s.controls
+            .iter()
+            .any(|c| matches!(c, sonic_ui::prefs::Control::Toggle(t) if t.interaction.pressed))
+    }
+
+    fn clear_toggle_pressed(s: &mut PrefsState) {
+        for c in &mut s.controls {
+            if let sonic_ui::prefs::Control::Toggle(t) = c {
+                t.interaction.pressed = false;
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn set_toggle_hovered_for_test(&mut self, x: f32, y: f32) -> bool {
+        let Some(s) = self.prefs_state.as_mut() else { return false };
+        Self::set_toggle_hovered(s, x, y)
+    }
+
+    #[doc(hidden)]
+    pub fn toggle_interaction_for_test(
+        &self,
+        id: sonic_ui::prefs::WidgetId,
+    ) -> Option<sonic_ui::prefs::InteractionState> {
+        self.prefs_state.as_ref()?.controls.iter().find_map(|c| match c {
+            sonic_ui::prefs::Control::Toggle(t) if t.id == id => Some(t.interaction),
+            _ => None,
+        })
+    }
+
     pub(super) fn create_prefs_window(&mut self, el: &ActiveEventLoop) {
         let attrs = with_integrated_titlebar(
             Window::default_attributes()

@@ -70,9 +70,9 @@ impl InteractionState {
 /// state flip happened (set by [`Toggle::toggle`] and [`Toggle::set`]
 /// when the value actually changes). The renderer interpolates the
 /// thumb between the off- and on-position over [`Toggle::ANIM_MS`]
-/// using [`Toggle::knob_x_animated`]; once that helper sees
-/// `now - start >= ANIM_MS` it returns the final snapped position so
-/// callers do not need to clear the field on every frame.
+/// using [`Toggle::knob_x_animated`]. Call
+/// [`Toggle::clear_anim_if_done`] after reading the animated position so
+/// completed animations are not needlessly re-interpolated every frame.
 #[derive(Debug, Clone)]
 pub struct Toggle {
     pub id: WidgetId,
@@ -153,13 +153,26 @@ impl Toggle {
     /// Pure math + a single `now.duration_since(start)` read, so tests
     /// can inject any `now` and assert mid-animation behavior.
     pub fn knob_x_animated(&self, now: Instant, knob_size: f32, margin: f32) -> f32 {
+        let (x, _) = self.knob_x_animated_with_done(now, knob_size, margin);
+        x
+    }
+
+    /// Same as [`Self::knob_x_animated`], plus a completion flag the
+    /// renderer can use to clear [`Self::knob_anim_start`] after the
+    /// final snapped frame has been computed.
+    pub fn knob_x_animated_with_done(
+        &self,
+        now: Instant,
+        knob_size: f32,
+        margin: f32,
+    ) -> (f32, bool) {
         let end = self.knob_x(knob_size, margin);
         let Some(start) = self.knob_anim_start else {
-            return end;
+            return (end, false);
         };
         let elapsed_ms = now.saturating_duration_since(start).as_millis() as u64;
         if elapsed_ms >= Self::ANIM_MS {
-            return end;
+            return (end, true);
         }
         // start_pos == the snapped position of the *previous* value,
         // which is `!self.value`.
@@ -169,7 +182,13 @@ impl Toggle {
             self.rect.x + margin
         };
         let t = elapsed_ms as f32 / Self::ANIM_MS as f32;
-        start_pos + (end - start_pos) * t
+        (start_pos + (end - start_pos) * t, false)
+    }
+
+    pub fn clear_anim_if_done(&mut self, done: bool) {
+        if done {
+            self.knob_anim_start = None;
+        }
     }
 }
 

@@ -808,7 +808,7 @@ impl PrefsRenderer {
         self.cell_w
     }
 
-    pub fn render(&mut self, state: &PrefsState, theme: &Theme) -> Result<()> {
+    pub fn render(&mut self, state: &mut PrefsState, theme: &Theme) -> Result<()> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -851,6 +851,7 @@ impl PrefsRenderer {
             .create_command_encoder(&CommandEncoderDescriptor { label: Some("prefs-encoder") });
 
         let draw = build_draw_list(state, theme);
+        state.clear_completed_toggle_anims(std::time::Instant::now());
         let clear = wgpu::Color {
             r: draw.clear[0] as f64,
             g: draw.clear[1] as f64,

@@ -460,6 +460,21 @@ impl PrefsState {
         appended
     }
 
+    /// Clear completed toggle thumb animations after the renderer has emitted
+    /// the final snapped frame for them.
+    pub fn clear_completed_toggle_anims(&mut self, now: std::time::Instant) {
+        for c in &mut self.controls {
+            if let Control::Toggle(t) = c {
+                let (_, done) = t.knob_x_animated_with_done(
+                    now,
+                    super::layout::TOGGLE_KNOB,
+                    super::layout::TOGGLE_KNOB_MARGIN,
+                );
+                t.clear_anim_if_done(done);
+            }
+        }
+    }
+
     /// Classify a pointer click into a [`PrefsHit`] using the same
     /// priority order the host should honor: chrome → sidebar → open
     /// dropdown options → widgets.
