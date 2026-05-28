@@ -110,12 +110,23 @@ fn rect_contains_is_half_open() {
 }
 
 #[test]
-fn bar_background_click_between_tabs_swallows_to_active() {
+fn bar_background_click_between_tabs_snaps_to_nearest_tab() {
+    // v0.6 user report "标题的tab选中区域不是一整个tab区域": before
+    // the fix this returned `Activate(active_tab)` for every click in
+    // the inter-tab gap, which meant clicking the visual padding next
+    // to tab 0 silently re-activated the already-active tab. After
+    // the fix the gap click snaps to the nearest tab horizontally —
+    // here, 1px past tab 0's right edge picks tab 0, not tab 1.
     let mut bar = bar_with(3);
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let gap_x = layout.tabs[0].bg.x + layout.tabs[0].bg.w + TAB_GAP / 2.0;
-    let hit = layout.hit(gap_x, 1.0);
+    let just_past_tab0 = layout.tabs[0].bg.x + layout.tabs[0].bg.w + 1.0;
+    let hit = layout.hit(just_past_tab0, 1.0);
+    assert_eq!(hit, Some(TabHit::Activate(0)));
+    // Symmetric: 1px before tab 1's left edge → tab 1, regardless of
+    // which tab is currently active.
+    let just_before_tab1 = layout.tabs[1].bg.x - 1.0;
+    let hit = layout.hit(just_before_tab1, 1.0);
     assert_eq!(hit, Some(TabHit::Activate(1)));
 }
 

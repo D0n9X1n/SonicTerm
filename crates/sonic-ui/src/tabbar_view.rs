@@ -328,8 +328,39 @@ impl TabBarLayout {
                 return Some(TabHit::Activate(t.index));
             }
         }
-        // Clicked the bar background between/around tabs — swallow the
-        // click so it doesn't fall through to the terminal grid.
+        // The cursor is somewhere inside the bar but not over any
+        // tab's `bg` rect. Two sub-cases:
+        //   (a) cursor falls inside the `TAB_GAP` between two tabs
+        //       (or in the `BAR_LEFT_PAD` lead-in to the first tab,
+        //       or just past the last tab before the `+` button) —
+        //       snap to the nearest tab horizontally so the user
+        //       gets the obvious result instead of having a dead
+        //       sliver of bar that silently activates whatever was
+        //       already active. This was the v0.6 user complaint
+        //       "标题的tab选中区域不是一整个tab区域" — clicks on
+        //       the padding around the title text felt unresponsive.
+        //   (b) the bar is entirely empty (n == 0) — fall through
+        //       to the active-tab default below.
+        if !self.tabs.is_empty() {
+            let mut best: Option<(f32, usize)> = None;
+            for t in &self.tabs {
+                // Horizontal distance from `px` to the tab's nearest edge.
+                // Inside the tab → 0; left of it → `bg.x - px`; right
+                // of it → `px - (bg.x + bg.w)`. The earlier loop
+                // already returned for the "inside" case, so this
+                // strictly picks a neighbour tab for gap clicks.
+                let dx = if px < t.bg.x { t.bg.x - px } else { px - (t.bg.x + t.bg.w) };
+                match best {
+                    Some((d, _)) if d <= dx => {}
+                    _ => best = Some((dx, t.index)),
+                }
+            }
+            if let Some((_, idx)) = best {
+                return Some(TabHit::Activate(idx));
+            }
+        }
+        // Empty bar: swallow the click so it doesn't fall through
+        // to the terminal grid.
         Some(TabHit::Activate(self.active.unwrap_or(0)))
     }
 
