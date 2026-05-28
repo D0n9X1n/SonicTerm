@@ -55,6 +55,27 @@ How to use:
 13. [vtebench / cat-large-file perf](#13-vtebench--cat-large-file-perf)
 14. [Drag-drop file from Finder](#14-drag-drop-file-from-finder)
 15. [Clean quit](#15-clean-quit)
+16. [Scrollback / select / copy](#16-scrollback--select--copy)
+17. [Search overlay](#17-search-overlay)
+18. [Resize semantics (SIGWINCH)](#18-resize-semantics-sigwinch)
+19. [HiDPI / multi-monitor](#19-hidpi--multi-monitor)
+20. [Theme + font live-reload](#20-theme--font-live-reload)
+21. [Shell exit / kill behavior](#21-shell-exit--kill-behavior)
+22. [Ctrl-letter / modifier key encoding](#22-ctrl-letter--modifier-key-encoding)
+23. [Alt-screen round-trip](#23-alt-screen-round-trip)
+24. [OSC 8 + URL safety extended](#24-osc-8--url-safety-extended)
+25. [Mouse reporting modes](#25-mouse-reporting-modes)
+26. [Wide chars / grapheme clusters](#26-wide-chars--grapheme-clusters)
+27. [Cursor styles (DECSCUSR)](#27-cursor-styles-decscusr)
+28. [Session restore (deferred, N/A)](#28-session-restore-deferred-na)
+29. [Crash hygiene](#29-crash-hygiene)
+30. [Accessibility](#30-accessibility)
+31. [First-run experience](#31-first-run-experience)
+32. [Locale / non-UTF8](#32-locale--non-utf8)
+33. [Permissions / TCC prompts](#33-permissions--tcc-prompts)
+34. [Long-running (1 hour) stability](#34-long-running-1-hour-stability)
+35. [Drag-drop edge cases](#35-drag-drop-edge-cases)
+36. [Config validation](#36-config-validation)
 
 ---
 
@@ -448,6 +469,552 @@ ps -p $(pgrep sonic-mac | head -1) -o %cpu
 
 ---
 
+## 16. Scrollback / select / copy
+
+**Setup:** fresh launch; single pane.
+
+**Commands / actions:**
+1. `seq 1 5000` to fill scrollback.
+2. Scroll back with trackpad two-finger drag / mouse wheel / `Shift+PageUp` to the top.
+3. Click at line `123`, shift-click at line `456` to select a multi-row block.
+4. `Cmd+C` to copy.
+5. In a separate app (TextEdit), `Cmd+V` to paste.
+6. Re-select using a triple-click (whole-line selection) and copy.
+7. Drag-select across a wrapped line (a line containing `123456789` repeated 30×).
+8. `Cmd+Shift+K` (or bound clear-scrollback action) → scrollback flushed.
+
+Screenshots: `/tmp/rel-vX.Y.Z-16-scroll-N.png`.
+
+**Expected outcome:**
+
+- [ ] Scrollback retains all 5000 lines (scroll-to-top shows line 1).
+- [ ] Selection highlight uses theme selection bg (not glitchy / not invisible).
+- [ ] Copied text matches selection exactly, with correct newlines (LF, no CRLF surprise).
+- [ ] Triple-click selects the full logical line including wrapped continuations.
+- [ ] Wrapped-line copy yields a single logical line in the clipboard (no spurious newline at the wrap point).
+- [ ] Clear-scrollback empties the buffer; scroll-up no longer goes anywhere.
+
+**FAIL → block release.**
+
+---
+
+## 17. Search overlay
+
+**Setup:** fresh launch; populate scrollback with `seq 1 2000; echo NEEDLE; seq 1 500; echo needle; seq 1 200; echo Needle`.
+
+**Actions:**
+1. Open search (`Cmd+F` or bound action).
+2. Type `needle`.
+3. Press `Enter` (or arrow) to step to next match; cycle through all.
+4. Toggle case-sensitive (if available); confirm only `needle` lowercase matches.
+5. `Esc` to dismiss.
+6. Re-open, search for a term that does NOT exist (`zzznomatchzzz`).
+
+Screenshots: `/tmp/rel-vX.Y.Z-17-search-N.png`.
+
+**Expected outcome:**
+
+- [ ] Overlay renders centered or anchored per design; input is focused.
+- [ ] All three matches are visibly highlighted in the grid (different bg).
+- [ ] Stepping scrolls the viewport so the active match is visible.
+- [ ] Active match has a distinct highlight from other matches.
+- [ ] Case-sensitive toggle filters matches correctly.
+- [ ] No-match state shows a clear "no results" indicator and does not scroll.
+- [ ] `Esc` removes overlay and clears highlights.
+
+**FAIL → block release.**
+
+---
+
+## 18. Resize semantics (SIGWINCH)
+
+**Setup:** fresh launch; run `python3 -c "import shutil,time; [print(shutil.get_terminal_size()) or time.sleep(1) for _ in range(60)]"` in a pane.
+
+**Actions:**
+1. Drag the window corner to grow ~+200 px in both dimensions.
+2. Drag to shrink ~-300 px in both dimensions.
+3. Maximize (green button → Zoom, NOT full-screen).
+4. Toggle full-screen (`Ctrl+Cmd+F`).
+5. Exit full-screen.
+6. While running `htop`, resize repeatedly during paint.
+
+Screenshots: `/tmp/rel-vX.Y.Z-18-resize-N.png`.
+
+**Expected outcome:**
+
+- [ ] Each resize prints a new `os.terminal_size(columns=..., lines=...)` matching the visible grid dimensions.
+- [ ] No SIGWINCH dropouts (the printout updates within 1 s of resize ending).
+- [ ] htop redraws without garbage; no stray cells outside the new viewport.
+- [ ] Full-screen toggle does not crash and grid fills the whole display.
+- [ ] No panic in `/tmp/gui-smoke.log` referencing surface configure / wgpu textures (CLAUDE.md §4 Suboptimal guard).
+
+**FAIL → block release.**
+
+---
+
+## 19. HiDPI / multi-monitor
+
+**Setup:** machine with at least one Retina display; second external monitor at a different scale factor if available.
+
+**Actions:**
+1. Launch Sonic on the Retina display. Confirm text sharpness against Section 1.
+2. Drag the window to the external monitor.
+3. Drag back to the Retina display.
+4. If macOS has "scaled" resolution options, change display scale via System Settings → Displays.
+5. Take a 200% zoom screenshot of a glyph (`screencapture -x -R …`).
+
+Screenshots: `/tmp/rel-vX.Y.Z-19-hidpi-N.png`.
+
+**Expected outcome:**
+
+- [ ] Glyphs render at native pixel density on Retina (no upscale blur).
+- [ ] Moving between monitors does not leave a stale low-DPI bitmap.
+- [ ] Display-scale change refreshes the grid sharply within 2 s.
+- [ ] No panic in `/tmp/gui-smoke.log` referencing scale_factor.
+- [ ] Cursor and selection highlight align to whole-pixel boundaries.
+
+**FAIL → block release.**
+
+---
+
+## 20. Theme + font live-reload
+
+**Setup:** fresh launch; have the config file path ready (`~/Library/Application Support/Sonic/sonic.toml` on macOS).
+
+**Actions:**
+1. Edit config to change theme (e.g. `tokyo-night` → `gruvbox-dark-hard`); save.
+2. Within 2 s, confirm main window background swaps.
+3. Edit config to change font family to a known-installed font (e.g. `St Helens` → `Menlo`); save.
+4. Confirm grid re-shapes with the new font (cell metrics update).
+5. Set font_size 14 → 18; save; confirm cell size increases.
+6. Introduce a deliberate typo (`themee = "..."`); save; confirm app does NOT crash and surfaces an error (log or in-app banner).
+
+Screenshots: `/tmp/rel-vX.Y.Z-20-livereload-N.png`.
+
+**Expected outcome:**
+
+- [ ] Theme change applies without restart and without window flicker beyond a single repaint.
+- [ ] Font family change applies live; no tofu in the post-reload screenshot.
+- [ ] Font size change rescales the grid and reflows the active shell (SIGWINCH fires).
+- [ ] Bad config does NOT crash Sonic; previous good config remains in effect; error is logged to `/tmp/gui-smoke.log`.
+
+**FAIL → block release.**
+
+---
+
+## 21. Shell exit / kill behavior
+
+**Setup:** fresh launch; 2 tabs, each with 2 panes (4 shells).
+
+**Actions:**
+1. In pane 1, type `exit` + Enter.
+2. In pane 2, type `kill -9 $$` + Enter.
+3. In pane 3, type `sleep 99999` + Enter, then send `Ctrl+C`.
+4. In pane 4, type `cat`, then send EOF (`Ctrl+D`) on an empty line.
+5. Quit the app (`Cmd+Q`) and check for orphan shells.
+
+Screenshots: `/tmp/rel-vX.Y.Z-21-shellexit-N.png`.
+
+**Expected outcome:**
+
+- [ ] `exit` closes the pane (or replaces with a "process exited" indicator per design); no zombie.
+- [ ] `kill -9 $$` likewise — the parent shell death is noticed within 1 s.
+- [ ] `Ctrl+C` interrupts the sleep without killing the shell; prompt returns.
+- [ ] `Ctrl+D` on empty `cat` terminates cat; shell stays alive.
+- [ ] After `Cmd+Q`: `pgrep -fl '/bin/zsh|/bin/bash'` shows none of the Sonic-spawned PIDs (PtyHandle::Drop, CLAUDE.md §4).
+
+**FAIL → block release.**
+
+---
+
+## 22. Ctrl-letter / modifier key encoding
+
+**Setup:** fresh launch; run `cat -v` (so control bytes are visible).
+
+**Actions:** press each in sequence and observe `cat -v` output:
+1. `Ctrl+A` through `Ctrl+Z` (expect `^A` … `^Z`, with `^J` = newline behavior).
+2. `Ctrl+[` (`^[` = ESC), `Ctrl+\` (`^\`), `Ctrl+]` (`^]`), `Ctrl+/`, `Ctrl+_`.
+3. `Alt+A` / `Option+A` — should emit either `^[a` (meta-prefix) or `å` (macOS default), per configured `option_as_meta`.
+4. `Shift+Tab` (expect `^[[Z`).
+5. Arrow keys (`^[[A` etc.), Home/End, PageUp/PageDown.
+6. `Ctrl+Space` (NUL: `^@`).
+
+Exit `cat` with `Ctrl+D` on a fresh line.
+
+Screenshots: `/tmp/rel-vX.Y.Z-22-keys-N.png`.
+
+**Expected outcome:**
+
+- [ ] Every Ctrl+letter emits the canonical control byte exactly once.
+- [ ] Option-as-meta works per config (no silently swallowed bindings, no double-emit).
+- [ ] Shift+Tab and arrows emit the correct CSI sequence (not raw text).
+- [ ] No key combo triggers an unintended app-level action that swallows the input.
+
+**FAIL → block release.**
+
+---
+
+## 23. Alt-screen round-trip
+
+**Setup:** fresh launch.
+
+**Actions:**
+1. Run `echo MAIN-LINE-1; echo MAIN-LINE-2`.
+2. `vim` (or `less /etc/hosts`).
+3. Inside, scroll, type, do anything that paints the alt screen.
+4. `:q` (vim) / `q` (less).
+5. Confirm the original `MAIN-LINE-1` / `MAIN-LINE-2` output is RESTORED, cursor is on the next prompt line.
+6. Re-enter `vim`, then re-enter without exiting (`:vsplit` etc.) — ensure DECSET 1049 idempotence (CLAUDE.md §4 guard).
+7. Exit and re-check.
+
+Screenshots: `/tmp/rel-vX.Y.Z-23-altscreen-N.png`.
+
+**Expected outcome:**
+
+- [ ] Entering alt screen hides the main scrollback content.
+- [ ] Exiting restores main scrollback exactly; no overwrite, no missing rows.
+- [ ] Repeated `?1049h` is a no-op; saved cursor not clobbered (`dec_1049h_repeated_does_not_clobber_saved_cursor` test mirror).
+- [ ] Scrollback while in alt screen is either scoped to the alt buffer or disabled per design; never bleeds into main.
+
+**FAIL → block release.**
+
+---
+
+## 24. OSC 8 + URL safety extended
+
+**Setup:** fresh launch.
+
+**Commands:**
+```bash
+# Allowed schemes
+printf '\e]8;;https://example.com/path?q=1\e\\OK-https\e]8;;\e\\\n'
+printf '\e]8;;http://example.com\e\\OK-http\e]8;;\e\\\n'
+
+# Denied schemes (must NOT spawn anything)
+for url in 'javascript:alert(1)' 'data:text/html,<script>' 'vbscript:msgbox' \
+           'ssh://x;rm -rf /' 'http://x.com" && calc.exe' \
+           'http://x.com`whoami`' 'http://x.com$(whoami)' \
+           "http://x.com'; echo PWN" "http://x.com\nDROP TABLE"; do
+  printf '\e]8;;%s\e\\BAD\e]8;;\e\\\n' "$url"
+done
+
+# Over-length (>4096) — must be rejected silently
+python3 -c "print('\\x1b]8;;' + 'http://x.com/' + 'A'*5000 + '\\x1b\\\\LONG\\x1b]8;;\\x1b\\\\')"
+```
+
+**Actions:** `Cmd+click` each link in turn.
+
+Screenshots: `/tmp/rel-vX.Y.Z-24-urlsafety-N.png`.
+
+**Expected outcome:**
+
+- [ ] Only allow-listed schemes (`http`, `https`, `mailto`, `file`) open anything.
+- [ ] All denied URLs do nothing (no browser launch, no crash, no shell injection).
+- [ ] No process spawned with shell metacharacters in argv (verify via `ps` snapshot).
+- [ ] Over-length URI is rejected silently.
+- [ ] `crates/sonic-cfg/src/url_open.rs::validate` is the single gatekeeper (CLAUDE.md §4).
+
+**FAIL → block release.**
+
+---
+
+## 25. Mouse reporting modes
+
+**Setup:** fresh launch.
+
+**Commands:**
+```bash
+# Tmux exercises 1006 (SGR) and 1002 (button-event) modes
+tmux
+# Inside tmux: split, click panes, drag to resize splits.
+
+# Vim mouse mode
+vim
+:set mouse=a
+# Click to position cursor; drag to visual-select.
+
+# Raw enable/disable
+printf '\e[?1000h'   # X10 button reporting
+# Click; should see escape sequences in raw echo if you cat -v.
+printf '\e[?1000l'
+```
+
+Screenshots: `/tmp/rel-vX.Y.Z-25-mouse-N.png`.
+
+**Expected outcome:**
+
+- [ ] Tmux receives clicks; pane focus follows the click.
+- [ ] Tmux drag-resizes splits using mouse.
+- [ ] Vim cursor jumps to clicked cell; visual mode selects on drag.
+- [ ] Mode enable/disable toggles raw mouse reporting in real time.
+- [ ] Scroll wheel inside tmux/vim sends arrow keys (or scroll, per app); does NOT touch Sonic scrollback (alt-screen behavior).
+
+**FAIL → block release.**
+
+---
+
+## 26. Wide chars / grapheme clusters
+
+**Setup:** fresh launch.
+
+**Commands:**
+```bash
+printf 'CJK: 中文测试|\n'
+printf 'JP : こんにちは|\n'
+printf 'KR : 안녕하세요|\n'
+printf 'Emo: 🎉🇺🇸👨‍👩‍👧‍👦|\n'   # last is a ZWJ family
+printf 'Flag: 🇯🇵🇰🇷|\n'                 # regional-indicator pairs
+printf 'Comb: é (é) à (à)|\n'
+printf 'Pwr :    |\n' # Powerline PUA
+```
+
+Then test cursor arithmetic: type each char into a `read -r x; echo "$x" | wc -m`.
+
+Screenshots: `/tmp/rel-vX.Y.Z-26-wide-N.png`.
+
+**Expected outcome:**
+
+- [ ] CJK/JP/KR each occupy 2 cells; trailing `|` aligns to a consistent column across rows.
+- [ ] Emoji ZWJ family renders as a SINGLE glyph (not 4 separate emoji).
+- [ ] Flag pairs render as flag (not as letters R/I + R/I).
+- [ ] Combining accents render on the base char (single cell), not as standalone marks.
+- [ ] Powerline PUA glyphs render (font: `Rec Mono Casual` fallback per CLAUDE.md §1).
+- [ ] Cursor advances by the correct cell count after each char.
+
+**FAIL → block release** (Unicode capability matrix from §11 must also be green).
+
+---
+
+## 27. Cursor styles (DECSCUSR)
+
+**Setup:** fresh launch.
+
+**Commands:**
+```bash
+printf '\e[0 q'  # default
+printf '\e[1 q'  # blinking block
+printf '\e[2 q'  # steady block
+printf '\e[3 q'  # blinking underline
+printf '\e[4 q'  # steady underline
+printf '\e[5 q'  # blinking bar
+printf '\e[6 q'  # steady bar
+```
+
+Type characters between each to observe the cursor shape. Then run `nvim` and observe insert-mode cursor (vim emits `\e[6 q` by default in insert).
+
+Screenshots: `/tmp/rel-vX.Y.Z-27-cursor-N.png`.
+
+**Expected outcome:**
+
+- [ ] Each `q` sequence changes cursor shape live.
+- [ ] Blinking variants actually blink (visible toggle at the cursor cell).
+- [ ] Steady variants do NOT blink.
+- [ ] nvim insert mode shows the bar cursor.
+- [ ] Cursor color reads from `theme.colors.cursor` (or per-cell inverse) per design.
+
+**FAIL → block release.**
+
+---
+
+## 28. Session restore (deferred, N/A)
+
+Session restore is explicitly out of scope until post-v1.0 (CLAUDE.md North Star).
+
+**Expected outcome:**
+
+- [x] N/A — feature deferred; no check required for this release. (Pre-checked so the gate does not block. Re-introduce as a real section once the feature lands.)
+
+---
+
+## 29. Crash hygiene
+
+**Setup:** fresh launch.
+
+**Actions:**
+1. Inject a deliberate panic via a debug-only `SONIC_PANIC=1` env var if such a path exists; otherwise skip the synthetic injection and rely on observed-in-the-wild crashes.
+2. Force-kill the app (`kill -9 $(pgrep sonic-mac)`).
+3. Re-launch.
+4. Check macOS Console.app for any crash report tagged `sonic-mac`.
+
+**Expected outcome:**
+
+- [ ] Re-launch after kill works without complaint (no half-written state file blocking startup).
+- [ ] If a panic occurred, the backtrace is captured (RUST_BACKTRACE-enabled binary in dev; in release at least a one-line panic message in `/tmp/gui-smoke.log` or stderr).
+- [ ] No corrupted user config after force-kill (validate by re-reading `sonic.toml` and confirming app starts).
+- [ ] No "Sonic quit unexpectedly" dialog from macOS for a normal `Cmd+Q` quit.
+
+**FAIL → block release.**
+
+---
+
+## 30. Accessibility
+
+**Setup:** fresh launch.
+
+**Actions:**
+1. Increase OS text size via System Settings → Accessibility → Display → if applicable.
+2. Toggle "Increase Contrast" in Accessibility settings.
+3. Enable "Reduce Motion".
+4. Enable VoiceOver briefly (`Cmd+F5`); navigate around the window with VO+arrows.
+5. Use macOS Zoom (`Ctrl+scroll`) into the terminal.
+
+Screenshots: `/tmp/rel-vX.Y.Z-30-a11y-N.png`.
+
+**Expected outcome:**
+
+- [ ] Sonic does not crash under any accessibility toggle.
+- [ ] VoiceOver at minimum reads the window title; menu items announce correctly.
+- [ ] Increase-contrast does not render the cursor or text invisible.
+- [ ] Reduce-motion suppresses any animated overlay if implemented.
+- [ ] OS Zoom magnifies cleanly (no garbled glyphs at high zoom).
+
+**FAIL → block release** for crashes. Known-incomplete VoiceOver support may be documented as a v1.x item (note in PR body), not blocking.
+
+---
+
+## 31. First-run experience
+
+**Setup:** `rm -rf ~/Library/Application\ Support/Sonic/` (BACK UP first if you care about your config). Then launch fresh.
+
+**Expected outcome:**
+
+- [ ] First launch creates the config dir without prompting.
+- [ ] Default theme + keymap (wezterm) apply (CLAUDE.md §1).
+- [ ] No error dialog about missing config.
+- [ ] Default font resolves (`St Helens` system, falls back to `Rec Mono Casual` bundled) — no tofu in welcome shell prompt.
+- [ ] `sonic.toml` exists after first quit (or is generated lazily on first edit — verify against current design and note which).
+
+**FAIL → block release.**
+
+---
+
+## 32. Locale / non-UTF8
+
+**Setup:** fresh launch.
+
+**Actions:**
+1. In a pane: `LANG=C printf '\xe4\xb8\xad\xe6\x96\x87\n'` (UTF-8 bytes for 中文 in a C locale shell).
+2. `LANG=zh_CN.UTF-8 printf 'OK 中文\n'`.
+3. Pipe a binary file briefly: `head -c 4096 /bin/ls | cat -v` (controls / non-UTF8 bytes).
+4. Set `LANG=en_US.UTF-8` and confirm parity with Section 1.
+
+Screenshots: `/tmp/rel-vX.Y.Z-32-locale-N.png`.
+
+**Expected outcome:**
+
+- [ ] UTF-8 byte input still renders correctly regardless of `$LANG` (Sonic treats stream as UTF-8 with replacement for invalid bytes).
+- [ ] Binary garbage does not crash the VT parser (`cargo test -p sonic-core --test vt_fuzz` mirror).
+- [ ] Invalid UTF-8 bytes show U+FFFD replacement, not silent corruption.
+- [ ] Returning to UTF-8 locale produces identical rendering to baseline.
+
+**FAIL → block release.**
+
+---
+
+## 33. Permissions / TCC prompts
+
+**Setup:** clean TCC state if possible (`tccutil reset ScreenCapture com.sonic.terminal` etc., adjusted to actual bundle id).
+
+**Actions:**
+1. First launch — observe any TCC prompts (Input Monitoring, Screen Recording, Accessibility, Full Disk Access).
+2. Decline a prompt; observe Sonic continues to function for unrelated features.
+3. Re-launch after granting; confirm the feature that needed the permission now works.
+
+**Expected outcome:**
+
+- [ ] Sonic only prompts for permissions it actually requires (no unjustified Accessibility / FDA request).
+- [ ] Declined permission does not crash the app; degraded feature surfaces a clear message.
+- [ ] Granted permission is honored on next launch without re-prompt.
+
+**FAIL → block release** if an unexpected/unjustified prompt appears.
+
+---
+
+## 34. Long-running (1 hour) stability
+
+**Setup:** fresh launch; 2 tabs each with 2 panes.
+
+**Actions:**
+1. In one pane: `while true; do date; sleep 1; done`.
+2. In another: `tail -F /var/log/system.log` (or any always-growing log).
+3. In a third: idle prompt.
+4. In the fourth: `htop`.
+5. Walk away for 60 minutes.
+
+**Measurement (every 10 min via `launchctl`/`cron` or scripted, or just spot-check at the end):**
+```bash
+ps -p $(pgrep sonic-mac | head -1) -o rss,vsz,%cpu
+```
+
+**Expected outcome:**
+
+- [ ] RSS growth over the hour is < 50 MB (no leak in glyph atlas / scrollback / shape cache).
+- [ ] CPU stays bounded (no runaway above 30% sustained without input).
+- [ ] No crash, no beachball.
+- [ ] After the hour, all four panes still respond to keystrokes within 100 ms.
+
+**FAIL → block release.**
+
+---
+
+## 35. Drag-drop edge cases
+
+**Setup:** fresh launch.
+
+**Actions:**
+1. Drag a folder (not file) from Finder onto the terminal.
+2. Drag a file whose name contains spaces, an apostrophe (`O'Brien.txt`), unicode (`日本語.txt`), and a `$VAR` looking sequence.
+3. Drag multiple files at once (Cmd-click 3 files, drag together).
+4. Drag a file into a non-active pane; confirm the path goes to the focused pane only (or to the pane under the cursor, per design — pick one and verify).
+5. Drag an image from a browser (cross-app, may be URL or file).
+
+Screenshots: `/tmp/rel-vX.Y.Z-35-drop-N.png`.
+
+**Expected outcome:**
+
+- [ ] Folder path is pasted shell-quoted correctly.
+- [ ] Spaces / quote / unicode / `$` chars in names are properly escaped — the shell accepts the line verbatim on Enter.
+- [ ] Multiple files yield a single line with all paths space-separated and each individually quoted.
+- [ ] Per-pane targeting is consistent with documented behavior; no path written to a wrong pane.
+- [ ] Cross-app drop with URL pastes the URL or path (NOT raw HTML payload).
+
+**FAIL → block release.**
+
+---
+
+## 36. Config validation
+
+**Setup:** back up `sonic.toml` then mutate it.
+
+**Cases (one per launch):**
+1. Missing top-level table — file with just `# comment`.
+2. Unknown key — `nonexistent_option = "x"`.
+3. Wrong type — `font_size = "big"` instead of number.
+4. Bad theme name — `theme = "doesnotexist"`.
+5. Bad keymap binding — `bind = "CmdShiftCtrlAlt+QWERTY"`.
+6. Circular include (if includes exist) — `include = ["./sonic.toml"]`.
+7. Empty file.
+8. UTF-8 BOM at start.
+
+For each: launch Sonic, observe behavior, then restore the good config.
+
+Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
+
+**Expected outcome:**
+
+- [ ] No crash for any malformed config.
+- [ ] Missing/unknown keys → default applied + warning logged.
+- [ ] Wrong type → clear parse error in log; previous good config OR default in effect; app still launches.
+- [ ] Bad theme name → falls back to default theme with a logged warning, not a panic.
+- [ ] Bad keymap binding → that binding skipped, others active; warning logged.
+- [ ] Circular include is broken with an error (not stack overflow).
+- [ ] Empty file is equivalent to "all defaults".
+- [ ] BOM is silently tolerated.
+
+**FAIL → block release.**
+
+---
+
 ## Sign-off
 
 Tag: `v___________`
@@ -455,4 +1022,4 @@ Run by: `___________`
 Date: `___________`
 Platform: `___________` (macOS 14.x / Windows 11 23H2)
 
-All 15 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.
+All 36 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.
