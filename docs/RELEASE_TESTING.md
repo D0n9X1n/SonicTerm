@@ -76,6 +76,7 @@ How to use:
 34. [Long-running (1 hour) stability](#34-long-running-1-hour-stability)
 35. [Drag-drop edge cases](#35-drag-drop-edge-cases)
 36. [Config validation](#36-config-validation)
+37. [CLAUDE.md §4 land-mine coverage](#37-claudemd-4-land-mine-coverage)
 
 ---
 
@@ -1015,6 +1016,54 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 ---
 
+## 37. CLAUDE.md §4 land-mine coverage
+
+Each row in this table maps a CLAUDE.md §4 land-mine to (a) the manual UX
+section in this checklist that exercises it end-to-end, and (b) the
+automated regression test that pins the contract. The manual section is
+listed for human reproducibility; the automated test is the durable
+guard. Tick both columns once you have confirmed the manual section
+passes AND the named test still exists and runs green.
+
+Some land-mines are purely code-internal (no plausible UX-level repro);
+those rely on the automated test alone — that's noted in the row.
+
+| # | Land-mine (CLAUDE.md §4) | Manual section | Automated test |
+|---|---|---|---|
+| 1 | `try_lock` on parser in render path (no AB-BA deadlock; missed redraw must reschedule) | Sec 12 (idle no-freeze) + Sec 7 (nvim burst) | `crates/sonic-app/tests/pty_multi_round_hang.rs` |
+| 2 | 16 ms PTY redraw coalescing (burst output does not freeze UI; vsync bypass via `pty_burst_gen`) | Sec 7 (nvim Ctrl+D burst) + Sec 13 (vtebench) | `crates/sonic-app/tests/vsync_pty_burst_bypass.rs` + `crates/sonic-app/tests/vsync_input_bypass.rs` |
+| 3 | CSI `J` (ED) and `K` (EL) honor mode params (J0/J1/J2, K0/K1/K2) | Sec 1 (shell prompt redraw — code-internal beyond that) | `crates/sonic-core/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor` |
+| 4 | Repeated DEC `?1049h` is a no-op when already in alt screen (don't clobber `saved_cursor`) | Sec 7 (vim re-entry) | `crates/sonic-core/tests/vt.rs::dec_1049h_repeated_does_not_clobber_saved_cursor` |
+| 5 | `wgpu::CurrentSurfaceTexture::Suboptimal(frame)` — drop SurfaceTexture BEFORE `surface.configure(...)` (wgpu 29 panic otherwise) | Sec 1 + window-resize-many (code-internal; manual repro is "resize the window 20× rapidly, no panic") | **[ ] needs-test** — see TODO at bottom; covered today only by source-comment + GUI smoke (CLAUDE.md §13) |
+| 6 | `set_rich_text` vs `set_text` — per-cell color/weight/style needs `Shaping::Advanced` (cosmic-text 0.18 API) | Sec 8 (per-cell colored bold/italic + per-cell bg) | `crates/sonic-shared/tests/per_cell_bg_renders.rs` + `crates/sonic-shared/tests/unified_font_attrs.rs` + `crates/sonic-shared/tests/user_regressions.rs` (build_tab_title_rich_text_spans) |
+| 7 | `PtyHandle::Drop` kills child explicitly (no orphans) | Sec 15 (Cmd+Q leaves no shell PIDs) | covered by Sec 15 manual gate + `impl Drop` invariant in `crates/sonic-io/src/pty.rs` |
+| 8 | `sonic_cfg::url_open::validate()` rejects shell-metachar / non-allowlisted scheme URIs | Sec 9 (OSC 8 hostile URL is silently rejected) | `crates/sonic-cfg/tests/*` (url_open allow/deny matrix) |
+
+**Sign-off rule:** every row above must have BOTH the manual section
+passing AND the named automated test green (`cargo test --workspace`
+includes them in the standard floor). If a row is marked
+`[ ] needs-test`, the release is blocked until the TODO is closed.
+
+- [ ] All 8 rows of the §4 land-mine table verified (manual section + automated test).
+
+### TODO: automated test gaps
+
+The following land-mines have no dedicated automated regression test and
+are covered only by manual checklist + source-comment + GUI smoke. File
+a follow-up to add them before tagging the next major release:
+
+- [ ] **Row 5 — Suboptimal drop-before-configure:** add a unit test that
+  constructs the `CurrentSurfaceTexture::Suboptimal(frame)` arm in
+  `crates/sonic-shared/src/render/core.rs` (and `prefs_renderer.rs`),
+  asserts the `SurfaceTexture` is dropped before `surface.configure(...)`
+  is called, and would fail to compile if the drop ordering regresses
+  (e.g. via a typestate guard or a `Drop` impl that toggles an atomic
+  the configure call asserts on). Today this is only caught by GUI
+  smoke (CLAUDE.md §13) on a real wgpu 29 surface, which is a slow
+  manual loop.
+
+---
+
 ## Sign-off
 
 Tag: `v___________`
@@ -1022,4 +1071,4 @@ Run by: `___________`
 Date: `___________`
 Platform: `___________` (macOS 14.x / Windows 11 23H2)
 
-All 36 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.
+All 37 sections passing → `bash scripts/check-release-testing.sh && git tag vX.Y.Z && git push origin vX.Y.Z`.

@@ -22,6 +22,25 @@ fi
 # `grep -n` so we can report line numbers; `|| true` because grep exits 1 on no-match.
 unchecked=$(grep -nE '^[[:space:]]*-[[:space:]]+\[[[:space:]]\][[:space:]]' "$DOC" || true)
 
+# Section 37 (CLAUDE.md §4 land-mine coverage) MUST have no `needs-test`
+# markers in its table rows — those flag missing automated regression
+# tests for the §4 land-mines and block release until closed. The TODO
+# section at the bottom of the doc explains each gap and is itself a
+# checklist box that must be ticked, so we only fail on raw `needs-test`
+# table cells (not the TODO heading).
+needs_test=$(grep -nE 'needs-test' "$DOC" | grep -vE '^[^:]*:[[:space:]]*#|TODO:' || true)
+# Filter out lines inside the TODO list (those are tracking the gaps,
+# not asserting coverage). Table cells contain ` | ` separators; TODO
+# bullets begin with `- [ ]`.
+needs_test_table=$(printf '%s\n' "$needs_test" | grep -E '\| ' || true)
+if [[ -n "$needs_test_table" ]]; then
+  echo "FAIL: Section 37 has 'needs-test' row(s) in $DOC — automated test gap:" >&2
+  printf '%s\n' "$needs_test_table" >&2
+  echo "" >&2
+  echo "Add the missing automated regression test(s) before tagging." >&2
+  exit 1
+fi
+
 if [[ -z "$unchecked" ]]; then
   total=$(grep -cE '^[[:space:]]*-[[:space:]]+\[[xX]\][[:space:]]' "$DOC" || echo 0)
   echo "OK: all $total checklist items in $DOC are checked."
