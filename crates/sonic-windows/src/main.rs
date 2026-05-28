@@ -19,13 +19,29 @@ mod menubar;
 mod os_drag_win;
 
 fn main() -> Result<()> {
-    let bootstrap_cfg = sonic_logging::LoggingConfig::default();
-    let _log_guard = sonic_logging::init(&bootstrap_cfg).ok();
+    // Install panic hook BEFORE config load so a panic during load
+    // still produces a crash dump. Logger init is deferred until
+    // after the user's `[logging]` section has been read so its
+    // `level` + retention knobs actually drive the runtime —
+    // `tracing_subscriber::try_init` only ever installs the first
+    // subscriber, so the previous "bootstrap-then-reinit" dance
+    // silently dropped the user-configured level (Haiku review of
+    // PR #222).
     sonic_logging::install_panic_hook(sonic_logging::log_dir());
+    let bootstrap_cfg = sonic_logging::LoggingConfig::default();
     sonic_logging::cleanup_old_files_async(sonic_logging::log_dir(), &bootstrap_cfg);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
 
-    let config = load_config()?;
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("sonic: config load failed: {e:?}");
+            return Err(e);
+        }
+    };
+    let log_cfg = config.logging.clone();
+    let _log_guard = sonic_logging::init(&log_cfg).ok();
+    sonic_logging::cleanup_old_files_async(sonic_logging::log_dir(), &log_cfg);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
     let theme_loader: sonic_app::ThemeLoader = Box::new(|name: &str| load_theme(name));

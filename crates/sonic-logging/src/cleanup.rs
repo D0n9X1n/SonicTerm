@@ -13,6 +13,9 @@ use crate::sinks::ROTATED_PREFIX;
 
 /// Run a cleanup pass over `log_dir` and its `crashes/` subdirectory.
 ///
+/// - Rotates the active log file when it exceeds
+///   `cfg.max_file_size_mb` MiB (renamed to
+///   `sonic.log.<unix-seconds>` so daily rotation doesn't collide).
 /// - Caps rotated log files at `cfg.max_rotated_files` (oldest mtime
 ///   evicted first).
 /// - Deletes rotated log files older than `cfg.max_age_days`
@@ -21,8 +24,10 @@ use crate::sinks::ROTATED_PREFIX;
 /// - Deletes crash dumps older than `cfg.max_crash_age_days`
 ///   (`0` disables age eviction).
 ///
-/// The active `sonic.log` is **never** deleted.
+/// The active `sonic.log` is never *deleted*, only renamed when it
+/// exceeds the size cap.
 pub fn cleanup_old_files(log_dir: &Path, cfg: &LoggingConfig) {
+    enforce_size_rotation(log_dir, cfg);
     enforce_rotated_logs(log_dir, cfg);
     enforce_crash_dumps(log_dir, cfg);
 }
@@ -110,6 +115,55 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
         .collect();
     candidates.sort_by_key(|(_, m)| *m);
     candidates.pop().map(|(p, _)| p)
+}
+
+/// If the active log file is larger than `cfg.max_file_size_mb` MiB,
+/// rename it to `sonic.log.<unix-seconds>` so the next write opens a
+/// fresh file. `max_file_size_mb = 0` disables this check.
+///
+/// Rationale: `tracing-appender::rolling::daily` only rotates on the
+/// day boundary, so a single chatty day can blow past the per-file
+/// size budget that `[logging]` advertises. The rename here is a
+/// best-effort second axis — when it fires the actively-open file
+/// handle inside the appender keeps writing to the inode under its
+/// new name; the next `daily` boundary then opens a fresh
+/// `sonic.log.YYYY-MM-DD` and subsequent cleanups evict the
+/// timestamp-suffixed file via [`enforce_rotated_logs`].
+fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
+    if cfg.max_file_size_mb == 0 {
+        return;
+    }
+    let limit_bytes = cfg.max_file_size_mb.saturating_mul(1024 * 1024);
+    let Some(active) = active_log(log_dir) else { return };
+    let Ok(meta) = std::fs::metadata(&active) else { return };
+    if meta.len() <= limit_bytes {
+        return;
+    }
+    let ts =
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut target = log_dir.join(format!("{}{ts}", crate::sinks::ROTATED_PREFIX));
+    // Collision guard — if the same second already produced a rotated
+    // file, append a monotonic counter so we don't clobber it.
+    let mut bump = 0u32;
+    while target.exists() {
+        bump += 1;
+        target = log_dir.join(format!("{}{ts}-{bump}", crate::sinks::ROTATED_PREFIX));
+    }
+    match std::fs::rename(&active, &target) {
+        Ok(()) => {
+            // On platforms where the appender holds the file open,
+            // truncate the (newly-recreated-on-next-write) path so
+            // the next write starts from zero. We don't pre-create
+            // the file: `tracing-appender` will open it lazily.
+            tracing::info!(
+                from = %active.display(),
+                to = %target.display(),
+                size = meta.len(),
+                "size-rotated active log"
+            );
+        }
+        Err(e) => tracing::warn!("cleanup: size-rotate {active:?} -> {target:?} failed: {e}"),
+    }
 }
 
 fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
