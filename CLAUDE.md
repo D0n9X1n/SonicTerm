@@ -432,6 +432,35 @@ Before opening a PR on a hot file, run:
 If a hit comes back, the other PM already reserved it — wait or
 coordinate via a comment on their PR. Don't race.
 
+### Mandatory `dev:*` label
+
+Every PR MUST carry exactly one `dev:*` label identifying the PM machine
+that authored it:
+
+- `dev:mac` — opened from the macOS PM session
+- `dev:windows` — opened from the Windows PM session
+- `dev:linux` — opened from the Linux PM session (future)
+
+This is set IMMEDIATELY after `gh pr create`, e.g.:
+
+    PR_URL=$(gh pr create --title "..." --body "..." | tail -1)
+    PR_NUM=${PR_URL##*/}
+    gh pr edit $PR_NUM --add-label dev:mac
+
+The dev label is distinct from `platform:*`:
+- `platform:*` describes which OS the CHANGE affects (build target).
+- `dev:*` describes which PM AUTHORED the PR (review channel).
+
+So a `dev:mac` PR can be `platform:windows` (rare — coordinate first via
+issue, since the authoring PM can't §13 smoke that platform). Normal case:
+`dev:mac` pairs with `platform:mac` or `platform:both`.
+
+When a `gh pr list` filter is needed to see "my work" vs "other PM's
+work", filter on `dev:*`:
+
+    gh pr list --label dev:mac    # my open PRs
+    gh pr list --label dev:windows --state open  # peek peer's work
+
 ### Per-platform GUI smoke
 
 Render/input/VT/window-state PRs need §13 smoke on BOTH platforms
