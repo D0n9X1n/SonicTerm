@@ -142,6 +142,19 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();
             }
+            WindowEvent::Focused(focused) => {
+                // Record focus so menubar-routed actions (Cmd+T, ...)
+                // target this child window instead of the main App.
+                // Release the child borrow before touching `self`.
+                let _ = child;
+                if focused {
+                    self.focused_child = Some(win_id);
+                } else if self.focused_child == Some(win_id) {
+                    // Lost focus → clear; if another window claims it,
+                    // its own Focused(true) arm will set it.
+                    self.focused_child = None;
+                }
+            }
             WindowEvent::CursorLeft { .. } => {
                 let changed = child.renderer.set_hover_cursor(None);
                 if changed {
@@ -411,5 +424,102 @@ impl App {
             w.set_visible(true);
         }
         self.main_hidden = false;
+    }
+
+    /// Spawn a new tab containing a single fresh pane inside the
+    /// child window identified by `win_id`. Returns `false` if no
+    /// such child window exists (caller should fall back to the main
+    /// App's `new_tab`). The new pane's redraw target is bound to the
+    /// child window so VT output redraws the child, not the main App.
+    ///
+    /// This is the routing target for `Action::NewTab` whenever
+    /// `App::focused_child` points at a torn-out window — without it
+    /// Cmd+T in the child silently spawned the tab in the main App.
+    pub(super) fn spawn_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        use sonic_core::{grid::Grid, vt::Parser};
+        // Snapshot everything we need from the child up-front so the
+        // mutable borrow ends before we spawn the VT thread (which
+        // captures clones), then re-borrow to install the new tab.
+        let (cols, rows, child_window, cursor_visible_arc) = {
+            let Some(child) = self.child_windows.get_mut(&win_id) else {
+                return false;
+            };
+            let (c, r) = child.renderer.cells();
+            (c, r, child.window.clone(), child.cursor_visible.clone())
+        };
+        let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
+            Arc::new(Mutex::new(Some(child_window.clone())));
+        let pty = match PtyHandle::spawn_default_shell(cols, rows) {
+            Ok(pty) => {
+                let parser_clone = parser.clone();
+                let out_rx = pty.out_rx.clone();
+                let in_tx_reply = pty.in_tx.clone();
+                let redraw_target_thread = redraw_target.clone();
+                let cursor_visible = cursor_visible_arc;
+                let pty_burst_gen = self.pty_burst_gen.clone();
+                std::thread::Builder::new()
+                    .name("sonic-vt-reply-child".into())
+                    .spawn(move || {
+                        while let Ok(bytes) = reply_rx.recv() {
+                            if in_tx_reply.send(bytes).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn vt reply forwarder (child)");
+                std::thread::Builder::new()
+                    .name("sonic-vt-loop-child".into())
+                    .spawn(move || {
+                        // Lean variant of the main-window VT loop: drain
+                        // bytes, advance parser, request a redraw. The
+                        // child window does not currently update its
+                        // title from OSC 0/2 (single-tab tear-out today),
+                        // so we skip the title plumbing.
+                        while let Ok(bytes) = out_rx.recv() {
+                            if !bytes.is_empty() {
+                                pty_burst_gen.fetch_add(1, Ordering::Release);
+                            }
+                            {
+                                let mut p = parser_clone.lock();
+                                for ev in p.advance(&bytes) {
+                                    if let VtEvent::CursorVisibility(v) = ev {
+                                        cursor_visible
+                                            .store(v, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            if let Some(w) = redraw_target_thread.lock().as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    })
+                    .expect("spawn vt loop (child)");
+                Some(pty)
+            }
+            Err(e) => {
+                tracing::error!("failed to spawn pty for child tab: {e}");
+                None
+            }
+        };
+        let mut pane_state = PaneState::new(parser, pty);
+        pane_state.redraw_target = redraw_target;
+        let pane_id = next_pane_id();
+        let Some(child) = self.child_windows.get_mut(&win_id) else {
+            return false;
+        };
+        child.panes.insert(pane_id, pane_state);
+        let n = child.tabs.len() + 1;
+        child.tabs.push(Tab::new(format!("shell {n}")));
+        child.tab_states.push(TabState {
+            tree: PaneTree::leaf(pane_id),
+            active_pane: pane_id,
+            search: None,
+        });
+        let last = child.tabs.len().saturating_sub(1);
+        child.tabs.activate(last);
+        child.window.request_redraw();
+        true
     }
 }

@@ -564,6 +564,16 @@ pub struct App {
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     pub(super) child_windows: HashMap<WindowId, ChildWindow>,
+    /// Most-recently-focused window's id. `None` means the main window
+    /// is focused (or no window has been focused yet). Set/cleared in
+    /// the `WindowEvent::Focused` handler on both the main and child
+    /// windows so menubar-driven actions (Cmd+T, Cmd+W, …) — which the
+    /// OS delivers to the App, not the window — can be routed to the
+    /// window the user is actually looking at. Without this routing,
+    /// Cmd+T pressed in a torn-out child opened a new tab in the main
+    /// window every time. User report v0.6: "拖拽形成新的窗口后，再新
+    /// 的窗口按 ctrl+t 还是在原来的窗口打开新tab".
+    pub(super) focused_child: Option<WindowId>,
     /// Pending cross-window drag-merge target chosen on the most recent
     /// `CursorMoved` while a tab is held. On mouse-up we use this to
     /// decide between "tear out into new window" (None) and "merge into
@@ -700,6 +710,7 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             child_windows: HashMap::new(),
+            focused_child: None,
             drag_target: None,
             main_hidden: false,
             theme_loader: None,
@@ -947,6 +958,28 @@ impl App {
         self.child_windows.get(&id).map(|c| c.tabs.len())
     }
 
+    /// Test-only: install a `focused_child` id without going through a
+    /// real `WindowEvent::Focused(true)` (which requires a winit window).
+    /// Used by `tearout_newtab_routing.rs` to confirm `Action::NewTab`
+    /// falls back to the main App when the recorded child no longer
+    /// exists (and clears the stale `focused_child`).
+    #[doc(hidden)]
+    pub fn __test_set_focused_child(&mut self, id: Option<WindowId>) {
+        self.focused_child = id;
+    }
+
+    /// Test-only: read back the current `focused_child`.
+    #[doc(hidden)]
+    pub fn __test_focused_child(&self) -> Option<WindowId> {
+        self.focused_child
+    }
+
+    /// Test-only: count of tabs in the main App.
+    #[doc(hidden)]
+    pub fn __test_main_tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
     /// Test-only: install a synthetic `drag_target` so the
     /// cross-window-merge gate can be exercised without driving a
     /// live winit cursor through `CursorMoved`.
@@ -997,6 +1030,36 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_ids(&self) -> Vec<u64> {
         self.panes.keys().copied().collect()
+    }
+
+    /// Test-only: id of the active pane in a given tab. Returns `None`
+    /// when `tab_idx` is out of range. Used by `split_focus.rs` to
+    /// assert that splitting a pane plus the click-to-focus path
+    /// actually flips the focused leaf.
+    #[doc(hidden)]
+    pub fn __test_active_pane_in_tab(&self, tab_idx: usize) -> Option<u64> {
+        self.tab_states.get(tab_idx).map(|st| st.active_pane)
+    }
+
+    /// Test-only: set the active pane in `tab_idx` to `pane_id`. The
+    /// click-to-focus logic in `window_event.rs` is the production
+    /// caller; tests exercise the same state transition without
+    /// driving a synthetic winit `MouseInput` event.
+    #[doc(hidden)]
+    pub fn __test_set_active_pane(&mut self, tab_idx: usize, pane_id: u64) -> bool {
+        if let Some(st) = self.tab_states.get_mut(tab_idx) {
+            st.active_pane = pane_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Test-only: drive `split_active(Direction::Right)`. Mirrors the
+    /// `Action::SplitRight` dispatch but skips the `Action` round-trip.
+    #[doc(hidden)]
+    pub fn __test_split_active_right(&mut self) {
+        self.split_active(sonic_core::keymap::Direction::Right);
     }
 
     /// Test-only: tab count.

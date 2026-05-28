@@ -46,6 +46,18 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
+                // Route to the focused window so torn-out child windows
+                // get their own tab instead of injecting one into the
+                // main window. User report v0.6: see `App::focused_child`
+                // doc for the original Chinese complaint + repro.
+                if let Some(win_id) = self.focused_child {
+                    if self.spawn_tab_in_child(win_id) {
+                        return true;
+                    }
+                    // Child window vanished mid-dispatch — fall back to
+                    // the main App rather than dropping the action.
+                    self.focused_child = None;
+                }
                 let n = self.tabs.len() + 1;
                 self.new_tab(format!("shell {n}"));
             }

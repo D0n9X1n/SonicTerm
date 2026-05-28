@@ -275,6 +275,12 @@ impl App {
             }
 
             WindowEvent::Focused(focused) => {
+                // Main window gained focus → clear `focused_child` so
+                // menubar-routed actions (NewTab, …) target the main
+                // App again. See `App::focused_child` doc for context.
+                if focused {
+                    self.focused_child = None;
+                }
                 // Reset IME state across focus transitions. When focus is
                 // lost mid-composition, the OS IME panel detaches without
                 // sending us a Commit; dropping the preedit avoids replaying
@@ -527,6 +533,53 @@ impl App {
                         return;
                     }
                     if let Some(r) = self.renderer.as_ref() {
+                        // Click-to-focus: figure out which pane rect
+                        // contains the click and make it the active
+                        // pane. Without this, splitting a pane spawned
+                        // a working PTY that the user could never
+                        // type into — there was no way to move focus
+                        // off the originally-active pane other than
+                        // the (undiscoverable) keyboard shortcuts.
+                        // User report v0.6: "split window 这个功能是
+                        // 坏的，没有能够形成两个可以输入的 windows".
+                        let tab_idx = self.tabs.active_index();
+                        let pane_rects = self
+                            .tab_states
+                            .get(tab_idx)
+                            .map(|st| {
+                                let (w, h) = r.logical_size();
+                                let top = r.top_inset();
+                                let pl = r.padding_left();
+                                let pr = r.padding_right();
+                                let pb = r.padding_bottom();
+                                let outer = sonic_ui::pane::Rect::new(
+                                    pl,
+                                    top,
+                                    (w - pl - pr).max(0.0),
+                                    (h - top - pb).max(0.0),
+                                );
+                                st.tree.layout(outer)
+                            })
+                            .unwrap_or_default();
+                        if pane_rects.len() > 1 {
+                            let sf = self.scale_factor as f32;
+                            let (lx, ly) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
+                            for (id, rect) in &pane_rects {
+                                if lx >= rect.x
+                                    && lx < rect.x + rect.w
+                                    && ly >= rect.y
+                                    && ly < rect.y + rect.h
+                                {
+                                    if let Some(st) = self.tab_states.get_mut(tab_idx) {
+                                        if st.active_pane != *id {
+                                            st.active_pane = *id;
+                                            mark_all_panes_dirty(&self.panes);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         // `pixel_to_cell` expects PHYSICAL px.
                         if let Some((row, col)) =
                             r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
