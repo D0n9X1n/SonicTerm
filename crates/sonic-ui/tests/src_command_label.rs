@@ -30,6 +30,7 @@ fn variant_kind_covers_every_action() {
         Action::ToggleFullscreen,
         Action::OpenSearch,
         Action::OpenCommandPalette,
+        Action::ShowKeymapCheatsheet,
         Action::OpenPreferences,
         Action::Scroll(ScrollAction::PageUp),
         Action::ScrollToPrevPrompt,

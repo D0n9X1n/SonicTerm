@@ -106,6 +106,7 @@ pub fn integrated_titlebar_inset_px() -> u32 {
 
 use crate::config_watch::ConfigWatcher;
 use sonic_shared::render::GpuRenderer;
+use sonic_ui::cheatsheet::CheatsheetState;
 use sonic_ui::command_palette::CommandPalette;
 use sonic_ui::ime::ImeState;
 use sonic_ui::pane::PaneTree;
@@ -596,6 +597,8 @@ pub struct App {
     /// terminal cursor moves to a different cell.
     pub(super) ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle,
     pub(super) command_palette: CommandPalette,
+    pub(super) cheatsheet_open: bool,
+    pub(super) cheatsheet: CheatsheetState,
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
     pub(super) pressed_tab: Option<usize>,
@@ -786,6 +789,8 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
+            cheatsheet_open: false,
+            cheatsheet: CheatsheetState::new(),
             pressed_tab: None,
             drag_session: None,
             child_windows: HashMap::new(),

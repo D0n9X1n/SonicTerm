@@ -108,6 +108,8 @@ pub enum Action {
     OpenSearch,
     /// Open the command palette overlay.
     OpenCommandPalette,
+    /// Toggle the searchable keyboard shortcuts cheat sheet overlay.
+    ShowKeymapCheatsheet,
     /// Open the preferences window.
     OpenPreferences,
 

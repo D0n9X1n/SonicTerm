@@ -41,6 +41,66 @@ use super::{
 use crate::app::integrated_titlebar_inset;
 
 impl App {
+    pub(super) fn cheatsheet_bindings(&self) -> Vec<(String, String)> {
+        self.keymap
+            .bindings
+            .iter()
+            .map(|binding| (binding.keys.clone(), format!("{:?}", binding.action.0)))
+            .collect()
+    }
+
+    pub(super) fn cheatsheet_handle_key(&mut self, event: &KeyEvent) -> bool {
+        use sonic_ui::cheatsheet::filter_indices;
+        use winit::keyboard::{Key, NamedKey};
+        if !self.cheatsheet_open {
+            return false;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.cheatsheet_open = false;
+                self.cheatsheet.clear();
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                let bindings = self.cheatsheet_bindings();
+                let len = filter_indices(&bindings, &self.cheatsheet.query).len();
+                self.cheatsheet.move_selection_down(len);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let bindings = self.cheatsheet_bindings();
+                let len = filter_indices(&bindings, &self.cheatsheet.query).len();
+                self.cheatsheet.move_selection_up(len);
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.cheatsheet.backspace();
+                true
+            }
+            Key::Character(s) => {
+                for ch in s.chars() {
+                    if !ch.is_control() {
+                        self.cheatsheet.input_char(ch);
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    pub(super) fn toggle_cheatsheet(&mut self) {
+        self.cheatsheet_open = !self.cheatsheet_open;
+        if self.cheatsheet_open {
+            self.command_palette.close();
+            self.cheatsheet.clear();
+        }
+        tracing::info!(open = self.cheatsheet_open, "keymap cheat sheet toggled");
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {

@@ -206,6 +206,9 @@ impl App {
                     r.set_inactive_pane_cursors(inactive_cursors);
                 }
 
+                let cheatsheet_render = self
+                    .cheatsheet_open
+                    .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
                 if let (Some(r), Some(pane)) =
                     (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
@@ -302,6 +305,7 @@ impl App {
                             &self.tabs,
                             search,
                             Some(&mut self.command_palette),
+                            cheatsheet_render,
                             Some(&self.ime),
                             pane.viewport_top_abs,
                         ) {
@@ -768,6 +772,28 @@ impl App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.cheatsheet_open {
+                    // Let the toggle binding (super+?) still close the cheat
+                    // sheet; everything else routes into overlay state and is
+                    // NOT forwarded to the pty.
+                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if matches!(action, Action::ShowKeymapCheatsheet) {
+                                self.run_action(&action);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.cheatsheet_handle_key(&event);
+                    self.drain_pending_window_creates(el);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.command_palette.is_open() {
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette

@@ -168,6 +168,7 @@ impl App {
                         &child.tabs,
                         search,
                         None, // command palette: not exposed in child window yet
+                        None, // keymap cheat sheet: not exposed in child window yet
                         None, // ime preedit: not exposed in child window yet
                         pane.viewport_top_abs,
                     ) {

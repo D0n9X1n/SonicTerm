@@ -47,13 +47,15 @@ fn integrated_titlebar_inset_px() -> u32 {
 
 use crate::{
     atlas_upload::AtlasUpload,
+    cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
     cursor::{self, CursorShape},
     glyph_atlas::GlyphAtlas,
     ime::ImeState,
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_INNER_PAD, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_RADIUS,
+        PALETTE_INNER_PAD, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP,
+        PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::Rect as PaneRect,
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
@@ -65,6 +67,112 @@ use crate::{
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
 };
+
+struct CheatsheetLayout {
+    scrim: crate::tabbar_view::Rect,
+    border: crate::tabbar_view::Rect,
+    bg: crate::tabbar_view::Rect,
+    query_row: crate::tabbar_view::Rect,
+    rows: Vec<crate::tabbar_view::Rect>,
+    selected_row: Option<usize>,
+    query_label: String,
+    rows_text: String,
+    footer: crate::tabbar_view::Rect,
+    footer_label: String,
+}
+
+fn compute_cheatsheet_layout(
+    state: &CheatsheetState,
+    bindings: &[(String, String)],
+    window_w: f32,
+    window_h: f32,
+) -> CheatsheetLayout {
+    let modal_w = 760.0_f32.min((window_w - 48.0).max(180.0));
+    let modal_h = 520.0_f32.min((window_h - 96.0).max(140.0));
+    let border = crate::tabbar_view::Rect {
+        x: ((window_w - modal_w) * 0.5).max(0.0),
+        y: (window_h * 0.14).max(48.0).min((window_h - modal_h).max(0.0)),
+        w: modal_w,
+        h: modal_h,
+    };
+    let bg = crate::tabbar_view::Rect {
+        x: border.x + PALETTE_BORDER,
+        y: border.y + PALETTE_BORDER,
+        w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
+        h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
+    };
+    let query_row = crate::tabbar_view::Rect {
+        x: bg.x + PALETTE_INNER_PAD,
+        y: bg.y + PALETTE_INNER_PAD,
+        w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+        h: 44.0,
+    };
+    let footer = crate::tabbar_view::Rect {
+        x: bg.x,
+        y: (bg.y + bg.h - 32.0).max(query_row.y + query_row.h),
+        w: bg.w,
+        h: 32.0,
+    };
+    let list_top = query_row.y + query_row.h + PALETTE_INNER_PAD;
+    let list_bottom = footer.y - PALETTE_INNER_PAD;
+    let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
+    let max_rows = (((list_bottom - list_top).max(0.0) + PALETTE_ROW_GAP) / row_stride)
+        .floor()
+        .max(0.0) as usize;
+
+    let idxs = filter_indices(bindings, &state.query);
+    let total = idxs.len();
+    let selected = state.selected_idx.min(total.saturating_sub(1));
+    let window_start = selected.saturating_sub(max_rows.saturating_sub(1));
+    let window_end = (window_start + max_rows).min(total);
+    let selected_row = (total > 0).then_some(selected - window_start);
+
+    let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
+    let mut rows_text = String::new();
+    for (row_i, idx_pos) in (window_start..window_end).enumerate() {
+        rows.push(crate::tabbar_view::Rect {
+            x: bg.x + PALETTE_INNER_PAD,
+            y: list_top + (row_i as f32) * row_stride,
+            w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+            h: PALETTE_ROW_HEIGHT,
+        });
+        if row_i > 0 {
+            rows_text.push('\n');
+        }
+        if let Some((keys, action)) = idxs.get(idx_pos).and_then(|idx| bindings.get(*idx)) {
+            rows_text.push_str(keys);
+            rows_text.push_str("    ");
+            rows_text.push_str(action);
+        }
+    }
+    if total == 0 {
+        rows_text.push_str("No shortcuts found");
+    }
+
+    let query_label = if state.query.is_empty() {
+        "Search keyboard shortcuts… ▏".to_string()
+    } else {
+        format!("{}▏", state.query)
+    };
+    let footer_label = format!(
+        "{} shortcut{} · ↑↓ navigate · type to search · esc close",
+        total,
+        if total == 1 { "" } else { "s" }
+    );
+
+    CheatsheetLayout {
+        scrim: crate::tabbar_view::Rect { x: 0.0, y: 0.0, w: window_w, h: window_h },
+        border,
+        bg,
+        query_row,
+        rows,
+        selected_row,
+        query_label,
+        rows_text,
+        footer,
+        footer_label,
+    }
+}
 
 // (Per-row cache + grid SpanDesc removed in the B3 cutover — the GPU
 // atlas does an O(1) lookup per cell, so the bookkeeping is wasted
@@ -195,6 +303,9 @@ pub struct GpuRenderer {
     palette_query_buffer: Buffer,
     palette_rows_buffer: Buffer,
     palette_footer_buffer: Buffer,
+    cheatsheet_query_buffer: Buffer,
+    cheatsheet_rows_buffer: Buffer,
+    cheatsheet_footer_buffer: Buffer,
     ime_buffer: Buffer,
     /// Dedicated text buffer for the drag-chip title overlay.
     drag_chip_buffer: Buffer,
@@ -270,6 +381,7 @@ struct FrameKey {
     search_hash: u64,
     palette_hash: u64,
     ime_hash: u64,
+    cheatsheet_hash: u64,
     width: u32,
     height: u32,
     tab_hash: u64,
@@ -512,6 +624,24 @@ impl GpuRenderer {
             Some(size.width as f32),
             Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
         );
+        let mut cheatsheet_query_buffer = Buffer::new(&mut font_system, palette_metrics);
+        cheatsheet_query_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(font_size * 1.25),
+        );
+        let mut cheatsheet_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
+        cheatsheet_rows_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
+        let mut cheatsheet_footer_buffer = Buffer::new(&mut font_system, palette_footer_metrics);
+        cheatsheet_footer_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
+        );
         let ime_metrics = Metrics::new(font_size, font_size * 1.25);
         let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
         ime_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
@@ -577,6 +707,9 @@ impl GpuRenderer {
             palette_query_buffer,
             palette_rows_buffer,
             palette_footer_buffer,
+            cheatsheet_query_buffer,
+            cheatsheet_rows_buffer,
+            cheatsheet_footer_buffer,
             ime_buffer,
             drag_chip_buffer,
             drag_chip_visual: None,
@@ -1208,6 +1341,7 @@ impl GpuRenderer {
         tabs: &TabBar,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
+        cheatsheet: Option<(CheatsheetState, Vec<(String, String)>)>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
@@ -1325,6 +1459,18 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
+        let cheatsheet_hash: u64 = cheatsheet
+            .as_ref()
+            .map(|(state, bindings)| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                0xC4EA_75EE_u64.hash(&mut h);
+                state.query.hash(&mut h);
+                state.selected_idx.hash(&mut h);
+                bindings.hash(&mut h);
+                h.finish()
+            })
+            .unwrap_or(0);
         // Likewise for IME preedit — composition changes don't bump grid
         // revision until commit.
         let ime_hash: u64 = ime
@@ -1407,6 +1553,7 @@ impl GpuRenderer {
             search_hash,
             palette_hash,
             ime_hash,
+            cheatsheet_hash,
             width: self.config.width,
             height: self.config.height,
             tab_hash,
@@ -2506,6 +2653,102 @@ impl GpuRenderer {
             self.palette_footer_buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
+        // -------- Keyboard shortcuts cheat sheet overlay --------------------
+        let cheatsheet_layout = cheatsheet
+            .as_ref()
+            .map(|(state, bindings)| compute_cheatsheet_layout(state, bindings, sw, sh));
+        if let Some(layout) = &cheatsheet_layout {
+            let palette_chrome = crate::ui_tokens::UiPalette::from_theme(theme);
+            let accent_rgba = palette_chrome.accent;
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.scrim.x,
+                    layout.scrim.y,
+                    layout.scrim.w,
+                    layout.scrim.h,
+                    sw,
+                    sh,
+                ),
+                color: palette_chrome.scrim,
+                ..Default::default()
+            });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.border.x,
+                    layout.border.y,
+                    layout.border.w,
+                    layout.border.h,
+                    sw,
+                    sh,
+                ),
+                color: palette_chrome.border_subtle,
+                size_px: [layout.border.w, layout.border.h],
+                radius_px: PALETTE_PANEL_RADIUS + PALETTE_BORDER,
+                ..Default::default()
+            });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
+                color: palette_chrome.bg_elevated,
+                size_px: [layout.bg.w, layout.bg.h],
+                radius_px: PALETTE_PANEL_RADIUS,
+                ..Default::default()
+            });
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    layout.query_row.x,
+                    layout.query_row.y,
+                    layout.query_row.w,
+                    layout.query_row.h,
+                    sw,
+                    sh,
+                ),
+                color: palette_chrome.bg_base,
+                size_px: [layout.query_row.w, layout.query_row.h],
+                radius_px: PALETTE_QUERY_RADIUS,
+                ..Default::default()
+            });
+            if let Some(sel) = layout.selected_row {
+                if let Some(row) = layout.rows.get(sel) {
+                    quads_overlay.push(QuadInstance {
+                        rect: px_to_ndc(row.x, row.y, row.w, row.h, sw, sh),
+                        color: [accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16],
+                        size_px: [row.w, row.h],
+                        radius_px: PALETTE_ROW_RADIUS,
+                        ..Default::default()
+                    });
+                }
+            }
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
+                color: palette_chrome.border_subtle,
+                ..Default::default()
+            });
+            self.cheatsheet_query_buffer.set_text(
+                &mut self.font_system,
+                &layout.query_label,
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.cheatsheet_query_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.cheatsheet_rows_buffer.set_text(
+                &mut self.font_system,
+                &layout.rows_text,
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.cheatsheet_rows_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.cheatsheet_footer_buffer.set_text(
+                &mut self.font_system,
+                &layout.footer_label,
+                &terminal_font_attrs(&self.font_family).color(self.search_fg),
+                Shaping::Advanced,
+                None,
+            );
+            self.cheatsheet_footer_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
             let cursor_x = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
@@ -2767,6 +3010,55 @@ impl GpuRenderer {
             default_color: self.search_fg,
             custom_glyphs: &[],
         });
+        let cheatsheet_query_area = cheatsheet_layout.as_ref().map(|layout| TextArea {
+            buffer: &self.cheatsheet_query_buffer,
+            left: layout.query_row.x + 12.0,
+            top: layout.query_row.y + 2.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.query_row.x as i32,
+                top: layout.query_row.y as i32,
+                right: (layout.query_row.x + layout.query_row.w) as i32,
+                bottom: (layout.query_row.y + layout.query_row.h) as i32,
+            },
+            default_color: self.search_fg,
+            custom_glyphs: &[],
+        });
+        let cheatsheet_rows_area = cheatsheet_layout.as_ref().map(|layout| {
+            let (x, y) = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
+                layout.bg.x + PALETTE_INNER_PAD,
+                layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD,
+            ));
+            let line_height = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
+            TextArea {
+                buffer: &self.cheatsheet_rows_buffer,
+                left: x + 12.0,
+                top: y + (PALETTE_ROW_HEIGHT - line_height) * 0.5,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: layout.bg.x as i32,
+                    top: y as i32,
+                    right: (layout.bg.x + layout.bg.w) as i32,
+                    bottom: layout.footer.y as i32,
+                },
+                default_color: self.search_fg,
+                custom_glyphs: &[],
+            }
+        });
+        let cheatsheet_footer_area = cheatsheet_layout.as_ref().map(|layout| TextArea {
+            buffer: &self.cheatsheet_footer_buffer,
+            left: layout.footer.x + 12.0,
+            top: layout.footer.y + 8.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.footer.x as i32,
+                top: layout.footer.y as i32,
+                right: (layout.footer.x + layout.footer.w) as i32,
+                bottom: (layout.footer.y + layout.footer.h) as i32,
+            },
+            default_color: self.search_fg,
+            custom_glyphs: &[],
+        });
         let ime_area = ime_layout.as_ref().map(|layout| TextArea {
             buffer: &self.ime_buffer,
             left: layout.bg.x + 4.0,
@@ -2808,6 +3100,15 @@ impl GpuRenderer {
             overlay_areas.push(a);
         }
         if let Some(a) = palette_footer_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = cheatsheet_query_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = cheatsheet_rows_area {
+            overlay_areas.push(a);
+        }
+        if let Some(a) = cheatsheet_footer_area {
             overlay_areas.push(a);
         }
         if let Some(a) = ime_area {
