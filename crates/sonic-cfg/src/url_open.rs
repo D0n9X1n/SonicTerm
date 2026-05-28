@@ -84,3 +84,100 @@ pub fn build_command(url: &str) -> Command {
     c.arg(url);
     c
 }
+
+/// Pure dispatch helper for modifier-aware URL-click handling.
+///
+/// Decides whether a mouse-down event should open a URL, given:
+/// - `modifier_held`: did the platform open-URL modifier (Cmd on
+///   macOS, Ctrl on Windows/Linux) accompany the click?
+/// - `uri_at_cell`: the URI under the cursor cell, if any (OSC 8
+///   hyperlink OR plain-text URL detected by `url_scan`).
+/// - `open_fn`: how to actually open a validated URI. Production
+///   passes `url_open::open`; tests pass a capturing closure.
+///
+/// Returns `Some(uri)` when the opener was invoked (so the caller
+/// knows to swallow the click and skip selection start), `None`
+/// otherwise. Validation happens inside `open_fn` for the production
+/// path; this helper does not duplicate it.
+///
+/// This was extracted from `App::do_window_event`'s `MouseInput`
+/// arm so the modifier-aware dispatch decision is unit-testable
+/// without a real winit event loop.
+pub fn dispatch_modifier_click<F>(
+    modifier_held: bool,
+    uri_at_cell: Option<String>,
+    open_fn: F,
+) -> Option<String>
+where
+    F: FnOnce(&str) -> io::Result<()>,
+{
+    if !modifier_held {
+        return None;
+    }
+    let uri = uri_at_cell?;
+    // Best-effort spawn; an error from the opener does NOT cause us
+    // to fall through to selection start (the user clearly intended
+    // to open a link). Caller logs the error.
+    let _ = open_fn(&uri);
+    Some(uri)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn modifier_click_on_url_cell_calls_opener() {
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let out = dispatch_modifier_click(
+            true,
+            Some("https://example.com".to_string()),
+            |u| {
+                captured.borrow_mut().push(u.to_string());
+                Ok(())
+            },
+        );
+        assert_eq!(out.as_deref(), Some("https://example.com"));
+        assert_eq!(*captured.borrow(), vec!["https://example.com".to_string()]);
+    }
+
+    #[test]
+    fn click_without_modifier_does_not_call_opener() {
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let out = dispatch_modifier_click(
+            false,
+            Some("https://example.com".to_string()),
+            |u| {
+                captured.borrow_mut().push(u.to_string());
+                Ok(())
+            },
+        );
+        assert!(out.is_none(), "no opener invocation expected without modifier");
+        assert!(captured.borrow().is_empty(), "opener must not be called: {:?}", captured.borrow());
+    }
+
+    #[test]
+    fn modifier_click_on_non_url_cell_does_not_call_opener() {
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let out = dispatch_modifier_click(true, None, |u| {
+            captured.borrow_mut().push(u.to_string());
+            Ok(())
+        });
+        assert!(out.is_none());
+        assert!(captured.borrow().is_empty());
+    }
+
+    #[test]
+    fn opener_error_still_consumes_click() {
+        // If the opener spawn fails (e.g. no `xdg-open` available),
+        // the click is still consumed — the user clearly intended
+        // to open the link, not start a selection. Caller logs.
+        let out = dispatch_modifier_click(
+            true,
+            Some("https://example.com".to_string()),
+            |_| Err(io::Error::other("simulated spawn failure")),
+        );
+        assert_eq!(out.as_deref(), Some("https://example.com"));
+    }
+}
