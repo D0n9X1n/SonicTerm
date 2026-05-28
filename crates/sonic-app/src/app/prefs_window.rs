@@ -87,6 +87,7 @@ impl App {
                 if let Some(s) = self.prefs_state.as_mut() {
                     s.apply_button.interaction.pressed = s.apply_button.hit_test(x, y);
                     s.cancel_button.interaction.pressed = s.cancel_button.hit_test(x, y);
+                    s.reset_button.interaction.pressed = s.reset_button.hit_test(x, y);
                     Self::set_toggle_pressed(s, x, y);
                 }
                 // Issue #173 slice-2b: dismiss any open combobox
@@ -111,6 +112,12 @@ impl App {
                         self.prefs_window = None;
                         self.prefs_state = None;
                         self.prefs_renderer = None;
+                    }
+                    Some(PrefsHit::ResetSection) => {
+                        if let Some(s) = self.prefs_state.as_mut() {
+                            s.reset_active_section_to_default();
+                        }
+                        self.commit_prefs_and_apply_live();
                     }
                     other => {
                         let Some(s) = self.prefs_state.as_mut() else { return };
@@ -144,11 +151,13 @@ impl App {
                                 let _ = s.focus_text_field(id);
                             }
                             // PANIC: safe — the `match other` arms above
-                            // (Apply/Cancel) are handled in the outer match
+                            // (Apply/Cancel/ResetSection) are handled in the outer match
                             // before reaching this inner branch (see the
                             // outer `match hit` ~25 lines up). This arm is
                             // structurally unreachable.
-                            Some(PrefsHit::Apply) | Some(PrefsHit::Cancel) => unreachable!(),
+                            Some(PrefsHit::Apply)
+                            | Some(PrefsHit::Cancel)
+                            | Some(PrefsHit::ResetSection) => unreachable!(),
                             None => {
                                 s.blur_text_fields();
                             }
@@ -218,9 +227,11 @@ impl App {
                 if let Some(s) = self.prefs_state.as_mut() {
                     let was_pressed = s.apply_button.interaction.pressed
                         || s.cancel_button.interaction.pressed
+                        || s.reset_button.interaction.pressed
                         || Self::any_toggle_pressed(s);
                     s.apply_button.interaction.pressed = false;
                     s.cancel_button.interaction.pressed = false;
+                    s.reset_button.interaction.pressed = false;
                     Self::clear_toggle_pressed(s);
                     if was_pressed {
                         if let Some(w) = self.prefs_window.as_ref() {
@@ -241,12 +252,15 @@ impl App {
                     let (x, y) = (position.x as f32, position.y as f32);
                     let new_apply = s.apply_button.hit_test(x, y);
                     let new_cancel = s.cancel_button.hit_test(x, y);
+                    let new_reset = s.reset_button.hit_test(x, y);
                     let toggles_changed = Self::set_toggle_hovered(s, x, y);
                     let changed = s.apply_button.interaction.hovered != new_apply
                         || s.cancel_button.interaction.hovered != new_cancel
+                        || s.reset_button.interaction.hovered != new_reset
                         || toggles_changed;
                     s.apply_button.interaction.hovered = new_apply;
                     s.cancel_button.interaction.hovered = new_cancel;
+                    s.reset_button.interaction.hovered = new_reset;
                     if changed {
                         if let Some(w) = self.prefs_window.as_ref() {
                             w.request_redraw();

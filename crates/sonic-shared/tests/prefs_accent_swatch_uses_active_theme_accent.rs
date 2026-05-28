@@ -75,7 +75,7 @@ fn prefs_accent_swatch_uses_active_theme_accent() {
     let theme = synth_theme("#fabd2f");
     let mut state =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/sonic-prefs-test.toml"), theme);
-    state.set_category(Category::Appearance);
+    state.set_category(Category::Theme);
     let sw = find_accent_swatch(&state);
     assert_eq!(
         sw.value,

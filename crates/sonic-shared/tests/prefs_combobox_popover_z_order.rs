@@ -81,7 +81,7 @@ fn open_combobox_popover_lives_in_its_own_layer_above_base_text() {
     let theme = make_theme();
     let mut state =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"), theme.clone());
-    state.set_category(Category::Appearance);
+    state.set_category(Category::Theme);
 
     // Open the first dropdown.
     let (dropdown_rect, dropdown_options) = state
@@ -187,7 +187,7 @@ fn closed_combobox_emits_nothing_in_popover_layer() {
     let theme = make_theme();
     let mut state =
         PrefsState::new(Config::default(), PathBuf::from("/tmp/test.toml"), theme.clone());
-    state.set_category(Category::Appearance);
+    state.set_category(Category::Theme);
     // Don't open any dropdown.
     let dl = build_draw_list(&state, &theme);
     assert!(dl.popover_quads.is_empty(), "popover_quads should be empty when no dropdown is open");

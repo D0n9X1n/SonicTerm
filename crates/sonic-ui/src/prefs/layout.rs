@@ -15,32 +15,35 @@ use super::{PREFS_WIN_H, PREFS_WIN_W};
 /// Category list shown in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
-    General,
-    Appearance,
     Font,
+    Theme,
     Keymap,
-    Behavior,
+    Window,
+    Cursor,
+    Advanced,
 }
 
 impl Category {
     pub fn label(self) -> &'static str {
         match self {
-            Category::General => "General",
-            Category::Appearance => "Appearance",
             Category::Font => "Font",
+            Category::Theme => "Theme",
             Category::Keymap => "Keymap",
-            Category::Behavior => "Behavior",
+            Category::Window => "Window",
+            Category::Cursor => "Cursor",
+            Category::Advanced => "Advanced",
         }
     }
 
     /// One-line subtitle shown beneath the page title.
     pub fn description(self) -> &'static str {
         match self {
-            Category::General => "Startup, working directory, shell behavior.",
-            Category::Appearance => "Theme, accent colors, opacity, and preview.",
-            Category::Font => "Font family, size, line height, and ligatures.",
-            Category::Keymap => "Keyboard shortcuts and modifier bindings.",
-            Category::Behavior => "Scrollback, bell, mouse, and confirm-quit.",
+            Category::Font => "Choose the typeface and metrics used for terminal text.",
+            Category::Theme => "Pick the color theme and preview terminal chrome.",
+            Category::Keymap => "Select the keyboard shortcut preset.",
+            Category::Window => "Tune window chrome, opacity, blur, and padding.",
+            Category::Cursor => "Adjust cursor shape and blink behavior.",
+            Category::Advanced => "Set shell startup, scrollback, language, and diagnostics.",
         }
     }
 
@@ -56,22 +59,24 @@ impl Category {
     /// - Behavior →  (nf-fa-sliders, 0xf1de)  sliders / tweaks
     pub fn icon(self) -> char {
         match self {
-            Category::General => '\u{f013}',
-            Category::Appearance => '\u{f1fc}',
             Category::Font => '\u{f031}',
+            Category::Theme => '\u{f1fc}',
             Category::Keymap => '\u{f11c}',
-            Category::Behavior => '\u{f1de}',
+            Category::Window => '\u{f2d0}',
+            Category::Cursor => '\u{f245}',
+            Category::Advanced => '\u{f013}',
         }
     }
 }
 
 /// All categories in display order.
 pub const CATEGORIES: &[Category] = &[
-    Category::General,
-    Category::Appearance,
     Category::Font,
+    Category::Theme,
     Category::Keymap,
-    Category::Behavior,
+    Category::Window,
+    Category::Cursor,
+    Category::Advanced,
 ];
 
 // --- Tunables -----------------------------------------------------------
@@ -99,8 +104,8 @@ pub const CARD_PAD_H: f32 = 20.0;
 pub const CARD_GAP: f32 = 16.0;
 
 /// Form rows.
-pub const ROW_H: f32 = 48.0;
-pub const LABEL_W: f32 = 168.0;
+pub const ROW_H: f32 = 46.0;
+pub const LABEL_W: f32 = 160.0;
 
 /// Controls. The redesigned (issue #173 slice-2) primitives use a 32 px
 /// height with a 10 px corner radius for both buttons and comboboxes.
@@ -124,6 +129,8 @@ pub const FOCUS_RING_THICKNESS: f32 = 2.0;
 
 /// Footer.
 pub const FOOTER_H: f32 = 64.0;
+pub const RESET_LINK_W: f32 = 128.0;
+pub const RESET_LINK_H: f32 = 24.0;
 pub const BUTTON_H: f32 = 32.0;
 /// Pill button corner radius — matches `CONTROL_RADIUS` so buttons and
 /// comboboxes appear from the same family (fixes issue #169).
@@ -172,6 +179,7 @@ pub struct PrefsLayout {
     pub footer_divider: Rect,
     pub apply_button: Rect,
     pub cancel_button: Rect,
+    pub reset_link: Rect,
 }
 
 impl PrefsLayout {
@@ -208,6 +216,12 @@ impl PrefsLayout {
         let cancel_x = apply_x - SECONDARY_BUTTON_W - BUTTON_GAP;
         let apply_button = Rect::new(apply_x, buttons_y, PRIMARY_BUTTON_W, BUTTON_H);
         let cancel_button = Rect::new(cancel_x, buttons_y, SECONDARY_BUTTON_W, BUTTON_H);
+        let reset_link = Rect::new(
+            footer.x + CONTENT_PAD_H,
+            footer.y + (FOOTER_H - RESET_LINK_H) / 2.0,
+            RESET_LINK_W,
+            RESET_LINK_H,
+        );
         Self {
             width,
             height,
@@ -220,6 +234,7 @@ impl PrefsLayout {
             footer_divider,
             apply_button,
             cancel_button,
+            reset_link,
         }
     }
 
@@ -266,7 +281,7 @@ impl PrefsLayout {
     /// rendered controls and the hit-test rects to drift apart — render
     /// applied the offset, hit-test did not. Folding it into the layout
     /// here is the single source of truth.
-    pub const ROW_Y_OFFSET: f32 = TITLE_LINE + SUBTITLE_LINE + 8.0;
+    pub const ROW_Y_OFFSET: f32 = TITLE_LINE + SUBTITLE_LINE + 16.0;
 
     /// Row rect for the `n`th control inside the form card (0-based).
     /// Rows are stacked vertically inside the card with `CARD_PAD_V`

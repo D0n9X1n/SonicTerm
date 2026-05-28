@@ -39,7 +39,7 @@ use crate::prefs::layout::{
     SLIDER_THUMB, SLIDER_TRACK_H, SUBTITLE_GAP, SUBTITLE_LINE, SUBTITLE_SIZE, SWATCH_GAP,
     SWATCH_SIZE, TITLE_LINE, TOGGLE_H, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, TOGGLE_W,
 };
-use crate::prefs::state::PrefsState;
+use crate::prefs::state::{PrefsState, RESET_TO_DEFAULT_LABEL};
 use crate::quad::{px_to_ndc, QuadInstance, QuadPipeline};
 use crate::render::hex_to_wgpu;
 use crate::ui_tokens::{color, typography};
@@ -258,16 +258,26 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     );
 
     // --- Form card -----------------------------------------------------
-    quads.push(QuadCmd::sharp(layout.form_card, color::BG_SURFACE()));
+    quads.push(QuadCmd::rounded(layout.form_card, color::BG_SURFACE(), layout::CARD_RADIUS));
     // 1px subtle border drawn as 4 thin strips (the quad pipeline does
     // not support outlines yet).
     push_border(&mut quads, layout.form_card, color::BORDER_SUBTLE());
 
-    // Section title + help row inside the card.
+    // Section header: icon + title, with a one-line description below.
+    let header_x = layout.form_card.x + CARD_PAD_H;
+    let header_y = layout.form_card.y + CARD_PAD_V - 2.0;
+    let icon_rect = PrefsRect::new(header_x, header_y, 24.0, 20.0);
+    push_text(
+        &mut texts,
+        icon_rect,
+        state.active_category.icon().to_string(),
+        palette.accent,
+        typography::TypeRamp { size_px: SECTION_TITLE_SIZE + 1.0, line_px: 20.0, weight: 650 },
+    );
     let section_title_rect = PrefsRect::new(
-        layout.form_card.x + CARD_PAD_H,
-        layout.form_card.y + CARD_PAD_V - 2.0,
-        layout.form_card.w - CARD_PAD_H * 2.0,
+        header_x + 30.0,
+        header_y,
+        layout.form_card.w - CARD_PAD_H * 2.0 - 30.0,
         20.0,
     );
     push_text(
@@ -278,12 +288,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         typography::TypeRamp { size_px: SECTION_TITLE_SIZE, line_px: 20.0, weight: 650 },
     );
     let help_w = layout::SECTION_HELP_MAX_W.min(layout.form_card.w - CARD_PAD_H * 2.0);
-    let help_rect = PrefsRect::new(
-        layout.form_card.x + CARD_PAD_H,
-        section_title_rect.y + 20.0,
-        help_w,
-        SUBTITLE_LINE,
-    );
+    let help_rect = PrefsRect::new(header_x, section_title_rect.y + 22.0, help_w, SUBTITLE_LINE);
     push_text(
         &mut texts,
         help_rect,
@@ -316,7 +321,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     }
 
     // --- Preview card (Appearance category only) ----------------------
-    if matches!(state.active_category, layout::Category::Appearance) {
+    if matches!(state.active_category, layout::Category::Theme) {
         let last_row = layout.form_row(state.controls.len());
         let preview_y = last_row.y + 8.0;
         let preview_card = PrefsRect::new(
@@ -360,16 +365,26 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     quads.push(QuadCmd::sharp(layout.footer, color::with_alpha(color::BG_BASE(), 0.94)));
     quads.push(QuadCmd::sharp(layout.footer_divider, color::BORDER_SUBTLE()));
 
-    // Dirty indicator on the left.
+    // Reset link on the left.
+    let reset = &state.reset_button;
+    push_button_text(
+        &mut texts,
+        reset,
+        RESET_TO_DEFAULT_LABEL,
+        palette.accent,
+        typography::TypeRamp { size_px: 12.0, line_px: 16.0, weight: 600 },
+    );
+
+    // Dirty indicator next to the reset link.
     if state.dirty {
         let dot_size = 6.0;
         let dot_y = layout.footer.y + (layout.footer.h - dot_size) / 2.0;
         quads.push(QuadCmd::sharp(
-            PrefsRect::new(layout.footer.x + 28.0, dot_y, dot_size, dot_size),
+            PrefsRect::new(layout.footer.x + 172.0, dot_y, dot_size, dot_size),
             color::ACCENT_ORANGE(),
         ));
         let txt_rect = PrefsRect::new(
-            layout.footer.x + 28.0 + dot_size + 8.0,
+            layout.footer.x + 172.0 + dot_size + 8.0,
             layout.footer.y,
             220.0,
             layout.footer.h,
@@ -1239,9 +1254,9 @@ mod tests {
     #[test]
     fn switching_category_changes_subtitle() {
         let (mut state, theme) = fresh();
-        state.set_category(layout::Category::Appearance);
+        state.set_category(layout::Category::Theme);
         let dl_a = build_draw_list(&state, &theme);
-        state.set_category(layout::Category::Behavior);
+        state.set_category(layout::Category::Cursor);
         let dl_b = build_draw_list(&state, &theme);
         let a: String = dl_a.texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("|");
         let b: String = dl_b.texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("|");
@@ -1272,7 +1287,7 @@ mod tests {
     #[test]
     fn build_draw_list_covers_every_control_type() {
         let (mut state, theme) = fresh();
-        state.set_category(layout::Category::Appearance);
+        state.set_category(layout::Category::Theme);
         let dl = build_draw_list(&state, &theme);
         assert!(dl.quads.len() > 6);
         assert!(dl.texts.iter().any(|t| t.text.contains('▾')), "dropdown chevron missing");
@@ -1282,7 +1297,7 @@ mod tests {
     fn prefs_primary_button_uses_theme_accent() {
         let (mut state, theme) = fresh();
         // Force dirty so the primary button shows its enabled colors.
-        state.set_category(layout::Category::Appearance);
+        state.set_category(layout::Category::Theme);
         // Flip a toggle if there is one, otherwise mark dirty manually.
         // We approximate by finding any toggle control.
         let toggle_id = state.controls.iter().find_map(|c| {
@@ -1296,7 +1311,7 @@ mod tests {
             state.flip_toggle(id);
         } else {
             // Fallback: directly mark dirty by re-applying a category.
-            state.set_category(layout::Category::Behavior);
+            state.set_category(layout::Category::Cursor);
             let id = state.controls.iter().find_map(|c| {
                 if let Control::Toggle(t) = c {
                     Some(t.id)
@@ -1357,11 +1372,11 @@ mod tests {
         let Some((id, initial)) = toggle else {
             // No toggle on the default category — try every category.
             for cat in [
-                layout::Category::Appearance,
-                layout::Category::Behavior,
+                layout::Category::Theme,
+                layout::Category::Cursor,
                 layout::Category::Keymap,
                 layout::Category::Font,
-                layout::Category::General,
+                layout::Category::Advanced,
             ] {
                 state.set_category(cat);
                 if let Some(t) = state.controls.iter().find_map(|c| {
@@ -1438,11 +1453,11 @@ mod tests {
         // Find any category that has a slider in its control set.
         let mut slider_info: Option<(f32, f32, f32)> = None; // (x, y, w_at_full)
         for cat in [
-            layout::Category::Appearance,
-            layout::Category::Behavior,
+            layout::Category::Theme,
+            layout::Category::Cursor,
             layout::Category::Keymap,
             layout::Category::Font,
-            layout::Category::General,
+            layout::Category::Advanced,
         ] {
             state.set_category(cat);
             let has_slider =
@@ -1509,11 +1524,11 @@ mod tests {
         // covers the full track width and is unambiguous.
         let mut slot_info: Option<(f32, f32)> = None;
         for cat in [
-            layout::Category::Appearance,
-            layout::Category::Behavior,
+            layout::Category::Theme,
+            layout::Category::Cursor,
             layout::Category::Keymap,
             layout::Category::Font,
-            layout::Category::General,
+            layout::Category::Advanced,
         ] {
             state.set_category(cat);
             let has_slider =
@@ -1581,7 +1596,7 @@ mod tests {
     #[test]
     fn prefs_apply_button_uses_theme_accent() {
         let (mut state, theme) = fresh();
-        state.set_category(layout::Category::Appearance);
+        state.set_category(layout::Category::Theme);
         // Force dirty so we render the *enabled* path.
         let toggle_id = state.controls.iter().find_map(|c| {
             if let Control::Toggle(t) = c {
@@ -1792,7 +1807,7 @@ mod tests {
         // preview).
         let (state, theme) = fresh();
         let mut state = state;
-        state.set_category(crate::prefs::Category::Appearance);
+        state.set_category(crate::prefs::Category::Theme);
         state.config.font.family = "ZZZ-FixturePreviewFont".to_string();
         state.layout = crate::prefs::PrefsLayout::new(760.0, 900.0);
         state.rebuild_controls();
