@@ -309,16 +309,20 @@ impl TabBarLayout {
             return Some(TabHit::NewTab);
         }
         for t in &self.tabs {
-            let is_active = self.active == Some(t.index);
-            // Close `×` only fires on the ACTIVE tab. Chrome/WezTerm
-            // semantics: clicking an inactive tab — anywhere in its
-            // rect, including over its (typically hidden) × glyph —
-            // activates it. Only after activation does the × become
-            // a click target. Without this guard, the close-rect
-            // check below would swallow clicks on the right edge of
-            // an inactive tab and silently close it instead of
-            // activating (PR #107 regression).
-            if is_active && t.close.contains(px, py) {
+            // Close `×` fires for ANY tab whose × rect is hit. The
+            // renderer paints the × on hover of any tab (active or
+            // inactive — see render::core `draw_close = ... ||
+            // cursor_on_this_tab`), so the hit zone MUST match the
+            // paint: a visible button that swallows clicks into
+            // "activate" instead of "close" is the user-reported
+            // bug (issue: multi-tab × on inactive tab does nothing).
+            // Matches Chrome/Firefox behavior — clicking × on an
+            // inactive tab closes it directly, without first
+            // activating it. The PR #107 worry (right-edge clicks on
+            // inactive tabs silently closing) is mitigated by the
+            // small 14×14 close rect being well inside TAB_INNER_PAD
+            // of the right edge, not at it.
+            if t.close.contains(px, py) {
                 return Some(TabHit::Close(t.index));
             }
             // Full-bar-height hit zone: any vertical position inside
