@@ -72,7 +72,7 @@ pub fn assert_render_lock_forbidden() {
 /// as a fresh start and never trips the assertion. Release builds skip the
 /// timing math entirely.
 ///
-/// Note: the production coalescer in `spawn_pane.rs` currently uses a 4 ms
+/// Note: the production coalescer in `spawn_pane.rs` currently uses a 16 ms
 /// floor (small enough to stay under one frame for echo latency); CLAUDE.md
 /// §4 documents the original 16 ms guard. This probe is a generic utility
 /// — call sites pass whichever interval they actually enforce so the probe
