@@ -1,0 +1,40 @@
+# One Dark
+name = "One Dark"
+appearance = "dark"
+
+[colors]
+background    = "#282c34"
+foreground    = "#abb2bf"
+cursor        = "#528bff"
+cursor_text   = "#282c34"
+selection_bg  = "#3e4451"
+selection_fg  = "#abb2bf"
+
+[colors.ansi]
+black   = "#282c34"
+red     = "#e06c75"
+green   = "#98c379"
+yellow  = "#e5c07b"
+blue    = "#61afef"
+magenta = "#c678dd"
+cyan    = "#56b6c2"
+white   = "#abb2bf"
+
+[colors.bright]
+black   = "#5c6370"
+red     = "#e06c75"
+green   = "#98c379"
+yellow  = "#e5c07b"
+blue    = "#61afef"
+magenta = "#c678dd"
+cyan    = "#56b6c2"
+white   = "#ffffff"
+
+[colors.tab]
+bar_bg          = "#21252b"
+active_bg       = "#282c34"
+active_fg       = "#abb2bf"
+inactive_bg     = "#21252b"
+inactive_fg     = "#5c6370"
+hover_bg        = "#2c313a"
+close_button_fg = "#828997"

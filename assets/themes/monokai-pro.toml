@@ -1,0 +1,40 @@
+# Monokai Pro
+name = "Monokai Pro"
+appearance = "dark"
+
+[colors]
+background    = "#2d2a2e"
+foreground    = "#fcfcfa"
+cursor        = "#fcfcfa"
+cursor_text   = "#2d2a2e"
+selection_bg  = "#5b595c"
+selection_fg  = "#fcfcfa"
+
+[colors.ansi]
+black   = "#403e41"
+red     = "#ff6188"
+green   = "#a9dc76"
+yellow  = "#ffd866"
+blue    = "#fc9867"
+magenta = "#ab9df2"
+cyan    = "#78dce8"
+white   = "#fcfcfa"
+
+[colors.bright]
+black   = "#727072"
+red     = "#ff6188"
+green   = "#a9dc76"
+yellow  = "#ffd866"
+blue    = "#fc9867"
+magenta = "#ab9df2"
+cyan    = "#78dce8"
+white   = "#fcfcfa"
+
+[colors.tab]
+bar_bg          = "#221f22"
+active_bg       = "#2d2a2e"
+active_fg       = "#fcfcfa"
+inactive_bg     = "#221f22"
+inactive_fg     = "#939293"
+hover_bg        = "#403e41"
+close_button_fg = "#939293"
