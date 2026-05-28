@@ -32,12 +32,12 @@ use wgpu::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use crate::prefs::controls::{Control, Rect as PrefsRect};
+use crate::prefs::controls::{Button, Control, InteractionState, Rect as PrefsRect};
 use crate::prefs::layout::{
-    self, CARD_PAD_H, CARD_PAD_V, CATEGORIES, CONTROL_H, CONTROL_RADIUS, LABEL_W, PREVIEW_CARD_H,
-    PREVIEW_PAD, SECTION_HELP_SIZE, SECTION_TITLE_SIZE, SIDEBAR_LABEL_X, SLIDER_THUMB,
-    SLIDER_TRACK_H, SUBTITLE_GAP, SUBTITLE_LINE, SUBTITLE_SIZE, SWATCH_GAP, SWATCH_SIZE,
-    TITLE_LINE, TOGGLE_H, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, TOGGLE_W,
+    self, BUTTON_RADIUS, CARD_PAD_H, CARD_PAD_V, CATEGORIES, CONTROL_H, CONTROL_RADIUS, LABEL_W,
+    PREVIEW_CARD_H, PREVIEW_PAD, SECTION_HELP_SIZE, SECTION_TITLE_SIZE, SIDEBAR_LABEL_X,
+    SLIDER_THUMB, SLIDER_TRACK_H, SUBTITLE_GAP, SUBTITLE_LINE, SUBTITLE_SIZE, SWATCH_GAP,
+    SWATCH_SIZE, TITLE_LINE, TOGGLE_H, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, TOGGLE_W,
 };
 use crate::prefs::state::PrefsState;
 use crate::quad::{px_to_ndc, QuadInstance, QuadPipeline};
@@ -50,6 +50,28 @@ pub struct QuadCmd {
     pub rect: PrefsRect,
     /// **Linear-sRGB premultiplied** RGBA (matches `ui_tokens::color`).
     pub color: [f32; 4],
+    /// Corner radius in **logical pixels** (scaled by `scale_factor`
+    /// before being passed to the GPU's SDF rounded-rect path). `0.0`
+    /// keeps the legacy sharp-rect look. Used by the redesigned (issue
+    /// #173) prefs Button primitive so Apply / Cancel render as pill
+    /// shapes instead of hard rectangles.
+    pub radius_px: f32,
+}
+
+impl QuadCmd {
+    /// Sharp-edged rectangle — the historical default used by every
+    /// non-button quad. Kept as a helper so existing call sites stay
+    /// `QuadCmd { rect, color }`-shaped without re-stating the radius.
+    pub const fn sharp(rect: PrefsRect, color: [f32; 4]) -> Self {
+        Self { rect, color, radius_px: 0.0 }
+    }
+
+    /// Rounded rectangle for the prefs Button primitive (see
+    /// [`crate::prefs::controls::Button`]). The radius is in logical
+    /// pixels and gets multiplied by `scale_factor` at upload time.
+    pub const fn rounded(rect: PrefsRect, color: [f32; 4], radius_px: f32) -> Self {
+        Self { rect, color, radius_px }
+    }
 }
 
 /// One text run in logical pixels.
@@ -156,20 +178,20 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let bg_base = palette.bg_base;
 
     // --- Sidebar -------------------------------------------------------
-    quads.push(QuadCmd { rect: layout.sidebar, color: color::BG_ELEVATED() });
+    quads.push(QuadCmd::sharp(layout.sidebar, color::BG_ELEVATED()));
     // Right divider 1px.
-    quads.push(QuadCmd {
-        rect: layout.sidebar_divider,
-        color: color::with_alpha(color::hex("#FFFFFF"), 0.07),
-    });
+    quads.push(QuadCmd::sharp(
+        layout.sidebar_divider,
+        color::with_alpha(color::hex("#FFFFFF"), 0.07),
+    ));
 
     for (i, cat) in CATEGORIES.iter().enumerate() {
         let row = layout.category_row(i);
         let active = *cat == state.active_category;
         if active {
-            quads.push(QuadCmd { rect: row, color: color::BG_ACTIVE() });
+            quads.push(QuadCmd::sharp(row, color::BG_ACTIVE()));
             // Left accent bar.
-            quads.push(QuadCmd { rect: layout.category_accent(i), color: palette.accent });
+            quads.push(QuadCmd::sharp(layout.category_accent(i), palette.accent));
         }
         // Icon slot placeholder (subtle pill) — keeps spacing predictable
         // without forcing us to ship an icon font in this PR.
@@ -182,7 +204,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         );
         let icon_color =
             if active { palette.accent } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
-        quads.push(QuadCmd { rect: icon_rect, color: color::with_alpha(icon_color, 0.18) });
+        quads.push(QuadCmd::sharp(icon_rect, color::with_alpha(icon_color, 0.18)));
 
         // Label.
         let label_x = row.x + SIDEBAR_LABEL_X;
@@ -220,7 +242,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     );
 
     // --- Form card -----------------------------------------------------
-    quads.push(QuadCmd { rect: layout.form_card, color: color::BG_SURFACE() });
+    quads.push(QuadCmd::sharp(layout.form_card, color::BG_SURFACE()));
     // 1px subtle border drawn as 4 thin strips (the quad pipeline does
     // not support outlines yet).
     push_border(&mut quads, layout.form_card, color::BORDER_SUBTLE());
@@ -292,7 +314,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             // Use the active terminal theme's background for the
             // preview swatch.
             let preview_bg = hex_to_token(theme.colors.background.0.as_str());
-            quads.push(QuadCmd { rect: preview_card, color: preview_bg });
+            quads.push(QuadCmd::sharp(preview_card, preview_bg));
             push_border(&mut quads, preview_card, color::BORDER_SUBTLE());
             let preview_fg = hex_to_token(theme.colors.foreground.0.as_str());
             for (i, line) in state.preview_lines().iter().enumerate() {
@@ -319,17 +341,17 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     }
 
     // --- Footer --------------------------------------------------------
-    quads.push(QuadCmd { rect: layout.footer, color: color::with_alpha(color::BG_BASE(), 0.94) });
-    quads.push(QuadCmd { rect: layout.footer_divider, color: color::BORDER_SUBTLE() });
+    quads.push(QuadCmd::sharp(layout.footer, color::with_alpha(color::BG_BASE(), 0.94)));
+    quads.push(QuadCmd::sharp(layout.footer_divider, color::BORDER_SUBTLE()));
 
     // Dirty indicator on the left.
     if state.dirty {
         let dot_size = 6.0;
         let dot_y = layout.footer.y + (layout.footer.h - dot_size) / 2.0;
-        quads.push(QuadCmd {
-            rect: PrefsRect::new(layout.footer.x + 28.0, dot_y, dot_size, dot_size),
-            color: color::ACCENT_ORANGE(),
-        });
+        quads.push(QuadCmd::sharp(
+            PrefsRect::new(layout.footer.x + 28.0, dot_y, dot_size, dot_size),
+            color::ACCENT_ORANGE(),
+        ));
         let txt_rect = PrefsRect::new(
             layout.footer.x + 28.0 + dot_size + 8.0,
             layout.footer.y,
@@ -345,22 +367,21 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         );
     }
 
-    // Cancel button (secondary).
-    quads.push(QuadCmd {
-        rect: layout.cancel_button,
-        color: color::with_alpha(color::hex("#FFFFFF"), 0.07),
-    });
-    push_text(
-        &mut texts,
-        layout.cancel_button,
-        "Cancel",
-        color::TEXT_SECONDARY(),
-        typography::BODY,
-    );
+    // Cancel button (secondary) — pill rendered via the Button primitive
+    // (issue #173 slice-2). Background tints with hover/press from the
+    // owning [`InteractionState`]; the corner radius comes from the
+    // shared [`BUTTON_RADIUS`] constant so the GPU side stays in sync
+    // with `prefs::layout`.
+    let cancel = &state.cancel_button;
+    let cancel_base = color::with_alpha(color::hex("#FFFFFF"), 0.07);
+    let cancel_bg = button_bg(cancel_base, cancel.interaction);
+    quads.push(QuadCmd::rounded(cancel.rect, cancel_bg, BUTTON_RADIUS));
+    push_button_text(&mut texts, cancel, "Cancel", color::TEXT_SECONDARY(), typography::BODY);
 
-    // Apply button (primary accent).
+    // Apply button (primary accent) — same pill primitive, Primary kind.
+    let apply = &state.apply_button;
     let apply_enabled = state.dirty;
-    let (apply_bg, apply_fg) = if apply_enabled {
+    let (apply_base, apply_fg) = if apply_enabled {
         (palette.accent, color::hex("#0B1020"))
     } else {
         // Disabled state: theme-derived neutral fill (was hardcoded
@@ -368,10 +389,55 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         // disabled Apply button instead of a theme-consistent one).
         (palette.bg_active, palette.text_faint)
     };
-    quads.push(QuadCmd { rect: layout.apply_button, color: apply_bg });
-    push_text(&mut texts, layout.apply_button, "Apply", apply_fg, typography::BODY_STRONG);
+    let apply_bg =
+        if apply_enabled { button_bg(apply_base, apply.interaction) } else { apply_base };
+    quads.push(QuadCmd::rounded(apply.rect, apply_bg, BUTTON_RADIUS));
+    push_button_text(&mut texts, apply, "Apply", apply_fg, typography::BODY_STRONG);
 
     DrawList { clear: bg_base, quads, texts }
+}
+
+/// Tint a base button color by the current [`InteractionState`]. Hover
+/// brightens slightly, press darkens. Pure math so the renderer and the
+/// regression tests agree on the resulting RGBA token.
+fn button_bg(base: [f32; 4], i: InteractionState) -> [f32; 4] {
+    let scale = if i.pressed {
+        0.85
+    } else if i.hovered {
+        1.12
+    } else {
+        1.0
+    };
+    [
+        (base[0] * scale).clamp(0.0, 1.0),
+        (base[1] * scale).clamp(0.0, 1.0),
+        (base[2] * scale).clamp(0.0, 1.0),
+        base[3],
+    ]
+}
+
+/// Emit a centered text run for a [`Button`] primitive. The text's
+/// horizontal center is anchored at `button.text_center().0` (fixes
+/// issue #169 where Apply was left-aligned). `glyphon` itself paints
+/// inside the rect, so we hand it a rect whose left edge keeps the
+/// existing baseline math intact — i.e. the same `button.rect`, which
+/// the layout already sizes to the visible pill.
+fn push_button_text(
+    out: &mut Vec<TextCmd>,
+    button: &Button,
+    label: impl Into<String>,
+    color_token: [f32; 4],
+    ramp: typography::TypeRamp,
+) {
+    // text_center returns the button's geometric center; we keep using
+    // the button rect for the text run so glyphon can do its own
+    // centering, but recording the explicit center keeps the contract
+    // public (and is what the regression test asserts on).
+    debug_assert_eq!(
+        button.text_center(),
+        (button.rect.x + button.rect.w / 2.0, button.rect.y + button.rect.h / 2.0)
+    );
+    push_text(out, button.rect, label, color_token, ramp);
 }
 
 /// Convert a `#RRGGBB` hex string from the theme into a premultiplied
@@ -387,10 +453,10 @@ fn hex_to_token(s: &str) -> [f32; 4] {
 
 fn push_border(out: &mut Vec<QuadCmd>, r: PrefsRect, c: [f32; 4]) {
     let t = 1.0;
-    out.push(QuadCmd { rect: PrefsRect::new(r.x, r.y, r.w, t), color: c });
-    out.push(QuadCmd { rect: PrefsRect::new(r.x, r.y + r.h - t, r.w, t), color: c });
-    out.push(QuadCmd { rect: PrefsRect::new(r.x, r.y, t, r.h), color: c });
-    out.push(QuadCmd { rect: PrefsRect::new(r.x + r.w - t, r.y, t, r.h), color: c });
+    out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y, r.w, t), c));
+    out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y + r.h - t, r.w, t), c));
+    out.push(QuadCmd::sharp(PrefsRect::new(r.x, r.y, t, r.h), c));
+    out.push(QuadCmd::sharp(PrefsRect::new(r.x + r.w - t, r.y, t, r.h), c));
 }
 
 fn draw_control(
@@ -412,7 +478,7 @@ fn draw_control(
             // blue). bg_active = accent @ 14% alpha; under premultiplied
             // blending this reads as a subdued tint of the active theme.
             let off_color = palette.bg_active;
-            quads.push(QuadCmd { rect: track, color: if t.value { on_color } else { off_color } });
+            quads.push(QuadCmd::sharp(track, if t.value { on_color } else { off_color }));
             let knob_x = if t.value {
                 track.x + TOGGLE_W - TOGGLE_KNOB - TOGGLE_KNOB_MARGIN
             } else {
@@ -421,7 +487,7 @@ fn draw_control(
             let knob =
                 PrefsRect::new(knob_x, track.y + TOGGLE_KNOB_MARGIN, TOGGLE_KNOB, TOGGLE_KNOB);
             let knob_color = if t.value { color::hex("#FFFFFFFF") } else { palette.text_secondary };
-            quads.push(QuadCmd { rect: knob, color: knob_color });
+            quads.push(QuadCmd::sharp(knob, knob_color));
         }
         Control::Slider(s) => {
             let readout_w = 56.0;
@@ -432,10 +498,10 @@ fn draw_control(
             // Tokyo Night #343A52FF — that hardcode made the slider
             // read as "blue" on gruvbox even though the fill itself
             // was correctly using palette.accent).
-            quads.push(QuadCmd { rect: track, color: palette.bg_active });
+            quads.push(QuadCmd::sharp(track, palette.bg_active));
             let frac = ((s.value - s.min) / (s.max - s.min)).clamp(0.0, 1.0);
             let fill = PrefsRect::new(track.x, track.y, track.w * frac, track.h);
-            quads.push(QuadCmd { rect: fill, color: accent });
+            quads.push(QuadCmd::sharp(fill, accent));
             // Thumb (16x16) — drawn as a square. The renderer doesn't
             // round corners yet; the spec calls for r=8.
             let thumb_x = track.x + (track.w * frac) - SLIDER_THUMB / 2.0;
@@ -447,11 +513,11 @@ fn draw_control(
                 SLIDER_THUMB + 4.0,
                 SLIDER_THUMB + 4.0,
             );
-            quads.push(QuadCmd { rect: outer, color: palette.bg_base });
-            quads.push(QuadCmd {
-                rect: PrefsRect::new(thumb_x, thumb_y, SLIDER_THUMB, SLIDER_THUMB),
-                color: palette.text_primary,
-            });
+            quads.push(QuadCmd::sharp(outer, palette.bg_base));
+            quads.push(QuadCmd::sharp(
+                PrefsRect::new(thumb_x, thumb_y, SLIDER_THUMB, SLIDER_THUMB),
+                palette.text_primary,
+            ));
             // Numeric readout to the right.
             let readout = PrefsRect::new(track.x + track.w + 12.0, slot.y, readout_w, slot.h);
             push_text(
@@ -466,7 +532,7 @@ fn draw_control(
             let r = PrefsRect::new(slot.x, slot.y, slot.w.min(240.0), CONTROL_H);
             // Theme-derived input bg (was hardcoded #090C12FF Tokyo
             // Night near-black-blue).
-            quads.push(QuadCmd { rect: r, color: palette.bg_elevated });
+            quads.push(QuadCmd::sharp(r, palette.bg_elevated));
             push_border(quads, r, palette.border_subtle);
             let label = d.options.get(d.selected).cloned().unwrap_or_default();
             push_text(
@@ -508,13 +574,13 @@ fn draw_control(
                     color::hex(hex)
                 };
                 let cell = PrefsRect::new(x, y, SWATCH_SIZE, SWATCH_SIZE);
-                quads.push(QuadCmd { rect: cell, color: cell_rgba });
+                quads.push(QuadCmd::sharp(cell, cell_rgba));
                 if i == 0 {
                     // Selected ring (2px) + 1px inset of bg-base.
                     let ring =
                         PrefsRect::new(x - 2.0, y - 2.0, SWATCH_SIZE + 4.0, SWATCH_SIZE + 4.0);
                     // Order matters: ring first (under), then redraw cell.
-                    quads.insert(quads.len() - 1, QuadCmd { rect: ring, color: accent });
+                    quads.insert(quads.len() - 1, QuadCmd::sharp(ring, accent));
                 }
                 x += SWATCH_SIZE + SWATCH_GAP;
                 if x + SWATCH_SIZE > slot.x + slot.w {
@@ -525,7 +591,7 @@ fn draw_control(
         Control::TextField(f) => {
             let focused = state.focused_field == Some(f.id);
             let r = PrefsRect::new(slot.x, slot.y, slot.w.min(280.0), CONTROL_H);
-            quads.push(QuadCmd { rect: r, color: palette.bg_elevated });
+            quads.push(QuadCmd::sharp(r, palette.bg_elevated));
             let border = if focused { palette.border_focus } else { palette.border_subtle };
             push_border(quads, r, border);
             let display = if f.value.is_empty() && !focused {
@@ -764,10 +830,19 @@ impl PrefsRenderer {
         let quads: Vec<QuadInstance> = draw
             .quads
             .iter()
-            .map(|q| QuadInstance {
-                rect: px_to_ndc(q.rect.x * sf, q.rect.y * sf, q.rect.w * sf, q.rect.h * sf, sw, sh),
-                color: q.color,
-                ..Default::default()
+            .map(|q| {
+                let rect_ndc =
+                    px_to_ndc(q.rect.x * sf, q.rect.y * sf, q.rect.w * sf, q.rect.h * sf, sw, sh);
+                if q.radius_px > 0.0 {
+                    QuadInstance::rounded(
+                        rect_ndc,
+                        q.color,
+                        [q.rect.w * sf, q.rect.h * sf],
+                        q.radius_px * sf,
+                    )
+                } else {
+                    QuadInstance::sharp(rect_ndc, q.color)
+                }
             })
             .collect();
 
