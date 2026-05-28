@@ -384,6 +384,32 @@ impl PrefsState {
         }
     }
 
+    /// Close any open dropdown whose header AND popover do not contain
+    /// the click `(x, y)`. Returns `true` when at least one popover was
+    /// closed — the caller (host) can then `request_redraw`. Added in
+    /// issue #173 slice-2b so the prefs window's mouse handler can
+    /// dismiss combobox popovers on any click outside them, including
+    /// clicks that miss every widget entirely (the previous code only
+    /// closed the dropdown when the user clicked the header again,
+    /// trapping the popover open if they clicked anywhere else).
+    pub fn close_dropdowns_outside_click(&mut self, x: f32, y: f32) -> bool {
+        let mut any_closed = false;
+        for ctrl in self.controls.iter_mut() {
+            if let Control::Dropdown(d) = ctrl {
+                if !d.open {
+                    continue;
+                }
+                let inside_header = d.rect.contains(x, y);
+                let inside_option = d.hit_option(x, y).is_some();
+                if !inside_header && !inside_option {
+                    d.close();
+                    any_closed = true;
+                }
+            }
+        }
+        any_closed
+    }
+
     /// Select a dropdown option by index.
     pub fn select_dropdown(&mut self, id: WidgetId, idx: usize) -> Option<bool> {
         let ok = match self.find_mut(id)? {
