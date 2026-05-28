@@ -235,6 +235,13 @@ pub struct GpuRenderer {
     /// changed splices its cached output straight into the frame and
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: crate::row_glyph_cache::RowGlyphCache,
+    /// Per-pane origins recorded on the most recent `render()` call.
+    /// `(pane_id, [origin_x_px, origin_y_px])` for every pane in the
+    /// frame's pane slice. Test-only diagnostic surfaced through
+    /// [`Self::last_emitted_origins`]; production code must not rely
+    /// on it. Part B step 7 hook for the per-pane render integration
+    /// test.
+    last_emit_origins: Vec<(u64, [f32; 2])>,
     /// Monotonic counter bumped on theme / default-fg / default-bg
     /// changes. Folded into every `row_hash` so palette swaps
     /// invalidate cached colours without iterating the cache.
@@ -580,6 +587,7 @@ impl GpuRenderer {
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
             row_glyph_cache: crate::row_glyph_cache::RowGlyphCache::new(),
+            last_emit_origins: Vec::new(),
             style_rev: 0,
             drag_chip: None,
         })
@@ -808,6 +816,14 @@ impl GpuRenderer {
     /// Bottom padding in logical pixels.
     pub fn padding_bottom(&self) -> f32 {
         self.padding_bottom
+    }
+    /// Per-pane origins recorded by the most recent `render()` call, as
+    /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
+    /// Part B step 7 per-pane render integration test. Production code
+    /// must not depend on this.
+    #[doc(hidden)]
+    pub fn last_emitted_origins(&self) -> Vec<(u64, [f32; 2])> {
+        self.last_emit_origins.clone()
     }
 
     /// Update all four padding values at once (used by the live config
@@ -1195,6 +1211,12 @@ impl GpuRenderer {
         if panes.is_empty() {
             return Ok(());
         }
+        // Part B step 7: record per-pane origins for the integration test
+        // hook. Populated unconditionally on every render() call so the
+        // test can assert that all panes' origins reach the renderer with
+        // the expected x/y in physical pixels.
+        self.last_emit_origins =
+            panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
         let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
         let active_pane: u64 = panes[active_idx].id;
         // Derive the legacy `pane_rects` vector from the slice so downstream
