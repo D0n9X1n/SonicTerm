@@ -8,11 +8,13 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use sonic_core::keymap::Action;
+use sonic_core::{grid::Grid, keymap::Action};
+use sonic_shared::render::GpuRenderer;
+use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
 use winit::{
-    event::{ElementState, Ime, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
     window::{CursorIcon, WindowId},
@@ -306,6 +308,7 @@ impl App {
                             &self.theme,
                             self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                             self.selection.as_ref(),
+                            self.copy_mode.as_ref(),
                             &self.tabs,
                             search,
                             Some(&mut self.command_palette),
@@ -834,6 +837,13 @@ impl App {
                     }
                     return;
                 }
+                if self.copy_mode.is_some() {
+                    self.copy_mode_handle_key(&event);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.search_active() {
                     if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
@@ -877,5 +887,123 @@ impl App {
 
             _ => {}
         }
+    }
+}
+impl App {
+    fn copy_mode_handle_key(&mut self, event: &KeyEvent) {
+        let Some(mut state) = self.copy_mode.take() else { return };
+        let mut should_copy = false;
+        let mut should_exit = false;
+
+        let active_pane_id = self.active_pane_id();
+        if let Some(pane) = active_pane_id.and_then(|id| self.panes.get(&id)) {
+            let guard = pane.parser.lock();
+            let grid = guard.grid();
+            if let Some(quick_select) = state.quick_select.as_ref() {
+                let mut copied_text = None;
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => should_exit = true,
+                    Key::Character(s) => {
+                        if let Some(ch) = s.chars().next() {
+                            if let Some(text) = quick_select.text_for_hint(ch) {
+                                copied_text = Some(text.to_string());
+                                should_exit = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                drop(guard);
+                if let Some(text) = copied_text {
+                    self.set_clipboard_text(text);
+                }
+                if !should_exit {
+                    self.copy_mode = Some(state);
+                }
+                mark_all_panes_dirty(&self.panes);
+                return;
+            }
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => should_exit = true,
+                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
+                Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
+                Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
+                Key::Named(NamedKey::ArrowDown) => state.move_down(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("h") => state.move_left(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
+                Key::Character(s) if s == "v" => state.start_select(),
+                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "w" => state.move_word_fwd(grid),
+                Key::Character(s) if s == "b" => state.move_word_back(grid),
+                Key::Character(s) if s == "0" => state.move_line_start(grid),
+                Key::Character(s) if s == "$" => state.move_line_end(grid),
+                Key::Character(s) if s == "g" => state.move_top(grid),
+                Key::Character(s) if s == "G" => state.move_bottom(grid),
+                _ => {}
+            }
+
+            if should_copy {
+                if let Some(text) = copy_mode_selected_text(&state, grid) {
+                    drop(guard);
+                    self.set_clipboard_text(text);
+                }
+                should_exit = true;
+            } else {
+                let new_view_top =
+                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
+                drop(guard);
+                if let Some(id) = active_pane_id {
+                    if let Some(pane) = self.panes.get_mut(&id) {
+                        pane.viewport_top_abs = new_view_top;
+                    }
+                }
+            }
+        }
+
+        if should_exit {
+            self.copy_mode = None;
+        } else {
+            self.copy_mode = Some(state);
+        }
+        mark_all_panes_dirty(&self.panes);
+    }
+}
+
+fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String> {
+    let (start, end) = state.selected_range()?;
+    if start == end {
+        return None;
+    }
+    let mut out = String::new();
+    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
+    for row_idx in start.1..=last_row {
+        let Some(row) = copy_mode_row(grid, row_idx) else { break };
+        let col_start = if row_idx == start.1 { start.0 } else { 0 };
+        let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
+        let mut line = String::new();
+        for cell in &row[col_start.min(row.len())..col_end] {
+            if cell.flags.contains(sonic_core::grid::CellFlags::WIDE_CONT) {
+                continue;
+            }
+            line.push(cell.ch);
+        }
+        out.push_str(line.trim_end());
+        if row_idx < last_row {
+            out.push('\n');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonic_core::grid::Row> {
+    let sb = grid.scrollback_len();
+    if row_idx < sb {
+        grid.scrollback_row(row_idx)
+    } else {
+        let live = row_idx - sb;
+        (live < grid.rows as usize).then(|| grid.row(live as u16))
     }
 }

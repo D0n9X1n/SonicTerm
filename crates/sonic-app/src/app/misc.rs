@@ -99,6 +99,30 @@ impl App {
             }
         }
     }
+    pub(super) fn enter_copy_mode(&mut self) {
+        let Some(pane) = self.active_pane() else { return };
+        let cursor = {
+            let guard = pane.parser.lock();
+            let grid = guard.grid();
+            (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
+        };
+        self.copy_mode = Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor));
+        mark_all_panes_dirty(&self.panes);
+    }
+
+    pub(super) fn enter_quick_select(&mut self) {
+        let Some(pane) = self.active_pane() else { return };
+        let state = {
+            let guard = pane.parser.lock();
+            let grid = guard.grid();
+            let mut state = sonic_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
+            state.quick_select = Some(sonic_ui::copy_mode::QuickSelectState::from_grid(grid));
+            state
+        };
+        self.copy_mode = Some(state);
+        mark_all_panes_dirty(&self.panes);
+    }
+
     pub(super) fn copy_selection(&mut self) {
         let Some(sel) = self.selection.as_ref() else {
             return;
@@ -108,6 +132,10 @@ impl App {
         }
         let Some(pane) = self.active_pane() else { return };
         let text = sel.as_text(pane.parser.lock().grid());
+        self.set_clipboard_text(text);
+    }
+
+    pub(super) fn set_clipboard_text(&mut self, text: String) {
         if text.is_empty() {
             return;
         }

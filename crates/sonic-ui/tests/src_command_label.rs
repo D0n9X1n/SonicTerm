@@ -26,6 +26,7 @@ fn variant_kind_covers_every_action() {
         Action::ResizePaneDown,
         Action::ResizePane { dir: Direction::Left, amount: 1 },
         Action::CopyToClipboard,
+        Action::EnterCopyMode,
         Action::PasteFromClipboard,
         Action::IncreaseFontSize,
         Action::DecreaseFontSize,

@@ -114,6 +114,7 @@ use sonic_shared::render::GpuRenderer;
 use sonic_ui::broadcast::BroadcastState;
 use sonic_ui::cheatsheet::CheatsheetState;
 use sonic_ui::command_palette::CommandPalette;
+use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::ime::ImeState;
 use sonic_ui::pane::PaneTree;
 use sonic_ui::prefs::PrefsState;
@@ -145,6 +146,7 @@ pub struct ChildWindow {
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
     pub selection: Option<Selection>,
+    pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
     pub last_render: Instant,
@@ -604,6 +606,7 @@ pub struct App {
     pub(super) cursor_pos: (f64, f64),
     pub(super) mouse_down: bool,
     pub(super) selection: Option<Selection>,
+    pub(super) copy_mode: Option<CopyModeState>,
     pub(super) clipboard: Option<Clipboard>,
     pub(super) scale_factor: f64,
     pub(super) hover_link: bool,
@@ -813,6 +816,7 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            copy_mode: None,
             clipboard: Clipboard::new().ok(),
             scale_factor: 1.0,
             hover_link: false,

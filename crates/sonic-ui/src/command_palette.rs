@@ -268,6 +268,8 @@ pub fn action_display_name(a: &Action) -> String {
             format!("ResizePane({}, {amount})", dir_name(*dir))
         }
         Action::CopyToClipboard => "CopyToClipboard".into(),
+        Action::EnterCopyMode => "EnterCopyMode".into(),
+        Action::EnterQuickSelect => "EnterQuickSelect".into(),
         Action::PasteFromClipboard => "PasteFromClipboard".into(),
         Action::IncreaseFontSize => "IncreaseFontSize".into(),
         Action::DecreaseFontSize => "DecreaseFontSize".into(),
@@ -350,6 +352,7 @@ pub fn all_actions() -> Vec<Action> {
         Action::ResizePane { dir: Direction::Down, amount: 1 },
         // Clipboard
         Action::CopyToClipboard,
+        Action::EnterCopyMode,
         Action::PasteFromClipboard,
         // Font
         Action::IncreaseFontSize,

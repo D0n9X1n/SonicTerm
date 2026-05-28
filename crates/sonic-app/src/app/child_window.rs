@@ -169,6 +169,7 @@ impl App {
                         &theme,
                         child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                         child.selection.as_ref(),
+                        child.copy_mode.as_ref(),
                         &child.tabs,
                         search,
                         None, // command palette: not exposed in child window yet
@@ -375,6 +376,28 @@ impl App {
                 }
             },
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if child.copy_mode.is_some() {
+                    child_copy_mode_handle_key(child, &event);
+                    child.window.request_redraw();
+                    return;
+                }
+                if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
+                    if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                        match action {
+                            Action::EnterCopyMode => {
+                                child_enter_copy_mode(child);
+                                child.window.request_redraw();
+                                return;
+                            }
+                            Action::EnterQuickSelect => {
+                                child_enter_quick_select(child);
+                                child.window.request_redraw();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let mods = child.modifiers;
                 let tab_idx = child.tabs.active_index();
                 let active_id = match child.tab_states.get(tab_idx) {
@@ -582,5 +605,142 @@ impl App {
         child.tabs.activate(last);
         child.window.request_redraw();
         true
+    }
+}
+fn child_enter_copy_mode(child: &mut ChildWindow) {
+    let tab_idx = child.tabs.active_index();
+    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
+    let Some(pane) = child.panes.get(&active_id) else { return };
+    let cursor = {
+        let guard = pane.parser.lock();
+        let grid = guard.grid();
+        (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
+    };
+    child.copy_mode = Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor));
+    mark_all_panes_dirty(&child.panes);
+}
+
+fn child_enter_quick_select(child: &mut ChildWindow) {
+    let tab_idx = child.tabs.active_index();
+    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
+    let Some(pane) = child.panes.get(&active_id) else { return };
+    let state = {
+        let guard = pane.parser.lock();
+        let grid = guard.grid();
+        let mut state = sonic_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
+        state.quick_select = Some(sonic_ui::copy_mode::QuickSelectState::from_grid(grid));
+        state
+    };
+    child.copy_mode = Some(state);
+    mark_all_panes_dirty(&child.panes);
+}
+
+fn child_copy_mode_handle_key(child: &mut ChildWindow, event: &KeyEvent) {
+    let Some(mut state) = child.copy_mode.take() else { return };
+    let mut should_copy = false;
+    let mut should_exit = false;
+    let mut copied_text: Option<String> = None;
+
+    let tab_idx = child.tabs.active_index();
+    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
+    if let Some(pane) = child.panes.get_mut(&active_id) {
+        let guard = pane.parser.lock();
+        let grid = guard.grid();
+        if let Some(quick_select) = state.quick_select.as_ref() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => should_exit = true,
+                Key::Character(s) => {
+                    if let Some(ch) = s.chars().next() {
+                        if let Some(text) = quick_select.text_for_hint(ch) {
+                            copied_text = Some(text.to_string());
+                            should_exit = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => should_exit = true,
+                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
+                Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
+                Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
+                Key::Named(NamedKey::ArrowDown) => state.move_down(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("h") => state.move_left(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
+                Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
+                Key::Character(s) if s == "v" => state.start_select(),
+                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "w" => state.move_word_fwd(grid),
+                Key::Character(s) if s == "b" => state.move_word_back(grid),
+                Key::Character(s) if s == "0" => state.move_line_start(grid),
+                Key::Character(s) if s == "$" => state.move_line_end(grid),
+                Key::Character(s) if s == "g" => state.move_top(grid),
+                Key::Character(s) if s == "G" => state.move_bottom(grid),
+                _ => {}
+            }
+            if should_copy {
+                copied_text = child_copy_mode_selected_text(&state, grid);
+                should_exit = true;
+            } else {
+                pane.viewport_top_abs =
+                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
+            }
+        }
+    }
+
+    if let Some(text) = copied_text {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Err(e) = cb.set_text(text.clone()) {
+                tracing::warn!("clipboard set failed: {e}");
+            } else {
+                tracing::info!("copied {} bytes", text.len());
+            }
+        }
+    }
+    if !should_exit {
+        child.copy_mode = Some(state);
+    }
+    mark_all_panes_dirty(&child.panes);
+}
+
+fn child_copy_mode_selected_text(
+    state: &sonic_ui::copy_mode::CopyModeState,
+    grid: &Grid,
+) -> Option<String> {
+    let (start, end) = state.selected_range()?;
+    if start == end {
+        return None;
+    }
+    let mut out = String::new();
+    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
+    for row_idx in start.1..=last_row {
+        let Some(row) = child_copy_mode_row(grid, row_idx) else { break };
+        let col_start = if row_idx == start.1 { start.0 } else { 0 };
+        let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
+        let mut line = String::new();
+        for cell in &row[col_start.min(row.len())..col_end] {
+            if cell.flags.contains(sonic_core::grid::CellFlags::WIDE_CONT) {
+                continue;
+            }
+            line.push(cell.ch);
+        }
+        out.push_str(line.trim_end());
+        if row_idx < last_row {
+            out.push('\n');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn child_copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonic_core::grid::Row> {
+    let sb = grid.scrollback_len();
+    if row_idx < sb {
+        grid.scrollback_row(row_idx)
+    } else {
+        let live = row_idx - sb;
+        (live < grid.rows as usize).then(|| grid.row(live as u16))
     }
 }

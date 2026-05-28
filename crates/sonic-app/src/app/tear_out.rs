@@ -163,6 +163,7 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            copy_mode: None,
             modifiers: ModifiersState::empty(),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),

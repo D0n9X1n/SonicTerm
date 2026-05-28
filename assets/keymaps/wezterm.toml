@@ -140,6 +140,9 @@ action = "resize_pane_down"
 
 # --- Clipboard ---
 [[binding]]
+keys = "super+["
+action = "enter_copy_mode"
+[[binding]]
 keys = "super+c"
 action = "copy_to_clipboard"
 
@@ -194,10 +197,10 @@ action = "open_search"
 keys = "super+shift+p"
 action = "open_command_palette"
 
-# WezTerm's other common palette chord — Cmd+Shift+Space.
+# Quick select URL hints.
 [[binding]]
 keys = "super+shift+space"
-action = "open_command_palette"
+action = "enter_quick_select"
 
 # --- Scrolling ---
 [[binding]]
@@ -252,3 +255,4 @@ action = "open_preferences"
 # [[binding]]
 # keys = "super+shift+s"
 # action = { open_ssh_pane = "alice@dev.example.com:22" }
+

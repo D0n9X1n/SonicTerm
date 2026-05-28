@@ -49,6 +49,7 @@ use crate::{
     atlas_upload::AtlasUpload,
     cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
+    copy_mode::{CopyModeState, QuickSelectState},
     cursor::{self, CursorShape},
     glyph_atlas::GlyphAtlas,
     ime::ImeState,
@@ -300,6 +301,7 @@ pub struct GpuRenderer {
     search_fg: GColor,
     search_bg: [f32; 4],
     search_buffer: Buffer,
+    quick_select_buffer: Buffer,
     palette_query_buffer: Buffer,
     palette_rows_buffer: Buffer,
     palette_footer_buffer: Buffer,
@@ -377,6 +379,8 @@ struct FrameKey {
     /// is unchanged.
     pane_revs: Vec<(u64, u64)>,
     selection: Option<Selection>,
+    copy_mode: Option<CopyModeState>,
+    quick_select_hint_count: u32,
     cursor_visible: bool,
     tab: u64,
     pane: u64,
@@ -589,6 +593,12 @@ impl GpuRenderer {
             Some(size.width as f32),
             Some(font_size * 0.85 * 1.2),
         );
+        let mut quick_select_buffer = Buffer::new(&mut font_system, search_metrics);
+        quick_select_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
 
         // Overlay text buffers. Sized lazily inside render() since palette
         // and ime geometry depend on state. They start out at window
@@ -710,6 +720,7 @@ impl GpuRenderer {
             search_fg,
             search_bg,
             search_buffer,
+            quick_select_buffer,
             palette_query_buffer,
             palette_rows_buffer,
             palette_footer_buffer,
@@ -758,6 +769,7 @@ impl GpuRenderer {
             Some(logical_w),
             Some(self.font_size * 0.85 * 1.2),
         );
+        self.quick_select_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
         self.palette_query_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
@@ -964,6 +976,104 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn last_emitted_origins(&self) -> Vec<(u64, [f32; 2])> {
         self.last_emit_origins.clone()
+    }
+
+    /// Translate a scrollback-absolute row into the row index visible in the
+    /// current viewport. Returns `None` when the row lies above or below the
+    /// rendered viewport.
+    #[doc(hidden)]
+    pub fn viewport_relative_row(
+        absolute_row: usize,
+        view_top_abs: u64,
+        visible_rows: u16,
+    ) -> Option<u16> {
+        let visible_row = absolute_row as i128 - i128::from(view_top_abs);
+        (0..i128::from(visible_rows)).contains(&visible_row).then_some(visible_row as u16)
+    }
+
+    /// Resolve the viewport top used by the renderer after clamping explicit
+    /// scrollback requests to the live bottom.
+    #[doc(hidden)]
+    pub fn resolved_view_top_abs(grid: &Grid, viewport_top_abs: Option<u64>) -> u64 {
+        let live_top_abs = grid.scrollback_len() as u64;
+        viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+    }
+
+    /// Adjust a viewport after copy-mode movement so the scrollback-absolute
+    /// copy-mode cursor remains visible.
+    #[doc(hidden)]
+    pub fn copy_mode_view_top_after_move(
+        copy_mode: &CopyModeState,
+        grid: &Grid,
+        viewport_top_abs: Option<u64>,
+    ) -> Option<u64> {
+        let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+        let cursor_row = copy_mode.cursor.1 as u64;
+        let viewport_height = u64::from(grid.rows);
+        if cursor_row < view_top_abs {
+            Some(cursor_row)
+        } else if cursor_row >= view_top_abs.saturating_add(viewport_height) {
+            Some(cursor_row.saturating_add(1).saturating_sub(viewport_height))
+        } else {
+            viewport_top_abs
+        }
+    }
+
+    /// Emit copy-mode selection and cursor quads using scrollback-absolute
+    /// copy-mode coordinates translated into viewport-relative rows.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_copy_mode_quads(
+        copy_mode: &CopyModeState,
+        grid: &Grid,
+        view_top_abs: u64,
+        origin_x: f32,
+        origin_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        sw: f32,
+        sh: f32,
+        selection_color: [f32; 4],
+        cursor_color: [f32; 4],
+        quads: &mut Vec<QuadInstance>,
+    ) -> Option<(f32, f32)> {
+        if let Some((start, end)) = copy_mode.selected_range() {
+            for row_abs in start.1..=end.1 {
+                let Some(visible_row) =
+                    Self::viewport_relative_row(row_abs, view_top_abs, grid.rows)
+                else {
+                    continue;
+                };
+                let col_a = if row_abs == start.1 { start.0 } else { 0 }.min(grid.cols as usize);
+                let col_b = if row_abs == end.1 {
+                    end.0.min(grid.cols.saturating_sub(1) as usize)
+                } else {
+                    grid.cols.saturating_sub(1) as usize
+                };
+                if col_b < col_a {
+                    continue;
+                }
+                let x = origin_x + col_a as f32 * cell_w;
+                let y = origin_y + f32::from(visible_row) * cell_h;
+                let w = (col_b - col_a + 1) as f32 * cell_w;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(x, y, w, cell_h, sw, sh),
+                    color: selection_color,
+                    ..Default::default()
+                });
+            }
+        }
+
+        let visible_row = Self::viewport_relative_row(copy_mode.cursor.1, view_top_abs, grid.rows)?;
+        let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
+        let cx = origin_x + copy_col as f32 * cell_w;
+        let cy = origin_y + f32::from(visible_row) * cell_h;
+        quads.push(QuadInstance {
+            rect: px_to_ndc(cx, cy, cell_w, cell_h, sw, sh),
+            color: cursor_color,
+            ..Default::default()
+        });
+        Some((cx, cy))
     }
 
     /// PR #199 Fix 1 test hook: number of panes the most recent
@@ -1345,6 +1455,7 @@ impl GpuRenderer {
         theme: &Theme,
         cursor_visible: bool,
         selection: Option<&Selection>,
+        copy_mode: Option<&CopyModeState>,
         tabs: &TabBar,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
@@ -1561,10 +1672,15 @@ impl GpuRenderer {
             }
             (idx, on_close)
         };
+        let quick_select_hint_count = copy_mode
+            .and_then(|state| state.quick_select.as_ref())
+            .map_or(0, |quick| quick.hints.len() as u32);
         let key = FrameKey {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
             selection: selection.copied(),
+            copy_mode: copy_mode.cloned(),
+            quick_select_hint_count,
             cursor_visible,
             tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
             pane: active_pane,
@@ -1686,10 +1802,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                let live_top_abs = grid.scrollback_len() as u64;
-                let max_top_abs = live_top_abs; // never scroll below live
-                let view_top_abs =
-                    viewport_top_abs.map(|v| v.min(max_top_abs)).unwrap_or(live_top_abs);
+                let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
                 self.row_glyph_cache.resize(grid.rows);
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
@@ -1890,10 +2003,7 @@ impl GpuRenderer {
             let pv_grid: &Grid = pv.grid;
             emit_cell_bg_quads(
                 pv_grid,
-                {
-                    let live_top_abs = pv_grid.scrollback_len() as u64;
-                    viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
-                },
+                Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
                 theme,
                 pv.origin_x,
                 pv.origin_y,
@@ -1929,6 +2039,51 @@ impl GpuRenderer {
             }
         }
 
+        if let Some(copy_mode) = copy_mode {
+            if let Some(quick_select) = copy_mode.quick_select.as_ref() {
+                self.prepare_quick_select_overlay(
+                    quick_select,
+                    active_origin_x,
+                    active_origin_y,
+                    grid.scrollback_len(),
+                    grid.rows as usize,
+                    theme,
+                    sw,
+                    sh,
+                    &mut quads_overlay,
+                );
+            }
+            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            if let Some((cx, cy)) = Self::emit_copy_mode_quads(
+                copy_mode,
+                grid,
+                view_top_abs,
+                active_origin_x,
+                active_origin_y,
+                self.cell_w,
+                self.cell_h,
+                sw,
+                sh,
+                self.selection_color,
+                self.cursor_color,
+                &mut quads,
+            ) {
+                let mut bg = self.bg_rgba;
+                bg[0] *= bg[3];
+                bg[1] *= bg[3];
+                bg[2] *= bg[3];
+                recolor_cursor_glyphs(
+                    &mut glyph_instances,
+                    cx,
+                    cy,
+                    self.cell_w,
+                    self.cell_h,
+                    sw,
+                    sh,
+                    bg,
+                );
+            }
+        }
         if cursor_visible {
             // Hide the cursor when the viewport is scrolled away from the
             // live region — its absolute row is `scrollback_len + cursor.row`,
@@ -3215,6 +3370,22 @@ impl GpuRenderer {
                 custom_glyphs: &[],
             });
         }
+        if quick_select_hint_count > 0 {
+            overlay_areas.push(TextArea {
+                buffer: &self.quick_select_buffer,
+                left: 0.0,
+                top: 0.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
+        }
         // Drag-chip title: render in the overlay text pass so it sits
         // above terminal glyphs and tab chrome. Mirrors the chip rect
         // computed in the overlay quad block above.
@@ -3358,6 +3529,49 @@ impl GpuRenderer {
             p.grid.clear_dirty();
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_quick_select_overlay(
+        &mut self,
+        quick_select: &QuickSelectState,
+        origin_x: f32,
+        origin_y: f32,
+        scrollback_len: usize,
+        visible_rows: usize,
+        theme: &Theme,
+        sw: f32,
+        sh: f32,
+        quads_overlay: &mut Vec<QuadInstance>,
+    ) {
+        let mut overlay = String::new();
+        for hint in &quick_select.hints {
+            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else { continue };
+            if visible_row >= visible_rows {
+                continue;
+            }
+            let x = origin_x + hint.col_start as f32 * self.cell_w;
+            let y = origin_y + visible_row as f32 * self.cell_h;
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(x, y, self.cell_w, self.cell_h, sw, sh),
+                color: self.cursor_color,
+                ..Default::default()
+            });
+            for _ in 0..hint.col_start {
+                overlay.push(' ');
+            }
+            overlay.push(hint.hint);
+            overlay.push('\n');
+        }
+        self.quick_select_buffer.set_text(
+            &mut self.font_system,
+            &overlay,
+            &terminal_font_attrs(&self.font_family)
+                .color(hex_to_glyphon(theme.colors.background.0.as_str())),
+            Shaping::Advanced,
+            None,
+        );
+        self.quick_select_buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Shape a single style-run worth of cells and append the
