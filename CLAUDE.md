@@ -313,7 +313,9 @@ Local `target/` is a separate ~5 GB cost (debug + release + deps + incremental).
 
 The headless local gate (fmt / clippy / test / pty_dump) is necessary but not sufficient. Several real bugs have shipped past it: blank window (PR #36), CJK tofu (PR #42), 100 % idle CPU (PR #31), sRGB gamma washing out theme colors, low-DPI blur on Retina, and **dropped ANSI background colors (#161 → P0 #163)**. None of these show up in `cargo test` because they need a real wgpu surface + real macOS window + real glyph upload.
 
-**Rule:** every PR that touches any file under `crates/sonic-shared/src/render/`, `crates/sonic-text/src/`, `crates/sonic-gpu/src/`, `crates/sonic-app/src/app/`, `crates/sonic-ui/src/{tabbar_view,overlays,cursor,selection,search}.rs`, `crates/sonic-vt/src/vt.rs`, `crates/sonic-grid/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review:
+**Rule:** every PR that touches any file under `crates/sonic-shared/src/render/`, `crates/sonic-text/src/`, `crates/sonic-gpu/src/`, `crates/sonic-app/src/app/`, `crates/sonic-ui/src/{tabbar_view,overlays,cursor,selection,search}.rs`, `crates/sonic-vt/src/vt.rs`, `crates/sonic-grid/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review.
+
+**Prefer the harness:** run `just visual mac` (or `just visual-case <id> mac`) from `testing/workflows/mac.sh` against `testing/cases.toml` — that is the canonical, repeatable form of the ad-hoc snippet below, with per-case screenshots archived under `testing/results/mac-<sha>/`. The snippet below remains valid for one-off checks.
 
 ```bash
 pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
@@ -438,6 +440,12 @@ before merge.
   the screenshot path + outcome as a PR comment. **This is the only
   cross-PM interaction required.**
 - Merge requires BOTH smoke results recorded.
+
+**Visual-harness results are the cross-PM channel.** Attach the
+`testing/results/<plat>-<sha>/<case-id>/screen.png` path on the PR
+instead of pasting ad-hoc descriptions. Both PMs run `just visual <plat>`
+against the same `testing/cases.toml`, so the artifacts are directly
+comparable.
 
 ### No cross-PM PR review
 
