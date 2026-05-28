@@ -1234,6 +1234,12 @@ impl App {
         &self.theme.name
     }
 
+    /// Test-only accessor: live theme.
+    #[doc(hidden)]
+    pub fn theme_for_test(&self) -> &sonic_core::theme::Theme {
+        &self.theme
+    }
+
     /// Test-only accessor: snapshot of the live `Config`.
     #[doc(hidden)]
     pub fn config_for_test(&self) -> &sonic_core::config::Config {

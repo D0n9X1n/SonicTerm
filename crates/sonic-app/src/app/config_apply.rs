@@ -277,13 +277,14 @@ impl App {
             tracing::warn!("ApplyTheme({name}): no theme_loader installed; ignoring");
             return;
         };
-        let theme = match loader(name) {
+        let mut theme = match loader(name) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("ApplyTheme({name}): load failed: {e:#}");
                 return;
             }
         };
+        theme.apply_accessibility(&self.config.accessibility);
         if let Some(r) = self.renderer.as_mut() {
             r.set_theme(&theme);
         }
