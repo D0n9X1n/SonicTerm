@@ -89,12 +89,12 @@ fn abs_row_in_hash() {
 fn cache_get_insert_invalidate() {
     let mut cache = RowGlyphCache::new();
     let row = CachedRow::default();
-    cache.insert(5, 0xabcd, row.clone());
-    assert!(cache.get(5, 0xabcd).is_some());
-    assert!(cache.get(5, 0xdead).is_none());
-    cache.invalidate_row_abs(5);
-    assert!(cache.get(5, 0xabcd).is_none());
-    cache.insert(7, 0xabcd, row);
+    cache.insert(0, 5, 0xabcd, row.clone());
+    assert!(cache.get(0, 5, 0xabcd).is_some());
+    assert!(cache.get(0, 5, 0xdead).is_none());
+    cache.invalidate_row_abs(0, 5);
+    assert!(cache.get(0, 5, 0xabcd).is_none());
+    cache.insert(0, 7, 0xabcd, row);
     assert_eq!(cache.len(), 1);
     cache.invalidate_all();
     assert!(cache.is_empty());
@@ -105,12 +105,12 @@ fn cache_cap_resets_when_full() {
     let mut cache = RowGlyphCache::new();
     cache.resize(1);
     for i in 0..4 {
-        cache.insert(i as u64, i as u64, CachedRow::default());
+        cache.insert(0, i as u64, i as u64, CachedRow::default());
     }
     assert_eq!(cache.len(), 4);
-    cache.insert(99, 99, CachedRow::default());
+    cache.insert(0, 99, 99, CachedRow::default());
     assert_eq!(cache.len(), 1);
-    assert!(cache.get(99, 99).is_some());
+    assert!(cache.get(0, 99, 99).is_some());
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn resize_updates_cap_from_visible_rows() {
     let mut cache = RowGlyphCache::new();
     cache.resize(300);
     for i in 0..1100 {
-        cache.insert(i, i, CachedRow::default());
+        cache.insert(0, i, i, CachedRow::default());
     }
     assert_eq!(cache.len(), 1100);
 }

@@ -19,6 +19,16 @@
 //! key, we splice the cached `Vec` straight into the frame buffer and
 //! skip the shaping pass.
 //!
+//! **Per-pane keying (PR prerequisite for #199):** the cache is keyed
+//! by `(pane_id, abs_row, hash)`. Before this change the key was just
+//! `(abs_row, hash)`, which assumed a single grid. Once #199 introduces
+//! the per-pane render loop, every pane would otherwise read/write the
+//! same slot for any matching `(abs_row, hash)` pair and corrupt each
+//! other's glyphs. Folding the pane identifier into the key makes the
+//! cache safe for the multi-pane traversal without changing today's
+//! single-pane behaviour (callers pass `0` as the placeholder pane id
+//! until #199 wires real pane identifiers through).
+//!
 //! Cursor movement does NOT need to be folded into the hash: the cursor
 //! is drawn as a quad (`render::render` builds it from the cursor
 //! position after the text pass, not from cached glyphs), and the row
@@ -50,6 +60,11 @@ use std::hash::{Hash, Hasher};
 
 const CACHE_HEADROOM_FACTOR: usize = 4;
 
+/// Opaque per-pane identifier used as part of the cache key. Today the
+/// renderer only has one pane so callers pass `0`; once the per-pane
+/// render loop lands (#199) every pane will pass its own stable id.
+pub type PaneId = u64;
+
 /// One cached row's render artefacts. Replayed verbatim into the
 /// frame's glyph_instances / underlines / missing_chars vectors when
 /// the cache hits.
@@ -67,18 +82,23 @@ pub struct CachedRow {
     pub missing_chars: Vec<char>,
 }
 
-/// Per-row glyph cache. Keys are `(view_top_abs + r, hash)` — a row's
+/// Per-row glyph cache. Keys are `(pane_id, abs_row, hash)` — a row's
 /// cached output is only valid if the renderer is currently looking at
-/// the same absolute row AND that row's content / styling / selection
-/// overlap is unchanged.
+/// the same pane AND the same absolute row AND that row's content /
+/// styling / selection overlap is unchanged. Separating panes in the
+/// key prevents identical `(abs_row, hash)` pairs from colliding when
+/// the per-pane render loop (#199) walks more than one grid in a
+/// single frame.
 #[derive(Default, Debug)]
 pub struct RowGlyphCache {
-    /// (abs_row, hash) -> cached artefacts.
-    entries: HashMap<(u64, u64), CachedRow>,
+    /// (pane_id, abs_row, hash) -> cached artefacts.
+    entries: HashMap<(PaneId, u64, u64), CachedRow>,
     /// Soft cap so that long-running sessions with heavy scrollback
     /// don't grow without bound. The renderer calls `resize(grid.rows)`
     /// each frame; we keep ~4× headroom for scroll jiggle and call it
-    /// good.
+    /// good. With multiple panes, callers should call `resize` with the
+    /// sum of every pane's visible row count so the cap scales with the
+    /// total addressable working set rather than a single pane.
     cap: usize,
 }
 
@@ -90,6 +110,9 @@ impl RowGlyphCache {
     /// Resize the cache to match the current visible grid height. Cheap
     /// no-op unless the row count changes; when it does, this updates the
     /// soft cap and drops stale entries from the old viewport geometry.
+    ///
+    /// For multi-pane callers (#199), pass the sum of every pane's
+    /// visible row count.
     #[inline]
     pub fn resize(&mut self, rows: u16) {
         let new_cap = usize::from(rows).saturating_mul(CACHE_HEADROOM_FACTOR).max(1);
@@ -107,12 +130,21 @@ impl RowGlyphCache {
         self.entries.clear();
     }
 
-    /// Drop the cache entry for absolute row `abs_row` regardless of
-    /// hash. Called per-dirty-row from the renderer using
-    /// `grid.dirty_rows()`. Cheap: visible rows ≤ a few hundred.
+    /// Drop every cache entry belonging to a specific pane. Useful when
+    /// a pane is closed or its grid is replaced wholesale; cheaper than
+    /// `invalidate_all` because peer panes keep their entries.
     #[inline]
-    pub fn invalidate_row_abs(&mut self, abs_row: u64) {
-        self.entries.retain(|(r, _), _| *r != abs_row);
+    pub fn invalidate_pane(&mut self, pane_id: PaneId) {
+        self.entries.retain(|(p, _, _), _| *p != pane_id);
+    }
+
+    /// Drop the cache entry for absolute row `abs_row` in pane
+    /// `pane_id` regardless of hash. Called per-dirty-row from the
+    /// renderer using `grid.dirty_rows()`. Cheap: visible rows ≤ a few
+    /// hundred per pane.
+    #[inline]
+    pub fn invalidate_row_abs(&mut self, pane_id: PaneId, abs_row: u64) {
+        self.entries.retain(|(p, r, _), _| !(*p == pane_id && *r == abs_row));
     }
 
     /// Number of cached rows. Useful for tests and tracing.
@@ -128,8 +160,8 @@ impl RowGlyphCache {
 
     /// Look up a cached row by key. None on miss.
     #[inline]
-    pub fn get(&self, abs_row: u64, hash: u64) -> Option<&CachedRow> {
-        self.entries.get(&(abs_row, hash))
+    pub fn get(&self, pane_id: PaneId, abs_row: u64, hash: u64) -> Option<&CachedRow> {
+        self.entries.get(&(pane_id, abs_row, hash))
     }
 
     /// Insert (or replace) a cached row. If the cache is at capacity,
@@ -137,11 +169,11 @@ impl RowGlyphCache {
     /// homogeneous so an LRU buys little here and HashMap doesn't carry
     /// insertion order natively. The cap tracks the visible grid height
     /// via `resize` so this only fires after a long scroll session.
-    pub fn insert(&mut self, abs_row: u64, hash: u64, row: CachedRow) {
+    pub fn insert(&mut self, pane_id: PaneId, abs_row: u64, hash: u64, row: CachedRow) {
         if self.entries.len() >= self.cap {
             self.entries.clear();
         }
-        self.entries.insert((abs_row, hash), row);
+        self.entries.insert((pane_id, abs_row, hash), row);
     }
 }
 
@@ -157,6 +189,12 @@ impl RowGlyphCache {
 ///   every cell at a new physical position.
 /// * `selection` bbox — but only when it overlaps row `r`. A
 ///   selection outside this row's range doesn't change its rendering.
+///
+/// Note: the pane identifier is NOT folded into this hash because it
+/// is a separate component of the cache key tuple (see
+/// `RowGlyphCache`). Keeping pane separation in the tuple rather than
+/// the hash makes per-pane invalidation cheap and avoids spurious
+/// re-shaping if two panes happen to share content.
 #[allow(clippy::too_many_arguments)]
 pub fn row_hash(
     view_top_abs: u64,
@@ -198,4 +236,5 @@ pub fn row_hash(
     h.finish()
 }
 
-// Unit tests live in `tests/row_glyph_cache.rs`.
+// Unit tests live in `tests/row_glyph_cache.rs` and
+// `tests/row_glyph_cache_pane_isolation.rs`.
