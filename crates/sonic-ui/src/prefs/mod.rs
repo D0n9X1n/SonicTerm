@@ -16,7 +16,10 @@ pub mod controls;
 pub mod layout;
 pub mod state;
 
-pub use controls::{ColorSwatch, Control, Dropdown, Slider, TextField, Toggle, WidgetId};
+pub use controls::{
+    Button, ButtonKind, ColorSwatch, Control, Dropdown, InteractionState, Slider, TextField,
+    Toggle, WidgetId,
+};
 pub use layout::{Category, PrefsLayout, CATEGORIES};
 pub use state::{PrefsHit, PrefsState};
 

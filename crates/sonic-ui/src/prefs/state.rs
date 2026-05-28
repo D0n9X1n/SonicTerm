@@ -12,7 +12,9 @@ use anyhow::Result;
 use sonic_cfg::config::{Config, CursorShape};
 use sonic_cfg::theme::Theme;
 
-use super::controls::{ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId};
+use super::controls::{
+    Button, ButtonKind, ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId,
+};
 use super::layout::{Category, PrefsLayout};
 
 /// Resolve the swatch RGBA (`[u8; 4]`) for the active theme's accent.
@@ -102,6 +104,13 @@ pub struct PrefsState {
     /// Active terminal theme. Drives chrome-derived colors in the
     /// preferences UI (e.g. the Accent swatch in Appearance).
     pub theme: Theme,
+    /// Footer **Apply** button primitive (issue #173 slice-2). Owns its
+    /// own [`InteractionState`] so the mouse handler can flip
+    /// hover/press flags and the renderer can read them back for the
+    /// bg color and the rounded-rect radius.
+    pub apply_button: Button,
+    /// Footer **Cancel** button primitive (issue #173 slice-2).
+    pub cancel_button: Button,
 }
 
 impl PrefsState {
@@ -115,6 +124,16 @@ impl PrefsState {
         } else {
             Some(config.locale.as_str())
         });
+        // Footer button primitives (issue #173 slice-2). Stable widget
+        // IDs let the mouse handler dispatch hover/press events.
+        let apply_button =
+            Button::new(WidgetId(u32::MAX - 1), "Apply", layout.apply_button, ButtonKind::Primary);
+        let cancel_button = Button::new(
+            WidgetId(u32::MAX - 2),
+            "Cancel",
+            layout.cancel_button,
+            ButtonKind::Secondary,
+        );
         let mut s = Self {
             original: config.clone(),
             config,
@@ -126,6 +145,8 @@ impl PrefsState {
             focused_field: None,
             i18n,
             theme,
+            apply_button,
+            cancel_button,
         };
         s.rebuild_controls();
         s

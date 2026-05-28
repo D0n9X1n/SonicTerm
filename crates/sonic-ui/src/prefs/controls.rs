@@ -41,18 +41,41 @@ impl Rect {
     }
 }
 
-/// On/off switch backed by a `bool`.
+/// Visual interaction state shared across all control primitives. Drives
+/// hover tints, press feedback and focus halos in the renderer.
+///
+/// Added in the issue #173 slice-2 redesign so Toggle / Dropdown / Button
+/// can be rendered with consistent pressed / hovered / focused affordances
+/// without per-widget bespoke fields.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InteractionState {
+    pub hovered: bool,
+    pub pressed: bool,
+    pub focused: bool,
+}
+
+impl InteractionState {
+    pub const fn new() -> Self {
+        Self { hovered: false, pressed: false, focused: false }
+    }
+}
+
+/// On/off switch backed by a `bool`. The redesigned (issue #173) toggle is
+/// a 44×24 pill with a 20px sliding thumb; the active fill comes from
+/// `theme.accent`. The struct itself only carries data — the renderer
+/// reads `value`, `interaction`, and the layout's `TOGGLE_*` constants.
 #[derive(Debug, Clone)]
 pub struct Toggle {
     pub id: WidgetId,
     pub label: String,
     pub rect: Rect,
     pub value: bool,
+    pub interaction: InteractionState,
 }
 
 impl Toggle {
     pub fn new(id: WidgetId, label: impl Into<String>, rect: Rect, value: bool) -> Self {
-        Self { id, label: label.into(), rect, value }
+        Self { id, label: label.into(), rect, value, interaction: InteractionState::new() }
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
@@ -70,6 +93,17 @@ impl Toggle {
 
     pub fn get(&self) -> bool {
         self.value
+    }
+
+    /// X coordinate of the sliding thumb's left edge for a given track
+    /// rect, honoring `TOGGLE_KNOB` + `TOGGLE_KNOB_MARGIN` from the layout.
+    /// Pure math so the renderer and tests agree.
+    pub fn knob_x(&self, knob_size: f32, margin: f32) -> f32 {
+        if self.value {
+            self.rect.x + self.rect.w - knob_size - margin
+        } else {
+            self.rect.x + margin
+        }
     }
 }
 
@@ -150,7 +184,12 @@ impl Slider {
     }
 }
 
-/// Pop-down list of string options.
+/// Pop-down list of string options. The redesigned (issue #173 slice-2)
+/// combobox is 32 px tall with a 10 px radius, a visible right-edge
+/// chevron, and a popover that opens on click and closes on outside click
+/// or selection. The struct only carries data — the renderer reads
+/// `selected`, `open`, `interaction`, and uses [`chevron_rect`] to position
+/// the chevron quad.
 #[derive(Debug, Clone)]
 pub struct Dropdown {
     pub id: WidgetId,
@@ -159,6 +198,7 @@ pub struct Dropdown {
     pub options: Vec<String>,
     pub selected: usize,
     pub open: bool,
+    pub interaction: InteractionState,
 }
 
 impl Dropdown {
@@ -170,11 +210,32 @@ impl Dropdown {
         selected: usize,
     ) -> Self {
         let selected = if options.is_empty() { 0 } else { selected.min(options.len() - 1) };
-        Self { id, label: label.into(), rect, options, selected, open: false }
+        Self {
+            id,
+            label: label.into(),
+            rect,
+            options,
+            selected,
+            open: false,
+            interaction: InteractionState::new(),
+        }
     }
+
+    /// Width of the chevron column on the right edge of the closed combobox.
+    pub const CHEVRON_W: f32 = 22.0;
 
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
         self.rect.contains(x, y) || self.hit_option(x, y).is_some()
+    }
+
+    /// Rect occupied by the chevron glyph on the closed combobox.
+    pub fn chevron_rect(&self) -> Rect {
+        Rect::new(
+            self.rect.x + self.rect.w - Self::CHEVRON_W,
+            self.rect.y,
+            Self::CHEVRON_W,
+            self.rect.h,
+        )
     }
 
     /// Returns the index of the option list row hit when the dropdown is
@@ -203,6 +264,11 @@ impl Dropdown {
 
     pub fn toggle_open(&mut self) {
         self.open = !self.open;
+    }
+
+    /// Close the popover (used when the user clicks outside).
+    pub fn close(&mut self) {
+        self.open = false;
     }
 
     pub fn select(&mut self, idx: usize) -> bool {
@@ -235,6 +301,48 @@ impl Dropdown {
 
     pub fn get(&self) -> usize {
         self.selected
+    }
+}
+
+/// Pill-shaped button with center-aligned text. Added in the issue #173
+/// slice-2 redesign so the Apply / Cancel buttons (and any future bindable
+/// in-prefs actions) can share a single control primitive that
+/// participates in the standard hover / press / focus pipeline.
+///
+/// The struct only carries data; the renderer reads `label`, `rect`,
+/// `kind`, and `interaction`. Layout constants (radius, height) live in
+/// [`super::layout`] so the GPU side stays in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    /// Filled with `theme.accent`, contrasting text.
+    Primary,
+    /// Outlined / subtle fill, theme.fg text.
+    Secondary,
+}
+
+#[derive(Debug, Clone)]
+pub struct Button {
+    pub id: WidgetId,
+    pub label: String,
+    pub rect: Rect,
+    pub kind: ButtonKind,
+    pub interaction: InteractionState,
+}
+
+impl Button {
+    pub fn new(id: WidgetId, label: impl Into<String>, rect: Rect, kind: ButtonKind) -> Self {
+        Self { id, label: label.into(), rect, kind, interaction: InteractionState::new() }
+    }
+
+    pub fn hit_test(&self, x: f32, y: f32) -> bool {
+        self.rect.contains(x, y)
+    }
+
+    /// Center coordinates of the button's text. The renderer uses this to
+    /// emit text at the correct anchor (fixes issue #169 where the Apply
+    /// button text was left-aligned).
+    pub fn text_center(&self) -> (f32, f32) {
+        (self.rect.x + self.rect.w / 2.0, self.rect.y + self.rect.h / 2.0)
     }
 }
 

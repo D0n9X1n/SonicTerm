@@ -80,6 +80,13 @@ impl App {
                 ..
             } => {
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                // Issue #173 slice-2: flag the Button primitives as
+                // pressed so the renderer can paint the darker tint on
+                // mouse-down (released below clears it again).
+                if let Some(s) = self.prefs_state.as_mut() {
+                    s.apply_button.interaction.pressed = s.apply_button.hit_test(x, y);
+                    s.cancel_button.interaction.pressed = s.cancel_button.hit_test(x, y);
+                }
                 let hit = self.prefs_state.as_ref().and_then(|s| s.classify_click(x, y));
                 match hit {
                     Some(PrefsHit::Apply) => {
@@ -183,8 +190,47 @@ impl App {
                     _ => {}
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Clear Button pressed flag on mouse-up. The hover flag
+                // is independent and is maintained by CursorMoved.
+                if let Some(s) = self.prefs_state.as_mut() {
+                    let was_pressed =
+                        s.apply_button.interaction.pressed || s.cancel_button.interaction.pressed;
+                    s.apply_button.interaction.pressed = false;
+                    s.cancel_button.interaction.pressed = false;
+                    if was_pressed {
+                        if let Some(w) = self.prefs_window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                // Update Button hover state for the redesigned (issue
+                // #173 slice-2) Apply / Cancel primitives so the
+                // renderer can pick a hover-tinted background. Only the
+                // prefs Button instances participate here — sidebar,
+                // toggles, sliders, etc. still rely on the existing
+                // PrefsHit path.
+                if let Some(s) = self.prefs_state.as_mut() {
+                    let (x, y) = (position.x as f32, position.y as f32);
+                    let new_apply = s.apply_button.hit_test(x, y);
+                    let new_cancel = s.cancel_button.hit_test(x, y);
+                    let changed = s.apply_button.interaction.hovered != new_apply
+                        || s.cancel_button.interaction.hovered != new_cancel;
+                    s.apply_button.interaction.hovered = new_apply;
+                    s.cancel_button.interaction.hovered = new_cancel;
+                    if changed {
+                        if let Some(w) = self.prefs_window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                }
             }
             _ => {}
         }
