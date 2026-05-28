@@ -159,9 +159,22 @@
 
 **Escalation:** if Round 3 still fails the same gate, dev agent stops and tags PM with a `blocked-on:design` request.
 
-### C.5 Scaling: onboarding a new dev agent in <30 min
+### C.5 Scaling: onboarding a new dev agent (<2 hours wall-clock, ~30 min hands-on)
 
-A concrete playbook for adding e.g. a 4th `dev-mac-2` or a brand-new `dev-linux` once Linux is lifted out of "deferred". The goal is that a freshly-dispatched Opus subagent is productive on its first real PR within half an hour of cold start.
+A concrete playbook for adding e.g. a 4th `dev-mac-2` or a brand-new `dev-linux` once Linux is lifted out of "deferred". The goal is that a freshly-dispatched Opus subagent is productive on its first real PR within ~2 hours of cold start (hands-on time ~30 min; the rest is the cold cargo build).
+
+**Time breakdown (honest, M2 baseline):**
+
+| Step                                                         | Wall-clock      | Hands-on |
+|--------------------------------------------------------------|-----------------|----------|
+| Install deps (rustup, just, gh, tesseract)                   | ~5 min          | 5 min    |
+| `cargo build --workspace --release` (cold, no cache)         | ~60–90 min      | 0 (parallel with reading CLAUDE.md, ROADMAP.md, RELEASE_TESTING.md) |
+| Run local gate to verify env                                 | ~15 min         | 5 min    |
+| Open hello-PR                                                | ~10 min         | 10 min   |
+
+**Caveat:** with `ccache` or `sccache` pre-warmed (shared across agents on the same host), first build drops to ~15 min. Cold first-time on a fresh host is the bottleneck — budget the full 2 hours unless cache is shared.
+
+**Multi-agent-per-platform labeling:** when 2+ agents share a platform, EXTEND `dev:*` with a suffix: `dev:mac-1`, `dev:mac-2`, etc. The base `dev:mac` label may also be applied as a group identifier. The first agent on a platform uses the base label (`dev:mac`); second onward uses suffixed (`dev:mac-2`, `dev:mac-3`). Update §15 of CLAUDE.md to reflect this convention (do NOT update §15 in this PR; tracked as follow-up issue per §G Q9).
 
 **Provisioning checklist (PM does this once per new agent):**
 
@@ -193,14 +206,14 @@ gh issue list --label "good-first-issue,platform:<plat>" --search "-label:dev:ma
 3. Remove the deploy key from `sonic-bots`, revoke the PAT.
 4. Add a row to `docs/onboarding-log.md` marking the agent as retired (date + reason).
 
-**Scaling limits — when more dev agents stop helping:**
+**Scaling limits — measurable triggers for adding dev agents:**
 
-| Dev agents per platform | Effect                                                                              |
-|-------------------------|-------------------------------------------------------------------------------------|
-| 1                       | Baseline. Serializes hot-file PRs; bottlenecks on render/input changes.            |
-| 2                       | Sweet spot. One can hold a hot-file coord lock while the other drains the backlog. |
-| 3                       | Diminishing returns. Coord overhead (hot-file label sweep, PM-tracking) starts to eat the throughput gain. Only worth it during a release crunch or a large feature push. |
-| 4+                      | PM saturates first. Without a 2nd PM seat per platform, more devs just queue at the merge gate. Treat 4+ as a signal to split the PM role, not to add more devs. |
+| Dev agents per platform | Trigger to add (measurable)                                                          |
+|-------------------------|--------------------------------------------------------------------------------------|
+| 1                       | Baseline. Serializes hot-file PRs; bottlenecks on render/input changes.             |
+| 2                       | **Justified when**: (open issues with `dev:<plat>` label) ÷ (per-PM PRs/day capacity) > 3 |
+| 3                       | **Justified when**: 2-dev configuration's median PR-to-merge time > 2 days for 2 consecutive weeks |
+| 4+                      | Coordination cost exceeds throughput gain; **consider splitting the platform into sub-domains** (e.g. `dev:mac-render`, `dev:mac-vt`) rather than adding more general devs. Without a 2nd PM seat per platform, more devs just queue at the merge gate. |
 
 **Champion-handoff.** Feature champion role (see §B Phase 3) transfers via a single PR: the outgoing champion opens `chore(champion): hand off <feature> to <new-agent>` that flips `CODEOWNERS` and updates the `champion:<feature>` label-owner mapping in `docs/champions.md`. Two reviewers required (outgoing + incoming champion), no QA gate needed.
 
@@ -230,7 +243,7 @@ QA must not silently miss bugs. The §C.3 roster on its own is necessary but not
 
 1. **`qa-code` (Haiku code reviewer):**
    - **Always pulls a fresh clone** of the PR branch into `/tmp/qa-code-<pr>-<run>/`; never trusts in-place state or another agent's working tree.
-   - **MUST run the local gate herself** (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, both `pty_dump*` e2e). Trusting the PM's or dev's claim that "gate is green" is forbidden — that was the failure mode of #42.
+   - **MUST run the LOCAL GATE AS DEFINED IN CLAUDE.md §2 verbatim** — no shortcuts, no custom subset, no "abbreviated" version. Trusting the PM's or dev's claim that "gate is green" is forbidden — that was the failure mode of #42. If CLAUDE.md §2 changes, the qa-code prompt is auto-updated via `scripts/refresh-qa-prompts.sh` (new tool, tracked as follow-up issue per §G).
    - Reports both **APPROVED with a 2-line code summary** (one line: what the diff does; one line: why it's safe) AND any **CHANGES REQUESTED with `file:line`** evidence per finding. A bare "APPROVED" with no summary is treated as suspicious and the PM re-dispatches with a "summary required" reminder.
    - **Failure-feedback rule:** if `qa-code` posts PASS but a follow-up bug is found in the same PR within 7 days, the qa-code prompt template gets a new check added covering that class of bug. Tracked in §C.6.7.
 
@@ -243,16 +256,38 @@ QA must not silently miss bugs. The §C.3 roster on its own is necessary but not
    - Runs the **actual** §13 visual harness on a real display — no shortcuts, no "I would have run this".
    - Reports per-case `PASS`/`FAIL` with screenshot path AND OCR text dump (tesseract output) so a future agent can grep what was on screen even after the screenshot expires.
    - **Flake handling:** distinguishes "real bug" from "driver flake" by re-running the failing case once. Two-in-a-row fail = real bug; one-pass-one-fail = flake reported as `FLAKY` not `FAIL` (PM decides whether to merge).
+   - **Persistent-flake escape hatch:** if `qa-visual` reports flake on the same case 2 sessions in a row, PM files an issue `qa-visual-flake: <case-id>` with `dev:mac` (or `dev:windows`) label. PM may bypass that case with `[skip-visual-case:<id>]` flag in the PR body until the underlying flake is fixed.
 
-4. **Cross-check rule:** every PR needs **≥2 QA APPROVEDs** (`qa-code` + `qa-spec` minimum). `qa-visual` is **required** if the PR touches any path in the §13 file list (auto-triggered by the §D.3 file-path match in `scripts/on-pr-opened.sh`).
+   **Render/UX file path matcher** (triggers qa-visual auto-dispatch):
+   ```
+   crates/sonic-shared/src/render/**/*.rs
+   crates/sonic-text/src/**/*.rs
+   crates/sonic-gpu/src/**/*.rs
+   crates/sonic-app/src/app/{window_event,redraw,spawn_pane,overlays,input,keymap_dispatch}.rs
+   crates/sonic-ui/src/{tabbar_view,overlays,cursor,selection,search,command_palette,prefs/**}.rs
+   crates/sonic-vt/src/vt.rs
+   crates/sonic-grid/src/grid.rs
+   assets/{themes,keymaps}/*.toml
+   ```
+   Implemented as `scripts/needs-visual-qa.sh <pr-number>` returning exit 0 if the PR touches any path in this set.
 
-5. **QA escalation on disagreement:** if 2 QAs disagree (one APPROVED, one CHANGES REQUESTED), PM reads both reports and breaks the tie — OR dispatches a **3rd Haiku** with both prior verdicts as input ("here is verdict A, here is verdict B, you arbitrate"). Tiebreaker verdict is binding.
+4. **Cross-check rule:** every PR needs **≥2 QA APPROVEDs** (`qa-code` + `qa-spec` minimum). `qa-visual` is **required** if the PR touches any path in the §13 file list (auto-triggered by the path matcher above in `scripts/on-pr-opened.sh`).
+
+   **Exception (quick-mode)**: PRs that match ANY of these are exempt from the ≥2 QA requirement (`qa-code` only):
+   - body contains `[skip-qa-spec]` flag with an explicit justification on the next line
+   - changes only `**/*.md`, `docs/**`, `.github/**/*.yml` (excluding workflows that touch runtime)
+   - net diff ≤ 5 LOC AND no `.rs` file modified
+   - label `trivial` applied by PM with a justification comment
+
+   PM must NOT apply `trivial` for behavior changes, default-value changes, or anything in the CLAUDE.md §0 "Trivial-NOT-applies" list.
+
+5. **QA escalation on disagreement:** if 2 QAs disagree (one APPROVED, one CHANGES REQUESTED), PM reads both reports and breaks the tie — OR dispatches a **3rd Haiku** with both prior verdicts as input ("here is verdict A, here is verdict B, you arbitrate"). Tiebreaker verdict is binding. **Maximum 3 Haiku dispatches per PR for tiebreaking; on the 3rd disagreement, PM auto-decides and documents the rationale in a PR comment.**
 
 6. **Audit trail:** every QA verdict is posted as a **PR comment**, never as a private DM/log/agent reply only. Future agents (and future PMs) must be able to read the full QA history of any PR from `gh pr view <N> --comments` alone.
 
 7. **QA regression catalog:** `docs/qa/regressions.md` lists every "QA approved but bug shipped" incident with three fields: PR#, what was missed, prompt update applied. Living doc — **every dev and QA agent reads it on session start** (added to the onboarding checklist in §C.5). New entries are added by the PM the moment a regression is confirmed, not retroactively at release time.
 
-8. **"Trust but verify" by PM:** PM samples **1 in 10 APPROVED PRs** by reading the QA report end-to-end and doing a spot-check (random file in the diff, run one assertion mentally against the actual code). If sampled, PM leaves a `qa-sampled:OK` comment on the PR so the sampling rate is auditable.
+8. **"Trust but verify" by PM:** PM samples **1 in 10 APPROVED PRs** by reading the QA report end-to-end and doing a spot-check (random file in the diff, run one assertion mentally against the actual code). Sampling is **pseudo-random**: `PR# mod 10 == 7` (the offset `7` is picked by PM on each release-tag rotation and published in `docs/qa/sampling-offset.md`). Predictable enough to verify retroactively, random enough to be unpredictable to agents at PR-open time. If sampled, PM leaves a `qa-sampled:OK` comment on the PR so the sampling rate is auditable.
 
 ---
 
@@ -377,4 +412,5 @@ QA must not silently miss bugs. The §C.3 roster on its own is necessary but not
    | **Total**                                        | **~$60**|
    Opus dispatch dominates; QA is a rounding error. Acceptable?
 7. **Two-PM commit attribution.** Same `Co-Authored-By: Claude Opus 4` trailer across both, or separate "PM-mac" / "PM-windows" attribution? Audit / blame implications.
-8. **`onboard-dev-agent.sh` location.** `scripts/` (alongside other dispatch helpers) vs. `tooling/` (separate ops directory, kept out of the dev hot path)? Affects whether the script gets touched by routine `scripts/` refactors.
+8. **`onboard-dev-agent.sh` location.** **DECIDED:** `scripts/` (alongside other dispatch helpers like `scripts/check-deny.sh`), per existing repo convention. No `tooling/` directory will be introduced.
+9. **Multi-agent-per-platform labeling convention.** Approve the `dev:mac-N` / `dev:windows-N` suffix scheme from §C.5? Alternative: drop the suffix and use GitHub assignee (`@bot-mac-2`) as the disambiguator instead of a label. Either choice requires a one-line update to CLAUDE.md §15.
