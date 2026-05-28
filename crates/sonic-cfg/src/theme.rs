@@ -35,7 +35,7 @@ impl Hex {
 }
 
 /// One of the eight standard ANSI palette colors (normal or bright).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AnsiColors {
     /// ANSI color 0 / 8.
     pub black: Hex,
@@ -56,7 +56,7 @@ pub struct AnsiColors {
 }
 
 /// Tab-bar color slots.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TabColors {
     /// Background for the tab-bar chrome itself.
     pub bar_bg: Hex,
@@ -82,7 +82,7 @@ fn default_hover_fg() -> Hex {
 }
 
 /// Full color palette used by a theme.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Palette {
     /// Default terminal background.
     pub background: Hex,
@@ -105,7 +105,7 @@ pub struct Palette {
 }
 
 /// A complete loadable theme.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Theme {
     /// Human-readable theme name.
     pub name: String,
@@ -122,4 +122,47 @@ impl Theme {
         let t: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         Ok(t)
     }
+
+    /// Import a theme TOML file into `user_theme_dir`, returning its canonical name.
+    pub fn import_from_file(src: &Path, user_theme_dir: &Path) -> Result<String> {
+        let text = std::fs::read_to_string(src).with_context(|| format!("read {src:?}"))?;
+        let theme: Self = toml::from_str(&text).with_context(|| format!("parse {src:?}"))?;
+        let canonical_name = canonical_theme_name(&theme.name);
+        anyhow::ensure!(
+            !canonical_name.is_empty(),
+            "theme name must contain at least one ASCII alphanumeric character"
+        );
+
+        std::fs::create_dir_all(user_theme_dir)
+            .with_context(|| format!("create theme dir {user_theme_dir:?}"))?;
+        let dst = user_theme_dir.join(format!("{canonical_name}.toml"));
+        std::fs::write(&dst, text).with_context(|| format!("write {dst:?}"))?;
+        Ok(canonical_name)
+    }
+
+    /// Export this theme as TOML to `dst`.
+    pub fn export_to_file(&self, dst: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("serialize theme")?;
+        std::fs::write(dst, text).with_context(|| format!("write {dst:?}"))?;
+        Ok(())
+    }
+}
+
+fn canonical_theme_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+
+    for ch in name.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            out.push(ch);
+            pending_dash = false;
+        } else if !out.is_empty() {
+            pending_dash = true;
+        }
+    }
+
+    out
 }
