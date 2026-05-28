@@ -70,6 +70,8 @@ impl App {
                             }
                         }
                     })
+                    // PANIC: thread spawn at pane init — see sonic-io/pty.rs
+                    // rationale. Unrecoverable OS-level failure.
                     .expect("spawn vt reply forwarder");
                 std::thread::Builder::new()
                     .name("sonic-vt-loop".into())
@@ -172,6 +174,8 @@ impl App {
                             }
                         }
                     })
+                    // PANIC: thread spawn at pane init — see sonic-io/pty.rs
+                    // rationale. Unrecoverable OS-level failure.
                     .expect("spawn vt loop");
                 Some(pty)
             }

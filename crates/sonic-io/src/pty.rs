@@ -175,6 +175,10 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
                 }
             }
         })
+        // PANIC: thread::Builder::spawn only fails on OS-level resource
+        // exhaustion (out of memory / out of process handles). At terminal
+        // startup we cannot meaningfully recover — propagating a Result up
+        // through `spawn_pane` would land on the same `expect`. Documented.
         .expect("spawn pty reader");
 }
 
@@ -190,6 +194,8 @@ fn spawn_writer_thread(mut writer: Box<dyn Write + Send>, rx: Receiver<Outgoing>
                 let _ = writer.flush();
             }
         })
+        // PANIC: see `spawn_reader_thread` rationale above — OS-level
+        // thread-spawn failure at PTY init is unrecoverable.
         .expect("spawn pty writer");
 }
 

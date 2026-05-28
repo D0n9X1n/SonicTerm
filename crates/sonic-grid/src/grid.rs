@@ -484,6 +484,10 @@ impl Grid {
             if self.scrollback.len() == self.scrollback_limit {
                 // Reuse the oldest scrollback row as the new blank line
                 // (avoids both an allocation and a free).
+                // PANIC: safe — the surrounding `if` proves the deque is at
+                // capacity, so `len >= scrollback_limit >= 1`. We only enter
+                // this branch when `scrollback_limit > 0`, and a non-empty
+                // VecDeque always yields `Some` from `pop_front`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
                 for cell in recycled.iter_mut() {
                     *cell = Cell::default();

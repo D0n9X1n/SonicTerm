@@ -26,6 +26,10 @@ pub fn apply_backdrop(hwnd: HWND) {
 
 fn make_raw_handle(hwnd: HWND) -> RawWindowHandle {
     let h = std::num::NonZeroIsize::new(hwnd.0 as isize)
+        // PANIC: safe — `make_raw_handle` is called only from `apply_backdrop`
+        // (above) after winit has handed us a valid HWND for an existing
+        // window. A null HWND would mean winit lied; that's a Win32 / winit
+        // contract bug, not a recoverable runtime condition.
         .expect("HWND is non-null when applying backdrop");
     let handle = Win32WindowHandle::new(h);
     // hinstance is optional for window-vibrancy's purposes.

@@ -47,6 +47,9 @@ pub enum MenuEntry {
 static ENTRIES: Mutex<Vec<MenuEntry>> = Mutex::new(Vec::new());
 
 fn register(entry: MenuEntry) -> isize {
+    // PANIC: lock poisoning indicates a prior panic while another thread held
+    // the registry — process state is corrupt and continuing risks UB in the
+    // menu callbacks. Crashing here is the safe option.
     let mut v = ENTRIES.lock().expect("menubar entry registry poisoned");
     v.push(entry);
     // 1-based: 0 is AppKit's default tag.
@@ -98,6 +101,10 @@ fn open_url(url: &str) {
     let nsurl = NSURL::URLWithString(&NSString::from_str(url));
     if let Some(nsurl) = nsurl {
         let _ = MainThreadMarker::new()
+            // PANIC: safe — every caller of `open_url` is dispatched from
+            // AppKit menu actions, which AppKit guarantees fire on the main
+            // thread. Calling from any other thread is a programmer bug
+            // that would be caught immediately during dev — crash early.
             .expect("open_url must run on the macOS main thread (AppKit invariant)");
         let workspace = NSWorkspace::sharedWorkspace();
         workspace.openURL(&nsurl);
@@ -158,6 +165,10 @@ fn ns_selector_from_str(name: &str) -> Sel {
         "hideOtherApplications:" => sel!(hideOtherApplications:),
         "unhideAllApplications:" => sel!(unhideAllApplications:),
         "terminate:" => sel!(terminate:),
+        // PANIC: safe — the input strings come from the const menu blueprint
+        // (see `Blueprint::system` callers), which is authored alongside this
+        // match. Any new selector added to the blueprint must be added here
+        // in the same PR; mismatch is a dev-time bug, not a runtime risk.
         other => panic!("unknown system selector in menu blueprint: {other}"),
     }
 }
@@ -190,6 +201,10 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
         Binding::System(name) => unsafe {
             nsi.setAction(Some(ns_selector_from_str(name)));
         },
+        // PANIC: safe — `Binding::Separator` is intercepted by the caller
+        // (see `MenuItem::separator()` branch in build_menu before this fn
+        // is invoked); reaching it here would indicate a refactor missed
+        // the caller-side dispatch. Structurally unreachable.
         Binding::Separator => unreachable!(),
     }
     nsi

@@ -124,6 +124,10 @@ impl App {
                 )),
         );
         let window = Arc::new(el.create_window(attrs).expect("create window"));
+        // PANIC (above): `create_window` only fails when winit cannot reach
+        // the windowing system at all (no display, broken connection). At
+        // app startup this is unrecoverable — the user has no terminal to
+        // see an error in. Documented per panic audit.
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
@@ -164,6 +168,9 @@ impl App {
                 self.config.window.padding_bottom,
             ],
         )
+        // PANIC: renderer init failure means wgpu cannot initialize on the
+        // user's GPU at all — no recovery path exists in a GPU-accelerated
+        // terminal. Same justification as the `create_window` site above.
         .expect("init renderer");
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Subsequent

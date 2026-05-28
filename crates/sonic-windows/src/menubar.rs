@@ -36,6 +36,9 @@ enum WinEntry {
 static REGISTRY: Mutex<Option<HashMap<MenuId, WinEntry>>> = Mutex::new(None);
 
 fn registry_insert(id: MenuId, entry: WinEntry) {
+    // PANIC: lock poisoning means another thread panicked while mutating the
+    // menu registry; continuing would risk corrupted callback dispatch. Crash
+    // is the safe option (parity with sonic-mac/src/menubar.rs ENTRIES lock).
     let mut guard = REGISTRY.lock().expect("muda registry poisoned");
     guard.get_or_insert_with(HashMap::new).insert(id, entry);
 }

@@ -130,6 +130,11 @@ impl App {
                             Some(PrefsHit::TextField(id)) => {
                                 let _ = s.focus_text_field(id);
                             }
+                            // PANIC: safe — the `match other` arms above
+                            // (Apply/Cancel) are handled in the outer match
+                            // before reaching this inner branch (see the
+                            // outer `match hit` ~25 lines up). This arm is
+                            // structurally unreachable.
                             Some(PrefsHit::Apply) | Some(PrefsHit::Cancel) => unreachable!(),
                             None => {
                                 s.blur_text_fields();

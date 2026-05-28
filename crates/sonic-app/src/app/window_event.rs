@@ -218,6 +218,11 @@ impl App {
                         let active_pos = guards
                             .iter()
                             .position(|(id, _, _)| *id == active_id)
+                            // PANIC: safe — `guards` was populated immediately
+                            // above from `tab.panes` keyed by `active_id`, so
+                            // a guard with this id is present. Render hot
+                            // path: do NOT convert to Result (CLAUDE.md §4 —
+                            // this fn must never block or crash the terminal).
                             .expect("active pane guard collected above");
                         // Wezterm-style tab title: `#N icon parent/leaf`.
                         // Pull cwd from OSC 7, the foreground process from
