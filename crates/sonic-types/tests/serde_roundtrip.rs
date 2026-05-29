@@ -42,8 +42,8 @@ fn cell_value_semantics() {
     assert_eq!(a.ch, ' ');
     assert_eq!(a.fg, Color::Default);
     assert!(a.flags.is_empty());
-    assert!(a.hyperlink.is_none());
-    assert!(a.extras.is_none());
+    assert!(a.hyperlink().is_none());
+    assert!(a.extras().is_none());
 
     // Flags round-trip via bitflags bit semantics.
     let flags = CellFlags::BOLD | CellFlags::ITALIC;

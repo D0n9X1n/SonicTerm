@@ -4548,7 +4548,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
                 }
                 continue;
             }
-            match (cell.hyperlink, current) {
+            match (cell.hyperlink(), current) {
                 (Some(hid), Some(cur)) if hid == cur => {
                     last_col = col as u16;
                 }

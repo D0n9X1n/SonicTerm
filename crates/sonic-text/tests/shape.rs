@@ -8,7 +8,9 @@ use sonic_text::swash_rasterizer::SwashRasterizer;
 use sonic_types::Cell;
 
 fn cell(ch: char) -> Cell {
-    Cell { ch, ..Cell::default() }
+    let mut c = Cell::default();
+    c.ch = ch;
+    c
 }
 
 fn font_system_with_assets() -> FontSystem {

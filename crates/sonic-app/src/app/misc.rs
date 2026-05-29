@@ -49,7 +49,7 @@ impl App {
         }
         let r = grid.row(row);
         // First: OSC 8 hyperlink interned on the cell itself.
-        if let Some(hid) = r[col as usize].hyperlink {
+        if let Some(hid) = r[col as usize].hyperlink() {
             let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
             drop(guard);
             return uri;
@@ -83,7 +83,7 @@ impl App {
             return None;
         }
         let r = grid.row(row);
-        let hid = r[col as usize].hyperlink?;
+        let hid = r[col as usize].hyperlink()?;
         guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
     }
 

@@ -41,7 +41,14 @@ fn font_system() -> FontSystem {
 /// key so we can drive 5000 unique inserts with one tiny font.
 fn cells_for_index(i: usize) -> Vec<(u16, Cell)> {
     let s = format!("k{i}");
-    s.chars().enumerate().map(|(col, ch)| (col as u16, Cell { ch, ..Cell::default() })).collect()
+    s.chars()
+        .enumerate()
+        .map(|(col, ch)| {
+            let mut c = Cell::default();
+            c.ch = ch;
+            (col as u16, c)
+        })
+        .collect()
 }
 
 #[test]

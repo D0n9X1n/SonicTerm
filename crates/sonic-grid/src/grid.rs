@@ -382,12 +382,12 @@ impl Grid {
                 return;
             }
             let lead = &mut self.visible[r][c];
-            let mut s = match lead.extras.take() {
+            let mut s = match lead.take_extras() {
                 Some(boxed) => String::from(boxed),
                 None => String::new(),
             };
             s.push(ch);
-            lead.extras = Some(s.into_boxed_str());
+            lead.set_extras(Some(s.into_boxed_str()));
             self.mark_row(self.cursor.row);
             self.bump();
             return;
@@ -398,16 +398,13 @@ impl Grid {
         }
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
         let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
-        self.visible[r][c] = Cell { ch, fg, bg, flags: cell_flags, hyperlink, extras: None };
+        let mut lead = Cell::plain(ch, fg, bg, cell_flags);
+        lead.set_hyperlink(hyperlink);
+        self.visible[r][c] = lead;
         if width == 2 && c + 1 < self.cols as usize {
-            self.visible[r][c + 1] = Cell {
-                ch: ' ',
-                fg,
-                bg,
-                flags: flags | CellFlags::WIDE_CONT,
-                hyperlink,
-                extras: None,
-            };
+            let mut cont = Cell::plain(' ', fg, bg, flags | CellFlags::WIDE_CONT);
+            cont.set_hyperlink(hyperlink);
+            self.visible[r][c + 1] = cont;
         }
         self.cursor.col += width;
         self.mark_row(r as u16);

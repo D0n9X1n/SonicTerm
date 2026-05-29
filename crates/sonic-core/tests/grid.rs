@@ -123,7 +123,7 @@ fn goto_clamps_out_of_bounds() {
 #[test]
 fn cell_default_hyperlink_is_none() {
     let c = Cell::default();
-    assert!(c.hyperlink.is_none());
+    assert!(c.hyperlink().is_none());
 }
 
 #[test]
@@ -625,11 +625,11 @@ fn zwj_codepoints_are_retained_as_cell_extras() {
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             continue;
         }
-        if cell.ch == ' ' && cell.extras.is_none() {
+        if cell.ch == ' ' && cell.extras().is_none() {
             continue;
         }
         shaped_text.push(cell.ch);
-        if let Some(extras) = &cell.extras {
+        if let Some(extras) = cell.extras() {
             for ch in extras.chars() {
                 shaped_text.push(ch);
             }
@@ -646,7 +646,7 @@ fn zwj_codepoints_are_retained_as_cell_extras() {
     let zwjs: usize = g
         .row(0)
         .iter()
-        .filter_map(|c| c.extras.as_ref())
+        .filter_map(|c| c.extras())
         .map(|ex| ex.chars().filter(|c| *c == '\u{200D}').count())
         .sum();
     assert_eq!(zwjs, 2, "expected two ZWJ joiners attached as cell extras");

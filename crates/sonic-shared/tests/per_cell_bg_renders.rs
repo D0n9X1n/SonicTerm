@@ -71,14 +71,8 @@ fn theme_with_red_index1() -> Theme {
 fn write_indexed_run(grid: &mut Grid, row: u16, start_col: u16, len: u16, ch: char, index: u8) {
     let r = grid.row_mut(row);
     for i in 0..len {
-        r[(start_col + i) as usize] = Cell {
-            ch,
-            fg: Color::Default,
-            bg: Color::Indexed(index),
-            flags: CellFlags::empty(),
-            hyperlink: None,
-            extras: None,
-        };
+        r[(start_col + i) as usize] =
+            Cell::plain(ch, Color::Default, Color::Indexed(index), CellFlags::empty());
     }
 }
 
@@ -231,14 +225,7 @@ fn rgb_bg_also_emits_quad() {
     let mut g = Grid::new(10, 1);
     let r = g.row_mut(0);
     for cell in r.iter_mut().take(5) {
-        *cell = Cell {
-            ch: 'x',
-            fg: Color::Default,
-            bg: Color::Rgb(200, 50, 50),
-            flags: CellFlags::empty(),
-            hyperlink: None,
-            extras: None,
-        };
+        *cell = Cell::plain('x', Color::Default, Color::Rgb(200, 50, 50), CellFlags::empty());
     }
     let quads = run_emit(&g, &theme_with_red_index1());
     assert_eq!(quads.len(), 1, "expected 1 RGB-bg quad, got {}", quads.len());

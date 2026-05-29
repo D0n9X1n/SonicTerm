@@ -12,14 +12,9 @@ fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {
     let mut g = Grid::new(8, 1);
     let hid = HyperlinkId(42);
     for c in 0..3u16 {
-        g.row_mut(0)[c as usize] = Cell {
-            ch: 'x',
-            fg: Color::Default,
-            bg: Color::Default,
-            flags: CellFlags::empty(),
-            hyperlink: Some(hid),
-            extras: None,
-        };
+        let mut cell = Cell::plain('x', Color::Default, Color::Default, CellFlags::empty());
+        cell.set_hyperlink(Some(hid));
+        g.row_mut(0)[c as usize] = cell;
     }
     let runs = collect_hyperlink_runs(&g);
     assert_eq!(runs, vec![(0u16, 0u16, 2u16)]);
@@ -31,14 +26,9 @@ fn collect_hyperlink_runs_splits_on_different_id() {
     let a = HyperlinkId(1);
     let b = HyperlinkId(2);
     for (c, h) in [(0usize, a), (1, a), (3, b), (4, b)] {
-        g.row_mut(0)[c] = Cell {
-            ch: 'x',
-            fg: Color::Default,
-            bg: Color::Default,
-            flags: CellFlags::empty(),
-            hyperlink: Some(h),
-            extras: None,
-        };
+        let mut cell = Cell::plain('x', Color::Default, Color::Default, CellFlags::empty());
+        cell.set_hyperlink(Some(h));
+        g.row_mut(0)[c] = cell;
     }
     let runs = collect_hyperlink_runs(&g);
     assert_eq!(runs, vec![(0, 0, 1), (0, 3, 4)]);
