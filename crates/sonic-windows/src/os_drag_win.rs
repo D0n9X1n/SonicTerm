@@ -494,32 +494,28 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
                 Ok(_p) => {
-                    // Phase C2 (PR #295 review fix): post a real
-                    // `DroppedOnBar` outcome instead of routing through
-                    // the legacy single-slot + bridge path with a
-                    // zeroed `Drop`. The dispatcher in `App` performs
-                    // the source-removal + destination-insert via
-                    // `transfer_tab(src, src_idx, tgt, slot)`.
-                    //
-                    // `target_window: None` (= App main window) is
-                    // the conservative default for the IDropTarget
-                    // registered on the main HWND; a follow-up will
-                    // hit-test `pt` against the per-HWND tab bar to
-                    // resolve the real destination slot. For now we
-                    // pass slot=0 (insert at start), which is the
-                    // canonical "append-or-prepend" landing zone for
-                    // the new bar outcome — distinct from the old
-                    // zeroed-Drop semantics in that the source side
-                    // now actually moves the tab via transfer_tab
-                    // instead of relying on the legacy bridge's
-                    // out-of-band push.
+                    // Phase C2 (PR #295 review fix): resolve the real
+                    // destination via the shared TabBarRegistry the App
+                    // publishes into every frame. Falls back to
+                    // DroppedOnEmpty (tear out at drop point) when the
+                    // cursor isn't over any registered Sonic tab bar
+                    // but IS over a Sonic window's client area. If the
+                    // cursor isn't over any Sonic window at all we
+                    // still report DroppedOnEmpty so the source side
+                    // spawns a tear-out at the drop point.
                     if let Some(handle) = snapshot_drop_outcome_handle() {
-                        handle.post_drag_ended(
-                            sonic_app::app::os_drag::DragOutcome::DroppedOnBar {
-                                target_window: None,
-                                target_slot: 0,
+                        let outcome = match handle.query_tab_bar_slot(pt.x, pt.y) {
+                            Some((target_window, target_slot)) => {
+                                sonic_app::app::os_drag::DragOutcome::DroppedOnBar {
+                                    target_window,
+                                    target_slot,
+                                }
+                            }
+                            None => sonic_app::app::os_drag::DragOutcome::DroppedOnEmpty {
+                                drop_screen_pos: (pt.x, pt.y),
                             },
-                        );
+                        };
+                        handle.post_drag_ended(outcome);
                     }
                     // SAFETY: OLE out-param.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };

@@ -850,6 +850,14 @@ pub struct App {
     /// drag outcomes into. Drained by `do_user_event` on every
     /// `UserEvent::DragMoved` / `DragEnded` wake.
     pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
+    /// Shared tab-bar snapshot registry. The App publishes the live
+    /// per-window tab bar layout into this on every redraw (see
+    /// `publish_os_drag_bar_snapshot`); a Phase-C2 OS-drag backend
+    /// reads from it inside its drop callback (Windows
+    /// IDropTarget::Drop / macOS NSDraggingDestination::performDrop)
+    /// to resolve the raw screen-coordinate drop into a real
+    /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
+    pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
     /// Phase C2: tracks the source-side bookkeeping while an OS drag
     /// is in flight. `Some((source_window, source_tab_idx))` from
     /// `begin_session` until `UserEvent::DragEnded` is drained; back
@@ -1001,6 +1009,7 @@ impl App {
             os_drag_sink: None,
             os_drag_backend: None,
             os_drag_pending: Arc::new(os_drag::PendingDragOutcome::default()),
+            os_drag_bars: Arc::new(os_drag::TabBarRegistry::default()),
             os_drag_source: None,
             tab_bar_visible: true,
             broadcast: BroadcastState::Off,
@@ -1732,9 +1741,30 @@ impl App {
     /// caller treats as "fall back to the existing within-process
     /// tear_out path".
     pub fn os_drag_app_handle(&self) -> Option<os_drag::AppHandle> {
-        self.event_loop_proxy
-            .clone()
-            .map(|p| os_drag::AppHandle::with_pending(p, self.os_drag_pending.clone()))
+        self.event_loop_proxy.clone().map(|p| {
+            os_drag::AppHandle::with_pending_and_bars(
+                p,
+                self.os_drag_pending.clone(),
+                self.os_drag_bars.clone(),
+            )
+        })
+    }
+
+    /// Hand out an `Arc` clone of the shared [`os_drag::TabBarRegistry`].
+    /// Platform glue (e.g. `sonic-windows::os_drag_win`) calls this to
+    /// stash a reference for use inside the OLE IDropTarget::Drop
+    /// callback, where the AppHandle isn't always available.
+    pub fn os_drag_bar_registry(&self) -> Arc<os_drag::TabBarRegistry> {
+        self.os_drag_bars.clone()
+    }
+
+    /// Publish the current tab bar layout for `window` into the shared
+    /// registry. Called from the App's per-frame render path with
+    /// already-resolved screen coordinates (caller is responsible for
+    /// converting logical-px / window-local to screen via
+    /// winit's `Window::outer_position`).
+    pub fn publish_os_drag_bar_snapshot(&self, snapshot: os_drag::TabBarSnapshot) {
+        self.os_drag_bars.publish(snapshot);
     }
 
     /// Phase C2: begin an OS-level tab drag session via the installed

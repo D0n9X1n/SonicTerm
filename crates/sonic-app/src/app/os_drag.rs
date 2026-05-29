@@ -174,6 +174,153 @@ pub trait OsTabDragBackend: Send {
     }
 }
 
+/// Snapshot of a single window's tab bar, in **screen** coordinates,
+/// published by the App into a [`TabBarRegistry`] each frame so a
+/// platform OS-drag backend running off the winit thread (Windows OLE
+/// IDropTarget::Drop on the OLE worker thread, macOS NSDraggingDestination
+/// on the AppKit main loop) can hit-test the drop cursor without having
+/// to call back into the App's borrowed state.
+///
+/// Tabs are described by their horizontal extents only (`tab_lefts` +
+/// `tab_rights`) — the vertical coordinate is covered by `bar_rect`'s
+/// `top` / `bottom`. Slot resolution mirrors
+/// [`sonic_ui::tabbar_view::TabBarLayout::drop_slot`] exactly: left of
+/// tab `i`'s midpoint → slot `i`; right of the last midpoint → `n`.
+#[derive(Debug, Clone)]
+pub struct TabBarSnapshot {
+    /// Identifies the destination window. `None` means "the App's main
+    /// window" (mirrors the convention in [`DragOutcome::DroppedOnBar`]).
+    pub window: Option<WindowId>,
+    /// Window's outer rect in **screen** coordinates (origin top-left,
+    /// y-down — same convention as Win32 `GetWindowRect` and macOS
+    /// `screen.frame()` after CG-flip). The dispatcher hit-tests the
+    /// drop point against this first to pick a window.
+    pub window_rect: (i32, i32, i32, i32),
+    /// Tab bar's rect in **screen** coordinates. A drop inside
+    /// `window_rect` but outside `bar_rect` resolves to "in window but
+    /// not on bar" — see [`TabBarRegistry::resolve_screen_pos`].
+    pub bar_rect: (i32, i32, i32, i32),
+    /// Left edge of each tab in screen X, in tab order. Length == number
+    /// of tabs. Empty if the bar has no tabs (resolves to slot 0).
+    pub tab_lefts: Vec<i32>,
+    /// Right edge of each tab in screen X. Same length as `tab_lefts`.
+    pub tab_rights: Vec<i32>,
+}
+
+impl TabBarSnapshot {
+    /// Returns `true` iff the screen point `(sx, sy)` is inside this
+    /// window's outer rect (inclusive of left/top, exclusive of
+    /// right/bottom — matches Win32 `RECT` semantics).
+    pub fn window_contains(&self, sx: i32, sy: i32) -> bool {
+        let (l, t, r, b) = self.window_rect;
+        sx >= l && sx < r && sy >= t && sy < b
+    }
+
+    /// Returns `true` iff the screen point `(sx, sy)` is inside this
+    /// window's tab bar rect.
+    pub fn bar_contains(&self, sx: i32, sy: i32) -> bool {
+        let (l, t, r, b) = self.bar_rect;
+        sx >= l && sx < r && sy >= t && sy < b
+    }
+
+    /// Compute the insertion slot for a tab dropped at screen X `sx`.
+    /// Mirrors `TabBarLayout::drop_slot`: returns the index of the
+    /// first tab whose horizontal midpoint is to the right of `sx`, or
+    /// `tab_lefts.len()` if `sx` is past the last midpoint. Empty bar
+    /// → slot 0.
+    pub fn drop_slot(&self, sx: i32) -> usize {
+        debug_assert_eq!(self.tab_lefts.len(), self.tab_rights.len());
+        for (i, (&l, &r)) in self.tab_lefts.iter().zip(self.tab_rights.iter()).enumerate() {
+            let midx = (l + r) / 2;
+            if sx < midx {
+                return i;
+            }
+        }
+        self.tab_lefts.len()
+    }
+}
+
+/// Registry of currently-published [`TabBarSnapshot`]s, one per live
+/// Sonic window in this process. The App publishes into it on every
+/// resize / tab add-or-remove / window-move; the platform OS-drag
+/// backend reads from it inside its drop callback to translate a
+/// raw screen-coordinate drop into a `(WindowId, slot)` pair.
+///
+/// Thread-safe via an internal `Mutex<Vec<_>>`. The expected access
+/// pattern is "many publishes (winit thread) / occasional reads (OLE
+/// worker thread on drop)", so contention is a non-issue.
+#[derive(Debug, Default)]
+pub struct TabBarRegistry {
+    snapshots: Mutex<Vec<TabBarSnapshot>>,
+}
+
+impl TabBarRegistry {
+    /// Construct an empty registry. The App owns one and shares
+    /// `Arc<TabBarRegistry>` clones with backends through
+    /// [`AppHandle::tab_bar_registry`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace any existing snapshot for the same `window` (matched by
+    /// `WindowId` equality / `None == None`) and append the new one.
+    /// Called by the App each frame.
+    pub fn publish(&self, snapshot: TabBarSnapshot) {
+        let mut g = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        g.retain(|s| s.window != snapshot.window);
+        g.push(snapshot);
+    }
+
+    /// Remove the snapshot for `window` if any. Called when a window
+    /// closes so the registry doesn't keep a stale rect that would
+    /// false-positive a hit-test on later drops.
+    pub fn remove(&self, window: Option<WindowId>) {
+        let mut g = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        g.retain(|s| s.window != window);
+    }
+
+    /// Translate a screen-coordinate drop into a `(window, slot)` pair.
+    /// Returns:
+    ///   * `Some((window, slot))` if `(sx, sy)` falls inside any
+    ///     window's tab bar — `slot` is the insertion index in `[0,
+    ///     n]`.
+    ///   * `None` if no window contains the point, OR a window contains
+    ///     the point but the point isn't on its bar — in the latter case
+    ///     the caller (Windows IDropTarget::Drop) treats it as
+    ///     `DroppedOnEmpty` so the source tab tears out at the drop
+    ///     point. Distinguishing those is the caller's job (it knows
+    ///     `(sx, sy)` and can re-run `window_contains` on each
+    ///     snapshot).
+    pub fn resolve_screen_pos(&self, sx: i32, sy: i32) -> Option<(Option<WindowId>, usize)> {
+        let g = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        for snap in g.iter() {
+            if snap.bar_contains(sx, sy) {
+                return Some((snap.window, snap.drop_slot(sx)));
+            }
+        }
+        None
+    }
+
+    /// Returns `true` iff any registered window's outer rect (not bar)
+    /// contains `(sx, sy)`. Used by the Windows IDropTarget::Drop
+    /// fallback to decide whether to treat "in window but not on bar"
+    /// as `DroppedOnEmpty` (tear out at drop point) vs an unknown drop.
+    pub fn any_window_contains(&self, sx: i32, sy: i32) -> bool {
+        let g = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        g.iter().any(|s| s.window_contains(sx, sy))
+    }
+
+    /// Number of currently-published snapshots. For tests / diagnostics.
+    pub fn len(&self) -> usize {
+        self.snapshots.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// `true` iff no snapshots are published.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Thin shim that lets a backend running off the winit thread post
 /// events back into the App's event loop.
 ///
@@ -185,12 +332,17 @@ pub trait OsTabDragBackend: Send {
 pub struct AppHandle {
     proxy: EventLoopProxy<UserEvent>,
     pending: Arc<PendingDragOutcome>,
+    bars: Arc<TabBarRegistry>,
 }
 
 impl AppHandle {
     /// Wrap an existing [`EventLoopProxy`] + freshly-allocated mailbox.
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        Self { proxy, pending: Arc::new(PendingDragOutcome::default()) }
+        Self {
+            proxy,
+            pending: Arc::new(PendingDragOutcome::default()),
+            bars: Arc::new(TabBarRegistry::default()),
+        }
     }
 
     /// Reuse an existing mailbox — used by the App-side dispatcher so
@@ -200,7 +352,32 @@ impl AppHandle {
         proxy: EventLoopProxy<UserEvent>,
         pending: Arc<PendingDragOutcome>,
     ) -> Self {
-        Self { proxy, pending }
+        Self { proxy, pending, bars: Arc::new(TabBarRegistry::default()) }
+    }
+
+    /// Reuse both the mailbox and a shared [`TabBarRegistry`]. The App
+    /// uses this so its own publishing path and the backend's reading
+    /// path see the same registry instance.
+    pub fn with_pending_and_bars(
+        proxy: EventLoopProxy<UserEvent>,
+        pending: Arc<PendingDragOutcome>,
+        bars: Arc<TabBarRegistry>,
+    ) -> Self {
+        Self { proxy, pending, bars }
+    }
+
+    /// Hand out an `Arc` clone of the shared [`TabBarRegistry`] so the
+    /// backend can stash it for use inside its drop callback.
+    pub fn tab_bar_registry(&self) -> Arc<TabBarRegistry> {
+        self.bars.clone()
+    }
+
+    /// Convenience: same hit-test as
+    /// [`TabBarRegistry::resolve_screen_pos`] against the shared
+    /// registry. Backends typically call this from their drop
+    /// callback.
+    pub fn query_tab_bar_slot(&self, sx: i32, sy: i32) -> Option<(Option<WindowId>, usize)> {
+        self.bars.resolve_screen_pos(sx, sy)
     }
 
     /// Backend-side: cursor moved during a live drag. Posts a
