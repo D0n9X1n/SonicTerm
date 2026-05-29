@@ -708,6 +708,14 @@ pub struct App {
     pub(super) prefs_state: Option<PrefsState>,
     pub(super) prefs_renderer: Option<sonic_shared::prefs_renderer::PrefsRenderer>,
     pub(super) pending_prefs_open: bool,
+    /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
+    /// flag, then `drain_pending_window_creates` consumes it by calling
+    /// `create_new_terminal_window(el)`. Modeled on `pending_prefs_open`
+    /// because window creation requires an `ActiveEventLoop` reference
+    /// that isn't reachable from the keymap dispatcher. Works from BOTH
+    /// the windows-non-empty case (Cmd+N from a focused window) AND the
+    /// windows-empty post-close-last-window dock-alive case on macOS.
+    pub(super) pending_new_window: bool,
     /// IME composition state for CJK / other multi-key input methods.
     pub(super) ime: ImeState,
     /// Throttle for `Window::set_ime_cursor_area`. Without this every
@@ -981,6 +989,7 @@ impl App {
             prefs_state: None,
             prefs_renderer: None,
             pending_prefs_open: false,
+            pending_new_window: false,
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
@@ -1169,6 +1178,27 @@ fn notify_command_done(body: String) {
 }
 
 impl App {
+    /// Returns `true` when closing the last window should exit the
+    /// process, given a config. On macOS we honor
+    /// [`Config::quit_on_last_window_close`] (default `false` →
+    /// Chrome/Firefox-style: stay alive in the dock, waiting for
+    /// `Cmd+N`). On other platforms there is no dock concept, so we
+    /// always exit once the last window is gone — the config is
+    /// ignored. Exposed (test-only) so behavior is verifiable without
+    /// building a real winit event loop.
+    #[doc(hidden)]
+    pub fn should_exit_on_last_window_close(config: &Config) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            config.quit_on_last_window_close
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = config;
+            true
+        }
+    }
+
     /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
     /// right now would be coalesced (deferred to the next vsync boundary)
     /// or `false` if it would render immediately. Mirrors the exact
@@ -1578,6 +1608,25 @@ impl App {
     #[doc(hidden)]
     pub fn __test_main_tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Test-only: read the `pending_new_window` flag. Set by the
+    /// `Action::NewWindow` dispatcher arm; consumed by
+    /// `drain_pending_window_creates` (which needs a live
+    /// `ActiveEventLoop` and so can't run in a unit test). The flag
+    /// is the testable seam — see Phase E Haiku follow-up on PR #297.
+    #[doc(hidden)]
+    pub fn __test_pending_new_window(&self) -> bool {
+        self.pending_new_window
+    }
+
+    /// Test-only: count of entries in `self.windows`. Used by the
+    /// `new_window_*` regression tests to assert that a real drain
+    /// would change the windows-map cardinality (the post-drain
+    /// state itself requires an `ActiveEventLoop`).
+    #[doc(hidden)]
+    pub fn __test_windows_len(&self) -> usize {
+        self.windows.len()
     }
 
     /// Test-only: install a synthetic `drag_target` so the

@@ -251,10 +251,18 @@ impl App {
             Action::ResetFontSize => self.reset_font_size(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
-            Action::Scroll(_)
-            | Action::ToggleFullscreen
-            | Action::ResizePane { .. }
-            | Action::NewWindow => {
+            Action::NewWindow => {
+                // Epic #289 Phase E (Haiku follow-up): set the pending
+                // flag; `drain_pending_window_creates` consumes it with
+                // the live `ActiveEventLoop` and builds a fresh
+                // top-level terminal window. Works whether or not
+                // `self.windows` is empty — the dock-alive
+                // post-close-last-window case (macOS,
+                // quit_on_last_window_close=false) is the motivating
+                // bug Haiku flagged on PR #297.
+                self.pending_new_window = true;
+            }
+            Action::Scroll(_) | Action::ToggleFullscreen | Action::ResizePane { .. } => {
                 tracing::info!("action {action:?} accepted but not yet wired up");
             }
         }

@@ -75,7 +75,17 @@ impl App {
                 // are independent live terminals and must keep
                 // running. Only exit when nothing else is alive.
                 if self.windows.is_empty() {
-                    el.exit();
+                    if Self::should_exit_on_last_window_close(&self.config) {
+                        el.exit();
+                    } else {
+                        // Chrome/Firefox/Safari-style on macOS: keep the
+                        // process alive after the last window closes so
+                        // the user can `Cmd+N` (or use the dock menu) to
+                        // open a fresh window without cold-start cost.
+                        // The main window is hidden either way — on
+                        // non-macOS we would have exited above.
+                        self.hide_main_window();
+                    }
                 } else {
                     self.hide_main_window();
                 }
@@ -653,7 +663,11 @@ impl App {
                         }
                         if self.tabs.is_empty() {
                             if self.windows.is_empty() {
-                                el.exit();
+                                if Self::should_exit_on_last_window_close(&self.config) {
+                                    el.exit();
+                                } else {
+                                    self.hide_main_window();
+                                }
                             } else {
                                 self.hide_main_window();
                             }
