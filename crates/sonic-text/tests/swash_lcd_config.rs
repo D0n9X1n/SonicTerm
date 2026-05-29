@@ -6,17 +6,10 @@ use swash::zeno::Format;
 fn monochrome_rasterizer_uses_hinted_outlines() {
     let (sources, format, hint) = monochrome_render_config_for_test();
     assert!(hint, "outline scaler must enable hinting");
-    #[cfg(target_os = "windows")]
-    assert_eq!(
-        format,
-        Format::Subpixel,
-        "Windows uses LCD subpixel masks (ClearType parity, #261)"
-    );
-    #[cfg(not(target_os = "windows"))]
     assert_eq!(
         format,
         Format::Alpha,
-        "macOS + Linux use grayscale alpha masks; LCD subpixel produces color fringing on macOS"
+        "all platforms use grayscale alpha masks until the Windows LCD integration is fixed (#316)"
     );
     assert!(
         sources.iter().any(|source| matches!(source, Source::Outline)),
