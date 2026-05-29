@@ -1633,6 +1633,17 @@ impl App {
         self.close_active_tab_in_child(id)
     }
 
+    /// Test-only invoker for [`Self::reap_empty_child`]. Used by the
+    /// PR #302 follow-up regression that pins `App::transfer_tab` onto
+    /// the unified empty-window cleanup contract: a stale id is a
+    /// silent no-op (no panic, no spurious `windows` mutation), which
+    /// is the only behaviour we can reliably pin without a live
+    /// `WindowState` (needs a wgpu surface + winit `Window`).
+    #[doc(hidden)]
+    pub fn __test_invoke_reap_empty_child(&mut self, id: WindowId) {
+        self.reap_empty_child(id);
+    }
+
     /// Test-only invoker for [`Self::close_tab_at_in_child`] — the
     /// per-index helper the close-button (×) hit-test path uses in a
     /// torn-out child window's tab bar.
@@ -2343,8 +2354,12 @@ impl App {
         };
         if source_empty {
             if let Some(id) = source {
-                // child window — close it
-                self.windows.remove(&id);
+                // child window — route through the unified empty-window
+                // cleanup contract so straggler redraw targets get nulled
+                // and the "child reaped" trace fires (PR #302 follow-up:
+                // bypassing this dropped to a raw `windows.remove` which
+                // skipped both bits of bookkeeping).
+                self.reap_empty_child(id);
             } else {
                 // main window — leave the App to its existing
                 // last-tab-closed handling (Phase B already covers

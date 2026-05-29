@@ -300,3 +300,46 @@ fn transfer_with_oob_source_idx_returns_err() {
     assert_eq!(app.__test_main_tab_count(), 1, "source tab vec unchanged");
     assert_eq!(app.__test_pane_ids(), vec![pane_a], "panes map unchanged");
 }
+
+/// PR #302 Haiku follow-up: when `App::transfer_tab` empties a child
+/// source window it MUST route cleanup through `reap_empty_child` (the
+/// unified contract) instead of doing a direct `windows.remove`. The
+/// unified helper nulls out straggler `redraw_target`s and emits the
+/// "child window reaped" trace; the raw remove skipped both.
+///
+/// We can't construct a live `WindowState` in a unit test (it requires
+/// a wgpu surface + winit `Window`). What we CAN pin is the boundary
+/// contract that the rewrite depends on:
+///
+///   1. `reap_empty_child` on a stale id is a silent no-op — proves
+///      the new `transfer_tab` call site won't panic when the source
+///      child has already been raced away.
+///   2. `transfer_tab` with a missing child source still reports
+///      `SourceMissing` (the reap-routing change must not regress
+///      pre-validation — Haiku #294's data-loss guard).
+#[test]
+fn transfer_last_tab_uses_reap_empty_child() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    let children_before = app.child_window_count();
+
+    // (1) reap_empty_child on a stale id: no panic, no spurious insert.
+    let stale = WindowId::dummy();
+    app.__test_invoke_reap_empty_child(stale);
+    assert_eq!(
+        app.child_window_count(),
+        children_before,
+        "reap_empty_child on stale id must not invent a windows entry"
+    );
+
+    // (2) transfer_tab with stale child source still rejects with
+    //     SourceMissing BEFORE detaching anything — proves the
+    //     pre-validation guard (PR #294) survives the reap-routing
+    //     rewrite. If the rewrite had inverted the check order, this
+    //     would either panic in `reap_empty_child` or drop a tab.
+    let main_before = app.__test_main_tab_count();
+    let result = app.transfer_tab(Some(stale), 0, None, 0);
+    assert_eq!(result, Err(TransferError::SourceMissing));
+    assert_eq!(app.__test_main_tab_count(), main_before);
+    assert_eq!(app.child_window_count(), children_before);
+}
