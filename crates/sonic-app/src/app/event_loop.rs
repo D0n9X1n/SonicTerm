@@ -21,8 +21,8 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
-use super::{mark_all_panes_dirty, with_integrated_titlebar, App, UserEvent};
-use crate::app::integrated_titlebar_inset;
+use super::{mark_all_panes_dirty, with_integrated_titlebar_for, App, UserEvent};
+use crate::app::integrated_titlebar_inset_for;
 use crate::config_watch::ConfigWatcher;
 use winit::event_loop::ControlFlow;
 
@@ -147,7 +147,7 @@ impl App {
         let rows = self.config.window.rows;
 
         let attrs = super::with_backdrop_transparency(
-            with_integrated_titlebar(
+            with_integrated_titlebar_for(
                 Window::default_attributes()
                     .with_title(format!("Sonic Terminal — {}", self.theme.name))
                     .with_inner_size(winit::dpi::LogicalSize::new(
@@ -159,6 +159,7 @@ impl App {
                             + self.config.window.padding_bottom
                             + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
                     )),
+                self.config.tab_bar_position,
             ),
             self.config.appearance.backdrop,
         );
@@ -253,7 +254,7 @@ impl App {
         }
         self.renderer = Some(renderer);
         if let Some(r) = self.renderer.as_mut() {
-            r.set_titlebar_inset(integrated_titlebar_inset());
+            r.set_titlebar_inset(integrated_titlebar_inset_for(self.config.tab_bar_position));
             r.set_tab_bar_position(self.config.tab_bar_position);
             // Apply the user's `tab_close_button_color` from sonic.toml
             // BEFORE the first frame so a custom always-visible × shows

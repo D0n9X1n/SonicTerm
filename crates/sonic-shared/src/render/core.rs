@@ -1653,6 +1653,16 @@ impl GpuRenderer {
         if x < 0.0 || y < 0.0 {
             return None;
         }
+        // When the tab bar is pinned to the bottom of the window, clicks
+        // inside the bar strip must NOT resolve to a phantom grid cell —
+        // otherwise selection drags initiated in the bar would extend
+        // the underlying grid selection. Reject anything below the
+        // grid's content area.
+        let logical_h = self.config.height as f32 / self.scale_factor;
+        let content_bottom = logical_h - self.bottom_inset() - self.padding_bottom;
+        if py >= content_bottom {
+            return None;
+        }
         let col = (x / self.cell_w).floor() as i32;
         let row = (y / self.cell_h).floor() as i32;
         if col < 0 || row < 0 {
