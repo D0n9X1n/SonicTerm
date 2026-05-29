@@ -15,6 +15,7 @@ pub mod color;
 pub mod cursor;
 pub mod drag_chip;
 pub mod metrics;
+pub mod row_quad_cache;
 pub mod tab_spans;
 
 pub use color::*;

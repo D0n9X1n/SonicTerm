@@ -376,6 +376,12 @@ pub struct GpuRenderer {
     /// changed splices its cached output straight into the frame and
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: crate::row_glyph_cache::RowGlyphCache,
+    /// Per-row cache for background/underline/hyperlink-tint quads
+    /// (Epic #300 Phase P2). Mirrors `row_glyph_cache` but for the
+    /// `QuadInstance`s emitted by `emit_cell_bg_quads_clipped` — on a
+    /// hit we splice the cached `Vec<QuadInstance>` straight into the
+    /// frame's quad vector and skip the per-cell run-length-encode.
+    line_quad_cache: crate::render::row_quad_cache::LineQuadCache,
     /// Per-pane origins recorded on the most recent `render()` call.
     /// `(pane_id, [origin_x_px, origin_y_px])` for every pane in the
     /// frame's pane slice. Test-only diagnostic surfaced through
@@ -758,6 +764,7 @@ impl GpuRenderer {
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
             row_glyph_cache: crate::row_glyph_cache::RowGlyphCache::new(),
+            line_quad_cache: crate::render::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
             style_rev: 0,
             drag_chip: None,
@@ -777,6 +784,7 @@ impl GpuRenderer {
         // the surface size; cached glyph instances would land at the
         // wrong NDC coordinates.
         self.row_glyph_cache.invalidate_all();
+        self.line_quad_cache.invalidate_all();
         // Text buffers are laid out in LOGICAL pixels (their font_size
         // is logical); pass logical widths so wrapping/clipping doesn't
         // give them 2× the room on Retina.
@@ -1329,6 +1337,7 @@ impl GpuRenderer {
             );
         }
         self.row_glyph_cache.invalidate_all();
+        self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
         tracing::info!(
             "renderer.set_font: family={family} size={size} line_h={} cell={cw:.2}x{ch:.2}",
@@ -1392,6 +1401,7 @@ impl GpuRenderer {
             );
         }
         self.row_glyph_cache.invalidate_all();
+        self.line_quad_cache.invalidate_all();
         // The GPU-side AtlasUpload owns a texture sized to the old atlas
         // dimensions and a bind group pointing at it. After replacing the
         // CPU `GlyphAtlas` with one of a different size, the next
@@ -1448,6 +1458,7 @@ impl GpuRenderer {
         self.last_frame_key = None;
         self.style_rev = self.style_rev.wrapping_add(1);
         self.row_glyph_cache.invalidate_all();
+        self.line_quad_cache.invalidate_all();
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
@@ -2068,24 +2079,87 @@ impl GpuRenderer {
         // surface `LoadOp::Clear(self.bg)` already covers that area.
         // Part B step 3: emit bg quads for EVERY pane using each pane's
         // own origin, not just the active pane.
+        //
+        // Epic #300 P2: per-row LineQuadCache. Background quads are the
+        // hottest QuadInstance source in dense_cells (vtebench gap, see
+        // CLAUDE.md §14). Each row's emission is keyed on (pane_id,
+        // abs_row, content+geom+style+selection hash); on a hit we
+        // `extend_from_slice` the cached slice and skip the per-cell
+        // run-length-encode walk in `emit_cell_bg_quads_for_row`.
+        let sel_bbox_for_quads: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+            let (a, b) = s.normalized();
+            (a.0, a.1, b.0, b.1)
+        });
+        let total_visible_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
+        self.line_quad_cache.resize(total_visible_rows.max(1));
         for pv in &pane_views {
             let pv_grid: &Grid = pv.grid;
+            let pane_id: crate::render::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = pane_rects
                 .iter()
                 .find(|(id, _)| *id == pv.pane_id)
                 .map(|(_, rect)| *rect)
                 .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
-            emit_cell_bg_quads_clipped(
-                pv_grid,
-                Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
-                theme,
-                pane_rect,
-                cell_w,
-                cell_h,
-                sw,
-                sh,
-                &mut quads,
-            );
+            let view_top_abs_bg = Self::resolved_view_top_abs(pv_grid, viewport_top_abs);
+            // Mirror RowGlyphCache's dirty-row invalidation: drop entries
+            // for every row the VT thread mutated since the last frame.
+            for r in pv_grid.dirty_rows() {
+                self.line_quad_cache.invalidate_row_abs(pane_id, view_top_abs_bg + r as u64);
+            }
+            let pad_bg = pane_rect.x;
+            let top_inset_bg = pane_rect.y;
+            let max_cols =
+                ((pane_rect.w / cell_w).floor() as i32).clamp(0, i32::from(pv_grid.cols)) as u16;
+            let max_rows =
+                ((pane_rect.h / cell_h).floor() as i32).clamp(0, i32::from(pv_grid.rows)) as u16;
+            if max_cols == 0 || max_rows == 0 {
+                continue;
+            }
+            for r in 0..max_rows {
+                let row_abs = view_top_abs_bg + r as u64;
+                let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
+                    continue;
+                };
+                let key = crate::render::row_quad_cache::row_quad_hash(
+                    view_top_abs_bg,
+                    r as usize,
+                    row_cells,
+                    self.style_rev,
+                    cell_w,
+                    cell_h,
+                    pad_bg,
+                    top_inset_bg,
+                    pane_rect.w,
+                    pane_rect.h,
+                    sel_bbox_for_quads,
+                );
+                if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
+                    quads.extend_from_slice(&cached.quads);
+                    continue;
+                }
+                let base = quads.len();
+                emit_cell_bg_quads_for_row(
+                    pv_grid,
+                    view_top_abs_bg,
+                    theme,
+                    pad_bg,
+                    top_inset_bg,
+                    cell_w,
+                    cell_h,
+                    sw,
+                    sh,
+                    max_cols,
+                    r,
+                    &mut quads,
+                );
+                let row_quads = quads[base..].to_vec();
+                self.line_quad_cache.insert(
+                    pane_id,
+                    row_abs,
+                    key,
+                    crate::render::row_quad_cache::CachedRowQuads { quads: row_quads },
+                );
+            }
         }
 
         if let Some(sel) = selection {
@@ -4145,9 +4219,46 @@ pub fn emit_cell_bg_quads_clipped(
         return;
     }
     for r in 0..max_rows {
+        emit_cell_bg_quads_for_row(
+            grid,
+            view_top_abs,
+            theme,
+            pad,
+            top_inset,
+            cell_w,
+            cell_h,
+            sw,
+            sh,
+            max_cols,
+            r,
+            out,
+        );
+    }
+}
+
+/// Emit background quads for a single visible row. Extracted so the
+/// `LineQuadCache` miss path (Epic #300 P2) can call it for one row
+/// at a time and capture the resulting quads into the cache.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn emit_cell_bg_quads_for_row(
+    grid: &Grid,
+    view_top_abs: u64,
+    theme: &Theme,
+    pad: f32,
+    top_inset: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    max_cols: u16,
+    r: u16,
+    out: &mut Vec<QuadInstance>,
+) {
+    {
         let row_abs = view_top_abs + r as u64;
         let Some(row) = grid.row_at_abs(row_abs) else {
-            continue;
+            return;
         };
         // Run-length encode adjacent same-bg cells into one quad.
         let mut run_start: Option<u16> = None;
