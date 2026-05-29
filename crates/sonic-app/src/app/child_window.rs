@@ -34,7 +34,7 @@ use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
     resize_all_panes, shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App,
-    ChildWindow, PaneState, TabState, UserEvent,
+    PaneState, TabState, UserEvent, WindowState,
 };
 use crate::app::integrated_titlebar_inset;
 use sonic_ui::prefs::PrefsHit;
@@ -48,15 +48,15 @@ impl App {
     ) {
         let theme = self.theme.clone();
         let config = self.config.clone();
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return };
+        let Some(child) = self.windows.get_mut(&win_id) else { return };
         match event {
             WindowEvent::CloseRequested => {
                 // Clear redraw targets so the VT thread stops trying
                 // to redraw a dropped window (it will then notice the
                 // pty channel close on Drop and exit). Dropping the
-                // ChildWindow drops PaneState → PtyHandle → kills the
+                // WindowState drops PaneState → PtyHandle → kills the
                 // child shells.
-                if let Some(removed) = self.child_windows.remove(&win_id) {
+                if let Some(removed) = self.windows.remove(&win_id) {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
@@ -275,7 +275,7 @@ impl App {
                     // child borrow ends at last use; safe to call &mut self next
                     let _ = child;
                     let tgt = self.compute_child_drag_target(win_id, local);
-                    if let Some(c) = self.child_windows.get_mut(&win_id) {
+                    if let Some(c) = self.windows.get_mut(&win_id) {
                         c.drag_target = tgt;
                         c.window.request_redraw();
                     }
@@ -365,10 +365,10 @@ impl App {
                                 // No-op cancel.
                             }
                             crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                // Re-borrow via self.child_windows
+                                // Re-borrow via self.windows
                                 // because `let _ = child;` above
                                 // released the long-lived mut borrow.
-                                if let Some(c) = self.child_windows.get_mut(&win_id) {
+                                if let Some(c) = self.windows.get_mut(&win_id) {
                                     c.tabs.reorder(from, to);
                                     if from < c.tab_states.len() && to < c.tab_states.len() {
                                         let st = c.tab_states.remove(from);
@@ -471,9 +471,9 @@ impl App {
         }
     }
     pub(super) fn reap_empty_child(&mut self, win_id: WindowId) {
-        if let Some(child) = self.child_windows.get(&win_id) {
+        if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
-                if let Some(removed) = self.child_windows.remove(&win_id) {
+                if let Some(removed) = self.windows.remove(&win_id) {
                     // panes map should already be empty; defensively
                     // null out any stragglers' redraw targets.
                     for pane in removed.panes.values() {
@@ -482,7 +482,7 @@ impl App {
                     drop(removed);
                     tracing::info!(
                         "child window reaped after drag-merge; remaining children={}",
-                        self.child_windows.len()
+                        self.windows.len()
                     );
                 }
             }
@@ -502,7 +502,7 @@ impl App {
         }
         // If main has been drained but child windows are still alive,
         // hide the main window without exiting the app.
-        if self.tabs.is_empty() && !self.child_windows.is_empty() {
+        if self.tabs.is_empty() && !self.windows.is_empty() {
             self.hide_main_window();
         }
         if let Some(w) = &self.window {
@@ -514,7 +514,7 @@ impl App {
             w.set_visible(false);
         }
         self.main_hidden = true;
-        tracing::info!("main window hidden (drained); child_windows={}", self.child_windows.len());
+        tracing::info!("main window hidden (drained); windows={}", self.windows.len());
     }
     pub(super) fn show_main_window(&mut self) {
         if let Some(w) = &self.window {
@@ -606,7 +606,7 @@ impl App {
         // mutable borrow ends before we spawn the VT thread (which
         // captures clones), then re-borrow to install the new tab.
         let (cols, rows, child_window, cursor_visible_arc) = {
-            let Some(child) = self.child_windows.get_mut(&win_id) else {
+            let Some(child) = self.windows.get_mut(&win_id) else {
                 return false;
             };
             let (c, r) = child.renderer.cells();
@@ -615,7 +615,7 @@ impl App {
         let pane_state =
             self.spawn_pane_state_for_child(cols, rows, child_window.clone(), cursor_visible_arc);
         let pane_id = next_pane_id();
-        let Some(child) = self.child_windows.get_mut(&win_id) else {
+        let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };
         child.panes.insert(pane_id, pane_state);
@@ -652,7 +652,7 @@ impl App {
     /// Close the active tab of the given child window. Returns `true`
     /// on success.
     pub(super) fn close_active_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let idx = child.tabs.active_index();
         if idx >= child.tab_states.len() {
             return false;
@@ -672,7 +672,7 @@ impl App {
     /// iTerm2/wezterm rule: > 1 pane → close the focused pane only,
     /// else → close the whole tab.
     pub(super) fn close_active_pane_or_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         let pane_count = st.tree.leaves().len();
@@ -696,7 +696,7 @@ impl App {
 
     /// Advance the active tab in the child window.
     pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.next();
         child.window.request_redraw();
         true
@@ -704,7 +704,7 @@ impl App {
 
     /// Step back one tab in the child window.
     pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.prev();
         child.window.request_redraw();
         true
@@ -712,7 +712,7 @@ impl App {
 
     /// Activate a specific tab index in the child window.
     pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.activate(idx);
         child.window.request_redraw();
         true
@@ -720,7 +720,7 @@ impl App {
 
     /// Activate the last tab in the child window.
     pub(super) fn activate_last_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
         child.window.request_redraw();
@@ -748,12 +748,12 @@ impl App {
     /// `true` on success.
     pub(super) fn split_active_pane_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
         // Snapshot what we need to spawn a PTY before any mutable borrow
-        // of self.child_windows is taken — `spawn_pane_state_for_child`
+        // of self.windows is taken — `spawn_pane_state_for_child`
         // captures clones of (pty_burst_gen, window, cursor_visible) and
         // we want the borrow checker happy when we re-borrow `child`
         // below to install the new pane.
         let (cols, rows, child_window, cursor_visible_arc) = {
-            let Some(child) = self.child_windows.get_mut(&win_id) else {
+            let Some(child) = self.windows.get_mut(&win_id) else {
                 return false;
             };
             let (c, r) = child.renderer.cells();
@@ -762,7 +762,7 @@ impl App {
         let new_id = next_pane_id();
         let pane_state =
             self.spawn_pane_state_for_child(cols, rows, child_window.clone(), cursor_visible_arc);
-        let Some(child) = self.child_windows.get_mut(&win_id) else {
+        let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };
         let tab_idx = child.tabs.active_index();
@@ -782,14 +782,14 @@ impl App {
     /// tab has only one pane left, degrades to closing the tab (same
     /// iTerm2/wezterm rule as the main-window `close_active_pane`).
     pub(super) fn close_active_pane_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         let focus = st.active_pane;
         if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
             // Single-leaf → fall back to tab close. Release the &mut
-            // ChildWindow borrow first so `close_active_tab_in_child`
-            // can re-borrow `self.child_windows`.
+            // WindowState borrow first so `close_active_tab_in_child`
+            // can re-borrow `self.windows`.
             let _ = child;
             return self.close_active_tab_in_child(win_id);
         }
@@ -807,7 +807,7 @@ impl App {
     /// Move pane focus in the given direction within the active tab of
     /// the given child window.
     pub(super) fn focus_pane_dir_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
@@ -824,7 +824,7 @@ impl App {
 
     /// Toggle zoom on the active pane in the given child window.
     pub(super) fn toggle_active_pane_zoom_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         let active = st.active_pane;
@@ -844,7 +844,7 @@ impl App {
         win_id: WindowId,
         dir: Direction,
     ) -> bool {
-        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         if st.tree.resize_split(st.active_pane, dir, 0.05) {
@@ -860,12 +860,12 @@ impl App {
 /// current pane tree layout. Mirrors `App::resize_visible_panes` for the
 /// child case so split/close/zoom on a torn-out window propagate to the
 /// PTY winsize the same way.
-fn resize_visible_panes_in_child(child: &mut ChildWindow) {
+fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
     let (cw, ch) = child.renderer.cell_size();
     crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch);
 }
-fn child_enter_copy_mode(child: &mut ChildWindow) {
+fn child_enter_copy_mode(child: &mut WindowState) {
     let tab_idx = child.tabs.active_index();
     let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
     let Some(pane) = child.panes.get(&active_id) else { return };
@@ -878,7 +878,7 @@ fn child_enter_copy_mode(child: &mut ChildWindow) {
     mark_all_panes_dirty(&child.panes);
 }
 
-fn child_enter_quick_select(child: &mut ChildWindow) {
+fn child_enter_quick_select(child: &mut WindowState) {
     let tab_idx = child.tabs.active_index();
     let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else { return };
     let Some(pane) = child.panes.get(&active_id) else { return };
@@ -893,7 +893,7 @@ fn child_enter_quick_select(child: &mut ChildWindow) {
     mark_all_panes_dirty(&child.panes);
 }
 
-fn child_copy_mode_handle_key(child: &mut ChildWindow, event: &KeyEvent) {
+fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
     let Some(mut state) = child.copy_mode.take() else { return };
     let mut should_copy = false;
     let mut should_exit = false;

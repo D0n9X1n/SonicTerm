@@ -97,8 +97,8 @@ fn lone_tab_source_side_apply_with_no_child_windows_is_safe_noop_on_hide() {
 #[test]
 fn tear_out_apply_child_source_side_drops_drained_child() {
     // After tearing out a child's only tab, the child window entry
-    // must be removed from `App.child_windows`. We can't construct a
-    // real ChildWindow in tests (renderer requires a GPU surface),
+    // must be removed from `App.windows`. We can't construct a
+    // real WindowState in tests (renderer requires a GPU surface),
     // but we CAN verify the contract on the missing-id path: a stale
     // WindowId is a no-op (no panic, no spurious insertion).
     let mut app = synth_app();

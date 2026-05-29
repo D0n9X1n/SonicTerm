@@ -33,8 +33,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_panes_to_rects,
-    shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow,
-    PaneState, TabState, UserEvent,
+    shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState,
+    TabState, UserEvent, WindowState,
 };
 use crate::app::integrated_titlebar_inset;
 use sonic_ui::prefs::PrefsHit;
@@ -75,7 +75,7 @@ impl App {
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_theme(&t);
                     }
-                    for child in self.child_windows.values_mut() {
+                    for child in self.windows.values_mut() {
                         child.renderer.set_theme(&t);
                     }
                     self.theme = t;
@@ -83,7 +83,7 @@ impl App {
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
                     mark_all_panes_dirty(&self.panes);
-                    for child in self.child_windows.values() {
+                    for child in self.windows.values() {
                         mark_all_panes_dirty(&child.panes);
                     }
                 }
@@ -106,12 +106,12 @@ impl App {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_theme(&t);
             }
-            for child in self.child_windows.values_mut() {
+            for child in self.windows.values_mut() {
                 child.renderer.set_theme(&t);
             }
             self.theme = t;
             mark_all_panes_dirty(&self.panes);
-            for child in self.child_windows.values() {
+            for child in self.windows.values() {
                 mark_all_panes_dirty(&child.panes);
             }
             tracing::info!(
@@ -138,7 +138,7 @@ impl App {
             // child owns its own GpuRenderer, so it needs the font
             // change AND the matching pane resize against its own cell
             // metrics (its window can be a different size from main).
-            for child in self.child_windows.values_mut() {
+            for child in self.windows.values_mut() {
                 child.renderer.set_font(
                     &new_cfg.font.family,
                     new_cfg.font.size,
@@ -163,7 +163,7 @@ impl App {
             r.set_cursor_shape(new_cfg.terminal.cursor_shape);
             r.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
-        for child in self.child_windows.values_mut() {
+        for child in self.windows.values_mut() {
             child.renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
             child.renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
@@ -197,7 +197,7 @@ impl App {
                 let (cw, ch) = r.cell_size();
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
-            for child in self.child_windows.values_mut() {
+            for child in self.windows.values_mut() {
                 child.renderer.set_padding(pad);
                 let rects = App::compute_pane_rects_for(child);
                 let (cw, ch) = child.renderer.cell_size();
@@ -216,7 +216,7 @@ impl App {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
             }
-            for child in self.child_windows.values_mut() {
+            for child in self.windows.values_mut() {
                 child.renderer.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
             }
             tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
@@ -230,7 +230,7 @@ impl App {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
-            for child in self.child_windows.values_mut() {
+            for child in self.windows.values_mut() {
                 child.renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             tracing::info!(
@@ -276,7 +276,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        for child in self.child_windows.values() {
+        for child in self.windows.values() {
             child.window.request_redraw();
         }
     }
@@ -302,7 +302,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_theme(&theme);
         }
-        for child in self.child_windows.values_mut() {
+        for child in self.windows.values_mut() {
             child.renderer.set_theme(&theme);
         }
         self.theme = theme;
@@ -311,7 +311,7 @@ impl App {
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
         mark_all_panes_dirty(&self.panes);
-        for child in self.child_windows.values() {
+        for child in self.windows.values() {
             mark_all_panes_dirty(&child.panes);
         }
         // Keep the prefs surface (if open) in sync — the Appearance
@@ -322,7 +322,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        for child in self.child_windows.values() {
+        for child in self.windows.values() {
             child.window.request_redraw();
         }
         tracing::info!("theme -> {name}");
@@ -354,7 +354,7 @@ impl App {
             let (cw, ch) = r.cell_size();
             resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }
-        for child in self.child_windows.values_mut() {
+        for child in self.windows.values_mut() {
             child.renderer.set_font(&family, size, line_h);
             let rects = App::compute_pane_rects_for(child);
             let (cw, ch) = child.renderer.cell_size();
@@ -363,7 +363,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        for child in self.child_windows.values() {
+        for child in self.windows.values() {
             child.window.request_redraw();
         }
         tracing::info!("font size -> {size}pt");
@@ -384,7 +384,7 @@ impl App {
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
         }
-        for child in self.child_windows.values_mut() {
+        for child in self.windows.values_mut() {
             if child.renderer.set_tab_bar_visible(visible) {
                 let rects = App::compute_pane_rects_for(child);
                 let (cw, ch) = child.renderer.cell_size();
@@ -394,7 +394,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        for child in self.child_windows.values() {
+        for child in self.windows.values() {
             child.window.request_redraw();
         }
     }

@@ -14,7 +14,7 @@
 //! reading the Phase B production code: line in `tear_out.rs` /
 //! `tear_out_from_child` that sets
 //! `self.frontmost_window = Some(win_id);` directly after inserting
-//! into `self.child_windows`. Phase A's existing routing tests
+//! into `self.windows`. Phase A's existing routing tests
 //! ensure NewTab honors that value.
 
 use sonic_app::app::App;
@@ -76,7 +76,7 @@ fn synth_app() -> App {
 #[test]
 fn new_tab_with_stale_torn_window_id_falls_back_to_main() {
     // The Phase A contract: if `frontmost_window` is set but the
-    // window id is no longer in `child_windows`, NewTab must fall
+    // window id is no longer in `windows`, NewTab must fall
     // back to main rather than no-op. This shape is what the Phase
     // B tear-out produces transiently if the new window dies before
     // the next dispatch — pin the safety net.

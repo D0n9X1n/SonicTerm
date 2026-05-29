@@ -152,7 +152,30 @@ use sonic_ui::tabs::{CommandStatus, Tab, TabBar};
 /// to point at this child's window so output from the shell triggers
 /// redraws on the correct surface (otherwise typing in the child
 /// would render onto the parent's window, which was the v1 bug).
-pub struct ChildWindow {
+/// Epic #289 Phase B — kind of window stored in the unified
+/// [`App::windows`] map. Today every torn-out terminal child window is
+/// `Terminal`. `Prefs` is reserved for the preferences window once its
+/// state is folded into the unified map in Phase C.
+///
+/// Note: the main terminal window's authoritative state still lives
+/// directly on `App` (split across `App::tabs`, `App::panes`,
+/// `App::renderer`, etc.) pending the Phase C struct-level absorption.
+/// Phase B's deliverable is removing the `child_windows` field name
+/// and folding torn-out (and eventually prefs) windows under one
+/// role-tagged map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    /// A terminal window (torn-out child today; main + child after
+    /// Phase C lands).
+    Terminal,
+    /// The preferences window. Routed through a separate dispatch path
+    /// and never receives terminal action chords.
+    Prefs,
+}
+
+pub struct WindowState {
+    /// Phase B classification — see [`WindowRole`].
+    pub role: WindowRole,
     pub window: Arc<Window>,
     pub renderer: GpuRenderer,
     pub tabs: TabBar,
@@ -193,7 +216,7 @@ pub enum FrontmostKind {
     /// Main terminal window is OS-frontmost.
     Main,
     /// A torn-out child terminal window is OS-frontmost. Carries the
-    /// window id so the caller can index `child_windows`.
+    /// window id so the caller can index `windows`.
     Child(WindowId),
     /// A non-terminal window (prefs, etc.) is frontmost. Terminal
     /// actions fall back to main.
@@ -681,7 +704,7 @@ pub struct App {
     pub(super) drag_session: Option<crate::tab_drag::DragSession>,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
-    pub(super) child_windows: HashMap<WindowId, ChildWindow>,
+    pub(super) windows: HashMap<WindowId, WindowState>,
     /// Most-recently-focused window's id. `None` means the main window
     /// is focused (or no window has been focused yet). Set/cleared in
     /// the `WindowEvent::Focused` handler on both the main and child
@@ -843,7 +866,7 @@ impl App {
 
     /// Same as [`Self::compute_active_pane_rects`] but for a torn-out
     /// child window (its own renderer + tab_states).
-    pub(crate) fn compute_pane_rects_for(child: &ChildWindow) -> Vec<(u64, sonic_ui::pane::Rect)> {
+    pub(crate) fn compute_pane_rects_for(child: &WindowState) -> Vec<(u64, sonic_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
         let r = &child.renderer;
@@ -906,7 +929,7 @@ impl App {
             cheatsheet: CheatsheetState::new(),
             pressed_tab: None,
             drag_session: None,
-            child_windows: HashMap::new(),
+            windows: HashMap::new(),
             focused_child: None,
             frontmost_window: None,
             drag_target: None,
@@ -1013,7 +1036,7 @@ pub fn poll_command_events_for_tab_state(
 }
 
 #[doc(hidden)]
-pub fn poll_command_events_for_child_window(child: &mut ChildWindow, config: &Config) {
+pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) {
     for tab_idx in 0..child.tab_states.len() {
         poll_command_events_for_tab_state(
             &child.panes,
@@ -1260,12 +1283,12 @@ impl App {
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
         let main_alive = !self.main_hidden && !self.tabs.is_empty();
-        !main_alive && self.child_windows.is_empty()
+        !main_alive && self.windows.is_empty()
     }
 
     /// Test-only: pure policy fn mirroring `should_exit` so integration
     /// tests can exercise the rule without constructing a real
-    /// `ChildWindow` (which requires a live winit Window + GpuRenderer).
+    /// `WindowState` (which requires a live winit Window + GpuRenderer).
     #[doc(hidden)]
     pub fn should_exit_pure(main_tabs: usize, main_hidden: bool, child_count: usize) -> bool {
         let main_alive = !main_hidden && main_tabs > 0;
@@ -1327,7 +1350,7 @@ impl App {
     /// Test-only: how many tabs the named child window currently owns.
     #[doc(hidden)]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
-        self.child_windows.get(&id).map(|c| c.tabs.len())
+        self.windows.get(&id).map(|c| c.tabs.len())
     }
 
     /// Test-only: install a `focused_child` id without going through a
@@ -1369,7 +1392,7 @@ impl App {
     ///   * `FrontmostKind::Main` if the recorded id matches the main
     ///     window we currently own.
     ///   * `FrontmostKind::Child(id)` if the recorded id matches a live
-    ///     entry in [`Self::child_windows`].
+    ///     entry in [`Self::windows`].
     ///   * `FrontmostKind::Other` for the prefs window or any other
     ///     non-terminal window — actions should fall through to the safe
     ///     main-window default in that case rather than mutate prefs.
@@ -1384,7 +1407,7 @@ impl App {
                 return FrontmostKind::Main;
             }
         }
-        if self.child_windows.contains_key(&id) {
+        if self.windows.contains_key(&id) {
             return FrontmostKind::Child(id);
         }
         if let Some(w) = self.prefs_window.as_ref() {
@@ -1518,7 +1541,23 @@ impl App {
 
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
-        self.child_windows.len()
+        self.windows.len()
+    }
+
+    /// Epic #289 Phase B — number of windows in the unified
+    /// [`Self::windows`] map (terminal + prefs once it's folded in).
+    /// Used by the regression suite to pin the rename + role tagging.
+    #[doc(hidden)]
+    pub fn unified_window_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Epic #289 Phase B — count entries in [`Self::windows`] whose
+    /// role matches the argument. Today every entry is `Terminal`;
+    /// Phase C adds `Prefs` once that path moves in.
+    #[doc(hidden)]
+    pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
+        self.windows.values().filter(|w| w.role == role).count()
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY

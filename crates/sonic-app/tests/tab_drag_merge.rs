@@ -219,7 +219,7 @@ fn attach_to_missing_child_returns_false() {
     let _ = app.__test_seed_tab("alpha");
     let _ = app.__test_seed_tab("bravo");
     let (tab, state, panes) = app.detach_tab_state(0).expect("detach");
-    // Conjure a WindowId that won't be in child_windows. We use the
+    // Conjure a WindowId that won't be in windows. We use the
     // dummy one from `EventLoop::owned_display_handle`-adjacent code
     // not being available here; instead, fabricate via the public
     // `WindowId::from(NonZeroU64::new(1))`... which winit doesn't

@@ -127,7 +127,7 @@ fn close_tab_with_stale_frontmost_falls_back_to_main_and_clears() {
     app.__test_seed_tab("bravo");
     assert_eq!(app.__test_main_tab_count(), 2);
 
-    // Stale child id — no real child_windows entry. Dispatcher must
+    // Stale child id — no real windows entry. Dispatcher must
     // see Child(_) is impossible (stale → None), fall through to main.
     app.__test_set_frontmost_window(Some(WindowId::dummy()));
     app.run_action(&Action::CloseTab);
@@ -183,7 +183,7 @@ fn close_active_tab_in_child_with_missing_id_is_noop() {
     let mut app = make_app();
     app.__test_seed_tab("alpha");
     let main_before = app.__test_main_tab_count();
-    // No real child_windows entry for this id.
+    // No real windows entry for this id.
     let ok = app.__test_invoke_close_active_tab_in_child(WindowId::dummy());
     assert!(!ok, "missing-child case must return false");
     assert_eq!(
@@ -238,7 +238,7 @@ fn frontmost_child_routes_close_tab_away_from_main() {
     // assert the conditional structure of the dispatcher: with a stale
     // id the action falls through to main; with a recognized child the
     // dispatcher routes to the child helper INSTEAD of main. Since
-    // creating a real ChildWindow is infeasible in unit tests, the
+    // creating a real WindowState is infeasible in unit tests, the
     // direct routing-to-child end-to-end test lives in the manual GUI
     // smoke step (CLAUDE.md §13 / PR #289-Phase-A body).
     //

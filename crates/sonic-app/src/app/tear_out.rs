@@ -33,8 +33,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, PaneState, TabState,
-    UserEvent,
+    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
+    WindowState,
 };
 use crate::app::integrated_titlebar_inset;
 use crate::app::window_geom;
@@ -160,7 +160,8 @@ impl App {
         let mut child_tabs = TabBar::new();
         let active_pane = state.active_pane;
         child_tabs.push(tab);
-        let child = ChildWindow {
+        let child = WindowState {
+            role: crate::app::WindowRole::Terminal,
             window: window.clone(),
             renderer,
             tabs: child_tabs,
@@ -182,7 +183,7 @@ impl App {
             drag_session: None,
             drag_target: None,
         };
-        self.child_windows.insert(win_id, child);
+        self.windows.insert(win_id, child);
         window.request_redraw();
         // Epic #289 Phase B: the new window is now OS-frontmost (we
         // just created and focused it). Update `frontmost_window` so
@@ -193,7 +194,7 @@ impl App {
         // Phase B source-side cleanup: hide main if drained, else
         // activate the LEFT neighbor of the removed slot (spec §B4).
         self.tear_out_apply_source_side(index);
-        tracing::info!("tab torn out as new window; child_windows={}", self.child_windows.len());
+        tracing::info!("tab torn out as new window; windows={}", self.windows.len());
         true
     }
 
@@ -210,7 +211,7 @@ impl App {
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
         if self.tabs.is_empty() {
-            if !self.child_windows.is_empty() {
+            if !self.windows.is_empty() {
                 self.hide_main_window();
             }
             return;
@@ -226,7 +227,7 @@ impl App {
         src_id: WindowId,
         local_in_src: (f64, f64),
     ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
-        let src_child = self.child_windows.get(&src_id)?;
+        let src_child = self.windows.get(&src_id)?;
         let src_origin =
             src_child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(src_origin, local_in_src);
@@ -249,7 +250,7 @@ impl App {
                     .with_visible(self.tab_bar_visible),
             ));
         }
-        for (id, c) in &self.child_windows {
+        for (id, c) in &self.windows {
             if *id == src_id {
                 continue;
             }
@@ -274,7 +275,7 @@ impl App {
         let main_origin =
             main_window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
-        let candidates = self.child_windows.iter().map(|(id, c)| {
+        let candidates = self.windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
             let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
             let layout = TabBarLayout::compute_with_height(
@@ -340,7 +341,7 @@ impl App {
         if crate::tab_drag::global_to_local(window_geom(main), global).is_some() {
             return true;
         }
-        for c in self.child_windows.values() {
+        for c in self.windows.values() {
             if crate::tab_drag::global_to_local(window_geom(&c.window), global).is_some() {
                 return true;
             }
@@ -445,7 +446,8 @@ impl App {
         let mut child_tabs = TabBar::new();
         let active_pane = state.active_pane;
         child_tabs.push(tab);
-        let child = ChildWindow {
+        let child = WindowState {
+            role: crate::app::WindowRole::Terminal,
             window: window.clone(),
             renderer,
             tabs: child_tabs,
@@ -467,7 +469,7 @@ impl App {
             drag_session: None,
             drag_target: None,
         };
-        self.child_windows.insert(win_id, child);
+        self.windows.insert(win_id, child);
         window.request_redraw();
         self.frontmost_window = Some(win_id);
         // Source child: if drained, drop it (PtyHandle::Drop on any
@@ -475,9 +477,9 @@ impl App {
         // only tab's panes). Else activate left neighbor.
         self.tear_out_apply_child_source_side(src_id, index);
         tracing::info!(
-            "tab torn out of child {:?} as new window; child_windows={}",
+            "tab torn out of child {:?} as new window; windows={}",
             src_id,
-            self.child_windows.len()
+            self.windows.len()
         );
         true
     }
@@ -485,12 +487,12 @@ impl App {
     /// Epic #289 Phase B — child-side post-tear-out cleanup. Mirrors
     /// [`Self::tear_out_apply_source_side`] for a torn-from-child
     /// origin. Removes the source child window from
-    /// `self.child_windows` if it became empty; else activates the
+    /// `self.windows` if it became empty; else activates the
     /// LEFT neighbor of the removed slot.
     pub fn tear_out_apply_child_source_side(&mut self, src_id: WindowId, removed_idx: usize) {
-        let src_empty = self.child_windows.get(&src_id).map(|c| c.tabs.is_empty()).unwrap_or(false);
+        let src_empty = self.windows.get(&src_id).map(|c| c.tabs.is_empty()).unwrap_or(false);
         if src_empty {
-            if let Some(removed) = self.child_windows.remove(&src_id) {
+            if let Some(removed) = self.windows.remove(&src_id) {
                 // Drop the renderer + window explicitly; any leftover
                 // panes (there shouldn't be) drop here, which fires
                 // PtyHandle::Drop and kills their child shells.
@@ -498,7 +500,7 @@ impl App {
             }
             return;
         }
-        if let Some(c) = self.child_windows.get_mut(&src_id) {
+        if let Some(c) = self.windows.get_mut(&src_id) {
             let target = removed_idx.saturating_sub(1).min(c.tabs.len().saturating_sub(1));
             c.tabs.activate(target);
             c.window.request_redraw();

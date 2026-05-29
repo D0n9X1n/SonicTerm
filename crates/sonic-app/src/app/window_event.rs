@@ -64,7 +64,7 @@ impl App {
         }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
-        if self.child_windows.contains_key(&win_id) {
+        if self.windows.contains_key(&win_id) {
             self.handle_child_window_event(el, win_id, event);
             return;
         }
@@ -74,7 +74,7 @@ impl App {
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
                 // running. Only exit when nothing else is alive.
-                if self.child_windows.is_empty() {
+                if self.windows.is_empty() {
                     el.exit();
                 } else {
                     self.hide_main_window();
@@ -617,7 +617,7 @@ impl App {
                             None => unreachable!("tab_action.is_some() checked above"),
                         }
                         if self.tabs.is_empty() {
-                            if self.child_windows.is_empty() {
+                            if self.windows.is_empty() {
                                 el.exit();
                             } else {
                                 self.hide_main_window();
