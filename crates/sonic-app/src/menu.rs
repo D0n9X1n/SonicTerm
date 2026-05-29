@@ -165,10 +165,10 @@ pub fn blueprint() -> MenuBlueprint {
                 },
                 sep(),
                 Item {
-                    title: "Close Tab",
+                    title: "Close",
                     key: "w",
                     mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::CloseTab),
+                    binding: Action(sonic_core::keymap::Action::CloseActivePaneOrTab),
                 },
                 Item {
                     title: "Close Pane",

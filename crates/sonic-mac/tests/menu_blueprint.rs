@@ -74,8 +74,14 @@ fn menu_lists_all_documented_items() {
     assert!(matches!(split_d.binding, Binding::Action(Action::SplitDown)));
     assert_eq!(split_d.mods, KeyMods::CmdShift);
 
-    let close_tab = find("Shell", "Close Tab");
-    assert!(matches!(close_tab.binding, Binding::Action(Action::CloseTab)));
+    let close_tab = find("Shell", "Close");
+    assert!(
+        matches!(close_tab.binding, Binding::Action(Action::CloseActivePaneOrTab)),
+        "macOS ⌘W menu item routes through the smart-close action so users with \
+         split panes don't lose the whole tab on a single press (iTerm2 / WezTerm \
+         parity). NSMenu intercepts ⌘W before winit sees it, so the menubar binding \
+         is the authoritative path — bind it to the same action the keymap binds.",
+    );
     assert_eq!(close_tab.mods, KeyMods::Cmd);
 
     let close_pane = find("Shell", "Close Pane");
