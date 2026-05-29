@@ -51,9 +51,16 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
         let mut matched_scheme = None;
         for s in SCHEMES {
             let sb = s.as_bytes();
-            if i + sb.len() <= bytes.len() && text[i..i + sb.len()].eq_ignore_ascii_case(s) {
-                matched_scheme = Some(sb.len());
-                break;
+            // Use `text.get(..)` rather than `&text[..]` so a byte
+            // range that lands inside a multi-byte UTF-8 char (e.g.
+            // `❯` from an oh-my-zsh prompt) returns `None` instead of
+            // panicking. Schemes are pure ASCII so a non-boundary end
+            // index can never be a real match anyway.
+            if let Some(slice) = text.get(i..i + sb.len()) {
+                if slice.eq_ignore_ascii_case(s) {
+                    matched_scheme = Some(sb.len());
+                    break;
+                }
             }
         }
         let Some(scheme_len) = matched_scheme else {
