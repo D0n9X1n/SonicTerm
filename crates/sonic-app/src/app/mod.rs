@@ -768,8 +768,22 @@ pub struct App {
     /// terminal cursor moves to a different cell.
     pub(super) ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle,
     pub(super) command_palette: CommandPalette,
+    /// Epic #289 Phase A follow-up — which window the (single, modal)
+    /// command palette is currently attached to. `None` means it's
+    /// closed OR attached to the main window; `Some(id)` means it's
+    /// attached to that child window. The render paths for the main
+    /// window and each child window consult this so the palette only
+    /// paints on the frontmost window at the moment it was opened,
+    /// fixing the bug where Cmd+Shift+P typed in a torn-out child
+    /// silently opened the palette on the original main window. See
+    /// also `cheatsheet_attached_window`.
+    pub(super) palette_attached_window: Option<WindowId>,
     pub(super) cheatsheet_open: bool,
     pub(super) cheatsheet: CheatsheetState,
+    /// Sibling to `palette_attached_window` for the keymap cheat sheet
+    /// overlay (super+?). Same rationale: the overlay is App-level and
+    /// modal, so a tag is enough — we don't need per-window state.
+    pub(super) cheatsheet_attached_window: Option<WindowId>,
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
     pub(super) pressed_tab: Option<usize>,
@@ -1036,8 +1050,10 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
+            palette_attached_window: None,
             cheatsheet_open: false,
             cheatsheet: CheatsheetState::new(),
+            cheatsheet_attached_window: None,
             pressed_tab: None,
             drag_session: None,
             os_drag_handoff_started: false,
@@ -1519,6 +1535,42 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
         self.frontmost_window = id;
+    }
+
+    /// Test-only: read the window the command palette is currently
+    /// attached to. `None` = main window OR closed; `Some(id)` = that
+    /// child window. Used by overlay-routing regression tests.
+    #[doc(hidden)]
+    pub fn __test_palette_attached_window(&self) -> Option<WindowId> {
+        self.palette_attached_window
+    }
+
+    /// Test-only sibling of `__test_palette_attached_window` for the
+    /// keymap cheat sheet overlay.
+    #[doc(hidden)]
+    pub fn __test_cheatsheet_attached_window(&self) -> Option<WindowId> {
+        self.cheatsheet_attached_window
+    }
+
+    /// Test-only: whether the command palette is currently open.
+    #[doc(hidden)]
+    pub fn __test_palette_open(&self) -> bool {
+        self.command_palette.is_open()
+    }
+
+    /// Test-only: whether the keymap cheat sheet is currently open.
+    #[doc(hidden)]
+    pub fn __test_cheatsheet_open(&self) -> bool {
+        self.cheatsheet_open
+    }
+
+    /// Test-only invoker for `open_search_in_child`. Mirrors the
+    /// pattern used by `__test_invoke_close_active_tab_in_child` so
+    /// integration tests can assert the stale-id no-op contract for
+    /// the overlay routing follow-up.
+    #[doc(hidden)]
+    pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
+        self.open_search_in_child(id)
     }
 
     /// Epic #289 Phase A — classify [`Self::frontmost_window`] without

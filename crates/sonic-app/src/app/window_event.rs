@@ -221,9 +221,9 @@ impl App {
                     r.set_inactive_pane_cursors(inactive_cursors);
                 }
 
-                let cheatsheet_render = self
-                    .cheatsheet_open
-                    .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
+                let cheatsheet_render = (self.cheatsheet_open
+                    && self.cheatsheet_attached_window.is_none())
+                .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
                 if let (Some(r), Some(pane)) =
                     (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
@@ -294,7 +294,13 @@ impl App {
                             self.copy_mode.as_ref(),
                             &self.tabs,
                             search,
-                            Some(&mut self.command_palette),
+                            // Epic #289 follow-up: only feed the palette
+                            // to the main window when it's actually
+                            // attached here (None == main). Otherwise the
+                            // palette would paint on the wrong window.
+                            self.palette_attached_window
+                                .is_none()
+                                .then_some(&mut self.command_palette),
                             cheatsheet_render,
                             Some(&self.ime),
                             pane.viewport_top_abs,
