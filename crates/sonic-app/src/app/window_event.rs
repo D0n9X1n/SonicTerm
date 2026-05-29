@@ -556,7 +556,11 @@ impl App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
-                    let sf = self.scale_factor as f32;
+                    let sf = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.scale_factor() as f32)
+                        .unwrap_or(self.scale_factor as f32);
                     let (px, py) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
                     let window_width = self
                         .window
@@ -588,6 +592,11 @@ impl App {
                             }
                             TabHit::Close(i) => self.close_tab_at(i),
                             TabHit::NewTab => {
+                                tracing::trace!(
+                                    coords = ?(px, py),
+                                    "new_tab_button hit at {:?}, dispatching",
+                                    (px, py)
+                                );
                                 self.run_action(&Action::NewTab);
                             }
                         }

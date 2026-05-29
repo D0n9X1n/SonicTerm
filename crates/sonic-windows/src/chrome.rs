@@ -13,8 +13,12 @@
 
 #![cfg(target_os = "windows")]
 
-use sonic_app::app::integrated_titlebar_inset_px;
-use sonic_shared::tabbar_view::caption_button_rects;
+use sonic_app::{app::integrated_titlebar_inset_px, menubar_bridge};
+use sonic_core::keymap::Action;
+use sonic_shared::tabbar_view::{
+    caption_button_rects, caption_strip_reserved_width, BAR_LEFT_PAD, NEW_TAB_BUTTON_HEIGHT,
+    NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::UI::Controls::MARGINS;
@@ -22,10 +26,24 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, PostMessageW, GWL_STYLE, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
     HTMINBUTTON, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, WM_DWMCOMPOSITIONCHANGED,
-    WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SYSCOMMAND, WS_MAXIMIZE,
+    WM_LBUTTONDOWN, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SYSCOMMAND,
+    WS_MAXIMIZE,
 };
 
 const SUBCLASS_ID: usize = 0x5071_C001;
+
+fn new_tab_button_rect(width: u32) -> sonic_shared::tabbar_view::Rect {
+    let window_width = width as f32;
+    let nt_w = NEW_TAB_BUTTON_WIDTH.min(window_width.max(0.0));
+    let nt_h = NEW_TAB_BUTTON_HEIGHT.min(TAB_BAR_HEIGHT);
+    let nt_x = (window_width - nt_w - BAR_LEFT_PAD - caption_strip_reserved_width()).max(0.0);
+    let nt_y = ((TAB_BAR_HEIGHT - nt_h) * 0.5).max(0.0);
+    sonic_shared::tabbar_view::Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h }
+}
+
+fn rect_contains(r: &sonic_shared::tabbar_view::Rect, x: f32, y: f32) -> bool {
+    x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
+}
 
 /// Install the titlebar subclass on the given top-level HWND. Idempotent
 /// per HWND (re-installing replaces the existing subclass proc).
@@ -75,19 +93,39 @@ unsafe extern "system" fn subclass_proc(
             // gain a way to query the window's effective DPI cheaply we
             // can pass that instead.
             let [min, max, close] = caption_button_rects(width, 1.0);
-            let hit = |r: &sonic_shared::tabbar_view::Rect| {
-                local_x >= r.x && local_x < r.x + r.w && local_y >= r.y && local_y < r.y + r.h
-            };
-            if hit(&close) {
+            if rect_contains(&close, local_x, local_y) {
                 LRESULT(HTCLOSE as isize)
-            } else if hit(&max) {
+            } else if rect_contains(&max, local_x, local_y) {
                 LRESULT(HTMAXBUTTON as isize)
-            } else if hit(&min) {
+            } else if rect_contains(&min, local_x, local_y) {
                 LRESULT(HTMINBUTTON as isize)
+            } else if rect_contains(&new_tab_button_rect(width), local_x, local_y) {
+                // Let the integrated `+` stay a normal client-area control;
+                // returning HTCAPTION here makes Windows consume the click as
+                // a non-client drag before winit can dispatch NewTab.
+                LRESULT(HTCLIENT as isize)
             } else {
-                // Drag strip; anything not over a button is the caption.
+                // Drag strip; anything not over an interactive control is the caption.
                 LRESULT(HTCAPTION as isize)
             }
+        }
+        WM_LBUTTONDOWN => {
+            let local_x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let local_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            let _ =
+                unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect) };
+            let width = (rect.right - rect.left).max(0) as u32;
+            if rect_contains(&new_tab_button_rect(width), local_x, local_y) {
+                tracing::trace!(
+                    coords = ?(local_x, local_y),
+                    "new_tab_button hit at {:?}, dispatching",
+                    (local_x, local_y)
+                );
+                let _ = menubar_bridge::push_action(Action::NewTab);
+                return LRESULT(0);
+            }
+            unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
         }
         WM_DWMCOMPOSITIONCHANGED => {
             unsafe { extend_frame(hwnd) };

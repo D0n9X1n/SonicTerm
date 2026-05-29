@@ -224,10 +224,14 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
     [nx, ny, nw, nh]
 }
 
-/// Paint the three Win11-style caption-button backgrounds (min / max /
-/// close) into the given quad list. Glyph rendering (─ □ ✕) is handled
-/// by the text pipeline; this helper only owns the background plates so
-/// hover/press states can be styled by theme later.
+/// Paint the three Win11-style caption buttons (min / max / close) into
+/// the given quad list using geometric primitives, not font glyphs.
+///
+/// PR #241 only painted the background plates and left the symbols to the
+/// text pipeline. In the live Windows binary those Unicode caption glyphs
+/// could be missing from the bundled font/fallback chain, so the unit test
+/// counted quads while the user saw no `— ▢ ✕` controls. Keeping the icons
+/// as rectangles makes the caption strip independent of font coverage.
 ///
 /// Callers on platforms without an integrated titlebar inset (macOS /
 /// Linux) should early-return without ever invoking this helper — the
@@ -240,17 +244,50 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
 /// `rects` is `[min, max, close]` as `(x, y, w, h)` in physical pixels
 /// (see `sonic_ui::tabbar_view::caption_button_rects`); `surface` is
 /// `(w, h)` in the same units used by [`px_rect_to_ndc`]. `bg` is the
-/// plate background color (RGBA, premultiplied straight). The close
-/// button gets no special tint here — hover-red is a future enhancement.
+/// plate background color (RGBA, premultiplied straight) and `fg` is the
+/// theme foreground stroke color.
 pub fn paint_caption_buttons(
     out: &mut Vec<QuadInstance>,
     rects: &[(f32, f32, f32, f32); 3],
     surface: (f32, f32),
     bg: [f32; 4],
+    fg: [f32; 4],
 ) {
     let (sw, sh) = surface;
     for &(x, y, w, h) in rects {
-        let ndc = px_to_ndc(x, y, w, h, sw, sh);
-        out.push(QuadInstance::sharp(ndc, bg));
+        out.push(QuadInstance::sharp(px_to_ndc(x, y, w, h, sw, sh), bg));
+    }
+
+    let [min, max, close] = *rects;
+    let icon = 10.0;
+    let stroke = 1.5;
+
+    let push_rect = |out: &mut Vec<QuadInstance>, x: f32, y: f32, w: f32, h: f32| {
+        out.push(QuadInstance::sharp(px_to_ndc(x, y, w, h, sw, sh), fg));
+    };
+
+    // Minimize: a thin horizontal rect centered in the button.
+    let (x, y, w, h) = min;
+    push_rect(out, x + (w - icon) * 0.5, y + h * 0.5 + icon * 0.25, icon, stroke);
+
+    // Maximize: four thin rects forming a 10x10 outline.
+    let (x, y, w, h) = max;
+    let left = x + (w - icon) * 0.5;
+    let top = y + (h - icon) * 0.5;
+    push_rect(out, left, top, icon, stroke);
+    push_rect(out, left, top + icon - stroke, icon, stroke);
+    push_rect(out, left, top, stroke, icon);
+    push_rect(out, left + icon - stroke, top, stroke, icon);
+
+    // Close: two diagonal rects forming an X, approximated by short 45°
+    // stair-stepped strokes so the quad pipeline can stay axis-aligned.
+    let (x, y, w, h) = close;
+    let left = x + (w - icon) * 0.5;
+    let top = y + (h - icon) * 0.5;
+    let step = icon / 5.0;
+    for i in 0..5 {
+        let d = i as f32 * step;
+        push_rect(out, left + d, top + d, step, stroke);
+        push_rect(out, left + d, top + icon - d - stroke, step, stroke);
     }
 }
