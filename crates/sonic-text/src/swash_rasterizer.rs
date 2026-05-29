@@ -512,6 +512,16 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 if data.len() != expected {
                     data.resize(expected, 0);
                 }
+                for px in data.chunks_exact_mut(4) {
+                    let r = px[0];
+                    let g = px[1];
+                    let b = px[2];
+                    let a = r.max(g).max(b);
+                    px[0] = b;
+                    px[1] = g;
+                    px[2] = r;
+                    px[3] = a;
+                }
                 data
             }
             _ => {
