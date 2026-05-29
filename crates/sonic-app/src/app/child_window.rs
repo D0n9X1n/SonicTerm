@@ -100,12 +100,13 @@ impl App {
                         let top = child.renderer.top_inset();
                         let pl = child.renderer.padding_left();
                         let pr = child.renderer.padding_right();
+                        let bottom = child.renderer.bottom_inset();
                         let pb = child.renderer.padding_bottom();
                         let outer = sonic_ui::pane::Rect::new(
                             pl,
                             top,
                             (w - pl - pr).max(0.0),
-                            (h - top - pb).max(0.0),
+                            (h - top - bottom - pb).max(0.0),
                         );
                         st.tree.layout(outer)
                     })
