@@ -219,7 +219,7 @@ fn attach_to_missing_child_returns_false() {
     let _ = app.__test_seed_tab("alpha");
     let _ = app.__test_seed_tab("bravo");
     let (tab, state, panes) = app.detach_tab_state(0).expect("detach");
-    // Conjure a WindowId that won't be in child_windows. We use the
+    // Conjure a WindowId that won't be in windows. We use the
     // dummy one from `EventLoop::owned_display_handle`-adjacent code
     // not being available here; instead, fabricate via the public
     // `WindowId::from(NonZeroU64::new(1))`... which winit doesn't
@@ -425,25 +425,22 @@ fn cross_window_merge_clears_drag_state_on_consume() {
 
 #[test]
 fn lone_tab_tear_out_threshold_does_not_kill_drag_without_target() {
-    // Simulate: user mouse-down on the only tab, then drags far enough
-    // to trip tear-out, but the cursor is NOT yet over a sibling
-    // window's bar (drag_target is None).
+    // Epic #289 Phase B: tear-out is now ALWAYS productive (a lone
+    // tab tears into its own window + hides the drained main), so
+    // `tear_out_would_be_noop` returns false unconditionally. The
+    // gesture-preservation rationale this test originally guarded
+    // is moot — pin down the new contract so a regression that
+    // re-introduces the no-op guard is caught here.
     let mut app = synth_app();
     let _ = app.__test_seed_tab("only");
     app.__test_set_pressed_tab(Some(0));
     app.__test_set_mouse_down(true);
     app.__test_set_drag_target(None);
 
-    // The pure predicate the CursorMoved handler consults: with one
-    // tab + no target, the call would be a no-op and the handler must
-    // bail BEFORE clearing the gesture.
     assert!(
-        app.tear_out_would_be_noop(),
-        "single-tab + no-target must be classified as no-op so the handler skips state-clear"
+        !app.tear_out_would_be_noop(),
+        "Phase B: single-tab + no-target is productive (tear into new window), not a no-op"
     );
-
-    // Production-shaped assertion: gesture is intact, ready for the
-    // next CursorMoved to acquire a target.
     assert_eq!(app.__test_pressed_tab(), Some(0));
     assert!(app.__test_mouse_down());
     assert_eq!(app.__test_tab_count(), 1);
@@ -451,39 +448,30 @@ fn lone_tab_tear_out_threshold_does_not_kill_drag_without_target() {
 
 #[test]
 fn lone_tab_drag_completes_merge_after_threshold_then_target_acquired() {
-    // Full end-to-end production sequence for the single-tab cross-
-    // window merge:
-    //   1. mouse-down on the only tab → press recorded
-    //   2. cursor drags below the bar far enough to trip tear-out, but
-    //      still over the source window → no drop target → gate says
-    //      "no-op" → state preserved
-    //   3. cursor enters a sibling window's tab bar → drag_target =
-    //      Some(child) → gate flips to "not a no-op"
-    //   4. mouse-up (or further movement) consumes the gesture via
-    //      `try_cross_window_merge`, which drains the source tab.
+    // Epic #289 Phase B: the predicate is unconditionally false now,
+    // but the cross-window-merge path still wins over tear-out when
+    // a `drag_target` is set (see `try_cross_window_merge`). This
+    // test now pins that ordering rather than the gesture-preserve
+    // rationale (no longer needed under Phase B).
     let mut app = synth_app();
     let _ = app.__test_seed_tab("only");
-    // (1) press
     app.__test_set_pressed_tab(Some(0));
     app.__test_set_mouse_down(true);
-    // (2) cursor below the bar, no target yet
     app.__test_set_drag_target(None);
-    assert!(app.tear_out_would_be_noop());
-    // The CursorMoved branch sees the no-op and returns without
-    // touching the gesture. Simulate that by NOT clearing anything.
-    assert_eq!(app.__test_pressed_tab(), Some(0));
-    assert!(app.__test_mouse_down());
+    // Phase B: predicate is false even with a lone tab + no target.
+    assert!(!app.tear_out_would_be_noop());
 
-    // (3) cursor now over a sibling window's bar
+    // Acquire a sibling target → merge precedence kicks in.
     let phantom = make_phantom_window_id();
     app.__test_set_drag_target(Some(DropTarget { window: phantom, slot: 0 }));
-    assert!(!app.tear_out_would_be_noop(), "with a target the gate must allow forward progress");
+    assert!(!app.tear_out_would_be_noop());
 
-    // (4) consume via the merge gate (mirrors what tear_out_tab does
-    // internally before the single-tab guard).
+    // The merge gate consumes the gesture even without a real child
+    // window (the phantom id is unknown to attach_to_child, so panes
+    // are dropped with a warning — but the source IS drained, which
+    // is the contract this test pins).
     assert!(app.try_cross_window_merge(0), "merge must run for a lone tab once a target exists");
     assert_eq!(app.__test_tab_count(), 0, "source tab drained on consume");
-    // try_cross_window_merge clears its own bookkeeping on consume.
     assert_eq!(app.__test_pressed_tab(), None);
     assert!(!app.__test_mouse_down());
 }

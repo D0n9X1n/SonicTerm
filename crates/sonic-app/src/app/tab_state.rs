@@ -34,8 +34,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, PaneState, TabState,
-    UserEvent,
+    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
+    WindowState,
 };
 use crate::app::integrated_titlebar_inset;
 
@@ -83,7 +83,7 @@ impl App {
         src_id: WindowId,
         index: usize,
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
-        let child = self.child_windows.get_mut(&src_id)?;
+        let child = self.windows.get_mut(&src_id)?;
         if index >= child.tabs.len() || index >= child.tab_states.len() {
             return None;
         }
@@ -106,7 +106,7 @@ impl App {
         state: TabState,
         panes: HashMap<u64, PaneState>,
     ) -> bool {
-        let Some(child) = self.child_windows.get_mut(&dst_id) else { return false };
+        let Some(child) = self.windows.get_mut(&dst_id) else { return false };
         let (cols, rows) = child.renderer.cells();
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);
