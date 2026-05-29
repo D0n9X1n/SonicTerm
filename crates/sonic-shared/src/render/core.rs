@@ -1668,13 +1668,18 @@ impl GpuRenderer {
                         self.tab_bar_logical_height(),
                     )
                     .with_top_offset(self.titlebar_inset);
-                    for t in &layout.tabs {
-                        if t.bg.contains(cx, cy) {
-                            idx = t.index as u32;
-                            if t.close.contains(cx, cy) {
-                                on_close = 1;
+                    for t in layout.tabwidgets() {
+                        match t.hover_at(Some(sonic_ui::tabbar_view::Point { x: cx, y: cy })) {
+                            sonic_ui::tabbar_view::TabHover::None => {}
+                            sonic_ui::tabbar_view::TabHover::Body => {
+                                idx = t.idx as u32;
+                                break;
                             }
-                            break;
+                            sonic_ui::tabbar_view::TabHover::Close => {
+                                idx = t.idx as u32;
+                                on_close = 1;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2485,19 +2490,19 @@ impl GpuRenderer {
                 );
             }
             for t in &layout.tabs {
-                let is_active = layout.active == Some(t.index);
-                let cursor_on_this_tab = hover_tab_idx == t.index as u32;
+                let is_active = layout.active == Some(t.idx);
+                let cursor_on_this_tab = hover_tab_idx == t.idx as u32;
                 if is_active {
                     // Elevated pill background.
                     // TODO: switch to rounded quad after #116.
                     quads.push(QuadInstance {
-                        rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
                         color: active_bg,
                         ..Default::default()
                     });
                     // 2px top accent bar, ACCENT_BLUE, anchored to the
                     // active tab's own bg rect via `active_accent_rect()`.
-                    // Issue #171: the previous inline `t.bg.x + INSET`
+                    // Issue #171: the previous inline `t.bg_rect.x + INSET`
                     // math was correct in isolation but easy to drift
                     // away from on future refactors; centralising the
                     // computation in the layout keeps the regression
@@ -2513,20 +2518,20 @@ impl GpuRenderer {
                 } else if cursor_on_this_tab {
                     // Hover overlay on inactive tab — #FFFFFF/6%.
                     quads.push(QuadInstance {
-                        rect: px_to_ndc(t.bg.x, t.bg.y, t.bg.w, t.bg.h, sw, sh),
+                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
                         color: hover_bg,
                         ..Default::default()
                     });
                 }
                 // 1px BORDER_SUBTLE separator between adjacent inactive
                 // tabs (PR #109 dedup) — height bar_h - 16, centered.
-                if t.index + 1 < tabs.tabs().len() {
-                    let next_is_active = layout.active == Some(t.index + 1);
+                if t.idx + 1 < tabs.tabs().len() {
+                    let next_is_active = layout.active == Some(t.idx + 1);
                     if !is_active && !next_is_active {
                         let sep_w = 1.0_f32;
                         let sep_h = (layout.bar.h - 16.0).max(1.0);
                         let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
-                        let gap_mid = t.bg.x + t.bg.w + (TAB_GAP - sep_w) * 0.5;
+                        let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP - sep_w) * 0.5;
                         quads.push(QuadInstance {
                             rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
                             color: separator,
@@ -2552,11 +2557,11 @@ impl GpuRenderer {
                     } else {
                         muted
                     };
-                    let cx = t.close.x;
-                    let cy = t.close.y;
+                    let cx = t.close_x_rect.x;
+                    let cy = t.close_x_rect.y;
                     // 14×14 hit, 8×8 glyph (inset 3px each side).
-                    let inset = (t.close.w - 8.0) * 0.5;
-                    let glyph = (t.close.w - inset * 2.0).max(1.0);
+                    let inset = (t.close_x_rect.w - 8.0) * 0.5;
+                    let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
                     let thick = 1.5_f32;
                     // Diagonal × built from a stair-step of small squares
                     // along both diagonals (the wgpu quad pipeline has no
@@ -2612,15 +2617,15 @@ impl GpuRenderer {
                 .tabs
                 .iter()
                 .map(|t| TabSpanInput {
-                    index: t.index,
-                    title: &tabs.tabs()[t.index].title,
-                    title_x: t.title.x,
-                    title_w: t.title.w,
-                    is_active: layout.active == Some(t.index),
-                    badge: tabs.tabs()[t.index]
+                    index: t.idx,
+                    title: &tabs.tabs()[t.idx].title,
+                    title_x: t.title_rect.x,
+                    title_w: t.title_rect.w,
+                    is_active: layout.active == Some(t.idx),
+                    badge: tabs.tabs()[t.idx]
                         .command
                         .clone()
-                        .badge(now, layout.active == Some(t.index)),
+                        .badge(now, layout.active == Some(t.idx)),
                 })
                 .collect();
             let (title_text, tab_spans) = build_tab_title_spans(

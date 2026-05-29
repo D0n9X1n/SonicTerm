@@ -157,7 +157,7 @@ pub fn compute_action<W: Copy>(
         // user perceived "nothing happened" because the active tab
         // simply migrated to the same on-screen position the other
         // tab vacated. See tests/click_without_drag_does_not_reorder.rs.
-        let n = source_bar.tabs.len();
+        let n = source_bar.tabwidgets().len();
         if n > 0 && drag_moved_enough(session) {
             let raw_slot = source_bar.drop_slot(cx, cy);
             // Clamp insertion-slot semantics: `raw_slot == n` means

@@ -105,7 +105,7 @@ fn body_click_on_inactive_tab_returns_activate_for_that_tab() {
     let mut bar = bar_with(2);
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 1000.0);
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     // Aim somewhere in the title region — well away from the close
     // rect on the right edge.
     let cx = t0.bg.x + t0.bg.w / 2.0 - CLOSE_BUTTON_SIZE;
@@ -122,7 +122,7 @@ fn body_click_left_edge_of_inactive_tab_activates_it() {
     let mut bar = bar_with(3);
     bar.activate(2);
     let layout = TabBarLayout::compute(&bar, 1200.0);
-    let t1 = layout.tabs[1];
+    let t1 = &layout.tabs[1];
     let cx = t1.bg.x + 1.0;
     let cy = t1.bg.y + t1.bg.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Activate(1)));
@@ -137,7 +137,7 @@ fn body_click_far_right_of_rightmost_inactive_tab_activates_it() {
     let mut bar = bar_with(3);
     bar.activate(0); // tab #2 inactive
     let layout = TabBarLayout::compute(&bar, 1200.0);
-    let t2 = layout.tabs[2];
+    let t2 = &layout.tabs[2];
     // 1 px inside the right edge of the tab background, well above
     // the vertical centre of the close rect so we don't accidentally
     // sample inside the × hit zone.
@@ -147,17 +147,14 @@ fn body_click_far_right_of_rightmost_inactive_tab_activates_it() {
 }
 
 #[test]
-fn body_click_top_pixel_of_inactive_tab_activates_it() {
-    // Vertical extent: the activation hit zone is the full bar
-    // height, not just the inset background rect. A click at y=0
-    // (top of the bar) inside an inactive tab's column must still
-    // activate the tab. Regression for the "2px sliver above the
-    // visible bg rect falls through" behaviour called out in the
-    // pub-fn doc comment.
+fn body_click_top_pixel_above_inactive_tab_bg_misses() {
+    // Whole-widget hit-testing is anchored to the tab's bg rect. A click
+    // at y=0 in a tab's horizontal column is in the bar chrome, but not
+    // owned by that tab widget.
     let mut bar = bar_with(3);
     bar.activate(2);
     let layout = TabBarLayout::compute(&bar, 1200.0);
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     let cx = t0.bg.x + t0.bg.w / 2.0 - CLOSE_BUTTON_SIZE;
-    assert_eq!(layout.hit(cx, 0.0), Some(TabHit::Activate(0)));
+    assert_eq!(layout.hit(cx, 0.0), None);
 }

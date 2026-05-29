@@ -12,7 +12,7 @@ use sonic_core::{grid::Grid, keymap::Action};
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::selection::Selection;
-use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
+use sonic_ui::tabbar_view::{Point, TabAction, TabBarLayout};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
@@ -579,9 +579,11 @@ impl App {
                         self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
                     )
                     .with_visible(self.tab_bar_visible);
-                    if let Some(hit) = layout.hit(px, py) {
-                        match hit {
-                            TabHit::Activate(i) => {
+                    let tab_action =
+                        layout.tabwidgets().iter().find_map(|t| t.hit(Point { x: px, y: py }));
+                    if tab_action.is_some() || layout.new_tab.contains(px, py) {
+                        match tab_action {
+                            Some(TabAction::Activate(i)) => {
                                 self.tabs.activate(i);
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
@@ -590,8 +592,8 @@ impl App {
                                 self.drag_session =
                                     Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
-                            TabHit::Close(i) => self.close_tab_at(i),
-                            TabHit::NewTab => {
+                            Some(TabAction::Close(i)) => self.close_tab_at(i),
+                            None => {
                                 tracing::trace!(
                                     coords = ?(px, py),
                                     "new_tab_button hit at {:?}, dispatching",

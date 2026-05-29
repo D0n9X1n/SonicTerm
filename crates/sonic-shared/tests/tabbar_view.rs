@@ -27,7 +27,7 @@ fn empty_bar_still_has_new_tab_button() {
 fn click_inside_tab_returns_activate() {
     let bar = bar_with(3);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     let cx = t0.bg.x + t0.bg.w / 2.0 - CLOSE_BUTTON_SIZE;
     let cy = t0.bg.y + t0.bg.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Activate(0)));
@@ -38,7 +38,7 @@ fn click_on_close_button_returns_close() {
     let mut bar = bar_with(2);
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let t1 = layout.tabs[1];
+    let t1 = &layout.tabs[1];
     let cx = t1.close.x + t1.close.w / 2.0;
     let cy = t1.close.y + t1.close.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(1)));
@@ -54,7 +54,7 @@ fn click_on_close_x_of_inactive_tab_closes_it() {
     let mut bar = bar_with(3);
     bar.activate(2); // tab 2 active; tab 1 inactive but × is visible on hover
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let t1 = layout.tabs[1];
+    let t1 = &layout.tabs[1];
     let cx = t1.close.x + t1.close.w / 2.0;
     let cy = t1.close.y + t1.close.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(1)));
@@ -67,7 +67,7 @@ fn click_on_close_x_of_first_tab_closes_it_when_third_active() {
     let mut bar = bar_with(3);
     bar.activate(2);
     let layout = TabBarLayout::compute(&bar, 1200.0);
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     let cx = t0.close.x + t0.close.w / 2.0;
     let cy = t0.close.y + t0.close.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(0)));
@@ -78,7 +78,7 @@ fn click_on_close_x_of_active_tab_closes_it() {
     let mut bar = bar_with(3);
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let t1 = layout.tabs[1];
+    let t1 = &layout.tabs[1];
     let cx = t1.close.x + t1.close.w / 2.0;
     let cy = t1.close.y + t1.close.h / 2.0;
     assert_eq!(layout.hit(cx, cy), Some(TabHit::Close(1)));
@@ -125,24 +125,20 @@ fn rect_contains_is_half_open() {
 }
 
 #[test]
-fn bar_background_click_between_tabs_snaps_to_nearest_tab() {
-    // v0.6 user report "标题的tab选中区域不是一整个tab区域": before
-    // the fix this returned `Activate(active_tab)` for every click in
-    // the inter-tab gap, which meant clicking the visual padding next
-    // to tab 0 silently re-activated the already-active tab. After
-    // the fix the gap click snaps to the nearest tab horizontally —
-    // here, 1px past tab 0's right edge picks tab 0, not tab 1.
+fn bar_background_click_between_tabs_misses_every_tab_widget() {
+    // Whole-widget hit-testing means the inter-tab gap is owned by no tab.
+    // The old layout-level fallback snapped this point to a neighbour; that
+    // fallback is intentionally gone so one widget owns one bg rect.
     let mut bar = bar_with(3);
     bar.activate(1);
     let layout = TabBarLayout::compute(&bar, 800.0);
     let just_past_tab0 = layout.tabs[0].bg.x + layout.tabs[0].bg.w + 1.0;
     let hit = layout.hit(just_past_tab0, 1.0);
-    assert_eq!(hit, Some(TabHit::Activate(0)));
-    // Symmetric: 1px before tab 1's left edge → tab 1, regardless of
-    // which tab is currently active.
+    assert_eq!(hit, None);
+    // Symmetric: 1px before tab 1's left edge is still gap, not tab 1.
     let just_before_tab1 = layout.tabs[1].bg.x - 1.0;
     let hit = layout.hit(just_before_tab1, 1.0);
-    assert_eq!(hit, Some(TabHit::Activate(1)));
+    assert_eq!(hit, None);
 }
 
 #[test]
@@ -169,8 +165,9 @@ fn visible_bar_still_captures_clicks() {
     // x must land within tab 0's horizontal range (which now starts at
     // BAR_LEFT_PAD = 12, not 4).
     let probe_x = layout.tabs[0].bg.x + 1.0;
-    assert!(matches!(layout.hit(probe_x, 5.0), Some(TabHit::Activate(0))));
-    assert!(layout.point_over_bar(probe_x, 5.0));
+    let probe_y = layout.tabs[0].bg.y + 1.0;
+    assert!(matches!(layout.hit(probe_x, probe_y), Some(TabHit::Activate(0))));
+    assert!(layout.point_over_bar(probe_x, probe_y));
 }
 
 #[test]
@@ -183,7 +180,7 @@ fn with_top_offset_shifts_every_rect() {
     for (a, b) in shifted.tabs.iter().zip(base.tabs.iter()) {
         assert_eq!(a.bg.y, b.bg.y + 28.0);
         assert_eq!(a.close.y, b.close.y + 28.0);
-        assert_eq!(a.title.y, b.title.y + 28.0);
+        assert_eq!(a.title_rect.y, b.title_rect.y + 28.0);
     }
 }
 
@@ -210,35 +207,30 @@ fn with_top_offset_zero_is_noop() {
 }
 
 #[test]
-fn hit_test_blank_area_of_tab_activates_it() {
-    // Regression: previously the hit-test used `t.bg.contains(px, py)`
-    // and `bg` is inset by 2px on top and 2px on bottom from the full
-    // bar height. A click in those thin slivers fell through to the
-    // "click between tabs → activate currently-active tab" default,
-    // making the user feel they had to aim at the title glyphs to
-    // switch tabs. After the fix, ANY pixel inside the bar whose x is
-    // within a tab's horizontal range activates that tab.
+fn hit_test_bar_chrome_above_and_below_tab_bg_misses() {
+    // Whole-widget hit-testing is anchored to the tab bg rect. A click in
+    // the bar chrome above/below that bg rect is not owned by the tab.
     let mut bar = bar_with(3);
     bar.activate(1); // tab 2 is currently active
     let layout = TabBarLayout::compute(&bar, 800.0);
 
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     // 1) Click at tab0's right edge, vertically at the top sliver
-    //    (y < bg.y) — must STILL activate tab 0, not snap to active=1.
+    //    (y < bg.y) — not inside the widget bg rect.
     let click_x = t0.bg.x + t0.bg.w - 1.0;
     let click_y_top = 0.5; // above bg.y = 2.0
     assert_eq!(
         layout.hit(click_x, click_y_top),
-        Some(TabHit::Activate(0)),
-        "click at tab0 right edge / top sliver must activate tab 0"
+        None,
+        "click at tab0 right edge / top sliver must miss tab 0"
     );
 
     // 2) Bottom sliver of tab 0 (y > bg.y + bg.h but y < bar.h).
     let click_y_bottom = TAB_BAR_HEIGHT - 0.5;
     assert_eq!(
         layout.hit(click_x, click_y_bottom),
-        Some(TabHit::Activate(0)),
-        "click at tab0 right edge / bottom sliver must activate tab 0"
+        None,
+        "click at tab0 right edge / bottom sliver must miss tab 0"
     );
 
     // 3) Middle of tab 0 — already worked, stays working.
