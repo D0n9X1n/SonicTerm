@@ -155,3 +155,75 @@ fn loader_type_matches_renderer_setter_surface() {
     // Sanity scaffold so the test has at least one runtime assertion.
     let _unused: Mutex<()> = Mutex::new(());
 }
+
+/// Strengthened guard (Haiku PR #318 review follow-up).
+///
+/// The prior tests in this file all pass even if every
+/// `renderer.set_async_loader(...)` call is deleted from the
+/// production source — they only validate that the *plumbing types*
+/// exist and that the helper *can* fire `ClearShapeCache`. They do
+/// NOT exercise the attachment path on the real `GpuRenderer`
+/// construction sites in `sonic-app`. That's the actual bug Haiku
+/// flagged on PR #318.
+///
+/// We can't drive a live `GpuRenderer` from a `cargo test` process
+/// (no wgpu surface, no winit `EventLoop`). So instead we read the
+/// production source files that own every `GpuRenderer::new` site in
+/// `sonic-app` and assert that each one is followed by a
+/// `set_async_loader` call. If a future refactor removes ANY of the
+/// production wires, this test fails — which is exactly the signal
+/// Haiku said was missing.
+///
+/// Remove-restore experiment: delete the
+/// `renderer.set_async_loader(...)` line from
+/// `crates/sonic-app/src/app/event_loop.rs` (or `tear_out.rs` or
+/// `misc.rs`) and re-run `cargo test -p sonic-app
+/// --test async_font_loader_attached_in_prod` — this test fails.
+#[test]
+fn every_gpurenderer_new_site_in_sonic_app_attaches_async_loader() {
+    // Resolve files relative to this crate's manifest dir so the test
+    // works no matter where `cargo test` is invoked from.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let sources: &[&str] = &["src/app/event_loop.rs", "src/app/tear_out.rs", "src/app/misc.rs"];
+
+    for rel in sources {
+        let path = std::path::Path::new(manifest_dir).join(rel);
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read production source {}: {e}", path.display()));
+
+        // Every file that constructs a `GpuRenderer` MUST also wire the
+        // async fallback loader. We treat `GpuRenderer::new(` as the
+        // construction marker and `set_async_loader` as the wire
+        // marker. Count both — if a file constructs N renderers it must
+        // also wire N loaders.
+        let new_sites = body.matches("GpuRenderer::new(").count();
+        let wire_sites = body.matches("set_async_loader(").count();
+
+        assert!(
+            new_sites > 0,
+            "{rel}: expected at least one GpuRenderer::new( construction site (test premise broke — \
+             update the source list if the renderer moved)",
+        );
+        assert_eq!(
+            new_sites, wire_sites,
+            "{rel}: found {new_sites} GpuRenderer::new( construction sites but only \
+             {wire_sites} set_async_loader( wire sites — every production renderer must \
+             have its async font fallback loader attached (PR #318 Haiku guard).",
+        );
+    }
+
+    // Defense-in-depth: the helper that builds the loader from the
+    // proxy must also be referenced by each of those source files.
+    // Removing the call (the original PR #318 bug shape) is what this
+    // catches.
+    for rel in sources {
+        let path = std::path::Path::new(manifest_dir).join(rel);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("build_async_fallback_loader_for_proxy"),
+            "{rel}: production source must reference \
+             build_async_fallback_loader_for_proxy — without it the loader \
+             passed to set_async_loader cannot notify ClearShapeCache.",
+        );
+    }
+}
