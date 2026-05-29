@@ -207,15 +207,36 @@ impl TabBar {
     }
 
     /// Reorder the tab at `from` to position `to` (used by drag-reorder).
+    ///
+    /// Re-anchors `self.active` so that the *same* `Tab` instance remains
+    /// active after the move. Pre-fix the function only handled the case
+    /// where the active tab was itself dragged (`from == active`); a drag
+    /// of a *non-active* tab past the active slot would silently shift
+    /// the active `Tab` to a new index while `self.active` stayed pinned,
+    /// so the tab bar highlight and the rendered pane content disagreed
+    /// (user sees tab `#1` selected but pane shows tab `#2`'s grid).
     pub fn reorder(&mut self, from: usize, to: usize) {
         if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
             return;
         }
         let t = self.tabs.remove(from);
         self.tabs.insert(to, t);
-        if self.active == from {
-            self.active = to;
-        }
+        self.active = if self.active == from {
+            // The active tab itself was dragged → follow it.
+            to
+        } else if from < self.active && to >= self.active {
+            // A tab to the left of the active tab moved to its right
+            // (or onto it) → the active tab slides one slot left.
+            self.active - 1
+        } else if from > self.active && to <= self.active {
+            // A tab to the right of the active tab moved to its left
+            // (or onto it) → the active tab slides one slot right.
+            self.active + 1
+        } else {
+            // Move happened entirely on one side of the active tab —
+            // its index is unaffected.
+            self.active
+        };
         self.recompute_all_titles();
     }
 
