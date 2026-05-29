@@ -137,7 +137,7 @@ impl App {
                     child.window.request_redraw();
                     return;
                 }
-                if let Some(pane) = child.panes.get(&active_id) {
+                if let Some(pane) = child.panes.get_mut(&active_id) {
                     let active_pos = guards
                         .iter()
                         .position(|(id, _, _)| *id == active_id)
@@ -146,6 +146,18 @@ impl App {
                         // map keyed by `active_id`, so a guard with this id
                         // must exist. Render hot path: no Result conversion.
                         .expect("active pane guard collected above");
+                    // Bug fix: child windows (Cmd+N, tear-out) were rendering
+                    // their tab bar with the literal fallback title
+                    // ("shell N") because the wezterm-style title formatter
+                    // was only invoked on the main-window redraw path. Mirror
+                    // the main-window logic so OSC 7 cwd + foreground-process
+                    // probes flow into every window's tab bar uniformly.
+                    let _ = crate::app::refresh_active_tab_title(
+                        &mut child.tabs,
+                        pane,
+                        &guards[active_pos].1,
+                        tab_idx,
+                    );
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                     {

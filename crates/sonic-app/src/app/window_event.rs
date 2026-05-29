@@ -247,45 +247,18 @@ impl App {
                         // the pid probe (macOS only for now), and the OSC
                         // 0/2 title as the last-resort body (so `ssh
                         // user@host` still labels itself).
-                        let (cwd, raw_title) = {
-                            let g = &guards[active_pos].1;
-                            (g.cwd().map(str::to_string), g.title().map(str::to_string))
-                        };
-                        let proc_name = {
-                            // TTL-cache the foreground-process probe: it
-                            // walks the entire macOS process table (~600
-                            // procs, ~6ms) and the render path now ticks
-                            // ~26×/sec while the cursor blinks. Without
-                            // this cache an idle window pegs ~17% CPU
-                            // (regression: `scripts/bench_headless_gui.sh`).
-                            // 500ms is short enough that `nvim foo` still
-                            // flips the icon promptly.
-                            const TTL: std::time::Duration = std::time::Duration::from_millis(500);
-                            let now = Instant::now();
-                            let fresh = pane
-                                .fg_proc_cache
-                                .as_ref()
-                                .is_some_and(|(t, _)| now.duration_since(*t) < TTL);
-                            if !fresh {
-                                let probed = pane
-                                    .pty
-                                    .as_ref()
-                                    .and_then(|p| p.pid())
-                                    .and_then(sonic_core::proc_info::foreground_process);
-                                pane.fg_proc_cache = Some((now, probed));
-                            }
-                            pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone())
-                        };
-                        let pretty = sonic_ui::tab_title::format_tab_title(
+                        //
+                        // Shared with `app/child_window.rs` via
+                        // `refresh_active_tab_title` so Cmd+N / tear-out
+                        // windows pick up cwd-based titles too (was
+                        // previously stuck on the literal "shell N"
+                        // placeholder set at spawn time).
+                        let _ = crate::app::refresh_active_tab_title(
+                            &mut self.tabs,
+                            pane,
+                            &guards[active_pos].1,
                             tab_idx,
-                            cwd.as_deref(),
-                            proc_name.as_deref(),
-                            raw_title.as_deref(),
                         );
-                        let cur = self.tabs.active().map(|tab| tab.title.clone());
-                        if cur.as_deref() != Some(pretty.as_str()) {
-                            self.tabs.set_active_title(pretty);
-                        }
                         if let Some(search) =
                             self.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                         {
