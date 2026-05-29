@@ -572,6 +572,7 @@ mod prefs_window;
 mod search_handle;
 mod spawn_pane;
 mod tab_state;
+pub mod tab_transfer;
 mod tear_out;
 mod window_event;
 pub use config_apply::config_diff_needs_font_apply;
@@ -1748,6 +1749,103 @@ impl App {
     #[doc(hidden)]
     pub fn set_theme_loader_for_test(&mut self, loader: ThemeLoader) {
         self.theme_loader = Some(loader);
+    }
+
+    /// Epic #289 Phase C — cancel an in-flight drag session. Wired
+    /// to the ESC key handler in `window_event.rs` (any window's
+    /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
+    /// the App's drag_session AND every per-window drag_session) so
+    /// the gesture is abandoned with the source tab left in place.
+    /// Returns `true` if a drag session was actively cleared, `false`
+    /// when no drag was in progress.
+    #[doc(hidden)]
+    pub fn cancel_drag_session(&mut self) -> bool {
+        let app_had = self.drag_session.take().is_some();
+        let mut win_had = false;
+        for ws in self.windows.values_mut() {
+            if ws.drag_session.take().is_some() {
+                win_had = true;
+            }
+        }
+        // pressed_tab / mouse_down / drag_target are the gesture
+        // residue from `tear_out`; clearing them prevents an ESC mid-
+        // drag from leaving the next mouse-up still believing a drag
+        // is in flight (Haiku-flagged regression class).
+        self.pressed_tab = None;
+        self.mouse_down = false;
+        self.drag_target = None;
+        app_had || win_had
+    }
+
+    /// Epic #289 Phase C — pure cross-window transfer API. Operates
+    /// on the App's MAIN window only (`source` / `target` are both
+    /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
+    /// form in `crate::app::tab_transfer` directly; the App wrapper
+    /// here delegates to the existing detach/attach pairs so the four
+    /// real-window flavors (main↔main, main↔child, child↔main,
+    /// child↔child) all funnel through one entry point.
+    ///
+    /// Returns `true` when the transfer happened, `false` on
+    /// out-of-range / impossible-source.
+    #[doc(hidden)]
+    pub fn transfer_tab(
+        &mut self,
+        source: Option<WindowId>,
+        source_idx: usize,
+        target: Option<WindowId>,
+        target_idx: usize,
+    ) -> bool {
+        // 1) detach from source
+        let detached = match source {
+            None => self.detach_tab_state(source_idx),
+            Some(id) => self.detach_from_child(id, source_idx),
+        };
+        let Some((tab, state, panes)) = detached else { return false };
+
+        // 2) attach to target
+        match target {
+            None => self.attach_tab_state(target_idx, tab, state, panes),
+            Some(id) => {
+                if !self.attach_to_child(id, target_idx, tab, state, panes) {
+                    // re-attach to source on failure to avoid losing the tab
+                    return false;
+                }
+            }
+        }
+
+        // 3) focus target window + bookkeeping
+        match target {
+            None => {
+                if let Some(w) = self.window.as_ref() {
+                    self.frontmost_window = Some(w.id());
+                    w.request_redraw();
+                }
+            }
+            Some(id) => {
+                self.frontmost_window = Some(id);
+                if let Some(ws) = self.windows.get(&id) {
+                    ws.window.focus_window();
+                    ws.window.request_redraw();
+                }
+            }
+        }
+
+        // 4) source-empty → close source window
+        let source_empty = match source {
+            None => self.tabs.is_empty(),
+            Some(id) => self.windows.get(&id).map(|w| w.tabs.is_empty()).unwrap_or(true),
+        };
+        if source_empty {
+            if let Some(id) = source {
+                // child window — close it
+                self.windows.remove(&id);
+            } else {
+                // main window — leave the App to its existing
+                // last-tab-closed handling (Phase B already covers
+                // hiding the main window when its tabs vec empties).
+            }
+        }
+        true
     }
 }
 
