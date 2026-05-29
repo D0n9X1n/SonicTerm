@@ -2,7 +2,7 @@
 //!
 //! Migrated from inline `#[cfg(test)] mod tests` in `src/shape.rs`.
 
-use cosmic_text::FontSystem;
+use cosmic_text::{fontdb, FontSystem};
 use sonic_text::shape::{shape_run, RunStyle};
 use sonic_text::swash_rasterizer::SwashRasterizer;
 use sonic_types::Cell;
@@ -20,12 +20,31 @@ fn font_system_with_assets() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
     }
     fs
+}
+
+#[test]
+fn bundled_st_helens_normal_query_resolves_upright_face() {
+    let fs = font_system_with_assets();
+    let families = [fontdb::Family::Name("Rec Mono St.Helens")];
+    let query = fontdb::Query {
+        families: &families,
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    };
+    let raw_id = fs.db().query(&query).expect("bundled Rec Mono St.Helens family must resolve");
+    let raw_face = fs.db().face(raw_id).expect("resolved fontdb face must exist");
+    assert_eq!(
+        raw_face.style,
+        fontdb::Style::Normal,
+        "bundled Rec Mono St.Helens Regular must be registered as upright Normal, not Italic"
+    );
 }
 
 #[test]
