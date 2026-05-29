@@ -71,16 +71,16 @@ use std::sync::{Arc, Mutex};
 use winit::event_loop::EventLoopProxy;
 use winit::window::{Window, WindowId};
 
-/// Re-export of [`winit::window::WindowId`] so platform backend crates
-/// (`sonic-mac`, `sonic-windows`) that already depend on `sonic-app`
-/// don't have to add a direct `winit` dep just to spell the trait
-/// signature. Keeps the dependency surface minimal.
-pub use winit::window::WindowId as BackendWindowId;
 /// Re-export of [`winit::window::Window`] for the same reason as
 /// [`BackendWindowId`] — platform backend crates need to spell the
 /// `register_window` trait signature without taking a direct winit
 /// dep just for the type name.
 pub use winit::window::Window as BackendWindow;
+/// Re-export of [`winit::window::WindowId`] so platform backend crates
+/// (`sonic-mac`, `sonic-windows`) that already depend on `sonic-app`
+/// don't have to add a direct `winit` dep just to spell the trait
+/// signature. Keeps the dependency surface minimal.
+pub use winit::window::WindowId as BackendWindowId;
 
 use super::UserEvent;
 
