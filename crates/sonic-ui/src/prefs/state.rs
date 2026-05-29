@@ -84,7 +84,7 @@ pub const LANGUAGE_OPTIONS: &[(&str, &str)] =
     &[("", "Auto"), ("en", "English"), ("zh-CN", "中文"), ("ja", "日本語")];
 
 /// In-memory edit state for the preferences window.
-pub const RESET_TO_DEFAULT_LABEL: &str = "Reset to default";
+pub const RESET_TO_DEFAULT_KEY: &str = "prefs-reset-to-default";
 
 pub struct PrefsState {
     /// Live mutable copy of the config.
@@ -133,17 +133,21 @@ impl PrefsState {
         });
         // Footer button primitives (issue #173 slice-2). Stable widget
         // IDs let the mouse handler dispatch hover/press events.
-        let apply_button =
-            Button::new(WidgetId(u32::MAX - 1), "Apply", layout.apply_button, ButtonKind::Primary);
+        let apply_button = Button::new(
+            WidgetId(u32::MAX - 1),
+            i18n.t("prefs-apply"),
+            layout.apply_button,
+            ButtonKind::Primary,
+        );
         let cancel_button = Button::new(
             WidgetId(u32::MAX - 2),
-            "Cancel",
+            i18n.t("prefs-cancel"),
             layout.cancel_button,
             ButtonKind::Secondary,
         );
         let reset_button = Button::new(
             WidgetId(u32::MAX - 3),
-            RESET_TO_DEFAULT_LABEL,
+            i18n.t(RESET_TO_DEFAULT_KEY),
             layout.reset_link,
             ButtonKind::Link,
         );
@@ -178,6 +182,10 @@ impl PrefsState {
     /// Rebuild the [`Control`] list for the active category. Called any
     /// time the category changes or controls are mutated.
     pub fn rebuild_controls(&mut self) {
+        self.apply_button.label = self.i18n.t("prefs-apply");
+        self.cancel_button.label = self.i18n.t("prefs-cancel");
+        self.reset_button.label = self.i18n.t(RESET_TO_DEFAULT_KEY);
+
         let mut id: u32 = 1;
         let mut next_id = || {
             let i = id;
@@ -212,7 +220,7 @@ impl PrefsState {
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
-                        "Line height",
+                        self.i18n.t("prefs-line-height"),
                         l.control_slot(2),
                         1.0,
                         2.0,
@@ -239,7 +247,7 @@ impl PrefsState {
                 ));
                 out.push(Control::ColorSwatch(ColorSwatch::new(
                     next_id(),
-                    "Accent",
+                    self.i18n.t("prefs-accent"),
                     l.control_slot(1),
                     accent_swatch_rgba(&self.theme),
                 )));
@@ -248,7 +256,7 @@ impl PrefsState {
                 out.push(Control::Button(
                     Button::new(
                         next_id(),
-                        "Open keymap file",
+                        self.i18n.t("prefs-open-keymap-file"),
                         l.control_slot(0),
                         ButtonKind::Secondary,
                     )
@@ -259,7 +267,7 @@ impl PrefsState {
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
-                        "Opacity",
+                        self.i18n.t("prefs-opacity"),
                         l.control_slot(0),
                         0.3,
                         1.0,
@@ -270,20 +278,20 @@ impl PrefsState {
                 }));
                 out.push(Control::Toggle(Toggle::new(
                     next_id(),
-                    "Background blur",
+                    self.i18n.t("prefs-background-blur"),
                     l.control_slot(1),
                     self.config.window.blur,
                 )));
                 out.push(Control::Toggle(Toggle::new(
                     next_id(),
-                    "Window decorations",
+                    self.i18n.t("prefs-window-decorations"),
                     l.control_slot(2),
                     self.config.window.decorations,
                 )));
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
-                        "Padding",
+                        self.i18n.t("prefs-padding"),
                         l.control_slot(3),
                         0.0,
                         32.0,
@@ -298,7 +306,7 @@ impl PrefsState {
                 let sel = KNOWN_CURSOR_SHAPES.iter().position(|s| *s == cur_shape).unwrap_or(0);
                 out.push(Control::Dropdown(Dropdown::new(
                     next_id(),
-                    "Cursor shape",
+                    self.i18n.t("prefs-cursor-shape"),
                     l.control_slot(0),
                     KNOWN_CURSOR_SHAPES.iter().map(|s| (*s).to_string()).collect(),
                     sel,
@@ -313,14 +321,14 @@ impl PrefsState {
             Category::Advanced => {
                 out.push(Control::TextField(TextField::new(
                     next_id(),
-                    "Shell",
+                    self.i18n.t("prefs-shell"),
                     l.control_slot(0),
                     self.config.terminal.shell.clone().unwrap_or_default(),
                 )));
                 out.push(Control::Slider({
                     let mut s = Slider::new(
                         next_id(),
-                        "Scrollback",
+                        self.i18n.t("prefs-scrollback"),
                         l.control_slot(1),
                         1_000.0,
                         100_000.0,

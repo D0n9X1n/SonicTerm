@@ -43,7 +43,7 @@ use crate::prefs::layout::{
     SLIDER_THUMB, SLIDER_TRACK_H, SUBTITLE_GAP, SUBTITLE_LINE, SUBTITLE_SIZE, SWATCH_GAP,
     SWATCH_SIZE, TITLE_LINE, TOGGLE_H, TOGGLE_KNOB, TOGGLE_KNOB_MARGIN, TOGGLE_W,
 };
-use crate::prefs::state::{PrefsState, RESET_TO_DEFAULT_LABEL};
+use crate::prefs::state::PrefsState;
 use crate::quad::{px_to_ndc, QuadInstance, QuadPipeline};
 use crate::render::hex_to_wgpu;
 use crate::ui_tokens::{color, typography};
@@ -246,7 +246,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         } else {
             (color::with_alpha(color::TEXT_SECONDARY(), 0.85), typography::BODY)
         };
-        push_text(&mut texts, label_rect, cat.label(), col, ramp);
+        push_text(&mut texts, label_rect, cat.localized_label(&state.i18n), col, ramp);
     }
 
     // --- Title block ---------------------------------------------------
@@ -256,7 +256,13 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         layout.title_block.w,
         TITLE_LINE,
     );
-    push_text(&mut texts, title_rect, "Preferences", color::TEXT_PRIMARY(), typography::H1);
+    push_text(
+        &mut texts,
+        title_rect,
+        state.i18n.t("prefs-title"),
+        color::TEXT_PRIMARY(),
+        typography::H1,
+    );
     let subtitle_rect = PrefsRect::new(
         layout.title_block.x,
         layout.title_block.y + TITLE_LINE + SUBTITLE_GAP,
@@ -266,7 +272,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     push_text(
         &mut texts,
         subtitle_rect,
-        state.active_category.description(),
+        state.active_category.localized_description(&state.i18n),
         color::TEXT_MUTED(),
         typography::TypeRamp { size_px: SUBTITLE_SIZE, line_px: SUBTITLE_LINE, weight: 500 },
     );
@@ -295,7 +301,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     push_text(
         &mut texts,
         section_title_rect,
-        state.active_category.label(),
+        state.active_category.localized_label(&state.i18n),
         color::TEXT_PRIMARY(),
         typography::TypeRamp { size_px: SECTION_TITLE_SIZE, line_px: 20.0, weight: 650 },
     );
@@ -304,7 +310,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     push_text(
         &mut texts,
         help_rect,
-        state.active_category.description(),
+        state.active_category.localized_description(&state.i18n),
         color::TEXT_MUTED(),
         typography::TypeRamp { size_px: SECTION_HELP_SIZE, line_px: SUBTITLE_LINE, weight: 500 },
     );
@@ -382,7 +388,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     push_button_text(
         &mut texts,
         reset,
-        RESET_TO_DEFAULT_LABEL,
+        reset.label.clone(),
         palette.accent,
         typography::TypeRamp { size_px: 12.0, line_px: 16.0, weight: 600 },
     );
@@ -404,7 +410,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         push_text(
             &mut texts,
             txt_rect,
-            "Unsaved changes",
+            state.i18n.t("prefs-unsaved-changes"),
             color::TEXT_SECONDARY(),
             typography::TypeRamp { size_px: 12.0, line_px: 16.0, weight: 500 },
         );
@@ -419,7 +425,13 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let cancel_base = color::with_alpha(color::hex("#FFFFFF"), 0.07);
     let cancel_bg = button_bg(cancel_base, cancel.interaction);
     quads.push(QuadCmd::rounded(cancel.rect, cancel_bg, BUTTON_RADIUS));
-    push_button_text(&mut texts, cancel, "Cancel", color::TEXT_SECONDARY(), typography::BODY);
+    push_button_text(
+        &mut texts,
+        cancel,
+        cancel.label.clone(),
+        color::TEXT_SECONDARY(),
+        typography::BODY,
+    );
 
     // Apply button (primary accent) — same pill primitive, Primary kind.
     let apply = &state.apply_button;
@@ -435,7 +447,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let apply_bg =
         if apply_enabled { button_bg(apply_base, apply.interaction) } else { apply_base };
     quads.push(QuadCmd::rounded(apply.rect, apply_bg, BUTTON_RADIUS));
-    push_button_text(&mut texts, apply, "Apply", apply_fg, typography::BODY_STRONG);
+    push_button_text(&mut texts, apply, apply.label.clone(), apply_fg, typography::BODY_STRONG);
 
     // --- Open dropdown popovers (issue #173 slice-2b) -----------------
     // Routed into `popover_quads` / `popover_texts` so the renderer can
@@ -831,7 +843,7 @@ fn draw_control(
             push_text(
                 texts,
                 PrefsRect::new(slot.x, slot.y + CONTROL_H + 8.0, slot.w, 18.0),
-                "Sonic watches this file and reloads bindings automatically",
+                state.i18n.t("prefs-keymap-auto-reload"),
                 palette.text_muted,
                 typography::TypeRamp { size_px: 12.0, line_px: 18.0, weight: 500 },
             );
@@ -1586,7 +1598,9 @@ mod tests {
         let joined: String = dl.texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("|");
         assert!(joined.contains("Preferences"), "title missing: {joined}");
         assert!(
-            dl.texts.iter().any(|t| t.text.contains(state.active_category.description())),
+            dl.texts.iter().any(|t| t
+                .text
+                .contains(&state.active_category.localized_description(&state.i18n))),
             "subtitle missing"
         );
     }
@@ -1597,7 +1611,8 @@ mod tests {
         let dl = build_draw_list(&state, &theme);
         let joined: String = dl.texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("|");
         for cat in CATEGORIES {
-            assert!(joined.contains(cat.label()), "category {} missing", cat.label());
+            let label = cat.localized_label(&state.i18n);
+            assert!(joined.contains(&label), "category {label} missing");
         }
     }
 
@@ -1606,8 +1621,8 @@ mod tests {
         let (state, theme) = fresh();
         let dl = build_draw_list(&state, &theme);
         let joined: String = dl.texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("|");
-        assert!(joined.contains("Apply"));
-        assert!(joined.contains("Cancel"));
+        assert!(joined.contains(&state.apply_button.label));
+        assert!(joined.contains(&state.cancel_button.label));
     }
 
     #[test]
@@ -2081,7 +2096,7 @@ mod tests {
             state.flip_toggle(id);
             let dl = build_draw_list(&state, &theme);
             assert!(
-                dl.texts.iter().any(|t| t.text == "Unsaved changes"),
+                dl.texts.iter().any(|t| t.text == state.i18n.t("prefs-unsaved-changes")),
                 "dirty indicator missing"
             );
         }

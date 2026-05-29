@@ -24,6 +24,17 @@ pub enum Category {
 }
 
 impl Category {
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Category::Font => "prefs-category-font",
+            Category::Theme => "prefs-category-theme",
+            Category::Keymap => "prefs-category-keymap",
+            Category::Window => "prefs-category-window",
+            Category::Cursor => "prefs-category-cursor",
+            Category::Advanced => "prefs-category-advanced",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Category::Font => "Font",
@@ -32,6 +43,22 @@ impl Category {
             Category::Window => "Window",
             Category::Cursor => "Cursor",
             Category::Advanced => "Advanced",
+        }
+    }
+
+    pub fn localized_label(self, i18n: &crate::i18n::I18n) -> String {
+        i18n.t(self.label_key())
+    }
+
+    /// One-line subtitle shown beneath the page title.
+    pub fn description_key(self) -> &'static str {
+        match self {
+            Category::Font => "prefs-category-font-description",
+            Category::Theme => "prefs-category-theme-description",
+            Category::Keymap => "prefs-category-keymap-description",
+            Category::Window => "prefs-category-window-description",
+            Category::Cursor => "prefs-category-cursor-description",
+            Category::Advanced => "prefs-category-advanced-description",
         }
     }
 
@@ -45,6 +72,10 @@ impl Category {
             Category::Cursor => "Adjust cursor shape and blink behavior.",
             Category::Advanced => "Set shell startup, scrollback, language, and diagnostics.",
         }
+    }
+
+    pub fn localized_description(self, i18n: &crate::i18n::I18n) -> String {
+        i18n.t(self.description_key())
     }
 
     /// Embedded SVG icon displayed in the sidebar next to the label.
