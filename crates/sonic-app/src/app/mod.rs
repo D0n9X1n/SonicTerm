@@ -40,16 +40,41 @@ use winit::{
 /// (main, tear-out, preferences) stay in sync.
 #[doc(hidden)]
 pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
+    with_integrated_titlebar_for(attrs, sonic_core::config::TabBarPosition::Top)
+}
+
+/// Position-aware variant of [`with_integrated_titlebar`]. When the tab bar
+/// is at the top we extend the content view under the macOS titlebar so the
+/// bar visually replaces the OS chrome (the v0.x-and-current default). When
+/// the bar is at the bottom there is nothing to merge with the titlebar, so
+/// we leave the OS chrome alone — a normal titled NSWindow. Mirrors the
+/// `integrated_titlebar_inset()` behavior (which returns 0 when the bar is
+/// bottom-pinned) so layout and chrome stay consistent.
+#[doc(hidden)]
+pub fn with_integrated_titlebar_for(
+    attrs: WindowAttributes,
+    bar_pos: sonic_core::config::TabBarPosition,
+) -> WindowAttributes {
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::WindowAttributesExtMacOS;
-        attrs.with_fullsize_content_view(true).with_titlebar_transparent(true)
+        match bar_pos {
+            sonic_core::config::TabBarPosition::Top => {
+                attrs.with_fullsize_content_view(true).with_titlebar_transparent(true)
+            }
+            // Bar at bottom: revert to a normal NSWindow titlebar so the
+            // OS draws its own title + traffic lights on top of the
+            // content area instead of us shifting the grid down by 28pt
+            // for an empty band.
+            sonic_core::config::TabBarPosition::Bottom => attrs,
+        }
     }
     // FUTURE: equivalent integration on Windows would require custom
     // non-client area painting (WM_NCCALCSIZE); winit 0.30 does not
     // expose this directly. Left as a no-op for now.
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = bar_pos;
         attrs
     }
 }
@@ -88,12 +113,24 @@ pub const MACOS_INTEGRATED_TITLEBAR_INSET: f32 = 28.0;
 /// combination. Returns 0 on platforms that don't extend content under
 /// the titlebar (Windows, Linux), so non-macOS layout is unchanged.
 pub fn integrated_titlebar_inset() -> f32 {
+    integrated_titlebar_inset_for(sonic_core::config::TabBarPosition::Top)
+}
+
+/// Position-aware variant. Returns 0 when the bar is at the bottom — in
+/// that mode we use a normal NSWindow titlebar (see
+/// [`with_integrated_titlebar_for`]) so no reservation is needed above
+/// the grid.
+pub fn integrated_titlebar_inset_for(bar_pos: sonic_core::config::TabBarPosition) -> f32 {
     #[cfg(target_os = "macos")]
     {
-        MACOS_INTEGRATED_TITLEBAR_INSET
+        match bar_pos {
+            sonic_core::config::TabBarPosition::Top => MACOS_INTEGRATED_TITLEBAR_INSET,
+            sonic_core::config::TabBarPosition::Bottom => 0.0,
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = bar_pos;
         0.0
     }
 }
@@ -2001,7 +2038,7 @@ impl App {
         let logical_w = inner_size.0 as f32 / sf;
         let layout =
             TabBarLayout::compute_with_height(&self.tabs, logical_w, r.tab_bar_logical_height())
-                .with_top_offset(r.titlebar_inset())
+                .with_top_offset(r.tab_bar_y_offset())
                 .with_visible(r.tab_bar_visible());
         let snap = os_drag::TabBarSnapshot::from_layout(
             Some(w.id()),
@@ -2037,7 +2074,7 @@ impl App {
             logical_w,
             child.renderer.tab_bar_logical_height(),
         )
-        .with_top_offset(child.renderer.titlebar_inset())
+        .with_top_offset(child.renderer.tab_bar_y_offset())
         .with_visible(child.renderer.tab_bar_visible());
         let snap =
             os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);

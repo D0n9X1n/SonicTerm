@@ -519,7 +519,7 @@ impl App {
                         .renderer
                         .as_ref()
                         .map(|r| {
-                            (r.tab_bar_logical_height(), r.titlebar_inset(), r.tab_bar_visible())
+                            (r.tab_bar_logical_height(), r.tab_bar_y_offset(), r.tab_bar_visible())
                         })
                         .unwrap_or((sonic_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
                     let layout = TabBarLayout::compute_with_height(&self.tabs, window_width, bar_h)
@@ -614,7 +614,7 @@ impl App {
                             .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                     )
                     .with_top_offset(
-                        self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                        self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                     )
                     .with_visible(self.tab_bar_visible);
                     let tab_action = layout.hit(px, py);
@@ -774,7 +774,7 @@ impl App {
                                 .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                         )
                         .with_top_offset(
-                            self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
+                            self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                         );
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         match action {
