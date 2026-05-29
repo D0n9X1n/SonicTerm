@@ -2520,8 +2520,18 @@ impl GpuRenderer {
 
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            let layout = TabBarLayout::compute_with_height(tabs, sw, self.tab_bar_logical_height())
-                .with_top_offset(self.titlebar_inset);
+            // Phase D (Epic #289): open an 8 px insertion gap at the
+            // current drop slot when a drag is active over this bar.
+            let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
+            let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
+            let source_alpha = self.drag_chip.as_ref().map(|c| c.source_alpha).unwrap_or(1.0);
+            let layout = TabBarLayout::compute_with_insertion_slot(
+                tabs,
+                sw,
+                self.tab_bar_logical_height(),
+                insertion_slot,
+            )
+            .with_top_offset(self.titlebar_inset);
             // Issue #112 Round 3 — premium browser-style chrome.
             // The structural colors come from `ui_tokens`, decoupled from
             // the terminal palette so every theme renders the same modern
@@ -2673,6 +2683,21 @@ impl GpuRenderer {
                         &mut quads,
                     );
                 }
+                // Phase D D3 (Epic #289): if this tab is the source of
+                // a live drag, overlay a translucent bar-bg quad to
+                // dim it to roughly `source_alpha` perceived opacity.
+                // The quad is painted AFTER the tab body + close icon
+                // so it dims everything in the tab's footprint.
+                if source_tab_idx == Some(t.idx) {
+                    let dim = (1.0 - source_alpha.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                    let mut overlay = bar_bg;
+                    overlay[3] = dim;
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
+                        color: overlay,
+                        ..Default::default()
+                    });
+                }
             }
             // `+` new-tab button — 28×28, radius 8 pill, hover BG.
             let nt = layout.new_tab;
@@ -2721,12 +2746,30 @@ impl GpuRenderer {
                         .badge(now, layout.active == Some(t.idx)),
                 })
                 .collect();
-            let (title_text, tab_spans) = build_tab_title_spans(
+            let (title_text, mut tab_spans) = build_tab_title_spans(
                 &tab_inputs,
                 avg_glyph_w,
                 self.tab_active_fg,
                 self.tab_inactive_fg,
             );
+            // Phase D D3 (Epic #289, Haiku follow-up): dim the source
+            // tab's TITLE TEXT at the same alpha as the source-tab
+            // body quad so the dragged tab visibly "lifts off"
+            // instead of leaving the title fully opaque on top of a
+            // 30 %-dimmed body. The dim quad lands on top of the
+            // text in z-order, so without this the title text was
+            // still readable at full opacity (Haiku reviewer finding
+            // on PR #298).
+            if let Some(src_idx) = source_tab_idx {
+                for (i, t) in tab_inputs.iter().enumerate() {
+                    if t.index == src_idx {
+                        if let Some(entry) = tab_spans.get_mut(i) {
+                            entry.1 = scale_glyphon_alpha(entry.1, source_alpha);
+                        }
+                        break;
+                    }
+                }
+            }
             let TabTitleRichTextSpans { spans: spans2, default_attrs } =
                 build_tab_title_rich_text_spans(
                     &title_text,
@@ -3217,10 +3260,12 @@ impl GpuRenderer {
                 });
             }
 
-            // Ghost body — semi-transparent (alpha 0.7 per spec) copy
-            // of the active-tab style.
+            // Ghost body — Phase D D1: alpha controlled by
+            // `chip.ghost_alpha` (spec 0.5). The historical chip
+            // rendered at 0.7; the Phase D spec ghost is more
+            // translucent so the bar underneath stays legible.
             let mut chip_color = self.tab_active_bg;
-            chip_color[3] = 0.7;
+            chip_color[3] = chip.ghost_alpha.clamp(0.0, 1.0);
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(x0, y0, w, h, sw, sh),
                 color: chip_color,
@@ -3230,8 +3275,18 @@ impl GpuRenderer {
             // Title text via glyphon: shape into the dedicated
             // drag-chip buffer so it composites on top of the ghost
             // body. Clipping is handled by TextBounds below.
+            //
+            // Phase D D1 (Haiku follow-up on PR #298): scale the
+            // text color alpha by `chip.ghost_alpha` (spec 0.5) so
+            // the GHOST TITLE matches the ghost body translucency.
+            // Without this the body painted at 50 % alpha but the
+            // title text rode on top at full opacity, which read
+            // as "solid title on a faint plate" rather than a
+            // unified ghost.
             if !chip.title.is_empty() {
-                let attrs = terminal_font_attrs(&self.font_family).color(self.tab_active_fg);
+                let ghost_fg =
+                    scale_glyphon_alpha(self.tab_active_fg, chip.ghost_alpha.clamp(0.0, 1.0));
+                let attrs = terminal_font_attrs(&self.font_family).color(ghost_fg);
                 self.drag_chip_buffer.set_text(
                     &mut self.font_system,
                     &chip.title,
@@ -4172,6 +4227,21 @@ fn hex_to_glyphon(h: &str) -> GColor {
     } else {
         GColor::rgb(0, 0, 0)
     }
+}
+
+/// Multiply the alpha channel of a [`glyphon::Color`] by `factor`
+/// (clamped to `0.0..=1.0`) and return a fresh color with the same
+/// RGB triplet. Used by the Phase D drag-feedback path (Epic #289) to
+/// dim the source-tab title text and the ghost-chip title text to
+/// match their corresponding body quads — without this helper, those
+/// titles painted at full opacity on top of dimmed bodies (Haiku
+/// reviewer finding on PR #298).
+#[doc(hidden)]
+#[must_use]
+pub fn scale_glyphon_alpha(c: GColor, factor: f32) -> GColor {
+    let f = factor.clamp(0.0, 1.0);
+    let a = ((c.a() as f32) * f).round().clamp(0.0, 255.0) as u8;
+    GColor::rgba(c.r(), c.g(), c.b(), a)
 }
 
 /// Single source of truth for the [`Attrs`] used by every text-rendering

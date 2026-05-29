@@ -20,6 +20,71 @@ pub struct RenderInputs<'a> {
     /// affordance — OSC 8 hyperlinks have their own pre-existing
     /// hover-underline path and are not represented here.
     pub hovered_url_underline: Option<UnderlineRect>,
+    /// Phase D — drag visual feedback (Epic #289).
+    ///
+    /// `Some(ghost)` while a tab drag session is live and the cursor
+    /// has moved at least the drag-start threshold from the press
+    /// point. Drives the three Phase D affordances:
+    ///   * D1 ghost copy of the dragged tab at the cursor position,
+    ///     painted at `alpha = 0.5`
+    ///   * D2 insertion gap — when `insertion_slot` is `Some`, the
+    ///     destination bar's `TabBarLayout::compute_with_insertion_slot`
+    ///     shifts tabs at `[slot..]` right by 8 logical px
+    ///   * D3 source tab grayed — when `source_tab_idx` is `Some`,
+    ///     the corresponding tab in the source bar is painted at
+    ///     `alpha = 0.3`
+    pub drag_ghost: Option<DragGhost>,
+}
+
+/// Phase D drag-feedback descriptor — pure data passed from the App
+/// layer to the renderer. The renderer reads this to paint a 50 %
+/// alpha ghost copy of the dragged tab at the cursor, draw the 8 px
+/// insertion gap in the destination bar, and gray out the source tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DragGhost {
+    /// Top-left of the ghost rect in physical pixels (typically the
+    /// cursor position offset by half the chip size).
+    pub top_left: (f32, f32),
+    /// Title of the dragged tab — painted into the ghost.
+    pub title: String,
+    /// Alpha multiplier for the ghost. Spec: `0.5`.
+    pub alpha: f32,
+    /// Index of the tab in the source bar being dragged. The renderer
+    /// paints that tab at [`Self::source_alpha`] in the source bar.
+    pub source_tab_idx: Option<usize>,
+    /// Alpha multiplier for the source tab while the drag is live.
+    /// Spec: `0.3`.
+    pub source_alpha: f32,
+    /// Insertion slot in the destination bar — `Some(slot)` when the
+    /// cursor is over a tab bar (OnBar / OnOtherBar). Tabs at
+    /// `[slot..]` shift right by [`Self::insertion_gap_px`] logical
+    /// pixels to preview the drop position.
+    pub insertion_slot: Option<usize>,
+    /// Width of the insertion gap in logical pixels. Spec: `8.0`.
+    pub insertion_gap_px: f32,
+}
+
+impl DragGhost {
+    /// Spec-default alpha for the ghost chip following the cursor.
+    pub const GHOST_ALPHA: f32 = 0.5;
+    /// Spec-default alpha for the source tab while drag is live.
+    pub const SOURCE_ALPHA: f32 = 0.3;
+    /// Spec-default width of the insertion gap in logical pixels.
+    pub const INSERTION_GAP_PX: f32 = 8.0;
+}
+
+impl Default for DragGhost {
+    fn default() -> Self {
+        Self {
+            top_left: (0.0, 0.0),
+            title: String::new(),
+            alpha: Self::GHOST_ALPHA,
+            source_tab_idx: None,
+            source_alpha: Self::SOURCE_ALPHA,
+            insertion_slot: None,
+            insertion_gap_px: Self::INSERTION_GAP_PX,
+        }
+    }
 }
 
 /// Axis-aligned pixel rectangle for an overlay underline quad.

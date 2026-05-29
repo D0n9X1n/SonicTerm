@@ -233,6 +233,45 @@ impl TabBarLayout {
         Self::compute_with_height(bar, window_width, TAB_BAR_HEIGHT)
     }
 
+    /// Width of the Phase D insertion gap (Epic #289) in logical px.
+    /// Tabs at or after the insertion slot shift right by this amount
+    /// while a drag is in progress, previewing the drop position.
+    pub const INSERTION_GAP_PX: f32 = 8.0;
+
+    /// Like [`Self::compute_with_height`] but also opens a Phase D
+    /// insertion gap of [`Self::INSERTION_GAP_PX`] pixels at
+    /// `insertion_slot` so the user can see where a dragged tab will
+    /// land. `insertion_slot` is in `[0, n]` (insertion-slot
+    /// semantics); `None` falls through to the regular layout.
+    ///
+    /// The gap is applied by shifting every tab at index ≥ slot right
+    /// by [`Self::INSERTION_GAP_PX`] logical pixels — the close-box
+    /// and title sub-rects shift with their parent so hit-testing
+    /// stays internally consistent. The `+` new-tab button is NOT
+    /// shifted because it's anchored to the right edge of the bar.
+    pub fn compute_with_insertion_slot(
+        bar: &TabBar,
+        window_width: f32,
+        bar_height: f32,
+        insertion_slot: Option<usize>,
+    ) -> Self {
+        let mut layout = Self::compute_with_height(bar, window_width, bar_height);
+        let Some(slot) = insertion_slot else {
+            return layout;
+        };
+        let dx = Self::INSERTION_GAP_PX;
+        for t in layout.tabs.iter_mut() {
+            if t.idx >= slot {
+                t.bg_rect.x += dx;
+                t.close_x_rect.x += dx;
+                t.title_rect.x += dx;
+                t.bg.x += dx;
+                t.close.x += dx;
+            }
+        }
+        layout
+    }
+
     /// Like [`Self::compute`] but with an explicit bar height — used by the
     /// renderer so the painted bar and the hit-tested bar always agree on
     /// height when the user's font size differs from the default.
