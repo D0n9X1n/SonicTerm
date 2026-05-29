@@ -117,6 +117,68 @@ fn multirow_selection_every_quad_within_pane() {
     }
 }
 
+// ---- Haiku audit: 4 explicitly-named axis-aligned clip cases ----
+//
+// These four tests pin down the four canonical positions a selection rect can
+// occupy relative to the pane boundary. They use `clip_rect_to_pane` directly
+// so the contract is exercised at the helper's API surface, independent of
+// `selection_quad_rects`.
+
+/// Bottom-edge overshoot: a rect that extends below the pane's bottom must be
+/// trimmed so `y + h == pane_y + pane_h`.
+#[test]
+fn selection_past_bottom_edge_clipped() {
+    let r = (10.0, LEFT_PANE_H - 5.0, CELL_W, 100.0);
+    let clipped = clip_rect_to_pane(r, LEFT_ORIGIN_X, LEFT_ORIGIN_Y, LEFT_PANE_W, LEFT_PANE_H)
+        .expect("rect straddling bottom edge should survive (trimmed)");
+    assert!(
+        (clipped.1 + clipped.3 - LEFT_PANE_H).abs() < 0.001,
+        "clipped bottom {} should equal pane bottom {}",
+        clipped.1 + clipped.3,
+        LEFT_PANE_H,
+    );
+}
+
+/// Left-edge underflow: a rect whose `x` is negative (left of the pane) must
+/// have its `x` snapped to the pane's left edge and its width reduced accordingly.
+#[test]
+fn selection_before_left_edge_clipped() {
+    let r = (-50.0, 20.0, 200.0, CELL_H);
+    let clipped = clip_rect_to_pane(r, LEFT_ORIGIN_X, LEFT_ORIGIN_Y, LEFT_PANE_W, LEFT_PANE_H)
+        .expect("rect straddling left edge should survive (trimmed)");
+    assert!(
+        clipped.0 >= LEFT_ORIGIN_X - 0.001,
+        "clipped x {} should not be left of pane origin {}",
+        clipped.0,
+        LEFT_ORIGIN_X,
+    );
+    assert!(
+        (clipped.2 - 150.0).abs() < 0.001,
+        "clipped width should be 200 - 50 == 150, got {}",
+        clipped.2,
+    );
+}
+
+/// A rect wholly inside the pane must pass through unchanged.
+#[test]
+fn selection_wholly_inside_pane_unchanged() {
+    let r = (10.0, 20.0, 100.0, CELL_H);
+    let clipped = clip_rect_to_pane(r, LEFT_ORIGIN_X, LEFT_ORIGIN_Y, LEFT_PANE_W, LEFT_PANE_H)
+        .expect("interior rect should survive clipping");
+    assert!((clipped.0 - r.0).abs() < 0.001);
+    assert!((clipped.1 - r.1).abs() < 0.001);
+    assert!((clipped.2 - r.2).abs() < 0.001);
+    assert!((clipped.3 - r.3).abs() < 0.001);
+}
+
+/// A rect entirely outside the pane (in any axis) must be dropped (returns None).
+#[test]
+fn selection_wholly_outside_pane_emits_nothing() {
+    let r = (LEFT_PANE_W + 100.0, LEFT_PANE_H + 100.0, 50.0, 50.0);
+    let clipped = clip_rect_to_pane(r, LEFT_ORIGIN_X, LEFT_ORIGIN_Y, LEFT_PANE_W, LEFT_PANE_H);
+    assert!(clipped.is_none(), "rect entirely outside pane must produce no quad");
+}
+
 /// Empty selection emits zero quads (no degenerate 0-width quad pushed to GPU).
 #[test]
 fn empty_selection_emits_nothing() {

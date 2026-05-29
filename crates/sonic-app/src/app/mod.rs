@@ -739,6 +739,14 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+    /// Test-only redraw request counter (PR #271 follow-up). Every
+    /// production code path that calls `window.request_redraw()` after
+    /// a `run_action` dispatch also bumps this counter in lock-step.
+    /// Tests assert against this rather than the live winit window
+    /// (which has no public introspection API). Stays at zero in
+    /// release builds whose tests don't touch it.
+    #[doc(hidden)]
+    pub redraw_request_count: std::sync::atomic::AtomicUsize,
 }
 
 impl sonic_ui::broadcast::BroadcastTab for TabState {
@@ -853,6 +861,7 @@ impl App {
             broadcast: BroadcastState::Off,
             on_resumed: None,
             on_window_ready: None,
+            redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

@@ -121,21 +121,28 @@ fn close_active_pane_or_tab_fires_redraw_via_menubar_drain() {
     // dispatch that mutates visible state must be followed by a
     // `request_redraw` so the frame reflects the new shape on the same
     // tick. The menubar bridge path is the one that historically forgot
-    // it (Ctrl/Cmd+W on macOS). We assert that the action drains
-    // cleanly through the bridge — the same path `drain_menubar_actions`
-    // uses for the menu bar's "Close" item — and mutates state exactly
-    // once per push.
+    // it (Ctrl/Cmd+W on macOS). PR #271 follow-up audit (Haiku finding):
+    // earlier this test only asserted state mutation, not the redraw
+    // bump itself. We now read `App::redraw_request_count` before/after
+    // a single drain and assert it goes up by exactly 1 — the real
+    // counter assertion the audit asked for.
     let mut app = make_app();
     app.__test_seed_tab("alpha");
     app.__test_split_active_right();
     assert_eq!(app.__test_pane_count_in_tab(0), Some(2));
 
+    let before = app.redraw_request_count.load(std::sync::atomic::Ordering::Relaxed);
+
     let _ = sonic_app::menubar_bridge::push_action(Action::CloseActivePaneOrTab);
-    let drained = sonic_app::menubar_bridge::__test_drain();
-    assert_eq!(drained.len(), 1, "exactly one action queued");
-    for action in drained {
-        app.run_action(&action);
-    }
+    app.__test_drain_menubar_actions();
+
+    let after = app.redraw_request_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        after - before,
+        1,
+        "exactly one redraw must be requested per drain batch \
+         (before={before}, after={after}); PR #200 guard"
+    );
 
     assert_eq!(app.__test_tab_count(), 1, "tab survives the pane close");
     assert_eq!(
