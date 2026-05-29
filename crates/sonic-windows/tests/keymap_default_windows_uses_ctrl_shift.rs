@@ -26,6 +26,7 @@ fn keymap_default_windows_uses_ctrl_shift() {
         Some(&Action::ShowKeymapCheatsheet),
         "VK_OEM_2 + Ctrl + Shift is encoded as ctrl+shift+/; Shift already carries the question mark"
     );
+    assert_eq!(keymap.lookup("ctrl+shift+w"), Some(&Action::CloseTab));
     assert!(
         keymap
             .bindings

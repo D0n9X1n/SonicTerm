@@ -297,17 +297,24 @@ fn tab_inner_pad_is_10() {
 
 #[test]
 fn active_tab_top_accent_2px_blue() {
-    // The renderer draws a 2px top accent bar on the active tab,
-    // ACCENT_BLUE, inset on each side by ACTIVE_TOP_ACCENT_INSET so
-    // its width is `tab_w - 2 * inset`. Lock the constants so a
-    // future tweak doesn't silently drift.
+    // The renderer draws a 2px top accent bar on the active tab using
+    // ACCENT_BLUE. Issue #257: its width must equal the laid-out active
+    // tab width exactly; it must not stretch into the remaining strip.
     assert_eq!(ACTIVE_TOP_ACCENT_H, 2.0);
-    assert_eq!(ACTIVE_TOP_ACCENT_INSET, 6.0);
-    // And the token color is the canonical Tokyo-night blue (#7AA2F7).
     let blue = sonic_shared::ui_tokens::color::ACCENT_BLUE();
     assert!((blue[3] - 1.0).abs() < 1e-4);
-    // Premultiplied invariant.
     assert!(blue[0] <= blue[3] + 1e-5);
+}
+
+#[test]
+fn active_indicator_width_equals_active_tab_width_after_slack_distribution() {
+    let mut bar = bar_with(2);
+    bar.activate(1);
+    let layout = TabBarLayout::compute(&bar, 1200.0);
+    let active = layout.tabs[1].bg;
+    let indicator = layout.active_accent_rect().expect("active indicator");
+    assert_eq!(indicator.x, active.x);
+    assert_eq!(indicator.w, active.w, "active indicator must not use the full strip width");
 }
 
 #[test]

@@ -136,7 +136,7 @@ screencapture -x -D 1 /tmp/rel-vX.Y.Z-01-baseline.png
 4. Click the × on an inactive tab to the **left** of the active one.
 5. Click the × on an inactive tab to the **right** of the active one.
 6. With the right-most tab active, click the right-edge of its body (within 4 px of the trailing edge).
-7. Press `Ctrl+W` once.
+7. Press `Ctrl+Shift+W` once.
 8. (If reorder is implemented) drag tab 2 past tab 4 and drop.
 
 Screenshot after each non-trivial step: `/tmp/rel-vX.Y.Z-02-tabs-N.png`.
@@ -148,7 +148,7 @@ Screenshot after each non-trivial step: `/tmp/rel-vX.Y.Z-02-tabs-N.png`.
 - [ ] × on active tab closes it; focus moves to neighbor.
 - [ ] × on inactive tab (both sides) closes only that tab; active tab stays active.
 - [ ] Right-edge body click on rightmost tab activates it (no off-by-one hit-test, #181-class).
-- [ ] `Ctrl+W` once closes the active tab (NOT double-press, #178-class regression-guard).
+- [ ] `Ctrl+Shift+W` once closes the active tab (NOT double-press, #178-class regression-guard; avoids shell `Ctrl+W`).
 - [ ] Drag-reorder, if implemented, moves the tab to the dropped slot and preserves tab content + PTY.
 
 **FAIL → block release.**
@@ -1131,12 +1131,14 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 |---|---|
 | Confirm default keymap is `wezterm`; press `Cmd+T`. | Confirm default keymap is `wezterm-windows`; press `Ctrl+Shift+T`. |
 | Press another primary default chord such as `Cmd+D` for split. | Press another primary default chord such as `Ctrl+Shift+D` for split. |
+| Press `Cmd+W` / the active close-tab chord. | Press `Ctrl+Shift+W` and confirm the active tab closes (`Ctrl+W` remains shell word-delete). |
 | Verify Linux remains documented as `wezterm` with Super=Meta; no macOS run required. | Press common Win-key chords (for example `Win+T`, `Win+D`) and confirm Sonic does not bind or swallow them. |
 
 **Expected outcome:**
 
 - [ ] macOS default keymap is `wezterm`, and `Cmd+...` chords trigger default actions.
 - [ ] Windows default keymap is `wezterm-windows`, and `Ctrl+Shift+...` chords trigger the same actions.
+- [ ] Windows close-tab binding is `Ctrl+Shift+W`, not bare `Ctrl+W`.
 - [ ] Windows default bindings do not use Win-key chords that collide with the OS shell (#236 guard).
 - [ ] Linux default remains `wezterm` with Super=Meta documented for release notes.
 

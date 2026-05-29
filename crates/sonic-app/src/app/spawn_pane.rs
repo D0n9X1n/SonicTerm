@@ -256,6 +256,10 @@ impl App {
         if st.tree.split(focus, dir, new_id) {
             st.active_pane = new_id;
             self.panes.insert(new_id, new_pane);
+            self.resize_visible_panes();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
     pub(super) fn close_active_pane(&mut self) {

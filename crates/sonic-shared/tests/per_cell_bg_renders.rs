@@ -17,8 +17,9 @@
 use sonic_core::grid::{Cell, CellFlags, Color, Grid};
 use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonic_gpu::quad::QuadInstance;
+use sonic_shared::pane::Rect as PaneRect;
 use sonic_shared::render::color::srgb_u8_to_linear_lut;
-use sonic_shared::render::emit_cell_bg_quads;
+use sonic_shared::render::{emit_cell_bg_quads, emit_cell_bg_quads_clipped};
 
 fn theme_with_red_index1() -> Theme {
     let h = || Hex("#000000".to_string());
@@ -105,6 +106,14 @@ fn run_emit(grid: &Grid, theme: &Theme) -> Vec<QuadInstance> {
     out
 }
 
+fn ndc_to_px(rect: [f32; 4], sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+    let x = ((rect[0] + 1.0) * 0.5) * sw;
+    let w = rect[2] * sw * 0.5;
+    let h = rect[3] * sh * 0.5;
+    let y = ((1.0 - rect[1] - rect[3]) * 0.5) * sh;
+    (x, y, w, h)
+}
+
 #[test]
 fn red_bg_cells_produce_a_quad_at_all() {
     // The P0 bug: this assertion fails on `main` because the renderer
@@ -161,6 +170,59 @@ fn pure_default_bg_grid_emits_nothing() {
     let g = Grid::new(80, 24);
     let quads = run_emit(&g, &theme_with_red_index1());
     assert!(quads.is_empty(), "default-bg cells should emit no quads, got {}", quads.len());
+}
+
+#[test]
+fn split_pane_background_quads_are_clipped_to_each_pane_rect() {
+    let theme = theme_with_red_index1();
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let sw = 800.0;
+    let sh = 400.0;
+    let pane_a = PaneRect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
+    let pane_b = PaneRect { x: 200.0, y: 0.0, w: 200.0, h: 100.0 };
+
+    let mut grid_a = Grid::new(20, 5);
+    let mut grid_b = Grid::new(80, 5);
+    write_red_run(&mut grid_a, 0, 0, 20, 'A');
+    // Deliberately wider than pane_b: regression #263 painted this run
+    // into pane A / neighbouring cells instead of clipping to pane_b.
+    write_red_run(&mut grid_b, 0, 0, 80, 'B');
+
+    let mut pane_a_quads = Vec::new();
+    let mut pane_b_quads = Vec::new();
+    emit_cell_bg_quads_clipped(
+        &grid_a,
+        grid_a.scrollback_len() as u64,
+        &theme,
+        pane_a,
+        cell_w,
+        cell_h,
+        sw,
+        sh,
+        &mut pane_a_quads,
+    );
+    emit_cell_bg_quads_clipped(
+        &grid_b,
+        grid_b.scrollback_len() as u64,
+        &theme,
+        pane_b,
+        cell_w,
+        cell_h,
+        sw,
+        sh,
+        &mut pane_b_quads,
+    );
+
+    assert!(!pane_b_quads.is_empty(), "pane B should emit its own quads");
+    for q in pane_b_quads {
+        let (x, _, w, _) = ndc_to_px(q.rect, sw, sh);
+        assert!(x >= pane_b.x - 0.01, "pane B quad started inside pane A: x={x}");
+        assert!(
+            x + w <= pane_b.x + pane_b.w + 0.01,
+            "pane B quad exceeded pane B rect: x={x} w={w} pane_b={pane_b:?}"
+        );
+    }
 }
 
 #[test]
