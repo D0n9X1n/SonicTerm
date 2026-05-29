@@ -473,9 +473,15 @@ impl App {
                 let cheatsheet_here =
                     self.cheatsheet_open && self.cheatsheet_attached_window == Some(win_id);
                 if cheatsheet_here {
-                    // Drop the child borrow so we can call &mut self methods.
+                    // Capture the child window's own modifier state BEFORE
+                    // dropping the borrow — overlay chord lookup must use the
+                    // modifiers of the window that received the key, not the
+                    // main window's `self.modifiers`. Without this, an overlay
+                    // toggle chord pressed in a child window would be matched
+                    // against whatever the main window happened to be holding.
+                    let child_mods = child.modifiers;
                     let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::ShowKeymapCheatsheet) {
                                 self.run_action(&action);
@@ -493,8 +499,9 @@ impl App {
                     return;
                 }
                 if palette_here {
+                    let child_mods = child.modifiers;
                     let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::OpenCommandPalette) {
                                 self.run_action(&action);
