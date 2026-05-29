@@ -402,8 +402,7 @@ pub fn refresh_active_tab_title(
     let raw_title = parser.title().map(str::to_string);
     const TTL: std::time::Duration = std::time::Duration::from_millis(500);
     let now = Instant::now();
-    let fresh =
-        pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
+    let fresh = pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
     if !fresh {
         let probed = pane
             .pty
