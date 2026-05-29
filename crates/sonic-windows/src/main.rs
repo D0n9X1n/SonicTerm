@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     let _log_guard = sonic_logging::init(&log_cfg).ok();
     sonic_logging::cleanup_old_files_async(sonic_logging::log_dir(), &log_cfg);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
-    let tearout_payload = cli::parse_tearout_payload_from_env()?;
+    let _tearout_payload = cli::parse_tearout_payload_from_env()?;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
     let theme_loader: sonic_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
@@ -103,7 +103,7 @@ fn main() -> Result<()> {
             os_drag_win::WinOsDragSink::arc(),
             Some(theme_loader),
             Some(keymap_loader),
-            tearout_payload.or_else(os_drag_win::take_pending_payload),
+            _tearout_payload.or_else(os_drag_win::take_pending_payload),
             None,
             Some(on_window_ready),
         );

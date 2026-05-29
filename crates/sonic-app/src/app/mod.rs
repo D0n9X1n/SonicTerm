@@ -517,6 +517,7 @@ pub fn run_with_os_drag_pending_and_window_hook(
 mod child_window;
 mod config_apply;
 mod event_loop;
+pub mod hovered_url;
 pub mod invariants;
 mod key_encoding;
 mod keymap_dispatch;
@@ -625,6 +626,12 @@ pub struct App {
     pub(super) clipboard: Option<Clipboard>,
     pub(super) scale_factor: f64,
     pub(super) hover_link: bool,
+    /// Currently-hovered auto-detected URL (focused pane only), with
+    /// row + char-col span. Drives the Cmd-held underline overlay and
+    /// the pointer-cursor transition. `None` when the cursor isn't on
+    /// a URL OR the open-URL modifier isn't held. See
+    /// `crate::app::hovered_url` for the pure helpers.
+    pub(super) hovered_url: Option<hovered_url::HoveredUrl>,
     pub(super) cursor_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // v0.6: optional graphical preferences window.
     pub(super) prefs_window: Option<Arc<Window>>,
@@ -843,6 +850,7 @@ impl App {
             clipboard: Clipboard::new().ok(),
             scale_factor: 1.0,
             hover_link: false,
+            hovered_url: None,
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             prefs_window: None,
             prefs_state: None,

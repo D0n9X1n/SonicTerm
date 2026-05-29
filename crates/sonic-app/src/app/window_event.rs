@@ -17,7 +17,7 @@ use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
-    window::{CursorIcon, WindowId},
+    window::WindowId,
 };
 
 use super::key_encoding::{encode_key, key_event_to_string};
@@ -443,6 +443,16 @@ impl App {
 
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
+                // Releasing the open-URL modifier must clear any
+                // visible Cmd+hover URL underline (and revert the
+                // pointer to default if it was previously shown). We
+                // recompute hover state from the last cursor position
+                // so a subsequent re-press while still hovering brings
+                // the affordance back without needing a CursorMoved.
+                self.refresh_hovered_url();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
 
             // -- Mouse --
@@ -450,6 +460,9 @@ impl App {
                 let mut redraw = false;
                 if let Some(r) = self.renderer.as_mut() {
                     redraw = r.set_hover_cursor(None);
+                }
+                if self.hovered_url.take().is_some() {
+                    redraw = true;
                 }
                 if redraw {
                     if let Some(w) = &self.window {
@@ -531,25 +544,12 @@ impl App {
                         }
                     }
                 } else {
-                    // Hover-without-button: switch the OS cursor to a pointer
-                    // when the cell under the mouse is part of a hyperlink,
-                    // and reset to Default when leaving.
-                    let over_link = self
-                        .renderer
-                        .as_ref()
-                        .and_then(|r| r.pixel_to_cell(position.x as f32, position.y as f32))
-                        .and_then(|(row, col)| self.hyperlink_uri_at(row, col))
-                        .is_some();
-                    if over_link != self.hover_link {
-                        self.hover_link = over_link;
-                        if let Some(w) = &self.window {
-                            w.set_cursor(if over_link {
-                                CursorIcon::Pointer
-                            } else {
-                                CursorIcon::Default
-                            });
-                        }
-                    }
+                    // Hover-without-button: recompute the OSC8/auto-URL
+                    // hover state. Auto-detected URLs are gated on the
+                    // platform open-URL modifier (Cmd / Ctrl) per the
+                    // v1.0 Cmd-held-hover affordance; OSC 8 keeps its
+                    // unconditional pointer affordance.
+                    self.refresh_hovered_url();
                 }
             }
 
