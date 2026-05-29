@@ -29,7 +29,7 @@ pub use sonic_gpu::{atlas_upload, quad, text_pipeline};
 // refactor, issue #121). `sonic-ui` owns pure UI state + layout with no
 // winit / wgpu / glyphon deps.
 pub use sonic_ui::{
-    cheatsheet, command_label, command_palette, copy_mode, cursor, i18n, ime, overlays, pane,
+    cheatsheet, command_label, command_palette, copy_mode, cursor, i18n, icon, ime, overlays, pane,
     prefs, search, selection, tab_title, tabbar_view, tabs, ui_tokens,
 };
 

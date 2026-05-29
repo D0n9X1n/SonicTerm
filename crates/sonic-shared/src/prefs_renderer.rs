@@ -16,6 +16,7 @@
 //!
 //! `build_draw_list` is pure (no GPU) so it is trivially unit-testable.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -26,13 +27,15 @@ use glyphon::{
 use sonic_core::theme::Theme;
 use sonic_text::swash_rasterizer::load_bundled_fonts;
 use wgpu::{
-    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
-    LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
-    RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration, TextureFormat,
-    TextureUsages, TextureViewDescriptor,
+    BindGroup, BindGroupLayout, CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor,
+    Extent3d, FilterMode, Instance, InstanceDescriptor, LoadOp, MultisampleState, Operations,
+    Origin3d, PresentMode, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
+    Sampler, SamplerDescriptor, SurfaceConfiguration, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureAspect, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
+use crate::icon;
 use crate::prefs::controls::{Button, Control, InteractionState, Rect as PrefsRect, Toggle};
 use crate::prefs::layout::{
     self, BUTTON_RADIUS, CARD_PAD_H, CARD_PAD_V, CATEGORIES, CONTROL_H, CONTROL_RADIUS, LABEL_W,
@@ -92,6 +95,13 @@ pub struct TextCmd {
     pub font_family: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct IconCmd {
+    pub rect: PrefsRect,
+    pub key: &'static str,
+    pub color: [f32; 4],
+}
+
 /// Output of [`build_draw_list`].
 ///
 /// Rendering happens in two phases so combobox popovers ALWAYS win
@@ -105,6 +115,7 @@ pub struct TextCmd {
 pub struct DrawList {
     pub clear: [f32; 4],
     pub quads: Vec<QuadCmd>,
+    pub icons: Vec<IconCmd>,
     pub texts: Vec<TextCmd>,
     /// Popover-layer quads. Drawn AFTER `texts` so they overlay every
     /// base widget regardless of base text emission order.
@@ -184,6 +195,7 @@ fn terminal_font_attrs(state: &PrefsState) -> String {
 pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     let layout = state.layout;
     let mut quads: Vec<QuadCmd> = Vec::new();
+    let mut icons: Vec<IconCmd> = Vec::new();
     let mut texts: Vec<TextCmd> = Vec::new();
 
     // --- Background ----------------------------------------------------
@@ -210,9 +222,9 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             // Left accent bar.
             quads.push(QuadCmd::sharp(layout.category_accent(i), palette.accent));
         }
-        // Sidebar icon. These are Nerd Font PUA codepoints (see
-        // Category::icon); force the bundled JetBrainsMono Nerd Font so
-        // glyphon does not fall back to the system UI face and draw tofu.
+        // Sidebar icon. Bundled SVG masks are tinted with theme colors so
+        // preferences never depend on the user's terminal font containing
+        // Nerd Font private-use glyphs.
         let icon_y = row.y + (row.h - layout::SIDEBAR_ICON_SLOT) / 2.0;
         let icon_rect = PrefsRect::new(
             row.x + layout::SIDEBAR_ICON_X,
@@ -221,15 +233,8 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             layout::SIDEBAR_ICON_SLOT,
         );
         let icon_color =
-            if active { palette.accent } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
-        push_mono(
-            &mut texts,
-            icon_rect,
-            cat.icon().to_string(),
-            icon_color,
-            15.0,
-            Some("JetBrainsMono Nerd Font".to_string()),
-        );
+            if active { palette.accent } else { color::with_alpha(palette.text_primary, 0.6) };
+        icons.push(IconCmd { rect: icon_rect, key: cat.icon().key, color: icon_color });
 
         // Label.
         let label_x = row.x + SIDEBAR_LABEL_X;
@@ -275,14 +280,12 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
     // Section header: icon + title, with a one-line description below.
     let header_x = layout.form_card.x + CARD_PAD_H;
     let header_y = layout.form_card.y + CARD_PAD_V - 2.0;
-    let icon_rect = PrefsRect::new(header_x, header_y, 24.0, 20.0);
-    push_text(
-        &mut texts,
-        icon_rect,
-        state.active_category.icon().to_string(),
-        palette.accent,
-        typography::TypeRamp { size_px: SECTION_TITLE_SIZE + 1.0, line_px: 20.0, weight: 650 },
-    );
+    let icon_rect = PrefsRect::new(header_x, header_y, 20.0, 20.0);
+    icons.push(IconCmd {
+        rect: icon_rect,
+        key: state.active_category.icon().key,
+        color: palette.accent,
+    });
     let section_title_rect = PrefsRect::new(
         header_x + 30.0,
         header_y,
@@ -481,7 +484,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         }
     }
 
-    DrawList { clear: bg_base, quads, texts, popover_quads, popover_texts }
+    DrawList { clear: bg_base, quads, icons, texts, popover_quads, popover_texts }
 }
 
 /// Tint a base button color by the current [`InteractionState`]. Hover
@@ -847,6 +850,270 @@ fn control_label(c: &Control) -> &str {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct IconInstance {
+    rect: [f32; 4],
+    color: [f32; 4],
+}
+
+struct IconTexture {
+    bind_group: BindGroup,
+}
+
+struct SvgIconRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: BindGroupLayout,
+    sampler: Sampler,
+    instance_buf: wgpu::Buffer,
+    capacity: u64,
+    textures: HashMap<(&'static str, u32), IconTexture>,
+}
+
+const ICON_SHADER: &str = r#"
+struct Instance {
+    @location(0) rect: vec4<f32>,
+    @location(1) color: vec4<f32>,
+}
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+}
+
+@group(0) @binding(0) var icon_tex: texture_2d<f32>;
+@group(0) @binding(1) var icon_sampler: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32, inst: Instance) -> VsOut {
+    var corners = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let c = corners[vid];
+    var out: VsOut;
+    out.pos = vec4<f32>(inst.rect.x + c.x * inst.rect.z, inst.rect.y + c.y * inst.rect.w, 0.0, 1.0);
+    out.uv = c;
+    out.color = inst.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let mask = textureSample(icon_tex, icon_sampler, in.uv).r;
+    return vec4<f32>(in.color.rgb, in.color.a * mask);
+}
+"#;
+
+impl SvgIconRenderer {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: TextureFormat) -> Self {
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("prefs-icon-sampler"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("prefs-icon-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("prefs-icon-pipeline-layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("prefs-icon-shader"),
+            source: wgpu::ShaderSource::Wgsl(ICON_SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("prefs-icon-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<IconInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let capacity = 16;
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("prefs-icon-instances"),
+            size: capacity * std::mem::size_of::<IconInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut renderer = Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            instance_buf,
+            capacity,
+            textures: HashMap::new(),
+        };
+        renderer.cache_icons(device, queue);
+        renderer
+    }
+
+    fn cache_icons(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        for icon in icon::ALL {
+            for size in [16, 24, 32] {
+                let alpha = icon::rasterize_alpha(icon, size);
+                self.textures.insert((icon.key, size), self.upload(device, queue, size, &alpha));
+            }
+        }
+    }
+
+    fn upload(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: u32,
+        alpha: &[u8],
+    ) -> IconTexture {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("prefs-svg-icon-mask"),
+            size: Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            alpha,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size),
+                rows_per_image: Some(size),
+            },
+            Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("prefs-svg-icon-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        IconTexture { bind_group }
+    }
+
+    fn draw<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'a>,
+        icons: &[IconCmd],
+        sf: f32,
+        surface_size: [f32; 2],
+    ) {
+        if icons.is_empty() {
+            return;
+        }
+        let instances: Vec<IconInstance> = icons
+            .iter()
+            .map(|cmd| IconInstance {
+                rect: px_to_ndc(
+                    cmd.rect.x * sf,
+                    cmd.rect.y * sf,
+                    cmd.rect.w * sf,
+                    cmd.rect.h * sf,
+                    surface_size[0],
+                    surface_size[1],
+                ),
+                color: cmd.color,
+            })
+            .collect();
+        if instances.len() as u64 > self.capacity {
+            let mut cap = self.capacity.max(1);
+            while cap < instances.len() as u64 {
+                cap *= 2;
+            }
+            self.instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("prefs-icon-instances"),
+                size: cap * std::mem::size_of::<IconInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.capacity = cap;
+        }
+        queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+        for (index, cmd) in icons.iter().enumerate() {
+            let size = if cmd.rect.w.max(cmd.rect.h) <= 16.0 {
+                16
+            } else if cmd.rect.w.max(cmd.rect.h) <= 24.0 {
+                24
+            } else {
+                32
+            };
+            if let Some(texture) = self.textures.get(&(cmd.key, size)) {
+                pass.set_bind_group(0, &texture.bind_group, &[]);
+                pass.draw(0..4, index as u32..index as u32 + 1);
+            }
+        }
+    }
+}
+
 /// Minimal GPU renderer driving a single preferences window. Owns the
 /// wgpu surface + glyphon + a quad pipeline. Reconfigures on resize +
 /// scale-factor changes.
@@ -873,6 +1140,7 @@ pub struct PrefsRenderer {
     /// `draw(&[QuadInstance])` does not clobber the base pipeline's
     /// per-frame instance buffer mid-encoder.
     popover_quad: QuadPipeline,
+    icon_renderer: SvgIconRenderer,
     cell_w: f32,
     window: Arc<Window>,
 }
@@ -935,6 +1203,7 @@ impl PrefsRenderer {
 
         let quad = QuadPipeline::new(&device, format);
         let popover_quad = QuadPipeline::new(&device, format);
+        let icon_renderer = SvgIconRenderer::new(&device, &queue, format);
 
         Ok(Self {
             surface,
@@ -952,6 +1221,7 @@ impl PrefsRenderer {
             popover_text_renderer,
             quad,
             popover_quad,
+            icon_renderer,
             cell_w: scale_factor * BASE_CELL_W,
             window,
         })
@@ -1194,8 +1464,16 @@ impl PrefsRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // Phase 1: base quads then base text.
+            // Phase 1: base quads, SVG icons, then base text.
             self.quad.draw(&self.device, &self.queue, &mut pass, &base_quads);
+            self.icon_renderer.draw(
+                &self.device,
+                &self.queue,
+                &mut pass,
+                &draw.icons,
+                sf,
+                [sw, sh],
+            );
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .map_err(|e| anyhow!("prefs text render: {e:?}"))?;
@@ -1925,14 +2203,12 @@ mod tests {
             .texts
             .iter()
             .any(|t| t.monospace && t.font_family.as_deref() == Some("ZZZ-FixturePreviewFont"));
-        let sidebar_icon_used = dl
-            .texts
-            .iter()
-            .any(|t| t.monospace && t.font_family.as_deref() == Some("JetBrainsMono Nerd Font"));
+        let sidebar_icon_used =
+            dl.icons.iter().any(|icon| icon.key == "font" || icon.key == "theme");
         assert!(
             preview_used,
             "preview card text did not carry the configured terminal font family (mono_count={mono_count}, with_family={with_family})"
         );
-        assert!(sidebar_icon_used, "sidebar Nerd Font icons must force JetBrainsMono Nerd Font");
+        assert!(sidebar_icon_used, "sidebar SVG icons must be emitted separately from text");
     }
 }

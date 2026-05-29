@@ -31,6 +31,7 @@ pub mod command_palette;
 pub mod copy_mode;
 pub mod cursor;
 pub mod i18n;
+pub mod icon;
 pub mod ime;
 pub mod overlays;
 pub mod pane;
