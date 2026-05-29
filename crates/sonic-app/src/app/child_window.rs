@@ -609,6 +609,11 @@ impl App {
         }
     }
     pub(super) fn reap_empty_child(&mut self, win_id: WindowId) {
+        // PR #302 follow-up: bump the test-observable counter on EVERY
+        // invocation (even no-ops on stale ids) so tests can pin that
+        // child-window cleanup truly routed through this contract rather
+        // than a raw `windows.remove`.
+        self.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(removed) = self.windows.remove(&win_id) {

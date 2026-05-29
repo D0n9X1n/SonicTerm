@@ -959,6 +959,15 @@ pub struct App {
     /// release builds whose tests don't touch it.
     #[doc(hidden)]
     pub redraw_request_count: std::sync::atomic::AtomicUsize,
+    /// Test-only counter incremented on every call to
+    /// [`Self::reap_empty_child`] (PR #302 Haiku follow-up). Lets tests
+    /// distinguish "child window cleanup went through the unified reap
+    /// contract" from "a direct `windows.remove` happened" — both would
+    /// shrink the `windows` map, but only the former nulls out straggler
+    /// `redraw_target`s and fires the reap trace. Stays at zero in
+    /// release builds whose tests don't touch it.
+    #[doc(hidden)]
+    pub reap_call_count: std::sync::atomic::AtomicUsize,
 }
 
 impl sonic_ui::broadcast::BroadcastTab for TabState {
@@ -1084,6 +1093,7 @@ impl App {
             on_resumed: None,
             on_window_ready: None,
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
+            reap_call_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
