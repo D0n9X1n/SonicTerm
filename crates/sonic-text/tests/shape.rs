@@ -4,7 +4,7 @@
 
 use cosmic_text::{fontdb, FontSystem};
 use sonic_text::shape::{shape_run, RunStyle};
-use sonic_text::swash_rasterizer::SwashRasterizer;
+use sonic_text::swash_rasterizer::{lookup_id_in_db, SwashRasterizer};
 use sonic_types::Cell;
 
 fn cell(ch: char) -> Cell {
@@ -33,19 +33,27 @@ fn font_system_with_assets() -> FontSystem {
 #[test]
 fn bundled_st_helens_normal_query_resolves_upright_face() {
     let fs = font_system_with_assets();
-    let families = [fontdb::Family::Name("Rec Mono St.Helens")];
-    let query = fontdb::Query {
-        families: &families,
-        weight: fontdb::Weight::NORMAL,
-        stretch: fontdb::Stretch::Normal,
-        style: fontdb::Style::Normal,
-    };
-    let raw_id = fs.db().query(&query).expect("bundled Rec Mono St.Helens family must resolve");
-    let raw_face = fs.db().face(raw_id).expect("resolved fontdb face must exist");
+    let id = lookup_id_in_db(fs.db(), "Rec Mono St.Helens", false, false)
+        .expect("bundled Rec Mono St.Helens family must resolve");
+    let face = fs.db().face(id).expect("resolved fontdb face must exist");
     assert_eq!(
-        raw_face.style,
+        face.style,
         fontdb::Style::Normal,
         "bundled Rec Mono St.Helens Regular must be registered as upright Normal, not Italic"
+    );
+}
+
+#[test]
+fn normal_lookup_rejects_italic_face_when_regular_is_missing() {
+    let mut fs = FontSystem::new();
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/fonts/RecMonoSt.Helens-Italic.ttf");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    fs.db_mut().load_font_data(bytes);
+
+    assert!(
+        lookup_id_in_db(fs.db(), "Rec Mono St.Helens", false, false).is_none(),
+        "upright lookup must not accept fontdb's fuzzy Italic fallback when Regular is absent"
     );
 }
 

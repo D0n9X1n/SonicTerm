@@ -36,7 +36,7 @@
 //!   draws the missing-glyph outline box)
 //! - swash's `Render` returns `None` for a valid glyph id (rare)
 
-use cosmic_text::FontSystem;
+use cosmic_text::{fontdb, FontSystem};
 use sonic_types::GlyphKey;
 use std::collections::HashMap;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -220,6 +220,33 @@ pub fn platform_fallback_chain_for_test() -> &'static [&'static str] {
     PLATFORM_FALLBACK_CHAIN
 }
 
+/// Test-visible helper for the exact fontdb lookup semantics used by
+/// [`SwashRasterizer`].
+#[doc(hidden)]
+pub fn lookup_id_in_db(
+    db: &fontdb::Database,
+    family: &str,
+    weight_bold: bool,
+    italic: bool,
+) -> Option<fontdb::ID> {
+    let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
+    let style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+    // Only ask fontdb for `Name(family)` — no Monospace tail here,
+    // otherwise the lookup for a CJK family on a system without it
+    // would silently substitute the default monospace and shadow
+    // a real fallback in the next slot.
+    let families = [fontdb::Family::Name(family)];
+    let query =
+        fontdb::Query { families: &families, weight, stretch: fontdb::Stretch::Normal, style };
+    let id = db.query(&query)?;
+    let face = db.face(id)?;
+    if face.style == style {
+        Some(id)
+    } else {
+        None
+    }
+}
+
 /// Load bundled TTF/OTF files from the same locations used by the windowed
 /// renderers. Shared by the terminal renderer and the preferences renderer so
 /// Nerd Font PUA codepoints resolve consistently in both paths.
@@ -244,7 +271,7 @@ pub fn load_bundled_fonts(fs: &mut FontSystem) {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    crate::load_font_data_with_sonic_overrides(fs, bytes);
                     n += 1;
                 }
             }
@@ -383,18 +410,10 @@ impl<'a> SwashRasterizer<'a> {
     }
 
     /// Look up the fontdb ID for `family` at the given (bold, italic)
-    /// combination, returning `None` if nothing in the fontdb matches.
+    /// combination, returning `None` if nothing in the fontdb exactly matches
+    /// the requested style.
     fn lookup_id(&self, family: &str, weight_bold: bool, italic: bool) -> Option<fontdb::ID> {
-        let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
-        let style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
-        // Only ask fontdb for `Name(family)` — no Monospace tail here,
-        // otherwise the lookup for a CJK family on a system without it
-        // would silently substitute the default monospace and shadow
-        // a real fallback in the next slot.
-        let families = [fontdb::Family::Name(family)];
-        let query =
-            fontdb::Query { families: &families, weight, stretch: fontdb::Stretch::Normal, style };
-        self.font_system.db().query(&query)
+        lookup_id_in_db(self.font_system.db(), family, weight_bold, italic)
     }
 
     /// Reverse-lookup the slot index for a fontdb ID. Used by the
