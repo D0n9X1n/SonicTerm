@@ -504,6 +504,39 @@ pub enum UserEvent {
     ClearShapeCache,
 }
 
+/// Build an [`AsyncFallbackLoader`] whose notifier fires
+/// `UserEvent::ClearShapeCache` on `proxy`. The loader uses
+/// [`sonic_text::async_fallback::default_load_font_family`] for actual
+/// font resolution (zero-byte handle for OS-resident faces, which is
+/// what we want — cosmic-text's `FontSystem` does the real install on
+/// first use).
+///
+/// This is the production wire that `Haiku` flagged as missing on
+/// PR #318: pre-fix, the loader was wired only inside tests, and
+/// real frame-time misses never spawned `request_load` calls. With
+/// this helper, every `GpuRenderer::new` site in `sonic-app`
+/// constructs the loader from its event-loop proxy and hands it to
+/// `GpuRenderer::set_async_loader`. From that point on, a
+/// background font load completion bumps `style_rev` on every live
+/// window and triggers a redraw — the tofu cells flip to real
+/// glyphs without the user having to type anything.
+#[must_use]
+pub fn build_async_fallback_loader_for_proxy(
+    proxy: EventLoopProxy<UserEvent>,
+) -> sonic_text::async_fallback::AsyncFallbackLoader {
+    use sonic_text::async_fallback::{
+        default_load_font_family, AsyncFallbackLoader, LoadFn, NotifyFn,
+    };
+    let load_fn: LoadFn = Arc::new(default_load_font_family);
+    let notify: NotifyFn = Arc::new(move || {
+        // Best-effort: the only reason `send_event` fails is the loop
+        // already exited, in which case the user has closed the app
+        // and there is nothing to redraw.
+        let _ = proxy.send_event(UserEvent::ClearShapeCache);
+    });
+    AsyncFallbackLoader::new(load_fn, notify)
+}
+
 /// Same as [`run`] but installs a platform-specific OS-drag sink.
 /// `sonic-mac` calls this with a `NSPasteboard`-backed impl; future
 /// `sonic-windows` work will pass an `IDataObject`/`DoDragDrop` impl.

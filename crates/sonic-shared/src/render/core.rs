@@ -449,6 +449,16 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
+    /// Optional async font fallback loader (Epic #300 P4 follow-up).
+    /// When set, every transient `SwashRasterizer` built inside
+    /// `render()` / `set_font` / `rebuild_for_scale` has the loader
+    /// attached so misses on CJK / emoji / nerd-font codepoints fire a
+    /// background `request_load` and, on completion, the loader's
+    /// notifier fires `UserEvent::ClearShapeCache` on the winit
+    /// `EventLoopProxy` plumbed in by `sonic-app`. Stays `None` in
+    /// tests / examples that construct `GpuRenderer` without an event
+    /// loop proxy (the existing tofu fallback path keeps working).
+    async_loader: Option<sonic_text::async_fallback::AsyncFallbackLoader>,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -823,6 +833,7 @@ impl GpuRenderer {
             last_emit_origins: Vec::new(),
             style_rev: 0,
             drag_chip: None,
+            async_loader: None,
         })
     }
 
@@ -1551,6 +1562,26 @@ impl GpuRenderer {
         self.style_rev
     }
 
+    /// Attach (or replace) the async font fallback loader. The next
+    /// frame's transient `SwashRasterizer` picks the loader up via
+    /// [`Self::async_loader`]; misses on CJK / emoji / nerd-font
+    /// codepoints then trigger background `request_load` and the
+    /// loader's notifier fires `UserEvent::ClearShapeCache` through the
+    /// winit `EventLoopProxy` plumbed in by `sonic-app`. See Epic #300
+    /// P4 follow-up.
+    pub fn set_async_loader(&mut self, loader: sonic_text::async_fallback::AsyncFallbackLoader) {
+        self.async_loader = Some(loader);
+    }
+
+    /// Borrow the attached async loader, if any. Test/diagnostic only —
+    /// used by `async_font_loader_attached_in_prod` to assert the
+    /// production wiring actually plumbed the loader through.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn async_loader(&self) -> Option<&sonic_text::async_fallback::AsyncFallbackLoader> {
+        self.async_loader.as_ref()
+    }
+
     /// Translate physical-pixel `(px, py)` (as winit reports) into a
     /// `(col, row)` cell address inside the grid, or `None` if the point
     /// falls outside the grid (in the tab bar, padding, etc.).
@@ -1951,6 +1982,18 @@ impl GpuRenderer {
                 &self.font_family,
                 self.font_size * self.scale_factor,
             );
+            // Epic #300 P4 follow-up: if the app plumbed an async
+            // fallback loader through `set_async_loader`, attach it
+            // here so missing CJK/emoji/nerd-font glyphs spawn a
+            // background load + a `UserEvent::ClearShapeCache` wakeup
+            // on completion. Without this attach the loader is
+            // constructed in `sonic-app` but never reaches the codepath
+            // that calls `request_load`, so real misses silently render
+            // as tofu forever (regression caught by Haiku PR #318
+            // review).
+            if let Some(loader) = self.async_loader.clone() {
+                rasterizer.set_async_loader(loader);
+            }
             // Part B step 3: iterate every pane. Each iteration rebinds
             // `grid` to that pane's Grid (via the raw pointer collected
             // into pane_views above), uses the pane's own origin instead
