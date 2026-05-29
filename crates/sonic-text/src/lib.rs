@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod async_fallback;
 pub mod glyph_atlas;
 pub mod row_glyph_cache;
 pub mod shape;
