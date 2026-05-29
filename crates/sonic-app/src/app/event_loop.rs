@@ -104,11 +104,32 @@ impl App {
             UserEvent::DragEnded => {
                 let _ = self.handle_os_drag_ended();
             }
+            UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
         }
         // Any path above that ran an action may have set
         // `pending_prefs_open` — make sure the prefs window actually
         // materializes regardless of the dispatch source.
         self.drain_pending_window_creates(el);
+    }
+
+    /// Drain a `UserEvent::ClearShapeCache` (Epic #300 P4 follow-up):
+    /// an async font fallback family just landed in
+    /// [`sonic_text::async_fallback::AsyncFallbackLoader`]. Clear every
+    /// live renderer's shape / row / line caches (bumping `style_rev`)
+    /// and request a redraw on every live window. The next frame
+    /// re-walks the fallback chain and the user's tofu cells flip to
+    /// real glyphs.
+    pub(super) fn handle_clear_shape_cache(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_shape_cache();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        for (_id, child) in self.windows.iter_mut() {
+            child.renderer.clear_shape_cache();
+            child.window.request_redraw();
+        }
     }
 
     pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {
@@ -196,6 +217,16 @@ impl App {
         // user's GPU at all — no recovery path exists in a GPU-accelerated
         // terminal. Same justification as the `create_window` site above.
         .expect("init renderer");
+        // Epic #300 P4 follow-up wire: attach the async font fallback
+        // loader so frame-time misses on CJK / emoji / nerd-font
+        // codepoints trigger a background `request_load` and a
+        // `UserEvent::ClearShapeCache` wake-up on completion. Skipped
+        // when the App was constructed without a proxy (test harness
+        // path); the existing tofu fallback keeps working in that
+        // case.
+        if let Some(proxy) = self.event_loop_proxy.clone() {
+            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
+        }
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Subsequent
         // edits to sonic.toml take effect through the config-watch hook
