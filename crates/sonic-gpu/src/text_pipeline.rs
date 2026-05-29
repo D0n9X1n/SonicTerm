@@ -71,11 +71,17 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sample = textureSample(atlas_tex, atlas_smp, in.uv);
     if (in.flags.x >= 0.5) {
-        // Color/LCD glyph: atlas already holds premultiplied BGRA from the
-        // emoji strike or a premultiplied subpixel coverage mask. wgpu's
-        // Bgra8Unorm format swizzles BGRA → RGBA at sample time, so
-        // `sample` is already premultiplied. Return as-is.
-        return sample * in.color;
+        // Color glyph: atlas already holds premultiplied BGRA from the
+        // emoji strike (Bgra8Unorm). wgpu's Bgra8Unorm format swizzles
+        // BGRA → RGBA at sample time, so `sample` is already
+        // (r, g, b, a) premultiplied. Return as-is.
+        //
+        // NOTE: PR #267 added a `* in.color` tint here to LCD-tint
+        // subpixel masks, but LCD masks are flagged `is_color: false`
+        // (see `lcd_glyph_not_marked_color`), so they go through the
+        // monochrome branch below — the tint here only affected
+        // emoji glyphs and broke the macOS visual_snapshot baseline.
+        return sample;
     }
     // Monochrome glyph: atlas stores replicated coverage in all four
     // channels. Modulate by the per-instance foreground color and

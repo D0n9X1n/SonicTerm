@@ -150,32 +150,40 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 ///
 /// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
 /// but the chain shouldn't be empty.
+// NOTE: `JetBrainsMono Nerd Font` lives at the TAIL of every chain.
+// PR #267 inserted it at the FRONT to satisfy Nerd Font PUA-codepoint
+// coverage (#261), but at the front it stole CJK glyph resolution from
+// PingFang/Microsoft YaHei/Noto because cosmic-text walks the chain in
+// order. Nerd Font has no CJK coverage, so CJK cells rendered as tofu /
+// JBM-mangled boxes on macOS — the P0 user-visible regression. The tail
+// position still resolves the PUA codepoints (#261) because no earlier
+// face in the chain covers them.
 #[cfg(target_os = "macos")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
-    "JetBrainsMono Nerd Font",
     "PingFang SC",
     "Hiragino Sans GB",
     "Apple SD Gothic Neo",
     "Symbols Nerd Font Mono",
     "Apple Color Emoji",
+    "JetBrainsMono Nerd Font",
 ];
 #[cfg(target_os = "windows")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
-    "JetBrainsMono Nerd Font",
     "Microsoft YaHei",
     "MS Gothic",
     "Malgun Gothic",
     "Symbols Nerd Font Mono",
     "Segoe UI Emoji",
+    "JetBrainsMono Nerd Font",
 ];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
-    "JetBrainsMono Nerd Font",
     "Noto Sans CJK SC",
     "Noto Sans CJK JP",
     "Noto Sans CJK KR",
     "Symbols Nerd Font Mono",
     "Noto Color Emoji",
+    "JetBrainsMono Nerd Font",
 ];
 
 /// Maximum number of families in the fallback chain. One byte in the
@@ -184,7 +192,17 @@ const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
 pub const MAX_FALLBACK_SLOTS: u8 = 8;
 
 const MONOCHROME_SOURCES: &[Source] = &[Source::Outline, Source::Bitmap(StrikeWith::BestFit)];
+
+// LCD subpixel rendering is Windows-only. On macOS, Apple removed
+// system-wide subpixel AA in Mojave and the LCD path produces visible
+// color fringing against the terminal background (P0 regression from
+// PR #267). On Linux the subpixel ordering of the display is unknown
+// to us, so grayscale is the safe default. Windows DirectWrite/ClearType
+// is the only path where LCD subpixel is the user-expected behavior.
+#[cfg(target_os = "windows")]
 const MONOCHROME_FORMAT: Format = Format::Subpixel;
+#[cfg(not(target_os = "windows"))]
+const MONOCHROME_FORMAT: Format = Format::Alpha;
 
 /// Test-visible snapshot of the monochrome rasterizer quality settings.
 /// Windows text-quality issue #261 requires hinted outline rendering plus
@@ -192,6 +210,14 @@ const MONOCHROME_FORMAT: Format = Format::Subpixel;
 #[doc(hidden)]
 pub fn monochrome_render_config_for_test() -> (&'static [Source], Format, bool) {
     (MONOCHROME_SOURCES, MONOCHROME_FORMAT, true)
+}
+
+/// Test-visible snapshot of the platform fallback chain. Used by the
+/// `lcd_only_on_windows` regression to assert Nerd Font sits at the TAIL
+/// (not the FRONT) of every chain — see the P0 fix for PR #267.
+#[doc(hidden)]
+pub fn platform_fallback_chain_for_test() -> &'static [&'static str] {
+    PLATFORM_FALLBACK_CHAIN
 }
 
 /// Load bundled TTF/OTF files from the same locations used by the windowed
