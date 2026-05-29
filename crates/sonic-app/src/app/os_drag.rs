@@ -223,6 +223,47 @@ impl TabBarSnapshot {
         sx >= l && sx < r && sy >= t && sy < b
     }
 
+    /// Build a [`TabBarSnapshot`] from a computed [`TabBarLayout`]
+    /// (in window-local **logical** pixels) plus the destination window's
+    /// **physical** inner-origin and HiDPI scale factor. All output rects
+    /// are in screen-global **physical** pixels — the same coordinate
+    /// system the OS reports drop cursors in.
+    ///
+    /// `inner_origin` is the window's `inner_position()` (top-left of
+    /// the client area, screen-global, physical px). `inner_size` is
+    /// `inner_size()` (physical px). `scale_factor` is `Window::scale_factor()`.
+    ///
+    /// Used by the App's per-frame redraw path to publish the live tab
+    /// bar geometry into the shared [`TabBarRegistry`] so platform OS-drag
+    /// backends can hit-test drop cursors without re-entering the App.
+    pub fn from_layout(
+        window: Option<WindowId>,
+        inner_origin: (i32, i32),
+        inner_size: (u32, u32),
+        scale_factor: f32,
+        layout: &sonic_ui::tabbar_view::TabBarLayout,
+    ) -> Self {
+        let sf = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+        let (ox, oy) = inner_origin;
+        let (iw, ih) = inner_size;
+        let window_rect = (ox, oy, ox + iw as i32, oy + ih as i32);
+        // Bar rect: logical → physical, then translate by inner origin.
+        let bar = &layout.bar;
+        let bar_rect = (
+            ox + (bar.x * sf).round() as i32,
+            oy + (bar.y * sf).round() as i32,
+            ox + ((bar.x + bar.w) * sf).round() as i32,
+            oy + ((bar.y + bar.h) * sf).round() as i32,
+        );
+        let mut tab_lefts = Vec::with_capacity(layout.tabs.len());
+        let mut tab_rights = Vec::with_capacity(layout.tabs.len());
+        for t in &layout.tabs {
+            tab_lefts.push(ox + (t.bg_rect.x * sf).round() as i32);
+            tab_rights.push(ox + ((t.bg_rect.x + t.bg_rect.w) * sf).round() as i32);
+        }
+        Self { window, window_rect, bar_rect, tab_lefts, tab_rights }
+    }
+
     /// Compute the insertion slot for a tab dropped at screen X `sx`.
     /// Mirrors `TabBarLayout::drop_slot`: returns the index of the
     /// first tab whose horizontal midpoint is to the right of `sx`, or

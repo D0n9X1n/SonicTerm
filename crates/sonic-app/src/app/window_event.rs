@@ -329,6 +329,12 @@ impl App {
                         let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };
+                    // Epic #289 Phase C2 — refresh the OS-drag tab bar
+                    // snapshot so cross-window drop hit-tests see the
+                    // current layout. Drops between PRs read this; an
+                    // empty registry means every drop resolves to
+                    // `DroppedOnEmpty` (the bug PR #295 review caught).
+                    // (moved after the renderer borrow scope below)
                     // Tell the OS where the active text cursor lives so the
                     // IME candidate window (pinyin candidates, Japanese
                     // romaji selector, Korean Hangul composer) appears
@@ -348,6 +354,10 @@ impl App {
                         }
                     }
                 }
+                // Epic #289 Phase C2 — refresh OS-drag tab bar snapshot
+                // for the main window. Outside the renderer borrow scope
+                // so the immutable self borrow doesn't conflict with `r`.
+                self.publish_main_window_tab_bar();
             }
 
             WindowEvent::Focused(focused) => {

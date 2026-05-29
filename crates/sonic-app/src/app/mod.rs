@@ -1767,6 +1767,67 @@ impl App {
         self.os_drag_bars.publish(snapshot);
     }
 
+    /// Convenience: build a [`os_drag::TabBarSnapshot`] from the main
+    /// window's current geometry + tab bar and publish it. No-op if the
+    /// main window or renderer aren't yet initialized (pre-`resumed`).
+    /// Called from the per-frame `RedrawRequested` handler so the
+    /// snapshot registry tracks every visible tab-bar state change.
+    pub(super) fn publish_main_window_tab_bar(&self) {
+        use sonic_ui::tabbar_view::TabBarLayout;
+        let Some(w) = self.window.as_ref() else { return };
+        let Some(r) = self.renderer.as_ref() else { return };
+        let inner_origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+        let inner_size = {
+            let s = w.inner_size();
+            (s.width, s.height)
+        };
+        let sf = w.scale_factor() as f32;
+        let logical_w = inner_size.0 as f32 / sf;
+        let layout =
+            TabBarLayout::compute_with_height(&self.tabs, logical_w, r.tab_bar_logical_height())
+                .with_top_offset(r.titlebar_inset())
+                .with_visible(r.tab_bar_visible());
+        let snap = os_drag::TabBarSnapshot::from_layout(
+            Some(w.id()),
+            inner_origin,
+            inner_size,
+            sf,
+            &layout,
+        );
+        self.publish_os_drag_bar_snapshot(snap);
+    }
+
+    /// Remove a window's snapshot from the registry (called on window
+    /// close). Safe to call with `None` (matches main-window convention).
+    pub fn remove_os_drag_bar_snapshot(&self, window: Option<WindowId>) {
+        self.os_drag_bars.remove(window);
+    }
+
+    /// Publish the tab bar snapshot for the child window keyed by `id`.
+    /// No-op if the child isn't found. Called from the child's redraw
+    /// path right after `Renderer::render`.
+    pub fn publish_child_window_tab_bar(&self, id: WindowId) {
+        use sonic_ui::tabbar_view::TabBarLayout;
+        let Some(child) = self.windows.get(&id) else { return };
+        let inner_origin = child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+        let inner_size = {
+            let s = child.window.inner_size();
+            (s.width, s.height)
+        };
+        let sf = child.window.scale_factor() as f32;
+        let logical_w = inner_size.0 as f32 / sf;
+        let layout = TabBarLayout::compute_with_height(
+            &child.tabs,
+            logical_w,
+            child.renderer.tab_bar_logical_height(),
+        )
+        .with_top_offset(child.renderer.titlebar_inset())
+        .with_visible(child.renderer.tab_bar_visible());
+        let snap =
+            os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);
+        self.publish_os_drag_bar_snapshot(snap);
+    }
+
     /// Phase C2: begin an OS-level tab drag session via the installed
     /// backend. Returns `true` when the backend was invoked, `false`
     /// when no backend is installed or no event-loop proxy exists (in

@@ -60,6 +60,10 @@ impl App {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    // Epic #289 Phase C2 — drop this window's tab bar
+                    // snapshot so later OS drops can't false-positive
+                    // hit-test against a stale rect.
+                    self.os_drag_bars.remove(Some(win_id));
                     drop(removed);
                 }
                 // If this was the last child AND the main window had
@@ -180,6 +184,33 @@ impl App {
                         tracing::warn!("child render error: {e}");
                     }
                     child.last_render = Instant::now();
+                    // Epic #289 Phase C2 — publish this child's tab bar
+                    // snapshot for cross-window OS drag hit-tests. See
+                    // `App::publish_child_window_tab_bar` for the
+                    // rationale on the main-window mirror.
+                    {
+                        let inner_origin =
+                            child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+                        let isz = child.window.inner_size();
+                        let inner_size = (isz.width, isz.height);
+                        let sf = child.window.scale_factor() as f32;
+                        let logical_w = inner_size.0 as f32 / sf.max(1.0);
+                        let layout = TabBarLayout::compute_with_height(
+                            &child.tabs,
+                            logical_w,
+                            child.renderer.tab_bar_logical_height(),
+                        )
+                        .with_top_offset(child.renderer.titlebar_inset())
+                        .with_visible(child.renderer.tab_bar_visible());
+                        let snap = crate::app::os_drag::TabBarSnapshot::from_layout(
+                            Some(win_id),
+                            inner_origin,
+                            inner_size,
+                            sf,
+                            &layout,
+                        );
+                        self.os_drag_bars.publish(snap);
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
