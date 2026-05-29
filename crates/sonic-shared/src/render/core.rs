@@ -2405,8 +2405,9 @@ impl GpuRenderer {
             let bar_bg = tok::BG_BASE();
             let active_bg = tok::BG_ELEVATED();
             let hover_bg = tok::BG_HOVER();
+            let ui_palette = crate::ui_tokens::UiPalette::from_theme(theme);
             // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
-            let accent_blue = crate::ui_tokens::UiPalette::from_theme(theme).accent;
+            let accent_blue = ui_palette.accent;
             let separator = tok::BORDER_SUBTLE();
             let border_subtle = tok::BORDER_SUBTLE();
             let muted = tok::TEXT_MUTED();
@@ -2432,10 +2433,11 @@ impl GpuRenderer {
                 color: border_subtle,
                 ..Default::default()
             });
-            // Win11-style caption buttons (─ □ ✕) — only painted when the
+            // Win11-style caption buttons — only painted when the
             // integrated titlebar inset is non-zero (Windows). On macOS the
-            // inset is 0 and `paint_caption_buttons` early-returns, so this
-            // is a no-op there. See sonic-shared/src/quad.rs::paint_caption_buttons.
+            // inset is 0 and this is a no-op there. The symbols are geometric
+            // primitives in `paint_caption_buttons`, avoiding Unicode caption
+            // glyphs that may be absent from the bundled font.
             if integrated_titlebar_inset_px() > 0 {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
                 let tuples = [
@@ -2443,7 +2445,15 @@ impl GpuRenderer {
                     (rects[1].x, rects[1].y, rects[1].w, rects[1].h),
                     (rects[2].x, rects[2].y, rects[2].w, rects[2].h),
                 ];
-                crate::quad::paint_caption_buttons(&mut quads, &tuples, (sw, sh), bar_bg);
+                let caption_bg = ui_palette.bg_surface;
+                let caption_fg = ui_palette.text_primary;
+                crate::quad::paint_caption_buttons(
+                    &mut quads,
+                    &tuples,
+                    (sw, sh),
+                    caption_bg,
+                    caption_fg,
+                );
             }
             for t in &layout.tabs {
                 let is_active = layout.active == Some(t.index);
