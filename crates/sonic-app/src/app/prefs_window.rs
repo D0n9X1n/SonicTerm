@@ -80,7 +80,24 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                // BUGFIX (issue: mac prefs clicks not routing):
+                // `self.cursor_pos` holds the raw physical-pixel
+                // position from the last CursorMoved event. The prefs
+                // layout is computed in *logical* pixels (see
+                // `prefs/layout.rs` module docs) — the renderer scales
+                // by `scale_factor` at draw time. On any HiDPI display
+                // (every Retina Mac), passing physical pixels to
+                // `classify_click`/`hit_test` lands every click outside
+                // every widget rect, so nothing reacts. Convert to
+                // logical pixels using the prefs window's *own* scale
+                // factor (mirrors the per-window-sf fix PR #244 applied
+                // to the main window).
+                let sf = self
+                    .prefs_window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(self.scale_factor as f32);
+                let (x, y) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
                 // Issue #173 slice-2: flag the Button primitives as
                 // pressed so the renderer can paint the darker tint on
                 // mouse-down (released below clears it again).
@@ -249,7 +266,16 @@ impl App {
                 // toggles, sliders, etc. still rely on the existing
                 // PrefsHit path.
                 if let Some(s) = self.prefs_state.as_mut() {
-                    let (x, y) = (position.x as f32, position.y as f32);
+                    // Same physical→logical conversion as the click
+                    // path above; without it, hover tints never light
+                    // up on Retina because the position falls outside
+                    // every Button rect.
+                    let sf = self
+                        .prefs_window
+                        .as_ref()
+                        .map(|w| w.scale_factor() as f32)
+                        .unwrap_or(self.scale_factor as f32);
+                    let (x, y) = to_logical_pos(position.x, position.y, sf);
                     let new_apply = s.apply_button.hit_test(x, y);
                     let new_cancel = s.cancel_button.hit_test(x, y);
                     let new_reset = s.reset_button.hit_test(x, y);
