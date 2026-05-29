@@ -104,6 +104,7 @@ impl App {
             Action::ResizePaneDown => self.resize_active_split(Direction::Down),
             Action::OpenSearch => self.open_search(),
             Action::OpenPreferences => self.open_preferences(),
+            Action::OpenKeymapFile => self.open_keymap_file(),
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ShowKeymapCheatsheet => self.toggle_cheatsheet(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),

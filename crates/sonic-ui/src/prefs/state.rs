@@ -13,8 +13,8 @@ use sonic_cfg::config::{Config, CursorShape};
 use sonic_cfg::theme::Theme;
 
 use super::controls::{
-    known_theme_preview, Button, ButtonKind, ColorSwatch, Control, Dropdown, Rect, Slider,
-    TextField, Toggle, WidgetId,
+    known_theme_preview, Button, ButtonAction, ButtonKind, ColorSwatch, Control, Dropdown, Rect,
+    Slider, TextField, Toggle, WidgetId,
 };
 use super::layout::{Category, PrefsLayout};
 
@@ -46,6 +46,7 @@ pub enum PrefsHit {
     DropdownOption { id: WidgetId, index: usize },
     ColorCell { id: WidgetId, index: usize },
     TextField(WidgetId),
+    Button(WidgetId),
 }
 
 /// Pre-canned theme list shown in the Appearance picker. Matches the
@@ -244,14 +245,15 @@ impl PrefsState {
                 )));
             }
             Category::Keymap => {
-                let sel = KNOWN_KEYMAPS.iter().position(|k| *k == self.config.keymap).unwrap_or(0);
-                out.push(Control::Dropdown(Dropdown::new(
-                    next_id(),
-                    "Keymap",
-                    l.control_slot(0),
-                    KNOWN_KEYMAPS.iter().map(|s| (*s).to_string()).collect(),
-                    sel,
-                )));
+                out.push(Control::Button(
+                    Button::new(
+                        next_id(),
+                        "Open keymap file",
+                        l.control_slot(0),
+                        ButtonKind::Secondary,
+                    )
+                    .with_action(ButtonAction::OpenKeymapFile),
+                ));
             }
             Category::Window => {
                 out.push(Control::Slider({
@@ -562,6 +564,7 @@ impl PrefsState {
                 Control::TextField(tf) if tf.hit_test(x, y) => {
                     return Some(PrefsHit::TextField(tf.id))
                 }
+                Control::Button(b) if b.hit_test(x, y) => return Some(PrefsHit::Button(b.id)),
                 _ => {}
             }
         }
@@ -650,11 +653,6 @@ impl PrefsState {
             (Category::Font, 2, Control::Slider(s)) => {
                 self.config.font.line_height = s.get();
             }
-            (Category::Keymap, 0, Control::Dropdown(d)) => {
-                if let Some(v) = d.value() {
-                    self.config.keymap = v.to_string();
-                }
-            }
             (Category::Window, 2, Control::Toggle(t)) => {
                 self.config.window.decorations = t.get();
             }
@@ -725,6 +723,9 @@ impl PrefsState {
     }
 
     pub fn reset_active_section_to_default(&mut self) {
+        if self.active_category == Category::Keymap {
+            return;
+        }
         let before = self.config.to_toml().unwrap_or_default();
         let defaults = Config::default();
         match self.active_category {

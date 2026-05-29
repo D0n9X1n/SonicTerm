@@ -40,6 +40,7 @@ fn variant_kind_covers_every_action() {
         Action::OpenCommandPalette,
         Action::ShowKeymapCheatsheet,
         Action::OpenPreferences,
+        Action::OpenKeymapFile,
         Action::Scroll(ScrollAction::PageUp),
         Action::ScrollToPrevPrompt,
         Action::ScrollToNextPrompt,

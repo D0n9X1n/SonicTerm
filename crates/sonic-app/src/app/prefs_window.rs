@@ -136,6 +136,21 @@ impl App {
                         }
                         self.commit_prefs_and_apply_live();
                     }
+                    Some(PrefsHit::Button(id)) => {
+                        let action = self
+                            .prefs_state
+                            .as_ref()
+                            .and_then(|s| {
+                                s.controls.iter().find(|c| c.id() == id).and_then(|c| match c {
+                                    sonic_ui::prefs::Control::Button(b) => b.action.as_ref(),
+                                    _ => None,
+                                })
+                            })
+                            .cloned();
+                        if let Some(sonic_ui::prefs::ButtonAction::OpenKeymapFile) = action {
+                            self.run_action(&sonic_core::keymap::Action::OpenKeymapFile);
+                        }
+                    }
                     other => {
                         let Some(s) = self.prefs_state.as_mut() else { return };
                         match other {
@@ -174,7 +189,8 @@ impl App {
                             // structurally unreachable.
                             Some(PrefsHit::Apply)
                             | Some(PrefsHit::Cancel)
-                            | Some(PrefsHit::ResetSection) => unreachable!(),
+                            | Some(PrefsHit::ResetSection)
+                            | Some(PrefsHit::Button(_)) => unreachable!(),
                             None => {
                                 s.blur_text_fields();
                             }
@@ -451,6 +467,13 @@ impl App {
         let new_cfg = s.config.clone();
         self.apply_new_config(new_cfg);
     }
+    pub(super) fn open_keymap_file(&mut self) {
+        match sonic_core::keymap::open_user_keymap_file() {
+            Ok(path) => tracing::info!("opened keymap file {path:?}"),
+            Err(e) => tracing::warn!("open keymap file failed: {e:#}"),
+        }
+    }
+
     pub(super) fn open_preferences(&mut self) {
         // Already open → just re-focus.
         if let Some(w) = self.prefs_window.as_ref() {

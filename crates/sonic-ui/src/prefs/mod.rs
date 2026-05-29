@@ -17,8 +17,8 @@ pub mod layout;
 pub mod state;
 
 pub use controls::{
-    known_theme_preview, Button, ButtonKind, ColorSwatch, Control, Dropdown, InteractionState,
-    Slider, TextField, ThemePreviewSwatch, Toggle, WidgetId,
+    known_theme_preview, Button, ButtonAction, ButtonKind, ColorSwatch, Control, Dropdown,
+    InteractionState, Slider, TextField, ThemePreviewSwatch, Toggle, WidgetId,
 };
 pub use layout::{Category, PrefsLayout, CATEGORIES};
 pub use state::{PrefsHit, PrefsState};

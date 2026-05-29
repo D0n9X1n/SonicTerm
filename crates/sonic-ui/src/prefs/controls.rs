@@ -489,6 +489,17 @@ pub enum ButtonKind {
     Link,
 }
 
+/// Non-mutating action triggered by a button in the preferences form.
+///
+/// This keeps prefs-state hit-testing pure while allowing the host app to
+/// dispatch side effects (like opening the keymap file) through the same
+/// Action pipeline used by key bindings and the command palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ButtonAction {
+    /// Open the user's editable keymap TOML file in the OS default editor.
+    OpenKeymapFile,
+}
+
 #[derive(Debug, Clone)]
 pub struct Button {
     pub id: WidgetId,
@@ -496,11 +507,25 @@ pub struct Button {
     pub rect: Rect,
     pub kind: ButtonKind,
     pub interaction: InteractionState,
+    pub action: Option<ButtonAction>,
 }
 
 impl Button {
     pub fn new(id: WidgetId, label: impl Into<String>, rect: Rect, kind: ButtonKind) -> Self {
-        Self { id, label: label.into(), rect, kind, interaction: InteractionState::new() }
+        Self {
+            id,
+            label: label.into(),
+            rect,
+            kind,
+            interaction: InteractionState::new(),
+            action: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_action(mut self, action: ButtonAction) -> Self {
+        self.action = Some(action);
+        self
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
@@ -681,6 +706,7 @@ pub enum Control {
     Dropdown(Dropdown),
     ColorSwatch(ColorSwatch),
     TextField(TextField),
+    Button(Button),
 }
 
 impl Control {
@@ -691,6 +717,7 @@ impl Control {
             Control::Dropdown(d) => d.id,
             Control::ColorSwatch(c) => c.id,
             Control::TextField(f) => f.id,
+            Control::Button(b) => b.id,
         }
     }
 
@@ -701,6 +728,7 @@ impl Control {
             Control::Dropdown(d) => d.hit_test(x, y),
             Control::ColorSwatch(c) => c.hit_test(x, y),
             Control::TextField(f) => f.hit_test(x, y),
+            Control::Button(b) => b.hit_test(x, y),
         }
     }
 }

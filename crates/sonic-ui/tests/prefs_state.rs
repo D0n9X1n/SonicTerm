@@ -228,6 +228,7 @@ fn hit_test_finds_widget_by_position() {
         Control::Dropdown(d) => d.rect,
         Control::ColorSwatch(c) => c.rect,
         Control::TextField(tf) => tf.rect,
+        Control::Button(b) => b.rect,
     };
     assert_eq!(s.hit_test(r.x + 1.0, r.y + 1.0), Some(first.id()));
 }
@@ -521,7 +522,7 @@ fn reset_each_section_only_restores_that_subset() {
 
     s.set_category(Category::Keymap);
     s.reset_active_section_to_default();
-    assert_eq!(s.config.keymap, Config::default().keymap);
+    assert_eq!(s.config.keymap, "custom");
     assert!((s.config.window.opacity - 0.5).abs() < f32::EPSILON);
 
     s.set_category(Category::Window);

@@ -245,7 +245,11 @@ impl App {
         // Keymap
         if new_cfg.keymap != self.config.keymap {
             let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
-            match Keymap::load(&km_path) {
+            match self
+                .keymap_loader
+                .as_ref()
+                .map_or_else(|| Keymap::load(&km_path), |loader| loader(&new_cfg.keymap))
+            {
                 Ok(km) => {
                     tracing::info!(
                         "live-reload: keymap -> {} ({} bindings)",

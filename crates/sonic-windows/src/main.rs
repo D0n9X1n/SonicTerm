@@ -137,6 +137,12 @@ fn load_theme(name: &str) -> Result<Theme> {
 }
 
 fn load_keymap(name: &str) -> Result<Keymap> {
+    if name == "user" {
+        if let Some(path) = sonic_core::keymap::default_user_keymap_path() {
+            sonic_core::keymap::ensure_user_keymap_file(&path)?;
+            return Keymap::load(&path);
+        }
+    }
     Keymap::load(&asset_dir().join("keymaps").join(format!("{name}.toml")))
 }
 
