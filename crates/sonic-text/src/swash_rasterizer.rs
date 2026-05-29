@@ -551,16 +551,26 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
                 data
             }
             _ => {
+                // Format::Alpha (macOS + Linux): swash returns one alpha
+                // byte per pixel and the atlas blit in
+                // `glyph_atlas::insert_glyph` for `is_color = false`
+                // replicates each alpha byte into BGRA itself. Returning
+                // 1 byte per pixel here is REQUIRED — pre-#267 we did
+                // exactly this and #267 inadvertently broke it by always
+                // pre-expanding to 4 bytes per pixel (the atlas was not
+                // updated to match, so on macOS post-#267 every
+                // monochrome glyph was read as 1/4 the actual buffer
+                // length, producing the "smeared color stripes" P0
+                // user-reported in the wake of #282 — which reverted the
+                // FORMAT but left the expansion in place. See the
+                // `mono_alpha_returns_one_byte_per_pixel` regression
+                // test in `crates/sonic-text/tests/mono_alpha_byte_layout.rs`.
                 let expected = (p.width as usize) * (p.height as usize);
                 let mut alpha = image.data;
                 if alpha.len() != expected {
                     alpha.resize(expected, 0);
                 }
-                let mut data = Vec::with_capacity(expected * 4);
-                for a in alpha {
-                    data.extend_from_slice(&[a, a, a, a]);
-                }
-                data
+                alpha
             }
         };
 

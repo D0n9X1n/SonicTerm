@@ -275,7 +275,15 @@ fn hamming(a: &[u8], b: &[u8]) -> u32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
 
+// Ignored by fix(text): P0 mac glyph blur — atlas / swash 1-byte vs
+// 4-byte coverage mismatch from PR #267 was concealed by baselines
+// refreshed to the broken state in PR #282. Re-baking the baselines
+// here would re-poison the gate; instead the new
+// `mono_alpha_byte_layout` test in sonic-text pins the correct
+// pixel-byte contract. Un-ignore + refresh baselines in the follow-up
+// that re-shoots the snapshots from a corrected mac build.
 #[test]
+#[ignore = "baselines poisoned by #282; new contract pinned in sonic-text::mono_alpha_byte_layout"]
 fn visual_snapshot_regression_dhash() {
     let dir = snapshots_dir();
     std::fs::create_dir_all(&dir).expect("mkdir snapshots");
