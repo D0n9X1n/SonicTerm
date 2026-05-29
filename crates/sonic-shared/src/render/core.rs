@@ -2017,21 +2017,32 @@ impl GpuRenderer {
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
-                let (a, b) = sel.normalized();
-                for r in a.0..=b.0 {
-                    if r >= grid.rows {
-                        break;
-                    }
-                    let col_a = if r == a.0 { a.1 } else { 0 };
-                    let col_b = if r == b.0 { b.1 } else { grid.cols.saturating_sub(1) };
-                    if col_b < col_a {
-                        continue;
-                    }
-                    let x = active_origin_x + f32::from(col_a) * self.cell_w;
-                    let y = active_origin_y + f32::from(r) * self.cell_h;
-                    let w = f32::from(col_b - col_a + 1) * self.cell_w;
+                // Selection highlights are anchored to the active pane's
+                // origin. They MUST be clipped to that pane's rect — otherwise
+                // a selection that extends past the pane's last visible column
+                // (e.g. the user drags across the split into the neighbouring
+                // pane) would emit a quad that visually bleeds into the
+                // neighbouring pane's grid area. Regression-guard for the
+                // bug where dragging in a split-right layout painted the
+                // selection across both panes.
+                let pane_x = active_origin_x;
+                let pane_y = active_origin_y;
+                let pane_w = f32::from(grid.cols) * self.cell_w;
+                let pane_h = f32::from(grid.rows) * self.cell_h;
+                for rect in selection_quad_rects(
+                    sel,
+                    grid.rows,
+                    grid.cols,
+                    active_origin_x,
+                    active_origin_y,
+                    self.cell_w,
+                    self.cell_h,
+                )
+                .into_iter()
+                .filter_map(|r| clip_rect_to_pane(r, pane_x, pane_y, pane_w, pane_h))
+                {
                     quads.push(QuadInstance {
-                        rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
+                        rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, sw, sh),
                         color: self.selection_color,
                         ..Default::default()
                     });
@@ -4204,5 +4215,83 @@ pub fn command_status_hash(status: &sonic_ui::tabs::CommandStatus, now: Instant)
             let is_past_expiry = u64::from(now >= *until);
             2 | (u64::from(exit.unwrap_or(255)) << 8) | (is_past_expiry << 32)
         }
+    }
+}
+
+/// Compute the per-row selection quad rects (in physical pixels) that the
+/// renderer would emit for `sel` against a grid of `rows` × `cols`, anchored
+/// at `(origin_x, origin_y)` with `cell_w × cell_h` cells.
+///
+/// Pure helper, no clipping applied — pair with [`clip_rect_to_pane`] before
+/// pushing to the GPU. Exposed so integration tests can verify the
+/// pre-clip / post-clip relationship without standing up a real surface.
+///
+/// Each returned tuple is `(x, y, w, h)` in physical pixels.
+#[doc(hidden)]
+pub fn selection_quad_rects(
+    sel: &sonic_ui::selection::Selection,
+    rows: u16,
+    cols: u16,
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    if sel.is_empty() {
+        return Vec::new();
+    }
+    let (a, b) = sel.normalized();
+    let mut out = Vec::with_capacity(usize::from(b.0.saturating_sub(a.0)) + 1);
+    for r in a.0..=b.0 {
+        if r >= rows {
+            break;
+        }
+        let col_a = if r == a.0 { a.1 } else { 0 };
+        // Note: do NOT clamp `col_b` to `cols - 1` here. The selection may
+        // legitimately reach the grid's last column, and the per-pane clip
+        // below trims any pixel overhang. Clamping pre-clip would silently
+        // shrink the selection on the last row when the user dragged past
+        // the rightmost cell — which is precisely the path that hides
+        // bugs like the split-pane bleed-through.
+        let col_b = if r == b.0 { b.1 } else { cols.saturating_sub(1) };
+        if col_b < col_a {
+            continue;
+        }
+        let x = origin_x + f32::from(col_a) * cell_w;
+        let y = origin_y + f32::from(r) * cell_h;
+        let w = f32::from(col_b - col_a + 1) * cell_w;
+        out.push((x, y, w, cell_h));
+    }
+    out
+}
+
+/// Clip a quad rect (in physical pixels) to the active pane's bounding box.
+/// Returns `None` if the rect is entirely outside the pane.
+///
+/// Selection / cursor / overlay quads are anchored to the active pane's
+/// origin and can extend past its right or bottom edge when the user drags
+/// beyond the pane (or the cursor temporarily sits outside the grid bounds
+/// due to a resize race). Pushing the unclipped quad would paint into the
+/// neighbouring pane in a split layout — see the regression test for
+/// the split-right drag-select bug.
+#[doc(hidden)]
+pub fn clip_rect_to_pane(
+    rect: (f32, f32, f32, f32),
+    pane_x: f32,
+    pane_y: f32,
+    pane_w: f32,
+    pane_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let (x, y, w, h) = rect;
+    let clipped_x = x.max(pane_x);
+    let clipped_right = (x + w).min(pane_x + pane_w);
+    let clipped_y = y.max(pane_y);
+    let clipped_bottom = (y + h).min(pane_y + pane_h);
+    let clipped_w = clipped_right - clipped_x;
+    let clipped_h = clipped_bottom - clipped_y;
+    if clipped_w > 0.0 && clipped_h > 0.0 {
+        Some((clipped_x, clipped_y, clipped_w, clipped_h))
+    } else {
+        None
     }
 }
