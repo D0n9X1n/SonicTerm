@@ -148,8 +148,17 @@ pub fn compute_action<W: Copy>(
         // ReorderTab variant on it actually differing from the source
         // — otherwise this is the regular "drop on yourself" no-op
         // that browsers also treat as a cancel.
+        //
+        // A press-then-release with sub-threshold cursor movement is
+        // a CLICK, not a drag — it must never reorder. Pre-fix, the
+        // right half of any tab (which includes the title-to-`×` gap
+        // on tab 0) had `drop_slot` returning the next tab's index,
+        // so a stationary click silently swapped the two tabs and the
+        // user perceived "nothing happened" because the active tab
+        // simply migrated to the same on-screen position the other
+        // tab vacated. See tests/click_without_drag_does_not_reorder.rs.
         let n = source_bar.tabs.len();
-        if n > 0 {
+        if n > 0 && drag_moved_enough(session) {
             let raw_slot = source_bar.drop_slot(cx, cy);
             // Clamp insertion-slot semantics: `raw_slot == n` means
             // "after the last tab", which is the last index.
