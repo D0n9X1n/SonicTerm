@@ -207,10 +207,25 @@ impl App {
                 let _ = child;
                 if focused {
                     self.focused_child = Some(win_id);
-                } else if self.focused_child == Some(win_id) {
-                    // Lost focus → clear; if another window claims it,
-                    // its own Focused(true) arm will set it.
-                    self.focused_child = None;
+                    // Epic #289 Phase A — also update the unified
+                    // frontmost tracker. Unlike `focused_child`, this
+                    // discriminates between "main is frontmost" and
+                    // "nothing is frontmost yet"; main's Focused(true)
+                    // overwrites with main's id.
+                    self.frontmost_window = Some(win_id);
+                } else {
+                    if self.focused_child == Some(win_id) {
+                        // Lost focus → clear; if another window claims it,
+                        // its own Focused(true) arm will set it.
+                        self.focused_child = None;
+                    }
+                    if self.frontmost_window == Some(win_id) {
+                        // Same rule for frontmost: only clear if WE were
+                        // the recorded one. A sibling sonic window's
+                        // Focused(true) will arrive separately and
+                        // overwrite.
+                        self.frontmost_window = None;
+                    }
                 }
             }
             WindowEvent::CursorLeft { .. } => {
@@ -601,6 +616,105 @@ impl App {
         let n = child.tabs.len() + 1;
         child.tabs.push(Tab::new(format!("shell {n}")));
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        let last = child.tabs.len().saturating_sub(1);
+        child.tabs.activate(last);
+        child.window.request_redraw();
+        true
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Epic #289 Phase A — per-child action helpers
+    //
+    // These mirror the equivalent main-window mutators in
+    // `app/misc.rs` and `app/spawn_pane.rs` but operate on a child
+    // window's owned (tabs / tab_states / panes) triple. Each helper:
+    //   * returns `true` if it mutated state (so the caller knows to
+    //     bump `redraw_request_count`),
+    //   * issues `child.window.request_redraw()` on the child handle
+    //     when state changed,
+    //   * returns `false` (no-op + no redraw) when the recorded child
+    //     no longer exists — the keymap_dispatch caller then falls
+    //     through to the main-window default.
+    //
+    // The empty-tab-vec post-condition (close the window? leave it
+    // dangling? merge into main?) is deliberately left to the existing
+    // teardown plumbing — `reap_empty_child` runs on user-event drain
+    // and on the next focus event, so we don't replicate that
+    // single-source-of-truth here.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Close the active tab of the given child window. Returns `true`
+    /// on success.
+    pub(super) fn close_active_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let idx = child.tabs.active_index();
+        if idx >= child.tab_states.len() {
+            return false;
+        }
+        let st = child.tab_states.remove(idx);
+        for id in st.tree.leaves() {
+            child.panes.remove(&id);
+        }
+        if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
+            child.tabs.close(tab_id);
+        }
+        child.window.request_redraw();
+        true
+    }
+
+    /// Close-active-pane-or-tab inside a child window. Mirrors the
+    /// iTerm2/wezterm rule: > 1 pane → close the focused pane only,
+    /// else → close the whole tab.
+    pub(super) fn close_active_pane_or_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        let tab_idx = child.tabs.active_index();
+        let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
+        let pane_count = st.tree.leaves().len();
+        if pane_count <= 1 {
+            // Single pane → degrade to close-tab path. Drop the
+            // child borrow so close_active_tab_in_child can re-borrow.
+            let _ = st;
+            let _ = child;
+            return self.close_active_tab_in_child(win_id);
+        }
+        let focus = st.active_pane;
+        let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
+        if st.tree.close(focus) {
+            st.active_pane = new_focus;
+            child.panes.remove(&focus);
+            child.window.request_redraw();
+            return true;
+        }
+        false
+    }
+
+    /// Advance the active tab in the child window.
+    pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        child.tabs.next();
+        child.window.request_redraw();
+        true
+    }
+
+    /// Step back one tab in the child window.
+    pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        child.tabs.prev();
+        child.window.request_redraw();
+        true
+    }
+
+    /// Activate a specific tab index in the child window.
+    pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
+        child.tabs.activate(idx);
+        child.window.request_redraw();
+        true
+    }
+
+    /// Activate the last tab in the child window.
+    pub(super) fn activate_last_tab_in_child(&mut self, win_id: WindowId) -> bool {
+        let Some(child) = self.child_windows.get_mut(&win_id) else { return false };
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
         child.window.request_redraw();

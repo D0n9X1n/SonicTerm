@@ -178,6 +178,28 @@ pub struct ChildWindow {
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Epic #289 Phase A — classification of which terminal window currently
+/// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
+/// consumed by keymap_dispatch arms + menubar drain to decide where a
+/// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
+///
+/// `Other` covers the prefs window today; it explicitly does NOT route
+/// terminal actions and falls back to main as a safe default.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontmostKind {
+    /// No window has focus, or recorded id is stale.
+    None,
+    /// Main terminal window is OS-frontmost.
+    Main,
+    /// A torn-out child terminal window is OS-frontmost. Carries the
+    /// window id so the caller can index `child_windows`.
+    Child(WindowId),
+    /// A non-terminal window (prefs, etc.) is frontmost. Terminal
+    /// actions fall back to main.
+    Other,
+}
+
 /// Read a window's screen-global inner origin + inner size into the
 /// pure helper struct used by the drag-merge module. Falls back to
 /// (0, 0) origin if the platform refuses to report position (e.g. on
@@ -670,6 +692,27 @@ pub struct App {
     /// window every time. User report v0.6: "拖拽形成新的窗口后，再新
     /// 的窗口按 ctrl+t 还是在原来的窗口打开新tab".
     pub(super) focused_child: Option<WindowId>,
+    /// Epic #289 Phase A — most-recently-OS-frontmost window id, INCLUDING
+    /// the main window. Where [`Self::focused_child`] historically only
+    /// tracked torn-out windows (`None` meaning "main is focused"), the
+    /// frontmost field tracks *every* sonic-owned terminal window with a
+    /// single non-`Option` discriminant once the first focus arrives:
+    ///
+    ///   * `Some(main_window_id)`  → main window is OS-frontmost
+    ///   * `Some(child_window_id)` → that child window is OS-frontmost
+    ///   * `None`                  → no sonic window has been focused yet,
+    ///     OR focus has moved out of every sonic window to another app.
+    ///
+    /// Keyboard / menubar / accelerator actions (Cmd+T, Cmd+W, Cmd+\\, …)
+    /// route through this id so a chord typed in window B never mutates
+    /// window A's tab vec. Set in both the main and child `Focused(true)`
+    /// arms; on `Focused(false)` we only clear when the dropped window was
+    /// the current frontmost (focus moving to a *different* sonic window
+    /// arrives as that other window's `Focused(true)` and overwrites
+    /// frontmost in the right order). Bug reports addressed by this field:
+    ///   * #2: Cmd+T after tear-out opens tab in WRONG window
+    ///   * #3: Cmd+W in new window closes OLD window's tab
+    pub(super) frontmost_window: Option<WindowId>,
     /// Pending cross-window drag-merge target chosen on the most recent
     /// `CursorMoved` while a tab is held. On mouse-up we use this to
     /// decide between "tear out into new window" (None) and "merge into
@@ -865,6 +908,7 @@ impl App {
             drag_session: None,
             child_windows: HashMap::new(),
             focused_child: None,
+            frontmost_window: None,
             drag_target: None,
             main_hidden: false,
             theme_loader: None,
@@ -1300,6 +1344,105 @@ impl App {
     #[doc(hidden)]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
         self.focused_child
+    }
+
+    /// Test-only: read back the current `frontmost_window`.
+    #[doc(hidden)]
+    pub fn __test_frontmost_window(&self) -> Option<WindowId> {
+        self.frontmost_window
+    }
+
+    /// Test-only: install a `frontmost_window` id without going through a
+    /// real `WindowEvent::Focused(true)` (which requires a winit window).
+    /// Used by Epic #289 Phase A regression tests to assert that
+    /// keymap-dispatched actions route to the right window's tab vec.
+    #[doc(hidden)]
+    pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
+        self.frontmost_window = id;
+    }
+
+    /// Epic #289 Phase A — classify [`Self::frontmost_window`] without
+    /// borrowing anything mutably. Returns:
+    ///   * `FrontmostKind::None` if no sonic window has been focused yet,
+    ///     focus is currently outside every sonic window, or the recorded
+    ///     id no longer matches any live window (stale-id race).
+    ///   * `FrontmostKind::Main` if the recorded id matches the main
+    ///     window we currently own.
+    ///   * `FrontmostKind::Child(id)` if the recorded id matches a live
+    ///     entry in [`Self::child_windows`].
+    ///   * `FrontmostKind::Other` for the prefs window or any other
+    ///     non-terminal window — actions should fall through to the safe
+    ///     main-window default in that case rather than mutate prefs.
+    ///
+    /// Pure read; no mutation, no logging. The keymap_dispatch arms call
+    /// this first, then route to the matching mutator + redraw target.
+    #[doc(hidden)]
+    pub fn frontmost_kind(&self) -> FrontmostKind {
+        let Some(id) = self.frontmost_window else { return FrontmostKind::None };
+        if let Some(w) = self.window.as_ref() {
+            if w.id() == id {
+                return FrontmostKind::Main;
+            }
+        }
+        if self.child_windows.contains_key(&id) {
+            return FrontmostKind::Child(id);
+        }
+        if let Some(w) = self.prefs_window.as_ref() {
+            if w.id() == id {
+                return FrontmostKind::Other;
+            }
+        }
+        // Recorded id doesn't match anything live (rare: window closed
+        // between the focus event and the action dispatch). Treat as
+        // "no frontmost" so callers fall back to the main-window default.
+        FrontmostKind::None
+    }
+
+    /// Epic #289 Phase A — if [`Self::frontmost_window`] is `Some(_)`
+    /// but classifies as `None` (recorded id no longer matches any
+    /// live window), clear it. Called by keymap_dispatch arms BEFORE
+    /// falling back to main, so the next dispatch doesn't retry the
+    /// dead id. Returns `true` if a stale id was cleared (purely
+    /// informational; callers ignore it today).
+    #[doc(hidden)]
+    pub fn clear_stale_frontmost(&mut self) -> bool {
+        if self.frontmost_window.is_some() && self.frontmost_kind() == FrontmostKind::None {
+            self.frontmost_window = None;
+            return true;
+        }
+        false
+    }
+
+    /// Test-only invoker for [`Self::close_active_tab_in_child`]. Exists
+    /// because the helper is `pub(super)` and tests live outside the
+    /// `app` module tree.
+    #[doc(hidden)]
+    pub fn __test_invoke_close_active_tab_in_child(&mut self, id: WindowId) -> bool {
+        self.close_active_tab_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::close_active_pane_or_tab_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_close_active_pane_or_tab_in_child(&mut self, id: WindowId) -> bool {
+        self.close_active_pane_or_tab_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::next_tab_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_next_tab_in_child(&mut self, id: WindowId) -> bool {
+        self.next_tab_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::prev_tab_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_prev_tab_in_child(&mut self, id: WindowId) -> bool {
+        self.prev_tab_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::activate_tab_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_activate_tab_in_child(&mut self, id: WindowId, idx: usize) -> bool {
+        self.activate_tab_in_child(id, idx)
     }
 
     /// Test-only: count of tabs in the main App.

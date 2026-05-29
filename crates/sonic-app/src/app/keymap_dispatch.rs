@@ -34,13 +34,19 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, PaneState, TabState,
-    UserEvent,
+    to_logical_pos, with_integrated_titlebar, wrap_paste, App, ChildWindow, FrontmostKind,
+    PaneState, TabState, UserEvent,
 };
 use crate::app::integrated_titlebar_inset;
 
 impl App {
     pub fn run_action(&mut self, action: &Action) -> bool {
+        // Epic #289 Phase A — if `frontmost_window` was set to a stale id
+        // (window closed between focus event + this dispatch), clear it
+        // now so the routing arms below see `None` (safe main fallback)
+        // AND the next action doesn't retry the dead window. This single
+        // up-front check covers every routed arm.
+        let _ = self.clear_stale_frontmost();
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::EnterCopyMode => self.enter_copy_mode(),
@@ -48,29 +54,75 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
-                // Route to the focused window so torn-out child windows
-                // get their own tab instead of injecting one into the
-                // main window. User report v0.6: see `App::focused_child`
-                // doc for the original Chinese complaint + repro.
-                if let Some(win_id) = self.focused_child {
+                // Epic #289 Phase A — route through the unified
+                // `frontmost_window` discriminator first so a Cmd+T
+                // typed in a torn-out child opens a tab in THAT child,
+                // not in the main window. Falls back to the existing
+                // `focused_child` logic for back-compat with any focus
+                // event that updated only the old field, and finally
+                // to the main App (safe default).
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.spawn_tab_in_child(id) {
+                        return true;
+                    }
+                    // Child vanished between focus and dispatch — clear
+                    // both trackers and fall through.
+                    self.frontmost_window = None;
+                    self.focused_child = None;
+                } else if let Some(win_id) = self.focused_child {
                     if self.spawn_tab_in_child(win_id) {
                         return true;
                     }
-                    // Child window vanished mid-dispatch — fall back to
-                    // the main App rather than dropping the action.
                     self.focused_child = None;
                 }
                 let n = self.tabs.len() + 1;
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
+                // Epic #289 Phase A — route to frontmost window.
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.close_active_tab_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
                 let i = self.tabs.active_index();
                 self.close_tab_at(i);
             }
-            Action::NextTab => self.tabs.next(),
-            Action::PrevTab => self.tabs.prev(),
-            Action::ActivateTab(i) => self.tabs.activate(*i),
+            Action::NextTab => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.next_tab_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.tabs.next();
+            }
+            Action::PrevTab => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.prev_tab_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.tabs.prev();
+            }
+            Action::ActivateTab(i) => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.activate_tab_in_child(id, *i) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.tabs.activate(*i);
+            }
             Action::ActivateLastTab => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.activate_last_tab_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
                 let last = self.tabs.len().saturating_sub(1);
                 self.tabs.activate(last);
             }
@@ -78,6 +130,15 @@ impl App {
             Action::SplitDown => self.split_active(Direction::Down),
             Action::ClosePane => self.close_active_pane(),
             Action::CloseActivePaneOrTab => {
+                // Epic #289 Phase A — Cmd+W routes to frontmost window.
+                // Without this, a Cmd+W typed in a torn-out child window
+                // closed a tab in the original main window (bug #3).
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.close_active_pane_or_tab_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
                 // iTerm2/wezterm-style Cmd+W: when the active tab has more
                 // than one pane, close just the focused pane; otherwise
                 // close the whole tab. `close_active_pane` already folds
