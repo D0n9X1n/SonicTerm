@@ -381,10 +381,12 @@ impl App {
                                 self.merge_child_into_target(win_id, src_idx, target);
                             }
                             crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                // Tearing out of a child today is a
-                                // no-op: single-tab children are the
-                                // common case and re-parenting the
-                                // only tab would be visually identical.
+                                // Epic #289 Phase B: tear out from a
+                                // child window into a NEW top-level
+                                // window. The Tab + PaneState (incl.
+                                // PtyHandle) MOVE — no clone, no
+                                // respawn, same child PID.
+                                self.tear_out_from_child(el, win_id, src_idx);
                             }
                         }
                     }
