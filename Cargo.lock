@@ -4765,6 +4765,7 @@ dependencies = [
  "lru 0.12.5",
  "sonic-types",
  "swash",
+ "tracing",
 ]
 
 [[package]]

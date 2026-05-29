@@ -41,6 +41,7 @@ use sonic_types::GlyphKey;
 use std::collections::HashMap;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
+use tracing;
 
 use crate::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer};
 
@@ -151,6 +152,7 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 /// but the chain shouldn't be empty.
 #[cfg(target_os = "macos")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "JetBrainsMono Nerd Font",
     "PingFang SC",
     "Hiragino Sans GB",
     "Apple SD Gothic Neo",
@@ -158,10 +160,17 @@ const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "Apple Color Emoji",
 ];
 #[cfg(target_os = "windows")]
-const PLATFORM_FALLBACK_CHAIN: &[&str] =
-    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Symbols Nerd Font Mono", "Segoe UI Emoji"];
+const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "JetBrainsMono Nerd Font",
+    "Microsoft YaHei",
+    "MS Gothic",
+    "Malgun Gothic",
+    "Symbols Nerd Font Mono",
+    "Segoe UI Emoji",
+];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
+    "JetBrainsMono Nerd Font",
     "Noto Sans CJK SC",
     "Noto Sans CJK JP",
     "Noto Sans CJK KR",
@@ -173,6 +182,53 @@ const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
 /// `GlyphKey` is plenty; we also keep an end-of-chain sentinel below
 /// for cells the entire chain can't satisfy.
 pub const MAX_FALLBACK_SLOTS: u8 = 8;
+
+const MONOCHROME_SOURCES: &[Source] = &[Source::Outline, Source::Bitmap(StrikeWith::BestFit)];
+const MONOCHROME_FORMAT: Format = Format::Subpixel;
+
+/// Test-visible snapshot of the monochrome rasterizer quality settings.
+/// Windows text-quality issue #261 requires hinted outline rendering plus
+/// LCD/subpixel masks, not grayscale alpha-only masks.
+#[doc(hidden)]
+pub fn monochrome_render_config_for_test() -> (&'static [Source], Format, bool) {
+    (MONOCHROME_SOURCES, MONOCHROME_FORMAT, true)
+}
+
+/// Load bundled TTF/OTF files from the same locations used by the windowed
+/// renderers. Shared by the terminal renderer and the preferences renderer so
+/// Nerd Font PUA codepoints resolve consistently in both paths.
+pub fn load_bundled_fonts(fs: &mut FontSystem) {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            candidates.push(d.join("assets/fonts"));
+            if let Some(contents) = d.parent() {
+                candidates.push(contents.join("Resources/assets/fonts"));
+            }
+        }
+    }
+    candidates
+        .push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
+
+    for dir in candidates {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut n = 0;
+        for e in entries.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    fs.db_mut().load_font_data(bytes);
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            tracing::info!("loaded {n} bundled font(s) from {dir:?}");
+            return;
+        }
+    }
+}
 
 /// Production [`Rasterizer`] impl. Holds a mutable borrow on the
 /// renderer's `FontSystem` and an owned `ScaleContext` (swash's
@@ -432,8 +488,8 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             }
         }
 
-        let image = Render::new(&[Source::Outline, Source::Bitmap(StrikeWith::BestFit)])
-            .format(Format::Alpha)
+        let image = Render::new(MONOCHROME_SOURCES)
+            .format(MONOCHROME_FORMAT)
             .render(&mut scaler, glyph_id)?;
 
         let p = image.placement;
@@ -449,11 +505,38 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
             });
         }
 
-        let mut coverage = image.data;
-        let expected = (p.width as usize) * (p.height as usize);
-        if coverage.len() != expected {
-            coverage.resize(expected, 0);
-        }
+        let coverage = match image.content {
+            swash::scale::image::Content::SubpixelMask => {
+                let expected = (p.width as usize) * (p.height as usize) * 4;
+                let mut data = image.data;
+                if data.len() != expected {
+                    data.resize(expected, 0);
+                }
+                for px in data.chunks_exact_mut(4) {
+                    let r = px[0];
+                    let g = px[1];
+                    let b = px[2];
+                    let a = r.max(g).max(b);
+                    px[0] = b;
+                    px[1] = g;
+                    px[2] = r;
+                    px[3] = a;
+                }
+                data
+            }
+            _ => {
+                let expected = (p.width as usize) * (p.height as usize);
+                let mut alpha = image.data;
+                if alpha.len() != expected {
+                    alpha.resize(expected, 0);
+                }
+                let mut data = Vec::with_capacity(expected * 4);
+                for a in alpha {
+                    data.extend_from_slice(&[a, a, a, a]);
+                }
+                data
+            }
+        };
 
         Some(RasterTile {
             width: p.width,

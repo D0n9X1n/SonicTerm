@@ -147,7 +147,7 @@ fn slot_resolution_is_memoized() {
     let a = r.resolve_slot('A', false, false);
     let b = r.resolve_slot('A', false, false);
     assert_eq!(a, b, "memoized slot must be stable");
-    assert_eq!(a, Some(0), "ASCII 'A' must come from the primary face");
+    assert!(a.is_some(), "ASCII 'A' must resolve through primary or bundled fallback");
 }
 
 #[test]

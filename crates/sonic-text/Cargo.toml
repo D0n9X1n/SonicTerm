@@ -17,3 +17,4 @@ swash.workspace = true
 fontdb.workspace = true
 bytemuck.workspace = true
 lru = "0.12"
+tracing.workspace = true

@@ -198,7 +198,7 @@ pub struct GpuRenderer {
     config: SurfaceConfiguration,
     window: Arc<Window>,
 
-    font_system: FontSystem,
+    pub(crate) font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -978,6 +978,14 @@ impl GpuRenderer {
         self.last_emit_origins.clone()
     }
 
+    /// Test-only snapshot of the renderer's text cache sizes. Used to
+    /// assert that a font-family live apply re-derives metrics and drops
+    /// shaped rows from the old face instead of reusing stale advances.
+    #[doc(hidden)]
+    pub fn text_cache_sizes_for_test(&self) -> (usize, usize) {
+        (self.shape_cache.len(), self.row_glyph_cache.len())
+    }
+
     /// Translate a scrollback-absolute row into the row index visible in the
     /// current viewport. Returns `None` when the row lies above or below the
     /// rendered viewport.
@@ -1288,6 +1296,7 @@ impl GpuRenderer {
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
+        self.shape_cache = ShapeCache::new();
         {
             let mut prebake_raster = SwashRasterizer::new(
                 &mut self.font_system,
@@ -2001,12 +2010,21 @@ impl GpuRenderer {
         // own origin, not just the active pane.
         for pv in &pane_views {
             let pv_grid: &Grid = pv.grid;
-            emit_cell_bg_quads(
+            let pane_rect = pane_rects
+                .iter()
+                .find(|(id, _)| *id == pv.pane_id)
+                .map(|(_, rect)| *rect)
+                .unwrap_or(PaneRect {
+                    x: pv.origin_x,
+                    y: pv.origin_y,
+                    w: f32::from(pv_grid.cols) * cell_w,
+                    h: f32::from(pv_grid.rows) * cell_h,
+                });
+            emit_cell_bg_quads_clipped(
                 pv_grid,
                 Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
                 theme,
-                pv.origin_x,
-                pv.origin_y,
+                pane_rect,
                 cell_w,
                 cell_h,
                 sw,
@@ -3916,7 +3934,48 @@ pub fn emit_cell_bg_quads(
     sh: f32,
     out: &mut Vec<QuadInstance>,
 ) {
-    for r in 0..grid.rows {
+    emit_cell_bg_quads_clipped(
+        grid,
+        view_top_abs,
+        theme,
+        PaneRect {
+            x: pad,
+            y: top_inset,
+            w: f32::from(grid.cols) * cell_w,
+            h: f32::from(grid.rows) * cell_h,
+        },
+        cell_w,
+        cell_h,
+        sw,
+        sh,
+        out,
+    );
+}
+
+/// Like [`emit_cell_bg_quads`] but clips runs to a pane sub-rect. This is
+/// the production split-pane path: a pane whose grid is wider than its
+/// current tile must never emit quads into its neighbour's rectangle.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn emit_cell_bg_quads_clipped(
+    grid: &Grid,
+    view_top_abs: u64,
+    theme: &Theme,
+    pane_rect: PaneRect,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    out: &mut Vec<QuadInstance>,
+) {
+    let pad = pane_rect.x;
+    let top_inset = pane_rect.y;
+    let max_cols = ((pane_rect.w / cell_w).floor() as i32).clamp(0, i32::from(grid.cols)) as u16;
+    let max_rows = ((pane_rect.h / cell_h).floor() as i32).clamp(0, i32::from(grid.rows)) as u16;
+    if max_cols == 0 || max_rows == 0 {
+        return;
+    }
+    for r in 0..max_rows {
         let row_abs = view_top_abs + r as u64;
         let Some(row) = grid.row_at_abs(row_abs) else {
             continue;
@@ -3929,10 +3988,14 @@ pub fn emit_cell_bg_quads(
             |start: u16, end_exclusive: u16, color: [f32; 4], out: &mut Vec<QuadInstance>| {
                 let x = pad + f32::from(start) * cell_w;
                 let y = top_inset + f32::from(r) * cell_h;
-                let w = f32::from(end_exclusive - start) * cell_w;
+                let clipped_end = end_exclusive.min(max_cols);
+                if clipped_end <= start {
+                    return;
+                }
+                let w = f32::from(clipped_end - start) * cell_w;
                 out.push(QuadInstance::sharp(px_to_ndc(x, y, w, cell_h, sw, sh), color));
             };
-        for cell in row.iter() {
+        for cell in row.iter().take(max_cols as usize) {
             let bg = cell_bg_rgba(cell, theme);
             match (run_color, bg) {
                 (Some(prev), Some(cur)) if prev == cur => {
@@ -4167,37 +4230,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
 ///   1. `<exe-dir>/assets/fonts/` — what the .app/.msi bundles ship
 ///   2. `<workspace-root>/assets/fonts/` — dev (`cargo run`)
 fn load_bundled_fonts(fs: &mut FontSystem) {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
-            candidates.push(d.join("assets/fonts"));
-            // .app bundle: <exe-dir is MacOS>/.. /Resources/assets/fonts
-            if let Some(contents) = d.parent() {
-                candidates.push(contents.join("Resources/assets/fonts"));
-            }
-        }
-    }
-    candidates
-        .push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
-
-    for dir in candidates {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        let mut n = 0;
-        for e in entries.flatten() {
-            let p = e.path();
-            let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
-            if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
-                if let Ok(bytes) = std::fs::read(&p) {
-                    sonic_text::load_font_data_with_sonic_overrides(fs, bytes);
-                    n += 1;
-                }
-            }
-        }
-        if n > 0 {
-            tracing::info!("loaded {n} bundled font(s) from {dir:?}");
-            return; // first dir that produced fonts wins
-        }
-    }
+    sonic_text::swash_rasterizer::load_bundled_fonts(fs);
 }
 
 /// Stable fingerprint for command badges, including wall-clock buckets that

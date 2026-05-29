@@ -24,6 +24,7 @@ use glyphon::{
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use sonic_core::theme::Theme;
+use sonic_text::swash_rasterizer::load_bundled_fonts;
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
@@ -209,8 +210,9 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             // Left accent bar.
             quads.push(QuadCmd::sharp(layout.category_accent(i), palette.accent));
         }
-        // Icon slot placeholder (subtle pill) — keeps spacing predictable
-        // without forcing us to ship an icon font in this PR.
+        // Sidebar icon. These are Nerd Font PUA codepoints (see
+        // Category::icon); force the bundled JetBrainsMono Nerd Font so
+        // glyphon does not fall back to the system UI face and draw tofu.
         let icon_y = row.y + (row.h - layout::SIDEBAR_ICON_SLOT) / 2.0;
         let icon_rect = PrefsRect::new(
             row.x + layout::SIDEBAR_ICON_X,
@@ -220,7 +222,14 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
         );
         let icon_color =
             if active { palette.accent } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
-        quads.push(QuadCmd::sharp(icon_rect, color::with_alpha(icon_color, 0.18)));
+        push_mono(
+            &mut texts,
+            icon_rect,
+            cat.icon().to_string(),
+            icon_color,
+            15.0,
+            Some("JetBrainsMono Nerd Font".to_string()),
+        );
 
         // Label.
         let label_x = row.x + SIDEBAR_LABEL_X;
@@ -887,7 +896,8 @@ impl PrefsRenderer {
         };
         surface.configure(&device, &config);
 
-        let font_system = FontSystem::new();
+        let mut font_system = FontSystem::new();
+        load_bundled_fonts(&mut font_system);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -1068,7 +1078,7 @@ impl PrefsRenderer {
                 buf.set_size(font_system, Some(t.rect.w), Some(t.rect.h));
                 let family = match (&t.font_family, t.monospace) {
                     (Some(name), _) if !name.is_empty() => Family::Name(name.as_str()),
-                    (_, true) => Family::Name("monospace"),
+                    (_, true) => Family::Name("JetBrainsMono Nerd Font"),
                     (_, false) => Family::Name(ui_family),
                 };
                 let mut attrs = Attrs::new().family(family).color(t.color);
@@ -1887,9 +1897,14 @@ mod tests {
             .texts
             .iter()
             .any(|t| t.monospace && t.font_family.as_deref() == Some("ZZZ-FixturePreviewFont"));
+        let sidebar_icon_used = dl
+            .texts
+            .iter()
+            .any(|t| t.monospace && t.font_family.as_deref() == Some("JetBrainsMono Nerd Font"));
         assert!(
             preview_used,
             "preview card text did not carry the configured terminal font family (mono_count={mono_count}, with_family={with_family})"
         );
+        assert!(sidebar_icon_used, "sidebar Nerd Font icons must force JetBrainsMono Nerd Font");
     }
 }

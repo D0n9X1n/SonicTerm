@@ -92,7 +92,7 @@ fn determinism_same_key_twice() {
 }
 
 #[test]
-fn missing_family_returns_none() {
+fn missing_family_returns_none_when_no_fallback_face_covers_the_glyph() {
     // No font loaded — every lookup must fail gracefully (no panic).
     let mut fs = FontSystem::new();
     let mut r = SwashRasterizer::new(&mut fs, "Definitely Not A Real Font 42", 14.0);

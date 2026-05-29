@@ -19,8 +19,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use sonic_app::app::{resize_panes_to_rects, PaneState};
 use sonic_core::grid::Grid;
+use sonic_core::keymap::Direction;
 use sonic_core::vt::Parser;
-use sonic_ui::pane::Rect;
+use sonic_ui::pane::{PaneTree, Rect};
 
 fn make_pane(cols: u16, rows: u16) -> (PaneState, Arc<Mutex<Parser>>) {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
@@ -50,6 +51,24 @@ fn split_panes_size_to_their_own_rects() {
     assert_eq!(parser_a.lock().grid().rows, 35);
     assert_eq!(parser_b.lock().grid().cols, 50);
     assert_eq!(parser_b.lock().grid().rows, 35);
+}
+
+#[test]
+fn newly_split_pane_is_resized_to_subrect_not_whole_window() {
+    let mut tree = PaneTree::leaf(1);
+    assert!(tree.split(1, Direction::Right, 2));
+    let rects = tree.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+
+    let (pane_a, parser_a) = make_pane(100, 35);
+    let (pane_b, parser_b) = make_pane(100, 35);
+    let mut panes: HashMap<u64, PaneState> = HashMap::new();
+    panes.insert(1, pane_a);
+    panes.insert(2, pane_b);
+
+    resize_panes_to_rects(&panes, &rects, 10.0, 20.0);
+
+    assert_eq!(parser_a.lock().grid().cols, 50);
+    assert_eq!(parser_b.lock().grid().cols, 50, "new pane must not keep whole-window cols");
 }
 
 #[test]

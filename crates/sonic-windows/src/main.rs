@@ -10,6 +10,23 @@ use anyhow::{Context, Result};
 use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 
 #[cfg(target_os = "windows")]
+fn set_process_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+
+    // SAFETY: process-wide opt-in before winit creates any HWND. Failure is
+    // non-fatal (Windows may reject it if a manifest already set awareness),
+    // but calling here avoids blurry/scaled glyphs on mixed-DPI monitors.
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_process_dpi_awareness() {}
+
+#[cfg(target_os = "windows")]
 mod backdrop;
 #[cfg(target_os = "windows")]
 mod chrome;
@@ -19,6 +36,7 @@ mod menubar;
 mod os_drag_win;
 
 fn main() -> Result<()> {
+    set_process_dpi_awareness();
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
     // after the user's `[logging]` section has been read so its

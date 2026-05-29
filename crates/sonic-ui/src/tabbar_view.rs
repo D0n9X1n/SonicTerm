@@ -248,9 +248,11 @@ impl TabBarLayout {
     pub fn active_accent_rect(&self) -> Option<Rect> {
         let idx = self.active?;
         let t = self.tabs.get(idx)?;
-        let x = t.bg.x + ACTIVE_TOP_ACCENT_INSET;
-        let w = (t.bg.w - 2.0 * ACTIVE_TOP_ACCENT_INSET).max(0.0);
-        Some(Rect { x, y: t.bg.y, w, h: ACTIVE_TOP_ACCENT_H })
+        // Issue #257: the active indicator must be clipped to the active
+        // tab's post-layout width. Do not derive it from the whole strip or
+        // shrink/grow it independently; wide two-tab Windows layouts exposed
+        // that drift as an orange line overshooting into empty chrome.
+        Some(Rect { x: t.bg.x, y: t.bg.y, w: t.bg.w.max(0.0), h: ACTIVE_TOP_ACCENT_H })
     }
 
     /// Builder-style helper to mark the layout as hidden. A hidden
