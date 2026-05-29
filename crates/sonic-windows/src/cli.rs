@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use sonic_app::os_drag::TabPayload;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn parse_tearout_payload_from<I, S>(args: I) -> Result<Option<TabPayload>>
 where
     I: IntoIterator<Item = S>,
@@ -23,7 +24,7 @@ where
     Ok(payload)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, not(windows)), allow(dead_code))]
 pub fn parse_tearout_payload_from_env() -> Result<Option<TabPayload>> {
     parse_tearout_payload_from(std::env::args())
 }

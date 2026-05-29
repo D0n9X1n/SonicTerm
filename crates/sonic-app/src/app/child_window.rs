@@ -378,9 +378,27 @@ impl App {
                                 child.drag_session =
                                     Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
-                            TabHit::Close(_) | TabHit::NewTab => {
-                                // close/new-tab in child are deferred —
-                                // single-tab children today. Swallow.
+                            TabHit::Close(idx) => {
+                                // Drop the &mut child borrow before
+                                // re-entering &mut self via helpers.
+                                let _ = child;
+                                // Auto-reap is now inside
+                                // close_tab_at_in_child (PR #302
+                                // follow-up); no explicit reap call
+                                // needed at the call-site.
+                                self.close_tab_at_in_child(win_id, idx);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.window.request_redraw();
+                                }
+                                return;
+                            }
+                            TabHit::NewTab => {
+                                let _ = child;
+                                self.spawn_tab_in_child(win_id);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.window.request_redraw();
+                                }
+                                return;
                             }
                         }
                         child.window.request_redraw();
@@ -591,6 +609,11 @@ impl App {
         }
     }
     pub(super) fn reap_empty_child(&mut self, win_id: WindowId) {
+        // PR #302 follow-up: bump the test-observable counter on EVERY
+        // invocation (even no-ops on stale ids) so tests can pin that
+        // child-window cleanup truly routed through this contract rather
+        // than a raw `windows.remove`.
+        self.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(removed) = self.windows.remove(&win_id) {
@@ -772,19 +795,47 @@ impl App {
     /// Close the active tab of the given child window. Returns `true`
     /// on success.
     pub(super) fn close_active_tab_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else { return false };
-        let idx = child.tabs.active_index();
-        if idx >= child.tab_states.len() {
-            return false;
+        let idx = {
+            let Some(child) = self.windows.get(&win_id) else { return false };
+            child.tabs.active_index()
+        };
+        self.close_tab_at_in_child(win_id, idx)
+    }
+
+    /// Close the tab at `idx` in the given child window. Used by the
+    /// close-button (×) hit-test path in the child's tab bar, which
+    /// passes the clicked index directly (not the active one). Returns
+    /// `true` on success.
+    ///
+    /// Auto-reap behavior (PR #302 follow-up): when this drains the
+    /// child to zero tabs we immediately invoke
+    /// [`Self::reap_empty_child`] so callers never have to remember.
+    /// The previous contract (caller-responsible reap) left Cmd+W and
+    /// `CloseActivePaneOrTab` on a single-pane child window leaking a
+    /// ghost frame — Haiku finding on PR #302. Centralising the reap
+    /// here is the single-source-of-truth pattern: every close path
+    /// (× button, Cmd+W, close-active-pane-or-tab) now flows through
+    /// this function and gets the reap for free.
+    pub(super) fn close_tab_at_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
+        let drained = {
+            let Some(child) = self.windows.get_mut(&win_id) else { return false };
+            if idx >= child.tab_states.len() {
+                return false;
+            }
+            let st = child.tab_states.remove(idx);
+            for id in st.tree.leaves() {
+                // PaneState::Drop → PtyHandle::Drop kills the shell.
+                child.panes.remove(&id);
+            }
+            if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
+                child.tabs.close(tab_id);
+            }
+            child.window.request_redraw();
+            child.tabs.is_empty()
+        };
+        if drained {
+            self.reap_empty_child(win_id);
         }
-        let st = child.tab_states.remove(idx);
-        for id in st.tree.leaves() {
-            child.panes.remove(&id);
-        }
-        if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
-            child.tabs.close(tab_id);
-        }
-        child.window.request_redraw();
         true
     }
 

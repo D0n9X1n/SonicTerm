@@ -300,3 +300,113 @@ fn transfer_with_oob_source_idx_returns_err() {
     assert_eq!(app.__test_main_tab_count(), 1, "source tab vec unchanged");
     assert_eq!(app.__test_pane_ids(), vec![pane_a], "panes map unchanged");
 }
+
+/// PR #302 Haiku follow-up — boundary-contract pin (NOT an end-to-end
+/// `transfer_tab(child → main)` exercise).
+///
+/// HONEST SCOPE: this test does NOT call `transfer_tab` with a real
+/// child source and observe the source-empty branch invoke
+/// `reap_empty_child` from the inside. That ideal end-to-end pin
+/// requires constructing a second live `WindowState`, which needs a
+/// wgpu surface + winit `Window` — neither is available in a unit-test
+/// binary, and no test fake exists for `WindowState` today.
+///
+/// What this test DOES pin are the two boundary contracts the rewrite
+/// depends on — necessary, not sufficient:
+///
+///   1. `reap_empty_child` on a stale id is a silent no-op AND bumps
+///      `reap_call_count` exactly once. The counter is the
+///      test-observable signal that distinguishes "routed through the
+///      unified reap contract" from "raw `windows.remove`".
+///   2. `transfer_tab` with a missing child source rejects with
+///      `SourceMissing` BEFORE detaching anything — proves the
+///      pre-validation guard (PR #294 data-loss fix) survives the
+///      reap-routing rewrite, AND the reap counter does not tick on
+///      a rejected transfer.
+///
+/// The actual `child → main` source-empty branch is exercised by the
+/// GUI smoke (§13 in CLAUDE.md) and is tracked as a follow-up to add
+/// a `WindowState` test-fake (see PR #302 comment trail).
+#[test]
+fn transfer_tab_reap_boundary_contracts() {
+    let mut app = synth_app();
+    let _ = app.__test_seed_tab("only");
+    let children_before = app.child_window_count();
+    let reap_before = app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed);
+
+    // (1) reap_empty_child on a stale id: no panic, no spurious insert —
+    //     AND `reap_call_count` MUST tick by exactly 1. The counter is
+    //     the test-observable signal that distinguishes "routed through
+    //     the unified reap contract" from "raw `windows.remove`": both
+    //     leave the windows map shrunk, but only the former bumps the
+    //     counter and nulls straggler `redraw_target`s. Pre-#302 the
+    //     transfer_tab source-empty branch did a raw remove and would
+    //     have left this counter at zero.
+    let stale = WindowId::dummy();
+    app.__test_invoke_reap_empty_child(stale);
+    assert_eq!(
+        app.child_window_count(),
+        children_before,
+        "reap_empty_child on stale id must not invent a windows entry"
+    );
+    let reap_after = app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        reap_after,
+        reap_before + 1,
+        "reap_empty_child must bump reap_call_count on every invocation \
+         (the observable contract transfer_tab relies on post-#302)"
+    );
+
+    // (2) transfer_tab with stale child source still rejects with
+    //     SourceMissing BEFORE detaching anything — proves the
+    //     pre-validation guard (PR #294) survives the reap-routing
+    //     rewrite. If the rewrite had inverted the check order, this
+    //     would either panic in `reap_empty_child` or drop a tab.
+    //
+    //     The reap counter MUST NOT advance on a rejected transfer:
+    //     pre-validation runs first and there is no source to drain.
+    let main_before = app.__test_main_tab_count();
+    let reap_pre_reject = app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed);
+    let result = app.transfer_tab(Some(stale), 0, None, 0);
+    assert_eq!(result, Err(TransferError::SourceMissing));
+    assert_eq!(app.__test_main_tab_count(), main_before);
+    assert_eq!(app.child_window_count(), children_before);
+    assert_eq!(
+        app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed),
+        reap_pre_reject,
+        "a pre-validation reject must NOT invoke reap_empty_child"
+    );
+}
+
+/// PR #302 Haiku follow-up — negative-side companion to
+/// `transfer_tab_reap_boundary_contracts`. A transfer that leaves the
+/// source non-empty MUST NOT invoke `reap_empty_child`. Without this
+/// pin, a regression that unconditionally reaps the source after every
+/// transfer would silently destroy windows that still had tabs.
+///
+/// We exercise the only source-domain a unit test can construct (the
+/// main window) and assert `reap_call_count` is flat across a transfer
+/// that leaves a tab behind.
+#[test]
+fn transfer_non_last_tab_does_not_reap() {
+    let mut app = synth_app();
+    let _pane_a = app.__test_seed_tab("a0");
+    let _pane_b = app.__test_seed_tab("a1");
+    assert_eq!(app.__test_main_tab_count(), 2);
+    let reap_before = app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed);
+
+    // main → main reorder: source not drained (still has the other tab),
+    // so the source-empty branch must not fire. Whether the reorder
+    // itself succeeds is not the point; the pin is that reap stays put.
+    let _ = app.transfer_tab(None, 0, None, 1);
+    assert_eq!(
+        app.__test_main_tab_count(),
+        2,
+        "tab count unchanged — both tabs still live in main"
+    );
+    assert_eq!(
+        app.reap_call_count.load(std::sync::atomic::Ordering::Relaxed),
+        reap_before,
+        "transfer that leaves source non-empty must NOT invoke reap_empty_child"
+    );
+}
