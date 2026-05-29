@@ -12,7 +12,7 @@ fn each_section_exposes_icon_title_description_in_order() {
     assert!(header_y < desc_y, "description must sit below icon+title row");
 
     for category in CATEGORIES {
-        assert!(!category.icon().is_control(), "{} has invalid icon", category.label());
+        assert!(category.icon().svg.contains("<svg"), "{} has invalid icon", category.label());
         assert!(!category.label().is_empty());
         assert!(!category.description().is_empty());
     }

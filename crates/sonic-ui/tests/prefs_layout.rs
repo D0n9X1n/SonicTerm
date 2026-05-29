@@ -148,25 +148,16 @@ fn every_category_has_description() {
 }
 
 #[test]
-fn every_category_has_a_distinct_nerd_font_icon() {
-    // Issue #170: sidebar rows show a Nerd Font glyph next to the label.
-    // Glyphs must live in the Private Use Area so the bundled
-    // JetBrainsMono Nerd Font can render them, and they must be unique
-    // so each row is visually distinguishable at a glance.
-    let mut icons: Vec<char> = CATEGORIES.iter().map(|c| c.icon()).collect();
-    let original_len = icons.len();
-    icons.sort_unstable();
-    icons.dedup();
-    assert_eq!(icons.len(), original_len, "category icons must be unique");
+fn every_category_has_a_distinct_svg_icon() {
+    let mut keys: Vec<&'static str> = CATEGORIES.iter().map(|c| c.icon().key).collect();
+    let original_len = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), original_len, "category icons must be unique");
     for c in CATEGORIES {
-        let glyph = c.icon();
-        let cp = glyph as u32;
-        assert!(
-            (0xE000..=0xF8FF).contains(&cp),
-            "category {:?} icon 0x{:04x} is outside the Nerd Font PUA",
-            c.label(),
-            cp
-        );
+        let icon = c.icon();
+        assert!(!icon.key.is_empty(), "category {:?} icon key is empty", c.label());
+        assert!(icon.svg.contains("<svg"), "category {:?} icon is not SVG", c.label());
     }
 }
 

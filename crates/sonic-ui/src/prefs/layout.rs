@@ -47,25 +47,9 @@ impl Category {
         }
     }
 
-    /// Nerd Font glyph displayed in the sidebar next to the label.
-    ///
-    /// Codepoints are from JetBrainsMono Nerd Font (bundled in
-    /// `assets/fonts/`). Chosen for visual coherence with the rest of
-    /// the redesign per issue #173 / #170:
-    /// - General  →  (nf-fa-cog,    0xf013)  settings cog
-    /// - Appearance → (nf-fa-paint_brush, 0xf1fc) appearance/theme brush
-    /// - Font     →  (nf-fa-font,   0xf031)  font / typography
-    /// - Keymap   →  (nf-fa-keyboard_o, 0xf11c) keyboard
-    /// - Behavior →  (nf-fa-sliders, 0xf1de)  sliders / tweaks
-    pub fn icon(self) -> char {
-        match self {
-            Category::Font => '\u{f031}',
-            Category::Theme => '\u{f1fc}',
-            Category::Keymap => '\u{f11c}',
-            Category::Window => '\u{f2d0}',
-            Category::Cursor => '\u{f245}',
-            Category::Advanced => '\u{f013}',
-        }
+    /// Embedded SVG icon displayed in the sidebar next to the label.
+    pub fn icon(self) -> &'static crate::icon::Icon {
+        crate::icon::for_category(self)
     }
 }
 
