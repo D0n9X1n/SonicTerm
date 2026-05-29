@@ -12,7 +12,7 @@ use glyphon::{
 use sonic_core::{
     config::BackdropKind,
     grid::{Cell, CellFlags, Color, Grid},
-    theme::Theme,
+    theme::{Color as ThemeColor, Theme},
 };
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
@@ -55,6 +55,58 @@ pub struct RendererSettings<'a> {
     pub appearance: SurfaceAppearance,
 }
 
+fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
+    let bg = theme.colors.background.color().unwrap_or_else(|| ThemeColor::rgb(0, 0, 0));
+    let fg = theme.colors.foreground.color().unwrap_or_else(|| ThemeColor::rgb(255, 255, 255));
+    bg.shift_toward(fg, 0.18).to_rgba_f32_linear(1.0)
+}
+
+fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> Vec<SplitterRect> {
+    let mut out = Vec::new();
+    let thickness = thickness.max(0.0);
+    let eps = 0.5_f32;
+
+    for (i, (_, a)) in pane_rects.iter().enumerate() {
+        for (_, b) in pane_rects.iter().skip(i + 1) {
+            let vertical_overlap = a.y.max(b.y) < (a.y + a.h).min(b.y + b.h) - eps;
+            if vertical_overlap && ((a.x + a.w) - b.x).abs() <= eps {
+                let y = a.y.max(b.y);
+                let h = (a.y + a.h).min(b.y + b.h) - y;
+                out.push(SplitterRect {
+                    axis: SplitAxis::Vertical,
+                    rect: PaneRect::new(b.x - thickness * 0.5, y, thickness, h),
+                });
+            } else if vertical_overlap && ((b.x + b.w) - a.x).abs() <= eps {
+                let y = a.y.max(b.y);
+                let h = (a.y + a.h).min(b.y + b.h) - y;
+                out.push(SplitterRect {
+                    axis: SplitAxis::Vertical,
+                    rect: PaneRect::new(a.x - thickness * 0.5, y, thickness, h),
+                });
+            }
+
+            let horizontal_overlap = a.x.max(b.x) < (a.x + a.w).min(b.x + b.w) - eps;
+            if horizontal_overlap && ((a.y + a.h) - b.y).abs() <= eps {
+                let x = a.x.max(b.x);
+                let w = (a.x + a.w).min(b.x + b.w) - x;
+                out.push(SplitterRect {
+                    axis: SplitAxis::Horizontal,
+                    rect: PaneRect::new(x, b.y - thickness * 0.5, w, thickness),
+                });
+            } else if horizontal_overlap && ((b.y + b.h) - a.y).abs() <= eps {
+                let x = a.x.max(b.x);
+                let w = (a.x + a.w).min(b.x + b.w) - x;
+                out.push(SplitterRect {
+                    axis: SplitAxis::Horizontal,
+                    rect: PaneRect::new(x, a.y - thickness * 0.5, w, thickness),
+                });
+            }
+        }
+    }
+
+    out
+}
+
 /// Integer-pixel inset for the Windows custom titlebar strip; 0
 /// elsewhere. Duplicated (in tiny form) from `sonic_app::app` so this
 /// module can stay independent of the app crate.
@@ -83,7 +135,7 @@ use crate::{
         PALETTE_INNER_PAD, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP,
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
-    pane::Rect as PaneRect,
+    pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     quad::{px_to_ndc, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
@@ -321,6 +373,7 @@ pub struct GpuRenderer {
     /// allocation-free.
     tab_separator: [f32; 4],
     hyperlink_underline: [f32; 4],
+    splitter_color: [f32; 4],
     hyperlink_tint: [f32; 4],
     search_highlight: [f32; 4],
     search_highlight_current: [f32; 4],
@@ -594,6 +647,7 @@ impl GpuRenderer {
         // accent (every bundled theme designates it). Underline reads as
         // deliberate at high opacity; the tint behind the run is subtle.
         let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        let splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
             sonic_core::theme::Appearance::Dark => 0.14,
             sonic_core::theme::Appearance::Light => 0.10,
@@ -734,6 +788,7 @@ impl GpuRenderer {
             hover_cursor: None,
             tab_separator,
             hyperlink_underline,
+            splitter_color,
             hyperlink_tint,
             search_highlight,
             search_highlight_current,
@@ -1437,6 +1492,7 @@ impl GpuRenderer {
         self.tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
         self.tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        self.splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
             sonic_core::theme::Appearance::Dark => 0.14,
             sonic_core::theme::Appearance::Light => 0.10,
@@ -2456,68 +2512,68 @@ impl GpuRenderer {
             });
         }
 
-        // -------- Pane split borders + broadcast safety chrome --------------
-        // Each pane in the tab gets a thin border outlining its rectangle so
-        // splits are visible; the FOCUSED pane gets the theme accent color.
-        // Broadcast receivers override that chrome with an unmistakable red
-        // 2px border plus a warning strip so users do not accidentally leave
-        // mirrored input enabled.
-        if pane_rects.len() > 1 || !broadcast_receiver_ids.is_empty() {
-            let accent = crate::ui_tokens::UiPalette::from_theme(theme).accent;
-            let focus_border = accent;
-            let border = [accent[0] * 0.35, accent[1] * 0.35, accent[2] * 0.35, accent[3]];
+        // -------- Pane splitters + broadcast safety chrome ------------------
+        // Splitters are 1px interior seams at the shared OUTER pane boundary.
+        // They are not pane borders: no window perimeter is drawn, and the
+        // seam sits outside the per-pane cell padding that is applied inside
+        // each pane rect by the layout caller.
+        if pane_rects.len() > 1 {
+            for splitter in splitter_rects_from_panes(pane_rects, 1.0) {
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(
+                        splitter.rect.x,
+                        splitter.rect.y,
+                        splitter.rect.w,
+                        splitter.rect.h,
+                        sw,
+                        sh,
+                    ),
+                    color: self.splitter_color,
+                    ..Default::default()
+                });
+            }
+        }
+
+        // Broadcast receivers keep unmistakable red safety chrome so users do
+        // not accidentally leave mirrored input enabled. This is intentionally
+        // independent of the subtle split-pane seam styling above.
+        if !broadcast_receiver_ids.is_empty() {
             let warning = hex_to_rgba(theme.colors.bright.red.0.as_str(), 1.0);
             for (id, r) in pane_rects {
-                let is_receiver = broadcast_receiver_ids.contains(id);
-                let is_active = *id == active_pane;
-                let color = if is_receiver {
-                    warning
-                } else if is_active {
-                    focus_border
-                } else {
-                    border
-                };
-                let t = if is_active || is_receiver { 2.0_f32 } else { 1.0_f32 };
+                if !broadcast_receiver_ids.contains(id) {
+                    continue;
+                }
+                let t = 2.0_f32;
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
-                    color,
+                    color: warning,
                     ..Default::default()
                 });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y + r.h - t, r.w, t, sw, sh),
-                    color,
+                    color: warning,
                     ..Default::default()
                 });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh),
-                    color,
+                    color: warning,
                     ..Default::default()
                 });
                 quads.push(QuadInstance {
                     rect: px_to_ndc(r.x + r.w - t, r.y, t, r.h, sw, sh),
-                    color,
+                    color: warning,
                     ..Default::default()
                 });
-                if is_receiver {
-                    let strip_h = (self.font_size * 1.45).max(20.0).min(r.h.max(0.0));
-                    let mut strip = warning;
-                    strip[3] = 0.92;
-                    quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(
-                            r.x + t,
-                            r.y + t,
-                            (r.w - t * 2.0).max(0.0),
-                            strip_h,
-                            sw,
-                            sh,
-                        ),
-                        color: strip,
-                        ..Default::default()
-                    });
-                }
+                let strip_h = (self.font_size * 1.45).max(20.0).min(r.h.max(0.0));
+                let mut strip = warning;
+                strip[3] = 0.92;
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(r.x + t, r.y + t, (r.w - t * 2.0).max(0.0), strip_h, sw, sh),
+                    color: strip,
+                    ..Default::default()
+                });
             }
         }
-
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
             // Phase D (Epic #289): open an 8 px insertion gap at the
