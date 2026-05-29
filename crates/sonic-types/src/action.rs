@@ -143,8 +143,8 @@ pub enum Action {
     OpenCommandPalette,
     /// Toggle the searchable keyboard shortcuts cheat sheet overlay.
     ShowKeymapCheatsheet,
-    /// Open the preferences window.
-    OpenPreferences,
+    /// Open the editable user config TOML file in the OS default editor.
+    EditConfigFile,
     /// Open the editable user keymap TOML file in the OS default editor.
     OpenKeymapFile,
 

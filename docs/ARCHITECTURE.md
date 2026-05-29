@@ -48,10 +48,10 @@ crate owns a given concern or where to put a new module.
 | `sonic-text` | sonic-types | shape LRU cache, swash rasterizer, glyph atlas (LRU eviction), row-glyph cache |
 | `sonic-render-model` | sonic-types | renderer-agnostic geometry / inputs / `Painter` trait — what to draw |
 | `sonic-gpu` | sonic-types, sonic-text | wgpu pipelines: quad, text, atlas upload |
-| `sonic-ui` | sonic-types, sonic-cfg, sonic-grid, sonic-render-model | tabs, tabbar_view, pane, selection, search, command_palette, cursor, IME, i18n, prefs |
+| `sonic-ui` | sonic-types, sonic-cfg, sonic-grid, sonic-render-model | tabs, tabbar_view, pane, selection, search, command_palette, cursor, IME, i18n |
 | `sonic-core` | sonic-{vt,grid,cfg,io} | **deprecated façade** — re-exports leaf modules under their historical paths |
 | `sonic-shared` | sonic-ui, sonic-gpu, sonic-app | **thin façade** — re-exports + `render/{core,color,metrics,tab_spans,cursor,drag_chip}.rs` |
-| `sonic-app` | everything above | winit ApplicationHandler split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,prefs_window,config_apply,search_handle,misc}.rs`; menu, os_drag, tab_drag, config_watch |
+| `sonic-app` | everything above | winit ApplicationHandler split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; menu, os_drag, tab_drag, config_watch |
 | `sonic-mac` | sonic-app (via sonic-shared) | macOS binary, ~30 LOC main |
 | `sonic-windows` | sonic-app (via sonic-shared) | Windows binary, ~30 LOC main |
 | `sonic-mux` | sonic-io, sonic-grid | persistent PTY session daemon |

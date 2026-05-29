@@ -111,7 +111,6 @@ use sonic_ui::command_palette::CommandPalette;
 use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::ime::ImeState;
 use sonic_ui::pane::PaneTree;
-use sonic_ui::prefs::PrefsState;
 use sonic_ui::search::SearchState;
 use sonic_ui::selection::Selection;
 use sonic_ui::tabs::{CommandStatus, Tab, TabBar};
@@ -133,23 +132,18 @@ use sonic_ui::tabs::{CommandStatus, Tab, TabBar};
 /// would render onto the parent's window, which was the v1 bug).
 /// Epic #289 Phase B — kind of window stored in the unified
 /// [`App::windows`] map. Today every torn-out terminal child window is
-/// `Terminal`. `Prefs` is reserved for the preferences window once its
-/// state is folded into the unified map in Phase C.
+/// `Terminal`.
 ///
 /// Note: the main terminal window's authoritative state still lives
 /// directly on `App` (split across `App::tabs`, `App::panes`,
 /// `App::renderer`, etc.) pending the Phase C struct-level absorption.
 /// Phase B's deliverable is removing the `child_windows` field name
-/// and folding torn-out (and eventually prefs) windows under one
-/// role-tagged map.
+/// and folding torn-out windows under one role-tagged map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     /// A terminal window (torn-out child today; main + child after
     /// Phase C lands).
     Terminal,
-    /// The preferences window. Routed through a separate dispatch path
-    /// and never receives terminal action chords.
-    Prefs,
 }
 
 pub struct WindowState {
@@ -185,8 +179,8 @@ static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
 /// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
 ///
-/// `Other` covers the prefs window today; it explicitly does NOT route
-/// terminal actions and falls back to main as a safe default.
+/// `Other` covers any non-terminal Sonic window; it explicitly does NOT
+/// route terminal actions and falls back to main as a safe default.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontmostKind {
@@ -197,8 +191,8 @@ pub enum FrontmostKind {
     /// A torn-out child terminal window is OS-frontmost. Carries the
     /// window id so the caller can index `windows`.
     Child(WindowId),
-    /// A non-terminal window (prefs, etc.) is frontmost. Terminal
-    /// actions fall back to main.
+    /// A non-terminal Sonic window is frontmost. Terminal actions fall
+    /// back to main.
     Other,
 }
 
@@ -410,14 +404,13 @@ pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
 }
 
-/// Loader callback type used by `run_with` to reload a theme by name
-/// when the user picks a new one in the preferences window.
+/// Loader callback type used by `run_with` to reload a theme by name.
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
 /// Loader callback type used by `run_with` to reload a keymap by name.
 pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
 
-/// Entry point that additionally accepts asset loaders so the prefs
-/// window can apply theme + keymap changes live (no restart).
+/// Entry point that additionally accepts asset loaders so theme +
+/// keymap changes can apply live (no restart).
 pub fn run_with(
     theme: Theme,
     config: Config,
@@ -657,7 +650,6 @@ mod keymap_dispatch;
 mod misc;
 pub mod os_drag;
 mod overlays;
-mod prefs_window;
 mod search_handle;
 mod spawn_pane;
 mod tab_state;
@@ -768,15 +760,10 @@ pub struct App {
     /// `crate::app::hovered_url` for the pure helpers.
     pub(super) hovered_url: Option<hovered_url::HoveredUrl>,
     pub(super) cursor_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    // v0.6: optional graphical preferences window.
-    pub(super) prefs_window: Option<Arc<Window>>,
-    pub(super) prefs_state: Option<PrefsState>,
-    pub(super) prefs_renderer: Option<sonic_shared::prefs_renderer::PrefsRenderer>,
-    pub(super) pending_prefs_open: bool,
     /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
-    /// `create_new_terminal_window(el)`. Modeled on `pending_prefs_open`
-    /// because window creation requires an `ActiveEventLoop` reference
+    /// `create_new_terminal_window(el)`. Window creation requires an
+    /// `ActiveEventLoop` reference
     /// that isn't reachable from the keymap dispatcher. Works from BOTH
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
@@ -869,8 +856,8 @@ pub struct App {
     /// window is hidden but the event loop keeps spinning so live
     /// child windows continue to run.
     pub(super) main_hidden: bool,
-    /// Optional theme loader, set by `run_with`. Used by the prefs
-    /// window's apply/close path to reload a theme by name live.
+    /// Optional theme loader, set by `run_with`. Used to reload a theme
+    /// by name live.
     pub(super) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
     pub(super) keymap_loader: Option<KeymapLoader>,
@@ -1083,10 +1070,6 @@ impl App {
             hover_link: false,
             hovered_url: None,
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            prefs_window: None,
-            prefs_state: None,
-            prefs_renderer: None,
-            pending_prefs_open: false,
             pending_new_window: false,
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
@@ -1382,27 +1365,6 @@ impl App {
         self.input_dirty = false;
     }
 
-    /// Test-only setter for `prefs_state`. Mirrors what
-    /// [`Self::create_prefs_window`] does at runtime when the user
-    /// presses Cmd/Ctrl+, — minus the wgpu surface — so a regression
-    /// test can drive [`Self::commit_prefs_and_apply_live`] without
-    /// instantiating a real preferences window.
-    #[doc(hidden)]
-    pub fn install_prefs_state_for_test(&mut self, state: sonic_ui::prefs::PrefsState) {
-        self.prefs_state = Some(state);
-    }
-
-    /// Test-only entry point for the exact slot the prefs UI invokes
-    /// when the user clicks Apply (or hits Esc while dirty). Drives
-    /// the real `commit_prefs_and_apply_live` path so a regression
-    /// test (issue #167) can assert that font / theme / keymap edits
-    /// flow through `apply_new_config` and reach the renderer — not
-    /// just into `self.config`.
-    #[doc(hidden)]
-    pub fn commit_prefs_for_test(&mut self) {
-        self.commit_prefs_and_apply_live();
-    }
-
     /// Called from the `RedrawRequested` handler when the active pane's
     /// parser lock is contended (held by the VT thread mid-parse).
     /// Marks `pending_redraw` so `about_to_wait` schedules a
@@ -1459,9 +1421,8 @@ impl App {
         self.i18n.locale()
     }
 
-    /// Live-apply a new locale. Persists the choice to `self.config.locale`
-    /// so a subsequent prefs save writes it to disk. Pass `""` to mean
-    /// "auto-detect from OS locale".
+    /// Live-apply a new locale. Persists the choice to `self.config.locale`.
+    /// Pass `""` to mean "auto-detect from OS locale".
     pub fn set_locale(&mut self, requested: &str) {
         self.config.locale = requested.to_string();
         self.i18n =
@@ -1624,9 +1585,9 @@ impl App {
     ///     window we currently own.
     ///   * `FrontmostKind::Child(id)` if the recorded id matches a live
     ///     entry in [`Self::windows`].
-    ///   * `FrontmostKind::Other` for the prefs window or any other
-    ///     non-terminal window — actions should fall through to the safe
-    ///     main-window default in that case rather than mutate prefs.
+    ///   * `FrontmostKind::Other` for any non-terminal window — actions
+    ///     should fall through to the safe
+    ///     main-window default in that case.
     ///
     /// Pure read; no mutation, no logging. The keymap_dispatch arms call
     /// this first, then route to the matching mutator + redraw target.
@@ -1640,11 +1601,6 @@ impl App {
         }
         if self.windows.contains_key(&id) {
             return FrontmostKind::Child(id);
-        }
-        if let Some(w) = self.prefs_window.as_ref() {
-            if w.id() == id {
-                return FrontmostKind::Other;
-            }
         }
         // Recorded id doesn't match anything live (rare: window closed
         // between the focus event and the action dispatch). Treat as
@@ -1814,7 +1770,7 @@ impl App {
     }
 
     /// Epic #289 Phase B — number of windows in the unified
-    /// [`Self::windows`] map (terminal + prefs once it's folded in).
+    /// [`Self::windows`] map.
     /// Used by the regression suite to pin the rename + role tagging.
     #[doc(hidden)]
     pub fn unified_window_count(&self) -> usize {
@@ -1823,7 +1779,6 @@ impl App {
 
     /// Epic #289 Phase B — count entries in [`Self::windows`] whose
     /// role matches the argument. Today every entry is `Terminal`;
-    /// Phase C adds `Prefs` once that path moves in.
     #[doc(hidden)]
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
         self.windows.values().filter(|w| w.role == role).count()
@@ -2448,144 +2403,4 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.do_about_to_wait(el);
     }
-}
-
-/// Test-only helper: simulate the command-palette path dispatching the
-/// `OpenPreferences` action, and return whether the App's
-/// `pending_prefs_open` flag was set as a result.
-///
-/// This is the cheapest possible regression for the palette → preferences
-/// wiring (PR #41 review). The real prefs window can only be created from
-/// a live winit `ActiveEventLoop`, but the flag-set is the necessary
-/// pre-condition that the palette path was incorrectly skipping.
-#[doc(hidden)]
-pub fn __test_palette_dispatch_open_preferences_sets_pending() -> bool {
-    use sonic_core::keymap::{Keymap, Meta};
-    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
-    let hex = || Hex("#000000".to_string());
-    let ansi = || AnsiColors {
-        black: hex(),
-        red: hex(),
-        green: hex(),
-        yellow: hex(),
-        blue: hex(),
-        magenta: hex(),
-        cyan: hex(),
-        white: hex(),
-    };
-    let theme = Theme {
-        name: "test".into(),
-        appearance: Appearance::Dark,
-        colors: Palette {
-            background: hex(),
-            foreground: hex(),
-            cursor: hex(),
-            cursor_text: hex(),
-            selection_bg: hex(),
-            selection_fg: hex(),
-            ansi: ansi(),
-            bright: ansi(),
-            tab: TabColors {
-                bar_bg: hex(),
-                active_bg: hex(),
-                active_fg: hex(),
-                inactive_bg: hex(),
-                inactive_fg: hex(),
-                hover_bg: hex(),
-                hover_fg: hex(),
-                close_button_fg: hex(),
-            },
-        },
-    };
-    let config = Config::default();
-    let keymap =
-        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
-    let mut app = App::new(theme, config, keymap);
-    // Simulate what the palette Enter branch does: pick the selected
-    // action and dispatch via run_action — exactly the sequence run by
-    // `command_palette_handle_key` on Enter.
-    app.command_palette.open();
-    // Filter so OpenPreferences becomes the current item; it's the only
-    // action whose name contains "openpre".
-    app.command_palette.set_query("openpre");
-    let action =
-        app.command_palette.current().cloned().expect("OpenPreferences should be filtered in");
-    assert!(matches!(action, sonic_core::keymap::Action::OpenPreferences));
-    app.command_palette.close();
-    app.run_action(&action);
-    app.pending_prefs_open
-}
-
-/// Test-only helper: dispatch the menubar `OpenPreferences` action the
-/// same way the macOS NSMenu bridge does (push onto the bridge queue,
-/// then call the actions drain), and report whether the resulting state
-/// is "ready for `drain_pending_window_creates` to materialize the
-/// prefs window" — i.e. `pending_prefs_open == true`.
-///
-/// This is the regression for the bug where ⌘, (and the macOS
-/// menubar > Preferences item, which routes through the same bridge)
-/// logged "awaiting resumed-event-loop hook" but the prefs window
-/// never appeared. The inline consumer for `pending_prefs_open` lived
-/// only on the KeyboardInput path; menubar dispatch never hit it. The
-/// fix centralizes the consumer in `drain_pending_window_creates` and
-/// calls it from both `user_event` (menubar/UserEvent) and the
-/// KeyboardInput arm of `window_event`.
-///
-/// We can't construct an `ActiveEventLoop` in a unit test, so this
-/// helper stops one step short of `create_window` and asserts the
-/// pre-condition the bug violated. The full GUI verify recipe lives
-/// in the doc comment on `drain_pending_window_creates`.
-#[doc(hidden)]
-pub fn __test_menubar_dispatch_open_preferences_sets_pending() -> bool {
-    use sonic_core::keymap::{Action, Keymap, Meta};
-    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
-    let hex = || Hex("#000000".to_string());
-    let ansi = || AnsiColors {
-        black: hex(),
-        red: hex(),
-        green: hex(),
-        yellow: hex(),
-        blue: hex(),
-        magenta: hex(),
-        cyan: hex(),
-        white: hex(),
-    };
-    let theme = Theme {
-        name: "test".into(),
-        appearance: Appearance::Dark,
-        colors: Palette {
-            background: hex(),
-            foreground: hex(),
-            cursor: hex(),
-            cursor_text: hex(),
-            selection_bg: hex(),
-            selection_fg: hex(),
-            ansi: ansi(),
-            bright: ansi(),
-            tab: TabColors {
-                bar_bg: hex(),
-                active_bg: hex(),
-                active_fg: hex(),
-                inactive_bg: hex(),
-                inactive_fg: hex(),
-                hover_bg: hex(),
-                hover_fg: hex(),
-                close_button_fg: hex(),
-            },
-        },
-    };
-    let config = Config::default();
-    let keymap =
-        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
-    let mut app = App::new(theme, config, keymap);
-    // Mirror what NSMenu does: enqueue Action::OpenPreferences and let
-    // the App run every queued action. This is the action-loop portion
-    // of `drain_menubar_actions` — we stop just before the
-    // `drain_pending_window_creates(el)` step (which needs a real
-    // `ActiveEventLoop`) and verify the flag landed.
-    let _ = crate::menubar_bridge::push_action(Action::OpenPreferences);
-    for action in crate::menubar_bridge::__test_drain() {
-        app.run_action(&action);
-    }
-    app.pending_prefs_open
 }

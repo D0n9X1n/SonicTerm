@@ -11,10 +11,8 @@
 //!   * [`atlas_upload`] — wgpu-side wrapper around `sonic_text::glyph_atlas`
 //!     that owns the texture/view/sampler/bind-group and syncs dirty tiles.
 //!
-//! The composite renderer (`sonic-shared::render`) and the prefs window
-//! renderer still live in `sonic-shared` for now; PR 7b will split `render.rs`
-//! into sub-files and PR 7c may move the prefs renderer once its `crate::prefs`
-//! dependency is decoupled.
+//! The composite renderer (`sonic-shared::render`) still lives in
+//! `sonic-shared`; PR 7b split `render.rs` into sub-files.
 //!
 //! Dependency rule: `sonic-gpu` may depend on `sonic-types`, `sonic-text`, and
 //! `sonic-render-model` only. It must NOT depend on `sonic-ui` or `sonic-shared`

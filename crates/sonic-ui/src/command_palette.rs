@@ -280,7 +280,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::OpenSearch => "OpenSearch".into(),
         Action::OpenCommandPalette => "OpenCommandPalette".into(),
         Action::ShowKeymapCheatsheet => "ShowKeymapCheatsheet".into(),
-        Action::OpenPreferences => "OpenPreferences".into(),
+        Action::EditConfigFile => "EditConfigFile".into(),
         Action::OpenKeymapFile => "OpenKeymapFile".into(),
         Action::Scroll(s) => format!("Scroll({})", scroll_name(*s)),
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
@@ -366,11 +366,11 @@ pub fn all_actions() -> Vec<Action> {
         // Window
         Action::NewWindow,
         Action::ToggleFullscreen,
-        // Search / palette / prefs
+        // Search / palette / editable config files
         Action::OpenSearch,
         Action::OpenCommandPalette,
         Action::ShowKeymapCheatsheet,
-        Action::OpenPreferences,
+        Action::EditConfigFile,
         Action::OpenKeymapFile,
         // Scroll
         Action::Scroll(ScrollAction::LineUp),

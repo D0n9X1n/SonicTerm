@@ -39,7 +39,7 @@ fn variant_kind_covers_every_action() {
         Action::OpenSearch,
         Action::OpenCommandPalette,
         Action::ShowKeymapCheatsheet,
-        Action::OpenPreferences,
+        Action::EditConfigFile,
         Action::OpenKeymapFile,
         Action::Scroll(ScrollAction::PageUp),
         Action::ScrollToPrevPrompt,
@@ -61,7 +61,7 @@ fn variant_kind_covers_every_action() {
 fn labels_are_human_readable_verb_noun() {
     assert_eq!(label(&Action::NewTab), "New Tab");
     assert_eq!(label(&Action::SplitRight), "Split Pane Right");
-    assert_eq!(label(&Action::OpenPreferences), "Open Preferences");
+    assert_eq!(label(&Action::EditConfigFile), "Edit sonic.toml");
     assert_eq!(label(&Action::ReloadConfig), "Reload Config");
 }
 

@@ -46,13 +46,13 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonic-shared/src/render.rs` + `app.rs` |
 | In-page search (`Cmd+F`) | ✅ v0.4 | `sonic-shared/src/search.rs` |
 | Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonic-core::vt` |
-| **In-app graphical preferences UI subsystem** | ✅ v0.6 | `sonic-shared/src/prefs/` (controls + state + `super+comma`; in-window rendering deferred) |
+| **Palette config-file editing** | ✅ v1.0-RC | `Edit sonic.toml` / `Edit keymap.toml` palette actions replace the removed prefs UI (#326) |
 | Tab tear-out + cross-window merge | ✅ v0.8 | `sonic-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
 | Command palette (`super+shift+P`) | ✅ v0.8 | (#41, #45) |
 | IME composition + preedit anchoring | ✅ v0.8 | (#40, #50) |
 | In-page + scrollback search | ✅ v0.8 | (#51) |
 | Bracketed paste + OSC 133 shell-integration | ✅ v0.8 | (#52) |
-| Font / theme / keymap live-reload + prefs persist | ✅ v0.8 | (#53, #54) |
+| Font / theme / keymap live-reload + config-file editing | ✅ v0.8 / v1.0-RC | (#53, #54, #326) |
 | i18n (en / zh-CN / ja) | ✅ v0.8 | (#55) |
 | `sonic-mux` daemon (persistent PTY sessions) | ✅ v0.8 | `sonic-mux/` (#56) |
 | Programming ligatures + ZWJ shaping | ✅ v0.8 | (#57) |
@@ -115,24 +115,17 @@ production blockers are clear.
 - Cursor visibility (`?25`), bracketed paste (`?2004`), SGR mouse
   (`?1006`).
 
-### ✅ v0.6.0 — Graphical preferences UI subsystem (#26)
-Shipped:
-1. **Settings state**: typed `Prefs` model owning every config tunable.
-2. **Form controls** built on the existing quad + glyphon stack:
-   toggle / switch, slider, dropdown, color picker, text field, keymap
-   recorder.
-3. **Binding**: `super+comma` (Cmd+, on macOS) → `open_preferences`
-   action wired through `assets/keymaps/wezterm.toml`.
+### ✅ v0.6.0 — Historical graphical preferences experiment (#26)
 
-Deferred to a follow-up: a dedicated settings window with in-window
-control rendering, theme live-preview, and config hot-reload through the
-`notify` watcher. The state and controls already land; surfacing them
-in their own window is the next slice.
+The graphical preferences subsystem shipped experimentally in v0.6 and was
+removed before v1.0-RC (#326). The supported settings workflow is now the
+command palette: run `Edit sonic.toml` or `Edit keymap.toml`; the existing
+`notify` watcher live-reloads saved changes.
 
 ### ✅ v0.8.0 — Production polish (2026-05-26)
 
-The bridge from v0.6 to v1.0. Everything between "preferences ship" and
-"ready to sign + release to the public" lands here. Full per-PR detail
+The bridge from v0.6 to v1.0. Everything between the early settings
+workflow and "ready to sign + release to the public" lands here. Full per-PR detail
 in [`CHANGELOG.md`](../CHANGELOG.md); cut script in [`RELEASE.md`](../RELEASE.md).
 
 Highlights:
@@ -147,8 +140,7 @@ Highlights:
 5. **WezTerm visual parity within 3 ΔE** on the standard recipe (#70,
    #75) — HiDPI physical-px rasterization (#63, #72, #76), sRGB→linear
    gamma (#65), CJK / emoji / Hangul / Powerline / ZWJ (#49, #57, #68).
-6. **Live reload** of font/theme/keymap + prefs persist & live-apply
-   (#53, #54).
+6. **Live reload** of font/theme/keymap via config files (#53, #54, #326).
 7. **`sonic-mux` daemon** for persistent PTY sessions (#56).
 8. **SSH client pane** behind `ssh` feature flag (#58).
 9. **Native macOS menubar** (#66) + WezTerm-style tab titles (#77).
@@ -172,7 +164,7 @@ PRs landed this session:
   #151 (extract `sonic-types`), #152 (split `sonic-core` into
   `sonic-vt` / `sonic-grid` / `sonic-cfg` / `sonic-io` + façade), #153
   (extract `sonic-text`: shape + atlas + raster), #154 (extract
-  `sonic-ui`: tabs / panes / search / palette / IME / prefs / i18n),
+  `sonic-ui`: tabs / panes / search / palette / IME / i18n),
   #155 (extract `sonic-render-model`), #156 (extract `sonic-gpu`),
   #157 (split `render.rs` → `render/{color,metrics,tab_spans,cursor,drag_chip,core}.rs`),
   #158 (extract `sonic-app`), #160 (split `app.rs` into 16 modules

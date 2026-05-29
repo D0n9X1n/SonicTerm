@@ -130,7 +130,7 @@ fn menu_lists_all_documented_items() {
         .unwrap()
         .items
         .iter()
-        .any(|i| i.title == "Preferences…"));
+        .any(|i| i.title == "Edit sonic.toml…"));
     assert!(bp
         .iter()
         .find(|s| s.title == "Sonic")

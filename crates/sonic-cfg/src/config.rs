@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::keymap::open_in_default_app;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +24,7 @@ pub struct Config {
     /// [`sonic_logging::LoggingConfig`]).
     #[serde(default)]
     pub logging: sonic_logging::LoggingConfig,
-    /// Accessibility presentation modes. Config-only for now; prefs UI
-    /// controls are deferred.
+    /// Accessibility presentation modes. Config-only for now.
     #[serde(default)]
     pub accessibility: AccessibilityConfig,
     /// User-selected UI locale (e.g. `"en"`, `"zh-CN"`, `"ja"`). Empty
@@ -173,7 +173,7 @@ pub struct AccessibilityConfig {
 #[serde(default)]
 /// Terminal engine settings.
 pub struct TerminalConfig {
-    /// Shell to spawn (defaults to `$SHELL` / `cmd.exe` when `None`).
+    /// Shell to spawn (defaults to `$SHELL` / platform default when `None`).
     pub shell: Option<String>,
     /// Scrollback buffer depth, in rows.
     pub scrollback: usize,
@@ -288,8 +288,7 @@ impl Default for Config {
 /// (with the dot) — that's the exact name to use here. When the family is
 /// missing the renderer falls through to the system mono chain;
 /// `JetBrainsMono Nerd Font` is also bundled and serves as the implicit
-/// fallback. Users can override via `[font] family = "..."` in `sonic.toml`
-/// or via the Font tab of the prefs window.
+/// fallback. Users can override via `[font] family = "..."` in `sonic.toml`.
 pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
@@ -338,6 +337,30 @@ impl Config {
             dirs_home()?.join(".config/sonic")
         };
         Some(base.join("sonic.toml"))
+    }
+
+    /// Ensure the editable user config exists, creating a small commented
+    /// starter file if necessary.
+    pub fn ensure_user_config_file(path: &Path) -> Result<()> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+            }
+        }
+        const HEADER: &str =
+            "# Sonic config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
+        std::fs::write(path, HEADER).with_context(|| format!("write {path:?}"))
+    }
+
+    /// Ensure and open the platform user config file.
+    pub fn open_user_config_file() -> Result<PathBuf> {
+        let path = Self::default_path().ok_or_else(|| anyhow::anyhow!("no user config path"))?;
+        Self::ensure_user_config_file(&path)?;
+        open_in_default_app(&path)?;
+        Ok(path)
     }
 
     /// Load from `path`, or return defaults if the file does not exist.

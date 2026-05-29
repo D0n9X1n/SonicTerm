@@ -238,18 +238,6 @@ action = "reload_config"
 keys = "super+r"
 action = "reload_config"
 
-# --- Preferences ---
-[[binding]]
-keys = "super+comma"
-action = "open_preferences"
-
-# The dispatcher emits "super+," (Character key), not "super+comma".
-# Keep both: "super+comma" for forward-compat if a future keyboard
-# delivers it as a named key, "super+," for the actual current path.
-[[binding]]
-keys = "super+,"
-action = "open_preferences"
-
 # --- SSH client (example; uncomment + edit target to enable) ---
 # Requires building sonic with `--features sonic-core/ssh`.
 # [[binding]]

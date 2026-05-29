@@ -48,6 +48,16 @@ fn save_is_atomic_no_tmp_left_behind() {
     assert!(path.exists());
 }
 
+#[test]
+fn ensure_user_config_file_creates_header() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("nested/sonic.toml");
+    Config::ensure_user_config_file(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Sonic config"));
+    assert!(text.contains("https://github.com/D0n9X1n/sonic"));
+}
+
 /// WezTerm parity: `window_background_opacity` defaults to 1.0
 /// (fully opaque) and `macos_window_background_blur` defaults to 0.
 #[test]

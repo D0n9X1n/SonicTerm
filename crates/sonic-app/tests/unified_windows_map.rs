@@ -9,22 +9,20 @@
 //!
 //!   1. the field is renamed `windows` (not `child_windows`),
 //!   2. the struct is renamed `WindowState` (not `ChildWindow`),
-//!   3. every `WindowState` carries a `WindowRole` (Terminal / Prefs),
+//!   3. every `WindowState` carries a `WindowRole` (Terminal),
 //!   4. accessors return counts that the test suite can pin.
 //!
 //! Phase C (follow-up PR) will absorb the main window's per-field
-//! state into a full `WindowState` entry and add a prefs-folding
-//! commit; this test will be extended then.
+//! state into a full `WindowState` entry.
 
 use sonic_app::app::{App, WindowRole, WindowState};
 
 /// `WindowRole` carries the variants Phase B documented and derives
 /// the traits callers depend on.
 #[test]
-fn window_role_variants_are_terminal_and_prefs() {
+fn window_role_variant_is_terminal() {
     assert_eq!(WindowRole::Terminal, WindowRole::Terminal);
-    assert_ne!(WindowRole::Terminal, WindowRole::Prefs);
-    let r: WindowRole = WindowRole::Prefs;
+    let r: WindowRole = WindowRole::Terminal;
     let _copy: WindowRole = r; // Copy
     let _dbg = format!("{r:?}"); // Debug
 }
@@ -57,6 +55,6 @@ fn app_unified_window_count_accessor_exists() {
 #[test]
 fn app_windows_with_role_accessor_exists() {
     fn _accessor(app: &App) -> usize {
-        app.windows_with_role(WindowRole::Terminal) + app.windows_with_role(WindowRole::Prefs)
+        app.windows_with_role(WindowRole::Terminal)
     }
 }

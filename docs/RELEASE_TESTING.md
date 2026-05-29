@@ -44,7 +44,7 @@ How to use:
 2. [Tab operations](#2-tab-operations)
 3. [Pane operations](#3-pane-operations)
 4. [Command palette](#4-command-palette)
-5. [Preferences window](#5-preferences-window)
+5. [Palette → edit config files](#5-palette--edit-config-files)
 6. [Tab tear-out](#6-tab-tear-out)
 7. [Big-file stress (vim/nvim)](#7-big-file-stress-vimnvim)
 8. [Color / ANSI matrix](#8-color--ansi-matrix)
@@ -212,26 +212,25 @@ Screenshots: `/tmp/rel-vX.Y.Z-04-palette-N.png`.
 
 ---
 
-## 5. Preferences window
+## 5. Palette → edit config files
 
 **Setup:** fresh launch.
 
 **Keystrokes:**
-1. `Cmd+,` → preferences window opens as a **separate** OS window.
-2. Click each sidebar entry in order: General → Appearance → Font → Keymap → Behavior.
-3. In Appearance, change theme to a different bundled one (e.g. `nord` → `dracula`).
-4. Click Apply.
-5. Switch focus to main window; type `echo themed`.
-6. Close prefs window with its red close button.
+1. Open command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
+2. Type `edit sonic` and press Enter.
+3. If prompted, let the OS open the `.toml` file in the default handler.
+4. Change a harmless live-reload setting in `sonic.toml` (for example theme or font size), save, and return to Sonic.
+5. Re-open command palette, type `edit keymap`, and press Enter.
 
-Screenshots: `/tmp/rel-vX.Y.Z-05-prefs-N.png`.
+Screenshots: `/tmp/rel-vX.Y.Z-05-edit-config-N.png`.
 
 **Expected outcome:**
 
-- [ ] Prefs window is a distinct OS window (separate entry in Cmd+Tab and Mission Control).
-- [ ] Every sidebar entry renders its pane without missing controls or overflow.
-- [ ] Theme change takes effect in the main window **without restart** (background pixel changes; sample with Digital Color Meter).
-- [ ] Closing prefs window does NOT close the main window.
+- [ ] Palette contains `Edit sonic.toml` and opens the platform user config file.
+- [ ] If `sonic.toml` did not exist, Sonic creates it with a commented header first.
+- [ ] Saving `sonic.toml` live-reloads without restart.
+- [ ] Palette contains `Edit keymap.toml` and opens the editable user keymap file.
 
 **FAIL → block release.**
 
@@ -1253,7 +1252,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 | macOS | Windows |
 |---|---|
-| Set `high_contrast = true`; launch, then switch themes from prefs/config. | Set `high_contrast = true`; launch, then switch themes from prefs/config. |
+| Set `high_contrast = true`; launch, then switch themes from config. | Set `high_contrast = true`; launch, then switch themes from config. |
 | Set `reduced_motion = true`; toggle overlays, pane zoom, and search. | Set `reduced_motion = true`; toggle overlays, pane zoom, and search. |
 | Set `strong_focus = true`; move focus across tabs/panes. | Set `strong_focus = true`; move focus across tabs/panes. |
 
@@ -1277,7 +1276,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 | macOS | Windows |
 |---|---|
-| Copy the TOML into `~/Library/Application Support/Sonic/themes/`; select it from prefs/config. | Copy the TOML into `%APPDATA%\Sonic\themes\`; select it from prefs/config. |
+| Copy the TOML into `~/Library/Application Support/Sonic/themes/`; select it from config. | Copy the TOML into `%APPDATA%\Sonic\themes\`; select it from config. |
 | Export the current theme to `/tmp/rel-theme-export.toml`. | Export the current theme to `%TEMP%\rel-theme-export.toml`. |
 | Re-import the exported TOML under a new name and switch to it. | Re-import the exported TOML under a new name and switch to it. |
 

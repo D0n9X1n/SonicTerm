@@ -6,6 +6,7 @@
 
 use std::{
     io::{Read, Write},
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
 };
@@ -200,9 +201,52 @@ fn spawn_writer_thread(mut writer: Box<dyn Write + Send>, rx: Receiver<Outgoing>
 }
 
 fn default_shell() -> String {
-    if cfg!(target_os = "windows") {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+    default_shell_program()
+}
+
+#[cfg(target_os = "windows")]
+fn default_shell_program() -> String {
+    path_lookup("pwsh.exe")
+        .or_else(|| path_lookup("powershell.exe"))
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_shell_program() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn path_lookup(name: &str) -> Option<String> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 && candidate.is_file() {
+        return Some(candidate.to_string_lossy().to_string());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir: PathBuf| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_shell_program;
+
+    #[test]
+    fn default_shell_program_returns_platform_default() {
+        let shell = default_shell_program();
+        #[cfg(target_os = "windows")]
+        {
+            let lower = shell.to_ascii_lowercase();
+            assert!(
+                lower.ends_with("pwsh.exe")
+                    || lower.ends_with("powershell.exe")
+                    || lower == "cmd.exe",
+                "unexpected default shell: {shell}"
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        assert!(!shell.is_empty());
     }
 }

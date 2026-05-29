@@ -60,7 +60,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "OpenSearch",
     "OpenCommandPalette",
     "ShowKeymapCheatsheet",
-    "OpenPreferences",
+    "EditConfigFile",
     "OpenKeymapFile",
     "Scroll",
     "ScrollToPrevPrompt",
@@ -107,7 +107,7 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::OpenSearch => "OpenSearch",
         Action::OpenCommandPalette => "OpenCommandPalette",
         Action::ShowKeymapCheatsheet => "ShowKeymapCheatsheet",
-        Action::OpenPreferences => "OpenPreferences",
+        Action::EditConfigFile => "EditConfigFile",
         Action::OpenKeymapFile => "OpenKeymapFile",
         Action::Scroll(_) => "Scroll",
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt",
@@ -159,8 +159,8 @@ pub fn label(a: &Action) -> String {
         Action::OpenSearch => "Open Search".into(),
         Action::OpenCommandPalette => "Open Command Palette".into(),
         Action::ShowKeymapCheatsheet => "Show Keyboard Shortcuts".into(),
-        Action::OpenPreferences => "Open Preferences".into(),
-        Action::OpenKeymapFile => "Open Keymap File".into(),
+        Action::EditConfigFile => "Edit sonic.toml".into(),
+        Action::OpenKeymapFile => "Edit keymap.toml".into(),
         Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
         Action::ScrollToNextPrompt => "Scroll to Next Prompt".into(),
@@ -175,8 +175,8 @@ pub fn label(a: &Action) -> String {
 /// keeps this allocation-free on the hot search path.
 ///
 /// Example: typing `sett` in the palette must surface
-/// [`Action::OpenPreferences`] even though its label is
-/// "Open Preferences" (no `sett` subsequence). We expose
+/// [`Action::EditConfigFile`] even though its label is
+/// "Edit sonic.toml" (no `sett` subsequence). We expose
 /// `["settings", "config", "options", "prefs"]` so any of those land it.
 #[must_use]
 pub fn keywords(a: &Action) -> &'static [&'static str] {
@@ -215,9 +215,10 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         Action::OpenSearch => &["find"],
         Action::OpenCommandPalette => &["palette", "commands"],
         Action::ShowKeymapCheatsheet => &["keyboard", "shortcuts", "keys", "help", "cheatsheet"],
-        // The whole point of this PR's alias path: "sett" → Open Preferences.
-        Action::OpenPreferences => &["settings", "config", "options", "prefs", "preferences"],
-        Action::OpenKeymapFile => &["settings", "config", "keys", "bindings", "shortcuts"],
+        Action::EditConfigFile => {
+            &["settings", "config", "options", "prefs", "preferences", "toml"]
+        }
+        Action::OpenKeymapFile => &["settings", "config", "keys", "bindings", "shortcuts", "toml"],
         Action::Scroll(_) => &["page", "line", "scrollback"],
         Action::ScrollToPrevPrompt => &["jump", "prompt", "previous"],
         Action::ScrollToNextPrompt => &["jump", "prompt", "next"],

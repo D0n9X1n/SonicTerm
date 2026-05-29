@@ -32,7 +32,7 @@ impl App {
     ) {
         // PR #132: mark any user-driven event so the next
         // RedrawRequested bypasses the vsync coalescing gate. This
-        // covers main, prefs, and child windows uniformly. PTY-byte
+        // covers main and child windows uniformly. PTY-byte
         // redraws (the high-volume path) arrive as RedrawRequested
         // with this flag still false and continue to coalesce.
         if matches!(
@@ -55,13 +55,6 @@ impl App {
         // dispatching the event — guarantees font/theme/keymap swaps
         // land on the same redraw tick they were detected on.
         self.poll_config_reload();
-        // v0.6: route events to the preferences window if it owns this id.
-        if let Some(pw) = self.prefs_window.as_ref() {
-            if pw.id() == win_id {
-                self.handle_prefs_event(el, event);
-                return;
-            }
-        }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
         if self.windows.contains_key(&win_id) {
