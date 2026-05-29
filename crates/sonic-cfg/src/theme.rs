@@ -34,6 +34,12 @@ impl Hex {
         let b = u8::from_str_radix(&s[4..6], 16).ok()?;
         Some((r, g, b))
     }
+
+    /// Parse `#rrggbb` into opaque RGBA bytes. Returns `None` for malformed values.
+    pub fn rgba(&self) -> Option<[u8; 4]> {
+        let (r, g, b) = self.rgb()?;
+        Some([r, g, b, 255])
+    }
 }
 
 /// One of the eight standard ANSI palette colors (normal or bright).
@@ -125,6 +131,20 @@ impl Theme {
             self.colors.foreground = Hex("#ffffff".to_string());
             self.colors.background = Hex("#000000".to_string());
         }
+    }
+
+    /// First eight normal-intensity ANSI colors in terminal palette order.
+    pub fn palette_first_8(&self) -> [&Hex; 8] {
+        [
+            &self.colors.ansi.black,
+            &self.colors.ansi.red,
+            &self.colors.ansi.green,
+            &self.colors.ansi.yellow,
+            &self.colors.ansi.blue,
+            &self.colors.ansi.magenta,
+            &self.colors.ansi.cyan,
+            &self.colors.ansi.white,
+        ]
     }
 
     /// Load a theme from a TOML file at `path`.

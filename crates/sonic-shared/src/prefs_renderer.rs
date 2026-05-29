@@ -450,13 +450,24 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
                 if i == d.selected {
                     popover_quads.push(QuadCmd::sharp(row, palette.bg_hover));
                 }
+                let swatch_w = if d.option_previews.get(i).is_some() { 136.0 } else { 0.0 };
                 push_text(
                     &mut popover_texts,
-                    PrefsRect::new(row.x + 10.0, row.y, row.w - 20.0, row.h),
+                    PrefsRect::new(row.x + 10.0, row.y, (row.w - swatch_w - 28.0).max(40.0), row.h),
                     opt.clone(),
                     palette.text_primary,
                     typography::BODY,
                 );
+                if let Some(preview) = d.option_previews.get(i) {
+                    let swatch_x = (row.x + row.w - swatch_w - 10.0).max(row.x + 96.0);
+                    draw_theme_preview_swatch(
+                        &mut popover_quads,
+                        &mut popover_texts,
+                        swatch_x,
+                        row.y,
+                        preview,
+                    );
+                }
             }
         }
     }
@@ -481,6 +492,42 @@ fn button_bg(base: [f32; 4], i: InteractionState) -> [f32; 4] {
         (base[2] * scale).clamp(0.0, 1.0),
         base[3],
     ]
+}
+
+fn draw_theme_preview_swatch(
+    quads: &mut Vec<QuadCmd>,
+    texts: &mut Vec<TextCmd>,
+    x: f32,
+    y: f32,
+    preview: &crate::prefs::ThemePreviewSwatch,
+) {
+    const BG_W: f32 = 48.0;
+    const BG_H: f32 = 24.0;
+    const TILE_W: f32 = 4.0;
+    const TILE_H: f32 = 8.0;
+    const GAP: f32 = 3.0;
+
+    let top = y + 4.0;
+    let bg = PrefsRect::new(x, top, BG_W, BG_H);
+    quads.push(QuadCmd::sharp(bg, rgba_to_token(preview.background)));
+
+    let tile_y = top + BG_H - TILE_H;
+    for (i, rgba) in preview.ansi.iter().enumerate() {
+        let tile_x = x + BG_W + 8.0 + i as f32 * (TILE_W + GAP);
+        quads.push(QuadCmd::sharp(
+            PrefsRect::new(tile_x, tile_y, TILE_W, TILE_H),
+            rgba_to_token(*rgba),
+        ));
+    }
+
+    push_mono(
+        texts,
+        PrefsRect::new(x + 8.0, top + 2.0, 28.0, 16.0),
+        "Aa",
+        rgba_to_token(preview.foreground),
+        11.0,
+        None,
+    );
 }
 
 /// Render the redesigned (issue #173 slice-2c) [`Toggle`] primitive.
@@ -576,6 +623,19 @@ fn hex_to_token(s: &str) -> [f32; 4] {
     }
 }
 
+fn rgba_to_token(rgba: [u8; 4]) -> [f32; 4] {
+    let a = rgba[3] as f32 / 255.0;
+    let to_linear = |channel: u8| {
+        let v = channel as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [to_linear(rgba[0]) * a, to_linear(rgba[1]) * a, to_linear(rgba[2]) * a, a]
+}
+
 fn push_border(out: &mut Vec<QuadCmd>, r: PrefsRect, c: [f32; 4]) {
     push_border_with_thickness(out, r, c, 1.0);
 }
@@ -656,13 +716,18 @@ fn draw_control(
             push_border(quads, r, palette.border_subtle);
             let label = d.options.get(d.selected).cloned().unwrap_or_default();
             let chev = d.chevron_rect();
+            let swatch_w = if d.option_previews.get(d.selected).is_some() { 136.0 } else { 0.0 };
             push_text(
                 texts,
-                PrefsRect::new(r.x + 10.0, r.y, r.w - chev.w - 10.0, r.h),
+                PrefsRect::new(r.x + 10.0, r.y, (r.w - chev.w - swatch_w - 18.0).max(40.0), r.h),
                 label,
                 palette.text_primary,
                 typography::BODY,
             );
+            if let Some(preview) = d.option_previews.get(d.selected) {
+                let swatch_x = (chev.x - swatch_w - 6.0).max(r.x + 96.0);
+                draw_theme_preview_swatch(quads, texts, swatch_x, r.y, preview);
+            }
             // Chevron glyph anchored inside `chevron_rect` so the
             // visual cue matches the hit-test region.
             push_text(
