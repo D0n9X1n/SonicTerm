@@ -572,6 +572,7 @@ mod prefs_window;
 mod search_handle;
 mod spawn_pane;
 mod tab_state;
+pub mod tab_transfer;
 mod tear_out;
 mod window_event;
 pub use config_apply::config_diff_needs_font_apply;
@@ -1749,6 +1750,155 @@ impl App {
     pub fn set_theme_loader_for_test(&mut self, loader: ThemeLoader) {
         self.theme_loader = Some(loader);
     }
+
+    /// Epic #289 Phase C — cancel an in-flight drag session. Wired
+    /// to the ESC key handler in `window_event.rs` (any window's
+    /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
+    /// the App's drag_session AND every per-window drag_session) so
+    /// the gesture is abandoned with the source tab left in place.
+    /// Returns `true` if a drag session was actively cleared, `false`
+    /// when no drag was in progress.
+    #[doc(hidden)]
+    pub fn cancel_drag_session(&mut self) -> bool {
+        let app_had = self.drag_session.take().is_some();
+        let mut win_had = false;
+        for ws in self.windows.values_mut() {
+            if ws.drag_session.take().is_some() {
+                win_had = true;
+            }
+        }
+        // pressed_tab / mouse_down / drag_target are the gesture
+        // residue from `tear_out`; clearing them prevents an ESC mid-
+        // drag from leaving the next mouse-up still believing a drag
+        // is in flight (Haiku-flagged regression class).
+        self.pressed_tab = None;
+        self.mouse_down = false;
+        self.drag_target = None;
+        app_had || win_had
+    }
+
+    /// Epic #289 Phase C — pure cross-window transfer API. Operates
+    /// on the App's MAIN window only (`source` / `target` are both
+    /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
+    /// form in `crate::app::tab_transfer` directly; the App wrapper
+    /// here delegates to the existing detach/attach pairs so the four
+    /// real-window flavors (main↔main, main↔child, child↔main,
+    /// child↔child) all funnel through one entry point.
+    ///
+    /// Returns `Ok(())` when the transfer happened, or a
+    /// [`TransferError`] describing the validation failure. The
+    /// pre-validation step is intentional: PR #294 review (Haiku) found
+    /// that the prior `bool` API silently dropped the detached tab —
+    /// killing its child shell via `PtyHandle::Drop` — when the target
+    /// window vanished between gesture-start and drop. We now refuse to
+    /// touch source state until *both* endpoints have been proven
+    /// reachable.
+    #[doc(hidden)]
+    pub fn transfer_tab(
+        &mut self,
+        source: Option<WindowId>,
+        source_idx: usize,
+        target: Option<WindowId>,
+        target_idx: usize,
+    ) -> Result<(), TransferError> {
+        // 0) pre-validate BOTH endpoints before mutating any window.
+        //    Data-loss fix (PR #294, Haiku review): detaching and then
+        //    failing to attach drops the `PaneState`, which kills the
+        //    child shell via `PtyHandle::Drop`.
+        match source {
+            None => {
+                if source_idx >= self.tab_states.len() || source_idx >= self.tabs.len() {
+                    return Err(TransferError::SourceIndexOutOfBounds);
+                }
+            }
+            Some(id) => {
+                let src = self.windows.get(&id).ok_or(TransferError::SourceMissing)?;
+                if source_idx >= src.tab_states.len() || source_idx >= src.tabs.len() {
+                    return Err(TransferError::SourceIndexOutOfBounds);
+                }
+            }
+        }
+        if let Some(id) = target {
+            if !self.windows.contains_key(&id) {
+                return Err(TransferError::TargetMissing);
+            }
+        }
+
+        // 1) detach from source — guaranteed to succeed after step 0.
+        let detached = match source {
+            None => self.detach_tab_state(source_idx),
+            Some(id) => self.detach_from_child(id, source_idx),
+        };
+        let Some((tab, state, panes)) = detached else {
+            // Shouldn't happen — step 0 validated. Defensive bail.
+            return Err(TransferError::SourceIndexOutOfBounds);
+        };
+
+        // 2) attach to target — also guaranteed reachable after step 0.
+        match target {
+            None => self.attach_tab_state(target_idx, tab, state, panes),
+            Some(id) => {
+                if !self.attach_to_child(id, target_idx, tab, state, panes) {
+                    // Defensive: target was present at step 0 but vanished
+                    // (e.g. closed on another thread). Re-attach to source
+                    // would require holding the moved values, but we've
+                    // already passed ownership to attach_to_child which
+                    // returned false; treat as TargetMissing.
+                    return Err(TransferError::TargetMissing);
+                }
+            }
+        }
+
+        // 3) focus target window + bookkeeping
+        match target {
+            None => {
+                if let Some(w) = self.window.as_ref() {
+                    self.frontmost_window = Some(w.id());
+                    w.request_redraw();
+                }
+            }
+            Some(id) => {
+                self.frontmost_window = Some(id);
+                if let Some(ws) = self.windows.get(&id) {
+                    ws.window.focus_window();
+                    ws.window.request_redraw();
+                }
+            }
+        }
+
+        // 4) source-empty → close source window
+        let source_empty = match source {
+            None => self.tabs.is_empty(),
+            Some(id) => self.windows.get(&id).map(|w| w.tabs.is_empty()).unwrap_or(true),
+        };
+        if source_empty {
+            if let Some(id) = source {
+                // child window — close it
+                self.windows.remove(&id);
+            } else {
+                // main window — leave the App to its existing
+                // last-tab-closed handling (Phase B already covers
+                // hiding the main window when its tabs vec empties).
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a transfer rejected the gesture without losing the tab. Returned
+/// by [`App::transfer_tab`]; introduced in PR #294 to fix the
+/// Haiku-flagged data-loss bug where a missing-target attach silently
+/// dropped the detached `PaneState` (killing its child shell via
+/// `PtyHandle::Drop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum TransferError {
+    /// `source` was `Some(id)` but the id is not in `App::windows`.
+    SourceMissing,
+    /// `target` was `Some(id)` but the id is not in `App::windows`.
+    TargetMissing,
+    /// `source_idx` is beyond the source window's tab vector.
+    SourceIndexOutOfBounds,
 }
 
 impl ApplicationHandler<UserEvent> for App {
