@@ -1,3 +1,5 @@
+//! Integration tests for OSC 133 (shell-integration command lifecycle) parsing.
+
 use sonic_grid::grid::Grid;
 use sonic_vt::vt::{CommandEvent, Parser, VtEvent};
 

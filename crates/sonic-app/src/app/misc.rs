@@ -211,6 +211,28 @@ impl App {
         // Users perceived this as "Ctrl/Cmd+W needs two presses." Mirror
         // the keyboard path so the first press is visible immediately.
         if ran_any {
+            self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+    /// Test-only mirror of [`Self::drain_menubar_actions`] that omits the
+    /// `ActiveEventLoop`-dependent window-creation drain. Used by the
+    /// `close_pane_or_tab_semantics` regression suite to assert that a
+    /// menubar-bridged action increments [`Self::redraw_request_count`]
+    /// exactly once per drained action batch — the contract PR #200
+    /// added (Cmd+W "two presses" bug) and the PR #271 follow-up
+    /// audit hardened with a real counter assertion.
+    #[doc(hidden)]
+    pub fn __test_drain_menubar_actions(&mut self) {
+        let mut ran_any = false;
+        for action in crate::menubar_bridge::drain() {
+            self.run_action(&action);
+            ran_any = true;
+        }
+        if ran_any {
+            self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
