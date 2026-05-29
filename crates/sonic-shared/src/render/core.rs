@@ -22,7 +22,7 @@ use wgpu::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu};
-use super::cursor::{push_hollow_rect, recolor_cursor_glyphs, InactivePaneCursor};
+use super::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
 use super::drag_chip::{DragChipOverlay, DragChipVisual};
 use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
 use super::tab_spans::{
@@ -1524,6 +1524,16 @@ impl GpuRenderer {
             pane_id: u64,
             origin_x: f32,
             origin_y: f32,
+            // Pane rect width/height in pixels — the source of truth for
+            // pane geometry. Do NOT recompute as `grid.cols * cell_w`
+            // for clipping bounds: when the pane has just been resized
+            // but the grid hasn't yet been resynced (resize is debounced
+            // through the PTY) the derived value is smaller than the
+            // real pane rect and overlay quads at the trailing edge get
+            // clipped away, re-introducing the bleed-through PR #274 set
+            // out to fix. See Haiku review on #274.
+            rect_w: f32,
+            rect_h: f32,
             is_active: bool,
         }
         let pane_views: Vec<PaneView<'_>> = panes
@@ -1533,6 +1543,8 @@ impl GpuRenderer {
                 pane_id: p.id,
                 origin_x: p.rect_px.x as f32,
                 origin_y: p.rect_px.y as f32,
+                rect_w: p.rect_px.w as f32,
+                rect_h: p.rect_px.h as f32,
                 is_active: p.is_active,
             })
             .collect();
@@ -1546,6 +1558,23 @@ impl GpuRenderer {
         let active_view_idx = pane_views.iter().position(|p| p.is_active).unwrap_or(0);
         let active_origin_x: f32 = pane_views[active_view_idx].origin_x;
         let active_origin_y: f32 = pane_views[active_view_idx].origin_y;
+        // Active pane rect (px) — used to clip every overlay quad anchored
+        // to the active pane (selection, cursor, hyperlink hover, search
+        // matches, IME preedit) so a quad that would otherwise extend past
+        // the pane edge never bleeds into a neighbouring split pane.
+        // See PR #270 (selection clipping) — same overflow class for the
+        // other overlay families is handled here.
+        let active_pane_x: f32 = active_origin_x;
+        let active_pane_y: f32 = active_origin_y;
+        // Use the pane's own rect_px width/height (the source of truth
+        // for pane geometry) rather than `grid.cols * cell_w`. After a
+        // pane resize the grid resync is debounced through the PTY;
+        // during that window the derived extent is *smaller* than the
+        // real pane rect, which clipped overlays inside the trailing
+        // edge and re-introduced the bleed-through PR #274 set out to
+        // fix. Haiku review on #274.
+        let active_pane_w: f32 = pane_views[active_view_idx].rect_w;
+        let active_pane_h: f32 = pane_views[active_view_idx].rect_h;
         // Active grid borrow — shared, used by overlays that read the
         // active pane's cursor/scrollback/prompts. Disjoint from the
         // per-pane loop (which uses its own per-iteration borrow).
@@ -2014,12 +2043,7 @@ impl GpuRenderer {
                 .iter()
                 .find(|(id, _)| *id == pv.pane_id)
                 .map(|(_, rect)| *rect)
-                .unwrap_or(PaneRect {
-                    x: pv.origin_x,
-                    y: pv.origin_y,
-                    w: f32::from(pv_grid.cols) * cell_w,
-                    h: f32::from(pv_grid.rows) * cell_h,
-                });
+                .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
             emit_cell_bg_quads_clipped(
                 pv_grid,
                 Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
@@ -2045,8 +2069,9 @@ impl GpuRenderer {
                 // selection across both panes.
                 let pane_x = active_origin_x;
                 let pane_y = active_origin_y;
-                let pane_w = f32::from(grid.cols) * self.cell_w;
-                let pane_h = f32::from(grid.rows) * self.cell_h;
+                // Pane rect_px is the source of truth — see note above.
+                let pane_w = active_pane_w;
+                let pane_h = active_pane_h;
                 for rect in selection_quad_rects(
                     sel,
                     grid.rows,
@@ -2140,11 +2165,19 @@ impl GpuRenderer {
                 match self.cursor_shape {
                     CursorShape::Block => {
                         if self.window_focused {
-                            quads.push(QuadInstance {
-                                rect: px_to_ndc(cx, cy, self.cell_w, self.cell_h, sw, sh),
-                                color,
-                                ..Default::default()
-                            });
+                            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                                (cx, cy, self.cell_w, self.cell_h),
+                                active_pane_x,
+                                active_pane_y,
+                                active_pane_w,
+                                active_pane_h,
+                            ) {
+                                quads.push(QuadInstance {
+                                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                                    color,
+                                    ..Default::default()
+                                });
+                            }
                             // Recolor every glyph instance that sits in the
                             // cursor cell from fg → theme.bg, producing the
                             // classic "inverted cell" look. The bg alpha
@@ -2178,7 +2211,7 @@ impl GpuRenderer {
                             // wezterm/iTerm2 behaviour. The glyph
                             // remains in the original fg color since
                             // the cell is not inverted.
-                            push_hollow_rect(
+                            push_hollow_rect_clipped(
                                 &mut quads,
                                 cx,
                                 cy,
@@ -2188,29 +2221,42 @@ impl GpuRenderer {
                                 sh,
                                 color,
                                 2.0,
+                                active_pane_x,
+                                active_pane_y,
+                                active_pane_w,
+                                active_pane_h,
                             );
                         }
                     }
                     CursorShape::Bar => {
-                        quads.push(QuadInstance {
-                            rect: px_to_ndc(cx, cy, SUBSHAPE_PX, self.cell_h, sw, sh),
-                            color,
-                            ..Default::default()
-                        });
+                        if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                            (cx, cy, SUBSHAPE_PX, self.cell_h),
+                            active_pane_x,
+                            active_pane_y,
+                            active_pane_w,
+                            active_pane_h,
+                        ) {
+                            quads.push(QuadInstance {
+                                rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                                color,
+                                ..Default::default()
+                            });
+                        }
                     }
                     CursorShape::Underline => {
-                        quads.push(QuadInstance {
-                            rect: px_to_ndc(
-                                cx,
-                                cy + self.cell_h - SUBSHAPE_PX,
-                                self.cell_w,
-                                SUBSHAPE_PX,
-                                sw,
-                                sh,
-                            ),
-                            color,
-                            ..Default::default()
-                        });
+                        if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                            (cx, cy + self.cell_h - SUBSHAPE_PX, self.cell_w, SUBSHAPE_PX),
+                            active_pane_x,
+                            active_pane_y,
+                            active_pane_w,
+                            active_pane_h,
+                        ) {
+                            quads.push(QuadInstance {
+                                rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                                color,
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
             }
@@ -2232,14 +2278,12 @@ impl GpuRenderer {
                 // top-left without re-applying the global padding.
                 let icx = ic.rect.x + f32::from(ic.col) * self.cell_w;
                 let icy = ic.rect.y + f32::from(ic.row) * self.cell_h;
-                // Clamp to the pane rect so a stale cursor position
-                // from a pre-resize grid never bleeds onto a sibling.
-                if icx + self.cell_w > ic.rect.x + ic.rect.w
-                    || icy + self.cell_h > ic.rect.y + ic.rect.h
-                {
-                    continue;
-                }
-                push_hollow_rect(
+                // Clip to the pane rect so a stale cursor position from a
+                // pre-resize grid never bleeds onto a sibling. Routed
+                // through the shared clip helper (PR #270 follow-up) — a
+                // partially out-of-bounds cell still draws the visible
+                // portion instead of the previous all-or-nothing skip.
+                push_hollow_rect_clipped(
                     &mut quads,
                     icx,
                     icy,
@@ -2249,6 +2293,10 @@ impl GpuRenderer {
                     sh,
                     hollow_color,
                     2.0,
+                    ic.rect.x,
+                    ic.rect.y,
+                    ic.rect.w,
+                    ic.rect.h,
                 );
             }
         }
@@ -2296,16 +2344,35 @@ impl GpuRenderer {
             let x = active_origin_x + f32::from(*col_a) * self.cell_w;
             let y = active_origin_y + f32::from(*row) * self.cell_h;
             let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
-                color: self.hyperlink_tint,
-                ..Default::default()
-            });
-            quads.push(QuadInstance {
-                rect: px_to_ndc(x, y + self.cell_h - hl_thickness, w, hl_thickness, sw, sh),
-                color: self.hyperlink_underline,
-                ..Default::default()
-            });
+            // Clip hyperlink tint + underline to active pane (PR #270
+            // follow-up) — a hyperlinked run that reaches the last column
+            // of a narrowed pane would otherwise bleed into the neighbour.
+            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                (x, y, w, self.cell_h),
+                active_pane_x,
+                active_pane_y,
+                active_pane_w,
+                active_pane_h,
+            ) {
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                    color: self.hyperlink_tint,
+                    ..Default::default()
+                });
+            }
+            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                (x, y + self.cell_h - hl_thickness, w, hl_thickness),
+                active_pane_x,
+                active_pane_y,
+                active_pane_w,
+                active_pane_h,
+            ) {
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                    color: self.hyperlink_underline,
+                    ..Default::default()
+                });
+            }
         }
 
         // Underline quads — drawn last so they appear on top of the text.
@@ -2668,11 +2735,22 @@ impl GpuRenderer {
                 } else {
                     self.search_highlight
                 };
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
-                    color,
-                    ..Default::default()
-                });
+                // Clip the match highlight to the active pane (PR #270
+                // follow-up) — a long match that runs past the pane's
+                // last column would otherwise paint into the neighbour.
+                if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                    (x, y, w, self.cell_h),
+                    active_pane_x,
+                    active_pane_y,
+                    active_pane_w,
+                    active_pane_h,
+                ) {
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                        color,
+                        ..Default::default()
+                    });
+                }
             }
             // Status bar background pinned to bottom edge.
             search_bar_top = sh - search_bar_h;
@@ -3002,18 +3080,23 @@ impl GpuRenderer {
                 color: [0.10, 0.11, 0.14, 0.95],
                 ..Default::default()
             });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.underline.x,
-                    layout.underline.y,
-                    layout.underline.w,
-                    layout.underline.h,
-                    sw,
-                    sh,
-                ),
-                color: self.hyperlink_underline,
-                ..Default::default()
-            });
+            // Clip the preedit underline to the active pane (PR #270
+            // follow-up) — the underline anchors under the cursor cell
+            // and would otherwise paint into a neighbour split pane when
+            // the cursor sits near the pane's right edge.
+            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                (layout.underline.x, layout.underline.y, layout.underline.w, layout.underline.h),
+                active_pane_x,
+                active_pane_y,
+                active_pane_w,
+                active_pane_h,
+            ) {
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                    color: self.hyperlink_underline,
+                    ..Default::default()
+                });
+            }
             self.ime_buffer.set_text(
                 &mut self.font_system,
                 state.preedit(),

@@ -67,6 +67,58 @@ pub fn push_hollow_rect(
     });
 }
 
+/// Push a hollow rect outline clipped to a pane rect. Each of the four
+/// edges is clipped independently so a cursor whose cell would extend
+/// past the pane edge still draws the visible portion of the outline
+/// without bleeding into a neighbouring split pane.
+///
+/// `pane_*` arguments are in physical pixels (same coordinate space as
+/// `cell_*`). Mirrors [`crate::render::core::clip_rect_to_pane`] for
+/// the per-edge case.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn push_hollow_rect_clipped(
+    quads: &mut Vec<QuadInstance>,
+    cell_x: f32,
+    cell_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    color: [f32; 4],
+    t: f32,
+    pane_x: f32,
+    pane_y: f32,
+    pane_w: f32,
+    pane_h: f32,
+) {
+    if sw <= 0.0 || sh <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return;
+    }
+    let t = t.min(cell_w * 0.5).min(cell_h * 0.5);
+    let edges = [
+        // top
+        (cell_x, cell_y, cell_w, t),
+        // bottom
+        (cell_x, cell_y + cell_h - t, cell_w, t),
+        // left
+        (cell_x, cell_y, t, cell_h),
+        // right
+        (cell_x + cell_w - t, cell_y, t, cell_h),
+    ];
+    for (ex, ey, ew, eh) in edges {
+        if let Some((cx, cy, cw, ch)) =
+            crate::render::core::clip_rect_to_pane((ex, ey, ew, eh), pane_x, pane_y, pane_w, pane_h)
+        {
+            quads.push(QuadInstance {
+                rect: px_to_ndc(cx, cy, cw, ch, sw, sh),
+                color,
+                ..Default::default()
+            });
+        }
+    }
+}
+
 /// Recolor every glyph instance whose center falls inside the cursor
 /// cell to `bg_rgba`. Used to produce the wezterm-style "inverted"
 /// block cursor: the foreground glyph is painted in the theme
