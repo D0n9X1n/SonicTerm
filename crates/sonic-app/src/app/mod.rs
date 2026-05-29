@@ -1445,6 +1445,48 @@ impl App {
         self.activate_tab_in_child(id, idx)
     }
 
+    /// Test-only invoker for [`Self::split_active_pane_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_split_active_pane_in_child(
+        &mut self,
+        id: WindowId,
+        dir: sonic_core::keymap::Direction,
+    ) -> bool {
+        self.split_active_pane_in_child(id, dir)
+    }
+
+    /// Test-only invoker for [`Self::close_active_pane_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_close_active_pane_in_child(&mut self, id: WindowId) -> bool {
+        self.close_active_pane_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::focus_pane_dir_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_focus_pane_dir_in_child(
+        &mut self,
+        id: WindowId,
+        dir: sonic_core::keymap::Direction,
+    ) -> bool {
+        self.focus_pane_dir_in_child(id, dir)
+    }
+
+    /// Test-only invoker for [`Self::toggle_active_pane_zoom_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_toggle_active_pane_zoom_in_child(&mut self, id: WindowId) -> bool {
+        self.toggle_active_pane_zoom_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::resize_active_split_in_child`].
+    #[doc(hidden)]
+    pub fn __test_invoke_resize_active_split_in_child(
+        &mut self,
+        id: WindowId,
+        dir: sonic_core::keymap::Direction,
+    ) -> bool {
+        self.resize_active_split_in_child(id, dir)
+    }
+
     /// Test-only: count of tabs in the main App.
     #[doc(hidden)]
     pub fn __test_main_tab_count(&self) -> usize {

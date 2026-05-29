@@ -33,7 +33,7 @@
 use sonic_app::app::{App, FrontmostKind};
 use sonic_core::{
     config::Config,
-    keymap::{Action, Keymap, Meta},
+    keymap::{Action, Direction, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
 use winit::window::WindowId;
@@ -285,3 +285,159 @@ fn frontmost_main_routes_actions_to_main_tabs() {
     // executing without panic confirms the action reached main's TabBar.
     assert_eq!(app.__test_main_tab_count(), 3, "NextTab is a presentation change only");
 }
+
+// ─── PANE-level per-child mutators (Haiku finding on PR #291) ────────
+//
+// Pane-mutating arms (SplitRight/SplitDown/ClosePane/FocusPane/
+// TogglePaneZoom/ResizePane*) used to call main-window helpers directly
+// regardless of frontmost. This block pins down that each new per-child
+// pane helper:
+//   * returns false when the child id is stale (lets the dispatcher
+//     fall back to main without panic), and
+//   * does NOT mutate the main App's tab/pane state on a stale-id call.
+//
+// End-to-end "split actually lands in child window B" coverage requires
+// a real winit + wgpu surface and lives in the manual GUI smoke step
+// (CLAUDE.md §13). What we CAN unit-test here is the routing CONDITION
+// (frontmost-stale ⇒ fallback to main ⇒ stale id cleared).
+
+#[test]
+fn split_active_pane_in_child_with_missing_id_is_noop() {
+    let mut app = make_app();
+    app.__test_seed_tab("alpha");
+    let main_panes_before = app.__test_pane_count_in_tab(0).unwrap_or(0);
+    let ok = app.__test_invoke_split_active_pane_in_child(WindowId::dummy(), Direction::Right);
+    assert!(!ok, "missing-child split must return false");
+    assert_eq!(
+        app.__test_pane_count_in_tab(0).unwrap_or(0),
+        main_panes_before,
+        "missing-child split must NOT spawn a pane on main",
+    );
+}
+
+#[test]
+fn close_active_pane_in_child_with_missing_id_is_noop() {
+    let mut app = make_app();
+    app.__test_seed_tab("alpha");
+    let main_tabs_before = app.__test_main_tab_count();
+    let ok = app.__test_invoke_close_active_pane_in_child(WindowId::dummy());
+    assert!(!ok, "missing-child close_pane must return false");
+    assert_eq!(
+        app.__test_main_tab_count(),
+        main_tabs_before,
+        "missing-child close_pane must NOT touch main's tabs",
+    );
+}
+
+#[test]
+fn focus_pane_dir_in_child_with_missing_id_is_noop() {
+    let mut app = make_app();
+    let ok = app.__test_invoke_focus_pane_dir_in_child(WindowId::dummy(), Direction::Left);
+    assert!(!ok, "missing-child focus_pane must return false");
+}
+
+#[test]
+fn toggle_active_pane_zoom_in_child_with_missing_id_is_noop() {
+    let mut app = make_app();
+    let ok = app.__test_invoke_toggle_active_pane_zoom_in_child(WindowId::dummy());
+    assert!(!ok, "missing-child toggle_zoom must return false");
+}
+
+#[test]
+fn resize_active_split_in_child_with_missing_id_is_noop() {
+    let mut app = make_app();
+    let ok = app.__test_invoke_resize_active_split_in_child(WindowId::dummy(), Direction::Right);
+    assert!(!ok, "missing-child resize_split must return false");
+}
+
+// ─── Dispatcher fallback for pane actions when frontmost is stale ────
+//
+// The crux: pane-mutating actions used to skip the frontmost check
+// entirely (Haiku finding). After the fix, with a stale `frontmost_window`
+// the dispatcher must (a) attempt the per-child path, (b) see it returns
+// false, (c) clear the stale id, AND (d) still take effect on main so
+// the user's keystroke isn't silently dropped.
+
+#[test]
+fn close_pane_with_stale_frontmost_falls_back_to_main_and_clears() {
+    let mut app = make_app();
+    // Seed two tabs so a fallback-to-main ClosePane (which degrades to
+    // close_tab on a single-leaf tab) is observable as a tab count drop.
+    app.__test_seed_tab("alpha");
+    app.__test_seed_tab("bravo");
+    let main_tabs_before = app.__test_main_tab_count();
+
+    app.__test_set_frontmost_window(Some(WindowId::dummy()));
+    app.run_action(&Action::ClosePane);
+
+    assert_eq!(
+        app.__test_main_tab_count(),
+        main_tabs_before - 1,
+        "stale-frontmost ClosePane must fall back to main (single-leaf tab → tab close)",
+    );
+    assert_eq!(
+        app.__test_frontmost_window(),
+        None,
+        "stale frontmost id must be cleared on fallback",
+    );
+}
+
+#[test]
+fn focus_pane_with_stale_frontmost_falls_back_to_main_and_clears() {
+    let mut app = make_app();
+    app.__test_seed_tab("alpha");
+
+    app.__test_set_frontmost_window(Some(WindowId::dummy()));
+    // FocusPane with one pane is a no-op on main, but the dispatcher
+    // must still clear the stale frontmost so the next chord doesn't
+    // retry the dead id.
+    app.run_action(&Action::FocusPane(Direction::Right));
+
+    assert_eq!(
+        app.__test_frontmost_window(),
+        None,
+        "stale frontmost must be cleared even when fallback is a no-op",
+    );
+}
+
+#[test]
+fn toggle_pane_zoom_with_stale_frontmost_falls_back_to_main_and_clears() {
+    let mut app = make_app();
+    app.__test_seed_tab("alpha");
+
+    app.__test_set_frontmost_window(Some(WindowId::dummy()));
+    app.run_action(&Action::TogglePaneZoom);
+
+    assert_eq!(
+        app.__test_frontmost_window(),
+        None,
+        "stale frontmost must be cleared after pane-zoom fallback",
+    );
+}
+
+#[test]
+fn resize_pane_with_stale_frontmost_falls_back_to_main_and_clears() {
+    let mut app = make_app();
+    app.__test_seed_tab("alpha");
+
+    app.__test_set_frontmost_window(Some(WindowId::dummy()));
+    app.run_action(&Action::ResizePaneLeft);
+
+    assert_eq!(
+        app.__test_frontmost_window(),
+        None,
+        "stale frontmost must be cleared after resize-pane fallback",
+    );
+}
+
+// ─── Compile-time regression: every pane action arm routes ──────────
+//
+// This is documentation-as-test: the assertion lives in source review
+// (no remaining `self.split_active(...)` / `self.close_active_pane()` /
+// `self.focus_pane_dir(...)` / `self.toggle_active_pane_zoom()` /
+// `self.resize_active_split(...)` call inside `keymap_dispatch.rs`
+// without a preceding `FrontmostKind::Child(id) => *_in_child(...)`
+// branch). Adding a new pane-mutating Action variant in the future
+// without the routing branch will be caught by the Haiku review pattern
+// established in PR #291; if you want a mechanical guard, add a
+// `compiletest_rs` or `trybuild` harness in a follow-up.

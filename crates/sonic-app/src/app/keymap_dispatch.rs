@@ -126,9 +126,36 @@ impl App {
                 let last = self.tabs.len().saturating_sub(1);
                 self.tabs.activate(last);
             }
-            Action::SplitRight => self.split_active(Direction::Right),
-            Action::SplitDown => self.split_active(Direction::Down),
-            Action::ClosePane => self.close_active_pane(),
+            Action::SplitRight => {
+                // Epic #289 Phase A — route to frontmost window so Cmd+D
+                // typed in a torn-out child splits THAT window's active
+                // pane, not the main window's.
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.split_active_pane_in_child(id, Direction::Right) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.split_active(Direction::Right);
+            }
+            Action::SplitDown => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.split_active_pane_in_child(id, Direction::Down) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.split_active(Direction::Down);
+            }
+            Action::ClosePane => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.close_active_pane_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.close_active_pane();
+            }
             Action::CloseActivePaneOrTab => {
                 // Epic #289 Phase A — Cmd+W routes to frontmost window.
                 // Without this, a Cmd+W typed in a torn-out child window
@@ -156,13 +183,61 @@ impl App {
                     self.close_tab_at(i);
                 }
             }
-            Action::TogglePaneZoom => self.toggle_active_pane_zoom(),
+            Action::TogglePaneZoom => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.toggle_active_pane_zoom_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.toggle_active_pane_zoom();
+            }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
-            Action::FocusPane(d) => self.focus_pane_dir(*d),
-            Action::ResizePaneLeft => self.resize_active_split(Direction::Left),
-            Action::ResizePaneRight => self.resize_active_split(Direction::Right),
-            Action::ResizePaneUp => self.resize_active_split(Direction::Up),
-            Action::ResizePaneDown => self.resize_active_split(Direction::Down),
+            Action::FocusPane(d) => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.focus_pane_dir_in_child(id, *d) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.focus_pane_dir(*d);
+            }
+            Action::ResizePaneLeft => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.resize_active_split_in_child(id, Direction::Left) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.resize_active_split(Direction::Left);
+            }
+            Action::ResizePaneRight => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.resize_active_split_in_child(id, Direction::Right) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.resize_active_split(Direction::Right);
+            }
+            Action::ResizePaneUp => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.resize_active_split_in_child(id, Direction::Up) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.resize_active_split(Direction::Up);
+            }
+            Action::ResizePaneDown => {
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.resize_active_split_in_child(id, Direction::Down) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.resize_active_split(Direction::Down);
+            }
             Action::OpenSearch => self.open_search(),
             Action::OpenPreferences => self.open_preferences(),
             Action::OpenKeymapFile => self.open_keymap_file(),
