@@ -9,7 +9,10 @@
 //!     (= `RegisterClipboardFormatW("com.sonic-terminal.tab.v1")`) and
 //!     calls `DoDragDrop` with an `IDropSource` whose
 //!     `QueryContinueDrag` honours ESC (cancel) and primary-button
-//!     release (drop).
+//!     release (drop). If OLE returns `DROPEFFECT_NONE` (no target
+//!     accepted the drop), the sink spawns a new `sonic-windows.exe`
+//!     with `--tear-out-payload <json>` and reports acceptance so the
+//!     source tab can be removed.
 //!   * **Destination** ([`DropTarget`] / [`register_for_window`]):
 //!     `IDropTarget` registered on the winit HWND via `RegisterDragDrop`.
 //!     `Drop()` accepts either `CF_SONIC_TAB` (parsed into a
@@ -299,9 +302,10 @@ pub fn begin_tab_drag(payload_json: &str) -> u32 {
 // ---- OsDragSink wiring ------------------------------------------------------
 
 /// `OsDragSink` impl that, on `begin_drag`, kicks off the OLE drag
-/// loop synchronously. As of v1 the destination side has no
-/// cross-process consumption ack, so the return is always
-/// [`DragAck::NotAcknowledged`] — same data-loss-safe stance as Mac.
+/// loop synchronously. A normal Sonic drop target returns
+/// `DROPEFFECT_MOVE`; a drop on bare desktop / non-Sonic targets returns
+/// `DROPEFFECT_NONE`, which we treat as a Windows tear-out by spawning a
+/// child `sonic-windows.exe` with the serialized payload.
 pub struct WinOsDragSink;
 
 impl WinOsDragSink {
@@ -319,14 +323,34 @@ impl OsDragSink for WinOsDragSink {
                 return DragAck::NotAcknowledged;
             }
         };
-        let _effect = begin_tab_drag(&json);
-        // No reliable cross-process consumption ack on Windows v1 — be
-        // conservative and keep the source tab alive. The destination
-        // process (which may be ours or a future second instance) will
-        // pick up the payload via take_pending_payload() and spawn its
-        // own tab; the data-loss-safe behavior is to let the user
-        // close the original tab manually after they see the new one.
+        let effect = begin_tab_drag(&json);
+        if effect == DROPEFFECT_NONE.0 {
+            return spawn_tearout_child(&json);
+        }
+        if effect == DROPEFFECT_MOVE.0 {
+            return DragAck::Accepted;
+        }
         DragAck::NotAcknowledged
+    }
+}
+
+fn spawn_tearout_child(payload_json: &str) -> DragAck {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!(?e, "Windows tab tear-out: current_exe failed");
+            return DragAck::NotAcknowledged;
+        }
+    };
+    match std::process::Command::new(exe).arg("--tear-out-payload").arg(payload_json).spawn() {
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "Windows tab tear-out: spawned child window");
+            DragAck::Accepted
+        }
+        Err(e) => {
+            tracing::error!(?e, "Windows tab tear-out: failed to spawn child window");
+            DragAck::NotAcknowledged
+        }
     }
 }
 

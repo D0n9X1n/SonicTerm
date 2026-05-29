@@ -47,6 +47,21 @@ impl App {
         if self.try_cross_window_merge(index) {
             return true;
         }
+        // OS-level cross-process drag: if a sink is installed AND the
+        // cursor has left every Sonic-owned window, hand the tab off
+        // to the OS (NSPasteboard / OLE) and KILL the local copy
+        // (dropping the panes runs PtyHandle::Drop which signals the
+        // child). The destination Sonic process picks up the payload
+        // from its own pasteboard read and spawns a fresh tab with
+        // the same cwd/cmd/env, showing scrollback as history.
+        //
+        // This must run before the single-tab no-op guard: on Windows,
+        // dropping the only tab on the bare desktop returns
+        // DROPEFFECT_NONE, which the OLE sink promotes into a real
+        // child-process tear-out.
+        if self.try_os_drag_handoff(index) {
+            return true;
+        }
         // Don't tear the only tab when there's no cross-window target —
         // that's a no-op (the new window would be identical to the old
         // one, minus its renderer). Critically: return `false` so the
@@ -55,16 +70,6 @@ impl App {
         // sibling window's tab bar.
         if self.tabs.len() <= 1 {
             return false;
-        }
-        // OS-level cross-process drag: if a sink is installed AND the
-        // cursor has left every Sonic-owned window, hand the tab off
-        // to the OS (NSPasteboard / OLE) and KILL the local copy
-        // (dropping the panes runs PtyHandle::Drop which signals the
-        // child). The destination Sonic process picks up the payload
-        // from its own pasteboard read and spawns a fresh tab with
-        // the same cwd/cmd/env, showing scrollback as history.
-        if self.try_os_drag_handoff(index) {
-            return true;
         }
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
