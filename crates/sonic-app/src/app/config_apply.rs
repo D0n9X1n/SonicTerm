@@ -156,6 +156,23 @@ impl App {
             );
         }
 
+        // Language / i18n. Rebuild both the app-level bundle and the
+        // open prefs edit buffer's bundle so translated strings are
+        // re-derived on the next frame instead of requiring a restart.
+        if new_cfg.locale != self.config.locale {
+            let requested =
+                if new_cfg.locale.is_empty() { None } else { Some(new_cfg.locale.as_str()) };
+            self.i18n.reload_locale(requested);
+            if let Some(prefs) = self.prefs_state.as_mut() {
+                prefs.i18n.reload_locale(requested);
+                prefs.rebuild_controls();
+            }
+            if let Some(w) = self.prefs_window.as_ref() {
+                w.request_redraw();
+            }
+            tracing::info!(locale = %self.i18n.locale(), "live-reload: locale");
+        }
+
         // Cursor visuals — cheap to apply; the setters short-circuit
         // when nothing changed, so an unrelated config edit (e.g. a
         // theme swap) doesn't reset the blink phase.

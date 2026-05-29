@@ -62,6 +62,16 @@ impl I18n {
         self.active.to_string()
     }
 
+    /// Replace the active locale bundle in-place. This is the runtime
+    /// live-reload hook for config/prefs language changes; existing `I18n`
+    /// owners can keep their cached struct while all future lookups use the
+    /// newly-negotiated bundle.
+    pub fn reload_locale(&mut self, requested: Option<&str>) {
+        let active_tag = pick_locale(requested);
+        self.active = active_tag.parse().unwrap_or(langid!("en"));
+        self.active_bundle = build_bundle(&active_tag);
+    }
+
     /// Translate a message id. Missing keys fall back to English; missing in
     /// English too returns the key itself so UIs never show an empty string.
     pub fn t(&self, key: &str) -> String {
