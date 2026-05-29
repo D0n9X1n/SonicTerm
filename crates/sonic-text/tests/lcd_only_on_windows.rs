@@ -1,21 +1,15 @@
-//! Regression guard for the P0 macOS-glyph-blur fix.
+//! Regression guard for P0 text rasterizer fixes.
 //!
-//! PR #267 enabled `Format::Subpixel` (LCD) rendering for ALL platforms
-//! to address Windows ClearType parity (#261), and inserted
-//! `JetBrainsMono Nerd Font` at the FRONT of every fallback chain to
-//! satisfy Nerd Font PUA coverage. Both changes regressed macOS:
+//! PR #267 enabled `Format::Subpixel` (LCD) rendering to address Windows
+//! ClearType parity (#261), and inserted `JetBrainsMono Nerd Font` at the
+//! FRONT of every fallback chain to satisfy Nerd Font PUA coverage. The
+//! fallback ordering regressed CJK glyph resolution on macOS, and the Windows
+//! LCD integration later regressed terminal cell readability into horizontal
+//! ink-stroke artifacts (#316).
 //!
-//! 1. LCD subpixel masks produce visible color fringing on macOS where
-//!    grayscale `Format::Alpha` was correct (Mojave+ removed system
-//!    subpixel AA).
-//! 2. Nerd Font at the front of the chain stole CJK glyph resolution
-//!    from PingFang SC / Microsoft YaHei / Noto CJK, since cosmic-text
-//!    walks fallbacks in order and Nerd Font has no CJK coverage —
-//!    so CJK cells rendered as mangled boxes.
-//!
-//! These tests pin the platform-gated invariants so a future "let's
-//! unify the rasterizer config" or "let's reorder the chain for
-//! convenience" PR cannot silently re-regress.
+//! These tests pin the safe grayscale rasterizer format and fallback-chain
+//! invariants so a future "let's unify the rasterizer config" or "let's
+//! reorder the chain for convenience" PR cannot silently re-regress.
 
 #![allow(missing_docs)]
 
@@ -25,26 +19,12 @@ use sonic_text::swash_rasterizer::{
 use swash::zeno::Format;
 
 #[test]
-#[cfg(not(target_os = "windows"))]
-fn non_windows_uses_alpha_format() {
+fn monochrome_uses_alpha_format_on_all_platforms() {
     let (_sources, format, _hint) = monochrome_render_config_for_test();
     assert_eq!(
         format,
         Format::Alpha,
-        "macOS and Linux must use grayscale alpha masks. LCD subpixel \
-         (Format::Subpixel) produces color fringing on macOS where the OS \
-         no longer performs system-level subpixel AA. See P0 fix for PR #267."
-    );
-}
-
-#[test]
-#[cfg(target_os = "windows")]
-fn windows_uses_subpixel_format() {
-    let (_sources, format, _hint) = monochrome_render_config_for_test();
-    assert_eq!(
-        format,
-        Format::Subpixel,
-        "Windows must use LCD subpixel masks for ClearType parity (#261)."
+        "all platforms must use grayscale alpha masks until the Windows LCD integration is fixed (#316)"
     );
 }
 

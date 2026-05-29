@@ -193,20 +193,19 @@ pub const MAX_FALLBACK_SLOTS: u8 = 8;
 
 const MONOCHROME_SOURCES: &[Source] = &[Source::Outline, Source::Bitmap(StrikeWith::BestFit)];
 
-// LCD subpixel rendering is Windows-only. On macOS, Apple removed
-// system-wide subpixel AA in Mojave and the LCD path produces visible
-// color fringing against the terminal background (P0 regression from
-// PR #267). On Linux the subpixel ordering of the display is unknown
-// to us, so grayscale is the safe default. Windows DirectWrite/ClearType
-// is the only path where LCD subpixel is the user-expected behavior.
-#[cfg(target_os = "windows")]
-const MONOCHROME_FORMAT: Format = Format::Subpixel;
-#[cfg(not(target_os = "windows"))]
+// LCD subpixel rendering is temporarily disabled on every platform.
+//
+// PR #267 enabled `Format::Subpixel` on Windows for ClearType parity, but
+// the current text pipeline composites subpixel masks incorrectly after the
+// later linear-space/gamma changes: terminal cells become unreadable horizontal
+// ink-stroke artifacts while the glyphon-rendered tab titles remain fine
+// (#316). Use grayscale alpha masks until the LCD path has a dedicated shader
+// and blend-mode fix.
 const MONOCHROME_FORMAT: Format = Format::Alpha;
 
 /// Test-visible snapshot of the monochrome rasterizer quality settings.
-/// Windows text-quality issue #261 requires hinted outline rendering plus
-/// LCD/subpixel masks, not grayscale alpha-only masks.
+/// Keep outline hinting enabled, but use grayscale alpha masks until the
+/// Windows LCD/subpixel integration is fixed (#316).
 #[doc(hidden)]
 pub fn monochrome_render_config_for_test() -> (&'static [Source], Format, bool) {
     (MONOCHROME_SOURCES, MONOCHROME_FORMAT, true)
