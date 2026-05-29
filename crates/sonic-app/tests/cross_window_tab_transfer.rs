@@ -301,24 +301,34 @@ fn transfer_with_oob_source_idx_returns_err() {
     assert_eq!(app.__test_pane_ids(), vec![pane_a], "panes map unchanged");
 }
 
-/// PR #302 Haiku follow-up: when `App::transfer_tab` empties a child
-/// source window it MUST route cleanup through `reap_empty_child` (the
-/// unified contract) instead of doing a direct `windows.remove`. The
-/// unified helper nulls out straggler `redraw_target`s and emits the
-/// "child window reaped" trace; the raw remove skipped both.
+/// PR #302 Haiku follow-up — boundary-contract pin (NOT an end-to-end
+/// `transfer_tab(child → main)` exercise).
 ///
-/// We can't construct a live `WindowState` in a unit test (it requires
-/// a wgpu surface + winit `Window`). What we CAN pin is the boundary
-/// contract that the rewrite depends on:
+/// HONEST SCOPE: this test does NOT call `transfer_tab` with a real
+/// child source and observe the source-empty branch invoke
+/// `reap_empty_child` from the inside. That ideal end-to-end pin
+/// requires constructing a second live `WindowState`, which needs a
+/// wgpu surface + winit `Window` — neither is available in a unit-test
+/// binary, and no test fake exists for `WindowState` today.
 ///
-///   1. `reap_empty_child` on a stale id is a silent no-op — proves
-///      the new `transfer_tab` call site won't panic when the source
-///      child has already been raced away.
-///   2. `transfer_tab` with a missing child source still reports
-///      `SourceMissing` (the reap-routing change must not regress
-///      pre-validation — Haiku #294's data-loss guard).
+/// What this test DOES pin are the two boundary contracts the rewrite
+/// depends on — necessary, not sufficient:
+///
+///   1. `reap_empty_child` on a stale id is a silent no-op AND bumps
+///      `reap_call_count` exactly once. The counter is the
+///      test-observable signal that distinguishes "routed through the
+///      unified reap contract" from "raw `windows.remove`".
+///   2. `transfer_tab` with a missing child source rejects with
+///      `SourceMissing` BEFORE detaching anything — proves the
+///      pre-validation guard (PR #294 data-loss fix) survives the
+///      reap-routing rewrite, AND the reap counter does not tick on
+///      a rejected transfer.
+///
+/// The actual `child → main` source-empty branch is exercised by the
+/// GUI smoke (§13 in CLAUDE.md) and is tracked as a follow-up to add
+/// a `WindowState` test-fake (see PR #302 comment trail).
 #[test]
-fn transfer_last_tab_uses_reap_empty_child() {
+fn transfer_tab_reap_boundary_contracts() {
     let mut app = synth_app();
     let _ = app.__test_seed_tab("only");
     let children_before = app.child_window_count();
@@ -369,7 +379,7 @@ fn transfer_last_tab_uses_reap_empty_child() {
 }
 
 /// PR #302 Haiku follow-up — negative-side companion to
-/// `transfer_last_tab_uses_reap_empty_child`. A transfer that leaves the
+/// `transfer_tab_reap_boundary_contracts`. A transfer that leaves the
 /// source non-empty MUST NOT invoke `reap_empty_child`. Without this
 /// pin, a regression that unconditionally reaps the source after every
 /// transfer would silently destroy windows that still had tabs.
