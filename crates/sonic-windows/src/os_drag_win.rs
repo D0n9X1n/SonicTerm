@@ -36,9 +36,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use sonic_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
 
+use windows::core::HRESULT;
 use windows::core::{implement, w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL, HWND, OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
+    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL, HWND,
+    OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{
     IDataObject, IDataObject_Impl, IEnumFORMATETC, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
@@ -248,7 +250,6 @@ impl IDropSource_Impl for SonicDropSource_Impl {
         fescapepressed: BOOL,
         grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
     ) -> windows::core::HRESULT {
-        use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP};
         use windows::Win32::System::SystemServices::MK_LBUTTON;
         if fescapepressed.as_bool() {
             return DRAGDROP_S_CANCEL;
@@ -276,15 +277,21 @@ impl IDropSource_Impl for SonicDropSource_Impl {
 
 // ---- Public source-side entry points ----------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DragDropOutcome {
+    hr: HRESULT,
+    effect: u32,
+}
+
 /// Synchronously run a `DoDragDrop` loop carrying `payload_json` as the
-/// `CF_SONIC_TAB` blob. Returns the final `DROPEFFECT` reported by OLE
-/// (`DROPEFFECT_COPY`, `DROPEFFECT_MOVE`, or `DROPEFFECT_NONE`). The
-/// call blocks the calling thread until the user releases the mouse or
-/// presses ESC.
+/// `CF_SONIC_TAB` blob. Returns both the HRESULT and final `DROPEFFECT`
+/// reported by OLE (`DROPEFFECT_COPY`, `DROPEFFECT_MOVE`, or
+/// `DROPEFFECT_NONE`). The call blocks the calling thread until the user
+/// releases the mouse or presses ESC.
 ///
 /// MUST be called on a thread that has called `OleInitialize` —
 /// typically the main UI thread.
-pub fn begin_tab_drag(payload_json: &str) -> u32 {
+fn begin_tab_drag_outcome(payload_json: &str) -> DragDropOutcome {
     let data: IDataObject = SonicDataObject { json: payload_json.as_bytes().to_vec() }.into();
     let source: IDropSource = SonicDropSource.into();
     let mut effect = DROPEFFECT_NONE;
@@ -296,7 +303,12 @@ pub fn begin_tab_drag(payload_json: &str) -> u32 {
     if hr.is_err() {
         tracing::warn!(?hr, "DoDragDrop returned error");
     }
-    effect.0
+    DragDropOutcome { hr, effect: effect.0 }
+}
+
+#[allow(dead_code)]
+pub fn begin_tab_drag(payload_json: &str) -> u32 {
+    begin_tab_drag_outcome(payload_json).effect
 }
 
 // ---- OsDragSink wiring ------------------------------------------------------
@@ -323,15 +335,26 @@ impl OsDragSink for WinOsDragSink {
                 return DragAck::NotAcknowledged;
             }
         };
-        let effect = begin_tab_drag(&json);
-        if effect == DROPEFFECT_NONE.0 {
-            return spawn_tearout_child(&json);
-        }
-        if effect == DROPEFFECT_MOVE.0 {
-            return DragAck::Accepted;
-        }
-        DragAck::NotAcknowledged
+        let outcome = begin_tab_drag_outcome(&json);
+        drag_ack_for_outcome(outcome, &json, spawn_tearout_child)
     }
+}
+
+fn drag_ack_for_outcome(
+    outcome: DragDropOutcome,
+    payload_json: &str,
+    spawn_child: impl FnOnce(&str) -> DragAck,
+) -> DragAck {
+    if outcome.hr == DRAGDROP_S_DROP && outcome.effect == DROPEFFECT_NONE.0 {
+        return spawn_child(payload_json);
+    }
+    if outcome.hr == DRAGDROP_S_DROP && outcome.effect == DROPEFFECT_MOVE.0 {
+        return DragAck::Accepted;
+    }
+    if outcome.hr == DRAGDROP_S_CANCEL {
+        return DragAck::NotAcknowledged;
+    }
+    DragAck::NotAcknowledged
 }
 
 fn spawn_tearout_child(payload_json: &str) -> DragAck {
@@ -653,5 +676,37 @@ mod tests {
         let b = cf_sonic_tab();
         assert_eq!(a, b, "cf_sonic_tab must be cached");
         assert_ne!(a, 0, "RegisterClipboardFormatW returned 0");
+    }
+
+    #[test]
+    fn cancel_does_not_tear_out() {
+        let mut spawned = false;
+        let ack = drag_ack_for_outcome(
+            DragDropOutcome { hr: DRAGDROP_S_CANCEL, effect: DROPEFFECT_NONE.0 },
+            "{}",
+            |_| {
+                spawned = true;
+                DragAck::Accepted
+            },
+        );
+
+        assert_eq!(ack, DragAck::NotAcknowledged);
+        assert!(!spawned, "cancel must not spawn tear-out child");
+    }
+
+    #[test]
+    fn outside_drop_tears_out_only_after_drop_hresult() {
+        let mut spawned = false;
+        let ack = drag_ack_for_outcome(
+            DragDropOutcome { hr: DRAGDROP_S_DROP, effect: DROPEFFECT_NONE.0 },
+            "{}",
+            |_| {
+                spawned = true;
+                DragAck::Accepted
+            },
+        );
+
+        assert_eq!(ack, DragAck::Accepted);
+        assert!(spawned, "real outside-target drop should spawn tear-out child");
     }
 }
