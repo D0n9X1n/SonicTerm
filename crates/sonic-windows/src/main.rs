@@ -97,9 +97,19 @@ fn main() -> Result<()> {
 
 fn load_config() -> Result<Config> {
     match Config::default_path() {
-        Some(path) => Config::load_or_default(&path),
-        None => Ok(Config::default()),
+        Some(path) => {
+            if path.exists() {
+                Config::load_or_default(&path)
+            } else {
+                Ok(windows_default_config())
+            }
+        }
+        None => Ok(windows_default_config()),
     }
+}
+
+pub fn windows_default_config() -> Config {
+    Config { keymap: "wezterm-windows".to_string(), ..Config::default() }
 }
 
 fn load_theme(name: &str) -> Result<Theme> {

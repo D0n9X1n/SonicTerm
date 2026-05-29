@@ -26,7 +26,7 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
 }
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
-pub const TAB_MAX_WIDTH: f32 = 240.0;
+pub const TAB_MAX_WIDTH: f32 = 400.0;
 
 /// Preferred minimum width of a single tab. Acts as a soft floor: when the
 /// equal-share allocation per tab is ≥ this value, each tab is held at or
@@ -207,8 +207,9 @@ impl TabBarLayout {
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
         // clamp): tabs shrink to share the available space when the equal-
         // share allocation falls below it, so the strip never overflows the
-        // `+` button gutter. The TAB_MAX_WIDTH cap still applies when the
-        // window is wide and there are few tabs.
+        // `+` button gutter. When the strip has surplus, use the available
+        // equal share up to TAB_MAX_WIDTH so maximized windows can show long
+        // titles instead of staying pinned to the old narrow cap.
         let per_tab = raw.min(TAB_MAX_WIDTH);
 
         let bg_y = TAB_VERT_INSET;
