@@ -33,13 +33,11 @@ mod mac_linux {
 
     fn font_system_with_assets() -> FontSystem {
         let mut fs = FontSystem::new();
-        let dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                let ext =
-                    p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+                let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
                 if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                     if let Ok(bytes) = std::fs::read(&p) {
                         sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
