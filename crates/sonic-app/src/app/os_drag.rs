@@ -69,13 +69,18 @@
 use std::sync::{Arc, Mutex};
 
 use winit::event_loop::EventLoopProxy;
-use winit::window::WindowId;
+use winit::window::{Window, WindowId};
 
 /// Re-export of [`winit::window::WindowId`] so platform backend crates
 /// (`sonic-mac`, `sonic-windows`) that already depend on `sonic-app`
 /// don't have to add a direct `winit` dep just to spell the trait
 /// signature. Keeps the dependency surface minimal.
 pub use winit::window::WindowId as BackendWindowId;
+/// Re-export of [`winit::window::Window`] for the same reason as
+/// [`BackendWindowId`] — platform backend crates need to spell the
+/// `register_window` trait signature without taking a direct winit
+/// dep just for the type name.
+pub use winit::window::Window as BackendWindow;
 
 use super::UserEvent;
 
@@ -171,6 +176,22 @@ pub trait OsTabDragBackend: Send {
     /// legacy sink path remains a valid mirror.
     fn handles_full_gesture(&self) -> bool {
         false
+    }
+
+    /// Register a winit window with the backend so OS-level drag drops
+    /// targeting that window are routed back into the App. On Windows
+    /// this MUST call `RegisterDragDrop` against the HWND extracted
+    /// from `window`'s raw handle; without this, drops landing on
+    /// torn-out child windows are silently dropped by the OS (drops
+    /// never reach `IDropTarget::Drop`). On macOS this is a no-op —
+    /// AppKit's pasteboard-publish model does not need per-window
+    /// IDropTarget registration.
+    ///
+    /// Called once per window: by `App::resumed` for the main window
+    /// and by `App::tear_out_tab` / `App::tear_out_from_child` for each
+    /// torn-out child window. Default impl is a no-op so mock backends
+    /// in tests can opt in / out trivially.
+    fn register_window(&mut self, _handle: AppHandle, _window_id: WindowId, _window: &Arc<Window>) {
     }
 }
 

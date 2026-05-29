@@ -167,6 +167,18 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         // already complete for the same-process drag path.
         handle.post_drag_ended(DragOutcome::Cancelled);
     }
+
+    fn register_window(
+        &mut self,
+        _handle: AppHandle,
+        _window_id: sonic_app::app::os_drag::BackendWindowId,
+        _window: &std::sync::Arc<sonic_app::app::os_drag::BackendWindow>,
+    ) {
+        // macOS uses NSPasteboard publish/subscribe — there is no
+        // per-window IDropTarget equivalent to register. Implemented
+        // for trait consistency only; Haiku #295 fix is Windows-only
+        // in practice.
+    }
 }
 
 #[cfg(test)]

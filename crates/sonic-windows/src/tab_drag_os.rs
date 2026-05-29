@@ -28,8 +28,11 @@
 
 #![cfg(target_os = "windows")]
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use sonic_app::app::os_drag::{
-    AppHandle, BackendWindowId as WindowId, DragOutcome, OsTabDragBackend,
+    AppHandle, BackendWindow as Window, BackendWindowId as WindowId, DragOutcome, OsTabDragBackend,
 };
 
 /// Production `OsTabDragBackend` impl for Windows. Holds the most
@@ -39,13 +42,21 @@ use sonic_app::app::os_drag::{
 #[allow(dead_code)] // wired in production via `sonic-windows::main` (run_with_os_drag_pending_and_window_hook backend slot)
 pub struct WinOsTabDragBackend {
     handle_slot: std::sync::Mutex<Option<AppHandle>>,
+    /// Set of HWND ids (as u64) that have already had `RegisterDragDrop`
+    /// called against them. OLE leaks the previous registration on a
+    /// re-register, so we de-dupe here. Keyed by HWND-as-u64 so we
+    /// don't need a `Send`-unsafe `HWND` newtype just for tracking.
+    registered_windows: std::sync::Mutex<HashMap<WindowId, u64>>,
 }
 
 #[allow(dead_code)]
 impl WinOsTabDragBackend {
     /// Construct a backend with an empty handle slot.
     pub fn new() -> Self {
-        Self { handle_slot: std::sync::Mutex::new(None) }
+        Self {
+            handle_slot: std::sync::Mutex::new(None),
+            registered_windows: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Box-wrapped constructor for `App::set_os_drag_backend`.
@@ -159,6 +170,37 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         };
 
         handle.post_drag_ended(outcome);
+    }
+
+    fn register_window(&mut self, _handle: AppHandle, window_id: WindowId, window: &Arc<Window>) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let raw = match window.window_handle() {
+            Ok(h) => h.as_raw(),
+            Err(e) => {
+                tracing::warn!(?e, "WinOsTabDragBackend::register_window: no raw handle");
+                return;
+            }
+        };
+        let RawWindowHandle::Win32(h) = raw else {
+            tracing::warn!(?raw, "WinOsTabDragBackend::register_window: not a Win32 handle");
+            return;
+        };
+        let hwnd_val = h.hwnd.get() as u64;
+        let mut reg = match self.registered_windows.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if reg.contains_key(&window_id) {
+            tracing::debug!(?window_id, "register_window: already registered, skipping");
+            return;
+        }
+        let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+        // SAFETY: HWND is alive (caller just created the window) and
+        // OLE was initialized on this thread by `os_drag_win::init_ole`
+        // in main.rs.
+        unsafe { crate::os_drag_win::register_for_window(hwnd) };
+        reg.insert(window_id, hwnd_val);
+        tracing::info!(?window_id, hwnd = hwnd_val, "register_window: RegisterDragDrop installed");
     }
 }
 

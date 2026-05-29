@@ -184,6 +184,10 @@ impl App {
             drag_target: None,
         };
         self.windows.insert(win_id, child);
+        // Phase C2 / Haiku #295: register the new window's HWND with
+        // the OS-drag backend so drops on this child window reach
+        // IDropTarget::Drop. No-op on mac (pasteboard model).
+        self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
         // Epic #289 Phase B: the new window is now OS-frontmost (we
         // just created and focused it). Update `frontmost_window` so
@@ -505,6 +509,10 @@ impl App {
             drag_target: None,
         };
         self.windows.insert(win_id, child);
+        // Phase C2 / Haiku #295: register the new window's HWND with
+        // the OS-drag backend so drops on this child window reach
+        // IDropTarget::Drop. No-op on mac.
+        self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
         self.frontmost_window = Some(win_id);
         // Source child: if drained, drop it (PtyHandle::Drop on any

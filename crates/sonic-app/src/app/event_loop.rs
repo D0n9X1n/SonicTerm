@@ -204,6 +204,11 @@ impl App {
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
         self.window = Some(window.clone());
+        // Phase C2 / Haiku #295: register the main window's HWND with
+        // the OS-drag backend through the unified entry point so the
+        // main and torn-out windows share code paths. No-op on mac.
+        let main_id = window.id();
+        self.register_window_with_os_drag_backend(main_id, &window);
         // Fire the one-shot window-ready hook (Windows uses this slot
         // to install the muda menubar against the HWND). Best-effort:
         // if the platform can't surface a raw handle, skip the hook

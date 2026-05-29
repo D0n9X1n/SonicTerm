@@ -90,10 +90,10 @@ fn main() -> Result<()> {
                     if let Err(e) = mac.install(Sender::new()) {
                         tracing::error!("WinMenu install failed: {e}");
                     }
-                    // SAFETY: HWND is alive (winit just created it)
-                    // and OLE was initialized above on this same
-                    // thread.
-                    unsafe { os_drag_win::register_for_window(hwnd) };
+                    // RegisterDragDrop is now handled via the unified
+                    // OsTabDragBackend::register_window entry point in
+                    // App::resumed — Haiku #295 fix to ensure torn-out
+                    // child windows go through the same code path.
                 } else {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }

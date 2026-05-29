@@ -1858,6 +1858,29 @@ impl App {
         self.os_drag_backend.as_ref().map(|b| b.handles_full_gesture()).unwrap_or(false)
     }
 
+    /// Phase C2: register a winit window with the installed OS-drag
+    /// backend so OS-level drops landing on that window's HWND /
+    /// NSWindow are routed back into the App. Called once per window
+    /// at creation time — main window from `App::resumed`, torn-out
+    /// child windows from `tear_out_tab` / `tear_out_from_child`.
+    ///
+    /// No-op if no backend is installed (mac, tests) — the trait's
+    /// default `register_window` impl is itself a no-op, so a backend
+    /// that does not need per-window registration (mac) can opt out
+    /// cleanly while still implementing the unified entry point.
+    ///
+    /// Without this call, drops on torn-out child windows on Windows
+    /// silently never reach `IDropTarget::Drop` (Haiku #295 blocker).
+    pub fn register_window_with_os_drag_backend(
+        &mut self,
+        window_id: WindowId,
+        window: &std::sync::Arc<winit::window::Window>,
+    ) {
+        let Some(handle) = self.os_drag_app_handle() else { return };
+        let Some(backend) = self.os_drag_backend.as_mut() else { return };
+        backend.register_window(handle, window_id, window);
+    }
+
     /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.
     /// Drains the mailbox; currently a no-op beyond logging — the
     /// drag-chip overlay is rendered from `tab_drag` state, not from
