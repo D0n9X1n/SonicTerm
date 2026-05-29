@@ -1410,6 +1410,21 @@ impl App {
         self.panes.get(&id).map(|p| p.redraw_target.clone())
     }
 
+    /// Test-only: install or clear a pane's PTY handle so tear-out tests
+    /// can verify ownership moves without spawning a real shell.
+    #[doc(hidden)]
+    pub fn __test_set_pane_pty(&mut self, id: u64, pty: Option<PtyHandle>) -> bool {
+        let Some(pane) = self.panes.get_mut(&id) else { return false };
+        pane.pty = pty;
+        true
+    }
+
+    /// Test-only: report whether a pane still has a PTY handle.
+    #[doc(hidden)]
+    pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
+        self.panes.get(&id).map(|pane| pane.pty.is_some())
+    }
+
     /// Drain the config-watcher channel and apply any incoming Config.
     /// Idempotent and cheap when nothing changed (early-returns when no
     /// new config is queued).
