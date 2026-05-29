@@ -13,6 +13,28 @@ pub struct RenderInputs<'a> {
     pub selection: Option<SelectionView>,
     /// Active in-pane search state when the search overlay is open.
     pub search: Option<SearchView>,
+    /// Pixel rect of a visible "Cmd+hover URL underline" on the focused
+    /// pane this frame, or `None` when no auto-detected URL is being
+    /// hovered while the platform open-URL modifier (Cmd on macOS,
+    /// Ctrl on Windows) is held. Added for the v1.0 Cmd-held URL
+    /// affordance — OSC 8 hyperlinks have their own pre-existing
+    /// hover-underline path and are not represented here.
+    pub hovered_url_underline: Option<UnderlineRect>,
+}
+
+/// Axis-aligned pixel rectangle for an overlay underline quad.
+/// Coordinates are in logical pixels relative to the focused pane's
+/// origin; the renderer clips against the pane rect before submitting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnderlineRect {
+    /// Left edge in pixels (pane-relative).
+    pub x: f32,
+    /// Top edge of the underline strip in pixels (pane-relative).
+    pub y: f32,
+    /// Width of the underline in pixels (covers all URL chars on the row).
+    pub w: f32,
+    /// Thickness in pixels (2.0 per the v1.0 spec).
+    pub h: f32,
 }
 
 /// Per-pane data the renderer needs to paint one terminal grid this frame.

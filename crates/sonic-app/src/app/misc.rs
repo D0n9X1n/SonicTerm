@@ -69,6 +69,85 @@ impl App {
         drop(guard);
         sonic_core::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
+
+    /// OSC 8-only lookup: returns the cell's interned hyperlink URI,
+    /// ignoring auto-detected plain-text URLs. Used by the hover
+    /// pointer-cursor logic so OSC 8 keeps its existing unconditional
+    /// pointer affordance while auto-detected URLs are gated behind
+    /// the Cmd / Ctrl open-URL modifier.
+    pub(super) fn osc8_uri_at(&self, row: u16, col: u16) -> Option<String> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        let r = grid.row(row);
+        let hid = r[col as usize].hyperlink?;
+        guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
+    }
+
+    /// Reconstruct the focused pane's row string at `row` (one char
+    /// per cell) for plain-text URL detection. Returns `None` when the
+    /// parser is locked or the row is out of range.
+    pub(super) fn focused_pane_row_text(&self, row: u16) -> Option<String> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows {
+            return None;
+        }
+        let r = grid.row(row);
+        let mut s = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            s.push(r[i as usize].ch);
+        }
+        Some(s)
+    }
+
+    /// Recompute `self.hovered_url` from the current cursor position
+    /// and modifier state. Called on every `CursorMoved` and every
+    /// `ModifiersChanged` so press / release / drift transitions all
+    /// converge to the same source of truth.
+    pub(super) fn refresh_hovered_url(&mut self) {
+        let new_hover = self.compute_current_hovered_url();
+        let changed = new_hover != self.hovered_url;
+        self.hovered_url = new_hover;
+        // Pointer-cursor transition: auto-detected URL needs the
+        // open-URL modifier held; OSC 8 keeps its always-on pointer.
+        let want_pointer = self.hovered_url.is_some()
+            || self
+                .renderer
+                .as_ref()
+                .and_then(|r| r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
+                .and_then(|(row, col)| self.osc8_uri_at(row, col))
+                .is_some();
+        if want_pointer != self.hover_link {
+            self.hover_link = want_pointer;
+            if let Some(w) = &self.window {
+                w.set_cursor(if want_pointer { CursorIcon::Pointer } else { CursorIcon::Default });
+            }
+        }
+        if changed {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn compute_current_hovered_url(&self) -> Option<super::hovered_url::HoveredUrl> {
+        if !self.url_open_modifier_held() {
+            return None;
+        }
+        let r = self.renderer.as_ref()?;
+        let (row, col) = r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)?;
+        // OSC 8 has its own affordance — don't double up.
+        if self.osc8_uri_at(row, col).is_some() {
+            return None;
+        }
+        let row_text = self.focused_pane_row_text(row)?;
+        super::hovered_url::hovered_from_row(&row_text, row, col)
+    }
     /// True iff the platform "open this in the browser" modifier is held.
     /// macOS: Cmd (super). Windows / Linux: Ctrl.
     pub(super) fn url_open_modifier_held(&self) -> bool {
