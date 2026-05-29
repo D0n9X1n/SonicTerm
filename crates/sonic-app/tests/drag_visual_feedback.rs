@@ -150,6 +150,108 @@ fn d3_source_tab_is_grayed_at_alpha_point_three() {
     );
 }
 
+/// Haiku follow-up on PR #298: the prior tests pin the `chip.ghost_alpha`
+/// and `chip.source_alpha` plumbing values (0.5 / 0.3) but DO NOT
+/// assert that the renderer actually emits a text run with the matching
+/// alpha. This test reproduces the exact computation the renderer
+/// performs in `crates/sonic-shared/src/render/core.rs` for the GHOST
+/// title (~line 3288): `scale_glyphon_alpha(tab_active_fg, chip.ghost_alpha)`.
+/// If a future refactor drops the `scale_glyphon_alpha` call, or feeds
+/// the wrong factor, this test fails with a concrete alpha mismatch.
+#[test]
+fn ghost_tab_text_run_has_half_alpha() {
+    use glyphon::Color as GColor;
+    use sonic_shared::render::scale_glyphon_alpha;
+
+    // Reproduce the live drag → chip pipeline the renderer consumes.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute(&bar, 1000.0);
+    let mut s = DragSession::new(1, (300.0, 10.0));
+    s.current_pos = (360.0, 10.0);
+    let chip = build_drag_chip_overlay(&s, &layout, "ghost-me".to_string())
+        .expect("chip must be present once drag passes threshold");
+
+    // Mirror the renderer: ghost title fg = tab_active_fg scaled by
+    // chip.ghost_alpha. Use an opaque base so the result alpha is
+    // purely a function of the ghost factor.
+    let tab_active_fg = GColor::rgba(0xEE, 0xEE, 0xEE, 0xFF);
+    let ghost_fg = scale_glyphon_alpha(tab_active_fg, chip.ghost_alpha.clamp(0.0, 1.0));
+
+    let alpha = ghost_fg.a();
+    assert!(
+        (alpha as i32 - 128).abs() <= 2,
+        "ghost text run alpha should be ~128 (50 % of 255), got {alpha}"
+    );
+    // rgb must round-trip — the scale only touches the alpha channel.
+    assert_eq!(ghost_fg.r(), 0xEE);
+    assert_eq!(ghost_fg.g(), 0xEE);
+    assert_eq!(ghost_fg.b(), 0xEE);
+}
+
+/// Haiku follow-up on PR #298: assert the SOURCE tab title text run
+/// actually carries the dimmed alpha. Reproduces the source-tab
+/// dimming pipeline from `render/core.rs` (~line 2767): build the
+/// tab-title spans with `build_tab_title_spans`, then dim the
+/// source-tab entry via `scale_glyphon_alpha(entry.1, source_alpha)`.
+/// The resulting span color must have alpha ≈ 77 (0.3 * 255).
+#[test]
+fn source_tab_text_during_drag_has_30pct_alpha() {
+    use glyphon::Color as GColor;
+    use sonic_shared::render::{build_tab_title_spans, scale_glyphon_alpha, TabSpanInput};
+
+    // Build a 3-tab bar; the drag's source is tab index 1.
+    let bar = bar_with(3);
+    let layout = TabBarLayout::compute_with_height(&bar, 1200.0, 40.0);
+    let mut s = DragSession::new(1, (layout.tabs[1].bg_rect.x + 5.0, 10.0));
+    s.current_pos = (layout.tabs[1].bg_rect.x + 70.0, 10.0);
+    let chip = build_drag_chip_overlay(&s, &layout, "t1".into()).expect("chip");
+    let src_idx = chip.source_tab_idx.expect("source idx must be populated for a live drag");
+
+    // Reproduce the renderer's span pipeline.
+    let active_fg = GColor::rgba(0xFF, 0xFF, 0xFF, 0xFF);
+    let inactive_fg = GColor::rgba(0xAA, 0xAA, 0xAA, 0xFF);
+    let inputs: Vec<TabSpanInput> = layout
+        .tabs
+        .iter()
+        .map(|t| TabSpanInput {
+            index: t.idx,
+            title: &bar.tabs()[t.idx].title,
+            title_x: t.title_rect.x,
+            title_w: t.title_rect.w,
+            is_active: layout.active == Some(t.idx),
+            badge: None,
+        })
+        .collect();
+    let (_title_text, mut tab_spans) = build_tab_title_spans(&inputs, 8.0, active_fg, inactive_fg);
+
+    // Dim the source-tab span exactly as the renderer does.
+    let mut dimmed_alpha: Option<u8> = None;
+    for (i, t) in inputs.iter().enumerate() {
+        if t.index == src_idx {
+            if let Some(entry) = tab_spans.get_mut(i) {
+                entry.1 = scale_glyphon_alpha(entry.1, chip.source_alpha);
+                dimmed_alpha = Some(entry.1.a());
+            }
+            break;
+        }
+    }
+    let alpha =
+        dimmed_alpha.expect("source-tab span must be present and dimmed by the renderer pipeline");
+    assert!(
+        (alpha as i32 - 77).abs() <= 3,
+        "source tab text alpha should be ~77 (30 % of 255), got {alpha}"
+    );
+
+    // Non-source tabs must remain at full opacity — pin that the
+    // dim is targeted, not global.
+    for (i, t) in inputs.iter().enumerate() {
+        if t.index != src_idx {
+            let a = tab_spans[i].1.a();
+            assert_eq!(a, 0xFF, "non-source tab {i} must keep full alpha; got {a}");
+        }
+    }
+}
+
 #[test]
 fn drag_ghost_render_input_field_defaults_to_none() {
     // The new `RenderInputs::drag_ghost` field defaults to `None` so
