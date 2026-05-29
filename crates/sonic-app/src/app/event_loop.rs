@@ -119,18 +119,21 @@ impl App {
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
 
-        let attrs = with_integrated_titlebar(
-            Window::default_attributes()
-                .with_title(format!("Sonic Terminal — {}", self.theme.name))
-                .with_inner_size(winit::dpi::LogicalSize::new(
-                    f32::from(cols) * 9.0
-                        + self.config.window.padding_left
-                        + self.config.window.padding_right,
-                    f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                        + self.config.window.padding_top
-                        + self.config.window.padding_bottom
-                        + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
-                )),
+        let attrs = super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title(format!("Sonic Terminal — {}", self.theme.name))
+                    .with_inner_size(winit::dpi::LogicalSize::new(
+                        f32::from(cols) * 9.0
+                            + self.config.window.padding_left
+                            + self.config.window.padding_right,
+                        f32::from(rows) * (self.config.font.size * self.config.font.line_height)
+                            + self.config.window.padding_top
+                            + self.config.window.padding_bottom
+                            + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
+                    )),
+            ),
+            self.config.appearance.backdrop,
         );
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // PANIC (above): `create_window` only fails when winit cannot reach

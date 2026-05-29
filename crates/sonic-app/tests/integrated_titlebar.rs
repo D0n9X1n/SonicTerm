@@ -40,6 +40,32 @@ fn integrated_titlebar_is_noop_off_macos() {
 }
 
 #[test]
+fn backdrop_transparency_tracks_opaque_vs_material_backdrop() {
+    use sonic_core::config::BackdropKind;
+    use winit::window::Window;
+
+    let opaque = sonic_app::app::with_backdrop_transparency(
+        Window::default_attributes(),
+        BackdropKind::Opaque,
+    );
+    let mica = sonic_app::app::with_backdrop_transparency(
+        Window::default_attributes(),
+        BackdropKind::Mica,
+    );
+
+    let opaque_dbg = format!("{opaque:?}");
+    let mica_dbg = format!("{mica:?}");
+    assert!(
+        opaque_dbg.contains("transparent: false"),
+        "opaque backdrop must keep the winit window opaque.\n{opaque_dbg}"
+    );
+    assert!(
+        mica_dbg.contains("transparent: true"),
+        "non-opaque backdrop must opt into winit window transparency.\n{mica_dbg}"
+    );
+}
+
+#[test]
 fn top_inset_helper_adds_titlebar_band() {
     use sonic_shared::render::tab_bar_top_inset_with_titlebar;
     // Tab bar visible: titlebar inset stacks above the bar.

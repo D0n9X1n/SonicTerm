@@ -73,10 +73,13 @@ impl App {
         }
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
-        let attrs = with_integrated_titlebar(
-            Window::default_attributes()
-                .with_title(format!("Sonic — {}", tab.title))
-                .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+        let attrs = super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title(format!("Sonic — {}", tab.title))
+                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+            ),
+            self.config.appearance.backdrop,
         );
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
