@@ -4177,7 +4177,7 @@ fn load_bundled_fonts(fs: &mut FontSystem) {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(fs, bytes);
                     n += 1;
                 }
             }

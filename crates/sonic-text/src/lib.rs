@@ -17,7 +17,7 @@ pub mod row_glyph_cache;
 pub mod shape;
 pub mod swash_rasterizer;
 
-use cosmic_text::{Attrs, Family};
+use cosmic_text::{Attrs, Family, FontSystem};
 
 /// Single source of truth for the [`Attrs`] used by every text-rendering
 /// site (terminal grid, tab titles, command palette, search status bar,
@@ -28,6 +28,45 @@ use cosmic_text::{Attrs, Family};
 #[must_use]
 pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
     Attrs::new().family(Family::Name(family))
+}
+
+/// Load a TTF/OTF payload into `font_system`, correcting metadata for bundled
+/// Sonic fonts whose OS/2 italic bit marks every generated face as Italic.
+///
+/// The override is intentionally narrow: only the Rec Mono St.Helens family we
+/// ship is patched, and the desired style is inferred from its PostScript name.
+pub fn load_font_data_with_sonic_overrides(font_system: &mut FontSystem, bytes: Vec<u8>) {
+    let ids =
+        font_system.db_mut().load_font_source(fontdb::Source::Binary(std::sync::Arc::new(bytes)));
+    let fixes: Vec<(fontdb::ID, fontdb::Style)> = ids
+        .iter()
+        .filter_map(|id| {
+            let face = font_system.db().face(*id)?;
+            let style = sonic_bundled_font_style_override(face)?;
+            Some((*id, style))
+        })
+        .collect();
+
+    for (id, style) in fixes {
+        let Some(face) = font_system.db().face(id).cloned() else { continue };
+        let mut fixed = fontdb::FaceInfo { style, ..face };
+        font_system.db_mut().remove_face(id);
+        fixed.id = fontdb::ID::dummy();
+        font_system.db_mut().push_face_info(fixed);
+    }
+}
+
+fn sonic_bundled_font_style_override(face: &fontdb::FaceInfo) -> Option<fontdb::Style> {
+    let family_match = face.families.iter().any(|(name, _)| name == "Rec Mono St.Helens");
+    if !family_match {
+        return None;
+    }
+
+    match face.post_script_name.as_str() {
+        "RecMonoSt.Helens" | "RecMonoSt.Helens-Bold" => Some(fontdb::Style::Normal),
+        "RecMonoSt.Helens-Italic" | "RecMonoSt.Helens-BoldItalic" => Some(fontdb::Style::Italic),
+        _ => None,
+    }
 }
 
 /// One drawable glyph in NDC space with its atlas UV rect and color.
