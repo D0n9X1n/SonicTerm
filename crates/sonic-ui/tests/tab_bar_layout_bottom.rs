@@ -30,7 +30,7 @@ fn compute_top(bar: &TabBar, font_size: f32) -> TabBarLayout {
 fn compute_bottom(bar: &TabBar, font_size: f32) -> TabBarLayout {
     let bar_h = tab_bar_height(font_size);
     let y = (WIN_H - bar_h).max(0.0);
-    TabBarLayout::compute_with_height(bar, WIN_W, bar_h).with_top_offset(y)
+    TabBarLayout::compute_at_y(bar, WIN_W, bar_h, y)
 }
 
 #[test]

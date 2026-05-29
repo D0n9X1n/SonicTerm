@@ -93,6 +93,27 @@ fn drag_last_tab_all_the_way_left_reorders_to_c_a_b_with_active_following() {
 }
 
 #[test]
+fn drag_tab0_past_tab2_reorders_to_b_c_a() {
+    let mut bar = three_tab_bar();
+    let layout = TabBarLayout::compute(&bar, 800.0);
+
+    let press_x = layout.tabs[0].bg.x + layout.tabs[0].bg.w / 2.0;
+    let past_tab2 = layout.tabs[2].bg.x + layout.tabs[2].bg.w + 8.0;
+    let mut s = DragSession::new(0, (press_x, 10.0));
+    s.current_pos = (past_tab2, 10.0);
+
+    let action: DragAction<&str> = compute_action(&s, None, &layout);
+    assert_eq!(action, DragAction::ReorderTab { from: 0, to: 2 });
+
+    if let DragAction::ReorderTab { from, to } = action {
+        bar.reorder(from, to);
+    }
+    let titles: Vec<&str> = bar.tabs().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, vec!["B", "C", "A"]);
+    assert_eq!(bar.active_index(), 2, "active tab must follow its tab past tab 2");
+}
+
+#[test]
 fn drag_past_tear_out_threshold_does_not_reorder() {
     // Same press, but the cursor leaves the bar vertically past the
     // tear-out hysteresis. Within-bar reorder must NOT fire; the

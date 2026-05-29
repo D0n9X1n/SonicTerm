@@ -276,8 +276,16 @@ impl TabBarLayout {
     /// renderer so the painted bar and the hit-tested bar always agree on
     /// height when the user's font size differs from the default.
     pub fn compute_with_height(bar: &TabBar, window_width: f32, bar_height: f32) -> Self {
+        Self::compute_at_y(bar, window_width, bar_height, 0.0)
+    }
+
+    /// Compute the tab bar layout anchored at an explicit `bar_y` position.
+    /// The bottom-bar renderer passes `window_h - bar_h` so the strip, active
+    /// indicator, close buttons, and `+` button all share bottom coordinates.
+    pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
         let bar_h = bar_height.max(1.0);
-        let bar_rect = Rect { x: 0.0, y: 0.0, w: window_width.max(0.0), h: bar_h };
+        let bar_y = bar_y.max(0.0);
+        let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
 
         // Browser-style `+` button: a 28x28 square hit target floated at
         // the right edge of the bar, vertically centered. The hit region
@@ -293,7 +301,7 @@ impl TabBarLayout {
         let nt_h = NEW_TAB_BUTTON_HEIGHT.min(bar_h);
         let right_reserved = caption_strip_reserved_width();
         let nt_x = (window_width - nt_w - BAR_LEFT_PAD - right_reserved).max(0.0);
-        let nt_y = ((bar_h - nt_h) * 0.5).max(0.0);
+        let nt_y = bar_y + ((bar_h - nt_h) * 0.5).max(0.0);
         let new_tab = Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h };
 
         let n = bar.len();
@@ -323,7 +331,7 @@ impl TabBarLayout {
         // titles instead of staying pinned to the old narrow cap.
         let per_tab = raw.min(TAB_MAX_WIDTH);
 
-        let bg_y = TAB_VERT_INSET;
+        let bg_y = bar_y + TAB_VERT_INSET;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET).max(1.0);
         let mut x = BAR_LEFT_PAD;
         for index in 0..n {

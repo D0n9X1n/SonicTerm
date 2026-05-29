@@ -136,7 +136,10 @@ use crate::{
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
-    quad::{px_to_ndc, QuadInstance, QuadPipeline},
+    quad::{
+        push_mask_icon_quads, px_to_ndc, MaskIconParams, QuadInstance, QuadPipeline, ICON_CLOSE_8,
+        ICON_PLUS_8,
+    },
     search::SearchState,
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
@@ -406,12 +409,6 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
-    /// Where the tab bar is rendered relative to the inner content area.
-    /// Sourced from [`sonic_cfg::config::Config::tab_bar_position`].
-    /// Affects [`Self::top_inset`] / [`Self::bottom_inset`] and the
-    /// `y` coordinate at which the bar layout is anchored — see
-    /// [`Self::tab_bar_y_offset`].
-    tab_bar_position: sonic_core::config::TabBarPosition,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Non-zero on macOS when the window uses
     /// `with_fullsize_content_view(true)` — without this the tab bar
@@ -831,7 +828,6 @@ impl GpuRenderer {
             last_frame_key: None,
             skipped_frames: 0,
             tab_bar_visible: true,
-            tab_bar_position: sonic_core::config::TabBarPosition::default(),
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
@@ -890,26 +886,16 @@ impl GpuRenderer {
     }
 
     /// Top inset reserved above the grid: OS titlebar band (when active)
-    /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]
-    /// AND the bar position is `Top`). When the bar position is `Bottom`,
-    /// the bar height is reserved via [`Self::bottom_inset`] instead.
+    /// plus top window padding. The tab bar is always bottom-pinned, so
+    /// its height is reserved via [`Self::bottom_inset`] instead of here.
     pub fn top_inset(&self) -> f32 {
-        let bar_at_top = matches!(self.tab_bar_position, sonic_core::config::TabBarPosition::Top);
-        let bar = if self.tab_bar_visible && bar_at_top {
-            self.tab_bar_logical_height() + self.padding_top
-        } else {
-            self.padding_top
-        };
-        self.titlebar_inset + bar
+        self.titlebar_inset + self.padding_top
     }
 
-    /// Bottom inset reserved below the grid: tab bar strip (when shown
-    /// AND positioned at the bottom). Returns 0 when the bar is hidden
-    /// or pinned to the top.
+    /// Bottom inset reserved below the grid for the bottom-pinned tab bar.
+    /// Returns 0 when the bar is hidden.
     pub fn bottom_inset(&self) -> f32 {
-        let bar_at_bottom =
-            matches!(self.tab_bar_position, sonic_core::config::TabBarPosition::Bottom);
-        if self.tab_bar_visible && bar_at_bottom {
+        if self.tab_bar_visible {
             self.tab_bar_logical_height()
         } else {
             0.0
@@ -917,36 +903,11 @@ impl GpuRenderer {
     }
 
     /// Y offset (in logical px) at which the tab bar layout should be
-    /// anchored. When the bar is at the top this is `titlebar_inset`;
-    /// when at the bottom this is `window_height - bar_h` so the bar
-    /// hugs the bottom edge of the window. Callers pass this into
-    /// [`TabBarLayout::with_top_offset`] in place of the raw titlebar
-    /// inset.
+    /// anchored. The tab bar is always pinned to the bottom of the window.
+    /// Callers pass this into [`TabBarLayout::with_top_offset`].
     pub fn tab_bar_y_offset(&self) -> f32 {
-        match self.tab_bar_position {
-            sonic_core::config::TabBarPosition::Top => self.titlebar_inset,
-            sonic_core::config::TabBarPosition::Bottom => {
-                let logical_h = self.config.height as f32 / self.scale_factor;
-                (logical_h - self.tab_bar_logical_height()).max(0.0)
-            }
-        }
-    }
-
-    /// Current tab bar position (top or bottom of window).
-    pub fn tab_bar_position(&self) -> sonic_core::config::TabBarPosition {
-        self.tab_bar_position
-    }
-
-    /// Set the tab bar position. Returns `true` if the position
-    /// actually changed (so callers can decide whether to recompute
-    /// grid dims / invalidate caches).
-    pub fn set_tab_bar_position(&mut self, pos: sonic_core::config::TabBarPosition) -> bool {
-        if self.tab_bar_position == pos {
-            return false;
-        }
-        self.tab_bar_position = pos;
-        self.last_frame_key = None;
-        true
+        let logical_h = self.config.height as f32 / self.scale_factor;
+        (logical_h - self.tab_bar_logical_height()).max(0.0)
     }
 
     /// Logical-pixel height of the tab bar for the renderer's current font
@@ -2939,21 +2900,20 @@ impl GpuRenderer {
                     let inset = (t.close_x_rect.w - 8.0) * 0.5;
                     let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
                     let thick = 1.5_f32;
-                    // Diagonal × built from a stair-step of small squares
-                    // along both diagonals (the wgpu quad pipeline has no
-                    // rotation; PR #117 emitted a horizontal+vertical pair
-                    // which read as a `+`, not a close icon — fixed here).
-                    build_close_x_quads(
-                        CloseXQuadParams {
+                    // SVG-source close icon, represented at render time as
+                    // an alpha mask so chrome never depends on font fallback.
+                    push_mask_icon_quads(
+                        &mut quads,
+                        MaskIconParams {
+                            mask: ICON_CLOSE_8,
                             x: cx + inset,
                             y: cy + inset,
-                            glyph,
-                            thick,
+                            size: glyph,
+                            min_cell: thick,
                             color: close_color,
                             sw,
                             sh,
                         },
-                        &mut quads,
                     );
                 }
                 // Phase D D3 (Epic #289): if this tab is the source of
@@ -4601,76 +4561,20 @@ pub fn build_new_tab_button_quads(
         });
     }
     let plus_color = if hover { colors.primary } else { colors.secondary };
-    let plus_thick = 2.0_f32;
-    let plus_len = 12.0_f32;
-    let pcx = nt.x + nt.w / 2.0;
-    let pcy = nt.y + nt.h / 2.0;
-    out.push(QuadInstance {
-        rect: px_to_ndc(pcx - plus_len / 2.0, pcy - plus_thick / 2.0, plus_len, plus_thick, sw, sh),
-        color: plus_color,
-        ..Default::default()
-    });
-    out.push(QuadInstance {
-        rect: px_to_ndc(pcx - plus_thick / 2.0, pcy - plus_len / 2.0, plus_thick, plus_len, sw, sh),
-        color: plus_color,
-        ..Default::default()
-    });
-}
-
-/// Emit the diagonal × glyph for a tab's close button.
-///
-/// Parameters for [`build_close_x_quads`]. Grouping these in a struct
-/// avoids the 8-positional-argument footgun where adjacent `f32`s could be
-/// swapped silently. All units are physical pixels except `color` (linear
-/// RGBA) and `sw`/`sh` (surface dimensions used by `px_to_ndc`).
-#[derive(Clone, Copy)]
-pub struct CloseXQuadParams {
-    /// Top-left x of the glyph's bounding box, in physical px.
-    pub x: f32,
-    /// Top-left y of the glyph's bounding box, in physical px.
-    pub y: f32,
-    /// Side length of the (square) glyph bounding box, in physical px.
-    pub glyph: f32,
-    /// Stroke thickness in physical px.
-    pub thick: f32,
-    /// Linear-space RGBA colour for every emitted quad.
-    pub color: [f32; 4],
-    /// Surface width in physical px (passed through to `px_to_ndc`).
-    pub sw: f32,
-    /// Surface height in physical px (passed through to `px_to_ndc`).
-    pub sh: f32,
-}
-
-/// Push the quads that draw a small × close-button glyph into `out`.
-///
-/// See [`CloseXQuadParams`] for the geometry. Pushes ~`ceil(glyph/thick)*2`
-/// axis-aligned squares stair-stepped along the ╲ and ╱ diagonals; every
-/// emitted quad sits strictly inside `[x, x+glyph] × [y, y+glyph]`.
-///
-/// The wgpu quad pipeline does not support rotation, and PR #117 emitted a
-/// horizontal+vertical pair that read as `+` instead of `×`. Stair-stepping
-/// a small SDF-free square per step is the simplest and least-invasive fix;
-/// visually indistinguishable from a rotated line at 14×14 px.
-pub fn build_close_x_quads(params: CloseXQuadParams, out: &mut Vec<QuadInstance>) {
-    let CloseXQuadParams { x, y, glyph, thick, color, sw, sh } = params;
-    let steps = ((glyph / thick).ceil() as usize).max(2);
-    let dot = thick;
-    for s in 0..steps {
-        let t_frac = (s as f32) / ((steps - 1) as f32);
-        let along = t_frac * (glyph - dot);
-        // ╲ diagonal: top-left → bottom-right
-        out.push(QuadInstance {
-            rect: px_to_ndc(x + along, y + along, dot, dot, sw, sh),
-            color,
-            ..Default::default()
-        });
-        // ╱ diagonal: top-right → bottom-left
-        out.push(QuadInstance {
-            rect: px_to_ndc(x + (glyph - dot - along), y + along, dot, dot, sw, sh),
-            color,
-            ..Default::default()
-        });
-    }
+    let plus_size = 12.0_f32;
+    push_mask_icon_quads(
+        out,
+        MaskIconParams {
+            mask: ICON_PLUS_8,
+            x: nt.x + (nt.w - plus_size) * 0.5,
+            y: nt.y + (nt.h - plus_size) * 0.5,
+            size: plus_size,
+            min_cell: 1.0,
+            color: plus_color,
+            sw,
+            sh,
+        },
+    );
 }
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink

@@ -20,20 +20,19 @@ fn new_tab_button_renders_rounded_bg_on_hover() {
     let mut quads = Vec::new();
     build_new_tab_button_quads(nt, true, colors(), 1000.0, 36.0, &mut quads);
 
-    // Three quads: rounded BG + two plus-stroke quads.
-    assert_eq!(quads.len(), 3, "hover should emit BG + 2 plus quads");
+    // Rounded BG + SVG-mask plus quads.
+    assert!(quads.len() > 3, "hover should emit BG + mask plus quads");
 
     let bg = &quads[0];
     assert_eq!(bg.color, HOVER_BG, "first quad must be the hover BG color");
     assert!((bg.radius_px - 8.0).abs() < 1e-6, "BG corner radius must be 8 px");
     assert_eq!(bg.size_px, [28.0, 28.0], "BG size_px must match the 28x28 hit rect");
 
-    // Plus strokes pick up TEXT_PRIMARY on hover.
-    assert_eq!(quads[1].color, PRIMARY);
-    assert_eq!(quads[2].color, PRIMARY);
-    // And the plus strokes are sharp rects (no SDF).
-    assert_eq!(quads[1].radius_px, 0.0);
-    assert_eq!(quads[2].radius_px, 0.0);
+    // Plus mask quads pick up TEXT_PRIMARY on hover.
+    for q in &quads[1..] {
+        assert_eq!(q.color, PRIMARY);
+        assert_eq!(q.radius_px, 0.0);
+    }
 }
 
 #[test]
@@ -42,12 +41,11 @@ fn new_tab_button_no_bg_when_not_hovering() {
     let mut quads = Vec::new();
     build_new_tab_button_quads(nt, false, colors(), 1000.0, 36.0, &mut quads);
 
-    // Just the two plus strokes — no BG.
-    assert_eq!(quads.len(), 2, "idle state emits only the 2 plus quads");
-    // Idle glyph uses TEXT_SECONDARY.
-    assert_eq!(quads[0].color, SECONDARY);
-    assert_eq!(quads[1].color, SECONDARY);
-    // No SDF rounded corners on the plus strokes.
-    assert_eq!(quads[0].radius_px, 0.0);
-    assert_eq!(quads[1].radius_px, 0.0);
+    // Just the SVG-mask plus quads — no BG.
+    assert!(quads.len() > 2, "idle state emits only mask plus quads");
+    // Idle glyph uses TEXT_SECONDARY and no SDF rounded corners.
+    for q in &quads {
+        assert_eq!(q.color, SECONDARY);
+        assert_eq!(q.radius_px, 0.0);
+    }
 }

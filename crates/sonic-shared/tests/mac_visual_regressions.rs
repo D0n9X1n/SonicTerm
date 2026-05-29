@@ -13,8 +13,7 @@ use sonic_shared::command_palette::CommandPalette;
 use sonic_shared::overlays::{PaletteLayout, PALETTE_ROW_HEIGHT};
 use sonic_shared::prefs::PrefsState;
 use sonic_shared::prefs_renderer::build_draw_list;
-use sonic_shared::quad::QuadInstance;
-use sonic_shared::render::{build_close_x_quads, CloseXQuadParams};
+use sonic_shared::quad::{push_mask_icon_quads, MaskIconParams, QuadInstance, ICON_CLOSE_8};
 use std::path::PathBuf;
 
 fn test_theme() -> Theme {
@@ -174,27 +173,28 @@ fn palette_row_height_matches_layout_stride() {
 
 /// Bug 5 — tab close × button rendered as `+`, not `×`.
 ///
-/// `build_close_x_quads` stair-steps small squares along both
-/// diagonals. The defining property: at least one emitted quad must
-/// sit *off-center* on both axes (a `+` would emit only axis-aligned
-/// horizontal + vertical bars centered on the glyph midline).
+/// Chrome icons now come from SVG-backed alpha masks. The defining close-icon
+/// property: at least one emitted quad must sit *off-center* on both axes (a
+/// `+` would emit only axis-aligned horizontal + vertical bars centered on the
+/// glyph midline).
 #[test]
 fn tab_close_button_renders_as_x_not_plus() {
     let mut quads: Vec<QuadInstance> = Vec::new();
-    // 8px glyph at (10, 20), 1.5px stroke, on a 200x200 surface.
-    build_close_x_quads(
-        CloseXQuadParams {
+    // 8px glyph at (10, 20), on a 200x200 surface.
+    push_mask_icon_quads(
+        &mut quads,
+        MaskIconParams {
+            mask: ICON_CLOSE_8,
             x: 10.0,
             y: 20.0,
-            glyph: 8.0,
-            thick: 1.5,
+            size: 8.0,
+            min_cell: 1.0,
             color: [1.0, 1.0, 1.0, 1.0],
             sw: 200.0,
             sh: 200.0,
         },
-        &mut quads,
     );
-    assert!(quads.len() >= 4, "× must emit ≥4 step quads (got {})", quads.len());
+    assert!(quads.len() >= 4, "× must emit ≥4 mask quads (got {})", quads.len());
 
     // For a `×` glyph, NO quad should sit exactly on the glyph's
     // horizontal midline AND have width == glyph (the old `+` path
@@ -213,20 +213,19 @@ fn tab_close_button_renders_as_x_not_plus() {
     // Top-left-most quad and top-right-most quad on the first row
     // must NOT share a quad (else the top is a single horizontal bar
     // → that's a `+`). Equivalent check: at the minimum y, there
-    // should be two well-separated x values (one near 10.0, one near
-    // 10.0 + glyph - dot ≈ 16.5).
+    // should be two well-separated x values.
     let min_y = quads.iter().map(|q| q.rect[1]).fold(f32::INFINITY, f32::min);
     let xs_at_top: Vec<f32> =
         quads.iter().filter(|q| (q.rect[1] - min_y).abs() < 1e-4).map(|q| q.rect[0]).collect();
-    assert_eq!(
-        xs_at_top.len(),
-        2,
-        "top row of `×` must contain exactly 2 quads (one per diagonal), got {}: {:?}",
+    assert!(
+        xs_at_top.len() >= 2,
+        "top row of `×` must contain diagonal mask quads, got {}: {:?}",
         xs_at_top.len(),
         xs_at_top
     );
-    let dx = (xs_at_top[0] - xs_at_top[1]).abs();
-    assert!(dx > 0.05, "the two top-row quads must be separated on x (got dx={:.4} in NDC)", dx);
+    let min_x = xs_at_top.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = xs_at_top.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    assert!(max_x - min_x > 0.05, "top row mask quads must be well-separated: {xs_at_top:?}");
 }
 
 /// Bug 6 — Ctrl+Shift+P palette has noticeable open latency.

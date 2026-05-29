@@ -33,10 +33,10 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar_for, wrap_paste, App, PaneState, TabState, UserEvent,
+    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
-use crate::app::integrated_titlebar_inset_for;
+use crate::app::integrated_titlebar_inset;
 use crate::app::window_geom;
 use sonic_ui::prefs::PrefsHit;
 
@@ -71,11 +71,10 @@ impl App {
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
         let attrs = super::with_backdrop_transparency(
-            with_integrated_titlebar_for(
+            with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("Sonic — {}", tab.title))
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
-                self.config.tab_bar_position,
             ),
             self.config.appearance.backdrop,
         );
@@ -129,8 +128,7 @@ impl App {
         // window doesn't suddenly revert to default block/blink.
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(integrated_titlebar_inset_for(self.config.tab_bar_position));
-        renderer.set_tab_bar_position(self.config.tab_bar_position);
+        renderer.set_titlebar_inset(integrated_titlebar_inset());
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
         // On macOS the freshly created window often reports
@@ -429,11 +427,10 @@ impl App {
         let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else { return false };
 
         let attrs = super::with_backdrop_transparency(
-            with_integrated_titlebar_for(
+            with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("Sonic — {}", tab.title))
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
-                self.config.tab_bar_position,
             ),
             self.config.appearance.backdrop,
         );
@@ -477,8 +474,7 @@ impl App {
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(integrated_titlebar_inset_for(self.config.tab_bar_position));
-        renderer.set_tab_bar_position(self.config.tab_bar_position);
+        renderer.set_titlebar_inset(integrated_titlebar_inset());
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window.scale_factor() as f32;
         renderer.force_rebuild_for_scale(real_sf);
