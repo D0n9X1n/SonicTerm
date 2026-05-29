@@ -35,6 +35,8 @@ mod cli;
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
+#[cfg(target_os = "windows")]
+mod tab_drag_os;
 
 fn main() -> Result<()> {
     set_process_dpi_awareness();

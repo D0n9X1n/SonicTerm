@@ -98,6 +98,12 @@ impl App {
             UserEvent::ConfigChanged => self.poll_config_reload(),
             UserEvent::MenuAction => self.drain_menubar_actions(el),
             UserEvent::OsDrag => self.drain_os_drag(),
+            UserEvent::DragMoved => {
+                let _ = self.handle_os_drag_moved();
+            }
+            UserEvent::DragEnded => {
+                let _ = self.handle_os_drag_ended();
+            }
         }
         // Any path above that ran an action may have set
         // `pending_prefs_open` — make sure the prefs window actually

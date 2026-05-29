@@ -438,6 +438,17 @@ pub enum UserEvent {
     /// [`Self::MenuAction`] so a noisy drag stream does not flood the
     /// menubar drain path.
     OsDrag,
+    /// Phase C2: an OS-level drag *session* (NSDraggingSession on
+    /// macOS, OLE DoDragDrop on Windows) reported a cursor move. The
+    /// actual position is in the [`os_drag::PendingDragOutcome`]
+    /// mailbox shared with the backend.
+    DragMoved,
+    /// Phase C2: an OS-level drag *session* terminated (drop or
+    /// cancel). The outcome (drop target, tear-out, or cancel) is in
+    /// the [`os_drag::PendingDragOutcome`] mailbox; the dispatcher
+    /// inspects it and routes to `App::transfer_tab` or
+    /// `App::cancel_drag_session` accordingly.
+    DragEnded,
 }
 
 /// Same as [`run`] but installs a platform-specific OS-drag sink.
@@ -567,6 +578,7 @@ pub mod invariants;
 mod key_encoding;
 mod keymap_dispatch;
 mod misc;
+pub mod os_drag;
 mod overlays;
 mod prefs_window;
 mod search_handle;
@@ -805,6 +817,22 @@ pub struct App {
     /// and KILLS the local tab instead of spawning a child window.
     /// Installed by the platform bin via [`run_with_os_drag`].
     pub(super) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
+    /// Phase C2 OS-level drag *session* backend. Distinct from
+    /// `os_drag_sink` (cross-process wire format): this drives the
+    /// NSDraggingSession / OLE DoDragDrop call that captures the
+    /// cursor across window boundaries for same-process tab drags.
+    /// Installed by the platform bin (`sonic-mac` / `sonic-windows`)
+    /// at startup. `None` in tests + on platforms without an impl.
+    pub(super) os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
+    /// Shared mailbox the [`os_drag::OsTabDragBackend`] writes pending
+    /// drag outcomes into. Drained by `do_user_event` on every
+    /// `UserEvent::DragMoved` / `DragEnded` wake.
+    pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
+    /// Phase C2: tracks the source-side bookkeeping while an OS drag
+    /// is in flight. `Some((source_window, source_tab_idx))` from
+    /// `begin_session` until `UserEvent::DragEnded` is drained; back
+    /// to `None` once the dispatcher routes the outcome.
+    pub(super) os_drag_source: Option<(WindowId, usize)>,
     /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
     /// Tab Bar action has hidden the tab bar chrome. Defaults to
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
@@ -948,6 +976,9 @@ impl App {
             last_seen_burst_gen: 0,
             i18n,
             os_drag_sink: None,
+            os_drag_backend: None,
+            os_drag_pending: Arc::new(os_drag::PendingDragOutcome::default()),
+            os_drag_source: None,
             tab_bar_visible: true,
             broadcast: BroadcastState::Off,
             on_resumed: None,
@@ -1632,6 +1663,146 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_os_drag_sink(&mut self, sink: Arc<dyn crate::os_drag::OsDragSink>) {
         self.os_drag_sink = Some(sink);
+    }
+
+    /// Phase C2: install the platform OS-level drag-session backend.
+    /// `sonic-mac` calls this with an NSDraggingSession impl,
+    /// `sonic-windows` with an OLE DoDragDrop impl. Tests use it via
+    /// [`Self::__test_set_os_drag_backend`] to inject a mock.
+    #[doc(hidden)]
+    pub fn set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
+        self.os_drag_backend = Some(backend);
+    }
+
+    /// Phase C2 test-only: install a mock [`os_drag::OsTabDragBackend`].
+    #[doc(hidden)]
+    pub fn __test_set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
+        self.os_drag_backend = Some(backend);
+    }
+
+    /// Phase C2 test-only: hand out the shared pending-outcome mailbox
+    /// so tests can drive [`Self::handle_os_drag_ended`] without
+    /// constructing a real [`winit::event_loop::EventLoopProxy`].
+    #[doc(hidden)]
+    pub fn __test_os_drag_pending(&self) -> Arc<os_drag::PendingDragOutcome> {
+        self.os_drag_pending.clone()
+    }
+
+    /// Phase C2 test-only: seed the in-flight source bookkeeping that
+    /// [`Self::begin_os_tab_drag`] normally sets. Used by tests that
+    /// drive the dispatcher directly without first calling
+    /// `begin_os_tab_drag`.
+    #[doc(hidden)]
+    pub fn __test_set_os_drag_source(&mut self, source: Option<(WindowId, usize)>) {
+        self.os_drag_source = source;
+    }
+
+    /// Phase C2: build an [`os_drag::AppHandle`] tied to the App's
+    /// event-loop proxy and the shared pending-outcome mailbox. The
+    /// returned handle is what gets passed to
+    /// [`os_drag::OsTabDragBackend::begin_session`] so the backend can
+    /// post `DragMoved` / `DragEnded` events back to the main loop.
+    ///
+    /// Returns `None` when no event-loop proxy has been wired (test
+    /// harnesses that construct `App` via plain `new` without a
+    /// proxy). In that case the OS drag is not startable, which the
+    /// caller treats as "fall back to the existing within-process
+    /// tear_out path".
+    pub fn os_drag_app_handle(&self) -> Option<os_drag::AppHandle> {
+        self.event_loop_proxy
+            .clone()
+            .map(|p| os_drag::AppHandle::with_pending(p, self.os_drag_pending.clone()))
+    }
+
+    /// Phase C2: begin an OS-level tab drag session via the installed
+    /// backend. Returns `true` when the backend was invoked, `false`
+    /// when no backend is installed or no event-loop proxy exists (in
+    /// which case the caller falls back to the existing tear_out path).
+    ///
+    /// Records `(source_window, source_tab_idx)` so the
+    /// `UserEvent::DragEnded` dispatcher knows where the gesture
+    /// originated when routing the outcome.
+    pub fn begin_os_tab_drag(
+        &mut self,
+        source_window: WindowId,
+        source_tab_idx: usize,
+        drag_image_png: Vec<u8>,
+    ) -> bool {
+        let Some(handle) = self.os_drag_app_handle() else { return false };
+        let Some(backend) = self.os_drag_backend.as_mut() else { return false };
+        backend.begin_session(handle, source_window, source_tab_idx, drag_image_png);
+        self.os_drag_source = Some((source_window, source_tab_idx));
+        true
+    }
+
+    /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.
+    /// Drains the mailbox; currently a no-op beyond logging — the
+    /// drag-chip overlay is rendered from `tab_drag` state, not from
+    /// the OS cursor stream. Reserved for future "highlight drop
+    /// target in destination bar" feedback.
+    pub fn handle_os_drag_moved(&mut self) -> Option<(i32, i32)> {
+        let pos = self.os_drag_pending.take_moved();
+        if let Some(p) = pos {
+            tracing::trace!(?p, "os_drag_session: cursor moved");
+        }
+        pos
+    }
+
+    /// Phase C2: dispatcher entry point for `UserEvent::DragEnded`.
+    /// Drains the mailbox outcome and routes it: `Drop` →
+    /// [`Self::transfer_tab`]; `Cancelled` → [`Self::cancel_drag_session`];
+    /// `TearOut` is left for the existing tear_out path (this dispatcher
+    /// just clears the in-flight bookkeeping). Returns the outcome that
+    /// was processed for tests to assert on.
+    pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
+        let outcome = self.os_drag_pending.take_ended()?;
+        let source = self.os_drag_source.take();
+        match outcome {
+            os_drag::DragOutcome::Drop { target_window, target_slot } => {
+                let Some((src_win, src_idx)) = source else {
+                    tracing::warn!(
+                        "os_drag_session: Drop arrived with no recorded source — cancelling"
+                    );
+                    self.cancel_drag_session();
+                    return Some(outcome);
+                };
+                // `source` / `target` are `Option<WindowId>`, where
+                // `None` means "the App's main window". In Phase C2 the
+                // backend always reports a concrete WindowId on the
+                // source side, but the *target* may legitimately be the
+                // main window. Detect that by comparing against the
+                // App's `window` field.
+                let src_opt = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.id())
+                    .filter(|&id| id == src_win)
+                    .map_or(Some(src_win), |_| None);
+                let tgt_opt = match target_window {
+                    Some(id) if self.window.as_ref().map(|w| w.id() == id).unwrap_or(false) => None,
+                    other => other,
+                };
+                if let Err(e) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
+                    tracing::warn!(?e, "os_drag_session: transfer_tab refused — cancelling");
+                    self.cancel_drag_session();
+                }
+            }
+            os_drag::DragOutcome::TearOut { drop_screen_pos } => {
+                tracing::debug!(
+                    ?drop_screen_pos,
+                    "os_drag_session: tear-out — existing path handles new-window spawn"
+                );
+                // The existing tear_out path is driven by within-process
+                // state machines; Phase C2 leaves window-spawn semantics
+                // unchanged. Clear residue so the next gesture starts
+                // fresh.
+                self.cancel_drag_session();
+            }
+            os_drag::DragOutcome::Cancelled => {
+                self.cancel_drag_session();
+            }
+        }
+        Some(outcome)
     }
 
     /// Test-only: drive the OS-drag handoff path with a forced "cursor

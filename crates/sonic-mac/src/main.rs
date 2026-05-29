@@ -9,6 +9,8 @@ use sonic_core::{config::Config, keymap::Keymap, theme::Theme};
 use sonic_mac::menubar;
 #[cfg(target_os = "macos")]
 mod os_drag_mac;
+#[cfg(target_os = "macos")]
+mod tab_drag_os;
 
 fn main() -> Result<()> {
     // Install panic hook BEFORE config load so a panic during load
