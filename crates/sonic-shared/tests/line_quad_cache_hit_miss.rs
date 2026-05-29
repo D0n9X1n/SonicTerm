@@ -9,7 +9,10 @@ use sonic_shared::render::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQu
 
 fn dummy_row(s: &str) -> Vec<Cell> {
     use sonic_core::grid::{CellFlags, Color};
-    s.chars().map(|c| Cell::plain(c, Color::default(), Color::default(), CellFlags::empty())).collect()
+
+    s.chars()
+        .map(|c| Cell::plain(c, Color::default(), Color::default(), CellFlags::empty()))
+        .collect()
 }
 
 fn dummy_quad(x: f32) -> QuadInstance {
