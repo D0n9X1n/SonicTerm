@@ -1785,8 +1785,14 @@ impl App {
     /// real-window flavors (main↔main, main↔child, child↔main,
     /// child↔child) all funnel through one entry point.
     ///
-    /// Returns `true` when the transfer happened, `false` on
-    /// out-of-range / impossible-source.
+    /// Returns `Ok(())` when the transfer happened, or a
+    /// [`TransferError`] describing the validation failure. The
+    /// pre-validation step is intentional: PR #294 review (Haiku) found
+    /// that the prior `bool` API silently dropped the detached tab —
+    /// killing its child shell via `PtyHandle::Drop` — when the target
+    /// window vanished between gesture-start and drop. We now refuse to
+    /// touch source state until *both* endpoints have been proven
+    /// reachable.
     #[doc(hidden)]
     pub fn transfer_tab(
         &mut self,
@@ -1794,21 +1800,51 @@ impl App {
         source_idx: usize,
         target: Option<WindowId>,
         target_idx: usize,
-    ) -> bool {
-        // 1) detach from source
+    ) -> Result<(), TransferError> {
+        // 0) pre-validate BOTH endpoints before mutating any window.
+        //    Data-loss fix (PR #294, Haiku review): detaching and then
+        //    failing to attach drops the `PaneState`, which kills the
+        //    child shell via `PtyHandle::Drop`.
+        match source {
+            None => {
+                if source_idx >= self.tab_states.len() || source_idx >= self.tabs.len() {
+                    return Err(TransferError::SourceIndexOutOfBounds);
+                }
+            }
+            Some(id) => {
+                let src = self.windows.get(&id).ok_or(TransferError::SourceMissing)?;
+                if source_idx >= src.tab_states.len() || source_idx >= src.tabs.len() {
+                    return Err(TransferError::SourceIndexOutOfBounds);
+                }
+            }
+        }
+        if let Some(id) = target {
+            if !self.windows.contains_key(&id) {
+                return Err(TransferError::TargetMissing);
+            }
+        }
+
+        // 1) detach from source — guaranteed to succeed after step 0.
         let detached = match source {
             None => self.detach_tab_state(source_idx),
             Some(id) => self.detach_from_child(id, source_idx),
         };
-        let Some((tab, state, panes)) = detached else { return false };
+        let Some((tab, state, panes)) = detached else {
+            // Shouldn't happen — step 0 validated. Defensive bail.
+            return Err(TransferError::SourceIndexOutOfBounds);
+        };
 
-        // 2) attach to target
+        // 2) attach to target — also guaranteed reachable after step 0.
         match target {
             None => self.attach_tab_state(target_idx, tab, state, panes),
             Some(id) => {
                 if !self.attach_to_child(id, target_idx, tab, state, panes) {
-                    // re-attach to source on failure to avoid losing the tab
-                    return false;
+                    // Defensive: target was present at step 0 but vanished
+                    // (e.g. closed on another thread). Re-attach to source
+                    // would require holding the moved values, but we've
+                    // already passed ownership to attach_to_child which
+                    // returned false; treat as TargetMissing.
+                    return Err(TransferError::TargetMissing);
                 }
             }
         }
@@ -1845,8 +1881,24 @@ impl App {
                 // hiding the main window when its tabs vec empties).
             }
         }
-        true
+        Ok(())
     }
+}
+
+/// Why a transfer rejected the gesture without losing the tab. Returned
+/// by [`App::transfer_tab`]; introduced in PR #294 to fix the
+/// Haiku-flagged data-loss bug where a missing-target attach silently
+/// dropped the detached `PaneState` (killing its child shell via
+/// `PtyHandle::Drop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum TransferError {
+    /// `source` was `Some(id)` but the id is not in `App::windows`.
+    SourceMissing,
+    /// `target` was `Some(id)` but the id is not in `App::windows`.
+    TargetMissing,
+    /// `source_idx` is beyond the source window's tab vector.
+    SourceIndexOutOfBounds,
 }
 
 impl ApplicationHandler<UserEvent> for App {

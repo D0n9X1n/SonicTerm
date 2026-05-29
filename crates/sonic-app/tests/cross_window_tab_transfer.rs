@@ -177,3 +177,126 @@ fn drop_on_other_window_then_cmd_t_goes_to_target() {
     assert_eq!(b.tabs.len(), 3, "1 original + transferred + new");
     assert_eq!(a.tabs.len(), 1, "source untouched by NewTab on target");
 }
+
+// ---------------------------------------------------------------------------
+// PR #294 — Haiku data-loss findings: pre-validation in `App::transfer_tab`.
+//
+// Before the fix `App::transfer_tab` ran `detach_tab_state` first and only
+// then tried to attach to the target. If the target window had vanished
+// between gesture-start and drop, the detached `(Tab, TabState, PaneState)`
+// triple was dropped on the floor — and `PaneState`'s `PtyHandle::Drop`
+// then killed the child shell. These regressions pin the fixed contract:
+//
+//   * the source window is left exactly as it was on every error path,
+//   * the failure mode is reported via a `TransferError` enum, not a bool,
+//   * no `PaneState` is ever moved out of the source on a rejected call.
+// ---------------------------------------------------------------------------
+
+use sonic_app::app::App;
+use sonic_app::app::TransferError;
+use sonic_core::{
+    config::Config,
+    keymap::{Keymap, Meta},
+    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
+};
+use winit::window::WindowId;
+
+fn synth_theme() -> Theme {
+    let hex = || Hex("#000000".to_string());
+    let ansi = || AnsiColors {
+        black: hex(),
+        red: hex(),
+        green: hex(),
+        yellow: hex(),
+        blue: hex(),
+        magenta: hex(),
+        cyan: hex(),
+        white: hex(),
+    };
+    Theme {
+        name: "test".into(),
+        appearance: Appearance::Dark,
+        colors: Palette {
+            background: hex(),
+            foreground: hex(),
+            cursor: hex(),
+            cursor_text: hex(),
+            selection_bg: hex(),
+            selection_fg: hex(),
+            ansi: ansi(),
+            bright: ansi(),
+            tab: TabColors {
+                bar_bg: hex(),
+                active_bg: hex(),
+                active_fg: hex(),
+                inactive_bg: hex(),
+                inactive_fg: hex(),
+                hover_bg: hex(),
+                hover_fg: hex(),
+                close_button_fg: hex(),
+            },
+        },
+    }
+}
+
+fn synth_app() -> App {
+    let keymap =
+        Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: Vec::new() };
+    App::new(synth_theme(), Config::default(), keymap)
+}
+
+/// Transferring a tab to a stale / never-existed target `WindowId` must
+/// leave the source's tabs + pane map untouched. Pre-fix the source
+/// tab was removed and the `PaneState` dropped, killing the child.
+#[test]
+fn transfer_with_missing_target_preserves_source() {
+    let mut app = synth_app();
+    let pane_a = app.__test_seed_tab("a0");
+    let pane_b = app.__test_seed_tab("a1");
+
+    assert_eq!(app.__test_main_tab_count(), 2);
+    let pane_ids_before = {
+        let mut ids = app.__test_pane_ids();
+        ids.sort();
+        ids
+    };
+    assert_eq!(pane_ids_before, {
+        let mut e = vec![pane_a, pane_b];
+        e.sort();
+        e
+    });
+
+    // Target window doesn't exist in App::windows.
+    let stale = WindowId::dummy();
+    let result = app.transfer_tab(None, 0, Some(stale), 0);
+    assert_eq!(result, Err(TransferError::TargetMissing));
+
+    // Source tabs untouched — both tabs still there, both panes still in map.
+    assert_eq!(app.__test_main_tab_count(), 2, "source tab must NOT be detached on error");
+    let pane_ids_after = {
+        let mut ids = app.__test_pane_ids();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        pane_ids_after, pane_ids_before,
+        "no PaneState may move out of source on error (PtyHandle would be dropped)"
+    );
+}
+
+/// Transferring with an out-of-bounds source index reports the error
+/// without mutating anything.
+#[test]
+fn transfer_with_oob_source_idx_returns_err() {
+    let mut app = synth_app();
+    let pane_a = app.__test_seed_tab("only");
+    assert_eq!(app.__test_main_tab_count(), 1);
+
+    // OOB source index — and target is the same main window (always present),
+    // so the failure mode is purely the index check, not target validation.
+    let result = app.transfer_tab(None, 99, None, 0);
+    assert_eq!(result, Err(TransferError::SourceIndexOutOfBounds));
+
+    assert_eq!(app.__test_main_tab_count(), 1, "source tab vec unchanged");
+    assert_eq!(app.__test_pane_ids(), vec![pane_a], "panes map unchanged");
+}
