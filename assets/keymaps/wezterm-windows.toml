@@ -12,7 +12,7 @@ keys = "ctrl+shift+t"
 action = "new_tab"
 
 [[binding]]
-keys = "ctrl+shift+?"
+keys = "ctrl+shift+/"
 action = "show_keymap_cheatsheet"
 
 [[binding]]

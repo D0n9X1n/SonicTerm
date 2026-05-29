@@ -24,3 +24,9 @@ fn broadcast_binding_keeps_all_real_modifiers() {
     let mods = ModifiersState::SUPER | ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert_eq!(shortcut("b", mods), "super+ctrl+shift+b");
 }
+
+#[test]
+fn windows_ctrl_shift_slash_uses_unshifted_key_name() {
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert_eq!(shortcut("/", mods), "ctrl+shift+/");
+}
