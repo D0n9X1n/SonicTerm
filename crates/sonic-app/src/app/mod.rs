@@ -2001,7 +2001,7 @@ impl App {
         let logical_w = inner_size.0 as f32 / sf;
         let layout =
             TabBarLayout::compute_with_height(&self.tabs, logical_w, r.tab_bar_logical_height())
-                .with_top_offset(r.titlebar_inset())
+                .with_top_offset(r.tab_bar_y_offset())
                 .with_visible(r.tab_bar_visible());
         let snap = os_drag::TabBarSnapshot::from_layout(
             Some(w.id()),
@@ -2037,7 +2037,7 @@ impl App {
             logical_w,
             child.renderer.tab_bar_logical_height(),
         )
-        .with_top_offset(child.renderer.titlebar_inset())
+        .with_top_offset(child.renderer.tab_bar_y_offset())
         .with_visible(child.renderer.tab_bar_visible());
         let snap =
             os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);

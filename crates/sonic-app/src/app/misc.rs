@@ -333,6 +333,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_bar_position(self.config.tab_bar_position);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window.scale_factor() as f32;
         renderer.force_rebuild_for_scale(real_sf);

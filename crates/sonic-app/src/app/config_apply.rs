@@ -229,6 +229,30 @@ impl App {
             );
         }
 
+        if new_cfg.tab_bar_position != self.config.tab_bar_position {
+            let pos = new_cfg.tab_bar_position;
+            let main_changed = if let Some(r) = self.renderer.as_mut() {
+                r.set_tab_bar_position(pos)
+            } else {
+                false
+            };
+            if main_changed {
+                let rects = self.compute_active_pane_rects();
+                if let Some(r) = self.renderer.as_ref() {
+                    let (cw, ch) = r.cell_size();
+                    resize_panes_to_rects(&self.panes, &rects, cw, ch);
+                }
+            }
+            for child in self.windows.values_mut() {
+                if child.renderer.set_tab_bar_position(pos) {
+                    let rects = App::compute_pane_rects_for(child);
+                    let (cw, ch) = child.renderer.cell_size();
+                    resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                }
+            }
+            tracing::info!("live-reload: tab_bar_position -> {}", pos.as_str());
+        }
+
         if (new_cfg.appearance.opacity - self.config.appearance.opacity).abs() > f32::EPSILON {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);

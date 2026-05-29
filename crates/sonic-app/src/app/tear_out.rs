@@ -129,6 +129,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_bar_position(self.config.tab_bar_position);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
         // On macOS the freshly created window often reports
@@ -244,7 +245,7 @@ impl App {
             let geom = window_geom(main);
             let width =
                 self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
-            let inset = self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0);
+            let inset = self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0);
             let bar_h = self
                 .renderer
                 .as_ref()
@@ -269,7 +270,7 @@ impl App {
                 bar_width,
                 c.renderer.tab_bar_logical_height(),
             )
-            .with_top_offset(c.renderer.titlebar_inset())
+            .with_top_offset(c.renderer.tab_bar_y_offset())
             .with_visible(c.renderer.tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
@@ -291,7 +292,7 @@ impl App {
                 bar_width,
                 c.renderer.tab_bar_logical_height(),
             )
-            .with_top_offset(c.renderer.titlebar_inset())
+            .with_top_offset(c.renderer.tab_bar_y_offset())
             .with_visible(c.renderer.tab_bar_visible());
             (*id, geom, layout)
         });
@@ -475,6 +476,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_bar_position(self.config.tab_bar_position);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window.scale_factor() as f32;
         renderer.force_rebuild_for_scale(real_sf);

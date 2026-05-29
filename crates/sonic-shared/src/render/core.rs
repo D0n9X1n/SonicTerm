@@ -406,6 +406,12 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
+    /// Where the tab bar is rendered relative to the inner content area.
+    /// Sourced from [`sonic_cfg::config::Config::tab_bar_position`].
+    /// Affects [`Self::top_inset`] / [`Self::bottom_inset`] and the
+    /// `y` coordinate at which the bar layout is anchored — see
+    /// [`Self::tab_bar_y_offset`].
+    tab_bar_position: sonic_core::config::TabBarPosition,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Non-zero on macOS when the window uses
     /// `with_fullsize_content_view(true)` — without this the tab bar
@@ -825,6 +831,7 @@ impl GpuRenderer {
             last_frame_key: None,
             skipped_frames: 0,
             tab_bar_visible: true,
+            tab_bar_position: sonic_core::config::TabBarPosition::default(),
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
@@ -883,14 +890,63 @@ impl GpuRenderer {
     }
 
     /// Top inset reserved above the grid: OS titlebar band (when active)
-    /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]).
+    /// plus the tab bar strip (when shown via [`Self::set_tab_bar_visible`]
+    /// AND the bar position is `Top`). When the bar position is `Bottom`,
+    /// the bar height is reserved via [`Self::bottom_inset`] instead.
     pub fn top_inset(&self) -> f32 {
-        let bar = if self.tab_bar_visible {
+        let bar_at_top = matches!(self.tab_bar_position, sonic_core::config::TabBarPosition::Top);
+        let bar = if self.tab_bar_visible && bar_at_top {
             self.tab_bar_logical_height() + self.padding_top
         } else {
             self.padding_top
         };
         self.titlebar_inset + bar
+    }
+
+    /// Bottom inset reserved below the grid: tab bar strip (when shown
+    /// AND positioned at the bottom). Returns 0 when the bar is hidden
+    /// or pinned to the top.
+    pub fn bottom_inset(&self) -> f32 {
+        let bar_at_bottom =
+            matches!(self.tab_bar_position, sonic_core::config::TabBarPosition::Bottom);
+        if self.tab_bar_visible && bar_at_bottom {
+            self.tab_bar_logical_height()
+        } else {
+            0.0
+        }
+    }
+
+    /// Y offset (in logical px) at which the tab bar layout should be
+    /// anchored. When the bar is at the top this is `titlebar_inset`;
+    /// when at the bottom this is `window_height - bar_h` so the bar
+    /// hugs the bottom edge of the window. Callers pass this into
+    /// [`TabBarLayout::with_top_offset`] in place of the raw titlebar
+    /// inset.
+    pub fn tab_bar_y_offset(&self) -> f32 {
+        match self.tab_bar_position {
+            sonic_core::config::TabBarPosition::Top => self.titlebar_inset,
+            sonic_core::config::TabBarPosition::Bottom => {
+                let logical_h = self.config.height as f32 / self.scale_factor;
+                (logical_h - self.tab_bar_logical_height()).max(0.0)
+            }
+        }
+    }
+
+    /// Current tab bar position (top or bottom of window).
+    pub fn tab_bar_position(&self) -> sonic_core::config::TabBarPosition {
+        self.tab_bar_position
+    }
+
+    /// Set the tab bar position. Returns `true` if the position
+    /// actually changed (so callers can decide whether to recompute
+    /// grid dims / invalidate caches).
+    pub fn set_tab_bar_position(&mut self, pos: sonic_core::config::TabBarPosition) -> bool {
+        if self.tab_bar_position == pos {
+            return false;
+        }
+        self.tab_bar_position = pos;
+        self.last_frame_key = None;
+        true
     }
 
     /// Logical-pixel height of the tab bar for the renderer's current font
@@ -1246,7 +1302,8 @@ impl GpuRenderer {
         let logical_w = self.config.width as f32 / self.scale_factor;
         let logical_h = self.config.height as f32 / self.scale_factor;
         let inner_w = (logical_w - self.padding_left - self.padding_right).max(self.cell_w);
-        let inner_h = (logical_h - self.top_inset() - self.padding_bottom).max(self.cell_h);
+        let inner_h = (logical_h - self.top_inset() - self.bottom_inset() - self.padding_bottom)
+            .max(self.cell_h);
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
         (cols.max(1), rows.max(1))
@@ -1345,7 +1402,7 @@ impl GpuRenderer {
         if !self.tab_bar_visible {
             return false;
         }
-        let inset = self.titlebar_inset;
+        let inset = self.tab_bar_y_offset();
         let bar_h = self.tab_bar_logical_height();
         let in_bar = |p: Option<(f32, f32)>| -> bool {
             match p {
@@ -1853,7 +1910,7 @@ impl GpuRenderer {
                         sw_log,
                         self.tab_bar_logical_height(),
                     )
-                    .with_top_offset(self.titlebar_inset);
+                    .with_top_offset(self.tab_bar_y_offset());
                     for t in layout.tabwidgets() {
                         match t.hover_at(Some(sonic_ui::tabbar_view::Point { x: cx, y: cy })) {
                             sonic_ui::tabbar_view::TabHover::None => {}
@@ -2737,7 +2794,7 @@ impl GpuRenderer {
                 self.tab_bar_logical_height(),
                 insertion_slot,
             )
-            .with_top_offset(self.titlebar_inset);
+            .with_top_offset(self.tab_bar_y_offset());
             // Issue #112 Round 3 — premium browser-style chrome.
             // The structural colors come from `ui_tokens`, decoupled from
             // the terminal palette so every theme renders the same modern
@@ -3529,8 +3586,8 @@ impl GpuRenderer {
         );
 
         let bar_h = self.tab_bar_logical_height();
-        let title_top =
-            self.titlebar_inset + ((bar_h - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
+        let bar_y = self.tab_bar_y_offset();
+        let title_top = bar_y + ((bar_h - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
         let tab_area = if self.tab_bar_visible {
             Some(TextArea {
                 buffer: &self.tab_buffer,
@@ -3539,9 +3596,9 @@ impl GpuRenderer {
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
-                    top: self.titlebar_inset as i32,
+                    top: bar_y as i32,
                     right: self.config.width as i32,
-                    bottom: (self.titlebar_inset + bar_h) as i32,
+                    bottom: (bar_y + bar_h) as i32,
                 },
                 default_color: self.tab_inactive_fg,
                 custom_glyphs: &[],

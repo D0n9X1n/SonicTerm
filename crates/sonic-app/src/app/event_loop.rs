@@ -254,6 +254,7 @@ impl App {
         self.renderer = Some(renderer);
         if let Some(r) = self.renderer.as_mut() {
             r.set_titlebar_inset(integrated_titlebar_inset());
+            r.set_tab_bar_position(self.config.tab_bar_position);
             // Apply the user's `tab_close_button_color` from sonic.toml
             // BEFORE the first frame so a custom always-visible × shows
             // up on the very first paint, not after a config edit.

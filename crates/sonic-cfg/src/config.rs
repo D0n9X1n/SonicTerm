@@ -45,6 +45,12 @@ pub struct Config {
     /// drawn dim, brightening on hover of the × glyph itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
+    /// Where the tab bar is rendered relative to the window content area.
+    /// Defaults to [`TabBarPosition::Bottom`] (per direct user request).
+    /// Set `tab_bar_position = "top"` in `sonic.toml` to restore the
+    /// classic top-of-window placement.
+    #[serde(default)]
+    pub tab_bar_position: TabBarPosition,
     /// When `true`, the app exits as soon as the last window is closed
     /// (classic single-window-app behavior). When `false` (the default,
     /// matching Chrome/Firefox/Safari on macOS), the application process
@@ -154,6 +160,31 @@ impl Default for AppearanceConfig {
         Self { backdrop: BackdropKind::Opaque, opacity: 1.0 }
     }
 }
+/// Where the tab bar is placed in the window chrome. WezTerm exposes
+/// the same knob (`tab_bar_at_bottom`). Sonic defaults to `Bottom` per
+/// the canonical user request that introduced this enum.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBarPosition {
+    /// Bar pinned to the top of the inner content area (just below any
+    /// OS / integrated titlebar inset).
+    Top,
+    /// Bar pinned to the bottom of the inner content area. The terminal
+    /// grid fills the space above. Default.
+    #[default]
+    Bottom,
+}
+
+impl TabBarPosition {
+    /// Lowercase string name matching the TOML serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TabBarPosition::Top => "top",
+            TabBarPosition::Bottom => "bottom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Accessibility presentation modes.
@@ -273,6 +304,7 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             appearance: AppearanceConfig::default(),
             tab_close_button_color: None,
+            tab_bar_position: TabBarPosition::default(),
             quit_on_last_window_close: default_quit_on_last_window_close(),
             extra: toml::Table::new(),
         }

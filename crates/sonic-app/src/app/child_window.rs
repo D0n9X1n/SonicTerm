@@ -233,7 +233,7 @@ impl App {
                             logical_w,
                             child.renderer.tab_bar_logical_height(),
                         )
-                        .with_top_offset(child.renderer.titlebar_inset())
+                        .with_top_offset(child.renderer.tab_bar_y_offset())
                         .with_visible(child.renderer.tab_bar_visible());
                         let snap = crate::app::os_drag::TabBarSnapshot::from_layout(
                             Some(win_id),
@@ -324,7 +324,7 @@ impl App {
                         bar_width,
                         child.renderer.tab_bar_logical_height(),
                     )
-                    .with_top_offset(child.renderer.titlebar_inset())
+                    .with_top_offset(child.renderer.tab_bar_y_offset())
                     .with_visible(child.renderer.tab_bar_visible());
                     let chip =
                         crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
@@ -367,7 +367,7 @@ impl App {
                         bar_width,
                         child.renderer.tab_bar_logical_height(),
                     )
-                    .with_top_offset(child.renderer.titlebar_inset())
+                    .with_top_offset(child.renderer.tab_bar_y_offset())
                     .with_visible(child.renderer.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
@@ -437,7 +437,7 @@ impl App {
                             bar_width,
                             child.renderer.tab_bar_logical_height(),
                         )
-                        .with_top_offset(child.renderer.titlebar_inset());
+                        .with_top_offset(child.renderer.tab_bar_y_offset());
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
                         // &mut self via the merge / tear path.
