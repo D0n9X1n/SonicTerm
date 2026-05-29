@@ -19,6 +19,7 @@ use sonic_core::{
     vt::{Parser, VtEvent},
 };
 use sonic_shared::render::GpuRenderer;
+use sonic_ui::command_palette::CommandPalette;
 use sonic_ui::pane::PaneTree;
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -48,6 +49,20 @@ impl App {
     ) {
         let theme = self.theme.clone();
         let config = self.config.clone();
+        // Epic #289 follow-up: snapshot the app-level overlay
+        // attachments here, BEFORE the mutable `child` borrow below
+        // pins `self.windows` for the rest of the match. Used only by
+        // the `RedrawRequested` arm but cheap enough to compute once.
+        let palette_here = self.palette_attached_window == Some(win_id);
+        let cheatsheet_here =
+            self.cheatsheet_open && self.cheatsheet_attached_window == Some(win_id);
+        let cheatsheet_payload =
+            cheatsheet_here.then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
+        // Split-borrow the palette out so the renderer can mutate it
+        // even though `child` borrows `self.windows` below. Disjoint
+        // fields — safe.
+        let palette_for_render: Option<&mut CommandPalette> =
+            if palette_here { Some(&mut self.command_palette) } else { None };
         let Some(child) = self.windows.get_mut(&win_id) else { return };
         match event {
             WindowEvent::CloseRequested => {
@@ -188,8 +203,14 @@ impl App {
                         child.copy_mode.as_ref(),
                         &child.tabs,
                         search,
-                        None, // command palette: not exposed in child window yet
-                        None, // keymap cheat sheet: not exposed in child window yet
+                        // Epic #289 follow-up: render the app-level
+                        // command palette / cheat sheet HERE when they
+                        // were opened while this child window was OS
+                        // frontmost. Pre-fix these were hardcoded to
+                        // `None` so the palette silently appeared on
+                        // the main window instead.
+                        palette_for_render,
+                        cheatsheet_payload,
                         None, // ime preedit: not exposed in child window yet
                         pane.viewport_top_abs,
                     ) {
@@ -439,6 +460,62 @@ impl App {
                 if child.copy_mode.is_some() {
                     child_copy_mode_handle_key(child, &event);
                     child.window.request_redraw();
+                    return;
+                }
+                // Epic #289 follow-up: when the cheat sheet / command
+                // palette is attached to THIS child window, route the
+                // keystroke into the overlay handler exactly like the
+                // main window does in window_event.rs ~line 855. Without
+                // this branch, every key while the palette was open in
+                // a child got forwarded to the PTY instead of filtering
+                // the palette query.
+                let palette_here = self.palette_attached_window == Some(win_id);
+                let cheatsheet_here =
+                    self.cheatsheet_open && self.cheatsheet_attached_window == Some(win_id);
+                if cheatsheet_here {
+                    // Capture the child window's own modifier state BEFORE
+                    // dropping the borrow — overlay chord lookup must use the
+                    // modifiers of the window that received the key, not the
+                    // main window's `self.modifiers`. Without this, an overlay
+                    // toggle chord pressed in a child window would be matched
+                    // against whatever the main window happened to be holding.
+                    let child_mods = child.modifiers;
+                    let _ = child;
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if matches!(action, Action::ShowKeymapCheatsheet) {
+                                self.run_action(&action);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.window.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.cheatsheet_handle_key(&event);
+                    if let Some(c) = self.windows.get(&win_id) {
+                        c.window.request_redraw();
+                    }
+                    return;
+                }
+                if palette_here {
+                    let child_mods = child.modifiers;
+                    let _ = child;
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if matches!(action, Action::OpenCommandPalette) {
+                                self.run_action(&action);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.window.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.command_palette_handle_key(&event);
+                    if let Some(c) = self.windows.get(&win_id) {
+                        c.window.request_redraw();
+                    }
                     return;
                 }
                 if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
