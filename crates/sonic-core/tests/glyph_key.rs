@@ -7,7 +7,7 @@ use sonic_core::grid::{Cell, CellFlags, Color};
 use sonic_core::hyperlink::HyperlinkId;
 
 fn cell(ch: char, flags: CellFlags) -> Cell {
-    Cell { ch, fg: Color::Default, bg: Color::Default, flags, hyperlink: None, extras: None }
+    Cell::plain(ch, Color::Default, Color::Default, flags)
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn hash_and_eq_are_deterministic() {
     c1.fg = Color::Rgb(10, 20, 30); // colors are deliberately NOT in the key
     let mut c2 = cell('q', CellFlags::BOLD);
     c2.fg = Color::Rgb(200, 0, 0);
-    c2.hyperlink = Some(HyperlinkId(7)); // and hyperlinks aren't either
+    c2.set_hyperlink(Some(HyperlinkId(7))); // and hyperlinks aren't either
     let k1 = GlyphKey::from_cell(&c1).unwrap();
     let k2 = GlyphKey::from_cell(&c2).unwrap();
     assert_eq!(k1, k2);

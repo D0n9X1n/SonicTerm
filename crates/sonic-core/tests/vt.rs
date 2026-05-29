@@ -170,12 +170,12 @@ fn osc8_tags_cells_then_untags() {
     let mut p = Parser::new(Grid::new(10, 1));
     p.advance(b"\x1b]8;;https://example.com\x07abc\x1b]8;;\x07de");
     let row = p.grid().row(0);
-    assert!(row[0].hyperlink.is_some());
-    assert!(row[1].hyperlink.is_some());
-    assert!(row[2].hyperlink.is_some());
-    assert_eq!(row[0].hyperlink, row[2].hyperlink, "same link reuses id");
-    assert!(row[3].hyperlink.is_none());
-    assert!(row[4].hyperlink.is_none());
+    assert!(row[0].hyperlink().is_some());
+    assert!(row[1].hyperlink().is_some());
+    assert!(row[2].hyperlink().is_some());
+    assert_eq!(row[0].hyperlink(), row[2].hyperlink(), "same link reuses id");
+    assert!(row[3].hyperlink().is_none());
+    assert!(row[4].hyperlink().is_none());
     assert!(p.current_hyperlink().is_none());
 }
 
@@ -184,7 +184,7 @@ fn osc8_explicit_id_preserved_in_registry() {
     let mut p = Parser::new(Grid::new(10, 1));
     p.advance(b"\x1b]8;id=foo;https://example.com\x07x\x1b]8;;\x07");
     let row = p.grid().row(0);
-    let hid = row[0].hyperlink.expect("hyperlink set");
+    let hid = row[0].hyperlink().expect("hyperlink set");
     let link = p.hyperlinks().lookup(hid).expect("present");
     assert_eq!(link.id.as_deref(), Some("id=foo"));
     assert_eq!(link.uri, "https://example.com");

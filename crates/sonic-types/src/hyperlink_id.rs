@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_HYPERLINK_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Opaque id referencing a `Hyperlink` in a `HyperlinkRegistry`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HyperlinkId(pub u64);
 
 impl HyperlinkId {

@@ -11,17 +11,7 @@ fn font_family_change_uses_distinct_shape_key_and_clears_row_cache() {
     load_bundled_fonts(&mut fs);
     let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let style = RunStyle { bold: false, italic: false };
-    let cells = [(
-        0u16,
-        Cell {
-            ch: 'W',
-            fg: Color::Default,
-            bg: Color::Default,
-            flags: Default::default(),
-            hyperlink: None,
-            extras: None,
-        },
-    )];
+    let cells = [(0u16, Cell::plain('W', Color::Default, Color::Default, Default::default()))];
 
     let mut shape_cache = ShapeCache::new();
     let _ = shape_cache.get_or_shape(

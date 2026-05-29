@@ -7,7 +7,11 @@ use sonic_types::Cell;
 
 fn cells(n: usize) -> Vec<Cell> {
     (0..n)
-        .map(|i| Cell { ch: char::from_u32(b'a' as u32 + i as u32).unwrap(), ..Cell::default() })
+        .map(|i| {
+            let mut c = Cell::default();
+            c.ch = char::from_u32(b'a' as u32 + i as u32).unwrap();
+            c
+        })
         .collect()
 }
 

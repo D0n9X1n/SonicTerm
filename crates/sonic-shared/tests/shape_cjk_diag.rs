@@ -8,7 +8,12 @@ use sonic_shared::shape::{shape_run, RunStyle};
 use sonic_shared::swash_rasterizer::SwashRasterizer;
 
 fn wide_cell(ch: char) -> Cell {
-    Cell { ch, flags: CellFlags::WIDE, ..Cell::default() }
+    Cell::plain(
+        ch,
+        sonic_core::grid::Color::Default,
+        sonic_core::grid::Color::Default,
+        CellFlags::WIDE,
+    )
 }
 
 #[test]

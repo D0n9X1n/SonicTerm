@@ -88,7 +88,7 @@ fn is_ligature_trigger(b: u8) -> bool {
 #[inline]
 pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
     cells.iter().all(|(_, c)| {
-        c.extras.is_none()
+        c.extras().is_none()
             && {
                 let n = c.ch as u32;
                 (0x20..=0x7E).contains(&n) && !is_ligature_trigger(n as u8)
@@ -177,7 +177,7 @@ pub fn shape_run(
         // zero-width per Unicode width but MUST be in the shaped string
         // so the font's GSUB sees the full cluster — that's the whole
         // point of preserving them through the grid.
-        if let Some(extras) = &cell.extras {
+        if let Some(extras) = cell.extras() {
             for ch in extras.chars() {
                 text.push(ch);
             }
@@ -410,7 +410,7 @@ impl ShapeCache {
         let mut text = String::with_capacity(cells.len() * 2);
         for (_, c) in cells {
             text.push(c.ch);
-            if let Some(ex) = &c.extras {
+            if let Some(ex) = c.extras() {
                 for ch in ex.chars() {
                     text.push(ch);
                 }

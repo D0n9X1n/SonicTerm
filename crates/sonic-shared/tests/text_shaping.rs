@@ -46,7 +46,9 @@ fn font_system() -> FontSystem {
 }
 
 fn cell(ch: char) -> Cell {
-    Cell { ch, ..Cell::default() }
+    let mut c = Cell::default();
+    c.ch = ch;
+    c
 }
 
 fn cells_for(s: &str) -> Vec<(u16, Cell)> {
@@ -188,7 +190,7 @@ fn ascii_fast_path_detects_pure_ascii_runs() {
     // mark or ZWJ retained by Grid) must also force shaping — the
     // extras can only be composed by cosmic-text.
     let mut cells = cells_for("a");
-    cells[0].1.extras = Some("\u{200D}".to_string().into_boxed_str());
+    cells[0].1.set_extras(Some("\u{200D}".to_string().into_boxed_str()));
     assert!(
         !sonic_shared::shape::run_is_ascii_fast(&cells),
         "cluster extras must force the shaping path"
