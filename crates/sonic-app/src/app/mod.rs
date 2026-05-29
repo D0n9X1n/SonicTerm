@@ -1169,6 +1169,27 @@ fn notify_command_done(body: String) {
 }
 
 impl App {
+    /// Returns `true` when closing the last window should exit the
+    /// process, given a config. On macOS we honor
+    /// [`Config::quit_on_last_window_close`] (default `false` →
+    /// Chrome/Firefox-style: stay alive in the dock, waiting for
+    /// `Cmd+N`). On other platforms there is no dock concept, so we
+    /// always exit once the last window is gone — the config is
+    /// ignored. Exposed (test-only) so behavior is verifiable without
+    /// building a real winit event loop.
+    #[doc(hidden)]
+    pub fn should_exit_on_last_window_close(config: &Config) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            config.quit_on_last_window_close
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = config;
+            true
+        }
+    }
+
     /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
     /// right now would be coalesced (deferred to the next vsync boundary)
     /// or `false` if it would render immediately. Mirrors the exact

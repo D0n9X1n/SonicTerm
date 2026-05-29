@@ -45,6 +45,16 @@ pub struct Config {
     /// drawn dim, brightening on hover of the × glyph itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
+    /// When `true`, the app exits as soon as the last window is closed
+    /// (classic single-window-app behavior). When `false` (the default,
+    /// matching Chrome/Firefox/Safari on macOS), the application process
+    /// stays alive on macOS after the last window closes — keeping the
+    /// dock icon active so the user can open a fresh window via
+    /// `Cmd+N` or the dock menu without paying cold-start cost. On
+    /// non-macOS platforms there is no dock concept and we always exit
+    /// once the last window is gone regardless of this setting.
+    #[serde(default = "default_quit_on_last_window_close")]
+    pub quit_on_last_window_close: bool,
     /// Unknown top-level keys captured verbatim so that newer config keys
     /// (or user/plugin extensions) survive a load/save round-trip. Not
     /// considered when comparing two `Config`s for behavioural equality;
@@ -193,6 +203,14 @@ fn default_threshold_secs() -> u64 {
     10
 }
 
+/// Default for [`Config::quit_on_last_window_close`]: `false`. This
+/// matches the Chrome/Firefox/Safari behavior on macOS — the app stays
+/// alive after the last window closes so the user can re-open one
+/// without a cold start.
+fn default_quit_on_last_window_close() -> bool {
+    false
+}
+
 impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
@@ -255,6 +273,7 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             appearance: AppearanceConfig::default(),
             tab_close_button_color: None,
+            quit_on_last_window_close: default_quit_on_last_window_close(),
             extra: toml::Table::new(),
         }
     }
