@@ -295,6 +295,41 @@ impl App {
             return false;
         }
         let Some(payload) = self.build_payload_for_tab(index) else { return false };
+
+        // Phase C2: hand the gesture to the installed OsTabDragBackend
+        // first. The backend is responsible for OS cursor capture +
+        // pasteboard / OLE handoff. If `handles_full_gesture()` returns
+        // true (Windows: DoDragDrop ran end-to-end inside the backend)
+        // we MUST NOT also invoke the legacy `sink.begin_drag` — that
+        // would re-enter DoDragDrop with no live gesture, immediately
+        // returning NONE and falsely triggering `spawn_tearout_child`.
+        // The backend's DragOutcome routes through `handle_os_drag_ended`
+        // (transfer_tab / cancel_drag_session); when the backend owns
+        // the gesture we return true here without detaching — the
+        // dispatcher will handle source-side removal via transfer_tab.
+        //
+        // On Mac (handles_full_gesture == false) the backend only
+        // writes the pasteboard (winit intercepts mouse events, so
+        // NSDraggingSession proper isn't reachable) — we still fall
+        // through to the legacy sink, which also writes the pasteboard
+        // + returns NotAcknowledged (the PR #59 data-loss fix).
+        if self.os_drag_backend.is_some() {
+            let payload_json = payload.to_json().unwrap_or_default();
+            let source_window = self.window.as_ref().map(|w| w.id());
+            if let Some(src_id) = source_window {
+                // TODO: capture tab thumbnail — see follow-up issue
+                let drag_image_png: Vec<u8> = Vec::new();
+                let started = self.begin_os_tab_drag(src_id, index, payload_json, drag_image_png);
+                if started && self.os_drag_backend_handles_full_gesture() {
+                    tracing::info!(
+                        tab = %payload.tab_title,
+                        "Phase C2: backend owns gesture end-to-end; legacy sink skipped"
+                    );
+                    return true;
+                }
+            }
+        }
+
         let ack = sink.begin_drag(&payload);
         match ack {
             crate::os_drag::DragAck::Accepted => {

@@ -36,7 +36,7 @@ use sonic_app::app::os_drag::{
 /// recently stashed [`AppHandle`] so the OLE `IDropSource` /
 /// `IDropTarget` callbacks can post back to the winit main loop via
 /// the wrapped `EventLoopProxy`.
-#[allow(dead_code)] // wired via `App::set_os_drag_backend` from main.rs in a follow-up commit
+#[allow(dead_code)] // wired in production via `sonic-windows::main` (run_with_os_drag_pending_and_window_hook backend slot)
 pub struct WinOsTabDragBackend {
     handle_slot: std::sync::Mutex<Option<AppHandle>>,
 }
@@ -77,11 +77,21 @@ fn build_payload_json(source_window: WindowId, source_tab_idx: usize) -> String 
 }
 
 impl OsTabDragBackend for WinOsTabDragBackend {
+    fn handles_full_gesture(&self) -> bool {
+        // We invoke `DoDragDrop` synchronously below — the caller in
+        // `App::try_os_drag_handoff` MUST NOT also call the legacy
+        // `OsDragSink::begin_drag`, which re-enters DoDragDrop and
+        // would falsely return `DROPEFFECT_NONE` (no live gesture),
+        // spuriously triggering `spawn_tearout_child`.
+        true
+    }
+
     fn begin_session(
         &mut self,
         handle: AppHandle,
         source_window: WindowId,
         source_tab_idx: usize,
+        payload_json: String,
         drag_image_png: Vec<u8>,
     ) {
         // Stash the handle. OLE callbacks (IDropSource::QueryContinueDrag,
@@ -97,45 +107,52 @@ impl OsTabDragBackend for WinOsTabDragBackend {
             ?source_window,
             source_tab_idx,
             image_bytes = drag_image_png.len(),
+            payload_bytes = payload_json.len(),
             "WinOsTabDragBackend::begin_session — entering DoDragDrop"
         );
 
-        let payload_json = build_payload_json(source_window, source_tab_idx);
+        // Carry the FULL TabPayload schema on CF_SONIC_TAB — peer
+        // IDropTarget on a Sonic HWND parses via
+        // `sonic_app::os_drag::TabPayload::from_json`. If the caller
+        // failed to serialize (passed empty), fall back to the
+        // lightweight identifier tuple so OLE still has a non-empty
+        // blob to publish; the destination will log a parse warning
+        // and decline, which is preferable to a 0-byte HGLOBAL.
+        let payload = if payload_json.is_empty() {
+            build_payload_json(source_window, source_tab_idx)
+        } else {
+            payload_json
+        };
 
-        // Run the real OLE drag/drop loop synchronously. The
-        // `begin_tab_drag_outcome` helper sets up `IDataObject` with
-        // CF_SONIC_TAB, an `IDropSource` that honors ESC + button
-        // release in QueryContinueDrag, and invokes `DoDragDrop` with
-        // the move|copy effect mask. Blocks until the user releases or
-        // cancels.
-        let effect = crate::os_drag_win::begin_tab_drag(&payload_json);
+        // Install the AppHandle so the IDropTarget::Drop callback in
+        // os_drag_win can post a real DragOutcome::Drop back to the
+        // dispatcher (target window / slot routing).
+        crate::os_drag_win::install_drop_outcome_handle(handle.clone());
 
-        // Translate the OLE outcome into a DragOutcome. The peer
-        // IDropTarget on the destination Sonic HWND posts its own
-        // drop coordinates through the AppHandle; here we just signal
-        // the terminal state so the App's dispatcher knows the gesture
-        // ended one way or another.
-        //
-        // DROPEFFECT_MOVE → drop accepted by a Sonic IDropTarget.
-        //     The target slot was recorded by the IDropTarget callback
-        //     in os_drag_win, which posted DragOutcome::Drop directly
-        //     via the same AppHandle mailbox. We don't need to post
-        //     again here — if the mailbox already has an ended slot
-        //     filled, post_drag_ended is idempotent (last writer wins,
-        //     but the IDropTarget already wrote the richer Drop variant
-        //     with target_slot). We post Cancelled only if nothing
-        //     wrote a richer outcome.
-        // DROPEFFECT_NONE + DRAGDROP_S_DROP → dropped on bare desktop.
-        //     That's the Phase C TearOut path — but it is already
-        //     handled by the cross-process `WinOsDragSink` /
-        //     `spawn_tearout_child` flow, so for the in-process Phase
-        //     C2 backend we treat it as Cancelled (the user-visible
-        //     effect is the source tab stays put; tear-out gets
-        //     re-triggered via the established Phase B path if the
-        //     gesture warrants it).
-        // Anything else (ESC, error) → Cancelled.
+        // Run the real OLE drag/drop loop synchronously.
+        let effect = crate::os_drag_win::begin_tab_drag(&payload);
+
+        // Clear the installed handle now that the gesture has
+        // terminated — a subsequent unrelated CF_SONIC_TAB drop
+        // (e.g. from another Sonic process) must not reuse a stale
+        // handle.
+        crate::os_drag_win::clear_drop_outcome_handle();
+
+        // If the IDropTarget::Drop callback already posted a richer
+        // outcome (target_window + target_slot from cursor hit-test),
+        // do not overwrite it. Otherwise translate the OLE DROPEFFECT.
+        if handle.pending_handle().peek_ended().is_some() {
+            return;
+        }
         let outcome = match effect {
             e if e == windows::Win32::System::Ole::DROPEFFECT_MOVE.0 => {
+                // Drop accepted by a Sonic IDropTarget but the
+                // destination side did not post a richer outcome —
+                // dispatcher will route via transfer_tab with default
+                // main-window/self target. The destination IDropTarget
+                // in os_drag_win already pushes a TabPayload via
+                // `os_drag_bridge::push_tab_payload`, so the
+                // user-visible result is "tab appears at destination".
                 DragOutcome::Drop { target_window: None, target_slot: source_tab_idx }
             }
             _ => DragOutcome::Cancelled,

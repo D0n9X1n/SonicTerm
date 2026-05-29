@@ -132,6 +132,14 @@ pub trait OsTabDragBackend: Send {
     /// for cursor capture and for posting `UserEvent::DragMoved` /
     /// `UserEvent::DragEnded` back through the handle.
     ///
+    /// `payload_json` is the full [`crate::os_drag::TabPayload`]
+    /// serialized to JSON, ready to be written to the platform
+    /// pasteboard / OLE clipboard under
+    /// [`crate::os_drag::PASTEBOARD_TYPE`] /
+    /// `CF_SONIC_TAB`. Backends MUST write the full schema so peer
+    /// Sonic windows / processes can parse it via
+    /// [`crate::os_drag::TabPayload::from_json`].
+    ///
     /// `drag_image_png` is an optional rasterized preview of the
     /// dragged tab. Backends that can render their own preview (e.g.
     /// via NSDraggingItem's `setImageComponentsProvider:`) may ignore
@@ -141,8 +149,26 @@ pub trait OsTabDragBackend: Send {
         handle: AppHandle,
         source_window: WindowId,
         source_tab_idx: usize,
+        payload_json: String,
         drag_image_png: Vec<u8>,
     );
+
+    /// Returns `true` if this backend OWNS the gesture end-to-end —
+    /// the caller MUST skip the legacy cross-process
+    /// [`crate::os_drag::OsDragSink::begin_drag`] path because invoking
+    /// it would double-fire (e.g. on Windows where both call
+    /// `DoDragDrop`).
+    ///
+    /// Default `false` keeps the legacy sink as a fallback. The
+    /// Windows backend overrides to `true` because its `begin_session`
+    /// invokes `DoDragDrop` synchronously. The macOS backend keeps
+    /// `false` — its `begin_session` only writes the pasteboard
+    /// (NSDraggingSession proper is constrained by winit's mouse
+    /// interception, see `sonic-mac/src/tab_drag_os.rs`), so the
+    /// legacy sink path remains a valid mirror.
+    fn handles_full_gesture(&self) -> bool {
+        false
+    }
 }
 
 /// Thin shim that lets a backend running off the winit thread post
@@ -234,6 +260,15 @@ impl PendingDragOutcome {
     /// Drain the terminal outcome (if any).
     pub fn take_ended(&self) -> Option<DragOutcome> {
         self.ended.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+    /// Non-destructive peek: returns whether the ended slot is
+    /// currently populated, without draining it. Used by the Windows
+    /// backend to detect whether the IDropTarget::Drop callback
+    /// already posted a richer outcome (target_window + target_slot
+    /// from cursor hit-test) so it doesn't overwrite that with a
+    /// less-specific DROPEFFECT-derived outcome.
+    pub fn peek_ended(&self) -> Option<DragOutcome> {
+        *self.ended.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 

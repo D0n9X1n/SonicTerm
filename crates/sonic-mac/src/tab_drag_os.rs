@@ -63,7 +63,7 @@ use sonic_app::os_drag::PASTEBOARD_TYPE;
 /// Production `OsTabDragBackend` impl for macOS. Holds the most
 /// recently stashed [`AppHandle`] so AppKit callback hooks (future
 /// NSDraggingSource subclass) can post back to the winit main loop.
-#[allow(dead_code)] // wired via `App::set_os_drag_backend` from main.rs in a follow-up commit
+#[allow(dead_code)] // wired in production via `sonic-mac::main` (run_with_os_drag_pending_and_hook backend slot)
 pub struct MacOsTabDragBackend {
     handle_slot: std::sync::Mutex<Option<AppHandle>>,
 }
@@ -118,6 +118,7 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         handle: AppHandle,
         source_window: WindowId,
         source_tab_idx: usize,
+        payload_json: String,
         drag_image_png: Vec<u8>,
     ) {
         // Stash the handle for any AppKit callback path.
@@ -128,7 +129,17 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         *slot = Some(handle.clone());
         drop(slot);
 
-        let json = build_payload_json(source_window, source_tab_idx);
+        // Prefer the full TabPayload schema from the caller. If for
+        // any reason the caller passed an empty string (e.g. payload
+        // serialization failed upstream — try_os_drag_handoff
+        // tolerates that), fall back to the lightweight identifier
+        // tuple so the pasteboard still carries a non-empty
+        // recognisable blob.
+        let json = if payload_json.is_empty() {
+            build_payload_json(source_window, source_tab_idx)
+        } else {
+            payload_json
+        };
 
         // Real pasteboard write — identical to the cross-process
         // Phase C1 path. This is the part that makes peer Sonic

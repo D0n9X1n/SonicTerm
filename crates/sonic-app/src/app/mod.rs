@@ -524,6 +524,7 @@ pub fn run_with_os_drag_pending_and_hook(
         pending,
         on_resumed,
         None,
+        None,
     )
 }
 
@@ -531,6 +532,13 @@ pub fn run_with_os_drag_pending_and_hook(
 /// one-shot `on_window_ready` hook invoked immediately after
 /// `create_window` succeeds, with the raw window handle. The Windows
 /// bin uses this slot to install the muda menubar (needs the HWND).
+///
+/// Phase C2: `os_drag_backend` is the platform OS-level drag-session
+/// backend (NSDraggingSession on Mac, OLE DoDragDrop on Windows).
+/// Installed onto the constructed App via
+/// [`App::set_os_drag_backend`]. Pass `None` on platforms / tests
+/// without a backend — the App falls back to the legacy `OsDragSink`
+/// path.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_os_drag_pending_and_window_hook(
     theme: Theme,
@@ -542,6 +550,7 @@ pub fn run_with_os_drag_pending_and_window_hook(
     pending: Option<crate::os_drag::TabPayload>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+    os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
 ) -> Result<()> {
     init_tracing();
     let event_loop =
@@ -557,6 +566,9 @@ pub fn run_with_os_drag_pending_and_window_hook(
     app.theme_loader = theme_loader;
     app.keymap_loader = keymap_loader;
     app.os_drag_sink = Some(sink);
+    if let Some(b) = os_drag_backend {
+        app.set_os_drag_backend(b);
+    }
     if let Some(hook) = on_resumed {
         app.on_resumed = Some(hook);
     }
@@ -1726,13 +1738,22 @@ impl App {
         &mut self,
         source_window: WindowId,
         source_tab_idx: usize,
+        payload_json: String,
         drag_image_png: Vec<u8>,
     ) -> bool {
         let Some(handle) = self.os_drag_app_handle() else { return false };
         let Some(backend) = self.os_drag_backend.as_mut() else { return false };
-        backend.begin_session(handle, source_window, source_tab_idx, drag_image_png);
+        backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
         self.os_drag_source = Some((source_window, source_tab_idx));
         true
+    }
+
+    /// Phase C2: does the installed backend own the gesture end-to-end?
+    /// `try_os_drag_handoff` consults this to decide whether to skip
+    /// the legacy `OsDragSink` after `begin_os_tab_drag` returns —
+    /// running both on Windows would invoke `DoDragDrop` twice.
+    pub fn os_drag_backend_handles_full_gesture(&self) -> bool {
+        self.os_drag_backend.as_ref().map(|b| b.handles_full_gesture()).unwrap_or(false)
     }
 
     /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.

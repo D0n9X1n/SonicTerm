@@ -108,6 +108,7 @@ impl OsTabDragBackend for EmittingBackend {
         handle: AppHandle,
         _source_window: WindowId,
         _source_tab_idx: usize,
+        _payload_json: String,
         _drag_image_png: Vec<u8>,
     ) {
         // Simulate the OS reporting two cursor positions during the
@@ -233,7 +234,7 @@ fn backend_emits_through_real_apphandle_shape() {
     let app = synth_app();
     let maybe_handle = app.os_drag_app_handle();
     if let Some(handle) = maybe_handle {
-        backend.begin_session(handle, synth_window_id(0x1234), 0, vec![]);
+        backend.begin_session(handle, synth_window_id(0x1234), 0, String::new(), vec![]);
     } else {
         // Test harness path: no proxy. Manually populate the recorded
         // emissions to assert the emission *contract* the real path

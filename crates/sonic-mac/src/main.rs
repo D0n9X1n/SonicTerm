@@ -62,7 +62,7 @@ fn main() -> Result<()> {
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        sonic_app::app::run_with_os_drag_pending_and_hook(
+        sonic_app::app::run_with_os_drag_pending_and_window_hook(
             theme,
             config,
             keymap,
@@ -71,6 +71,8 @@ fn main() -> Result<()> {
             Some(keymap_loader),
             pending,
             Some(on_resumed),
+            None,
+            Some(tab_drag_os::MacOsTabDragBackend::boxed()),
         )
     }
     #[cfg(not(target_os = "macos"))]

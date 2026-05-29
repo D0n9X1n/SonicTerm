@@ -121,6 +121,7 @@ impl OsTabDragBackend for MockBackend {
         _handle: AppHandle,
         source_window: WindowId,
         source_tab_idx: usize,
+        _payload_json: String,
         drag_image_png: Vec<u8>,
     ) {
         // SAFETY: reverse transmute of the synth_window_id helper —
@@ -146,7 +147,7 @@ fn begin_os_tab_drag_with_no_proxy_falls_back_cleanly() {
     let mut app = synth_app();
     let backend = MockBackend::new();
     app.__test_set_os_drag_backend(Box::new(backend.clone()));
-    let started = app.begin_os_tab_drag(synth_window_id(0xCAFE), 1, vec![1u8; 32]);
+    let started = app.begin_os_tab_drag(synth_window_id(0xCAFE), 1, String::new(), vec![1u8; 32]);
     assert!(!started, "no-proxy path must report false");
     assert_eq!(backend.call_count(), 0, "no-proxy path must not call backend");
 }
@@ -277,7 +278,7 @@ fn mock_backend_records_call_when_invoked_directly() {
         return;
     };
     let handle = AppHandle::new(proxy);
-    backend_for_app.begin_session(handle, synth_window_id(0x1234), 7, vec![0u8; 64]);
+    backend_for_app.begin_session(handle, synth_window_id(0x1234), 7, String::new(), vec![0u8; 64]);
     assert_eq!(backend.call_count(), 1);
     let call = backend.last_call().unwrap();
     assert_eq!(call.source_window_tag, 0x1234);

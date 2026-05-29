@@ -108,6 +108,7 @@ fn main() -> Result<()> {
             _tearout_payload.or_else(os_drag_win::take_pending_payload),
             None,
             Some(on_window_ready),
+            Some(tab_drag_os::WinOsTabDragBackend::boxed()),
         );
         os_drag_win::shutdown_ole();
         result
