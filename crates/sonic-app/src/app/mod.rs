@@ -1633,6 +1633,14 @@ impl App {
         self.close_active_tab_in_child(id)
     }
 
+    /// Test-only invoker for [`Self::close_tab_at_in_child`] — the
+    /// per-index helper the close-button (×) hit-test path uses in a
+    /// torn-out child window's tab bar.
+    #[doc(hidden)]
+    pub fn __test_invoke_close_tab_at_in_child(&mut self, id: WindowId, idx: usize) -> bool {
+        self.close_tab_at_in_child(id, idx)
+    }
+
     /// Test-only invoker for [`Self::close_active_pane_or_tab_in_child`].
     #[doc(hidden)]
     pub fn __test_invoke_close_active_pane_or_tab_in_child(&mut self, id: WindowId) -> bool {
