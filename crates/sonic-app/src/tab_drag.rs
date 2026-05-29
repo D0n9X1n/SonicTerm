@@ -123,6 +123,16 @@ pub fn build_drag_chip_overlay(
         drop_line_x,
         drop_line_y: source_bar.bar_y_range(),
         scale,
+        // Phase D (Epic #289) — drag visual feedback:
+        //   D1: ghost_alpha 0.5 on the chip body
+        //   D2: insertion_slot opens an 8 px gap in the destination
+        //       bar at the drop slot when the cursor is over a bar
+        //   D3: source_tab_idx flags the source tab for alpha-0.3
+        //       painting so the dragged tab visibly "lifts off"
+        source_tab_idx: Some(session.press_tab_index),
+        source_alpha: 0.3,
+        insertion_slot: if over_bar { Some(source_bar.drop_slot(cx, cy)) } else { None },
+        ghost_alpha: 0.5,
     })
 }
 

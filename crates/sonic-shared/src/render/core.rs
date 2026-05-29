@@ -2520,8 +2520,18 @@ impl GpuRenderer {
 
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            let layout = TabBarLayout::compute_with_height(tabs, sw, self.tab_bar_logical_height())
-                .with_top_offset(self.titlebar_inset);
+            // Phase D (Epic #289): open an 8 px insertion gap at the
+            // current drop slot when a drag is active over this bar.
+            let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
+            let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
+            let source_alpha = self.drag_chip.as_ref().map(|c| c.source_alpha).unwrap_or(1.0);
+            let layout = TabBarLayout::compute_with_insertion_slot(
+                tabs,
+                sw,
+                self.tab_bar_logical_height(),
+                insertion_slot,
+            )
+            .with_top_offset(self.titlebar_inset);
             // Issue #112 Round 3 — premium browser-style chrome.
             // The structural colors come from `ui_tokens`, decoupled from
             // the terminal palette so every theme renders the same modern
@@ -2672,6 +2682,21 @@ impl GpuRenderer {
                         },
                         &mut quads,
                     );
+                }
+                // Phase D D3 (Epic #289): if this tab is the source of
+                // a live drag, overlay a translucent bar-bg quad to
+                // dim it to roughly `source_alpha` perceived opacity.
+                // The quad is painted AFTER the tab body + close icon
+                // so it dims everything in the tab's footprint.
+                if source_tab_idx == Some(t.idx) {
+                    let dim = (1.0 - source_alpha.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                    let mut overlay = bar_bg;
+                    overlay[3] = dim;
+                    quads.push(QuadInstance {
+                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
+                        color: overlay,
+                        ..Default::default()
+                    });
                 }
             }
             // `+` new-tab button — 28×28, radius 8 pill, hover BG.
@@ -3217,10 +3242,12 @@ impl GpuRenderer {
                 });
             }
 
-            // Ghost body — semi-transparent (alpha 0.7 per spec) copy
-            // of the active-tab style.
+            // Ghost body — Phase D D1: alpha controlled by
+            // `chip.ghost_alpha` (spec 0.5). The historical chip
+            // rendered at 0.7; the Phase D spec ghost is more
+            // translucent so the bar underneath stays legible.
             let mut chip_color = self.tab_active_bg;
-            chip_color[3] = 0.7;
+            chip_color[3] = chip.ghost_alpha.clamp(0.0, 1.0);
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(x0, y0, w, h, sw, sh),
                 color: chip_color,
