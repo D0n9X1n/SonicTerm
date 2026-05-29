@@ -1444,15 +1444,26 @@ impl App {
         self.panes.get(&id).map(|pane| pane.pty.is_some())
     }
 
-    /// Drain the config-watcher channel and apply any incoming Config.
-    /// Idempotent and cheap when nothing changed (early-returns when no
-    /// new config is queued).
+    /// Drain the config-watcher channel and apply any incoming config/keymap.
+    /// Idempotent and cheap when nothing changed.
     #[doc(hidden)]
     pub fn poll_config_reload(&mut self) {
-        let Some(latest) = self.config_watcher.as_ref().and_then(ConfigWatcher::try_latest) else {
+        let Some(watcher) = self.config_watcher.as_ref() else {
             return;
         };
-        self.apply_new_config(latest);
+        let (latest_config, latest_keymap) = watcher.try_latest_updates();
+        if let Some(km) = latest_keymap {
+            tracing::info!(
+                "live-reload: keymap.toml -> {} ({} bindings)",
+                km.meta.name,
+                km.bindings.len()
+            );
+            self.keymap = km;
+            self.input_dirty = true;
+        }
+        if let Some(cfg) = latest_config {
+            self.apply_new_config(cfg);
+        }
     }
 
     /// Read-only accessor used by tests and (eventually) the

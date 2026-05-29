@@ -20,13 +20,19 @@ use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use notify::event::EventKind;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use sonic_core::config::Config;
+use sonic_core::{config::Config, keymap::Keymap};
 
 /// Handle to a running watcher thread. Drop it to stop watching (the
 /// underlying [`RecommendedWatcher`] is freed and the background thread
 /// shuts down on its next event poll).
+#[derive(Debug, Clone)]
+pub enum ConfigWatchUpdate {
+    Config(Box<Config>),
+    Keymap(Keymap),
+}
+
 pub struct ConfigWatcher {
-    rx: Receiver<Config>,
+    rx: Receiver<ConfigWatchUpdate>,
     // Held so the watcher stays alive; never read directly.
     _watcher: RecommendedWatcher,
 }
@@ -57,7 +63,7 @@ impl ConfigWatcher {
     where
         F: Fn() + Send + 'static,
     {
-        let (tx, rx) = unbounded::<Config>();
+        let (tx, rx) = unbounded::<ConfigWatchUpdate>();
         let watcher = spawn_inner(path, tx, Box::new(wake))?;
         Ok(Self { rx, _watcher: watcher })
     }
@@ -66,22 +72,42 @@ impl ConfigWatcher {
     /// the last call (older queued ones are drained and discarded).
     pub fn try_latest(&self) -> Option<Config> {
         let mut latest = None;
-        while let Ok(cfg) = self.rx.try_recv() {
-            latest = Some(cfg);
+        while let Ok(update) = self.rx.try_recv() {
+            if let ConfigWatchUpdate::Config(cfg) = update {
+                latest = Some(*cfg);
+            }
         }
         latest
+    }
+
+    /// Non-blocking poll for the newest config and newest keymap delivered
+    /// since the last call. Older queued values of the same kind are drained
+    /// and discarded.
+    pub fn try_latest_updates(&self) -> (Option<Config>, Option<Keymap>) {
+        let mut config = None;
+        let mut keymap = None;
+        while let Ok(update) = self.rx.try_recv() {
+            match update {
+                ConfigWatchUpdate::Config(cfg) => config = Some(*cfg),
+                ConfigWatchUpdate::Keymap(km) => keymap = Some(km),
+            }
+        }
+        (config, keymap)
     }
 
     /// Blocking receive for tests / instrumentation. Returns `None` on
     /// timeout.
     pub fn recv_timeout(&self, dur: Duration) -> Option<Config> {
-        self.rx.recv_timeout(dur).ok()
+        match self.rx.recv_timeout(dur).ok()? {
+            ConfigWatchUpdate::Config(cfg) => Some(*cfg),
+            ConfigWatchUpdate::Keymap(_) => None,
+        }
     }
 }
 
 fn spawn_inner(
     path: PathBuf,
-    tx: Sender<Config>,
+    tx: Sender<ConfigWatchUpdate>,
     wake: Box<dyn Fn() + Send + 'static>,
 ) -> Result<RecommendedWatcher> {
     let parent: PathBuf = path
@@ -98,6 +124,8 @@ fn spawn_inner(
     std::fs::create_dir_all(&parent).ok();
 
     let target = path.clone();
+    let keymap_path = sonic_core::keymap::default_user_keymap_path();
+    let keymap_basename = keymap_path.as_ref().and_then(|p| p.file_name().map(|s| s.to_owned()));
     let basename_clone = basename.clone();
     // notify's event channel is std::sync::mpsc — we forward into a
     // crossbeam channel after filtering + parsing.
@@ -127,7 +155,12 @@ fn spawn_inner(
             if !is_interesting(&ev.kind) {
                 continue;
             }
-            if !ev.paths.iter().any(|p| p.file_name() == Some(basename_clone.as_os_str())) {
+            let touches_config =
+                ev.paths.iter().any(|p| p.file_name() == Some(basename_clone.as_os_str()));
+            let touches_keymap = keymap_basename.as_ref().is_some_and(|name| {
+                ev.paths.iter().any(|p| p.file_name() == Some(name.as_os_str()))
+            });
+            if !touches_config && !touches_keymap {
                 continue;
             }
             // Drain any further events that arrive within SETTLE so
@@ -140,29 +173,43 @@ fn spawn_inner(
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
-            match Config::load_or_default(&target) {
-                Ok(cfg) => {
-                    let toml = match cfg.to_toml() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    if last_sent_toml.as_deref() == Some(toml.as_str()) {
-                        continue;
+            if touches_config {
+                match Config::load_or_default(&target) {
+                    Ok(cfg) => {
+                        let toml = match cfg.to_toml() {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        if last_sent_toml.as_deref() != Some(toml.as_str()) {
+                            if tx.send(ConfigWatchUpdate::Config(Box::new(cfg))).is_err() {
+                                // Receiver dropped — app is shutting down.
+                                return;
+                            }
+                            // Wake the main event loop so the queued config
+                            // is consumed promptly even when the terminal is
+                            // otherwise idle (winit's ControlFlow::Wait would
+                            // otherwise hold the main thread until the next
+                            // OS event).
+                            wake();
+                            last_sent_toml = Some(toml);
+                        }
                     }
-                    if tx.send(cfg).is_err() {
-                        // Receiver dropped — app is shutting down.
-                        return;
+                    Err(e) => {
+                        tracing::warn!("sonic.toml reload failed: {e:#}");
                     }
-                    // Wake the main event loop so the queued config
-                    // is consumed promptly even when the terminal is
-                    // otherwise idle (winit's ControlFlow::Wait would
-                    // otherwise hold the main thread until the next
-                    // OS event).
-                    wake();
-                    last_sent_toml = Some(toml);
                 }
-                Err(e) => {
-                    tracing::warn!("sonic.toml reload failed: {e:#}");
+            }
+            if touches_keymap {
+                if let Some(path) = keymap_path.as_ref() {
+                    match Keymap::load(path) {
+                        Ok(km) => {
+                            if tx.send(ConfigWatchUpdate::Keymap(km)).is_err() {
+                                return;
+                            }
+                            wake();
+                        }
+                        Err(e) => tracing::warn!("keymap.toml reload failed: {e:#}"),
+                    }
                 }
             }
         }

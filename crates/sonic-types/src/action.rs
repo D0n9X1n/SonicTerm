@@ -145,6 +145,8 @@ pub enum Action {
     ShowKeymapCheatsheet,
     /// Open the preferences window.
     OpenPreferences,
+    /// Open the editable user keymap TOML file in the OS default editor.
+    OpenKeymapFile,
 
     /// Scroll the active pane.
     Scroll(ScrollAction),

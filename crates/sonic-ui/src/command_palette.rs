@@ -281,6 +281,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::OpenCommandPalette => "OpenCommandPalette".into(),
         Action::ShowKeymapCheatsheet => "ShowKeymapCheatsheet".into(),
         Action::OpenPreferences => "OpenPreferences".into(),
+        Action::OpenKeymapFile => "OpenKeymapFile".into(),
         Action::Scroll(s) => format!("Scroll({})", scroll_name(*s)),
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
@@ -370,6 +371,7 @@ pub fn all_actions() -> Vec<Action> {
         Action::OpenCommandPalette,
         Action::ShowKeymapCheatsheet,
         Action::OpenPreferences,
+        Action::OpenKeymapFile,
         // Scroll
         Action::Scroll(ScrollAction::LineUp),
         Action::Scroll(ScrollAction::LineDown),

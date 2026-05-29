@@ -808,6 +808,31 @@ fn draw_control(
                 typography::BODY,
             );
         }
+        Control::Button(b) => {
+            let bg = match b.kind {
+                crate::prefs::controls::ButtonKind::Primary => palette.accent,
+                crate::prefs::controls::ButtonKind::Secondary => {
+                    button_bg(color::with_alpha(color::hex("#FFFFFF"), 0.07), b.interaction)
+                }
+                crate::prefs::controls::ButtonKind::Link => [0.0, 0.0, 0.0, 0.0],
+            };
+            if !matches!(b.kind, crate::prefs::controls::ButtonKind::Link) {
+                quads.push(QuadCmd::rounded(b.rect, bg, BUTTON_RADIUS));
+            }
+            let text_color = match b.kind {
+                crate::prefs::controls::ButtonKind::Primary => color::hex("#0B1020"),
+                crate::prefs::controls::ButtonKind::Secondary => palette.text_primary,
+                crate::prefs::controls::ButtonKind::Link => palette.accent,
+            };
+            push_button_text(texts, b, b.label.clone(), text_color, typography::BODY);
+            push_text(
+                texts,
+                PrefsRect::new(slot.x, slot.y + CONTROL_H + 8.0, slot.w, 18.0),
+                "Sonic watches this file and reloads bindings automatically",
+                palette.text_muted,
+                typography::TypeRamp { size_px: 12.0, line_px: 18.0, weight: 500 },
+            );
+        }
     }
 }
 
@@ -818,6 +843,7 @@ fn control_label(c: &Control) -> &str {
         Control::Dropdown(d) => d.label.as_str(),
         Control::ColorSwatch(c) => c.label.as_str(),
         Control::TextField(f) => f.label.as_str(),
+        Control::Button(b) => b.label.as_str(),
     }
 }
 
@@ -1806,6 +1832,7 @@ mod tests {
             Control::Slider(s) => s.rect,
             Control::Dropdown(d) => d.rect,
             Control::ColorSwatch(cs) => cs.rect,
+            Control::Button(b) => b.rect,
         };
         let cx = rect.x + rect.w / 2.0;
         let cy = rect.y + rect.h / 2.0;
@@ -1817,6 +1844,7 @@ mod tests {
             | PrefsHit::SliderTrack(id)
             | PrefsHit::DropdownHeader(id)
             | PrefsHit::TextField(id)
+            | PrefsHit::Button(id)
             | PrefsHit::DropdownOption { id, .. }
             | PrefsHit::ColorCell { id, .. } => id,
             other => panic!("expected control hit, got {other:?}"),
