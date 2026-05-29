@@ -383,6 +383,50 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
     }
 }
 
+/// Compute the wezterm-style pretty tab title for the active pane and
+/// (if it differs from the current `TabBar` active title) apply it via
+/// `set_active_title`. Returns the title actually applied, or `None` if
+/// no change was needed.
+///
+/// Refactored out of `app/window_event.rs` so the equivalent code path
+/// in `app/child_window.rs` (Cmd+N / tear-out windows) can share the
+/// same logic — otherwise child windows fall back to the literal
+/// "shell N" placeholder set at spawn time.
+pub fn refresh_active_tab_title(
+    tabs: &mut sonic_ui::tabs::TabBar,
+    pane: &mut PaneState,
+    parser: &Parser,
+    tab_idx: usize,
+) -> Option<String> {
+    let cwd = parser.cwd().map(str::to_string);
+    let raw_title = parser.title().map(str::to_string);
+    const TTL: std::time::Duration = std::time::Duration::from_millis(500);
+    let now = Instant::now();
+    let fresh =
+        pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
+    if !fresh {
+        let probed = pane
+            .pty
+            .as_ref()
+            .and_then(|p| p.pid())
+            .and_then(sonic_core::proc_info::foreground_process);
+        pane.fg_proc_cache = Some((now, probed));
+    }
+    let proc_name = pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone());
+    let pretty = sonic_ui::tab_title::format_tab_title(
+        tab_idx,
+        cwd.as_deref(),
+        proc_name.as_deref(),
+        raw_title.as_deref(),
+    );
+    let cur = tabs.active().map(|t| t.title.clone());
+    if cur.as_deref() == Some(pretty.as_str()) {
+        return None;
+    }
+    tabs.set_active_title(pretty.clone());
+    Some(pretty)
+}
+
 /// Entry point used by the platform bin crates.
 pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
     run_with(theme, config, keymap, None, None)
