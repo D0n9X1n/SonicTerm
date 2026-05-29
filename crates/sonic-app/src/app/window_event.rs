@@ -538,6 +538,27 @@ impl App {
                 // is deferred to mouse-up via `compute_action`.
                 if self.mouse_down && self.pressed_tab.is_some() {
                     self.drag_target = self.compute_main_drag_target((position.x, position.y));
+                    // Phase C2 (PR #295 review fix): start the OS-level
+                    // drag session AS SOON AS the cursor crosses the
+                    // drag-start threshold from its press point, not on
+                    // mouse-release. Releasing first means `DoDragDrop`
+                    // (Windows) or NSDraggingSession (macOS) get no
+                    // live button to capture the cursor with, so the
+                    // OS-level cross-window cursor capture never
+                    // engages. The `os_drag_handoff_started` flag
+                    // ensures we only attempt the handoff once per
+                    // gesture; if it succeeds the backend owns the
+                    // gesture end-to-end (Windows) or has already
+                    // written the pasteboard (macOS).
+                    if !self.os_drag_handoff_started {
+                        if let Some(session) = self.drag_session.as_ref() {
+                            if crate::tab_drag::drag_moved_enough(session) {
+                                let idx = session.press_tab_index;
+                                self.os_drag_handoff_started = true;
+                                let _ = self.try_os_drag_handoff(idx);
+                            }
+                        }
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -570,6 +591,10 @@ impl App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
+                    // Phase C2 (PR #295 review fix): re-arm the OS-drag
+                    // handoff gate so the CursorMoved threshold check
+                    // can fire once for the new gesture.
+                    self.os_drag_handoff_started = false;
                     let sf = self
                         .window
                         .as_ref()

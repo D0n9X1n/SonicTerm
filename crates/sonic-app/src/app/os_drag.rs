@@ -100,13 +100,16 @@ pub enum DragOutcome {
     /// User let go over a Sonic window's tab bar — perform a transfer.
     /// `target_window == None` means the App's main window; `Some(id)`
     /// means a torn-out child window. `target_slot` is the insertion
-    /// index in the destination bar (`[0, len]`).
-    Drop { target_window: Option<WindowId>, target_slot: usize },
-    /// User let go over empty space (no Sonic window) — Phase C
-    /// semantics: tear out to a new floating child window. The backend
-    /// includes the screen-global drop position so the App can place
-    /// the new window's origin sensibly.
-    TearOut { drop_screen_pos: (i32, i32) },
+    /// index in the destination bar (`[0, len]`). This is the "real"
+    /// drop-on-bar outcome the C2 spec asks for — the backend MUST hit
+    /// test the destination bar and post the resolved slot rather than
+    /// a placeholder zero.
+    DroppedOnBar { target_window: Option<WindowId>, target_slot: usize },
+    /// User let go over empty space (no Sonic tab bar under the
+    /// cursor) — Phase C semantics: tear out to a new floating child
+    /// window. The backend includes the screen-global drop position so
+    /// the App can place the new window's origin sensibly.
+    DroppedOnEmpty { drop_screen_pos: (i32, i32) },
     /// User cancelled (Esc pressed, drag rejected, source window
     /// closed mid-drag, etc.). No state change — the source tab stays
     /// where it was.

@@ -727,6 +727,16 @@ pub struct App {
     /// the translucent drag chip and `compute_action` can pick a
     /// commit-on-release outcome. `None` when no tab is being dragged.
     pub(super) drag_session: Option<crate::tab_drag::DragSession>,
+    /// Phase C2 (PR #295 review fix): set the moment a held-tab drag
+    /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
+    /// before the user releases the button. Guards
+    /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
+    /// OS-level drag session starts mid-gesture (cursor still down)
+    /// rather than waiting until mouse-up — which was too late for
+    /// `DoDragDrop` to capture the cursor across windows. Cleared on
+    /// `cancel_drag_session` and at every fresh mouse-down so a new
+    /// gesture re-arms cleanly.
+    pub(super) os_drag_handoff_started: bool,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     pub(super) windows: HashMap<WindowId, WindowState>,
@@ -970,6 +980,7 @@ impl App {
             cheatsheet: CheatsheetState::new(),
             pressed_tab: None,
             drag_session: None,
+            os_drag_handoff_started: false,
             windows: HashMap::new(),
             focused_child: None,
             frontmost_window: None,
@@ -1770,19 +1781,19 @@ impl App {
     }
 
     /// Phase C2: dispatcher entry point for `UserEvent::DragEnded`.
-    /// Drains the mailbox outcome and routes it: `Drop` →
+    /// Drains the mailbox outcome and routes it: `DroppedOnBar` →
     /// [`Self::transfer_tab`]; `Cancelled` → [`Self::cancel_drag_session`];
-    /// `TearOut` is left for the existing tear_out path (this dispatcher
-    /// just clears the in-flight bookkeeping). Returns the outcome that
-    /// was processed for tests to assert on.
+    /// `DroppedOnEmpty` is left for the existing tear_out path (this
+    /// dispatcher just clears the in-flight bookkeeping). Returns the
+    /// outcome that was processed for tests to assert on.
     pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
         let outcome = self.os_drag_pending.take_ended()?;
         let source = self.os_drag_source.take();
         match outcome {
-            os_drag::DragOutcome::Drop { target_window, target_slot } => {
+            os_drag::DragOutcome::DroppedOnBar { target_window, target_slot } => {
                 let Some((src_win, src_idx)) = source else {
                     tracing::warn!(
-                        "os_drag_session: Drop arrived with no recorded source — cancelling"
+                        "os_drag_session: DroppedOnBar arrived with no recorded source — cancelling"
                     );
                     self.cancel_drag_session();
                     return Some(outcome);
@@ -1808,10 +1819,10 @@ impl App {
                     self.cancel_drag_session();
                 }
             }
-            os_drag::DragOutcome::TearOut { drop_screen_pos } => {
+            os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos } => {
                 tracing::debug!(
                     ?drop_screen_pos,
-                    "os_drag_session: tear-out — existing path handles new-window spawn"
+                    "os_drag_session: DroppedOnEmpty — existing path handles new-window spawn"
                 );
                 // The existing tear_out path is driven by within-process
                 // state machines; Phase C2 leaves window-spawn semantics
@@ -1966,6 +1977,7 @@ impl App {
         self.pressed_tab = None;
         self.mouse_down = false;
         self.drag_target = None;
+        self.os_drag_handoff_started = false;
         app_had || win_had
     }
 

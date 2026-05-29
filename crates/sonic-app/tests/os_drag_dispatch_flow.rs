@@ -7,7 +7,7 @@
 //!    `begin_session` with the correct source coords + drag image.
 //!    (Tested in the no-proxy fallback shape — the real proxy path
 //!    requires a live display.)
-//! 2. `UserEvent::DragEnded` carrying a `DragOutcome::Drop` routes
+//! 2. `UserEvent::DragEnded` carrying a `DragOutcome::DroppedOnBar` routes
 //!    through `App::transfer_tab` when the source/target line up.
 //! 3. `UserEvent::DragEnded` carrying a `DragOutcome::Cancelled`
 //!    routes through `App::cancel_drag_session`, leaving the tab
@@ -198,10 +198,13 @@ fn drag_ended_drop_invokes_transfer_tab_and_logs_unknown_target_cleanly() {
     let tgt = synth_window_id(0xBBBB);
     app.__test_set_os_drag_source(Some((src, 1)));
     app.__test_os_drag_pending()
-        .set_ended(DragOutcome::Drop { target_window: Some(tgt), target_slot: 0 });
+        .set_ended(DragOutcome::DroppedOnBar { target_window: Some(tgt), target_slot: 0 });
 
     let processed = app.handle_os_drag_ended();
-    assert!(matches!(processed, Some(DragOutcome::Drop { .. })), "Drop outcome was drained");
+    assert!(
+        matches!(processed, Some(DragOutcome::DroppedOnBar { .. })),
+        "Drop outcome was drained"
+    );
     assert_eq!(app.__test_tab_count(), before, "unknown target must not destroy any tab");
 }
 
@@ -220,10 +223,10 @@ fn drag_ended_drop_without_source_cancels_cleanly() {
     // drained by an earlier event" case (concurrent ESC + drop).
     app.__test_set_os_drag_source(None);
     app.__test_os_drag_pending()
-        .set_ended(DragOutcome::Drop { target_window: None, target_slot: 0 });
+        .set_ended(DragOutcome::DroppedOnBar { target_window: None, target_slot: 0 });
 
     let processed = app.handle_os_drag_ended();
-    assert!(matches!(processed, Some(DragOutcome::Drop { .. })));
+    assert!(matches!(processed, Some(DragOutcome::DroppedOnBar { .. })));
     assert_eq!(app.__test_tab_count(), before);
 }
 

@@ -214,7 +214,7 @@ fn backend_emits_through_real_apphandle_shape() {
     // bookkeeping is what the real macOS/Windows backends produce —
     // pinning the contract callers downstream rely on.
     let mut backend =
-        EmittingBackend::new(DragOutcome::Drop { target_window: None, target_slot: 2 });
+        EmittingBackend::new(DragOutcome::DroppedOnBar { target_window: None, target_slot: 2 });
 
     // Direct trait-method assertion of the emission count + last
     // outcome. The AppHandle parameter is unused by EmittingBackend
@@ -242,12 +242,12 @@ fn backend_emits_through_real_apphandle_shape() {
         recorded_moves.lock().unwrap().push((10, 20));
         recorded_moves.lock().unwrap().push((30, 40));
         *recorded_end.lock().unwrap() =
-            Some(DragOutcome::Drop { target_window: None, target_slot: 2 });
+            Some(DragOutcome::DroppedOnBar { target_window: None, target_slot: 2 });
     }
 
     assert_eq!(recorded_moves.lock().unwrap().len(), 2);
     assert!(matches!(
         *recorded_end.lock().unwrap(),
-        Some(DragOutcome::Drop { target_slot: 2, .. })
+        Some(DragOutcome::DroppedOnBar { target_slot: 2, .. })
     ));
 }

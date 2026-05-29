@@ -153,7 +153,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
                 // in os_drag_win already pushes a TabPayload via
                 // `os_drag_bridge::push_tab_payload`, so the
                 // user-visible result is "tab appears at destination".
-                DragOutcome::Drop { target_window: None, target_slot: source_tab_idx }
+                DragOutcome::DroppedOnBar { target_window: None, target_slot: source_tab_idx }
             }
             _ => DragOutcome::Cancelled,
         };

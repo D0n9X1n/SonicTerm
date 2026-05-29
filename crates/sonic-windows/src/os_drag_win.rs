@@ -479,46 +479,47 @@ impl IDropTarget_Impl for DropTarget_Impl {
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
         _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
+        pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
             // SAFETY: out-param is OLE-managed.
             unsafe { *pdweffect = DROPEFFECT_NONE };
+            if let Some(handle) = snapshot_drop_outcome_handle() {
+                handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::Cancelled);
+            }
             return Ok(());
         };
         // CF_SONIC_TAB takes priority.
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
-                Ok(p) => {
-                    // Both stash in the legacy single-slot (kept for
-                    // backwards-compat with the one-shot startup drain
-                    // in main.rs) AND wake the event loop via the
-                    // bridge so subsequent drops in the same session
-                    // are observed — the legacy slot is only drained
-                    // once at startup. See PR #139 review.
-                    PENDING_PAYLOAD.put(p.clone());
-                    sonic_app::os_drag_bridge::push_tab_payload(p);
-                    // Phase C2: if a `WinOsTabDragBackend` session is
-                    // live (i.e. an AppHandle was installed by
-                    // `WinOsTabDragBackend::begin_session` immediately
-                    // before this DoDragDrop), post a real
-                    // `DragOutcome::Drop` so the source-side dispatcher
-                    // routes through `App::transfer_tab`. The
-                    // destination tab itself is created by the
-                    // os_drag_bridge push above; this outcome is what
-                    // removes the source.
+                Ok(_p) => {
+                    // Phase C2 (PR #295 review fix): post a real
+                    // `DroppedOnBar` outcome instead of routing through
+                    // the legacy single-slot + bridge path with a
+                    // zeroed `Drop`. The dispatcher in `App` performs
+                    // the source-removal + destination-insert via
+                    // `transfer_tab(src, src_idx, tgt, slot)`.
                     //
-                    // TODO: hit-test `_pt` against the destination
-                    // HWND's tab bar to compute a real target_slot
-                    // rather than the source_tab_idx fallback (which
-                    // the dispatcher absorbs as a same-window self
-                    // transfer). Follow-up issue tracks this.
+                    // `target_window: None` (= App main window) is
+                    // the conservative default for the IDropTarget
+                    // registered on the main HWND; a follow-up will
+                    // hit-test `pt` against the per-HWND tab bar to
+                    // resolve the real destination slot. For now we
+                    // pass slot=0 (insert at start), which is the
+                    // canonical "append-or-prepend" landing zone for
+                    // the new bar outcome — distinct from the old
+                    // zeroed-Drop semantics in that the source side
+                    // now actually moves the tab via transfer_tab
+                    // instead of relying on the legacy bridge's
+                    // out-of-band push.
                     if let Some(handle) = snapshot_drop_outcome_handle() {
-                        handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::Drop {
-                            target_window: None,
-                            target_slot: 0,
-                        });
+                        handle.post_drag_ended(
+                            sonic_app::app::os_drag::DragOutcome::DroppedOnBar {
+                                target_window: None,
+                                target_slot: 0,
+                            },
+                        );
                     }
                     // SAFETY: OLE out-param.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };
@@ -526,6 +527,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 }
                 Err(e) => {
                     tracing::warn!(?e, "CF_SONIC_TAB JSON malformed; ignoring");
+                    if let Some(handle) = snapshot_drop_outcome_handle() {
+                        handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::Cancelled);
+                    }
                 }
             }
         }
@@ -547,6 +551,14 @@ impl IDropTarget_Impl for DropTarget_Impl {
             // SAFETY: OLE out-param.
             unsafe { *pdweffect = DROPEFFECT_COPY };
             return Ok(());
+        }
+        // No recognised format → DroppedOnEmpty so the source-side
+        // dispatcher can spawn a tear-out window at the drop point
+        // (real outcome, not silent Cancelled).
+        if let Some(handle) = snapshot_drop_outcome_handle() {
+            handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::DroppedOnEmpty {
+                drop_screen_pos: (pt.x, pt.y),
+            });
         }
         // SAFETY: OLE out-param.
         unsafe { *pdweffect = DROPEFFECT_NONE };
