@@ -149,6 +149,9 @@ Screenshot after each non-trivial step: `/tmp/rel-vX.Y.Z-02-tabs-N.png`.
 - [ ] × on inactive tab (both sides) closes only that tab; active tab stays active.
 - [ ] Right-edge body click on rightmost tab activates it (no off-by-one hit-test, #181-class).
 - [ ] `Ctrl+Shift+W` once closes the active tab (NOT double-press, #178-class regression-guard; avoids shell `Ctrl+W`).
+  - With the active tab split into >1 pane, `Cmd+W` / `Ctrl+Shift+W` closes the **focused
+    pane** first; only when one pane is left does it close the tab itself
+    (iTerm2/wezterm-style; `Action::CloseActivePaneOrTab`).
 - [ ] Drag-reorder, if implemented, moves the tab to the dropped slot and preserves tab content + PTY.
 
 **FAIL → block release.**

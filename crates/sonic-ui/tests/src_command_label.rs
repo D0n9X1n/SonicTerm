@@ -10,6 +10,7 @@ fn variant_kind_covers_every_action() {
     let samples: Vec<Action> = vec![
         Action::NewTab,
         Action::CloseTab,
+        Action::CloseActivePaneOrTab,
         Action::NextTab,
         Action::PrevTab,
         Action::ActivateTab(1),

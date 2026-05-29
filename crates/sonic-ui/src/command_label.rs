@@ -31,6 +31,7 @@ use sonic_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 pub const ALL_VARIANT_KINDS: &[&str] = &[
     "NewTab",
     "CloseTab",
+    "CloseActivePaneOrTab",
     "NextTab",
     "PrevTab",
     "ActivateTab",
@@ -75,6 +76,7 @@ pub fn variant_kind(a: &Action) -> &'static str {
     match a {
         Action::NewTab => "NewTab",
         Action::CloseTab => "CloseTab",
+        Action::CloseActivePaneOrTab => "CloseActivePaneOrTab",
         Action::NextTab => "NextTab",
         Action::PrevTab => "PrevTab",
         Action::ActivateTab(_) => "ActivateTab",
@@ -121,6 +123,7 @@ pub fn label(a: &Action) -> String {
     match a {
         Action::NewTab => "New Tab".into(),
         Action::CloseTab => "Close Tab".into(),
+        Action::CloseActivePaneOrTab => "Close Pane or Tab".into(),
         Action::NextTab => "Next Tab".into(),
         Action::PrevTab => "Previous Tab".into(),
         Action::ActivateTab(i) => format!("Activate Tab {i}"),
@@ -177,6 +180,7 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
     match a {
         Action::NewTab => &["create", "open"],
         Action::CloseTab => &["quit", "x"],
+        Action::CloseActivePaneOrTab => &["close", "quit", "x", "pane", "tab", "cmd+w"],
         Action::NextTab => &["forward", "right"],
         Action::PrevTab => &["back", "left", "previous"],
         Action::ActivateTab(_) => &["switch", "go"],

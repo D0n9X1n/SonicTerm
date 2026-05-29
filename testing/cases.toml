@@ -67,7 +67,7 @@ fail_on = "Tab count != 3 after two cmd+T presses"
 [[case]]
 id = "tab-close-ctrl-w-single-press"
 section = 2
-title = "Cmd+W closes ONE tab per press (not two)"
+title = "Cmd+W closes ONE tab per press (single-pane tab → close tab)"
 applies_to = ["mac"]
 covers_bugs = ["#200"]
 covers_landmines = []
@@ -80,6 +80,27 @@ expect = [
   { kind = "tab-count", value = 2 },
 ]
 fail_on = "Tab count drops by 2 (double-fire regression #200)"
+
+[[case]]
+id = "pane-close-cmd-w-falls-back-to-tab"
+section = 2
+title = "Cmd+W with split: closes pane first, then tab"
+applies_to = ["mac"]
+covers_bugs = []
+covers_landmines = []
+setup = ["open-3-tabs"]
+keystrokes = [
+  # Split the active tab into two panes.
+  { kind = "key", value = "cmd+d" },
+  { kind = "wait", value = 0.2 },
+  # First Cmd+W: closes the focused pane only — tab survives.
+  { kind = "key", value = "cmd+w" },
+  { kind = "wait", value = 0.2 },
+]
+expect = [
+  { kind = "tab-count", value = 3 },
+]
+fail_on = "Cmd+W collapsed the whole tab even though a second pane exists (CloseActivePaneOrTab regression)"
 
 [[case]]
 id = "tab-close-x-on-active"

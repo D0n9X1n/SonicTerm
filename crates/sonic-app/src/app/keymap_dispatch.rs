@@ -77,6 +77,24 @@ impl App {
             Action::SplitRight => self.split_active(Direction::Right),
             Action::SplitDown => self.split_active(Direction::Down),
             Action::ClosePane => self.close_active_pane(),
+            Action::CloseActivePaneOrTab => {
+                // iTerm2/wezterm-style Cmd+W: when the active tab has more
+                // than one pane, close just the focused pane; otherwise
+                // close the whole tab. `close_active_pane` already folds
+                // the "last pane → close tab" case internally, so a single
+                // call covers both branches and the pane-count check below
+                // is purely documentation of intent. The explicit branch
+                // also keeps the dispatcher honest if `close_active_pane`
+                // ever changes its fall-through.
+                let i = self.tabs.active_index();
+                let pane_count =
+                    self.tab_states.get(i).map(|st| st.tree.leaves().len()).unwrap_or(0);
+                if pane_count > 1 {
+                    self.close_active_pane();
+                } else {
+                    self.close_tab_at(i);
+                }
+            }
             Action::TogglePaneZoom => self.toggle_active_pane_zoom(),
             Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
             Action::FocusPane(d) => self.focus_pane_dir(*d),
