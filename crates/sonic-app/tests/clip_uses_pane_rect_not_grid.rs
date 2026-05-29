@@ -52,8 +52,7 @@ fn clip_uses_pane_rect_not_stale_grid_extent_horizontal() {
     let pre = (750.0, 2.0 * CELL_H, CELL_W, CELL_H);
 
     // Under the (broken) derived bound the rect would be dropped:
-    let dropped_under_old =
-        clip_rect_to_pane(pre, PANE_X, PANE_Y, STALE_GRID_W, STALE_GRID_H);
+    let dropped_under_old = clip_rect_to_pane(pre, PANE_X, PANE_Y, STALE_GRID_W, STALE_GRID_H);
     assert!(
         dropped_under_old.is_none(),
         "sanity: old (grid-derived) bound must drop this quad — \
@@ -78,12 +77,8 @@ fn clip_uses_pane_rect_not_stale_grid_extent_vertical() {
     // but still inside the new pane rect.
     let pre = (5.0 * CELL_W, STALE_GRID_H + 4.0, CELL_W, CELL_H);
 
-    let dropped_under_old =
-        clip_rect_to_pane(pre, PANE_X, PANE_Y, STALE_GRID_W, STALE_GRID_H);
-    assert!(
-        dropped_under_old.is_none(),
-        "sanity: old (grid-derived) bound must drop this quad"
-    );
+    let dropped_under_old = clip_rect_to_pane(pre, PANE_X, PANE_Y, STALE_GRID_W, STALE_GRID_H);
+    assert!(dropped_under_old.is_none(), "sanity: old (grid-derived) bound must drop this quad");
 
     let kept = clip_rect_to_pane(pre, PANE_X, PANE_Y, PANE_W, PANE_H)
         .expect("quad inside pane.rect_px must survive");
