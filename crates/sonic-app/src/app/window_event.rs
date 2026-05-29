@@ -12,7 +12,7 @@ use sonic_core::{grid::Grid, keymap::Action};
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::selection::Selection;
-use sonic_ui::tabbar_view::{Point, TabAction, TabBarLayout};
+use sonic_ui::tabbar_view::TabBarLayout;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
@@ -579,11 +579,10 @@ impl App {
                         self.renderer.as_ref().map(|r| r.titlebar_inset()).unwrap_or(0.0),
                     )
                     .with_visible(self.tab_bar_visible);
-                    let tab_action =
-                        layout.tabwidgets().iter().find_map(|t| t.hit(Point { x: px, y: py }));
-                    if tab_action.is_some() || layout.new_tab.contains(px, py) {
+                    let tab_action = layout.hit(px, py);
+                    if tab_action.is_some() {
                         match tab_action {
-                            Some(TabAction::Activate(i)) => {
+                            Some(sonic_ui::tabbar_view::TabHit::Activate(i)) => {
                                 self.tabs.activate(i);
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
@@ -592,8 +591,8 @@ impl App {
                                 self.drag_session =
                                     Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
-                            Some(TabAction::Close(i)) => self.close_tab_at(i),
-                            None => {
+                            Some(sonic_ui::tabbar_view::TabHit::Close(i)) => self.close_tab_at(i),
+                            Some(sonic_ui::tabbar_view::TabHit::NewTab) => {
                                 tracing::trace!(
                                     coords = ?(px, py),
                                     "new_tab_button hit at {:?}, dispatching",
@@ -601,6 +600,7 @@ impl App {
                                 );
                                 self.run_action(&Action::NewTab);
                             }
+                            None => unreachable!("tab_action.is_some() checked above"),
                         }
                         if self.tabs.is_empty() {
                             if self.child_windows.is_empty() {

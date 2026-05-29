@@ -27,12 +27,12 @@ fn bar_with(n: usize, active: usize) -> TabBar {
 /// For tab `idx`, sample a point inside `bg` strictly between
 /// `title.right` and `close.left` (the "gap" the user clicked).
 fn gap_point(layout: &TabBarLayout, idx: usize) -> (f32, f32) {
-    let t = layout.tabs[idx];
+    let t = &layout.tabs[idx];
     // Title ends at close.x - TAB_INNER_PAD/2 (see compute_with_height);
     // pick the midpoint between title.right and close.left so we are
     // guaranteed inside `bg`, outside `title`, and outside `close`.
-    let gap_left = t.title.x + t.title.w;
-    let gap_right = t.close.x;
+    let gap_left = t.title_rect.x + t.title_rect.w;
+    let gap_right = t.close_x_rect.x;
     let cx = (gap_left + gap_right) * 0.5;
     let cy = t.bg.y + t.bg.h * 0.5;
     assert!(cx >= t.bg.x && cx < t.bg.x + t.bg.w, "gap x must be inside bg");
