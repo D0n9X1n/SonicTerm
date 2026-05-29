@@ -167,15 +167,21 @@ impl App {
             window.clone(),
             el,
             &self.theme,
-            &self.config.font.family,
-            self.config.font.size,
-            self.config.font.line_height,
-            [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
+            sonic_shared::render::RendererSettings {
+                font_family: &self.config.font.family,
+                font_size: self.config.font.size,
+                line_height_mult: self.config.font.line_height,
+                padding: [
+                    self.config.window.padding_left,
+                    self.config.window.padding_right,
+                    self.config.window.padding_top,
+                    self.config.window.padding_bottom,
+                ],
+                appearance: sonic_shared::render::SurfaceAppearance {
+                    backdrop: self.config.appearance.backdrop,
+                    opacity: self.config.appearance.opacity,
+                },
+            },
         )
         // PANIC: renderer init failure means wgpu cannot initialize on the
         // user's GPU at all — no recovery path exists in a GPU-accelerated

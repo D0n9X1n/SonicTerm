@@ -9,19 +9,63 @@
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
 };
-use windows::Win32::Foundation::HWND;
+use sonic_core::config::BackdropKind;
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE},
+};
 
-/// Apply Mica (Win11) or fall back to acrylic. Errors are swallowed —
+const DWMSBT_MAINWINDOW: u32 = 2;
+const DWMSBT_TABBEDWINDOW: u32 = 4;
+
+/// Apply the configured Windows compositor backdrop. Errors are swallowed —
 /// neither is critical; the terminal renders fine on an opaque BG.
-pub fn apply_backdrop(hwnd: HWND) {
+pub fn apply_backdrop(hwnd: HWND, backdrop: BackdropKind) {
+    let result = match backdrop {
+        BackdropKind::Opaque => Ok("opaque"),
+        BackdropKind::Mica => apply_mica(hwnd),
+        BackdropKind::Acrylic => apply_acrylic(hwnd),
+        BackdropKind::Tabbed => apply_tabbed(hwnd),
+    };
+    match result {
+        Ok(kind) => tracing::info!(backdrop = kind, "Windows backdrop applied"),
+        Err(e) => tracing::warn!(?backdrop, error = %e, "Windows backdrop apply failed"),
+    }
+}
+
+fn apply_mica(hwnd: HWND) -> Result<&'static str, String> {
     let raw = make_raw_handle(hwnd);
     let holder = HandleHolder(raw);
-    // Try Mica first — succeeds on Win11 22H2+.
-    if window_vibrancy::apply_mica(&holder, Some(true)).is_ok() {
-        return;
+    window_vibrancy::apply_mica(&holder, Some(true)).map_err(|e| e.to_string())?;
+    set_system_backdrop(hwnd, DWMSBT_MAINWINDOW).map_err(|e| e.to_string())?;
+    Ok("mica")
+}
+
+fn apply_acrylic(hwnd: HWND) -> Result<&'static str, String> {
+    let raw = make_raw_handle(hwnd);
+    let holder = HandleHolder(raw);
+    window_vibrancy::apply_acrylic(&holder, Some((18, 18, 18, 125))).map_err(|e| e.to_string())?;
+    Ok("acrylic")
+}
+
+fn apply_tabbed(hwnd: HWND) -> Result<&'static str, String> {
+    apply_mica(hwnd)?;
+    set_system_backdrop(hwnd, DWMSBT_TABBEDWINDOW).map_err(|e| e.to_string())?;
+    Ok("tabbed")
+}
+
+fn set_system_backdrop(hwnd: HWND, backdrop_type: u32) -> windows_core::Result<()> {
+    // SAFETY: `hwnd` is a live top-level window handle from winit, and the
+    // attribute payload is a pointer to a valid `u32` for the duration of the
+    // synchronous DWM call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop_type as *const u32 as *const _,
+            std::mem::size_of_val(&backdrop_type) as u32,
+        )
     }
-    // Fall back to acrylic for Win10 / older Win11 builds.
-    let _ = window_vibrancy::apply_acrylic(&holder, Some((18, 18, 18, 125)));
 }
 
 fn make_raw_handle(hwnd: HWND) -> RawWindowHandle {

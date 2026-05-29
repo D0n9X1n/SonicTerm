@@ -77,12 +77,13 @@ fn main() -> Result<()> {
         // muda's `init_for_hwnd` requires the window to exist; the
         // `on_window_ready` hook fires exactly once, right after
         // `el.create_window(...)` succeeds in `App::resumed`.
+        let backdrop_kind = config.appearance.backdrop;
         let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
-            Box::new(|raw| {
+            Box::new(move |raw| {
                 if let raw_window_handle::RawWindowHandle::Win32(h) = raw {
                     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
                     chrome::install_subclass(hwnd);
-                    backdrop::apply_backdrop(hwnd);
+                    backdrop::apply_backdrop(hwnd, backdrop_kind);
                     let mac = menubar::WinMenu::new(hwnd);
                     if let Err(e) = mac.install(Sender::new()) {
                         tracing::error!("WinMenu install failed: {e}");

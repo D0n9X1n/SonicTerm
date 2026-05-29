@@ -212,6 +212,16 @@ impl App {
             );
         }
 
+        if (new_cfg.appearance.opacity - self.config.appearance.opacity).abs() > f32::EPSILON {
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
+            }
+            for child in self.child_windows.values_mut() {
+                child.renderer.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
+            }
+            tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
+        }
+
         // Tab close-button override (wezterm `tab_close_button_color`).
         // Diff against the live config so an edit that adds, changes,
         // or clears the value propagates to the main + every child

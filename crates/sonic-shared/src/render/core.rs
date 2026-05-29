@@ -10,6 +10,7 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use sonic_core::{
+    config::BackdropKind,
     grid::{Cell, CellFlags, Color, Grid},
     theme::Theme,
 };
@@ -21,7 +22,7 @@ use wgpu::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu};
+use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu_with_alpha};
 use super::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
 use super::drag_chip::{DragChipOverlay, DragChipVisual};
 use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
@@ -29,6 +30,30 @@ use super::tab_spans::{
     build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
     TabTitleRichTextSpans,
 };
+
+/// Renderer compositor settings that affect surface configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceAppearance {
+    /// System backdrop material requested by config.
+    pub backdrop: BackdropKind,
+    /// Theme background opacity.
+    pub opacity: f32,
+}
+
+/// Renderer initialization settings derived from config.
+#[derive(Debug, Clone, Copy)]
+pub struct RendererSettings<'a> {
+    /// Font family to use for terminal text.
+    pub font_family: &'a str,
+    /// Font size in points.
+    pub font_size: f32,
+    /// Line-height multiplier.
+    pub line_height_mult: f32,
+    /// Window padding in logical pixels: left, right, top, bottom.
+    pub padding: [f32; 4],
+    /// Surface/backdrop settings.
+    pub appearance: SurfaceAppearance,
+}
 
 /// Integer-pixel inset for the Windows custom titlebar strip; 0
 /// elsewhere. Duplicated (in tiny form) from `sonic_app::app` so this
@@ -242,6 +267,7 @@ pub struct GpuRenderer {
     padding_top: f32,
     padding_bottom: f32,
     bg: wgpu::Color,
+    bg_opacity: f32,
     fg_default: GColor,
     cursor_color: [f32; 4],
     /// Theme background as straight RGBA. Used to recolor the glyph
@@ -433,31 +459,19 @@ impl GpuRenderer {
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
         theme: &Theme,
-        font_family: &str,
-        font_size: f32,
-        line_height_mult: f32,
-        padding: [f32; 4],
+        settings: RendererSettings<'_>,
     ) -> Result<Self> {
-        pollster::block_on(Self::new_async(
-            window,
-            event_loop,
-            theme,
-            font_family,
-            font_size,
-            line_height_mult,
-            padding,
-        ))
+        pollster::block_on(Self::new_async(window, event_loop, theme, settings))
     }
 
     async fn new_async(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
         theme: &Theme,
-        font_family: &str,
-        font_size: f32,
-        line_height_mult: f32,
-        padding: [f32; 4],
+        settings: RendererSettings<'_>,
     ) -> Result<Self> {
+        let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
+            settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
@@ -488,13 +502,18 @@ impl GpuRenderer {
         } else {
             PresentMode::Fifo
         };
+        let alpha_mode = if appearance.backdrop == BackdropKind::Opaque {
+            CompositeAlphaMode::Opaque
+        } else {
+            CompositeAlphaMode::PreMultiplied
+        };
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
-            alpha_mode: CompositeAlphaMode::Opaque,
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -559,7 +578,7 @@ impl GpuRenderer {
 
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
-        let bg = hex_to_wgpu(theme.colors.background.0.as_str());
+        let bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), appearance.opacity);
         let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         let fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
         let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
@@ -695,6 +714,7 @@ impl GpuRenderer {
             padding_top,
             padding_bottom,
             bg,
+            bg_opacity: appearance.opacity.clamp(0.0, 1.0),
             fg_default,
             cursor_color,
             bg_rgba,
@@ -1398,7 +1418,13 @@ impl GpuRenderer {
     /// Recomputes every cached wgpu / glyphon color derived from the
     /// theme so the next frame reflects the swap.
     pub fn set_theme(&mut self, theme: &Theme) {
-        self.bg = hex_to_wgpu(theme.colors.background.0.as_str());
+        self.set_theme_with_opacity(theme, self.bg_opacity);
+    }
+
+    /// Apply a new color theme and terminal background opacity.
+    pub fn set_theme_with_opacity(&mut self, theme: &Theme, opacity: f32) {
+        self.bg_opacity = opacity.clamp(0.0, 1.0);
+        self.bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), self.bg_opacity);
         self.fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
         self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
         self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
