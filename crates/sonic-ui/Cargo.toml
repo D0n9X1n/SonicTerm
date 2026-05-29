@@ -23,6 +23,7 @@ regex.workspace = true
 nucleo-matcher = "0.3"
 anyhow.workspace = true
 serde.workspace = true
+toml.workspace = true
 fluent-bundle = "0.15"
 fluent-langneg = "0.13"
 unic-langid = { version = "0.9", features = ["macros"] }

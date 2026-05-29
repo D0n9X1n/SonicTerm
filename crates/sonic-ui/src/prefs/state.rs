@@ -13,7 +13,8 @@ use sonic_cfg::config::{Config, CursorShape};
 use sonic_cfg::theme::Theme;
 
 use super::controls::{
-    Button, ButtonKind, ColorSwatch, Control, Dropdown, Rect, Slider, TextField, Toggle, WidgetId,
+    known_theme_preview, Button, ButtonKind, ColorSwatch, Control, Dropdown, Rect, Slider,
+    TextField, Toggle, WidgetId,
 };
 use super::layout::{Category, PrefsLayout};
 
@@ -222,13 +223,19 @@ impl PrefsState {
             }
             Category::Theme => {
                 let sel = KNOWN_THEMES.iter().position(|t| *t == self.config.theme).unwrap_or(0);
-                out.push(Control::Dropdown(Dropdown::new(
-                    next_id(),
-                    self.i18n.t("prefs-theme"),
-                    l.control_slot(0),
-                    KNOWN_THEMES.iter().map(|s| (*s).to_string()).collect(),
-                    sel,
-                )));
+                let options: Vec<String> = KNOWN_THEMES.iter().map(|s| (*s).to_string()).collect();
+                let previews =
+                    KNOWN_THEMES.iter().filter_map(|name| known_theme_preview(name)).collect();
+                out.push(Control::Dropdown(
+                    Dropdown::new(
+                        next_id(),
+                        self.i18n.t("prefs-theme"),
+                        l.control_slot(0),
+                        options,
+                        sel,
+                    )
+                    .with_option_previews(previews),
+                ));
                 out.push(Control::ColorSwatch(ColorSwatch::new(
                     next_id(),
                     "Accent",

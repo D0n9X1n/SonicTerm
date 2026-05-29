@@ -10,7 +10,10 @@
 //! text via the standard [`crate::render::GpuRenderer`].
 
 use std::fmt;
+use std::sync::OnceLock;
 use std::time::Instant;
+
+use sonic_cfg::theme::Theme;
 
 /// Stable id used by [`super::state::PrefsState`] to dispatch events to
 /// the right control without holding a `&mut` to the whole form.
@@ -280,6 +283,67 @@ impl Slider {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemePreviewSwatch {
+    pub background: [u8; 4],
+    pub foreground: [u8; 4],
+    pub ansi: [[u8; 4]; 8],
+}
+
+impl ThemePreviewSwatch {
+    pub fn from_theme(theme: &Theme) -> Self {
+        let fallback = default_theme_preview();
+        Self {
+            background: theme.colors.background.rgba().unwrap_or(fallback.background),
+            foreground: theme.colors.foreground.rgba().unwrap_or(fallback.foreground),
+            ansi: theme.palette_first_8().map(|hex| hex.rgba().unwrap_or([0, 0, 0, 255])),
+        }
+    }
+}
+
+pub fn known_theme_preview(name: &str) -> Option<ThemePreviewSwatch> {
+    known_theme_previews()
+        .iter()
+        .find(|(theme_name, _)| *theme_name == name)
+        .map(|(_, p)| p.clone())
+}
+
+fn known_theme_previews() -> &'static [(&'static str, ThemePreviewSwatch)] {
+    static PREVIEWS: OnceLock<Vec<(&'static str, ThemePreviewSwatch)>> = OnceLock::new();
+    PREVIEWS.get_or_init(|| {
+        bundled_themes()
+            .iter()
+            .map(|(name, toml)| {
+                (*name, parse_theme_preview(toml).unwrap_or_else(default_theme_preview))
+            })
+            .collect()
+    })
+}
+
+fn parse_theme_preview(toml_text: &str) -> Option<ThemePreviewSwatch> {
+    toml::from_str::<Theme>(toml_text).ok().map(|theme| ThemePreviewSwatch::from_theme(&theme))
+}
+
+fn default_theme_preview() -> ThemePreviewSwatch {
+    let ansi = default_ansi_palette();
+    ThemePreviewSwatch {
+        background: [0x1d, 0x20, 0x21, 0xff],
+        foreground: [0xeb, 0xdb, 0xb2, 0xff],
+        ansi: [ansi[0], ansi[1], ansi[2], ansi[3], ansi[4], ansi[5], ansi[6], ansi[7]],
+    }
+}
+
+fn bundled_themes() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("gruvbox-dark-hard", include_str!("../../../../assets/themes/gruvbox-dark-hard.toml")),
+        ("wezterm", include_str!("../../../../assets/themes/wezterm.toml")),
+        ("tokyo-night", include_str!("../../../../assets/themes/tokyo-night.toml")),
+        ("dracula", include_str!("../../../../assets/themes/dracula.toml")),
+        ("nord", include_str!("../../../../assets/themes/nord.toml")),
+        ("catppuccin-mocha", include_str!("../../../../assets/themes/catppuccin-mocha.toml")),
+    ]
+}
+
 /// Pop-down list of string options. The redesigned (issue #173 slice-2)
 /// combobox is 32 px tall with a 10 px radius, a visible right-edge
 /// chevron, and a popover that opens on click and closes on outside click
@@ -295,6 +359,7 @@ pub struct Dropdown {
     pub selected: usize,
     pub open: bool,
     pub interaction: InteractionState,
+    pub option_previews: Vec<ThemePreviewSwatch>,
 }
 
 impl Dropdown {
@@ -314,7 +379,13 @@ impl Dropdown {
             selected,
             open: false,
             interaction: InteractionState::new(),
+            option_previews: Vec::new(),
         }
+    }
+
+    pub fn with_option_previews(mut self, previews: Vec<ThemePreviewSwatch>) -> Self {
+        self.option_previews = previews;
+        self
     }
 
     /// Width of the chevron column on the right edge of the closed combobox.
