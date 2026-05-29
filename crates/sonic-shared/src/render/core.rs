@@ -1524,6 +1524,16 @@ impl GpuRenderer {
             pane_id: u64,
             origin_x: f32,
             origin_y: f32,
+            // Pane rect width/height in pixels — the source of truth for
+            // pane geometry. Do NOT recompute as `grid.cols * cell_w`
+            // for clipping bounds: when the pane has just been resized
+            // but the grid hasn't yet been resynced (resize is debounced
+            // through the PTY) the derived value is smaller than the
+            // real pane rect and overlay quads at the trailing edge get
+            // clipped away, re-introducing the bleed-through PR #274 set
+            // out to fix. See Haiku review on #274.
+            rect_w: f32,
+            rect_h: f32,
             is_active: bool,
         }
         let pane_views: Vec<PaneView<'_>> = panes
@@ -1533,6 +1543,8 @@ impl GpuRenderer {
                 pane_id: p.id,
                 origin_x: p.rect_px.x as f32,
                 origin_y: p.rect_px.y as f32,
+                rect_w: p.rect_px.w as f32,
+                rect_h: p.rect_px.h as f32,
                 is_active: p.is_active,
             })
             .collect();
@@ -1554,8 +1566,15 @@ impl GpuRenderer {
         // other overlay families is handled here.
         let active_pane_x: f32 = active_origin_x;
         let active_pane_y: f32 = active_origin_y;
-        let active_pane_w: f32 = f32::from(pane_views[active_view_idx].grid.cols) * self.cell_w;
-        let active_pane_h: f32 = f32::from(pane_views[active_view_idx].grid.rows) * self.cell_h;
+        // Use the pane's own rect_px width/height (the source of truth
+        // for pane geometry) rather than `grid.cols * cell_w`. After a
+        // pane resize the grid resync is debounced through the PTY;
+        // during that window the derived extent is *smaller* than the
+        // real pane rect, which clipped overlays inside the trailing
+        // edge and re-introduced the bleed-through PR #274 set out to
+        // fix. Haiku review on #274.
+        let active_pane_w: f32 = pane_views[active_view_idx].rect_w;
+        let active_pane_h: f32 = pane_views[active_view_idx].rect_h;
         // Active grid borrow — shared, used by overlays that read the
         // active pane's cursor/scrollback/prompts. Disjoint from the
         // per-pane loop (which uses its own per-iteration borrow).
@@ -2024,12 +2043,7 @@ impl GpuRenderer {
                 .iter()
                 .find(|(id, _)| *id == pv.pane_id)
                 .map(|(_, rect)| *rect)
-                .unwrap_or(PaneRect {
-                    x: pv.origin_x,
-                    y: pv.origin_y,
-                    w: f32::from(pv_grid.cols) * cell_w,
-                    h: f32::from(pv_grid.rows) * cell_h,
-                });
+                .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
             emit_cell_bg_quads_clipped(
                 pv_grid,
                 Self::resolved_view_top_abs(pv_grid, viewport_top_abs),
@@ -2055,8 +2069,9 @@ impl GpuRenderer {
                 // selection across both panes.
                 let pane_x = active_origin_x;
                 let pane_y = active_origin_y;
-                let pane_w = f32::from(grid.cols) * self.cell_w;
-                let pane_h = f32::from(grid.rows) * self.cell_h;
+                // Pane rect_px is the source of truth — see note above.
+                let pane_w = active_pane_w;
+                let pane_h = active_pane_h;
                 for rect in selection_quad_rects(
                     sel,
                     grid.rows,
