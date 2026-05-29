@@ -25,6 +25,12 @@ pub struct Hex(pub String);
 impl Hex {
     /// Parse `#rrggbb` into (r,g,b). Returns `None` for malformed values.
     pub fn rgb(&self) -> Option<(u8, u8, u8)> {
+        let color = self.color()?;
+        Some((color.r, color.g, color.b))
+    }
+
+    /// Parse `#rrggbb` into a typed color. Returns `None` for malformed values.
+    pub fn color(&self) -> Option<Color> {
         let s = self.0.trim_start_matches('#');
         if s.len() != 6 {
             return None;
@@ -32,13 +38,58 @@ impl Hex {
         let r = u8::from_str_radix(&s[0..2], 16).ok()?;
         let g = u8::from_str_radix(&s[2..4], 16).ok()?;
         let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some((r, g, b))
+        Some(Color::rgb(r, g, b))
     }
 
     /// Parse `#rrggbb` into opaque RGBA bytes. Returns `None` for malformed values.
     pub fn rgba(&self) -> Option<[u8; 4]> {
         let (r, g, b) = self.rgb()?;
         Some([r, g, b, 255])
+    }
+}
+/// Parsed 24-bit RGB color used for palette math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Color {
+    /// Red channel.
+    pub r: u8,
+    /// Green channel.
+    pub g: u8,
+    /// Blue channel.
+    pub b: u8,
+}
+
+impl Color {
+    /// Create a color from 8-bit RGB channels.
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// Move this color toward `target` by `amount` in `0.0..=1.0`.
+    pub fn shift_toward(self, target: Color, amount: f32) -> Color {
+        let amount = amount.clamp(0.0, 1.0);
+        let shift = |from: u8, to: u8| -> u8 {
+            (f32::from(from) + (f32::from(to) - f32::from(from)) * amount).round() as u8
+        };
+        Color::rgb(shift(self.r, target.r), shift(self.g, target.g), shift(self.b, target.b))
+    }
+
+    /// Return channels as straight sRGB RGBA floats with the supplied alpha.
+    pub fn to_rgba_f32(self, alpha: f32) -> [f32; 4] {
+        [f32::from(self.r) / 255.0, f32::from(self.g) / 255.0, f32::from(self.b) / 255.0, alpha]
+    }
+
+    /// Return channels as linear-light RGBA floats with the supplied alpha.
+    pub fn to_rgba_f32_linear(self, alpha: f32) -> [f32; 4] {
+        fn srgb_to_linear(channel: u8) -> f32 {
+            let c = f32::from(channel) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        [srgb_to_linear(self.r), srgb_to_linear(self.g), srgb_to_linear(self.b), alpha]
     }
 }
 
