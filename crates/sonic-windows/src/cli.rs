@@ -1,3 +1,5 @@
+#![allow(dead_code)] // tearout CLI helpers used only via integration test; production wiring tracked separately
+
 use anyhow::{bail, Context, Result};
 use sonic_app::os_drag::TabPayload;
 

@@ -8,7 +8,8 @@ use sonic_gpu::quad::QuadInstance;
 use sonic_shared::render::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQuadCache};
 
 fn dummy_row(s: &str) -> Vec<Cell> {
-    s.chars().map(|c| Cell { ch: c, ..Default::default() }).collect()
+    use sonic_core::grid::{CellFlags, Color};
+    s.chars().map(|c| Cell::plain(c, Color::default(), Color::default(), CellFlags::empty())).collect()
 }
 
 fn dummy_quad(x: f32) -> QuadInstance {
