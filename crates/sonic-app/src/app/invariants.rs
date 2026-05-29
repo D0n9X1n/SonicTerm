@@ -72,15 +72,36 @@ pub fn assert_render_lock_forbidden() {
 /// as a fresh start and never trips the assertion. Release builds skip the
 /// timing math entirely.
 ///
-/// Note: the production coalescer in `spawn_pane.rs` currently uses a 16 ms
-/// floor (small enough to stay under one frame for echo latency); CLAUDE.md
-/// §4 documents the original 16 ms guard. This probe is a generic utility
-/// — call sites pass whichever interval they actually enforce so the probe
-/// matches the implementation rather than the historical doc value.
+/// Note: the production coalescer in `spawn_pane.rs` currently uses a **3 ms**
+/// floor (Epic #300 P3, down from the original 16 ms) plus a 128 KB byte
+/// threshold for early flush. 3 ms is safe because the macOS "not responding"
+/// beach ball is driven by *main-thread* blocking, not by how often a
+/// *background* PTY thread posts redraw requests — the main thread coalesces
+/// RedrawRequested via vsync (PR #132). wezterm ships the same 3 ms / 128 KB
+/// combo. CLAUDE.md §4 documents the rationale. This probe is a generic
+/// utility — call sites pass whichever interval they actually enforce so the
+/// probe matches the implementation rather than the historical doc value.
 #[derive(Debug, Default)]
 pub struct RedrawCoalescerProbe {
     #[cfg(debug_assertions)]
     last: Option<Instant>,
+}
+
+/// Reason a redraw was flushed by the PTY-thread coalescer.
+///
+/// The coalescer in `spawn_pane.rs` has two legitimate flush triggers:
+/// the interval timer elapsing (`Interval`), or the pending byte buffer
+/// crossing the `FLUSH_BYTES` (128 KB) threshold (`Buffer`). Buffer-driven
+/// flushes can legally fire faster than `min_interval` — under a heavy PTY
+/// burst the 128 KB threshold can be hit in well under 3 ms, and the
+/// renderer needs that data immediately. The probe therefore only enforces
+/// the spacing rule for `Interval` flushes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushReason {
+    /// Time-based flush — must respect the `min_interval` floor.
+    Interval,
+    /// Byte-threshold flush — may fire at any interval.
+    Buffer,
 }
 
 impl RedrawCoalescerProbe {
@@ -93,24 +114,34 @@ impl RedrawCoalescerProbe {
     }
 
     /// Note that a redraw was issued. In debug builds, panics if this call is
-    /// closer than `min_interval` to the previous one. In release builds, a
-    /// no-op.
+    /// closer than `min_interval` to the previous one **and** the flush
+    /// reason was [`FlushReason::Interval`]. Byte-threshold ([`FlushReason::Buffer`])
+    /// flushes are always permitted regardless of spacing — a heavy PTY burst
+    /// can legally drop > 128 KB into the buffer in well under 3 ms, and the
+    /// whole point of the byte threshold is to keep the renderer fed in that
+    /// case. In release builds, a no-op.
     #[inline]
     #[allow(unused_variables)]
-    pub fn note_redraw(&mut self, min_interval: Duration) {
+    pub fn note_redraw(&mut self, min_interval: Duration, reason: FlushReason) {
         #[cfg(debug_assertions)]
         {
             let now = Instant::now();
-            if let Some(prev) = self.last {
-                let elapsed = now.saturating_duration_since(prev);
-                debug_assert!(
-                    elapsed >= min_interval,
-                    "PTY redraw coalescer fired too fast — interval {} µs < min {} µs \
-                     (see CLAUDE.md §4 / spawn_pane.rs min_interval)",
-                    elapsed.as_micros(),
-                    min_interval.as_micros(),
-                );
+            if matches!(reason, FlushReason::Interval) {
+                if let Some(prev) = self.last {
+                    let elapsed = now.saturating_duration_since(prev);
+                    debug_assert!(
+                        elapsed >= min_interval,
+                        "PTY redraw coalescer fired Interval-flush too fast — \
+                         interval {} µs < min {} µs (see CLAUDE.md §4 / \
+                         spawn_pane.rs min_interval)",
+                        elapsed.as_micros(),
+                        min_interval.as_micros(),
+                    );
+                }
             }
+            // Buffer-driven flushes are allowed at any interval — they exist
+            // precisely to short-circuit the timer when a burst exceeds
+            // FLUSH_BYTES.
             self.last = Some(now);
         }
     }
@@ -145,15 +176,54 @@ mod tests {
     #[test]
     fn coalescer_first_call_never_trips() {
         let mut probe = RedrawCoalescerProbe::new();
-        probe.note_redraw(Duration::from_millis(16));
+        probe.note_redraw(Duration::from_millis(16), FlushReason::Interval);
     }
 
     #[test]
     fn coalescer_spaced_calls_pass() {
         let mut probe = RedrawCoalescerProbe::new();
-        probe.note_redraw(Duration::from_micros(1));
+        probe.note_redraw(Duration::from_micros(1), FlushReason::Interval);
         std::thread::sleep(Duration::from_millis(2));
-        probe.note_redraw(Duration::from_millis(1));
+        probe.note_redraw(Duration::from_millis(1), FlushReason::Interval);
+    }
+
+    #[test]
+    fn coalescer_buffer_flush_does_not_panic_under_3ms() {
+        // Buffer-threshold flushes (128 KB hit) MUST be allowed to fire at any
+        // interval — including faster than min_interval. Regression guard for
+        // the PR #308 review finding: heavy PTY bursts otherwise trip the
+        // debug_assert on every flush.
+        let mut probe = RedrawCoalescerProbe::new();
+        probe.note_redraw(Duration::from_millis(3), FlushReason::Buffer);
+        // 1 ms later (much less than the 3 ms min_interval), another buffer
+        // flush — this must NOT panic.
+        std::thread::sleep(Duration::from_millis(1));
+        probe.note_redraw(Duration::from_millis(3), FlushReason::Buffer);
+        // And a third one, also under the interval. Still must not panic.
+        probe.note_redraw(Duration::from_millis(3), FlushReason::Buffer);
+    }
+
+    #[test]
+    #[should_panic(expected = "PTY redraw coalescer fired Interval-flush too fast")]
+    fn coalescer_interval_flush_under_3ms_panics() {
+        // Two Interval-reason flushes < min_interval apart MUST trip the
+        // debug_assert — that is the whole point of the probe.
+        let mut probe = RedrawCoalescerProbe::new();
+        probe.note_redraw(Duration::from_millis(3), FlushReason::Interval);
+        std::thread::sleep(Duration::from_millis(1));
+        probe.note_redraw(Duration::from_millis(3), FlushReason::Interval);
+    }
+
+    #[test]
+    fn coalescer_buffer_then_interval_respects_interval_spacing() {
+        // After a buffer flush, the next interval flush still must respect the
+        // spacing rule relative to the buffer flush — that prevents an
+        // adversarial caller from "laundering" interval flushes through buffer
+        // flushes.
+        let mut probe = RedrawCoalescerProbe::new();
+        probe.note_redraw(Duration::from_micros(1), FlushReason::Buffer);
+        std::thread::sleep(Duration::from_millis(2));
+        probe.note_redraw(Duration::from_millis(1), FlushReason::Interval);
     }
 
     #[test]
