@@ -382,13 +382,11 @@ impl App {
                                 // Drop the &mut child borrow before
                                 // re-entering &mut self via helpers.
                                 let _ = child;
+                                // Auto-reap is now inside
+                                // close_tab_at_in_child (PR #302
+                                // follow-up); no explicit reap call
+                                // needed at the call-site.
                                 self.close_tab_at_in_child(win_id, idx);
-                                // If the close emptied the child's tab
-                                // vec, reap the now-empty window so the
-                                // user doesn't end up with a ghost
-                                // frame. `reap_empty_child` is the
-                                // single-source-of-truth teardown.
-                                self.reap_empty_child(win_id);
                                 if let Some(c) = self.windows.get(&win_id) {
                                     c.window.request_redraw();
                                 }
@@ -804,24 +802,35 @@ impl App {
     /// passes the clicked index directly (not the active one). Returns
     /// `true` on success.
     ///
-    /// Note: when this drains the child to zero tabs the caller is
-    /// responsible for invoking [`Self::reap_empty_child`] to drop the
-    /// now-empty window. That mirrors the existing single-source-of-
-    /// truth teardown rather than racing it here.
+    /// Auto-reap behavior (PR #302 follow-up): when this drains the
+    /// child to zero tabs we immediately invoke
+    /// [`Self::reap_empty_child`] so callers never have to remember.
+    /// The previous contract (caller-responsible reap) left Cmd+W and
+    /// `CloseActivePaneOrTab` on a single-pane child window leaking a
+    /// ghost frame — Haiku finding on PR #302. Centralising the reap
+    /// here is the single-source-of-truth pattern: every close path
+    /// (× button, Cmd+W, close-active-pane-or-tab) now flows through
+    /// this function and gets the reap for free.
     pub(super) fn close_tab_at_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else { return false };
-        if idx >= child.tab_states.len() {
-            return false;
+        let drained = {
+            let Some(child) = self.windows.get_mut(&win_id) else { return false };
+            if idx >= child.tab_states.len() {
+                return false;
+            }
+            let st = child.tab_states.remove(idx);
+            for id in st.tree.leaves() {
+                // PaneState::Drop → PtyHandle::Drop kills the shell.
+                child.panes.remove(&id);
+            }
+            if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
+                child.tabs.close(tab_id);
+            }
+            child.window.request_redraw();
+            child.tabs.is_empty()
+        };
+        if drained {
+            self.reap_empty_child(win_id);
         }
-        let st = child.tab_states.remove(idx);
-        for id in st.tree.leaves() {
-            // PaneState::Drop → PtyHandle::Drop kills the shell.
-            child.panes.remove(&id);
-        }
-        if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
-            child.tabs.close(tab_id);
-        }
-        child.window.request_redraw();
         true
     }
 
