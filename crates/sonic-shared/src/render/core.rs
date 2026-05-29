@@ -2746,12 +2746,30 @@ impl GpuRenderer {
                         .badge(now, layout.active == Some(t.idx)),
                 })
                 .collect();
-            let (title_text, tab_spans) = build_tab_title_spans(
+            let (title_text, mut tab_spans) = build_tab_title_spans(
                 &tab_inputs,
                 avg_glyph_w,
                 self.tab_active_fg,
                 self.tab_inactive_fg,
             );
+            // Phase D D3 (Epic #289, Haiku follow-up): dim the source
+            // tab's TITLE TEXT at the same alpha as the source-tab
+            // body quad so the dragged tab visibly "lifts off"
+            // instead of leaving the title fully opaque on top of a
+            // 30 %-dimmed body. The dim quad lands on top of the
+            // text in z-order, so without this the title text was
+            // still readable at full opacity (Haiku reviewer finding
+            // on PR #298).
+            if let Some(src_idx) = source_tab_idx {
+                for (i, t) in tab_inputs.iter().enumerate() {
+                    if t.index == src_idx {
+                        if let Some(entry) = tab_spans.get_mut(i) {
+                            entry.1 = scale_glyphon_alpha(entry.1, source_alpha);
+                        }
+                        break;
+                    }
+                }
+            }
             let TabTitleRichTextSpans { spans: spans2, default_attrs } =
                 build_tab_title_rich_text_spans(
                     &title_text,
@@ -3257,8 +3275,18 @@ impl GpuRenderer {
             // Title text via glyphon: shape into the dedicated
             // drag-chip buffer so it composites on top of the ghost
             // body. Clipping is handled by TextBounds below.
+            //
+            // Phase D D1 (Haiku follow-up on PR #298): scale the
+            // text color alpha by `chip.ghost_alpha` (spec 0.5) so
+            // the GHOST TITLE matches the ghost body translucency.
+            // Without this the body painted at 50 % alpha but the
+            // title text rode on top at full opacity, which read
+            // as "solid title on a faint plate" rather than a
+            // unified ghost.
             if !chip.title.is_empty() {
-                let attrs = terminal_font_attrs(&self.font_family).color(self.tab_active_fg);
+                let ghost_fg =
+                    scale_glyphon_alpha(self.tab_active_fg, chip.ghost_alpha.clamp(0.0, 1.0));
+                let attrs = terminal_font_attrs(&self.font_family).color(ghost_fg);
                 self.drag_chip_buffer.set_text(
                     &mut self.font_system,
                     &chip.title,
@@ -4199,6 +4227,21 @@ fn hex_to_glyphon(h: &str) -> GColor {
     } else {
         GColor::rgb(0, 0, 0)
     }
+}
+
+/// Multiply the alpha channel of a [`glyphon::Color`] by `factor`
+/// (clamped to `0.0..=1.0`) and return a fresh color with the same
+/// RGB triplet. Used by the Phase D drag-feedback path (Epic #289) to
+/// dim the source-tab title text and the ghost-chip title text to
+/// match their corresponding body quads — without this helper, those
+/// titles painted at full opacity on top of dimmed bodies (Haiku
+/// reviewer finding on PR #298).
+#[doc(hidden)]
+#[must_use]
+pub fn scale_glyphon_alpha(c: GColor, factor: f32) -> GColor {
+    let f = factor.clamp(0.0, 1.0);
+    let a = ((c.a() as f32) * f).round().clamp(0.0, 255.0) as u8;
+    GColor::rgba(c.r(), c.g(), c.b(), a)
 }
 
 /// Single source of truth for the [`Attrs`] used by every text-rendering
