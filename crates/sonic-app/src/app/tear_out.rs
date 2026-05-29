@@ -73,10 +73,13 @@ impl App {
         }
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
-        let attrs = with_integrated_titlebar(
-            Window::default_attributes()
-                .with_title(format!("Sonic — {}", tab.title))
-                .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+        let attrs = super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title(format!("Sonic — {}", tab.title))
+                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+            ),
+            self.config.appearance.backdrop,
         );
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -98,15 +101,21 @@ impl App {
             window.clone(),
             el,
             &self.theme,
-            &self.config.font.family,
-            self.config.font.size,
-            self.config.font.line_height,
-            [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
+            sonic_shared::render::RendererSettings {
+                font_family: &self.config.font.family,
+                font_size: self.config.font.size,
+                line_height_mult: self.config.font.line_height,
+                padding: [
+                    self.config.window.padding_left,
+                    self.config.window.padding_right,
+                    self.config.window.padding_top,
+                    self.config.window.padding_bottom,
+                ],
+                appearance: sonic_shared::render::SurfaceAppearance {
+                    backdrop: self.config.appearance.backdrop,
+                    opacity: self.config.appearance.opacity,
+                },
+            },
         ) {
             Ok(r) => r,
             Err(e) => {

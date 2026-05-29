@@ -56,14 +56,22 @@ pub fn srgb_channel_to_linear(c: f64) -> f64 {
 /// Alpha is left straight (no gamma curve applies to alpha).
 #[doc(hidden)]
 pub fn hex_to_wgpu(h: &str) -> wgpu::Color {
+    hex_to_wgpu_with_alpha(h, 1.0)
+}
+
+/// Parse a `#rrggbb` hex string into a premultiplied `wgpu::Color` in
+/// **linear** space with the requested opacity.
+#[doc(hidden)]
+pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
+    let alpha = alpha.clamp(0.0, 1.0) as f64;
     let h = h.trim_start_matches('#');
     let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
     if h.len() == 6 {
         wgpu::Color {
-            r: srgb_channel_to_linear(parse(0)),
-            g: srgb_channel_to_linear(parse(2)),
-            b: srgb_channel_to_linear(parse(4)),
-            a: 1.0,
+            r: srgb_channel_to_linear(parse(0)) * alpha,
+            g: srgb_channel_to_linear(parse(2)) * alpha,
+            b: srgb_channel_to_linear(parse(4)) * alpha,
+            a: alpha,
         }
     } else {
         wgpu::Color::BLACK

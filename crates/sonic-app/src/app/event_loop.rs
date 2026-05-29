@@ -119,18 +119,21 @@ impl App {
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
 
-        let attrs = with_integrated_titlebar(
-            Window::default_attributes()
-                .with_title(format!("Sonic Terminal — {}", self.theme.name))
-                .with_inner_size(winit::dpi::LogicalSize::new(
-                    f32::from(cols) * 9.0
-                        + self.config.window.padding_left
-                        + self.config.window.padding_right,
-                    f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                        + self.config.window.padding_top
-                        + self.config.window.padding_bottom
-                        + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
-                )),
+        let attrs = super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title(format!("Sonic Terminal — {}", self.theme.name))
+                    .with_inner_size(winit::dpi::LogicalSize::new(
+                        f32::from(cols) * 9.0
+                            + self.config.window.padding_left
+                            + self.config.window.padding_right,
+                        f32::from(rows) * (self.config.font.size * self.config.font.line_height)
+                            + self.config.window.padding_top
+                            + self.config.window.padding_bottom
+                            + sonic_ui::tabbar_view::TAB_BAR_HEIGHT,
+                    )),
+            ),
+            self.config.appearance.backdrop,
         );
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // PANIC (above): `create_window` only fails when winit cannot reach
@@ -167,15 +170,21 @@ impl App {
             window.clone(),
             el,
             &self.theme,
-            &self.config.font.family,
-            self.config.font.size,
-            self.config.font.line_height,
-            [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
+            sonic_shared::render::RendererSettings {
+                font_family: &self.config.font.family,
+                font_size: self.config.font.size,
+                line_height_mult: self.config.font.line_height,
+                padding: [
+                    self.config.window.padding_left,
+                    self.config.window.padding_right,
+                    self.config.window.padding_top,
+                    self.config.window.padding_bottom,
+                ],
+                appearance: sonic_shared::render::SurfaceAppearance {
+                    backdrop: self.config.appearance.backdrop,
+                    opacity: self.config.appearance.opacity,
+                },
+            },
         )
         // PANIC: renderer init failure means wgpu cannot initialize on the
         // user's GPU at all — no recovery path exists in a GPU-accelerated

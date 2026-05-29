@@ -34,6 +34,9 @@ pub struct Config {
     /// Desktop notification settings.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Appearance and compositor backdrop settings.
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
     /// Optional override for the tab close `×` button color. When set
     /// (e.g. `"#ff5555"`), the close button is always visible in this
     /// color, matching WezTerm's `tab_close_button_color` setting.
@@ -111,6 +114,36 @@ impl WindowConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+/// OS compositor backdrop behind the terminal surface.
+pub enum BackdropKind {
+    /// Draw an opaque Sonic background with no system material.
+    #[default]
+    Opaque,
+    /// Windows 11 Mica material.
+    Mica,
+    /// Acrylic blur material.
+    Acrylic,
+    /// Windows 11 tabbed/titlebar material.
+    Tabbed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+/// Appearance and compositor backdrop settings.
+pub struct AppearanceConfig {
+    /// System compositor backdrop to request on supported platforms.
+    pub backdrop: BackdropKind,
+    /// Terminal background opacity in the range 0.0..=1.0.
+    pub opacity: f32,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self { backdrop: BackdropKind::Opaque, opacity: 1.0 }
+    }
+}
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Accessibility presentation modes.
@@ -220,6 +253,7 @@ impl Default for Config {
             accessibility: AccessibilityConfig::default(),
             locale: String::new(),
             notifications: NotificationsConfig::default(),
+            appearance: AppearanceConfig::default(),
             tab_close_button_color: None,
             extra: toml::Table::new(),
         }

@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonic_core::{
-    config::Config,
+    config::{BackdropKind, Config},
     grid::Grid,
     keymap::Keymap,
     pty::PtyHandle,
@@ -51,6 +51,21 @@ pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(not(target_os = "macos"))]
     {
         attrs
+    }
+}
+
+/// Enable OS-window alpha composition when a non-opaque compositor backdrop
+/// is requested. Without this, winit creates an opaque client area and the
+/// premultiplied swapchain is composited over that instead of Mica/acrylic.
+#[doc(hidden)]
+pub fn with_backdrop_transparency(
+    attrs: WindowAttributes,
+    backdrop: BackdropKind,
+) -> WindowAttributes {
+    if backdrop == BackdropKind::Opaque {
+        attrs
+    } else {
+        attrs.with_transparent(true)
     }
 }
 
