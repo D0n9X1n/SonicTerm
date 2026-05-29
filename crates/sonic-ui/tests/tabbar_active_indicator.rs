@@ -8,9 +8,7 @@
 //! computing it inline. These tests pin the helper's behaviour so a
 //! future refactor cannot silently re-introduce the off-by-one.
 
-use sonic_ui::tabbar_view::{
-    TabBarLayout, ACTIVE_TOP_ACCENT_H, ACTIVE_TOP_ACCENT_INSET, TAB_MIN_WIDTH,
-};
+use sonic_ui::tabbar_view::{TabBarLayout, ACTIVE_TOP_ACCENT_H, TAB_MIN_WIDTH};
 use sonic_ui::tabs::{Tab, TabBar};
 
 fn bar_with_active(n: usize, active: usize) -> TabBar {
@@ -22,30 +20,23 @@ fn bar_with_active(n: usize, active: usize) -> TabBar {
     b
 }
 
-/// Helper: anchor invariant — the accent's x MUST equal
-/// `tabs[active].bg.x + ACTIVE_TOP_ACCENT_INSET`, NOT
-/// `tabs[active + 1].bg.x + INSET` (the off-by-one in #171) and NOT
-/// `new_tab.x + INSET` (the worst-case drift into the gutter).
+/// Helper: anchor invariant — the accent's rect MUST equal the active
+/// tab's current post-layout bg rect (with only height reduced to 2px), NOT
+/// `tabs[active + 1]` (the off-by-one in #171) and NOT the full strip width
+/// (the overshoot in #257).
 fn assert_accent_on_active(layout: &TabBarLayout, active_idx: usize) {
     let acc = layout.active_accent_rect().expect("active rect must exist");
     let t = &layout.tabs[active_idx];
 
-    assert!(
-        (acc.x - (t.bg.x + ACTIVE_TOP_ACCENT_INSET)).abs() < 0.01,
-        "accent.x ({}) must equal tabs[{}].bg.x + INSET ({}), got delta {}",
-        acc.x,
-        active_idx,
-        t.bg.x + ACTIVE_TOP_ACCENT_INSET,
-        acc.x - (t.bg.x + ACTIVE_TOP_ACCENT_INSET),
-    );
+    assert!((acc.x - t.bg.x).abs() < 0.01, "accent.x must equal active tab x");
 
     // And explicitly: NOT the off-by-one position the bug report
     // showed. When active_idx is the last tab we check against the
     // `+` button rect; for inner tabs we check against the next tab.
     let bug_x = if active_idx + 1 < layout.tabs.len() {
-        layout.tabs[active_idx + 1].bg.x + ACTIVE_TOP_ACCENT_INSET
+        layout.tabs[active_idx + 1].bg.x
     } else {
-        layout.new_tab.x + ACTIVE_TOP_ACCENT_INSET
+        layout.new_tab.x
     };
     assert!(
         (acc.x - bug_x).abs() > 1.0,
@@ -59,9 +50,9 @@ fn assert_accent_on_active(layout: &TabBarLayout, active_idx: usize) {
     assert!((acc.y - t.bg.y).abs() < 0.01, "accent.y must match bg.y");
     assert!((acc.h - ACTIVE_TOP_ACCENT_H).abs() < 0.01, "accent.h must be 2px");
 
-    // Width pinned to `bg.w - 2 * inset`.
-    let want_w = (t.bg.w - 2.0 * ACTIVE_TOP_ACCENT_INSET).max(0.0);
-    assert!((acc.w - want_w).abs() < 0.01, "accent.w must be bg.w - 2*inset");
+    // Issue #257: width pinned to the active tab's actual width after
+    // slack distribution, not the remaining tab-strip area.
+    assert!((acc.w - t.bg.w).abs() < 0.01, "accent.w must equal active tab width");
 
     // And the accent must fully fall inside the active tab's bg rect.
     assert!(acc.x >= t.bg.x - 0.01);
