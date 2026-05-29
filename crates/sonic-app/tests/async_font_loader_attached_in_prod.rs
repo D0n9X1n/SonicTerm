@@ -188,8 +188,15 @@ fn every_gpurenderer_new_site_in_sonic_app_attaches_async_loader() {
 
     for rel in sources {
         let path = std::path::Path::new(manifest_dir).join(rel);
-        let body = std::fs::read_to_string(&path)
+        let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read production source {}: {e}", path.display()));
+        // Sanitize comments + string literals so commented-out / stringified
+        // calls do not count (Haiku PR #318 follow-up: prior implementation
+        // counted matches inside `//` and `/* */` and string literals, so
+        // commenting out the production call still let the test pass).
+        // Mirrors the sanitizer in
+        // `crates/sonic-shared/tests/suboptimal_drop_ordering.rs`.
+        let body = strip_comments_and_strings(&raw);
 
         // Every file that constructs a `GpuRenderer` MUST also wire the
         // async fallback loader. We treat `GpuRenderer::new(` as the
@@ -218,7 +225,8 @@ fn every_gpurenderer_new_site_in_sonic_app_attaches_async_loader() {
     // catches.
     for rel in sources {
         let path = std::path::Path::new(manifest_dir).join(rel);
-        let body = std::fs::read_to_string(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let body = strip_comments_and_strings(&raw);
         assert!(
             body.contains("build_async_fallback_loader_for_proxy"),
             "{rel}: production source must reference \
@@ -226,4 +234,180 @@ fn every_gpurenderer_new_site_in_sonic_app_attaches_async_loader() {
              passed to set_async_loader cannot notify ClearShapeCache.",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Comment / string-literal sanitizer (mirrors
+// `crates/sonic-shared/tests/suboptimal_drop_ordering.rs`). Inlined here
+// instead of factored to a shared helper because cargo integration-test
+// crates don't share modules across crates without extra build wiring, and
+// the function is small and self-contained.
+// ---------------------------------------------------------------------------
+
+/// Strip Rust line comments (`// ...\n`), block comments (`/* ... */`,
+/// nesting allowed), and the *contents* of string (`"..."`, including raw
+/// strings `r#"..."#`) and char (`'.'`) literals from `src`. Replaces those
+/// byte ranges with spaces / newlines so that line numbers stay stable.
+///
+/// This is intentionally conservative — it does NOT attempt to fully parse
+/// Rust — but it is enough to defeat the "commented-out `set_async_loader(`
+/// fools the scanner" failure mode Haiku flagged on PR #318.
+fn strip_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            let mut depth = 1usize;
+            out.push(b' ');
+            out.push(b' ');
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else {
+                    out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i] == b'r' && i + 1 < bytes.len() && (bytes[i + 1] == b'"' || bytes[i + 1] == b'#')
+        {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < bytes.len() && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'"' {
+                out.extend(std::iter::repeat_n(b' ', j - i + 1));
+                i = j + 1;
+                loop {
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    if bytes[i] == b'"' {
+                        let mut k = i + 1;
+                        let mut got = 0usize;
+                        while k < bytes.len() && got < hashes && bytes[k] == b'#' {
+                            got += 1;
+                            k += 1;
+                        }
+                        if got == hashes {
+                            out.extend(std::iter::repeat_n(b' ', k - i));
+                            i = k;
+                            break;
+                        }
+                    }
+                    out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            out.push(b' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    out.push(b' ');
+                    i += 1;
+                    break;
+                }
+                out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            let mut k = i + 1;
+            let mut found = None;
+            while k < bytes.len() && k - i <= 6 {
+                if bytes[k] == b'\\' && k + 1 < bytes.len() {
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'\'' {
+                    found = Some(k);
+                    break;
+                }
+                k += 1;
+            }
+            if let Some(end) = found {
+                out.extend(std::iter::repeat_n(b' ', end - i + 1));
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).expect("sanitized buffer must remain valid UTF-8")
+}
+
+// ---------------------------------------------------------------------------
+// Sanity self-tests for the sanitizer — guarantee a commented or stringified
+// `set_async_loader(` cannot satisfy the scan (the PR #318 Haiku finding).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sanitizer_strips_line_comment_set_async_loader() {
+    let src = "// renderer.set_async_loader(loader);\nlet x = 1;\n";
+    let sanitized = strip_comments_and_strings(src);
+    assert!(
+        !sanitized.contains("set_async_loader("),
+        "line-commented set_async_loader( must be stripped: got {sanitized:?}"
+    );
+}
+
+#[test]
+fn sanitizer_strips_block_comment_set_async_loader() {
+    let src = "/* renderer.set_async_loader(loader); */\nlet x = 1;\n";
+    let sanitized = strip_comments_and_strings(src);
+    assert!(
+        !sanitized.contains("set_async_loader("),
+        "block-commented set_async_loader( must be stripped: got {sanitized:?}"
+    );
+}
+
+#[test]
+fn sanitizer_strips_string_literal_set_async_loader() {
+    let src = "log::warn!(\"set_async_loader( was skipped\");\n";
+    let sanitized = strip_comments_and_strings(src);
+    assert!(
+        !sanitized.contains("set_async_loader("),
+        "stringified set_async_loader( must be stripped: got {sanitized:?}"
+    );
+}
+
+#[test]
+fn sanitizer_preserves_real_set_async_loader_call() {
+    let src = "renderer.set_async_loader(loader);\n";
+    let sanitized = strip_comments_and_strings(src);
+    assert!(
+        sanitized.contains("set_async_loader("),
+        "real set_async_loader( call must survive sanitizer: got {sanitized:?}"
+    );
 }
