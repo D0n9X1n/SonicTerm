@@ -17,7 +17,7 @@ action = "show_keymap_cheatsheet"
 
 [[binding]]
 keys = "ctrl+shift+w"
-action = "close_tab"
+action = "close_active_pane_or_tab"
 
 # Windows-native tab navigation alternatives avoid arrow/resize/scroll chords.
 [[binding]]

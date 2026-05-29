@@ -1360,6 +1360,16 @@ impl App {
         self.tabs.len()
     }
 
+    /// Test-only: number of leaf panes in the given tab. Returns
+    /// `None` when the tab index is out of range. Used by the
+    /// `close_pane_or_tab_semantics` regression suite to assert that
+    /// `Action::CloseActivePaneOrTab` shrinks the active tab's pane
+    /// tree rather than the tab bar when the tab still has > 1 pane.
+    #[doc(hidden)]
+    pub fn __test_pane_count_in_tab(&self, tab_idx: usize) -> Option<usize> {
+        self.tab_states.get(tab_idx).map(|st| st.tree.leaves().len())
+    }
+
     /// Test-only: install an `OsDragSink` so [`Self::try_os_drag_handoff`]
     /// can be exercised without going through the platform entry point.
     #[doc(hidden)]

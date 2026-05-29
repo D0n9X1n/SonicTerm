@@ -75,6 +75,10 @@ pub enum Action {
     SplitDown,
     /// Close the active pane.
     ClosePane,
+    /// Context-aware close: if the active tab has more than one pane, close
+    /// the active pane; otherwise close the active tab. iTerm2/wezterm-style
+    /// Cmd+W semantic.
+    CloseActivePaneOrTab,
     /// Temporarily make the active pane fill the tab area.
     TogglePaneZoom,
     /// Toggle broadcast input from the active pane to other panes.

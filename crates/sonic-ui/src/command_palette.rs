@@ -248,6 +248,7 @@ pub fn action_display_name(a: &Action) -> String {
     match a {
         Action::NewTab => "NewTab".into(),
         Action::CloseTab => "CloseTab".into(),
+        Action::CloseActivePaneOrTab => "CloseActivePaneOrTab".into(),
         Action::NextTab => "NextTab".into(),
         Action::PrevTab => "PrevTab".into(),
         Action::ActivateTab(i) => format!("ActivateTab({i})"),
@@ -327,6 +328,7 @@ pub fn all_actions() -> Vec<Action> {
         // Tabs
         Action::NewTab,
         Action::CloseTab,
+        Action::CloseActivePaneOrTab,
         Action::NextTab,
         Action::PrevTab,
         Action::ActivateLastTab,
