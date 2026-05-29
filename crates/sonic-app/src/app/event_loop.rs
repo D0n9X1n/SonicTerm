@@ -104,11 +104,32 @@ impl App {
             UserEvent::DragEnded => {
                 let _ = self.handle_os_drag_ended();
             }
+            UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
         }
         // Any path above that ran an action may have set
         // `pending_prefs_open` — make sure the prefs window actually
         // materializes regardless of the dispatch source.
         self.drain_pending_window_creates(el);
+    }
+
+    /// Drain a `UserEvent::ClearShapeCache` (Epic #300 P4 follow-up):
+    /// an async font fallback family just landed in
+    /// [`sonic_text::async_fallback::AsyncFallbackLoader`]. Clear every
+    /// live renderer's shape / row / line caches (bumping `style_rev`)
+    /// and request a redraw on every live window. The next frame
+    /// re-walks the fallback chain and the user's tofu cells flip to
+    /// real glyphs.
+    pub(super) fn handle_clear_shape_cache(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_shape_cache();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        for (_id, child) in self.windows.iter_mut() {
+            child.renderer.clear_shape_cache();
+            child.window.request_redraw();
+        }
     }
 
     pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {

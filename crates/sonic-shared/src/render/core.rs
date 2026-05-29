@@ -1518,6 +1518,39 @@ impl GpuRenderer {
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
+    /// Drop every shape/row/line cache and bump `style_rev` so the next
+    /// frame re-shapes from scratch. Called from the winit event loop
+    /// in response to `UserEvent::ClearShapeCache` — itself fired by
+    /// the [`sonic_text::async_fallback::AsyncFallbackLoader`]
+    /// notifier when a CJK/emoji family finishes loading off the hot
+    /// startup path (Epic #300 P4 follow-up).
+    ///
+    /// Without this method, freshly loaded fallback faces would not
+    /// take effect until something else invalidated the caches
+    /// (theme change, font reload, etc.) — the user would keep
+    /// seeing tofu boxes for an arbitrary amount of time after the
+    /// font finished loading.
+    pub fn clear_shape_cache(&mut self) {
+        self.shape_cache.clear();
+        self.row_glyph_cache.invalidate_all();
+        self.line_quad_cache.invalidate_all();
+        self.style_rev = self.style_rev.wrapping_add(1);
+        self.last_frame_key = None;
+        tracing::info!(
+            "renderer.clear_shape_cache (async fallback notifier) style_rev={}",
+            self.style_rev
+        );
+    }
+
+    /// Test/diagnostic peek at the renderer's monotonic style
+    /// revision. The counter is opaque; tests only care that it
+    /// *changes* on theme / `clear_shape_cache` calls.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn style_rev(&self) -> u64 {
+        self.style_rev
+    }
+
     /// Translate physical-pixel `(px, py)` (as winit reports) into a
     /// `(col, row)` cell address inside the grid, or `None` if the point
     /// falls outside the grid (in the tab bar, padding, etc.).

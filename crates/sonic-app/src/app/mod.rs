@@ -492,6 +492,16 @@ pub enum UserEvent {
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
     DragEnded,
+    /// Epic #300 P4 follow-up: a previously-deferred font fallback
+    /// family finished loading in the
+    /// [`sonic_text::async_fallback::AsyncFallbackLoader`] background
+    /// thread. The handler walks every live window's `GpuRenderer`,
+    /// calls `clear_shape_cache()` (which bumps `style_rev` and drops
+    /// the shape / row / line caches), and issues
+    /// `window.request_redraw()` so the next frame re-shapes through
+    /// the newly available face and the user's tofu cells get
+    /// replaced by real glyphs.
+    ClearShapeCache,
 }
 
 /// Same as [`run`] but installs a platform-specific OS-drag sink.

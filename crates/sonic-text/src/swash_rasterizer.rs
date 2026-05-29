@@ -43,6 +43,7 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use tracing;
 
+use crate::async_fallback::AsyncFallbackLoader;
 use crate::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer};
 
 /// Unicode ranges whose glyphs we eagerly bake into the atlas at font
@@ -275,6 +276,16 @@ pub struct SwashRasterizer<'a> {
     /// charmap walk. Capped only by the working set of distinct
     /// codepoints rendered.
     slot_cache: HashMap<(char, bool, bool), Option<u8>>,
+    /// Optional async loader for off-startup-path font fallback
+    /// resolution (Epic #300 P4 follow-up). When set, a miss in the
+    /// already-loaded fallback chain enqueues background `request_load`
+    /// calls for every static [`PLATFORM_FALLBACK_CHAIN`] entry the
+    /// loader has not yet attempted, then returns `None` (tofu)
+    /// WITHOUT sync-blocking on the load. When the loader completes a
+    /// family it fires its notifier — `sonic-app` wires that to a
+    /// `UserEvent::ClearShapeCache` which calls
+    /// [`Self::clear_caches`] and bumps the renderer's `style_rev`.
+    async_loader: Option<AsyncFallbackLoader>,
 }
 
 impl<'a> SwashRasterizer<'a> {
@@ -301,7 +312,40 @@ impl<'a> SwashRasterizer<'a> {
             families,
             px,
             slot_cache: HashMap::new(),
+            async_loader: None,
         }
+    }
+
+    /// Attach an [`AsyncFallbackLoader`] for off-startup-path fallback
+    /// resolution. See the [`Self::async_loader`] field doc for the
+    /// flow. Returns `self` to allow chaining at renderer construction.
+    #[must_use]
+    pub fn with_async_loader(mut self, loader: AsyncFallbackLoader) -> Self {
+        self.async_loader = Some(loader);
+        self
+    }
+
+    /// Replace (or install) the async fallback loader on an existing
+    /// rasterizer. Used by the renderer-construction path where the
+    /// loader is built after the rasterizer.
+    pub fn set_async_loader(&mut self, loader: AsyncFallbackLoader) {
+        self.async_loader = Some(loader);
+    }
+
+    /// Borrow the configured loader, if any. Test/diagnostic only.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn async_loader(&self) -> Option<&AsyncFallbackLoader> {
+        self.async_loader.as_ref()
+    }
+
+    /// Drop the memoized slot cache. Called from the renderer's
+    /// `clear_shape_cache()` after the async loader has fired its
+    /// notifier — without this, a negative slot decision recorded
+    /// before the family loaded would stick for the rest of the
+    /// session.
+    pub fn clear_caches(&mut self) {
+        self.slot_cache.clear();
     }
 
     /// Em-size (px) the rasterizer was constructed with.
@@ -380,6 +424,15 @@ impl<'a> SwashRasterizer<'a> {
     /// has a non-zero glyph for `ch`. Memoized per (ch, bold, italic).
     /// Returns `None` only if every face in the chain returns a zero
     /// glyph id (true tofu).
+    ///
+    /// When an [`AsyncFallbackLoader`] is attached AND the live chain
+    /// cannot satisfy `ch`, this method enqueues a background
+    /// `request_load` for every static [`PLATFORM_FALLBACK_CHAIN`]
+    /// entry the loader has not yet attempted, then returns `None`
+    /// (tofu) WITHOUT sync-blocking. The negative decision is NOT
+    /// cached when at least one such load was actually spawned —
+    /// otherwise the eventual `ClearShapeCache` clear-and-redraw
+    /// would still hit a stale `Some(None)` here.
     pub fn resolve_slot(&mut self, ch: char, weight_bold: bool, italic: bool) -> Option<u8> {
         if let Some(slot) = self.slot_cache.get(&(ch, weight_bold, italic)) {
             return *slot;
@@ -393,6 +446,33 @@ impl<'a> SwashRasterizer<'a> {
             if swash_font.charmap().map(ch) != 0 {
                 found = Some(idx as u8);
                 break;
+            }
+        }
+        if found.is_none() {
+            if let Some(loader) = &self.async_loader {
+                // Spawn background loads for any chain entry not yet
+                // resolved. `request_load` itself dedups against
+                // pending / loaded / failed sets — we just need to
+                // poke it so the eventual completion fires the
+                // notifier.
+                let mut spawned_any = false;
+                for family in PLATFORM_FALLBACK_CHAIN {
+                    if loader.is_loaded(family)
+                        || loader.is_pending(family)
+                        || loader.is_failed(family)
+                    {
+                        continue;
+                    }
+                    if loader.request_load(family) {
+                        spawned_any = true;
+                    }
+                }
+                if spawned_any {
+                    // Skip caching the negative so the post-load
+                    // re-render actually re-walks the chain instead
+                    // of fast-pathing through the memo.
+                    return None;
+                }
             }
         }
         self.slot_cache.insert((ch, weight_bold, italic), found);
