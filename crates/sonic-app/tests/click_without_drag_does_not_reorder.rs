@@ -41,11 +41,11 @@ fn bar_with(n: usize) -> TabBar {
 fn stationary_click_in_first_tab_title_gap_does_not_reorder() {
     let bar = bar_with(2);
     let layout = TabBarLayout::compute(&bar, 1000.0);
-    let t0 = layout.tabs[0];
+    let t0 = &layout.tabs[0];
     // A point in the right half of tab 0 (specifically the gap between
     // the title text and the close button — past the midpoint). This
     // is exactly where `drop_slot` would, pre-fix, return slot 1.
-    let gap_x = (t0.title.x + t0.title.w + t0.close.x) * 0.5;
+    let gap_x = (t0.title_rect.x + t0.title_rect.w + t0.close_x_rect.x) * 0.5;
     let gap_y = t0.bg.y + t0.bg.h * 0.5;
     let session = DragSession::new(0, (gap_x, gap_y)); // current == press
     let action: DragAction<&str> = compute_action(&session, None, &layout);
@@ -64,9 +64,9 @@ fn stationary_click_on_any_tab_right_half_does_not_reorder() {
     let bar = bar_with(4);
     let layout = TabBarLayout::compute(&bar, 1400.0);
     for idx in 0..layout.tabs.len() {
-        let t = layout.tabs[idx];
+        let t = &layout.tabs[idx];
         // right-of-midpoint, inside bg, outside close
-        let px = (t.title.x + t.title.w + t.close.x) * 0.5;
+        let px = (t.title_rect.x + t.title_rect.w + t.close_x_rect.x) * 0.5;
         let py = t.bg.y + t.bg.h * 0.5;
         let s = DragSession::new(idx, (px, py));
         let a: DragAction<&str> = compute_action(&s, None, &layout);
@@ -85,8 +85,8 @@ fn drag_that_moves_far_enough_still_reorders() {
     // drag and should produce ReorderTab { from: 0, to: 1 }.
     let bar = bar_with(3);
     let layout = TabBarLayout::compute(&bar, 1200.0);
-    let t0 = layout.tabs[0];
-    let t1 = layout.tabs[1];
+    let t0 = &layout.tabs[0];
+    let t1 = &layout.tabs[1];
     let press = (t0.bg.x + t0.bg.w * 0.5, t0.bg.y + t0.bg.h * 0.5);
     let drop = (t1.bg.x + t1.bg.w * 0.5 - 5.0, t1.bg.y + t1.bg.h * 0.5);
     let mut s = DragSession::new(0, press);

@@ -95,6 +95,6 @@ fn compute_with_height_threads_height_through_layout() {
         // Each tab inset 4px top + 4px bottom from the bar (issue #112 R3).
         assert_eq!(t.bg.h, 32.0 - 8.0);
         // Title rect starts TAB_INNER_PAD in from the tab's left edge.
-        assert!((t.title.x - (t.bg.x + TAB_INNER_PAD)).abs() < 0.01);
+        assert!((t.title_rect.x - (t.bg.x + TAB_INNER_PAD)).abs() < 0.01);
     }
 }

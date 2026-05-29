@@ -6,6 +6,13 @@
 
 use crate::tabs::TabBar;
 
+/// Pixel coordinate in tab-bar layout space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// Default height of the tab bar strip, in logical pixels. This is the
 /// historical hard-coded value used when no font_size is plumbed in (tests,
 /// pure-layout call sites). Renderer-driven layouts should prefer
@@ -90,15 +97,71 @@ impl Rect {
     }
 }
 
-/// Layout of a single tab inside the bar.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TabRect {
-    pub index: usize,
-    pub bg: Rect,
-    pub close: Rect,
-    /// Title rect (inside the tab, to the left of the close button).
-    pub title: Rect,
+/// Hover state for a whole tab widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabHover {
+    None,
+    Body,
+    Close,
 }
+
+/// Action produced by a whole-tab hit-test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabAction {
+    Activate(usize),
+    Close(usize),
+}
+
+/// Layout and interaction model for a single tab. The tab owns one
+/// background rect for all interaction; the close `×` is only a sub-rect
+/// inside that widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabWidget {
+    pub idx: usize,
+    pub bg_rect: Rect,
+    pub close_x_rect: Rect,
+    /// Title rect (inside the tab, to the left of the close button).
+    pub title_rect: Rect,
+    pub title: String,
+    pub active: bool,
+    pub hover: TabHover,
+    /// Back-compat public field alias for the tab index. Prefer `idx`.
+    pub index: usize,
+    /// Back-compat public field alias for the tab background rect. Prefer `bg_rect`.
+    pub bg: Rect,
+    /// Back-compat public field alias for the close sub-rect. Prefer `close_x_rect`.
+    pub close: Rect,
+}
+
+impl TabWidget {
+    /// Hit-test this tab as one whole widget. Any point inside `bg_rect`
+    /// activates the tab except points inside the visual close sub-rect,
+    /// which close the tab.
+    pub fn hit(&self, p: Point) -> Option<TabAction> {
+        if !self.bg_rect.contains(p.x, p.y) {
+            return None;
+        }
+        if self.close_x_rect.contains(p.x, p.y) {
+            Some(TabAction::Close(self.idx))
+        } else {
+            Some(TabAction::Activate(self.idx))
+        }
+    }
+
+    #[must_use]
+    pub fn hover_at(&self, p: Option<Point>) -> TabHover {
+        let Some(p) = p else { return TabHover::None };
+        match self.hit(p) {
+            Some(TabAction::Close(_)) => TabHover::Close,
+            Some(TabAction::Activate(_)) => TabHover::Body,
+            None => TabHover::None,
+        }
+    }
+}
+
+/// Back-compat alias for older render/test call sites. New code should treat
+/// each value as one whole [`TabWidget`].
+pub type TabRect = TabWidget;
 
 /// What part of the tab bar was clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +169,15 @@ pub enum TabHit {
     Activate(usize),
     Close(usize),
     NewTab,
+}
+
+impl From<TabAction> for TabHit {
+    fn from(action: TabAction) -> Self {
+        match action {
+            TabAction::Activate(idx) => Self::Activate(idx),
+            TabAction::Close(idx) => Self::Close(idx),
+        }
+    }
 }
 
 /// Minimum vertical drag distance below the bottom of the tab bar to
@@ -145,7 +217,7 @@ pub fn detect_tear_out(press_tab_index: usize, current_pos: (f32, f32)) -> Optio
 #[derive(Debug, Clone)]
 pub struct TabBarLayout {
     pub bar: Rect,
-    pub tabs: Vec<TabRect>,
+    pub tabs: Vec<TabWidget>,
     pub new_tab: Rect,
     pub active: Option<usize>,
     /// When `false`, the tab bar is hidden and [`Self::hit`] /
@@ -186,7 +258,7 @@ impl TabBarLayout {
         let new_tab = Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h };
 
         let n = bar.len();
-        let mut tabs: Vec<TabRect> = Vec::with_capacity(n);
+        let mut tabs: Vec<TabWidget> = Vec::with_capacity(n);
         if n == 0 {
             return Self { bar: bar_rect, tabs, new_tab, active: None, visible: true };
         }
@@ -226,7 +298,19 @@ impl TabBarLayout {
             let title_x = bg.x + TAB_INNER_PAD;
             let title_right = close.x - TAB_INNER_PAD / 2.0;
             let title = Rect { x: title_x, y: bg.y, w: (title_right - title_x).max(0.0), h: bg.h };
-            tabs.push(TabRect { index, bg, close, title });
+            let tab = &bar.tabs()[index];
+            tabs.push(TabWidget {
+                idx: index,
+                bg_rect: bg,
+                close_x_rect: close,
+                title_rect: title,
+                title: tab.title.clone(),
+                active: index == bar.active_index(),
+                hover: TabHover::None,
+                index,
+                bg,
+                close,
+            });
             x += per_tab + TAB_GAP;
         }
 
@@ -246,13 +330,30 @@ impl TabBarLayout {
     /// `TAB_GAP` that the naive multiplication ignores.
     #[must_use]
     pub fn active_accent_rect(&self) -> Option<Rect> {
-        let idx = self.active?;
-        let t = self.tabs.get(idx)?;
+        let t = self.active_widget()?;
         // Issue #257: the active indicator must be clipped to the active
         // tab's post-layout width. Do not derive it from the whole strip or
         // shrink/grow it independently; wide two-tab Windows layouts exposed
         // that drift as an orange line overshooting into empty chrome.
-        Some(Rect { x: t.bg.x, y: t.bg.y, w: t.bg.w.max(0.0), h: ACTIVE_TOP_ACCENT_H })
+        Some(Rect {
+            x: t.bg_rect.x,
+            y: t.bg_rect.y,
+            w: t.bg_rect.w.max(0.0),
+            h: ACTIVE_TOP_ACCENT_H,
+        })
+    }
+
+    /// Full background rect for the active tab indicator/widget. This is the
+    /// canonical rect for active-tab ownership; paint variants such as the
+    /// 2px top accent derive from it instead of recomputing from tab index.
+    #[must_use]
+    pub fn active_indicator_rect(&self) -> Option<Rect> {
+        Some(self.active_widget()?.bg_rect)
+    }
+
+    fn active_widget(&self) -> Option<&TabWidget> {
+        let idx = self.active?;
+        self.tabwidgets().get(idx)
     }
 
     /// Builder-style helper to mark the layout as hidden. A hidden
@@ -283,9 +384,11 @@ impl TabBarLayout {
         self.bar.y += dy;
         self.new_tab.y += dy;
         for t in &mut self.tabs {
+            t.bg_rect.y += dy;
+            t.close_x_rect.y += dy;
+            t.title_rect.y += dy;
             t.bg.y += dy;
             t.close.y += dy;
-            t.title.y += dy;
         }
         self
     }
@@ -311,64 +414,13 @@ impl TabBarLayout {
         if self.new_tab.contains(px, py) {
             return Some(TabHit::NewTab);
         }
-        for t in &self.tabs {
-            // Close `×` fires for ANY tab whose × rect is hit. The
-            // renderer paints the × on hover of any tab (active or
-            // inactive — see render::core `draw_close = ... ||
-            // cursor_on_this_tab`), so the hit zone MUST match the
-            // paint: a visible button that swallows clicks into
-            // "activate" instead of "close" is the user-reported
-            // bug (issue: multi-tab × on inactive tab does nothing).
-            // Matches Chrome/Firefox behavior — clicking × on an
-            // inactive tab closes it directly, without first
-            // activating it. The PR #107 worry (right-edge clicks on
-            // inactive tabs silently closing) is mitigated by the
-            // small 14×14 close rect being well inside TAB_INNER_PAD
-            // of the right edge, not at it.
-            if t.close.contains(px, py) {
-                return Some(TabHit::Close(t.index));
-            }
-            // Full-bar-height hit zone: any vertical position inside
-            // the bar that falls within this tab's horizontal range
-            // counts as a click on this tab.
-            if px >= t.bg.x && px < t.bg.x + t.bg.w {
-                return Some(TabHit::Activate(t.index));
-            }
-        }
-        // The cursor is somewhere inside the bar but not over any
-        // tab's `bg` rect. Two sub-cases:
-        //   (a) cursor falls inside the `TAB_GAP` between two tabs
-        //       (or in the `BAR_LEFT_PAD` lead-in to the first tab,
-        //       or just past the last tab before the `+` button) —
-        //       snap to the nearest tab horizontally so the user
-        //       gets the obvious result instead of having a dead
-        //       sliver of bar that silently activates whatever was
-        //       already active. This was the v0.6 user complaint
-        //       "标题的tab选中区域不是一整个tab区域" — clicks on
-        //       the padding around the title text felt unresponsive.
-        //   (b) the bar is entirely empty (n == 0) — fall through
-        //       to the active-tab default below.
-        if !self.tabs.is_empty() {
-            let mut best: Option<(f32, usize)> = None;
-            for t in &self.tabs {
-                // Horizontal distance from `px` to the tab's nearest edge.
-                // Inside the tab → 0; left of it → `bg.x - px`; right
-                // of it → `px - (bg.x + bg.w)`. The earlier loop
-                // already returned for the "inside" case, so this
-                // strictly picks a neighbour tab for gap clicks.
-                let dx = if px < t.bg.x { t.bg.x - px } else { px - (t.bg.x + t.bg.w) };
-                match best {
-                    Some((d, _)) if d <= dx => {}
-                    _ => best = Some((dx, t.index)),
-                }
-            }
-            if let Some((_, idx)) = best {
-                return Some(TabHit::Activate(idx));
-            }
-        }
-        // Empty bar: swallow the click so it doesn't fall through
-        // to the terminal grid.
-        Some(TabHit::Activate(self.active.unwrap_or(0)))
+        self.tabwidgets().iter().find_map(|t| t.hit(Point { x: px, y: py })).map(Into::into)
+    }
+
+    /// Whole-tab widgets for one-pass interaction/rendering decisions.
+    #[must_use]
+    pub fn tabwidgets(&self) -> &[TabWidget] {
+        &self.tabs
     }
 
     /// True if `(px, py)` falls anywhere inside the bar background,
@@ -394,9 +446,9 @@ impl TabBarLayout {
             return 0;
         }
         for t in &self.tabs {
-            let midx = t.bg.x + t.bg.w * 0.5;
+            let midx = t.bg_rect.x + t.bg_rect.w * 0.5;
             if px < midx {
-                return t.index;
+                return t.idx;
             }
         }
         self.tabs.len()
@@ -419,20 +471,20 @@ impl TabBarLayout {
         let slot = slot.min(n);
         if slot == 0 {
             // Just inside the bar's left padding.
-            return Some(self.tabs[0].bg.x - TAB_GAP * 0.5);
+            return Some(self.tabs[0].bg_rect.x - TAB_GAP * 0.5);
         }
         if slot == n {
             // After the last tab — between its right edge and the
             // `+` button (if any).
             let last = &self.tabs[n - 1];
-            return Some(last.bg.x + last.bg.w + TAB_GAP * 0.5);
+            return Some(last.bg_rect.x + last.bg_rect.w + TAB_GAP * 0.5);
         }
         // Between tab `slot - 1` and tab `slot`: halfway between
         // their adjacent edges, which is what the rendered gap is.
         let prev = &self.tabs[slot - 1];
         let next = &self.tabs[slot];
-        let right = prev.bg.x + prev.bg.w;
-        let left = next.bg.x;
+        let right = prev.bg_rect.x + prev.bg_rect.w;
+        let left = next.bg_rect.x;
         Some((right + left) * 0.5)
     }
 
