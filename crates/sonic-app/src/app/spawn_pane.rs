@@ -94,11 +94,23 @@ impl App {
                         // request_redraw() calls must respect the same
                         // min_interval the loop enforces; CLAUDE.md §4.
                         let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
-                        // 16ms min interval keeps the OS from marking the app
-                        // unresponsive under bursty pty output (cat largefile,
-                        // shell startup banner) while staying within one vsync
-                        // frame at 60Hz. See CLAUDE.md §4.
-                        let min_interval = Duration::from_millis(16);
+                        // Epic #300 P3: dropped from 16ms → 3ms (with a
+                        // 128 KB byte-threshold early-flush) to match
+                        // wezterm. The original 16ms guard was justified
+                        // as "keeps the OS from marking the app
+                        // unresponsive", but that beach ball comes from
+                        // the *main* thread blocking — not from how often
+                        // a *background* thread posts redraw requests.
+                        // Our PTY thread is background; the main thread
+                        // coalesces RedrawRequested via vsync (PR #132).
+                        // So this knob is purely a CPU-efficiency throttle.
+                        // 3ms still amortises bursts effectively while
+                        // cutting input→pixel latency; wezterm ships the
+                        // same 3ms / 128KB combo. See CLAUDE.md §4.
+                        const COALESCE_MS: u64 = 3;
+                        const FLUSH_BYTES: usize = 128 * 1024;
+                        let min_interval = Duration::from_millis(COALESCE_MS);
+                        let mut pending_bytes: usize = 0;
                         let mut command_started: Option<Instant> = None;
                         loop {
                             // Try to drain quickly; if nothing comes for
@@ -121,6 +133,7 @@ impl App {
                                             prev,
                                             prev.wrapping_add(1),
                                         );
+                                        pending_bytes = pending_bytes.saturating_add(bytes.len());
                                     }
                                     // Collect side-effects under the parser
                                     // lock, then DROP it before touching winit.
@@ -203,13 +216,16 @@ impl App {
                                             w.set_title(&format!("Sonic — {t}"));
                                         }
                                     }
-                                    if last_request.elapsed() >= min_interval {
+                                    if last_request.elapsed() >= min_interval
+                                        || pending_bytes >= FLUSH_BYTES
+                                    {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
                                         redraw_probe.note_redraw(min_interval);
                                         last_request = Instant::now();
                                         pending = false;
+                                        pending_bytes = 0;
                                     } else {
                                         pending = true;
                                     }
@@ -223,6 +239,7 @@ impl App {
                                         redraw_probe.note_redraw(min_interval);
                                         last_request = Instant::now();
                                         pending = false;
+                                        pending_bytes = 0;
                                     }
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

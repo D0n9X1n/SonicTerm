@@ -72,11 +72,15 @@ pub fn assert_render_lock_forbidden() {
 /// as a fresh start and never trips the assertion. Release builds skip the
 /// timing math entirely.
 ///
-/// Note: the production coalescer in `spawn_pane.rs` currently uses a 16 ms
-/// floor (small enough to stay under one frame for echo latency); CLAUDE.md
-/// §4 documents the original 16 ms guard. This probe is a generic utility
-/// — call sites pass whichever interval they actually enforce so the probe
-/// matches the implementation rather than the historical doc value.
+/// Note: the production coalescer in `spawn_pane.rs` currently uses a **3 ms**
+/// floor (Epic #300 P3, down from the original 16 ms) plus a 128 KB byte
+/// threshold for early flush. 3 ms is safe because the macOS "not responding"
+/// beach ball is driven by *main-thread* blocking, not by how often a
+/// *background* PTY thread posts redraw requests — the main thread coalesces
+/// RedrawRequested via vsync (PR #132). wezterm ships the same 3 ms / 128 KB
+/// combo. CLAUDE.md §4 documents the rationale. This probe is a generic
+/// utility — call sites pass whichever interval they actually enforce so the
+/// probe matches the implementation rather than the historical doc value.
 #[derive(Debug, Default)]
 pub struct RedrawCoalescerProbe {
     #[cfg(debug_assertions)]
