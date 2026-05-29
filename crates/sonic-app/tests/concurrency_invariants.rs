@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use sonic_app::app::invariants::{
-    assert_render_lock_forbidden, debug_assert_burst_gen_monotonic, RedrawCoalescerProbe,
+    assert_render_lock_forbidden, debug_assert_burst_gen_monotonic, FlushReason,
+    RedrawCoalescerProbe,
 };
 
 /// §4 land-mine 1: the render path must never use blocking `lock()`. Calling
@@ -26,13 +27,25 @@ fn render_path_blocking_lock_trips_invariant() {
 /// interval. Two back-to-back `note_redraw` calls with a generous min must
 /// trip the probe.
 #[test]
-#[should_panic(expected = "PTY redraw coalescer fired too fast")]
+#[should_panic(expected = "PTY redraw coalescer fired Interval-flush too fast")]
 fn redraw_coalescer_back_to_back_trips_invariant() {
     let mut probe = RedrawCoalescerProbe::new();
     // First call seeds the probe and never trips.
-    probe.note_redraw(Duration::from_secs(10));
+    probe.note_redraw(Duration::from_secs(10), FlushReason::Interval);
     // Second call lands microseconds later — way below the 10 s floor.
-    probe.note_redraw(Duration::from_secs(10));
+    probe.note_redraw(Duration::from_secs(10), FlushReason::Interval);
+}
+
+/// PR #308 follow-up: byte-threshold (`FlushReason::Buffer`) flushes are an
+/// explicit second valid flush trigger and MUST be allowed to fire faster
+/// than `min_interval` — otherwise the debug_assert panics on every heavy
+/// PTY burst (the 128 KB threshold can be hit in well under 3 ms).
+#[test]
+fn redraw_coalescer_buffer_flush_under_min_interval_is_ok() {
+    let mut probe = RedrawCoalescerProbe::new();
+    probe.note_redraw(Duration::from_secs(10), FlushReason::Buffer);
+    // Immediately again — must NOT panic.
+    probe.note_redraw(Duration::from_secs(10), FlushReason::Buffer);
 }
 
 /// §4 land-mine 3 / PR #162: the PTY burst-generation counter must be

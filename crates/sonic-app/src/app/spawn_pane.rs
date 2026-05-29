@@ -222,7 +222,17 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
-                                        redraw_probe.note_redraw(min_interval);
+                                        // Classify the flush: byte-threshold
+                                        // wins if both conditions are met (it
+                                        // is the more permissive reason and
+                                        // matches the operational intent of
+                                        // "ship pixels NOW under burst").
+                                        let reason = if pending_bytes >= FLUSH_BYTES {
+                                            crate::app::invariants::FlushReason::Buffer
+                                        } else {
+                                            crate::app::invariants::FlushReason::Interval
+                                        };
+                                        redraw_probe.note_redraw(min_interval, reason);
                                         last_request = Instant::now();
                                         pending = false;
                                         pending_bytes = 0;
@@ -236,7 +246,15 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
-                                        redraw_probe.note_redraw(min_interval);
+                                        // Quiescent-timeout flush only fires
+                                        // after the channel has been silent
+                                        // for `min_interval`, so the spacing
+                                        // is naturally satisfied — classify
+                                        // as Interval.
+                                        redraw_probe.note_redraw(
+                                            min_interval,
+                                            crate::app::invariants::FlushReason::Interval,
+                                        );
                                         last_request = Instant::now();
                                         pending = false;
                                         pending_bytes = 0;
