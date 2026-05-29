@@ -233,7 +233,7 @@ pub fn build_draw_list(state: &PrefsState, theme: &Theme) -> DrawList {
             layout::SIDEBAR_ICON_SLOT,
         );
         let icon_color =
-            if active { palette.accent } else { color::with_alpha(color::TEXT_MUTED(), 0.6) };
+            if active { palette.accent } else { color::with_alpha(palette.text_primary, 0.6) };
         icons.push(IconCmd { rect: icon_rect, key: cat.icon().key, color: icon_color });
 
         // Label.
