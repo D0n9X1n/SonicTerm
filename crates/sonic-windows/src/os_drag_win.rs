@@ -110,6 +110,44 @@ pub fn take_pending_payload() -> Option<TabPayload> {
     PENDING_PAYLOAD.take()
 }
 
+// ---- Phase C2 AppHandle slot -------------------------------------------------
+
+/// Slot for the [`sonic_app::app::os_drag::AppHandle`] the WinOsTabDragBackend
+/// installs for the duration of a single `DoDragDrop` call. The
+/// `IDropTarget::Drop` callback reads from here to post a real
+/// `DragOutcome::Drop` (target_window + target_slot) back to the
+/// dispatcher when a peer Sonic HWND accepts the drop within the same
+/// process.
+static DROP_OUTCOME_HANDLE: OnceLock<Mutex<Option<sonic_app::app::os_drag::AppHandle>>> =
+    OnceLock::new();
+
+fn drop_outcome_handle_slot() -> &'static Mutex<Option<sonic_app::app::os_drag::AppHandle>> {
+    DROP_OUTCOME_HANDLE.get_or_init(|| Mutex::new(None))
+}
+
+/// Install the AppHandle the `IDropTarget::Drop` callback should use to
+/// post a `DragOutcome::Drop`. Called by `WinOsTabDragBackend::begin_session`
+/// immediately before `DoDragDrop`. Idempotent — replaces any
+/// previously-installed handle.
+pub fn install_drop_outcome_handle(handle: sonic_app::app::os_drag::AppHandle) {
+    if let Ok(mut slot) = drop_outcome_handle_slot().lock() {
+        *slot = Some(handle);
+    }
+}
+
+/// Clear the AppHandle. Called by `WinOsTabDragBackend::begin_session`
+/// after `DoDragDrop` returns so a subsequent unrelated drop (e.g.
+/// from another Sonic process) doesn't reuse a stale handle.
+pub fn clear_drop_outcome_handle() {
+    if let Ok(mut slot) = drop_outcome_handle_slot().lock() {
+        *slot = None;
+    }
+}
+
+fn snapshot_drop_outcome_handle() -> Option<sonic_app::app::os_drag::AppHandle> {
+    drop_outcome_handle_slot().lock().ok().and_then(|g| g.clone())
+}
+
 // ---- OLE process-wide init ---------------------------------------------------
 
 /// Call once on Windows startup, before any drag-drop API. Idempotent
@@ -441,32 +479,53 @@ impl IDropTarget_Impl for DropTarget_Impl {
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
         _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
+        pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
             // SAFETY: out-param is OLE-managed.
             unsafe { *pdweffect = DROPEFFECT_NONE };
+            if let Some(handle) = snapshot_drop_outcome_handle() {
+                handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::Cancelled);
+            }
             return Ok(());
         };
         // CF_SONIC_TAB takes priority.
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
-                Ok(p) => {
-                    // Both stash in the legacy single-slot (kept for
-                    // backwards-compat with the one-shot startup drain
-                    // in main.rs) AND wake the event loop via the
-                    // bridge so subsequent drops in the same session
-                    // are observed — the legacy slot is only drained
-                    // once at startup. See PR #139 review.
-                    PENDING_PAYLOAD.put(p.clone());
-                    sonic_app::os_drag_bridge::push_tab_payload(p);
+                Ok(_p) => {
+                    // Phase C2 (PR #295 review fix): resolve the real
+                    // destination via the shared TabBarRegistry the App
+                    // publishes into every frame. Falls back to
+                    // DroppedOnEmpty (tear out at drop point) when the
+                    // cursor isn't over any registered Sonic tab bar
+                    // but IS over a Sonic window's client area. If the
+                    // cursor isn't over any Sonic window at all we
+                    // still report DroppedOnEmpty so the source side
+                    // spawns a tear-out at the drop point.
+                    if let Some(handle) = snapshot_drop_outcome_handle() {
+                        let outcome = match handle.query_tab_bar_slot(pt.x, pt.y) {
+                            Some((target_window, target_slot)) => {
+                                sonic_app::app::os_drag::DragOutcome::DroppedOnBar {
+                                    target_window,
+                                    target_slot,
+                                }
+                            }
+                            None => sonic_app::app::os_drag::DragOutcome::DroppedOnEmpty {
+                                drop_screen_pos: (pt.x, pt.y),
+                            },
+                        };
+                        handle.post_drag_ended(outcome);
+                    }
                     // SAFETY: OLE out-param.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };
                     return Ok(());
                 }
                 Err(e) => {
                     tracing::warn!(?e, "CF_SONIC_TAB JSON malformed; ignoring");
+                    if let Some(handle) = snapshot_drop_outcome_handle() {
+                        handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::Cancelled);
+                    }
                 }
             }
         }
@@ -488,6 +547,14 @@ impl IDropTarget_Impl for DropTarget_Impl {
             // SAFETY: OLE out-param.
             unsafe { *pdweffect = DROPEFFECT_COPY };
             return Ok(());
+        }
+        // No recognised format → DroppedOnEmpty so the source-side
+        // dispatcher can spawn a tear-out window at the drop point
+        // (real outcome, not silent Cancelled).
+        if let Some(handle) = snapshot_drop_outcome_handle() {
+            handle.post_drag_ended(sonic_app::app::os_drag::DragOutcome::DroppedOnEmpty {
+                drop_screen_pos: (pt.x, pt.y),
+            });
         }
         // SAFETY: OLE out-param.
         unsafe { *pdweffect = DROPEFFECT_NONE };

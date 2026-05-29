@@ -329,6 +329,12 @@ impl App {
                         let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };
+                    // Epic #289 Phase C2 — refresh the OS-drag tab bar
+                    // snapshot so cross-window drop hit-tests see the
+                    // current layout. Drops between PRs read this; an
+                    // empty registry means every drop resolves to
+                    // `DroppedOnEmpty` (the bug PR #295 review caught).
+                    // (moved after the renderer borrow scope below)
                     // Tell the OS where the active text cursor lives so the
                     // IME candidate window (pinyin candidates, Japanese
                     // romaji selector, Korean Hangul composer) appears
@@ -348,6 +354,10 @@ impl App {
                         }
                     }
                 }
+                // Epic #289 Phase C2 — refresh OS-drag tab bar snapshot
+                // for the main window. Outside the renderer borrow scope
+                // so the immutable self borrow doesn't conflict with `r`.
+                self.publish_main_window_tab_bar();
             }
 
             WindowEvent::Focused(focused) => {
@@ -538,6 +548,27 @@ impl App {
                 // is deferred to mouse-up via `compute_action`.
                 if self.mouse_down && self.pressed_tab.is_some() {
                     self.drag_target = self.compute_main_drag_target((position.x, position.y));
+                    // Phase C2 (PR #295 review fix): start the OS-level
+                    // drag session AS SOON AS the cursor crosses the
+                    // drag-start threshold from its press point, not on
+                    // mouse-release. Releasing first means `DoDragDrop`
+                    // (Windows) or NSDraggingSession (macOS) get no
+                    // live button to capture the cursor with, so the
+                    // OS-level cross-window cursor capture never
+                    // engages. The `os_drag_handoff_started` flag
+                    // ensures we only attempt the handoff once per
+                    // gesture; if it succeeds the backend owns the
+                    // gesture end-to-end (Windows) or has already
+                    // written the pasteboard (macOS).
+                    if !self.os_drag_handoff_started {
+                        if let Some(session) = self.drag_session.as_ref() {
+                            if crate::tab_drag::drag_moved_enough(session) {
+                                let idx = session.press_tab_index;
+                                self.os_drag_handoff_started = true;
+                                let _ = self.try_os_drag_handoff(idx);
+                            }
+                        }
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -570,6 +601,10 @@ impl App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     self.mouse_down = true;
+                    // Phase C2 (PR #295 review fix): re-arm the OS-drag
+                    // handoff gate so the CursorMoved threshold check
+                    // can fire once for the new gesture.
+                    self.os_drag_handoff_started = false;
                     let sf = self
                         .window
                         .as_ref()
