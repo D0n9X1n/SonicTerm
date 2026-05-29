@@ -262,6 +262,120 @@ impl App {
             self.pending_prefs_open = false;
             self.create_prefs_window(el);
         }
+        if self.pending_new_window {
+            self.pending_new_window = false;
+            self.create_new_terminal_window(el);
+        }
+    }
+
+    /// Epic #289 Phase E (Haiku follow-up on PR #297): create a fresh
+    /// top-level terminal window, install its renderer, spawn one
+    /// tab + PTY-backed pane, register it with the OS-drag backend,
+    /// and mark it as the new frontmost window.
+    ///
+    /// CRITICAL: this must work whether `self.windows` is empty or
+    /// not. The motivating bug: on macOS with
+    /// `quit_on_last_window_close = false`, after the user closes
+    /// the last window the process stays alive (dock icon + native
+    /// menubar), but Cmd+N was a no-op → the user was stuck with no
+    /// way to open a new window. After this fix, Cmd+N from the
+    /// dock-alive empty-windows state spawns a fresh terminal.
+    pub(super) fn create_new_terminal_window(&mut self, el: &ActiveEventLoop) {
+        use sonic_ui::tabs::Tab;
+
+        let attrs = super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title("Sonic")
+                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+            ),
+            self.config.appearance.backdrop,
+        );
+        let window = match el.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Action::NewWindow: create_window failed: {e}");
+                return;
+            }
+        };
+        window.set_ime_allowed(true);
+
+        let mut renderer = match GpuRenderer::new(
+            window.clone(),
+            el,
+            &self.theme,
+            sonic_shared::render::RendererSettings {
+                font_family: &self.config.font.family,
+                font_size: self.config.font.size,
+                line_height_mult: self.config.font.line_height,
+                padding: [
+                    self.config.window.padding_left,
+                    self.config.window.padding_right,
+                    self.config.window.padding_top,
+                    self.config.window.padding_bottom,
+                ],
+                appearance: sonic_shared::render::SurfaceAppearance {
+                    backdrop: self.config.appearance.backdrop,
+                    opacity: self.config.appearance.opacity,
+                },
+            },
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Action::NewWindow: renderer init failed: {e}");
+                return;
+            }
+        };
+        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
+        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
+        let real_sf = window.scale_factor() as f32;
+        renderer.force_rebuild_for_scale(real_sf);
+        let real_inner = window.inner_size();
+        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+
+        let (cols, rows) = renderer.cells();
+        let cursor_visible_arc = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pane_state =
+            self.spawn_pane_state_for_child(cols, rows, window.clone(), cursor_visible_arc.clone());
+        let pane_id = super::next_pane_id();
+        let mut panes = HashMap::new();
+        panes.insert(pane_id, pane_state);
+
+        let mut tabs = TabBar::new();
+        tabs.push(Tab::new("shell 1".to_string()));
+
+        let win_id = window.id();
+        let child = WindowState {
+            role: crate::app::WindowRole::Terminal,
+            window: window.clone(),
+            renderer,
+            tabs,
+            tab_states: vec![TabState::new(PaneTree::leaf(pane_id), pane_id)],
+            panes,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            selection: None,
+            copy_mode: None,
+            modifiers: ModifiersState::empty(),
+            cursor_visible: cursor_visible_arc,
+            last_render: Instant::now(),
+            pressed_tab: None,
+            drag_session: None,
+            drag_target: None,
+        };
+        self.windows.insert(win_id, child);
+        self.register_window_with_os_drag_backend(win_id, &window);
+        window.request_redraw();
+        // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
+        // here before the OS Focus event arrives — mirrors the
+        // tear_out_tab Phase B pattern.
+        self.frontmost_window = Some(win_id);
+        tracing::info!(
+            "Action::NewWindow: spawned terminal window; windows={}",
+            self.windows.len()
+        );
     }
     pub(super) fn drain_menubar_actions(&mut self, el: &ActiveEventLoop) {
         let mut ran_any = false;
