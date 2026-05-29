@@ -356,6 +356,20 @@ impl App {
                 // App again. See `App::focused_child` doc for context.
                 if focused {
                     self.focused_child = None;
+                    // Epic #289 Phase A — record the main window as
+                    // OS-frontmost so keymap_dispatch / menubar drain
+                    // route subsequent Cmd+T / Cmd+W / Cmd+\\ to the
+                    // main window's tabs vec.
+                    self.frontmost_window = Some(win_id);
+                } else if self.frontmost_window == Some(win_id) {
+                    // Only clear if WE were the recorded frontmost.
+                    // Focus moving to a sibling sonic window arrives as
+                    // that window's own `Focused(true)` and overwrites
+                    // frontmost in the right order; if the user is just
+                    // switching to another app we end up at `None` here
+                    // which makes terminal actions fall back to main
+                    // (safe default).
+                    self.frontmost_window = None;
                 }
                 // Reset IME state across focus transitions. When focus is
                 // lost mid-composition, the OS IME panel detaches without
