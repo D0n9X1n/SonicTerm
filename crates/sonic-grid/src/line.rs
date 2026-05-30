@@ -544,6 +544,87 @@ impl Line {
     pub fn storage(&self) -> &LineStorage {
         &self.storage
     }
+
+    // ----- PR-B1 (#319): shim accessors used by Grid's internal/public API
+    // while downstream callers still pass &Vec<Cell> / &[Cell] around. These
+    // force the storage to Flat (cheap in B1 because the Grid never produces
+    // Cluster yet) and expose the inner Vec directly so the lifetime chain
+    // `&Grid → &VecDeque<Line> → &Line → &Vec<Cell>` works without copies.
+
+    /// Borrow the underlying flat `Vec<Cell>`. Forces Flat first; in B1 this
+    /// is a no-op because no Cluster lines are produced. The returned
+    /// reference is only valid until the next `&mut self` call.
+    pub fn as_vec(&self) -> &Vec<Cell> {
+        match &self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => {
+                unreachable!("PR-B1 Grid never produces Cluster storage")
+            }
+        }
+    }
+
+    /// Mutably borrow the underlying flat `Vec<Cell>`. Degrades any Cluster
+    /// storage to Flat first.
+    pub fn as_vec_mut(&mut self) -> &mut Vec<Cell> {
+        self.degrade_to_flat();
+        match &mut self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => unreachable!("just degraded"),
+        }
+    }
+
+    /// Borrow the cells as a slice (read-only).
+    pub fn as_flat_slice(&self) -> &[Cell] {
+        self.as_vec().as_slice()
+    }
+
+    /// Borrow the cells as a mutable slice. Degrades to Flat first.
+    pub fn as_flat_slice_mut(&mut self) -> &mut [Cell] {
+        self.as_vec_mut().as_mut_slice()
+    }
+
+    /// Resize to `new_len`, padding with `fill` when growing. Forwards to
+    /// the underlying Vec for the Flat case.
+    pub fn resize(&mut self, new_len: usize, fill: Cell) {
+        self.degrade_to_flat();
+        if let LineStorage::Flat(v) = &mut self.storage {
+            v.resize(new_len, fill);
+        }
+    }
+
+    /// Mutable iterator over cells. Degrades to Flat first.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
+        self.as_flat_slice_mut().iter_mut()
+    }
+}
+
+impl<'a> IntoIterator for &'a Line {
+    type Item = &'a Cell;
+    type IntoIter = std::slice::Iter<'a, Cell>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_flat_slice().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Line {
+    type Item = &'a mut Cell;
+    type IntoIter = std::slice::IterMut<'a, Cell>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_flat_slice_mut().iter_mut()
+    }
+}
+
+impl std::ops::Index<usize> for Line {
+    type Output = Cell;
+    fn index(&self, idx: usize) -> &Cell {
+        &self.as_vec()[idx]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Line {
+    fn index_mut(&mut self, idx: usize) -> &mut Cell {
+        &mut self.as_vec_mut()[idx]
+    }
 }
 
 /// Transparent iterator over either storage form.
