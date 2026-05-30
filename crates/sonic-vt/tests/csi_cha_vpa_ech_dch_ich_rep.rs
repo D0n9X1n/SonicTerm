@@ -54,7 +54,7 @@ fn csi_dch_deletes_and_shifts_left() {
     p.advance(b"ABCDEF");
     p.advance(b"\x1b[1;2H"); // CUP -> (0,1) on 'B'
     p.advance(b"\x1b[2P"); // DCH 2: remove BC
-    // Remaining row: A, D, E, F, then 6 blanks (cols 4..=9).
+                           // Remaining row: A, D, E, F, then 6 blanks (cols 4..=9).
     assert_eq!(row_text(&p, 0), "ADEF      ");
 }
 
@@ -64,7 +64,7 @@ fn csi_ich_inserts_blanks_shift_right() {
     p.advance(b"ABCDEF");
     p.advance(b"\x1b[1;2H"); // (0,1) on 'B'
     p.advance(b"\x1b[2@"); // ICH 2: insert 2 blanks at col 1
-    // Expected: A, blank, blank, B, C, D, E, F, then trailing blanks.
+                           // Expected: A, blank, blank, B, C, D, E, F, then trailing blanks.
     assert_eq!(row_text(&p, 0), "A  BCDEF  ");
 }
 
@@ -75,6 +75,17 @@ fn csi_rep_repeats_last_printed_char() {
     p.advance(b"\x1b[4b"); // REP 4 -> four more X
     assert_eq!(row_text(&p, 0), "XXXXX     ");
     assert_eq!(p.grid().cursor.col, 5);
+}
+
+#[test]
+fn csi_rep_after_cuf_is_noop() {
+    let mut p = parser(10, 3);
+    p.advance(b"X");
+    p.advance(b"\x1b[1C"); // CUF resets last_printed_char per ECMA-48 REP semantics.
+    p.advance(b"\x1b[4b");
+
+    assert_eq!(row_text(&p, 0), "X         ");
+    assert_eq!(p.grid().cursor.col, 2);
 }
 
 #[test]

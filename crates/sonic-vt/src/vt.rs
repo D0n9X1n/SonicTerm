@@ -249,8 +249,8 @@ struct Performer {
     /// `true`.
     ground: bool,
     /// Most-recently-printed graphic character, for CSI `b` (REP).
-    /// ECMA-48: REP repeats the GRAPHIC CHARACTER which is the most recent
-    /// in the data stream. Reset on cursor motion / erase / scroll.
+    /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
+    /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
 }
 
@@ -293,6 +293,10 @@ impl Performer {
         if let Some(tx) = &self.reply_tx {
             let _ = tx.send(bytes.to_vec());
         }
+    }
+
+    fn reset_last_printed_char(&mut self) {
+        self.last_printed_char = None;
     }
 
     fn reset_attrs(&mut self) {
@@ -345,6 +349,7 @@ impl Performer {
 
     /// Handle a CSI sequence with `?` intermediate (DEC private modes).
     fn handle_dec_private_mode(&mut self, params: &Params, set: bool) {
+        self.reset_last_printed_char();
         for slice in params.iter() {
             let code = slice.first().copied().unwrap_or(0);
             match code {
@@ -450,6 +455,7 @@ impl Perform for Performer {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.reset_last_printed_char();
         match byte {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
@@ -480,6 +486,9 @@ impl Perform for Performer {
 
     fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
         self.ground = false;
+        if action != 'b' {
+            self.reset_last_printed_char();
+        }
         if inter.first() == Some(&b'?') {
             match action {
                 'h' => {
@@ -587,7 +596,6 @@ impl Perform for Performer {
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
                 self.grid.insert_cells(cur.row, cur.col, n);
-                self.last_printed_char = None;
             }
             'P' => {
                 // DCH — Delete n cells at the cursor, shifting trailing
@@ -595,7 +603,6 @@ impl Perform for Performer {
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
                 self.grid.delete_cells(cur.row, cur.col, n);
-                self.last_printed_char = None;
             }
             'X' => {
                 // ECH — Erase n cells starting at the cursor with the
@@ -604,7 +611,6 @@ impl Perform for Performer {
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
                 self.grid.erase_cells(cur.row, cur.col, n);
-                self.last_printed_char = None;
             }
             'G' | '`' => {
                 // CHA (G) / HPA (`) — Cursor to column p0 (1-based) on the
@@ -612,14 +618,12 @@ impl Perform for Performer {
                 let col_1 = p0().max(1);
                 let row = self.grid.cursor.row;
                 self.grid.goto(row, col_1.saturating_sub(1));
-                self.last_printed_char = None;
             }
             'd' => {
                 // VPA — Cursor to row p0 (1-based), column unchanged.
                 let row_1 = p0().max(1);
                 let col = self.grid.cursor.col;
                 self.grid.goto(row_1.saturating_sub(1), col);
-                self.last_printed_char = None;
             }
             'b' => {
                 // REP — Repeat last printable character n times at cursor.
@@ -788,6 +792,7 @@ impl Perform for Performer {
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.ground = false;
+        self.reset_last_printed_char();
         match byte {
             b'D' => {
                 // IND — Index. Move cursor down one line; if at the
