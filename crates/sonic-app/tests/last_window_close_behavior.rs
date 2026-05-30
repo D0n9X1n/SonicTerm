@@ -11,25 +11,25 @@ use sonic_core::config::Config;
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_default_config_keeps_app_alive_after_last_window_close() {
-    // Chrome/Firefox/Safari behavior on macOS: the dock icon stays
-    // active and Cmd+N can re-spawn a window without cold start.
+fn macos_default_config_exits_on_last_window_close() {
+    // Traditional terminal behavior on macOS (Terminal.app, iTerm2,
+    // Alacritty, WezTerm): closing the last tab/window quits the app.
     let cfg = Config::default();
-    assert!(!cfg.quit_on_last_window_close, "default must be false");
+    assert!(cfg.quit_on_last_window_close, "default must be true");
     assert!(
-        !App::should_exit_on_last_window_close(&cfg),
-        "macOS + default config (false) → must NOT exit on last window close"
+        App::should_exit_on_last_window_close(&cfg),
+        "macOS + default config (true) → MUST exit on last window close"
     );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_explicit_true_exits_on_last_window_close() {
-    // Opt-in to classic single-window-app behavior on macOS.
-    let cfg = Config { quit_on_last_window_close: true, ..Config::default() };
+fn macos_explicit_false_keeps_app_alive_after_last_window_close() {
+    // Opt-in to Chrome/Firefox/Safari dock-alive behavior on macOS.
+    let cfg = Config { quit_on_last_window_close: false, ..Config::default() };
     assert!(
-        App::should_exit_on_last_window_close(&cfg),
-        "macOS + quit_on_last_window_close=true → MUST exit on last window close"
+        !App::should_exit_on_last_window_close(&cfg),
+        "macOS + quit_on_last_window_close=false → must NOT exit on last window close"
     );
 }
 

@@ -768,6 +768,15 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
+    /// Bug fix (Cmd+W on last tab): the keymap dispatcher cannot call
+    /// `ActiveEventLoop::exit()` directly because it has no `&el`. It
+    /// sets this flag when `CloseActivePaneOrTab` closes the final
+    /// tab on the main window with no child windows alive; the next
+    /// `about_to_wait` / event-drain tick consumes it and either
+    /// exits the loop or hides the main window, per
+    /// `should_exit_on_last_window_close`. Mirrors the
+    /// `pending_new_window` pattern.
+    pub(super) pending_exit: bool,
     /// IME composition state for CJK / other multi-key input methods.
     pub(super) ime: ImeState,
     /// Throttle for `Window::set_ime_cursor_area`. Without this every
@@ -1071,6 +1080,7 @@ impl App {
             hovered_url: None,
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_new_window: false,
+            pending_exit: false,
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
@@ -1264,12 +1274,15 @@ fn notify_command_done(body: String) {
 impl App {
     /// Returns `true` when closing the last window should exit the
     /// process, given a config. On macOS we honor
-    /// [`Config::quit_on_last_window_close`] (default `false` →
-    /// Chrome/Firefox-style: stay alive in the dock, waiting for
-    /// `Cmd+N`). On other platforms there is no dock concept, so we
-    /// always exit once the last window is gone — the config is
-    /// ignored. Exposed (test-only) so behavior is verifiable without
-    /// building a real winit event loop.
+    /// [`Config::quit_on_last_window_close`] (default `true` →
+    /// traditional terminal behavior: closing the last tab/window
+    /// quits the app, matching Terminal.app / iTerm2 / Alacritty /
+    /// WezTerm). Users who prefer Chrome/Firefox-style dock-alive can
+    /// opt in by setting the field to `false`. On other platforms
+    /// there is no dock concept, so we always exit once the last
+    /// window is gone — the config is ignored. Exposed (test-only) so
+    /// behavior is verifiable without building a real winit event
+    /// loop.
     #[doc(hidden)]
     pub fn should_exit_on_last_window_close(config: &Config) -> bool {
         #[cfg(target_os = "macos")]
@@ -1730,6 +1743,25 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pending_new_window(&self) -> bool {
         self.pending_new_window
+    }
+
+    /// Test-only: read the `pending_exit` flag. Set by the
+    /// `Action::CloseActivePaneOrTab` dispatcher arm when the last
+    /// tab of the main window is closed with no child windows alive;
+    /// consumed by `drain_pending_exit` (which needs a live
+    /// `ActiveEventLoop` and so can't run in a unit test). The flag
+    /// is the testable seam for the Cmd+W-on-last-tab regression.
+    #[doc(hidden)]
+    pub fn __test_pending_exit(&self) -> bool {
+        self.pending_exit
+    }
+
+    /// Test-only: clear the `pending_exit` flag without invoking a
+    /// real event loop. Lets tests verify both the "set then drain"
+    /// and "set then re-set" paths.
+    #[doc(hidden)]
+    pub fn __test_clear_pending_exit(&mut self) {
+        self.pending_exit = false;
     }
 
     /// Test-only: count of entries in `self.windows`. Used by the

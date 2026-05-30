@@ -843,6 +843,7 @@ impl App {
                     }
                     self.cheatsheet_handle_key(&event);
                     self.drain_pending_window_creates(el);
+                    self.drain_pending_exit(el);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -865,6 +866,7 @@ impl App {
                     }
                     self.command_palette_handle_key(&event);
                     self.drain_pending_window_creates(el);
+                    self.drain_pending_exit(el);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -913,6 +915,7 @@ impl App {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
                             self.drain_pending_window_creates(el);
+                            self.drain_pending_exit(el);
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }

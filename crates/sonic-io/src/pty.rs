@@ -6,10 +6,11 @@
 
 use std::{
     io::{Read, Write},
-    path::{Path, PathBuf},
     sync::Arc,
     thread,
 };
+#[cfg(target_os = "windows")]
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};

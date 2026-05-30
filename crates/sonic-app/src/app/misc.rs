@@ -263,6 +263,32 @@ impl App {
         }
     }
 
+    /// Bug fix (Cmd+W on last tab): consume the `pending_exit` flag
+    /// set by the keymap dispatcher when `CloseActivePaneOrTab`
+    /// emptied the main window's tab list. Mirrors the post-tabbar-
+    /// close logic in `window_event.rs` (`WindowEvent::MouseInput`
+    /// → `TabHit::Close`): if no child windows are alive AND the
+    /// config says we should exit on last-window-close, call
+    /// `el.exit()`; otherwise hide the main window (dock-alive
+    /// Chrome mode). Idempotent: the flag is cleared on every drain.
+    pub(super) fn drain_pending_exit(&mut self, el: &ActiveEventLoop) {
+        if !self.pending_exit {
+            return;
+        }
+        self.pending_exit = false;
+        if !self.tabs.is_empty() || !self.windows.is_empty() {
+            // State changed between dispatch and drain (e.g. a new
+            // tab opened or a child window appeared) — abort the
+            // pending exit to be safe.
+            return;
+        }
+        if Self::should_exit_on_last_window_close(&self.config) {
+            el.exit();
+        } else {
+            self.hide_main_window();
+        }
+    }
+
     /// Epic #289 Phase E (Haiku follow-up on PR #297): create a fresh
     /// top-level terminal window, install its renderer, spawn one
     /// tab + PTY-backed pane, register it with the OS-drag backend,

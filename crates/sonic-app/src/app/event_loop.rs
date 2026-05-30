@@ -100,6 +100,9 @@ impl App {
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
         self.drain_pending_window_creates(el);
+        // Cmd+W on the last tab of the main window with no children
+        // alive sets `pending_exit`; honor it now that we have `el`.
+        self.drain_pending_exit(el);
     }
 
     /// Drain a `UserEvent::ClearShapeCache` (Epic #300 P4 follow-up):

@@ -181,6 +181,22 @@ impl App {
                 } else {
                     self.close_tab_at(i);
                 }
+                // Bug fix (Cmd+W on last tab): the tabbar-close mouse
+                // path in `window_event.rs` checks `tabs.is_empty()`
+                // after the close and either exits or hides the main
+                // window. Without the symmetric check here, hitting
+                // Cmd+W on the final tab silently left a 0-tab main
+                // window alive (or with the default flipped to true
+                // post-PR, kept the dock icon alive with nothing to
+                // do). Defer the actual `el.exit()` / hide via the
+                // `pending_exit` flag — the keymap dispatcher has no
+                // `ActiveEventLoop` reference; the next event drain
+                // (`event_loop.rs`) consumes it. Only set when no
+                // child windows are alive — if torn-out children
+                // exist they must keep running.
+                if self.tabs.is_empty() && self.windows.is_empty() {
+                    self.pending_exit = true;
+                }
             }
             Action::TogglePaneZoom => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
