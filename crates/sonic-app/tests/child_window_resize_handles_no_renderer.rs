@@ -47,7 +47,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
     use winit::event_loop::EventLoop;
     use winit::window::Window;
 
-    let Ok(event_loop) = std::panic::catch_unwind(|| EventLoop::<()>::new()) else {
+    let Ok(event_loop) = std::panic::catch_unwind(EventLoop::<()>::new) else {
         return;
     };
     let Ok(event_loop) = event_loop else {
