@@ -84,6 +84,318 @@ impl LineStorage {
             LineStorage::Cluster(cs) => cs.len() * std::mem::size_of::<Cluster>(),
         }
     }
+
+    // --- PR-A: API completeness (#319). Pure additive on the primitive.
+    // These methods cover every operation `Line` callers will need in PR-B
+    // (the Line::cells alias swap). Line itself is intentionally unchanged.
+
+    /// `true` if storage is currently in cluster (RLE) form.
+    pub fn is_cluster(&self) -> bool {
+        matches!(self, LineStorage::Cluster(_))
+    }
+
+    /// `true` if storage is currently in flat (dense `Vec<Cell>`) form.
+    pub fn is_flat(&self) -> bool {
+        matches!(self, LineStorage::Flat(_))
+    }
+
+    /// Force the storage to `Flat`. No-op if already flat.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_flat(&mut self) {
+        if let LineStorage::Cluster(cs) = self {
+            let total: usize = cs.iter().map(|c| c.count).sum();
+            let mut flat = Vec::with_capacity(total);
+            for c in cs.iter() {
+                for _ in 0..c.count {
+                    flat.push(c.cell.clone());
+                }
+            }
+            *self = LineStorage::Flat(flat);
+        }
+    }
+
+    /// Get the cell at logical column `idx`, materializing from cluster if
+    /// needed. Returns `None` if out of range.
+    pub fn get(&self, idx: usize) -> Option<Cell> {
+        match self {
+            LineStorage::Flat(v) => v.get(idx).cloned(),
+            LineStorage::Cluster(cs) => {
+                let mut off = 0;
+                for c in cs {
+                    if idx < off + c.count {
+                        return Some(c.cell.clone());
+                    }
+                    off += c.count;
+                }
+                None
+            }
+        }
+    }
+
+    /// Iterate over cells in `[start, end)`, cloning cells for a uniform return
+    /// type across storage forms. `end` is clamped to `len()`; empty or reversed
+    /// ranges yield no cells.
+    pub fn get_range(&self, start: u16, end: u16) -> impl Iterator<Item = Cell> + '_ {
+        let start = usize::from(start);
+        let end = usize::from(end).min(self.len());
+        if start >= end {
+            return StorageRangeIter::Empty;
+        }
+
+        match self {
+            LineStorage::Flat(v) => StorageRangeIter::Flat(v[start..end].iter()),
+            LineStorage::Cluster(cs) => StorageRangeIter::cluster(cs, start, end),
+        }
+    }
+
+    /// Set the cell at `idx`. Degrades to `Flat` on first write. Returns
+    /// `true` if the index was in range.
+    pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                if let Some(slot) = v.get_mut(idx) {
+                    *slot = cell;
+                    true
+                } else {
+                    false
+                }
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Append a cell to the right end. Degrades to Flat first.
+    pub fn push(&mut self, cell: Cell) {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => v.push(cell),
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Truncate to `new_len`. No-op if already shorter or equal. Preserves
+    /// the current storage form.
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.len() {
+            return;
+        }
+        match self {
+            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Cluster(cs) => {
+                let mut remaining = new_len;
+                let mut keep = 0;
+                for c in cs.iter_mut() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if c.count <= remaining {
+                        remaining -= c.count;
+                        keep += 1;
+                    } else {
+                        c.count = remaining;
+                        remaining = 0;
+                        keep += 1;
+                    }
+                }
+                cs.truncate(keep);
+            }
+        }
+    }
+
+    /// Resize to `new_len`, padding the right with `fill` if growing.
+    /// Preserves cluster form when the trailing cluster matches `fill`.
+    pub fn resize(&mut self, new_len: usize, fill: Cell) {
+        let cur = self.len();
+        if new_len == cur {
+            return;
+        }
+        if new_len < cur {
+            self.truncate(new_len);
+            return;
+        }
+        let extra = new_len - cur;
+        match self {
+            LineStorage::Flat(v) => v.resize(cur + extra, fill),
+            LineStorage::Cluster(cs) => match cs.last_mut() {
+                Some(last) if last.cell == fill => last.count += extra,
+                _ => cs.push(Cluster { cell: fill, count: extra }),
+            },
+        }
+    }
+
+    /// Drop all cells, leaving an empty Flat storage.
+    pub fn clear(&mut self) {
+        *self = LineStorage::Flat(Vec::new());
+    }
+
+    /// Iterate over all cells (cloned for uniform return type across forms).
+    pub fn iter(&self) -> StorageIter<'_> {
+        match self {
+            LineStorage::Flat(v) => StorageIter::Flat(v.iter()),
+            LineStorage::Cluster(cs) => {
+                StorageIter::Cluster { clusters: cs.iter(), current: None, remaining: 0 }
+            }
+        }
+    }
+
+    /// Iterate mutably. Forces Flat first so callers always get `&mut Cell`.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => v.iter_mut(),
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Fill cells in `[start, end)` with `cell`. Degrades to Flat. `end` is
+    /// clamped to `len()`; an empty range is a no-op.
+    pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return;
+        }
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                for slot in &mut v[start..end] {
+                    *slot = cell.clone();
+                }
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Clone the range `src` to the position starting at `dst`. Same
+    /// semantics as `slice::copy_within` (overlap-safe) but uses `Clone`
+    /// because `Cell` is not `Copy`. Degrades to Flat.
+    pub fn copy_within(&mut self, src: std::ops::Range<usize>, dst: usize) {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                let snapshot: Vec<Cell> = v[src.clone()].to_vec();
+                let len = snapshot.len();
+                for (i, cell) in snapshot.into_iter().enumerate() {
+                    v[dst + i] = cell;
+                }
+                let _ = len; // silence unused warning if optimizer drops it
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Try to re-compress into Cluster form. PR-A exposes only the
+    /// unconditional rebuild for callers that already know they want it
+    /// (e.g. scrollback eject in PR-C). The size-win threshold lives on
+    /// `Line::compact_if_beneficial`. Returns `true` if storage changed.
+    pub fn try_compress(&mut self) -> bool {
+        let flat = match self {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => return false,
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let candidate = Self::cluster_from_flat(flat);
+        if candidate.approx_byte_size() < self.approx_byte_size() {
+            *self = candidate;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Transparent iterator over either `LineStorage` form (clones cells for a
+/// uniform return type).
+pub enum StorageIter<'a> {
+    Flat(std::slice::Iter<'a, Cell>),
+    Cluster { clusters: std::slice::Iter<'a, Cluster>, current: Option<&'a Cell>, remaining: usize },
+}
+
+impl<'a> Iterator for StorageIter<'a> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StorageIter::Flat(it) => it.next().cloned(),
+            StorageIter::Cluster { clusters, current, remaining } => {
+                if *remaining == 0 {
+                    let c = clusters.next()?;
+                    *current = Some(&c.cell);
+                    *remaining = c.count;
+                }
+                *remaining -= 1;
+                current.cloned()
+            }
+        }
+    }
+}
+
+/// Transparent range iterator over either `LineStorage` form (clones cells for
+/// a uniform return type).
+pub enum StorageRangeIter<'a> {
+    Empty,
+    Flat(std::slice::Iter<'a, Cell>),
+    Cluster {
+        clusters: std::slice::Iter<'a, Cluster>,
+        current: Option<&'a Cell>,
+        remaining_in_cluster: usize,
+        remaining_total: usize,
+    },
+}
+
+impl<'a> StorageRangeIter<'a> {
+    fn cluster(clusters: &'a [Cluster], start: usize, end: usize) -> Self {
+        let total = end - start;
+        let mut off = 0;
+        let mut idx = 0;
+        while let Some(cluster) = clusters.get(idx) {
+            let next_off = off + cluster.count;
+            if start < next_off {
+                let skip_in_cluster = start - off;
+                return StorageRangeIter::Cluster {
+                    clusters: clusters[idx + 1..].iter(),
+                    current: Some(&cluster.cell),
+                    remaining_in_cluster: (cluster.count - skip_in_cluster).min(total),
+                    remaining_total: total,
+                };
+            }
+            off = next_off;
+            idx += 1;
+        }
+        StorageRangeIter::Empty
+    }
+}
+
+impl<'a> Iterator for StorageRangeIter<'a> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StorageRangeIter::Empty => None,
+            StorageRangeIter::Flat(it) => it.next().cloned(),
+            StorageRangeIter::Cluster {
+                clusters,
+                current,
+                remaining_in_cluster,
+                remaining_total,
+            } => {
+                if *remaining_total == 0 {
+                    return None;
+                }
+                if *remaining_in_cluster == 0 {
+                    let c = clusters.next()?;
+                    *current = Some(&c.cell);
+                    *remaining_in_cluster = c.count.min(*remaining_total);
+                }
+                *remaining_in_cluster -= 1;
+                *remaining_total -= 1;
+                current.cloned()
+            }
+        }
+    }
 }
 
 /// A line of cells with transparent cluster-or-flat storage.
