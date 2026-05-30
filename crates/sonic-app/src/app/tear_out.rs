@@ -324,8 +324,19 @@ impl App {
             let payload_json = payload.to_json().unwrap_or_default();
             let source_window = self.window.as_ref().map(|w| w.id());
             if let Some(src_id) = source_window {
-                // TODO: capture tab thumbnail — see follow-up issue
-                let drag_image_png: Vec<u8> = Vec::new();
+                // Issue #296: render a small PNG thumbnail of the
+                // dragged tab so NSDraggingSession / OLE DoDragDrop
+                // have a real preview instead of an empty Vec<u8>.
+                // See `crates/sonic-app/src/tab_thumbnail.rs` for the
+                // rationale behind the CPU-side renderer (vs the
+                // originally-spec'd offscreen wgpu readback).
+                let scale_factor =
+                    self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                let thumb_inputs = crate::tab_thumbnail::tab_thumbnail_inputs_from_payload(
+                    &payload.tab_title,
+                    scale_factor,
+                );
+                let drag_image_png = crate::tab_thumbnail::render_tab_thumbnail_png(&thumb_inputs);
                 let started = self.begin_os_tab_drag(src_id, index, payload_json, drag_image_png);
                 if started && self.os_drag_backend_handles_full_gesture() {
                     tracing::info!(

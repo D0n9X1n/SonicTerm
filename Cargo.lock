@@ -4556,6 +4556,7 @@ dependencies = [
  "crossbeam-channel",
  "fontdb",
  "glyphon",
+ "image",
  "notify",
  "notify-rust",
  "parking_lot",
