@@ -1320,3 +1320,30 @@ expect = [
   { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
 fail_on = "any PID that was a shell descendant of the sonic-mac PID before cmd+q is still alive 1s after cmd+q (became orphan adopted by launchd)"
+
+# ==========================================================================
+# §4 / land-mines  (covers #348 CSI IL/DL — nvim hold-j stale rows)
+# ==========================================================================
+
+[[case]]
+id = "nvim-hold-j-scroll"
+section = 4
+title = "nvim hold-j on a large file leaves no stale rows (CSI IL/DL implemented)"
+applies_to = ["mac"]
+covers_bugs = ["#348"]
+covers_landmines = ["csi-il-dl-not-noop"]
+setup = ["clear", "wait:0.3"]
+# Replay the exact byte pattern nvim batches under key-repeat: fill the screen,
+# set DECSTBM, then issue CUP+DL+CUP+IL+print. Pre-fix this left the body
+# rows stale because IL/DL were silently dropped into the wildcard arm.
+# Wrapped in ?2026 h/l (synchronized output) to also exercise the new mode-arm.
+keystrokes = [
+  { kind = "text", value = "printf '\\033[?2026hAAAAAAAAAA\\nBBBBBBBBBB\\nCCCCCCCCCC\\nDDDDDDDDDD\\nEEEEEEEEEE\\033[2;4r\\033[2;1H\\033[1M\\033[5;1HNEW\\033[?2026l\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "text-in-region", region = "body", value = "NEW" },
+]
+fail_on = "Body rows still show the original B/C/D layout — IL/DL silently dropped, stale rows above NEW."
