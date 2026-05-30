@@ -3,15 +3,6 @@
 use sonic_render_model::*;
 
 #[test]
-fn integrated_titlebar_inset_is_zero_on_mac_nonzero_on_win() {
-    let inset = integrated_titlebar_inset_px();
-    #[cfg(target_os = "windows")]
-    assert!(inset > 0);
-    #[cfg(not(target_os = "windows"))]
-    assert_eq!(inset, 0);
-}
-
-#[test]
 fn render_inputs_default_constructs() {
     let r = RenderInputs::default();
     assert_eq!(r.tab_bar.active, 0);

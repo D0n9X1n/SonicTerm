@@ -108,9 +108,9 @@ fn tab_widths_shrink_when_many_tabs() {
     let bar = bar_with(20);
     let layout = TabBarLayout::compute(&bar, 800.0);
     let last = layout.tabs.last().unwrap();
-    // Tabs must not overflow past the bar's right edge (minus the
-    // BAR_LEFT_PAD breathing room and the Windows caption strip).
-    let right_limit = layout.bar.w - BAR_LEFT_PAD - caption_strip_reserved_width();
+    // Tabs must not overflow past the bar's right edge minus the
+    // BAR_LEFT_PAD breathing room.
+    let right_limit = layout.bar.w - BAR_LEFT_PAD;
     assert!(last.bg.x + last.bg.w <= right_limit + 1.0);
 }
 

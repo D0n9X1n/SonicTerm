@@ -36,7 +36,6 @@ use super::{
     to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
-use crate::app::integrated_titlebar_inset;
 
 impl App {
     pub(super) fn search_handle_key(&mut self, event: &KeyEvent, mods: ModifiersState) -> bool {

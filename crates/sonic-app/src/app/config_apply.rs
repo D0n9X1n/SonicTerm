@@ -36,7 +36,6 @@ use super::{
     shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState,
     TabState, UserEvent, WindowState,
 };
-use crate::app::integrated_titlebar_inset;
 
 /// True iff any field in `new_cfg.font` differs from `old_cfg.font`
 /// (family, size, or line_height) in a way that should drive a live

@@ -40,8 +40,8 @@ pub const TAB_MAX_WIDTH: f32 = 400.0;
 /// above `TAB_MIN_WIDTH` (so the common 2–4 tab case at 1000 px wide keeps
 /// shell titles like `Administrator: cmd.exe` / `pwsh` readable). When the
 /// tab count grows large enough that holding the floor would overflow the
-/// right edge of the bar (or the Windows caption-button gutter), the floor
-/// yields and tabs shrink to share the available space evenly.
+/// right edge of the bar, the floor yields and tabs shrink to share the
+/// available space evenly.
 pub const TAB_MIN_WIDTH: f32 = 200.0;
 
 /// Size of the close `×` square inside each tab.
@@ -282,11 +282,8 @@ impl TabBarLayout {
         }
 
         // Region available for tabs is from BAR_LEFT_PAD to the right edge
-        // of the bar, minus another BAR_LEFT_PAD of breathing room. On
-        // Windows we also subtract the caption-button strip width reserved
-        // on the right edge.
-        let tabs_region =
-            (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD - caption_strip_reserved_width()).max(0.0);
+        // of the bar, minus another BAR_LEFT_PAD of breathing room.
+        let tabs_region = (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
@@ -504,49 +501,6 @@ impl TabBarLayout {
     pub fn bar_y_range(&self) -> (f32, f32) {
         (self.bar.y, self.bar.y + self.bar.h)
     }
-}
-
-/// Width (logical px) of a single caption button (min/max/close).
-/// Matches the Win11 standard 46x32 caption button hit/visual target.
-pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
-
-/// Height of the caption-button strip (logical px). Matches
-/// [`crate::app::WINDOWS_INTEGRATED_TITLEBAR_INSET`].
-pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
-
-/// Logical-pixel width reserved on the right edge of the tab bar for the
-/// integrated Win11 caption-button strip (min + max + close = 3 * 46 px).
-/// Returns 0.0 on non-Windows platforms, where the tab bar extends to the
-/// right edge of the window. Used by [`TabBarLayout::compute_with_height`]
-/// to keep tab widgets from overlapping the caption buttons.
-#[must_use]
-pub fn caption_strip_reserved_width() -> f32 {
-    #[cfg(target_os = "windows")]
-    {
-        CAPTION_BUTTON_WIDTH * 3.0
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        0.0
-    }
-}
-
-/// Returns the [min, max, close] caption-button rects, in **physical
-/// pixels**, anchored to the right edge of a window of the given width.
-///
-/// `width` is the window's physical pixel width; `dpi` is the scale
-/// factor (1.0 on standard displays, 1.5/2.0 on HiDPI). The buttons are
-/// laid out right-to-left as close ▶ max ▶ min, matching the Win11
-/// titlebar order.
-#[must_use]
-pub fn caption_button_rects(width: u32, dpi: f32) -> [Rect; 3] {
-    let bw = CAPTION_BUTTON_WIDTH * dpi;
-    let bh = CAPTION_BUTTON_HEIGHT * dpi;
-    let right = width as f32;
-    let close = Rect { x: right - bw, y: 0.0, w: bw, h: bh };
-    let max = Rect { x: right - bw * 2.0, y: 0.0, w: bw, h: bh };
-    let min = Rect { x: right - bw * 3.0, y: 0.0, w: bw, h: bh };
-    [min, max, close]
 }
 
 // Unit tests live in `tests/src_tabbar_view.rs`.

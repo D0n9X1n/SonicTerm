@@ -22,7 +22,6 @@ use winit::{
 };
 
 use super::{mark_all_panes_dirty, with_integrated_titlebar, App, UserEvent};
-use crate::app::integrated_titlebar_inset;
 use crate::config_watch::ConfigWatcher;
 use winit::event_loop::ControlFlow;
 
@@ -250,7 +249,7 @@ impl App {
                 Err(e) => tracing::warn!("on_window_ready: no raw handle: {e}"),
             }
         }
-        renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_titlebar_inset(0.0);
         // Apply the user's `tab_close_button_color` from sonic.toml
         // BEFORE the first frame so a custom always-visible × shows
         // up on the very first paint, not after a config edit.

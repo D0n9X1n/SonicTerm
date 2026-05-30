@@ -105,12 +105,6 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
     out
 }
 
-#[cfg(target_os = "macos")]
-#[inline]
-fn integrated_titlebar_inset_px() -> u32 {
-    32
-}
-
 use crate::{
     atlas_upload::AtlasUpload,
     cheatsheet::{filter_indices, CheatsheetState},
@@ -498,10 +492,8 @@ pub struct GpuRenderer {
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
     /// Reserved height (logical px) above the tab bar for the OS native
-    /// titlebar. Non-zero on macOS when the window uses
-    /// `with_fullsize_content_view(true)` — without this the tab bar
-    /// would paint under the traffic lights + window title. See
-    /// [`crate::app::integrated_titlebar_inset`].
+    /// titlebar. Kept at zero while Sonic uses the normal OS titlebar with a
+    /// bottom-pinned tab bar.
     titlebar_inset: f32,
     /// Characters from the most recent `render()` call that the
     /// rasterizer could not produce a tile for (i.e. would draw as a
@@ -2980,27 +2972,6 @@ impl GpuRenderer {
                     surface: (sw, sh),
                 },
             );
-            // macOS integrated titlebar still needs painted traffic-light
-            // affordances. Windows uses native Win11 chrome and must not paint
-            // duplicate caption buttons in the client area.
-            #[cfg(target_os = "macos")]
-            if integrated_titlebar_inset_px() > 0 {
-                let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
-                let tuples = [
-                    (rects[0].x, rects[0].y, rects[0].w, rects[0].h),
-                    (rects[1].x, rects[1].y, rects[1].w, rects[1].h),
-                    (rects[2].x, rects[2].y, rects[2].w, rects[2].h),
-                ];
-                let caption_bg = ui_palette.bg_surface;
-                let caption_fg = ui_palette.text_primary;
-                crate::quad::paint_caption_buttons(
-                    &mut quads,
-                    &tuples,
-                    (sw, sh),
-                    caption_bg,
-                    caption_fg,
-                );
-            }
             for t in &layout.tabs {
                 // Phase D D3 (Epic #289): if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to

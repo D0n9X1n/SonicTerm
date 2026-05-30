@@ -37,7 +37,6 @@ use super::{
     to_logical_pos, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState,
     UserEvent, WindowState,
 };
-use crate::app::integrated_titlebar_inset;
 
 impl App {
     pub(super) fn cheatsheet_bindings(&self) -> Vec<(String, String)> {
