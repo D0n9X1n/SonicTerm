@@ -83,6 +83,27 @@ impl Parser {
         Self { inner: vte::Parser::new(), performer: Performer::new(grid, Some(reply_tx)) }
     }
 
+    /// Tell the parser the theme default foreground colour. Used to answer
+    /// `OSC 10 ; ? ST` queries from the shell/TUI. nvim sends OSC 10/11
+    /// at startup to learn the terminal's defaults so it can render cells
+    /// declared with `fg=NONE`/`bg=NONE` consistently — see issue #369.
+    pub fn set_theme_fg(&mut self, r: u8, g: u8, b: u8) {
+        self.performer.theme_fg = Some((r, g, b));
+    }
+
+    /// Tell the parser the theme default background colour. Used to answer
+    /// `OSC 11 ; ? ST` queries (see [`Parser::set_theme_fg`]).
+    pub fn set_theme_bg(&mut self, r: u8, g: u8, b: u8) {
+        self.performer.theme_bg = Some((r, g, b));
+    }
+
+    /// Tell the parser the theme cursor colour. Used to answer
+    /// `OSC 12 ; ? ST` queries. When unset, OSC 12 falls back to the
+    /// theme foreground.
+    pub fn set_theme_cursor(&mut self, r: u8, g: u8, b: u8) {
+        self.performer.theme_cursor = Some((r, g, b));
+    }
+
     /// Whether DECSET ?1004 (focus reporting) is currently enabled. App should
     /// send `\e[I` / `\e[O` on focus in/out when this is true.
     pub fn focus_reporting_enabled(&self) -> bool {
@@ -232,6 +253,18 @@ struct Performer {
     /// one — modern zsh/bash/fish ship with cwd-reporting prompts.
     cwd: Option<String>,
     reply_tx: Option<Sender<Vec<u8>>>,
+    /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
+    /// `None` means the parser was never told a theme — query replies are
+    /// suppressed in that case so we don't lie to the shell.
+    theme_fg: Option<(u8, u8, u8)>,
+    /// Theme default background (sRGB), used to answer OSC 11 `?` queries.
+    /// nvim queries this to colour cells painted with `bg=NONE` (e.g.
+    /// neo-tree icon cells); without a reply nvim guesses (27,29,30)
+    /// instead of Sonic's actual theme bg — see issue #369.
+    theme_bg: Option<(u8, u8, u8)>,
+    /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
+    /// Falls back to `theme_fg` if unset.
+    theme_cursor: Option<(u8, u8, u8)>,
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -271,6 +304,9 @@ impl Performer {
             title: None,
             cwd: None,
             reply_tx,
+            theme_fg: None,
+            theme_bg: None,
+            theme_cursor: None,
             scroll_top: None,
             scroll_bottom: None,
             ground: true,
@@ -694,7 +730,7 @@ impl Perform for Performer {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.ground = false;
         let code = params
             .first()
@@ -738,6 +774,45 @@ impl Perform for Performer {
                         uri: uri.to_string(),
                     });
                 }
+            }
+            Some(code @ 10..=12) => {
+                // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
+                // Reply format (xterm): `ESC ] N ; rgb:RRRR/GGGG/BBBB ST`
+                // where each channel is duplicated to 16 bits (xterm
+                // canonical form, accepted by every consumer including
+                // nvim). Terminator matches the request's terminator
+                // (BEL → BEL, ST → ST) so we don't surprise the client.
+                //
+                // Without this reply nvim falls back to a hard-coded
+                // guess for the bg (NeoTreeNormal 27,29,30), which
+                // doesn't match Sonic's actual theme bg — neo-tree
+                // icon cells (painted with `bg=NONE`) then visibly
+                // differ from the surrounding theme-clear surface.
+                // See issue #369.
+                //
+                // OSC 10/11/12 *set* (payload is a colour, not `?`)
+                // is intentionally not implemented yet — diagnosis
+                // shows query-reply is sufficient to fix #369.
+                let payload = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
+                if payload != Some("?") {
+                    return;
+                }
+                let rgb = match code {
+                    10 => self.theme_fg,
+                    11 => self.theme_bg,
+                    12 => self.theme_cursor.or(self.theme_fg),
+                    _ => None,
+                };
+                let Some((r, g, b)) = rgb else { return };
+                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+                let mut buf = Vec::with_capacity(24);
+                buf.extend_from_slice(b"\x1b]");
+                buf.extend_from_slice(code.to_string().as_bytes());
+                buf.extend_from_slice(
+                    format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}").as_bytes(),
+                );
+                buf.extend_from_slice(terminator);
+                self.reply(&buf);
             }
             Some(52) => {
                 let sel = params.get(1).and_then(|s| s.first().copied()).unwrap_or(b'c') as char;

@@ -728,6 +728,19 @@ impl App {
         use sonic_core::{grid::Grid, vt::Parser};
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Seed theme defaults for OSC 10/11/12 query replies (#369).
+        {
+            let mut p = parser.lock();
+            if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
+                p.set_theme_fg(r, g, b);
+            }
+            if let Some((r, g, b)) = self.theme.colors.background.rgb() {
+                p.set_theme_bg(r, g, b);
+            }
+            if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
+                p.set_theme_cursor(r, g, b);
+            }
+        }
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
             Arc::new(Mutex::new(Some(child_window)));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
