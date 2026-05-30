@@ -77,7 +77,6 @@ How to use:
 35. [Drag-drop edge cases](#35-drag-drop-edge-cases)
 36. [Config validation](#36-config-validation)
 37. [Tab bar caption strip (per-OS chrome parity)](#37-tab-bar-caption-strip-per-os-chrome-parity)
-38. [Tab bar `+` new-tab button](#38-tab-bar--new-tab-button)
 39. [Tab title slack-distribution](#39-tab-title-slack-distribution)
 40. [Cell grid padding](#40-cell-grid-padding)
 41. [Per-OS default keymap chord prefix](#41-per-os-default-keymap-chord-prefix)
@@ -1050,29 +1049,6 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 - [ ] Tab content and PTY survive minimize/restore and maximize/restore.
 
 **FAIL → block release.** Any button missing, no hover state, wrong hover color on Windows close, or click no-op.
-
----
-
-## 38. Tab bar new-tab affordance (keyboard-only after #335)
-
-**Setup:** launch Sonic with one tab.
-
-**Keystrokes / actions:**
-
-| macOS | Windows |
-|---|---|
-| Press `Cmd+T` three times. | Press `Ctrl+Shift+T` three times. |
-| Open the command palette (`Cmd+P`) → run `New Tab`. | Open the command palette (`Ctrl+P`) → run `New Tab`. |
-| Visually scan the tab strip for any leftover `+` glyph. | Same; also confirm tabs may now extend closer to the caption-button strip. |
-
-**Expected outcome:**
-
-- [ ] No `+` button anywhere on the tab bar (issue #335 — removed; redundant with Cmd+T / palette).
-- [ ] Each `Cmd+T` / `Ctrl+Shift+T` spawns exactly one new tab and focuses it.
-- [ ] The command palette's `New Tab` entry still works.
-- [ ] Tab titles get the freed horizontal space (visibly wider than v0.x).
-
-**FAIL → block release.** Any stray `+` glyph, missing keyboard new-tab, or palette entry that does nothing.
 
 ---
 
