@@ -105,12 +105,6 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
     out
 }
 
-#[cfg(target_os = "macos")]
-#[inline]
-fn integrated_titlebar_inset_px() -> u32 {
-    32
-}
-
 use crate::{
     atlas_upload::AtlasUpload,
     cheatsheet::{filter_indices, CheatsheetState},
@@ -2980,27 +2974,9 @@ impl GpuRenderer {
                     surface: (sw, sh),
                 },
             );
-            // macOS integrated titlebar still needs painted traffic-light
-            // affordances. Windows uses native Win11 chrome and must not paint
-            // duplicate caption buttons in the client area.
-            #[cfg(target_os = "macos")]
-            if integrated_titlebar_inset_px() > 0 {
-                let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
-                let tuples = [
-                    (rects[0].x, rects[0].y, rects[0].w, rects[0].h),
-                    (rects[1].x, rects[1].y, rects[1].w, rects[1].h),
-                    (rects[2].x, rects[2].y, rects[2].w, rects[2].h),
-                ];
-                let caption_bg = ui_palette.bg_surface;
-                let caption_fg = ui_palette.text_primary;
-                crate::quad::paint_caption_buttons(
-                    &mut quads,
-                    &tuples,
-                    (sw, sh),
-                    caption_bg,
-                    caption_fg,
-                );
-            }
+            // Custom min/max/close trio removed (#366): all platforms now
+            // use the OS-native window controls (macOS traffic lights,
+            // Windows native caption buttons). Nothing painted here.
             for t in &layout.tabs {
                 // Phase D D3 (Epic #289): if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to

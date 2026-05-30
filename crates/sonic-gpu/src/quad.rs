@@ -296,61 +296,6 @@ pub fn px_to_ndc(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [f32; 4] {
     [nx, ny, nw, nh]
 }
 
-/// Paint the three Win11-style caption buttons (min / max / close) into
-/// the given quad list using geometric primitives, not font glyphs.
-///
-/// PR #241 only painted the background plates and left the symbols to the
-/// text pipeline. In the live Windows binary those Unicode caption glyphs
-/// could be missing from the bundled font/fallback chain, so the unit test
-/// counted quads while the user saw no `— ▢ ✕` controls. Keeping the icons
-/// as rectangles makes the caption strip independent of font coverage.
-///
-/// Callers on platforms without an integrated titlebar inset (macOS /
-/// Linux) should early-return without ever invoking this helper — the
-/// function itself is portable but the caption strip only exists on
-/// Windows. The previous in-function guard was removed when this code
-/// moved into `sonic-gpu` (which cannot depend on `sonic-shared::app`);
-/// the single existing caller (`sonic-shared::render`) already gates on
-/// `app::integrated_titlebar_inset_px() > 0`, so behavior is unchanged.
-///
-/// `rects` is `[min, max, close]` as `(x, y, w, h)` in physical pixels
-/// (see `sonic_ui::tabbar_view::caption_button_rects`); `surface` is
-/// `(w, h)` in the same units used by [`px_rect_to_ndc`]. `bg` is the
-/// plate background color (RGBA, premultiplied straight) and `fg` is the
-/// theme foreground stroke color.
-pub fn paint_caption_buttons(
-    out: &mut Vec<QuadInstance>,
-    rects: &[(f32, f32, f32, f32); 3],
-    surface: (f32, f32),
-    bg: [f32; 4],
-    fg: [f32; 4],
-) {
-    let (sw, sh) = surface;
-    for &(x, y, w, h) in rects {
-        out.push(QuadInstance::sharp(px_to_ndc(x, y, w, h, sw, sh), bg));
-    }
-
-    let [min, max, close] = *rects;
-    let icon = 10.0;
-    let stroke = 1.5;
-    let masks = [ICON_MINIMIZE_8, ICON_MAXIMIZE_8, ICON_CLOSE_8];
-    for ((x, y, w, h), mask) in [min, max, close].into_iter().zip(masks) {
-        push_mask_icon_quads(
-            out,
-            MaskIconParams {
-                mask,
-                x: x + (w - icon) * 0.5,
-                y: y + (h - icon) * 0.5,
-                size: icon,
-                min_cell: stroke,
-                color: fg,
-                sw,
-                sh,
-            },
-        );
-    }
-}
-
 /// Built-in 8x8 alpha mask for the minimize chrome icon, derived from SVG.
 pub const ICON_MINIMIZE_8: &[u8; 64] =
     &mask8_from_rows([0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00]);
