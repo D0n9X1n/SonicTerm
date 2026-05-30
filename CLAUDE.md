@@ -71,6 +71,7 @@ cargo test --workspace
 bash scripts/check-deny.sh                                     # supply-chain gate (advisories + licenses + bans + sources)
 cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
 cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK
+bash scripts/check-visual-snapshots.sh                         # render dHash drift gate (closes #283)
 cargo build --release -p sonic-mac                             # confirms fat-LTO build works
 bash scripts/bench.sh                                          # perf-bench subset vs baseline.json; warns locally, exits 1 in CI
 ```
@@ -292,6 +293,8 @@ cargo run --example pty_dump_unicode -p sonic-core --release
 ```
 
 The matrix exists because **the existing pty_dump e2e cannot catch this class of bug** — its shell payload is pure ASCII. Do NOT delete or weaken the matrix; if a class is intentionally dropped from scope, mark the corresponding test `#[ignore]` with a comment naming the deciding PR, never `#[cfg(skip)]` or deletion.
+
+**Render hot-file rule (closes #283):** any PR that modifies `crates/sonic-shared/src/render/core.rs`, `crates/sonic-gpu/src/text_pipeline.rs`, `crates/sonic-text/src/glyph_atlas.rs`, or `crates/sonic-text/src/swash_rasterizer.rs` MUST either keep `bash scripts/check-visual-snapshots.sh` green or explicitly bump the dHash baselines in the same PR (set `UPDATE_SNAPSHOTS=1`, commit refreshed `crates/sonic-shared/tests/snapshots/*.hash`, and append a row to `crates/sonic-shared/tests/snapshots/README.md`). Silent drift is how PR #282 shipped the glyph-blur P0 fixed in #284. Label such PRs `render` so reviewers see the gate at a glance.
 
 Ignored tests in the matrix document capability gaps awaiting a fix. Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.
 
