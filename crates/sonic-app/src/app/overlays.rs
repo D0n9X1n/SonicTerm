@@ -242,7 +242,7 @@ impl App {
         if let Some(st) = child.tab_states.get_mut(i) {
             st.search = Some(s);
         }
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -254,7 +254,7 @@ impl App {
         match attached {
             Some(id) => {
                 if let Some(child) = self.windows.get(&id) {
-                    child.window.request_redraw();
+                    child.request_redraw();
                 }
             }
             None => {

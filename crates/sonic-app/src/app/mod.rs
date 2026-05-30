@@ -101,7 +101,14 @@ pub enum WindowRole {
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
-    pub window: Arc<Window>,
+    /// Phase B2 PR-B2-0 (#365): promoted from `Arc<Window>` to
+    /// `Option<Arc<Window>>` so test seeders can build a `WindowState`
+    /// without running `do_resumed`. In production this is `Some(_)`
+    /// the moment `do_resumed` (main) or `create_child_window`
+    /// (torn-out) finishes; every call site either short-circuits via
+    /// `if let Some(w) = ws.window.as_ref()` or early-returns via
+    /// `ws.window.as_ref()?` when the window is gone.
+    pub window: Option<Arc<Window>>,
     /// Per-window wgpu renderer. `Some(_)` once `do_resumed` (main
     /// window) or `create_child_window` (torn-out) populates it.
     /// PR-B1b (#293): the main window's renderer now lives here too —
@@ -163,6 +170,17 @@ impl WindowState {
         self.renderer
             .as_mut()
             .expect("WindowState::renderer_mut() called before do_resumed populated it")
+    }
+
+    /// Phase B2 PR-B2-0 (#365): convenience that short-circuits when
+    /// `window` is `None`. Most call sites previously did
+    /// `ws.window.request_redraw()` unconditionally; after the
+    /// `Option` promotion they want a no-op when the window is gone.
+    #[inline]
+    pub fn request_redraw(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 }
 
@@ -1846,7 +1864,7 @@ impl App {
     /// PR-B1a). Returns `None` before `do_resumed` has run.
     #[doc(hidden)]
     pub fn main_window(&self) -> Option<&Arc<Window>> {
-        Some(&self.windows.get(&self.main_window_id?)?.window)
+        self.windows.get(&self.main_window_id?)?.window.as_ref()
     }
 
     /// Phase B2 PR-B1b (#293) — borrow the main window's `GpuRenderer`
@@ -2430,12 +2448,13 @@ impl App {
     pub fn publish_child_window_tab_bar(&self, id: WindowId) {
         use sonic_ui::tabbar_view::TabBarLayout;
         let Some(child) = self.windows.get(&id) else { return };
-        let inner_origin = child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+        let Some(win) = child.window.as_ref() else { return };
+        let inner_origin = win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
         let inner_size = {
-            let s = child.window.inner_size();
+            let s = win.inner_size();
             (s.width, s.height)
         };
-        let sf = child.window.scale_factor() as f32;
+        let sf = win.scale_factor() as f32;
         let logical_w = inner_size.0 as f32 / sf;
         let Some(r) = child.renderer.as_ref() else { return };
         let layout =
@@ -2801,8 +2820,10 @@ impl App {
             Some(id) => {
                 self.frontmost_window = Some(id);
                 if let Some(ws) = self.windows.get(&id) {
-                    ws.window.focus_window();
-                    ws.window.request_redraw();
+                    if let Some(w) = ws.window.as_ref() {
+                        w.focus_window();
+                        w.request_redraw();
+                    }
                 }
             }
         }

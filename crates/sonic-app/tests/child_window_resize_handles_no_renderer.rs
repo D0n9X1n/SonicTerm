@@ -65,7 +65,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
 
     let mut child = WindowState {
         role: WindowRole::Terminal,
-        window: Arc::new(window),
+        window: Some(Arc::new(window)),
         renderer: None,
         tabs: TabBar::new(),
         tab_states: Vec::new(),
