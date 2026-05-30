@@ -32,7 +32,7 @@ use winit::{
 };
 
 use super::{
-    key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
+    key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
     resize_all_panes, shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App,
     PaneState, TabState, UserEvent, WindowState,
@@ -536,7 +536,7 @@ impl App {
                     }
                     return;
                 }
-                if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
+                for key_str in key_to_strings(&event.logical_key, child.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         match action {
                             Action::EnterCopyMode => {

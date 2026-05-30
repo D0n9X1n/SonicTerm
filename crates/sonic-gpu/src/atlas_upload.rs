@@ -30,6 +30,24 @@ pub struct AtlasUpload {
     height: u32,
 }
 
+#[doc(hidden)]
+pub fn atlas_sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
+    wgpu::SamplerDescriptor {
+        label: Some("sonic-glyph-atlas-sampler"),
+        // Nearest is the right call for a monospace grid: pixels
+        // line up to cell boundaries and linear filtering would
+        // just blur tile edges. Rasterization already produced
+        // anti-aliased coverage.
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    }
+}
+
 impl AtlasUpload {
     /// Allocate a GPU texture sized to match `atlas` and seed it with
     /// the atlas's current (probably empty) pixels. `bgl` must match
@@ -78,20 +96,7 @@ impl AtlasUpload {
             },
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sonic-glyph-atlas-sampler"),
-            // Nearest is the right call for a monospace grid: pixels
-            // line up to cell boundaries and linear filtering would
-            // just blur tile edges. Rasterization already produced
-            // anti-aliased coverage.
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
-        });
+        let sampler = device.create_sampler(&atlas_sampler_descriptor());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sonic-glyph-atlas-bg"),
             layout: bgl,

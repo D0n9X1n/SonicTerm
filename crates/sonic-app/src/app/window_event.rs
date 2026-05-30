@@ -20,7 +20,7 @@ use winit::{
     window::WindowId,
 };
 
-use super::key_encoding::{encode_key, key_event_to_string};
+use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
 use super::{mark_all_panes_dirty, to_logical_pos, App};
 
 impl App {
@@ -909,7 +909,7 @@ impl App {
                     }
                     return;
                 }
-                if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                for key_str in key_to_strings(&event.logical_key, self.modifiers) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
                             self.drain_pending_window_creates(el);

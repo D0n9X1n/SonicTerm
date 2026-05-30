@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use sonic_core::{
     config::{BackdropKind, Config},
     grid::Grid,
-    keymap::Keymap,
+    keymap::{Action, Keymap},
     pty::PtyHandle,
     theme::Theme,
     vt::{CommandEvent, Parser},
@@ -657,7 +657,7 @@ pub mod tab_transfer;
 mod tear_out;
 mod window_event;
 pub use config_apply::config_diff_needs_font_apply;
-pub use key_encoding::{encode_logical, key_name, key_to_string, KeyName};
+pub use key_encoding::{encode_logical, key_name, key_to_string, key_to_strings, KeyName};
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -1520,6 +1520,24 @@ impl App {
         let Some(active_id) = self.active_pane_id() else { return };
         self.write_to_pane(active_id, bytes.clone());
         self.broadcast_from(active_id, bytes);
+    }
+
+    /// Test-only mirror of the normal KeyboardInput dispatch order: try every
+    /// keymap spelling before encoding bytes for PTY forwarding.
+    #[doc(hidden)]
+    pub fn __test_dispatch_key_or_encode_pty(
+        &mut self,
+        key: &winit::keyboard::Key,
+        mods: winit::keyboard::ModifiersState,
+    ) -> (Option<Action>, Option<Vec<u8>>) {
+        for key_str in key_to_strings(key, mods) {
+            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                if self.run_action(&action) {
+                    return (Some(action), None);
+                }
+            }
+        }
+        (None, encode_logical(key, mods))
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {

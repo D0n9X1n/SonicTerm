@@ -67,6 +67,20 @@ pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Opt
 
 #[doc(hidden)]
 pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
+    let mut candidates = key_candidates(key)?;
+    candidates.dedup();
+    let candidate = candidates.into_iter().next()?;
+    Some(chord_string(candidate.as_str(), mods))
+}
+
+#[doc(hidden)]
+pub fn key_to_strings(key: &Key, mods: ModifiersState) -> Vec<String> {
+    let Some(mut candidates) = key_candidates(key) else { return Vec::new() };
+    candidates.dedup();
+    candidates.into_iter().map(|candidate| chord_string(candidate.as_str(), mods)).collect()
+}
+
+fn chord_string(key_name: &str, mods: ModifiersState) -> String {
     let mut parts: Vec<String> = Vec::new();
     if mods.super_key() {
         parts.push("super".into());
@@ -80,9 +94,24 @@ pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
     if mods.shift_key() {
         parts.push("shift".into());
     }
-    let name = key_name(key)?;
-    parts.push(name.as_str().to_string());
-    Some(parts.join("+").to_ascii_lowercase())
+    parts.push(key_name.to_string());
+    parts.join("+").to_ascii_lowercase()
+}
+
+fn key_candidates(key: &Key) -> Option<Vec<KeyName>> {
+    let primary = key_name(key)?;
+    let mut candidates = vec![primary];
+    if let Key::Character(s) = key {
+        if s == "?" {
+            candidates.push(KeyName::Static("/"));
+        } else if s.chars().count() == 1 {
+            let lower = s.to_ascii_lowercase();
+            if lower != *s {
+                candidates.push(KeyName::Owned(lower));
+            }
+        }
+    }
+    Some(candidates)
 }
 
 #[doc(hidden)]
@@ -117,6 +146,7 @@ pub fn key_name(key: &Key) -> Option<KeyName> {
 
 #[doc(hidden)]
 #[doc(hidden)]
+#[derive(PartialEq, Eq)]
 pub enum KeyName {
     Static(&'static str),
     Owned(String),
