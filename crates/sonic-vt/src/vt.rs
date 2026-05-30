@@ -366,6 +366,10 @@ impl Performer {
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
                 1004 => self.focus_reporting = set,
+                2026 => { /* synchronized output (BSU/ESU) — accept silently for now;
+                     defer-paint optimisation tracked separately. Prevents future
+                     smear classes from apps that wrap updates in ?2026 h/l. */
+                }
                 _ => {}
             }
         }
@@ -541,6 +545,30 @@ impl Perform for Performer {
                 2 => self.grid.erase_line(),
                 _ => {}
             },
+            'L' => {
+                // CSI Ps L — IL (Insert Line). Insert n blank lines at the
+                // cursor row, pushing the rest of the scroll region down.
+                // ECMA-48: no-op when cursor is outside the active region.
+                // xterm behaviour: cursor moves to column 0.
+                let n = p0().max(1);
+                let (top, bot) = self.effective_scroll_region();
+                let cur = self.grid.cursor.row;
+                if cur >= top && cur <= bot {
+                    self.grid.scroll_region_down(cur, bot, n);
+                    self.grid.cursor.col = 0;
+                }
+            }
+            'M' => {
+                // CSI Ps M — DL (Delete Line). Delete n lines starting at
+                // the cursor row, pulling the region below up. Cursor->col 0.
+                let n = p0().max(1);
+                let (top, bot) = self.effective_scroll_region();
+                let cur = self.grid.cursor.row;
+                if cur >= top && cur <= bot {
+                    self.grid.scroll_region_up(cur, bot, n);
+                    self.grid.cursor.col = 0;
+                }
+            }
             'm' => self.apply_sgr(params),
             'n' => match p0() {
                 5 => self.reply(b"\x1b[0n"),
