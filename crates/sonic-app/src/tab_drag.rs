@@ -269,4 +269,21 @@ pub fn find_drop_target<W: Copy>(
     None
 }
 
+/// Variant of [`find_drop_target`] for app-level candidate lists where a
+/// window entry may not own a renderer yet. Phase B2 PR-A inserts a shadow
+/// main-window entry into `App::windows` with `renderer: None`; drag-target
+/// hit-testing must skip that placeholder rather than unwrapping it.
+#[doc(hidden)]
+pub fn find_drop_target_skipping_unrendered<W: Copy>(
+    global_cursor: (i32, i32),
+    candidates: impl IntoIterator<Item = (W, WindowGeom, Option<TabBarLayout>)>,
+) -> Option<DropTarget<W>> {
+    find_drop_target(
+        global_cursor,
+        candidates
+            .into_iter()
+            .filter_map(|(id, geom, layout)| layout.map(|layout| (id, geom, layout))),
+    )
+}
+
 // Unit tests live in `tests/src_tab_drag.rs`.

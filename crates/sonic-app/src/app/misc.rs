@@ -4,6 +4,7 @@
 
 #![allow(unused_imports)]
 
+use sonic_ui::ime::ImeState;
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
@@ -350,7 +351,7 @@ impl App {
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
             window: window.clone(),
-            renderer,
+            renderer: Some(renderer),
             tabs,
             tab_states: vec![TabState::new(PaneTree::leaf(pane_id), pane_id)],
             panes,
@@ -364,6 +365,9 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
         };
         self.windows.insert(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);

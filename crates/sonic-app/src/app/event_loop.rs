@@ -127,8 +127,14 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        for (_id, child) in self.windows.iter_mut() {
-            child.renderer.clear_shape_cache();
+        for (id, child) in self.windows.iter_mut() {
+            // Phase B2 PR-A: skip the shadow main entry — its
+            // `renderer` field is `None` (the real renderer is still
+            // owned by `App.renderer` and was cleared above).
+            if Some(*id) == self.main_window_id {
+                continue;
+            }
+            child.renderer.as_mut().unwrap().clear_shape_cache();
             child.window.request_redraw();
         }
     }
@@ -264,6 +270,40 @@ impl App {
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
+
+        // Phase B2 PR-A: insert a shadow `WindowState` for the main
+        // window into `self.windows`, keyed by `main_window_id`. The
+        // shadow mirrors the cheap scalar fields (cursor, modifiers,
+        // selection, ime, hovered_url, …) on every event tick via
+        // `sync_shadow_main`. Heavy fields (`renderer`, `tabs`,
+        // `tab_states`, `panes`) stay on `App` for PR-A and move into
+        // the shadow during PR-B's substitution pass.
+        self.main_window_id = Some(main_id);
+        let shadow = super::WindowState {
+            role: super::WindowRole::Terminal,
+            window: window.clone(),
+            renderer: None,
+            tabs: sonic_ui::tabs::TabBar::new(),
+            tab_states: Vec::new(),
+            panes: std::collections::HashMap::new(),
+            cursor_pos: self.cursor_pos,
+            mouse_down: self.mouse_down,
+            selection: self.selection,
+            copy_mode: self.copy_mode.clone(),
+            modifiers: self.modifiers,
+            cursor_visible: self.cursor_visible.clone(),
+            last_render: self.last_render,
+            pressed_tab: self.pressed_tab,
+            drag_session: self.drag_session,
+            drag_target: self.drag_target,
+            scale_factor: self.scale_factor,
+            ime: self.ime.clone(),
+            hovered_url: self.hovered_url.clone(),
+        };
+        self.windows.insert(main_id, shadow);
+        // Seed-sync immediately so the first event-tick observer sees a
+        // populated shadow rather than the all-zeros constructor state.
+        self.sync_shadow_main();
 
         let (rc, rr) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(

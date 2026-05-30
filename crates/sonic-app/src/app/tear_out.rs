@@ -4,6 +4,7 @@
 
 #![allow(unused_imports)]
 
+use sonic_ui::ime::ImeState;
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
@@ -167,7 +168,7 @@ impl App {
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
             window: window.clone(),
-            renderer,
+            renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
                 tree: state.tree,
@@ -186,6 +187,9 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
@@ -219,7 +223,7 @@ impl App {
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
         if self.tabs.is_empty() {
-            if !self.windows.is_empty() {
+            if self.child_window_count() > 0 {
                 self.hide_main_window();
             }
             return;
@@ -239,7 +243,8 @@ impl App {
         let src_origin =
             src_child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(src_origin, local_in_src);
-        let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, TabBarLayout)> = Vec::new();
+        let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, Option<TabBarLayout>)> =
+            Vec::new();
         if let Some(main) = self.window.as_ref() {
             let geom = window_geom(main);
             let width =
@@ -253,27 +258,29 @@ impl App {
             candidates.push((
                 main.id(),
                 geom,
-                TabBarLayout::compute_with_height(&self.tabs, width, bar_h)
-                    .with_top_offset(inset)
-                    .with_visible(self.tab_bar_visible),
+                Some(
+                    TabBarLayout::compute_with_height(&self.tabs, width, bar_h)
+                        .with_top_offset(inset)
+                        .with_visible(self.tab_bar_visible),
+                ),
             ));
         }
         for (id, c) in &self.windows {
-            if *id == src_id {
+            if *id == src_id || Some(*id) == self.main_window_id {
                 continue;
             }
+            let Some(r) = c.renderer.as_ref() else {
+                continue;
+            };
             let geom = window_geom(&c.window);
-            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
-            let layout = TabBarLayout::compute_with_height(
-                &c.tabs,
-                bar_width,
-                c.renderer.tab_bar_logical_height(),
-            )
-            .with_top_offset(c.renderer.tab_bar_y_offset())
-            .with_visible(c.renderer.tab_bar_visible());
-            candidates.push((*id, geom, layout));
+            let bar_width = r.width() as f32 / r.scale_factor();
+            let layout =
+                TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
+                    .with_top_offset(r.tab_bar_y_offset())
+                    .with_visible(r.tab_bar_visible());
+            candidates.push((*id, geom, Some(layout)));
         }
-        crate::tab_drag::find_drop_target(global, candidates)
+        crate::tab_drag::find_drop_target_skipping_unrendered(global, candidates)
     }
     pub(super) fn compute_main_drag_target(
         &self,
@@ -283,19 +290,20 @@ impl App {
         let main_origin =
             main_window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
-        let candidates = self.windows.iter().map(|(id, c)| {
+        let candidates = self.windows.iter().filter_map(|(id, c)| {
+            if Some(*id) == self.main_window_id {
+                return None;
+            }
+            let r = c.renderer.as_ref()?;
             let geom = window_geom(&c.window);
-            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
-            let layout = TabBarLayout::compute_with_height(
-                &c.tabs,
-                bar_width,
-                c.renderer.tab_bar_logical_height(),
-            )
-            .with_top_offset(c.renderer.tab_bar_y_offset())
-            .with_visible(c.renderer.tab_bar_visible());
-            (*id, geom, layout)
+            let bar_width = r.width() as f32 / r.scale_factor();
+            let layout =
+                TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
+                    .with_top_offset(r.tab_bar_y_offset())
+                    .with_visible(r.tab_bar_visible());
+            Some((*id, geom, Some(layout)))
         });
-        crate::tab_drag::find_drop_target(global, candidates)
+        crate::tab_drag::find_drop_target_skipping_unrendered(global, candidates)
     }
     pub(super) fn try_os_drag_handoff(&mut self, index: usize) -> bool {
         let Some(sink) = self.os_drag_sink.clone() else { return false };
@@ -508,7 +516,7 @@ impl App {
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
             window: window.clone(),
-            renderer,
+            renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
                 tree: state.tree,
@@ -527,6 +535,9 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
