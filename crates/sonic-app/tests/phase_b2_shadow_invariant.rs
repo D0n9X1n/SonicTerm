@@ -28,8 +28,9 @@
 //! into the shadow wholesale during PR-B (ownership transfer, not a
 //! clone), so PR-A keeps them as `None` / empty placeholders.
 
-use sonic_app::app::{
-    apply_shadow_main_snapshot, shadow_main_snapshot_from, App, ShadowMainSnapshot,
+use sonic_app::{
+    app::{apply_shadow_main_snapshot, shadow_main_snapshot_from, App, ShadowMainSnapshot},
+    tab_drag::{find_drop_target_skipping_unrendered, WindowGeom},
 };
 use sonic_core::{
     config::Config,
@@ -174,4 +175,59 @@ fn helpers_are_publicly_re_exported_from_sonic_app_app() {
     let app = synth_app();
     let _ = app.__test_shadow_main_in_sync();
     let _ = app.__test_main_window_id();
+}
+
+/// Main-window tab drag scans `App::windows` for foreign drop targets.
+/// Phase B2 PR-A also inserts the main window's shadow entry there, but
+/// that placeholder deliberately has no renderer. The drag-target path
+/// must skip such unrendered candidates instead of unwrapping them.
+#[test]
+fn drag_target_hit_test_skips_shadow_entry_without_renderer() {
+    let rendered_bar = {
+        let mut b = sonic_shared::tabs::TabBar::new();
+        b.push(sonic_shared::tabs::Tab::new("child"));
+        sonic_shared::tabbar_view::TabBarLayout::compute(&b, 800.0)
+    };
+    let candidates = [
+        ("main-shadow", WindowGeom::new((0, 0), (800, 600)), None),
+        ("child", WindowGeom::new((900, 0), (800, 600)), Some(rendered_bar)),
+    ];
+
+    let target = find_drop_target_skipping_unrendered((910, 10), candidates)
+        .expect("cursor over rendered child tab bar");
+
+    assert_eq!(target.window, "child");
+    assert_eq!(target.slot, 0);
+}
+
+/// Tie the pure skip-helper regression above back to the production main
+/// drag path. This source-level pin is intentional: headless integration
+/// tests cannot construct the real `Arc<Window>` + `GpuRenderer` pair that
+/// `compute_main_drag_target` needs, but the old bug shape was a literal
+/// `renderer.as_ref().unwrap()` in that function.
+#[test]
+fn compute_main_drag_target_uses_renderer_guarded_candidates() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/tear_out.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read production source {}: {e}", path.display()));
+    let start = source
+        .find("pub(super) fn compute_main_drag_target")
+        .expect("compute_main_drag_target must exist");
+    let rel_end = source[start..]
+        .find("pub(super) fn try_os_drag_handoff")
+        .expect("next function marker after compute_main_drag_target must exist");
+    let body = &source[start..start + rel_end];
+
+    assert!(
+        body.contains("find_drop_target_skipping_unrendered"),
+        "compute_main_drag_target must route through the unrendered-safe candidate filter"
+    );
+    assert!(
+        body.contains("renderer.as_ref()?") || body.contains("let Some(r) = c.renderer.as_ref()"),
+        "compute_main_drag_target must guard renderer access for the Phase B2 shadow entry"
+    );
+    assert!(
+        !body.contains("renderer.as_ref().unwrap()"),
+        "compute_main_drag_target must not unwrap WindowState.renderer; the main shadow entry stores None"
+    );
 }
