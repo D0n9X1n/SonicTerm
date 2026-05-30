@@ -127,7 +127,7 @@ use crate::{
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
-    quad::{push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline, ICON_CLOSE_8},
+    quad::{push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
@@ -136,6 +136,109 @@ use crate::{
     tabs::TabBar,
     text_pipeline::{GlyphInstance, TextPipeline},
 };
+
+/// Style and sizing inputs for tab-bar quad emission.
+pub struct TabBarQuadParams {
+    /// Number of tabs in the bar.
+    pub tab_count: usize,
+    /// Active tab fill color.
+    pub active_bg: [f32; 4],
+    /// Hovered inactive tab fill color.
+    pub hover_bg: [f32; 4],
+    /// Active tab accent color.
+    pub accent: [f32; 4],
+    /// Inactive tab separator color.
+    pub separator: [f32; 4],
+    /// Bar background and bottom border color.
+    pub border: [f32; 4],
+    /// Default close glyph color.
+    pub close_color: [f32; 4],
+    /// Hovered close glyph color.
+    pub hover_close_color: [f32; 4],
+    /// Hovered tab index, or `u32::MAX` when no tab is hovered.
+    pub hover_tab_idx: u32,
+    /// Non-zero when the hover is over the close glyph.
+    pub hover_close_hit: u8,
+    /// Surface dimensions in the same units as the layout rects.
+    pub surface: (f32, f32),
+}
+
+/// Paint the tab-bar background and tab chrome quads into `quads`.
+pub fn emit_tab_bar_quads(
+    quads: &mut Vec<QuadInstance>,
+    layout: &TabBarLayout,
+    params: &TabBarQuadParams,
+) {
+    let (sw, sh) = params.surface;
+    quads.push(QuadInstance {
+        rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
+        color: params.border,
+        ..Default::default()
+    });
+    quads.push(QuadInstance {
+        rect: px_to_ndc(layout.bar.x, layout.bar.y + layout.bar.h - 1.0, layout.bar.w, 1.0, sw, sh),
+        color: params.border,
+        ..Default::default()
+    });
+    for t in &layout.tabs {
+        let is_active = layout.active == Some(t.idx);
+        let cursor_on_this_tab = params.hover_tab_idx == t.idx as u32;
+        if is_active {
+            quads.push(QuadInstance {
+                rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
+                color: params.active_bg,
+                ..Default::default()
+            });
+            if let Some(acc) = layout.active_accent_rect() {
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
+                    color: params.accent,
+                    ..Default::default()
+                });
+            }
+        } else if cursor_on_this_tab {
+            quads.push(QuadInstance {
+                rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
+                color: params.hover_bg,
+                ..Default::default()
+            });
+        }
+        if t.idx + 1 < params.tab_count {
+            let next_is_active = layout.active == Some(t.idx + 1);
+            if !is_active && !next_is_active {
+                let sep_w = 1.0_f32;
+                let sep_h = (layout.bar.h - 16.0).max(1.0);
+                let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
+                let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP - sep_w) * 0.5;
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
+                    color: params.separator,
+                    ..Default::default()
+                });
+            }
+        }
+        let close = if cursor_on_this_tab && params.hover_close_hit == 1 {
+            params.hover_close_color
+        } else {
+            params.close_color
+        };
+        let inset = (t.close_x_rect.w - 8.0) * 0.5;
+        let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
+        let thick = (glyph * 0.14).max(1.25);
+        push_close_x_quads(
+            quads,
+            CloseXParams {
+                x: t.close_x_rect.x + inset,
+                y: t.close_x_rect.y + inset,
+                size: glyph,
+                thickness: thick,
+                color: close,
+                sw,
+                sh,
+            },
+        );
+    }
+}
 
 struct CheatsheetLayout {
     scrim: crate::tabbar_view::Rect,
@@ -2768,29 +2871,26 @@ impl GpuRenderer {
             // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
             let accent_blue = ui_palette.accent;
             let separator = tok::BORDER_SUBTLE();
-            let border_subtle = tok::BORDER_SUBTLE();
             let muted = tok::TEXT_MUTED();
             let primary = tok::TEXT_PRIMARY();
-            let danger = tok::DANGER();
-            // Bar background
-            quads.push(QuadInstance {
-                rect: px_to_ndc(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h, sw, sh),
-                color: bar_bg,
-                ..Default::default()
-            });
-            // 1px bottom border across the whole bar.
-            quads.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.bar.x,
-                    layout.bar.y + layout.bar.h - 1.0,
-                    layout.bar.w,
-                    1.0,
-                    sw,
-                    sh,
-                ),
-                color: border_subtle,
-                ..Default::default()
-            });
+            let close_color = self.tab_close_override.unwrap_or(muted);
+            emit_tab_bar_quads(
+                &mut quads,
+                &layout,
+                &TabBarQuadParams {
+                    tab_count: tabs.tabs().len(),
+                    active_bg,
+                    hover_bg,
+                    accent: accent_blue,
+                    separator,
+                    border: bar_bg,
+                    close_color,
+                    hover_close_color: primary,
+                    hover_tab_idx,
+                    hover_close_hit,
+                    surface: (sw, sh),
+                },
+            );
             // macOS integrated titlebar still needs painted traffic-light
             // affordances. Windows uses native Win11 chrome and must not paint
             // duplicate caption buttons in the client area.
@@ -2813,106 +2913,6 @@ impl GpuRenderer {
                 );
             }
             for t in &layout.tabs {
-                let is_active = layout.active == Some(t.idx);
-                let cursor_on_this_tab = hover_tab_idx == t.idx as u32;
-                if is_active {
-                    // Elevated pill background.
-                    // TODO: switch to rounded quad after #116.
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
-                        color: active_bg,
-                        ..Default::default()
-                    });
-                    // 2px top accent bar, ACCENT_BLUE, anchored to the
-                    // active tab's own bg rect via `active_accent_rect()`.
-                    // Issue #171: the previous inline `t.bg_rect.x + INSET`
-                    // math was correct in isolation but easy to drift
-                    // away from on future refactors; centralising the
-                    // computation in the layout keeps the regression
-                    // covered by the `crates/sonic-ui/tests/
-                    // tabbar_active_indicator.rs` unit tests.
-                    if let Some(acc) = layout.active_accent_rect() {
-                        quads.push(QuadInstance {
-                            rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
-                            color: accent_blue,
-                            ..Default::default()
-                        });
-                    }
-                } else if cursor_on_this_tab {
-                    // Hover overlay on inactive tab — #FFFFFF/6%.
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
-                        color: hover_bg,
-                        ..Default::default()
-                    });
-                }
-                // 1px BORDER_SUBTLE separator between adjacent inactive
-                // tabs (PR #109 dedup) — height bar_h - 16, centered.
-                if t.idx + 1 < tabs.tabs().len() {
-                    let next_is_active = layout.active == Some(t.idx + 1);
-                    if !is_active && !next_is_active {
-                        let sep_w = 1.0_f32;
-                        let sep_h = (layout.bar.h - 16.0).max(1.0);
-                        let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
-                        let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP - sep_w) * 0.5;
-                        quads.push(QuadInstance {
-                            rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
-                            color: separator,
-                            ..Default::default()
-                        });
-                    }
-                }
-                // Close × — always visible per user request: every tab
-                // (including the only tab) shows the close affordance so
-                // Cmd+W and click both have a discoverable target.
-                // Pre-fix the × was hover-gated, which combined with the
-                // tab.len()==1 close-tab path left the last tab with no
-                // visible × and no working keyboard close.
-                let cursor_on_close = cursor_on_this_tab && hover_close_hit == 1;
-                let draw_close = true;
-                if draw_close {
-                    let close_color = if let Some(o) = self.tab_close_override {
-                        o
-                    } else if cursor_on_close {
-                        // The spec calls for DANGER on click-down; we
-                        // don't currently track button-down here, so
-                        // hover brightens to TEXT_PRIMARY. (DANGER is
-                        // still wired through the override path for
-                        // theme authors who want it.)
-                        let _ = danger;
-                        primary
-                    } else {
-                        muted
-                    };
-                    let cx = t.close_x_rect.x;
-                    let cy = t.close_x_rect.y;
-                    // 14×14 hit, 8×8 glyph (inset 3px each side).
-                    let inset = (t.close_x_rect.w - 8.0) * 0.5;
-                    let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
-                    let thick = (glyph * 0.14).max(1.25);
-                    // SVG-style close icon: two anti-aliased diagonal
-                    // capsule strokes through the QuadPipeline's
-                    // line-SDF path. Replaces the previous 8x8 binary
-                    // alpha mask whose diagonals stair-stepped visibly
-                    // on Retina (per-pixel alpha was binary 0/255, so
-                    // every "off the diagonal" cell snapped flat).
-                    push_close_x_quads(
-                        &mut quads,
-                        CloseXParams {
-                            x: cx + inset,
-                            y: cy + inset,
-                            size: glyph,
-                            thickness: thick,
-                            color: close_color,
-                            sw,
-                            sh,
-                        },
-                    );
-                    // Keep the constant referenced so the mask table
-                    // stays accessible to other call sites without an
-                    // unused-import warning.
-                    let _ = ICON_CLOSE_8;
-                }
                 // Phase D D3 (Epic #289): if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to
                 // dim it to roughly `source_alpha` perceived opacity.
