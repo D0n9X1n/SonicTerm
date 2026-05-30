@@ -2876,10 +2876,14 @@ impl GpuRenderer {
                         });
                     }
                 }
-                // Close × — visible on hover of tab OR if user enabled
-                // an explicit close-button color override (PR #109 sem.).
+                // Close × — always visible per user request: every tab
+                // (including the only tab) shows the close affordance so
+                // Cmd+W and click both have a discoverable target.
+                // Pre-fix the × was hover-gated, which combined with the
+                // tab.len()==1 close-tab path left the last tab with no
+                // visible × and no working keyboard close.
                 let cursor_on_close = cursor_on_this_tab && hover_close_hit == 1;
-                let draw_close = self.tab_close_override.is_some() || cursor_on_this_tab;
+                let draw_close = true;
                 if draw_close {
                     let close_color = if let Some(o) = self.tab_close_override {
                         o
