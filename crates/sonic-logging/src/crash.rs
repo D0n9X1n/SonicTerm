@@ -103,15 +103,66 @@ static PANIC_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// `<log_dir>/crashes/crash-<utc-iso8601>.log` and then chains to the
 /// previously-installed (default) panic hook. Calling this more than
 /// once replaces the wrapper but keeps the originally captured chain.
+///
+/// The hook is process-wide and fires for panics on EVERY thread —
+/// including PTY-reader, render, winit, and tokio worker threads —
+/// not just the main thread. This is the cure for the
+/// "silent-exit-no-.ips-no-crashes-entry" class of bug where a
+/// background-thread panic propagated to abort with no forensic
+/// trace.
+///
+/// In addition to the file dump, a single-line summary is emitted at
+/// `ERROR` level on the `tracing` dispatcher so the rolling
+/// `sonic.log` carries an index entry even when the crash file write
+/// itself fails (e.g. read-only home, ENOSPC). The non-blocking
+/// appender may drop the marker if the process dies inside the same
+/// tick, but in practice the dump file is the authoritative artifact
+/// and the marker is just the breadcrumb.
+///
+/// Set `SONIC_PANIC_ABORT=1` in the environment to skip the chained
+/// previous hook and `std::process::abort()` immediately after the
+/// dump is written. The default behaviour (chain to `prev`, which is
+/// the libstd default = print to stderr + unwind) matches Rust's
+/// usual panic semantics so existing `catch_unwind` call-sites keep
+/// working.
 pub fn install_panic_hook(log_dir: PathBuf) {
     let _ = PANIC_DIR.set(log_dir);
     let prev = std::panic::take_hook();
+    let abort = std::env::var_os("SONIC_PANIC_ABORT").is_some_and(|v| v == "1");
     std::panic::set_hook(Box::new(move |info| {
+        let summary = summarize(info);
+        // Rolling-log breadcrumb first; file dump is the heavyweight
+        // artifact. Use a dedicated target so operators can filter.
+        tracing::error!(target: "sonic_logging::panic", "{summary}");
         if let Err(e) = write_dump(info) {
             eprintln!("sonic-logging: failed to write crash dump: {e}");
         }
+        if abort {
+            // Skip chained hook; give the non-blocking appender a
+            // best-effort moment to flush before the process exits.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::process::abort();
+        }
         prev(info);
     }));
+}
+
+#[allow(deprecated)]
+fn summarize(info: &std::panic::PanicInfo<'_>) -> String {
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("<unnamed>");
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}", l.file(), l.line()))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let payload = info
+        .payload()
+        .downcast_ref::<&'static str>()
+        .copied()
+        .map(str::to_string)
+        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string payload>".to_string());
+    format!("panic on thread '{thread_name}' at {location}: {payload}")
 }
 
 // MSRV is 1.80; `PanicHookInfo` only landed in 1.81, so `PanicInfo`
@@ -139,9 +190,12 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
         .or_else(|| info.payload().downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "<non-string panic payload>".to_string());
 
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("<unnamed>");
     writeln!(f, "== sonic crash dump ==")?;
     writeln!(f, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
     writeln!(f, "version:   {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(f, "thread:    {thread_name} ({:?})", thread.id())?;
     writeln!(f, "location:  {location}")?;
     writeln!(f, "message:   {payload}")?;
     writeln!(f)?;
