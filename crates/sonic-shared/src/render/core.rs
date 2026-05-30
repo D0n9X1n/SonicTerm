@@ -4167,10 +4167,21 @@ impl GpuRenderer {
                 // neighbouring Latin text. Regression target:
                 // `wide_cell_glyph_width_does_not_exceed_two_cells`.
                 let inv_s = 1.0 / scale_factor;
-                let gx = cx + info.px_offset[0] as f32 * inv_s;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let mut gw = info.px_size[0] as f32 * inv_s;
-                let mut gh = info.px_size[1] as f32 * inv_s;
+                let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
+                let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let gw_nat = info.px_size[0] as f32 * inv_s;
+                let gh_nat = info.px_size[1] as f32 * inv_s;
+                // Powerline PUA (U+E0B0..=U+E0BF) glyphs are cell-filling
+                // separators — anchor them to the cell rect so adjacent
+                // rows align. See `swash_rasterizer::anchor_powerline_rect`.
+                let (gx, gy, mut gw, mut gh) = sonic_text::swash_rasterizer::anchor_powerline_rect(
+                    ch,
+                    cx,
+                    cy,
+                    cell_pixel_width,
+                    cell_h,
+                    (gx_nat, gy_nat, gw_nat, gh_nat),
+                );
                 // Clamp tile to the cell box the codepoint reserves
                 // (1 cell for narrow, 2 for WIDE). Some fallback faces
                 // (notably Apple Color Emoji at small sizes, certain CJK
@@ -4216,10 +4227,21 @@ impl GpuRenderer {
             let cx = pad + f32::from(g.lead_col) * cell_w;
             let cy = top_inset + f32::from(row) * cell_h;
             let inv_s = 1.0 / scale_factor;
-            let gx = cx + info.px_offset[0] as f32 * inv_s;
-            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-            let mut gw = info.px_size[0] as f32 * inv_s;
-            let mut gh = info.px_size[1] as f32 * inv_s;
+            let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
+            let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+            let gw_nat = info.px_size[0] as f32 * inv_s;
+            let gh_nat = info.px_size[1] as f32 * inv_s;
+            // Powerline PUA (U+E0B0..=U+E0BF) anchor — see the matching
+            // call in the char-fallback branch above. `g.ch` is the
+            // shaped cluster's lead codepoint.
+            let (gx, gy, mut gw, mut gh) = sonic_text::swash_rasterizer::anchor_powerline_rect(
+                g.ch,
+                cx,
+                cy,
+                cell_pixel_width,
+                cell_h,
+                (gx_nat, gy_nat, gw_nat, gh_nat),
+            );
             // See the fallback path above for why we clamp to
             // `cell_pixel_width` — the same overflow class can occur on
             // shaped color emoji where the strike bitmap is slightly

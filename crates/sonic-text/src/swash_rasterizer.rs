@@ -63,6 +63,64 @@ use crate::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer};
 /// codepoints, comfortably under the 16k-tile atlas budget even at 2×.
 pub const PREBAKE_RANGES: &[std::ops::RangeInclusive<u32>] = &[0x2500..=0x259F, 0xE0A0..=0xE0D7];
 
+/// Powerline "Symbols" PUA block (U+E0B0..=U+E0BF) — the cell-filling
+/// separators (left/right arrow, half/full triangle, etc.) used by every
+/// powerline-style shell prompt (oh-my-zsh agnoster, p10k, starship).
+///
+/// These glyphs are intentionally designed to paint the entire cell
+/// rectangle — the arrow's diagonal must meet the cell's edge exactly so
+/// adjacent arrows on stacked rows form a continuous "tab" shape. They
+/// MUST be anchored to the cell rect, never to the text baseline:
+///
+///   * Baseline anchoring drifts because `placement.top` differs across
+///     glyphs in the range (U+E0B0 is full-bleed; U+E0B1 has thin
+///     stroke at different y). A row of arrows then sits at multiple
+///     vertical positions — visually one row "high", the next "low or
+///     missing" (the user-reported regression).
+///   * Cell-rect anchoring guarantees every powerline glyph paints at
+///     exactly (cell_x, cell_y, cell_w, cell_h) regardless of the
+///     resolving font face's metrics. Adjacent rows align by
+///     construction.
+///
+/// See [`anchor_powerline_rect`] for the helper applied at every glyph
+/// emit site in the render core.
+pub const POWERLINE_PUA_FIRST: u32 = 0xE0B0;
+pub const POWERLINE_PUA_LAST: u32 = 0xE0BF;
+
+/// Classify `ch` as a cell-filling Powerline glyph (see
+/// [`POWERLINE_PUA_FIRST`] for the rationale). Inline-cheap; used on the
+/// per-glyph emit hot path.
+#[inline]
+pub fn is_powerline_char(ch: char) -> bool {
+    let cp = ch as u32;
+    (POWERLINE_PUA_FIRST..=POWERLINE_PUA_LAST).contains(&cp)
+}
+
+/// Cell-rect anchor for cell-filling glyphs. If `ch` is a Powerline
+/// codepoint, returns the exact cell rect `(cx, cy, cell_w, cell_h)`;
+/// otherwise returns `natural` unchanged.
+///
+/// This is the single point of policy referenced from each glyph-emit
+/// path in `sonic-shared/src/render/core.rs` — keeping it here (in the
+/// crate that owns Powerline classification) ensures the policy stays
+/// consistent across the ASCII fast path, the shaped path, and the
+/// char-fallback path.
+#[inline]
+pub fn anchor_powerline_rect(
+    ch: char,
+    cx: f32,
+    cy: f32,
+    cell_w: f32,
+    cell_h: f32,
+    natural: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    if is_powerline_char(ch) {
+        (cx, cy, cell_w, cell_h)
+    } else {
+        natural
+    }
+}
+
 /// Eagerly rasterize every codepoint in [`PREBAKE_RANGES`] into `atlas`
 /// using `rasterizer`'s configured family/size. Returns the number of
 /// glyphs that were successfully inserted (i.e. the font chain resolved
