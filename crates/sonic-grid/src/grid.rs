@@ -506,6 +506,136 @@ impl Grid {
         self.bump();
     }
 
+    /// Scroll the visible region DOWN by `n` lines: every row at
+    /// `r` moves to `r + n`, the topmost `n` rows become blank, the
+    /// bottom `n` rows fall off the end of the visible region.
+    ///
+    /// Scrollback is NOT touched (this is the inverse of `scroll_up`
+    /// and is only meaningful for alt-screen / DECSTBM use). Marks
+    /// every visible row dirty since rows shifted identity.
+    pub fn scroll_down(&mut self, n: u16) {
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+        if rows == 0 {
+            return;
+        }
+        let n = (n as usize).min(rows);
+        for _ in 0..n {
+            // Drop bottom row, recycle it as the new blank top row.
+            let Some(mut row) = self.visible.pop_back() else {
+                break;
+            };
+            for cell in row.iter_mut() {
+                *cell = Cell::default();
+            }
+            row.resize(cols, Cell::default());
+            self.visible.push_front(row);
+        }
+        // Every row's identity shifted — dirty bitset is keyed on
+        // visible-row index, so mark all (same justification as
+        // `scroll_up`).
+        self.mark_all();
+        self.bump();
+    }
+
+    /// Scroll a sub-region `[top, bottom]` (inclusive, visible-row
+    /// coordinates) UP by `n` lines. Rows above `top` and below
+    /// `bottom` are left untouched; rows inside the region shift up
+    /// by `n` and the bottom `n` rows of the region become blank.
+    /// Scrollback is NOT touched — this is the in-region scroll used
+    /// by DECSTBM / CSI S / IND-at-bottom-margin and must not push
+    /// into history.
+    ///
+    /// Every row in `[top, bottom]` is marked dirty: even rows whose
+    /// content is "the same string they had two scrolls ago" must be
+    /// invalidated because the `LineQuadCache` is keyed on
+    /// `(pane_id, abs_row, content-hash)` — if the dirty bit is not
+    /// set for a moved-into row whose new content happens to collide
+    /// with a previously-cached hash for the same `abs_row`, the
+    /// renderer would replay stale quads. Marking the entire region
+    /// dirty is the simple correct option and costs nothing at
+    /// terminal row counts. Closes #348.
+    pub fn scroll_region_up(&mut self, top: u16, bottom: u16, n: u16) {
+        let rows = self.rows as usize;
+        if rows == 0 {
+            return;
+        }
+        let top_i = top as usize;
+        let bot_i = (bottom as usize).min(rows.saturating_sub(1));
+        if top_i > bot_i {
+            return;
+        }
+        let region_len = bot_i - top_i + 1;
+        let n = (n as usize).min(region_len);
+        if n == 0 {
+            return;
+        }
+        // Shift content up by `n` within the region.
+        for r in top_i..=bot_i {
+            let src = r + n;
+            if src <= bot_i {
+                self.visible.swap(r, src);
+            } else {
+                // Clear rows that have no source.
+                for cell in self.visible[r].iter_mut() {
+                    *cell = Cell::default();
+                }
+            }
+        }
+        // Some rows ended up with stale data after the swaps in the
+        // bottom `n` slots — explicitly clear them.
+        let blank_start = bot_i + 1 - n;
+        for r in blank_start..=bot_i {
+            for cell in self.visible[r].iter_mut() {
+                *cell = Cell::default();
+            }
+        }
+        self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
+        self.bump();
+    }
+
+    /// Scroll a sub-region `[top, bottom]` (inclusive, visible-row
+    /// coordinates) DOWN by `n` lines. Mirror of [`scroll_region_up`];
+    /// see that doc for the dirty-bit / cache-invalidation rationale.
+    pub fn scroll_region_down(&mut self, top: u16, bottom: u16, n: u16) {
+        let rows = self.rows as usize;
+        if rows == 0 {
+            return;
+        }
+        let top_i = top as usize;
+        let bot_i = (bottom as usize).min(rows.saturating_sub(1));
+        if top_i > bot_i {
+            return;
+        }
+        let region_len = bot_i - top_i + 1;
+        let n = (n as usize).min(region_len);
+        if n == 0 {
+            return;
+        }
+        // Shift content down by `n` within the region (work from the
+        // bottom so we don't clobber sources).
+        let mut r = bot_i + 1;
+        while r > top_i {
+            r -= 1;
+            if r >= top_i + n {
+                let src = r - n;
+                self.visible.swap(r, src);
+            } else {
+                for cell in self.visible[r].iter_mut() {
+                    *cell = Cell::default();
+                }
+            }
+        }
+        // Clear the top `n` rows of the region.
+        for r in top_i..(top_i + n).min(bot_i + 1) {
+            for cell in self.visible[r].iter_mut() {
+                *cell = Cell::default();
+            }
+        }
+        self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
+        self.bump();
+    }
+
     /// Erase from cursor to end of line (CSI 0 K).
     pub fn erase_line_to_end(&mut self) {
         let r = self.cursor.row as usize;
