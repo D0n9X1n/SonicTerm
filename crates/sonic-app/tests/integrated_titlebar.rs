@@ -96,3 +96,9 @@ fn integrated_titlebar_inset_macos_reserves_at_least_22_logical_px() {
 fn integrated_titlebar_inset_is_zero_off_macos() {
     assert_eq!(sonic_app::app::integrated_titlebar_inset(), 0.0);
 }
+
+#[test]
+fn tab_bar_draw_visibility_is_not_tied_to_integrated_titlebar() {
+    assert!(sonic_shared::render::tab_bar_draw_visible(true));
+    assert!(!sonic_shared::render::tab_bar_draw_visible(false));
+}

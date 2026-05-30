@@ -109,8 +109,19 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 
 #[cfg(target_os = "macos")]
 #[inline]
-fn integrated_titlebar_inset_px() -> u32 {
-    32
+fn should_paint_native_caption_buttons() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn should_paint_native_caption_buttons() -> bool {
+    false
+}
+
+#[doc(hidden)]
+pub fn tab_bar_draw_visible(tab_bar_visible: bool) -> bool {
+    tab_bar_visible
 }
 
 use crate::{
@@ -2741,7 +2752,7 @@ impl GpuRenderer {
             }
         }
         // -------- Tab bar ---------------------------------------------------
-        if self.tab_bar_visible {
+        if tab_bar_draw_visible(self.tab_bar_visible) {
             // Phase D (Epic #289): open an 8 px insertion gap at the
             // current drop slot when a drag is active over this bar.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
@@ -2794,8 +2805,7 @@ impl GpuRenderer {
             // macOS integrated titlebar still needs painted traffic-light
             // affordances. Windows uses native Win11 chrome and must not paint
             // duplicate caption buttons in the client area.
-            #[cfg(target_os = "macos")]
-            if integrated_titlebar_inset_px() > 0 {
+            if should_paint_native_caption_buttons() {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
                 let tuples = [
                     (rects[0].x, rects[0].y, rects[0].w, rects[0].h),

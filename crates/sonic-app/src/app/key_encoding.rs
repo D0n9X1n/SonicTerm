@@ -100,7 +100,7 @@ fn chord_string(key_name: &str, mods: ModifiersState) -> String {
 
 fn key_candidates(key: &Key) -> Option<Vec<KeyName>> {
     let primary = key_name(key)?;
-    let mut candidates = vec![primary];
+    let mut candidates = Vec::new();
     if let Key::Character(s) = key {
         if s == "?" {
             candidates.push(KeyName::Static("/"));
@@ -111,6 +111,7 @@ fn key_candidates(key: &Key) -> Option<Vec<KeyName>> {
             }
         }
     }
+    candidates.push(primary);
     Some(candidates)
 }
 
