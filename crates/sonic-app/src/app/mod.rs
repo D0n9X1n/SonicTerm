@@ -150,12 +150,12 @@ pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
     pub window: Arc<Window>,
-    /// Per-window wgpu renderer. `None` for the Phase B2 PR-A "shadow"
-    /// entry that mirrors the legacy `App.renderer` field — that field
-    /// still owns the actual GpuRenderer; PR-B will move ownership in
-    /// here. For all torn-out child windows this is `Some(_)`. Read
-    /// through [`Self::renderer`] / [`Self::renderer_mut`] which unwrap
-    /// (they always succeed for child windows).
+    /// Per-window wgpu renderer. `Some(_)` once `do_resumed` (main
+    /// window) or `create_child_window` (torn-out) populates it.
+    /// PR-B1b (#293): the main window's renderer now lives here too —
+    /// the legacy `App.renderer` field was deleted. Read through
+    /// [`Self::renderer`] / [`Self::renderer_mut`] which unwrap (always
+    /// safe after `do_resumed`).
     pub renderer: Option<GpuRenderer>,
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
@@ -193,17 +193,15 @@ pub struct WindowState {
 }
 
 impl WindowState {
-    /// Borrow the renderer. Panics on the PR-A shadow main entry where
-    /// it's `None`; every child window construction site initializes it
-    /// to `Some(_)` so this is always safe at child-window call sites.
-    /// During PR-B the field becomes non-optional again once the main
-    /// renderer moves out of `App`.
+    /// Borrow the renderer. Panics if the renderer field is `None`
+    /// (pre-`do_resumed` for the main entry; never for child entries —
+    /// every child construction site initializes it to `Some(_)`).
     #[inline]
     #[track_caller]
     pub fn renderer(&self) -> &GpuRenderer {
         self.renderer
             .as_ref()
-            .expect("WindowState::renderer() called on shadow main entry (PR-A); readers must keep using App.renderer until PR-B")
+            .expect("WindowState::renderer() called before do_resumed populated it")
     }
 
     /// Mutable counterpart of [`Self::renderer`]. Same panic semantics.
@@ -212,7 +210,7 @@ impl WindowState {
     pub fn renderer_mut(&mut self) -> &mut GpuRenderer {
         self.renderer
             .as_mut()
-            .expect("WindowState::renderer_mut() called on shadow main entry (PR-A); readers must keep using App.renderer until PR-B")
+            .expect("WindowState::renderer_mut() called before do_resumed populated it")
     }
 }
 
@@ -923,7 +921,9 @@ pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
     pub(super) keymap: Keymap,
-    pub(super) renderer: Option<GpuRenderer>,
+    // PR-B1b (#293): `App.renderer` field removed; the main window's
+    // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
+    // Access via `Self::main_renderer()` / `Self::main_renderer_mut()`.
     pub(super) tabs: TabBar,
     /// Parallel to `tabs.tabs()` — same length, same order.
     pub(super) tab_states: Vec<TabState>,
@@ -1192,7 +1192,7 @@ impl App {
     pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonic_ui::pane::Rect)> {
         let tab_idx = self.tabs.active_index();
         let Some(st) = self.tab_states.get(tab_idx) else { return Vec::new() };
-        let Some(r) = self.renderer.as_ref() else { return Vec::new() };
+        let Some(r) = self.main_renderer() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
         let pl = r.padding_left();
@@ -1251,7 +1251,6 @@ impl App {
             theme,
             config,
             keymap,
-            renderer: None,
             tabs: TabBar::new(),
             tab_states: Vec::new(),
             panes: HashMap::new(),
@@ -1871,6 +1870,22 @@ impl App {
         Some(&self.windows.get(&self.main_window_id?)?.window)
     }
 
+    /// Phase B2 PR-B1b (#293) — borrow the main window's `GpuRenderer`
+    /// from its `WindowState`. Sole source of truth for the main
+    /// renderer (legacy `App.renderer` field was deleted in PR-B1b).
+    /// Returns `None` before `do_resumed` has run.
+    #[doc(hidden)]
+    pub fn main_renderer(&self) -> Option<&GpuRenderer> {
+        self.windows.get(&self.main_window_id?)?.renderer.as_ref()
+    }
+
+    /// Mutable counterpart of [`Self::main_renderer`].
+    #[doc(hidden)]
+    pub fn main_renderer_mut(&mut self) -> Option<&mut GpuRenderer> {
+        let id = self.main_window_id?;
+        self.windows.get_mut(&id)?.renderer.as_mut()
+    }
+
     /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
     /// window is OS-frontmost. Falls back to the main window when no
     /// frontmost has been recorded yet (matches the safe default in
@@ -2354,7 +2369,7 @@ impl App {
     pub(super) fn publish_main_window_tab_bar(&self) {
         use sonic_ui::tabbar_view::TabBarLayout;
         let Some(w) = self.main_window() else { return };
-        let Some(r) = self.renderer.as_ref() else { return };
+        let Some(r) = self.main_renderer() else { return };
         let inner_origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
         let inner_size = {
             let s = w.inner_size();
@@ -2655,9 +2670,10 @@ impl App {
     pub fn cancel_drag_session(&mut self) -> bool {
         let app_had = self.drag_session.take().is_some();
         let mut win_had = false;
-        for ws in self.windows.values_mut() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
-            if ws.renderer.is_none() {
+        for (id, ws) in self.windows.iter_mut() {
+            // Phase B2 PR-B1b: skip shadow main entry by id (renderer
+            // is now Some on main — `is_none()` no longer identifies it).
+            if Some(*id) == self.main_window_id {
                 continue;
             }
             if ws.drag_session.take().is_some() {

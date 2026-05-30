@@ -60,7 +60,7 @@ impl App {
         if self.pending_redraw {
             next = Some(self.last_render + self.frame_period);
         }
-        if let Some(r) = self.renderer.as_ref() {
+        if let Some(r) = self.main_renderer() {
             if self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed) {
                 let blink = r.next_blink_redraw_at();
                 next = match (next, blink) {
@@ -121,19 +121,9 @@ impl App {
     /// re-walks the fallback chain and the user's tofu cells flip to
     /// real glyphs.
     pub(super) fn handle_clear_shape_cache(&mut self) {
-        if let Some(r) = self.renderer.as_mut() {
-            r.clear_shape_cache();
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
-        for (id, child) in self.windows.iter_mut() {
-            // Phase B2 PR-A: skip the shadow main entry — its
-            // `renderer` field is `None` (the real renderer is still
-            // owned by `App.renderer` and was cleared above).
-            if Some(*id) == self.main_window_id {
-                continue;
-            }
+        // PR-B1b: main window lives in `self.windows` with `renderer=Some`,
+        // so a single iteration covers main + all torn-out children.
+        for child in self.windows.values_mut() {
             if let Some(r) = child.renderer.as_mut() {
                 r.clear_shape_cache();
                 child.window.request_redraw();
@@ -260,30 +250,20 @@ impl App {
                 Err(e) => tracing::warn!("on_window_ready: no raw handle: {e}"),
             }
         }
-        self.renderer = Some(renderer);
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_titlebar_inset(integrated_titlebar_inset());
-            // Apply the user's `tab_close_button_color` from sonic.toml
-            // BEFORE the first frame so a custom always-visible × shows
-            // up on the very first paint, not after a config edit.
-            r.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        }
+        renderer.set_titlebar_inset(integrated_titlebar_inset());
+        // Apply the user's `tab_close_button_color` from sonic.toml
+        // BEFORE the first frame so a custom always-visible × shows
+        // up on the very first paint, not after a config edit.
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        // Seed the first tab + pane now that the window + renderer exist.
-        self.new_tab("shell");
-
-        // Phase B2 PR-A: insert a shadow `WindowState` for the main
-        // window into `self.windows`, keyed by `main_window_id`. The
-        // shadow mirrors the cheap scalar fields (cursor, modifiers,
-        // selection, ime, hovered_url, …) on every event tick via
-        // `sync_shadow_main`. Heavy fields (`renderer`, `tabs`,
-        // `tab_states`, `panes`) stay on `App` for PR-A and move into
-        // the shadow during PR-B's substitution pass.
+        // PR-B1b (#293): renderer is now owned by `WindowState.renderer`.
+        // Insert the main entry BEFORE `new_tab` so `spawn_pane` (which
+        // reads cell size through `self.main_renderer()`) sees it.
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
             role: super::WindowRole::Terminal,
             window: window.clone(),
-            renderer: None,
+            renderer: Some(renderer),
             tabs: sonic_ui::tabs::TabBar::new(),
             tab_states: Vec::new(),
             panes: std::collections::HashMap::new(),
@@ -302,11 +282,15 @@ impl App {
             hovered_url: self.hovered_url.clone(),
         };
         self.windows.insert(main_id, shadow);
+
+        // Seed the first tab + pane now that the window + renderer exist.
+        self.new_tab("shell");
+
         // Seed-sync immediately so the first event-tick observer sees a
         // populated shadow rather than the all-zeros constructor state.
         self.sync_shadow_main();
 
-        let (rc, rr) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((0, 0));
+        let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(
             "Sonic ready. theme={} keymap={} bindings={} grid={}x{}",
             self.theme.name,

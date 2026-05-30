@@ -64,7 +64,7 @@ impl App {
                 Ok(mut t) => {
                     t.apply_accessibility(&new_cfg.accessibility);
                     tracing::info!("live-reload: theme -> {}", t.name);
-                    if let Some(r) = self.renderer.as_mut() {
+                    if let Some(r) = self.main_renderer_mut() {
                         r.set_theme(&t);
                     }
                     for child in self.windows.values_mut() {
@@ -101,7 +101,7 @@ impl App {
                 }
             };
             t.apply_accessibility(&new_cfg.accessibility);
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.main_renderer_mut() {
                 r.set_theme(&t);
             }
             for child in self.windows.values_mut() {
@@ -127,14 +127,14 @@ impl App {
         // Font
         let font_changed = config_diff_needs_font_apply(&self.config, &new_cfg);
         if font_changed {
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.main_renderer_mut() {
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
             }
             // Cell metrics changed → resize each pane to its own PaneRect.
             // See docs/specs/per-pane-grids.md for why this is per-pane,
             // not whole-window.
             let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.renderer.as_ref() {
+            if let Some(r) = self.main_renderer() {
                 let (cw, ch) = r.cell_size();
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
@@ -170,7 +170,7 @@ impl App {
         // Cursor visuals — cheap to apply; the setters short-circuit
         // when nothing changed, so an unrelated config edit (e.g. a
         // theme swap) doesn't reset the blink phase.
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = self.main_renderer_mut() {
             r.set_cursor_shape(new_cfg.terminal.cursor_shape);
             r.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
@@ -202,11 +202,11 @@ impl App {
                 new_cfg.window.padding_top,
                 new_cfg.window.padding_bottom,
             ];
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.main_renderer_mut() {
                 r.set_padding(pad);
             }
             let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.renderer.as_ref() {
+            if let Some(r) = self.main_renderer() {
                 let (cw, ch) = r.cell_size();
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
@@ -227,12 +227,15 @@ impl App {
         }
 
         if (new_cfg.appearance.opacity - self.config.appearance.opacity).abs() > f32::EPSILON {
-            if let Some(r) = self.renderer.as_mut() {
-                r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
+            // B1b borrow-split: clone theme before borrowing renderer
+            // (theme + renderer used to be disjoint App fields).
+            let theme_snapshot = self.theme.clone();
+            if let Some(r) = self.main_renderer_mut() {
+                r.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
             }
             for child in self.windows.values_mut() {
                 if let Some(r) = child.renderer.as_mut() {
-                    r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
+                    r.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
                 }
             }
             tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
@@ -243,7 +246,7 @@ impl App {
         // or clears the value propagates to the main + every child
         // renderer without a restart.
         if new_cfg.tab_close_button_color != self.config.tab_close_button_color {
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.main_renderer_mut() {
                 r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             for child in self.windows.values_mut() {
@@ -318,7 +321,7 @@ impl App {
             }
         };
         theme.apply_accessibility(&self.config.accessibility);
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = self.main_renderer_mut() {
             r.set_theme(&theme);
         }
         for child in self.windows.values_mut() {
@@ -370,11 +373,11 @@ impl App {
         self.config.font.size = size;
         let family = self.config.font.family.clone();
         let line_h = self.config.font.line_height;
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = self.main_renderer_mut() {
             r.set_font(&family, size, line_h);
         }
         let rects = self.compute_active_pane_rects();
-        if let Some(r) = self.renderer.as_ref() {
+        if let Some(r) = self.main_renderer() {
             let (cw, ch) = r.cell_size();
             resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }
@@ -401,14 +404,14 @@ impl App {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
-        let main_changed = if let Some(r) = self.renderer.as_mut() {
+        let main_changed = if let Some(r) = self.main_renderer_mut() {
             r.set_tab_bar_visible(visible)
         } else {
             false
         };
         if main_changed {
             let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.renderer.as_ref() {
+            if let Some(r) = self.main_renderer() {
                 let (cw, ch) = r.cell_size();
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }

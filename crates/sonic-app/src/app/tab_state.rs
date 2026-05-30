@@ -64,7 +64,7 @@ impl App {
         state: TabState,
         panes: HashMap<u64, PaneState>,
     ) {
-        let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
+        let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);
             if let Some(pty) = pane.pty.as_ref() {

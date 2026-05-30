@@ -248,11 +248,10 @@ impl App {
         if let Some(main) = self.main_window() {
             let geom = window_geom(main);
             let width =
-                self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
-            let inset = self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0);
+                self.main_renderer().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
+            let inset = self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0);
             let bar_h = self
-                .renderer
-                .as_ref()
+                .main_renderer()
                 .map(|r| r.tab_bar_logical_height())
                 .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT);
             candidates.push((
