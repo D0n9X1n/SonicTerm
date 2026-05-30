@@ -69,16 +69,36 @@ launched Sonic from.
 ## Crash dumps
 
 A `tracing_subscriber::Layer` keeps a fixed-size ring of the most
-recent 200 events. On panic, Sonic's panic hook writes
+recent 50 events. On panic, Sonic's panic hook writes
 `crashes/crash-<utc-iso8601>.log` containing:
 
-- header (timestamp, version, panic location, panic message);
+- header (timestamp, version, **thread name + id**, panic location,
+  panic message);
 - a full `std::backtrace::Backtrace` (force-captured regardless of
   `RUST_BACKTRACE`);
-- the 200-event ring snapshot.
+- the 50-event ring snapshot.
+
+The hook is **process-wide and fires for panics on every thread** —
+including PTY-reader, render, winit, and any tokio worker — not just
+the main thread. This closes the "silent-exit / no `.ips` / no
+`crashes/` entry" forensic gap where a background-thread panic would
+abort the process with no on-disk trace. In addition to the file
+dump, a one-line `ERROR` breadcrumb is emitted to the rolling
+`sonic.log` under the `sonic_logging::panic` target, so even a
+crash-file write failure (read-only home, ENOSPC, etc.) leaves an
+index entry.
+
+Both `sonic-mac` and `sonic-windows` install the hook at the very top
+of `main()` — before config load — so panics during bootstrap (bad
+TOML, missing theme, GPU init failure) are captured the same way as
+steady-state ones.
 
 The hook then chains to the previously installed (default) panic
-hook, so normal abort behaviour is preserved.
+hook, so normal abort/unwind behaviour is preserved and existing
+`catch_unwind` call-sites keep working. Set `SONIC_PANIC_ABORT=1` in
+the environment to instead `std::process::abort()` immediately after
+the dump is written (useful when a chained unwind would itself
+deadlock — e.g. a poisoned mutex in the render path).
 
 ## Filing a bug report
 
