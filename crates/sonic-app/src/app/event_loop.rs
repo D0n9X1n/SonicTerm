@@ -151,6 +151,7 @@ impl App {
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("Sonic Terminal — {}", self.theme.name))
+                    .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(
                         f32::from(cols) * 9.0
                             + self.config.window.padding_left

@@ -28,8 +28,6 @@ fn set_process_dpi_awareness() {}
 
 #[cfg(target_os = "windows")]
 mod backdrop;
-#[cfg(target_os = "windows")]
-mod chrome;
 mod cli;
 #[cfg(target_os = "windows")]
 mod menubar;
@@ -85,7 +83,6 @@ fn main() -> Result<()> {
             Box::new(move |raw| {
                 if let raw_window_handle::RawWindowHandle::Win32(h) = raw {
                     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-                    chrome::install_subclass(hwnd);
                     backdrop::apply_backdrop(hwnd, backdrop_kind);
                     let mac = menubar::WinMenu::new(hwnd);
                     if let Err(e) = mac.install(Sender::new()) {

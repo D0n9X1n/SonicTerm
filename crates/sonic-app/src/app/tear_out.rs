@@ -73,6 +73,7 @@ impl App {
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("Sonic — {}", tab.title))
+                    .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
@@ -440,6 +441,7 @@ impl App {
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("Sonic — {}", tab.title))
+                    .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
