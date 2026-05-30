@@ -2183,6 +2183,54 @@ impl App {
         pane_id
     }
 
+    /// tests exercise tab/pane bookkeeping with a reply-capable parser but
+    /// without spawning shells.
+    #[doc(hidden)]
+    pub fn __test_seed_tab_with_reply(
+        &mut self,
+        title: &str,
+    ) -> (u64, crossbeam_channel::Receiver<Vec<u8>>) {
+        let pane_id = next_pane_id();
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(80, 24), tx)));
+        self.panes.insert(pane_id, PaneState::new(parser, None));
+        self.tabs.push(Tab::new(title));
+        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        (pane_id, rx)
+    }
+
+    /// Test-only: seed an existing synthetic pane parser with the app's
+    /// current theme defaults. Mirrors the production spawn path without
+    /// requiring a live PTY or reply-forwarder thread.
+    #[doc(hidden)]
+    pub fn __test_seed_pane_theme_colors(&mut self, pane_id: u64) -> bool {
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return false;
+        };
+        let mut parser = pane.parser.lock();
+        if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
+            parser.set_theme_fg(r, g, b);
+        }
+        if let Some((r, g, b)) = self.theme.colors.background.rgb() {
+            parser.set_theme_bg(r, g, b);
+        }
+        if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
+            parser.set_theme_cursor(r, g, b);
+        }
+        true
+    }
+
+    /// Test-only: feed bytes into an existing pane parser. Used by integration
+    /// tests that need to assert reply bytes from the real pane parser.
+    #[doc(hidden)]
+    pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return false;
+        };
+        pane.parser.lock().advance(bytes);
+        true
+    }
+
     /// Test-only: read-only access to the internal panes map so tests
     /// can assert "this pane id is gone after detach".
     #[doc(hidden)]

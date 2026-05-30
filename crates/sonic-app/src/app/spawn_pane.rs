@@ -42,6 +42,22 @@ impl App {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
+        // reply — without this nvim guesses (27,29,30) for bg and the
+        // neo-tree icon cells visibly differ from Sonic's clear surface
+        // (#369).
+        {
+            let mut p = parser.lock();
+            if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
+                p.set_theme_fg(r, g, b);
+            }
+            if let Some((r, g, b)) = self.theme.colors.background.rgb() {
+                p.set_theme_bg(r, g, b);
+            }
+            if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
+                p.set_theme_cursor(r, g, b);
+            }
+        }
         // Pre-create the redraw target Arc bound to the current parent
         // window. If the pane later tears out, `tear_out_tab` swaps the
         // inner Option to the child window's Arc<Window> so the VT
