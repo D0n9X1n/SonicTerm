@@ -1673,9 +1673,26 @@ impl App {
         key: &winit::keyboard::Key,
         mods: winit::keyboard::ModifiersState,
     ) -> (Option<Action>, Option<Vec<u8>>) {
+        self.__test_dispatch_key_or_encode_pty_with_drain(key, mods, false)
+    }
+
+    /// Test-only mirror of the child-window KeyboardInput action path.
+    /// The production child handler drains `pending_new_window` immediately
+    /// after `run_action`; this helper exposes the same post-dispatch state
+    /// without requiring a live `ActiveEventLoop`.
+    #[doc(hidden)]
+    pub fn __test_dispatch_key_or_encode_pty_with_drain(
+        &mut self,
+        key: &winit::keyboard::Key,
+        mods: winit::keyboard::ModifiersState,
+        simulate_drain: bool,
+    ) -> (Option<Action>, Option<Vec<u8>>) {
         for key_str in key_to_strings(key, mods) {
             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                 if self.run_action(&action) {
+                    if simulate_drain && self.pending_new_window {
+                        self.pending_new_window = false;
+                    }
                     return (Some(action), None);
                 }
             }
@@ -1741,6 +1758,16 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
         self.frontmost_window = id;
+    }
+
+    /// Test-only: resolve a chord string through the App's keymap.
+    /// Used by `child_window_tab_actions_dispatch.rs` (issue #370) to
+    /// pin down that the chords the child-window handler now dispatches
+    /// (cmd+1, cmd+2, cmd+Right, cmd+Left) actually resolve to their
+    /// expected Action variants.
+    #[doc(hidden)]
+    pub fn __test_keymap_lookup(&self, keys: &str) -> Option<Action> {
+        self.keymap.lookup(keys).cloned()
     }
 
     /// Test-only: read the window the command palette is currently
