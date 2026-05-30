@@ -68,6 +68,7 @@ See **`docs/ARCHITECTURE.md`** for the full dep graph.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+bash scripts/check-no-raw-process-exit.sh                      # exit logging gate (no raw process::exit in shipped code)
 bash scripts/check-deny.sh                                     # supply-chain gate (advisories + licenses + bans + sources)
 cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
 cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK

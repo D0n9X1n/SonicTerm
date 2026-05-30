@@ -65,9 +65,9 @@ pub struct LoggingGuard {
 /// shipped build doesn't accumulate steady-state INFO chatter into the
 /// rolling file (was INFO pre-v0.8.1; bumped to WARN as part of the
 /// release-blocker triage that brought RSS regression back under
-/// control).
-pub const DEFAULT_FILTER: &str =
-    "sonic=warn,sonic_vt=warn,sonic_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
+/// control). The `sonic_exit` target is kept explicitly WARN-on so exit
+/// markers survive the default filter.
+pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonic=warn,sonic_vt=warn,sonic_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).

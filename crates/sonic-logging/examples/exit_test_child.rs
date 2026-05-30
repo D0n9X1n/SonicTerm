@@ -1,8 +1,8 @@
 //! Child binary used by `tests/exit_trace.rs` to exercise every exit
 //! path under a real process. Dispatched on the `SONIC_EXIT_TEST_MODE`
 //! env var. Log + crash directories are taken from
-//! `SONIC_EXIT_TEST_LOG_DIR` so each test run uses a fresh tempdir
-//! and asserts on its contents without racing the user's real logs.
+//! `SONIC_LOG_DIR` so each test run uses a fresh tempdir and asserts
+//! on its contents without racing the user's real logs.
 
 use std::path::PathBuf;
 
@@ -10,15 +10,11 @@ fn main() {
     let mode = std::env::var("SONIC_EXIT_TEST_MODE").unwrap_or_else(|_| "clean".to_string());
     let log_dir = PathBuf::from(std::env::var("SONIC_LOG_DIR").expect("SONIC_LOG_DIR env not set"));
     std::fs::create_dir_all(&log_dir).expect("mkdir log_dir");
-    // Make sure INFO-level exit markers from sonic_logging make it
-    // into the file even though the shipped DEFAULT_FILTER caps at
-    // WARN. Tests assert on these markers.
-    if std::env::var_os("RUST_LOG").is_none() {
-        std::env::set_var("RUST_LOG", "info,sonic_logging=info");
-    }
-
     sonic_logging::install_panic_hook(log_dir.clone());
-    let cfg = sonic_logging::LoggingConfig::default();
+    let cfg = sonic_logging::LoggingConfig {
+        level: std::env::var("SONIC_EXIT_TEST_FILTER").ok(),
+        ..Default::default()
+    };
     let _g = sonic_logging::init(&cfg).expect("init log");
     let _exit_guard = sonic_logging::install_exit_logging(&log_dir);
 
@@ -51,6 +47,10 @@ fn main() {
         }
         "clean" => {
             tracing::info!("clean child: returning normally");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        "target_filter_clean" => {
+            tracing::info!(target: "sonic_exit", "filtered clean child: returning normally");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         other => {

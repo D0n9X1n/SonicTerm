@@ -38,12 +38,17 @@ fn child_binary() -> PathBuf {
 }
 
 fn run_child(mode: &str, log_dir: &Path) -> std::process::Output {
+    run_child_with_env(mode, log_dir, &[])
+}
+
+fn run_child_with_env(mode: &str, log_dir: &Path, env: &[(&str, &str)]) -> std::process::Output {
     let bin = child_binary();
-    Command::new(bin)
-        .env("SONIC_EXIT_TEST_MODE", mode)
-        .env("SONIC_LOG_DIR", log_dir)
-        .output()
-        .expect("spawn child")
+    let mut cmd = Command::new(bin);
+    cmd.env("SONIC_EXIT_TEST_MODE", mode).env("SONIC_LOG_DIR", log_dir).env_remove("RUST_LOG");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("spawn child")
 }
 
 fn read_all_logs(dir: &Path) -> String {
@@ -88,6 +93,44 @@ fn clean_main_return_logs_marker() {
     assert!(
         logs.contains("sonic exiting: clean main return"),
         "expected clean-exit marker, got:\n{logs}"
+    );
+}
+
+#[test]
+fn clean_main_return_logs_marker_under_default_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_child("clean", tmp.path());
+    assert!(out.status.success(), "child should exit 0, got {:?}", out.status);
+    wait_for(Duration::from_secs(2), || {
+        read_all_logs(tmp.path()).contains("sonic exiting: clean main return")
+    });
+    let logs = read_all_logs(tmp.path());
+    assert!(
+        logs.contains("sonic exiting: clean main return"),
+        "expected default-filter clean-exit marker, got:\n{logs}"
+    );
+}
+
+#[test]
+fn clean_main_return_survives_strict_sonic_exit_target_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_child_with_env(
+        "target_filter_clean",
+        tmp.path(),
+        &[("SONIC_EXIT_TEST_FILTER", "sonic_exit=warn")],
+    );
+    assert!(out.status.success(), "child should exit 0, got {:?}", out.status);
+    wait_for(Duration::from_secs(2), || {
+        read_all_logs(tmp.path()).contains("sonic exiting: clean main return")
+    });
+    let logs = read_all_logs(tmp.path());
+    assert!(
+        logs.contains("sonic exiting: clean main return"),
+        "expected clean-exit marker to survive sonic_exit=warn filter, got:\n{logs}"
+    );
+    assert!(
+        !logs.contains("filtered clean child: returning normally"),
+        "sonic_exit INFO control line should be filtered while WARN exit marker survives:\n{logs}"
     );
 }
 

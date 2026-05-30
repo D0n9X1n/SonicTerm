@@ -66,11 +66,15 @@ pub fn record_exit_reason(r: ExitReason) {
 }
 
 /// Record that the winit event loop is exiting. Wraps [`record_exit_reason`]
-/// with an info-level log line so the file shows the reason even if the
-/// drop guard never runs (e.g., the user kills the process during shutdown).
+/// with a warning-level `sonic_exit` log line so the file shows the reason even
+/// if the drop guard never runs (e.g., the user kills the process during
+/// shutdown) under the shipped default filter.
 pub fn record_loop_exiting() {
     record_exit_reason(ExitReason::LoopExiting);
-    tracing::info!("sonic exiting: winit LoopExiting (Cmd+Q / WM_CLOSE / last window)");
+    tracing::warn!(
+        target: "sonic_exit",
+        "sonic exiting: winit LoopExiting (Cmd+Q / WM_CLOSE / last window)"
+    );
 }
 
 /// Drop guard returned by [`install_exit_logging`]. On drop, logs the
@@ -82,13 +86,13 @@ impl Drop for ExitGuard {
     fn drop(&mut self) {
         match REASON.load(Ordering::SeqCst) {
             x if x == ExitReason::Clean as u8 => {
-                tracing::info!("sonic exiting: clean main return");
+                tracing::warn!(target: "sonic_exit", "sonic exiting: clean main return");
             }
             x if x == ExitReason::LoopExiting as u8 => {
-                tracing::info!("sonic exiting: clean after LoopExiting");
+                tracing::warn!(target: "sonic_exit", "sonic exiting: clean after LoopExiting");
             }
             x if x == ExitReason::ExplicitExit as u8 => {
-                tracing::info!("sonic exiting: via exit_with()");
+                tracing::warn!(target: "sonic_exit", "sonic exiting: via exit_with()");
             }
             x if x == ExitReason::Panic as u8 => {
                 tracing::error!("sonic exiting: after panic");
@@ -234,7 +238,12 @@ extern "C" fn handle_signal(
 /// exits go through this helper.
 pub fn exit_with(code: i32, reason: &str) -> ! {
     record_exit_reason(ExitReason::ExplicitExit);
-    tracing::info!(code, reason, "sonic exiting: explicit process::exit");
+    tracing::warn!(
+        target: "sonic_exit",
+        code,
+        reason,
+        "sonic exiting: explicit process::exit"
+    );
     std::process::exit(code);
 }
 
