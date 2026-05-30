@@ -227,6 +227,12 @@ struct Performer {
     /// one — modern zsh/bash/fish ship with cwd-reporting prompts.
     cwd: Option<String>,
     reply_tx: Option<Sender<Vec<u8>>>,
+    /// DECSTBM scrolling region top margin (visible-row, 0-based,
+    /// inclusive). `None` means "no region set — full screen".
+    scroll_top: Option<u16>,
+    /// DECSTBM scrolling region bottom margin (visible-row, 0-based,
+    /// inclusive).
+    scroll_bottom: Option<u16>,
     /// Tracks whether the underlying vte state machine is in the Ground
     /// state (no escape sequence currently being consumed). Maintained
     /// externally: set to `true` after every dispatch callback fires
@@ -256,8 +262,21 @@ impl Performer {
             title: None,
             cwd: None,
             reply_tx,
+            scroll_top: None,
+            scroll_bottom: None,
             ground: true,
         }
+    }
+
+    /// Resolve the active scroll region, defaulting to the full
+    /// visible grid when DECSTBM has not been set. Used by every
+    /// scroll-emitting opcode (CSI S, CSI T, IND-at-bottom-margin,
+    /// RI-at-top-margin).
+    fn effective_scroll_region(&self) -> (u16, u16) {
+        let rows = self.grid.rows;
+        let top = self.scroll_top.unwrap_or(0);
+        let bot = self.scroll_bottom.unwrap_or(rows.saturating_sub(1));
+        (top, bot)
     }
 
     fn reply(&self, bytes: &[u8]) {
@@ -420,7 +439,20 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A..=0x0C => self.grid.linefeed(),
+            0x0A..=0x0C => {
+                // LF/VT/FF — like IND, must scroll the active region
+                // (not the whole grid) when at the bottom margin so
+                // DECSTBM works for shells/apps that use LF rather
+                // than IND. #348.
+                let (top, bot) = self.effective_scroll_region();
+                if self.grid.cursor.row == bot
+                    && (self.scroll_top.is_some() || self.scroll_bottom.is_some())
+                {
+                    self.grid.scroll_region_up(top, bot, 1);
+                } else {
+                    self.grid.linefeed();
+                }
+            }
             0x0D => self.grid.carriage_return(),
             _ => {}
         }
@@ -526,6 +558,40 @@ impl Perform for Performer {
                     self.reply(b"\x1b[?62;c");
                 }
             }
+            'S' => {
+                // CSI Ps S — Scroll Up (SU). Scrolls the active region
+                // up by `n` lines, fills bottom with blanks. Dest rows
+                // are marked dirty by the grid, which is the fix for
+                // #348 (stale LineQuadCache entries after region scroll).
+                let n = p0().max(1);
+                let (top, bot) = self.effective_scroll_region();
+                self.grid.scroll_region_up(top, bot, n);
+            }
+            'T' => {
+                // CSI Ps T — Scroll Down (SD).
+                let n = p0().max(1);
+                let (top, bot) = self.effective_scroll_region();
+                self.grid.scroll_region_down(top, bot, n);
+            }
+            'r' => {
+                // CSI Ps ; Ps r — DECSTBM Set Top and Bottom Margins.
+                // Both omitted / 0 / out-of-range -> reset to full
+                // screen. Cursor moves to home as per spec.
+                let rows = self.grid.rows;
+                let top_p = p0();
+                let bot_p = p1();
+                let new_top = if top_p == 0 { 0 } else { top_p.saturating_sub(1) };
+                let new_bot =
+                    if bot_p == 0 { rows.saturating_sub(1) } else { bot_p.saturating_sub(1) };
+                if new_top < new_bot && new_bot < rows {
+                    self.scroll_top = Some(new_top);
+                    self.scroll_bottom = Some(new_bot);
+                } else {
+                    self.scroll_top = None;
+                    self.scroll_bottom = None;
+                }
+                self.grid.goto(0, 0);
+            }
             _ => {}
         }
     }
@@ -626,7 +692,46 @@ impl Perform for Performer {
     fn unhook(&mut self) {
         self.ground = false;
     }
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.ground = false;
+        match byte {
+            b'D' => {
+                // IND — Index. Move cursor down one line; if at the
+                // bottom margin of the scroll region, scroll the
+                // region up. Must respect DECSTBM (#348).
+                let (top, bot) = self.effective_scroll_region();
+                if self.grid.cursor.row == bot {
+                    self.grid.scroll_region_up(top, bot, 1);
+                } else {
+                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
+                    let col = self.grid.cursor.col;
+                    self.grid.goto(new_row, col);
+                }
+            }
+            b'M' => {
+                // RI — Reverse Index. Move cursor up; if at top
+                // margin, scroll the region down.
+                let (top, bot) = self.effective_scroll_region();
+                if self.grid.cursor.row == top {
+                    self.grid.scroll_region_down(top, bot, 1);
+                } else {
+                    let new_row = self.grid.cursor.row.saturating_sub(1);
+                    let col = self.grid.cursor.col;
+                    self.grid.goto(new_row, col);
+                }
+            }
+            b'E' => {
+                // NEL — Next Line. Like IND, but also moves cursor to col 0.
+                let (top, bot) = self.effective_scroll_region();
+                if self.grid.cursor.row == bot {
+                    self.grid.scroll_region_up(top, bot, 1);
+                    self.grid.goto(self.grid.cursor.row, 0);
+                } else {
+                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
+                    self.grid.goto(new_row, 0);
+                }
+            }
+            _ => {}
+        }
     }
 }
