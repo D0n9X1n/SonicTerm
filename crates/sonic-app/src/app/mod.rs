@@ -150,7 +150,13 @@ pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
     pub window: Arc<Window>,
-    pub renderer: GpuRenderer,
+    /// Per-window wgpu renderer. `None` for the Phase B2 PR-A "shadow"
+    /// entry that mirrors the legacy `App.renderer` field — that field
+    /// still owns the actual GpuRenderer; PR-B will move ownership in
+    /// here. For all torn-out child windows this is `Some(_)`. Read
+    /// through [`Self::renderer`] / [`Self::renderer_mut`] which unwrap
+    /// (they always succeed for child windows).
+    pub renderer: Option<GpuRenderer>,
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
     pub panes: HashMap<u64, PaneState>,
@@ -170,9 +176,183 @@ pub struct WindowState {
     /// Pending cross-window drop target chosen during a drag in the
     /// child's bar; consumed on mouse-up.
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    /// Per-window HiDPI scale factor (PR #244 lesson — cursor routing
+    /// MUST use the *window's own* scale, not a global). Promoted onto
+    /// `WindowState` by Phase B2 PR-A; the legacy `App.scale_factor`
+    /// stays in lock-step until PR-B substitutes readers.
+    pub scale_factor: f64,
+    /// Per-window IME composition state. Phase B2 PR-A — promoted from
+    /// `App.ime` (main-only) so torn-out windows can compose CJK input
+    /// independently. The legacy `App.ime` continues to exist and is
+    /// kept in sync on the main window until PR-B.
+    pub ime: ImeState,
+    /// Per-window hovered URL (Cmd-held underline + pointer cursor).
+    /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
+    /// stays in lock-step on the main window until PR-B.
+    pub hovered_url: Option<hovered_url::HoveredUrl>,
+}
+
+impl WindowState {
+    /// Borrow the renderer. Panics on the PR-A shadow main entry where
+    /// it's `None`; every child window construction site initializes it
+    /// to `Some(_)` so this is always safe at child-window call sites.
+    /// During PR-B the field becomes non-optional again once the main
+    /// renderer moves out of `App`.
+    #[inline]
+    #[track_caller]
+    pub fn renderer(&self) -> &GpuRenderer {
+        self.renderer
+            .as_ref()
+            .expect("WindowState::renderer() called on shadow main entry (PR-A); readers must keep using App.renderer until PR-B")
+    }
+
+    /// Mutable counterpart of [`Self::renderer`]. Same panic semantics.
+    #[inline]
+    #[track_caller]
+    pub fn renderer_mut(&mut self) -> &mut GpuRenderer {
+        self.renderer
+            .as_mut()
+            .expect("WindowState::renderer_mut() called on shadow main entry (PR-A); readers must keep using App.renderer until PR-B")
+    }
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
+/// the legacy `App.*` main-window fields into the shadow `WindowState`
+/// entry. Built by [`App::shadow_main_snapshot`] for the legacy side
+/// and by [`shadow_main_snapshot_from`] for the shadow side; equality
+/// of the two snapshots is the invariant the test pins.
+///
+/// Heavy fields (`renderer`, `tabs`, `tab_states`, `panes`) are NOT
+/// part of this snapshot — they move from `App` into the shadow in
+/// PR-B; the shadow holds `None` / empty placeholders for them until
+/// then. The snapshot deliberately excludes `cursor_visible` because
+/// it's an `Arc<AtomicBool>` shared by pointer (see the dedicated
+/// `Arc::ptr_eq` check on [`App::__test_shadow_main_in_sync`]).
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ShadowMainSnapshot {
+    pub cursor_pos: (f64, f64),
+    pub mouse_down: bool,
+    pub selection: Option<Selection>,
+    pub copy_mode: Option<CopyModeState>,
+    pub modifiers: ModifiersState,
+    pub last_render: Instant,
+    pub pressed_tab: Option<usize>,
+    pub drag_session: Option<crate::tab_drag::DragSession>,
+    pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    pub scale_factor: f64,
+    /// Compared via `Debug`-string equality (the IME state machine
+    /// does not implement `PartialEq` upstream).
+    pub ime: ImeState,
+    pub hovered_url: Option<hovered_url::HoveredUrl>,
+}
+
+impl PartialEq for ShadowMainSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.cursor_pos == other.cursor_pos
+            && self.mouse_down == other.mouse_down
+            && self.selection == other.selection
+            && self.copy_mode == other.copy_mode
+            && self.modifiers == other.modifiers
+            && self.last_render == other.last_render
+            && self.pressed_tab == other.pressed_tab
+            && format!("{:?}", self.drag_session) == format!("{:?}", other.drag_session)
+            && format!("{:?}", self.drag_target) == format!("{:?}", other.drag_target)
+            && self.scale_factor == other.scale_factor
+            && format!("{:?}", self.ime) == format!("{:?}", other.ime)
+            && self.hovered_url == other.hovered_url
+    }
+}
+
+/// Build a [`ShadowMainSnapshot`] from a shadow `WindowState` entry.
+#[doc(hidden)]
+pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
+    ShadowMainSnapshot {
+        cursor_pos: ws.cursor_pos,
+        mouse_down: ws.mouse_down,
+        selection: ws.selection,
+        copy_mode: ws.copy_mode.clone(),
+        modifiers: ws.modifiers,
+        last_render: ws.last_render,
+        pressed_tab: ws.pressed_tab,
+        drag_session: ws.drag_session,
+        drag_target: ws.drag_target,
+        scale_factor: ws.scale_factor,
+        ime: ws.ime.clone(),
+        hovered_url: ws.hovered_url.clone(),
+    }
+}
+
+/// Apply a snapshot to the shadow `WindowState` entry — the pure half
+/// of [`App::sync_shadow_main`]. Exposed for the invariant test so it
+/// can drive sync without constructing a real winit window (`cargo
+/// test` can't on headless macOS — same as
+/// `tests/clear_shape_cache_event.rs`).
+#[doc(hidden)]
+pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot) {
+    ws.cursor_pos = snap.cursor_pos;
+    ws.mouse_down = snap.mouse_down;
+    ws.selection = snap.selection;
+    ws.copy_mode = snap.copy_mode;
+    ws.modifiers = snap.modifiers;
+    ws.last_render = snap.last_render;
+    ws.pressed_tab = snap.pressed_tab;
+    ws.drag_session = snap.drag_session;
+    ws.drag_target = snap.drag_target;
+    ws.scale_factor = snap.scale_factor;
+    ws.ime = snap.ime;
+    ws.hovered_url = snap.hovered_url;
+}
+
+/// Phase B2 PR-A — pure helper that copies the cheap scalar fields
+/// from the legacy `App.*` snapshot into the shadow main `WindowState`
+/// entry. Factored out of [`App::sync_shadow_main`] so the invariant
+/// test can drive it on a synthetic `WindowState` without needing a
+/// real winit window.
+///
+/// Heavy fields (`renderer`, `tabs`, `tab_states`, `panes`, `window`,
+/// `role`) are NOT touched: ownership of those moves wholesale from
+/// `App` into the shadow during PR-B; until then the shadow holds
+/// `None` / empty placeholders for them and the test does not compare.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn apply_shadow_main_sync(
+    ws: &mut WindowState,
+    cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    cursor_pos: (f64, f64),
+    mouse_down: bool,
+    selection: Option<Selection>,
+    copy_mode: Option<CopyModeState>,
+    modifiers: ModifiersState,
+    last_render: Instant,
+    pressed_tab: Option<usize>,
+    drag_session: Option<crate::tab_drag::DragSession>,
+    drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    scale_factor: f64,
+    ime: ImeState,
+    hovered_url: Option<hovered_url::HoveredUrl>,
+) {
+    ws.cursor_visible = cursor_visible;
+    apply_shadow_main_snapshot(
+        ws,
+        ShadowMainSnapshot {
+            cursor_pos,
+            mouse_down,
+            selection,
+            copy_mode,
+            modifiers,
+            last_render,
+            pressed_tab,
+            drag_session,
+            drag_target,
+            scale_factor,
+            ime,
+            hovered_url,
+        },
+    );
+}
 
 /// Epic #289 Phase A — classification of which terminal window currently
 /// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
@@ -821,6 +1001,12 @@ pub struct App {
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
     pub(super) windows: HashMap<WindowId, WindowState>,
+    /// Phase B2 PR-A: id of the main window. Set in `do_resumed` once
+    /// the main `Window` is created and `WindowState` shadow entry is
+    /// inserted into [`Self::windows`]. Readers MUST still use the
+    /// legacy `App.window`/`renderer`/`tabs`/... fields — PR-B will
+    /// switch them to read off `self.windows[main_window_id]`.
+    pub(super) main_window_id: Option<WindowId>,
     /// Most-recently-focused window's id. `None` means the main window
     /// is focused (or no window has been focused yet). Set/cleared in
     /// the `WindowEvent::Focused` handler on both the main and child
@@ -1023,7 +1209,7 @@ impl App {
     pub(crate) fn compute_pane_rects_for(child: &WindowState) -> Vec<(u64, sonic_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
-        let r = &child.renderer;
+        let r = child.renderer.as_ref().unwrap();
         let (w, h) = r.logical_size();
         let top = r.top_inset();
         let pl = r.padding_left();
@@ -1090,6 +1276,7 @@ impl App {
             drag_session: None,
             os_drag_handoff_started: false,
             windows: HashMap::new(),
+            main_window_id: None,
             focused_child: None,
             frontmost_window: None,
             drag_target: None,
@@ -1447,7 +1634,9 @@ impl App {
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
         let main_alive = !self.main_hidden && !self.tabs.is_empty();
-        !main_alive && self.windows.is_empty()
+        // Phase B2 PR-A: subtract the shadow main entry so
+        // "no torn-out children" still tips this to true.
+        !main_alive && self.child_window_count() == 0
     }
 
     /// Test-only: pure policy fn mirroring `should_exit` so integration
@@ -1484,7 +1673,7 @@ impl App {
         if !self.tabs.is_empty() {
             return;
         }
-        if self.windows.is_empty() {
+        if self.child_window_count() == 0 {
             if Self::should_exit_on_last_window_close(&self.config) {
                 self.pending_exit = true;
             } else {
@@ -1651,6 +1840,91 @@ impl App {
     ///
     /// Pure read; no mutation, no logging. The keymap_dispatch arms call
     /// this first, then route to the matching mutator + redraw target.
+    /// Phase B2 PR-A — borrow the main window's [`WindowState`] shadow
+    /// entry from `self.windows`, keyed by [`Self::main_window_id`].
+    /// Returns `None` before `do_resumed` has run (no main window yet)
+    /// OR if the shadow entry is missing for any reason. PR-B will
+    /// migrate readers (`self.tabs`, `self.renderer`, …) to go through
+    /// this helper.
+    #[doc(hidden)]
+    pub fn main(&self) -> Option<&WindowState> {
+        let id = self.main_window_id?;
+        self.windows.get(&id)
+    }
+
+    /// Mutable counterpart of [`Self::main`].
+    #[doc(hidden)]
+    pub fn main_mut(&mut self) -> Option<&mut WindowState> {
+        let id = self.main_window_id?;
+        self.windows.get_mut(&id)
+    }
+
+    /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
+    /// window is OS-frontmost. Falls back to the main window when no
+    /// frontmost has been recorded yet (matches the safe default in
+    /// [`Self::frontmost_kind`]).
+    #[doc(hidden)]
+    pub fn frontmost(&self) -> Option<&WindowState> {
+        let id = self.frontmost_window.or(self.main_window_id)?;
+        self.windows.get(&id)
+    }
+
+    /// Mutable counterpart of [`Self::frontmost`].
+    #[doc(hidden)]
+    pub fn frontmost_mut(&mut self) -> Option<&mut WindowState> {
+        let id = self.frontmost_window.or(self.main_window_id)?;
+        self.windows.get_mut(&id)
+    }
+
+    /// Phase B2 PR-A — copy every cheaply-cloneable scalar from the
+    /// legacy `App` main-window fields into the shadow `WindowState`
+    /// entry in [`Self::windows`]. Called at the end of every event
+    /// tick (window event, user event, redraw) so the shadow stays
+    /// indistinguishable from the legacy authoritative copy. PR-B will
+    /// invert this — readers move to the shadow, the legacy fields go
+    /// away, and this helper is deleted.
+    ///
+    /// Fields NOT mirrored in PR-A (move in PR-B): `renderer` (owns a
+    /// GpuRenderer, can't be cloned), `tabs` / `tab_states` / `panes`
+    /// (own PtyHandle / Parser; ownership moves wholesale in PR-B).
+    /// The shadow keeps `renderer: None` and empty collections until
+    /// then; the invariant test does NOT compare those fields.
+    #[doc(hidden)]
+    pub fn sync_shadow_main(&mut self) {
+        let Some(id) = self.main_window_id else { return };
+        let cursor_visible = self.cursor_visible.clone();
+        let cursor_pos = self.cursor_pos;
+        let mouse_down = self.mouse_down;
+        let selection = self.selection;
+        let copy_mode = self.copy_mode.clone();
+        let modifiers = self.modifiers;
+        let last_render = self.last_render;
+        let pressed_tab = self.pressed_tab;
+        let drag_session = self.drag_session;
+        let drag_target = self.drag_target;
+        let scale_factor = self.scale_factor;
+        let ime = self.ime.clone();
+        let hovered_url = self.hovered_url.clone();
+        if let Some(ws) = self.windows.get_mut(&id) {
+            apply_shadow_main_sync(
+                ws,
+                cursor_visible,
+                cursor_pos,
+                mouse_down,
+                selection,
+                copy_mode,
+                modifiers,
+                last_render,
+                pressed_tab,
+                drag_session,
+                drag_target,
+                scale_factor,
+                ime,
+                hovered_url,
+            );
+        }
+    }
+
     #[doc(hidden)]
     pub fn frontmost_kind(&self) -> FrontmostKind {
         let Some(id) = self.frontmost_window else { return FrontmostKind::None };
@@ -1796,9 +2070,14 @@ impl App {
     /// `new_window_*` regression tests to assert that a real drain
     /// would change the windows-map cardinality (the post-drain
     /// state itself requires an `ActiveEventLoop`).
+    ///
+    /// Phase B2 PR-A: the shadow main entry inserted by
+    /// [`Self::do_resumed`] is excluded so existing call sites that
+    /// expected this to be "number of torn-out child terminal windows"
+    /// keep their pre-PR-A semantics.
     #[doc(hidden)]
     pub fn __test_windows_len(&self) -> usize {
-        self.windows.len()
+        self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
     /// Test-only: install a synthetic `drag_target` so the
@@ -1826,7 +2105,20 @@ impl App {
 
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
-        self.windows.len()
+        self.windows.len().saturating_sub(self.shadow_main_count())
+    }
+
+    /// Phase B2 PR-A — `1` if the shadow main entry is present in
+    /// [`Self::windows`], else `0`. Used by every "count torn-out
+    /// child windows" path that pre-existed PR-A so they keep the
+    /// same number.
+    #[inline]
+    #[doc(hidden)]
+    pub fn shadow_main_count(&self) -> usize {
+        match self.main_window_id {
+            Some(id) if self.windows.contains_key(&id) => 1,
+            _ => 0,
+        }
     }
 
     /// Epic #289 Phase B — number of windows in the unified
@@ -1834,18 +2126,73 @@ impl App {
     /// Used by the regression suite to pin the rename + role tagging.
     #[doc(hidden)]
     pub fn unified_window_count(&self) -> usize {
-        self.windows.len()
+        self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
     /// Epic #289 Phase B — count entries in [`Self::windows`] whose
     /// role matches the argument. Today every entry is `Terminal`;
     #[doc(hidden)]
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
-        self.windows.values().filter(|w| w.role == role).count()
+        self.windows
+            .iter()
+            .filter(|(id, w)| w.role == role && Some(**id) != self.main_window_id)
+            .count()
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY
     /// attached (just a Parser owning a fresh Grid). Lets integration
+    /// Read-back of [`Self::main_window_id`] for tests.
+    #[doc(hidden)]
+    pub fn __test_main_window_id(&self) -> Option<WindowId> {
+        self.main_window_id
+    }
+
+    /// Phase B2 PR-A — snapshot of the cheap scalar fields the shadow
+    /// `WindowState` must mirror. Built from the legacy `App.*` main
+    /// fields; the shadow side is built via
+    /// [`shadow_main_snapshot_from`]. Equality of the two is the
+    /// invariant the test pins.
+    #[doc(hidden)]
+    pub fn shadow_main_snapshot(&self) -> ShadowMainSnapshot {
+        ShadowMainSnapshot {
+            cursor_pos: self.cursor_pos,
+            mouse_down: self.mouse_down,
+            selection: self.selection,
+            copy_mode: self.copy_mode.clone(),
+            modifiers: self.modifiers,
+            last_render: self.last_render,
+            pressed_tab: self.pressed_tab,
+            drag_session: self.drag_session,
+            drag_target: self.drag_target,
+            scale_factor: self.scale_factor,
+            ime: self.ime.clone(),
+            hovered_url: self.hovered_url.clone(),
+        }
+    }
+
+    /// Phase B2 PR-A invariant probe: returns `true` iff every
+    /// cheaply-mirrored field on the shadow `windows[main]` entry equals
+    /// the legacy `App.*` field. Heavy fields (`renderer`, `tabs`,
+    /// `tab_states`, `panes`) are intentionally NOT compared — they
+    /// move from `App` into the shadow in PR-B; until then the shadow
+    /// holds `None` / empty placeholders.
+    #[doc(hidden)]
+    pub fn __test_shadow_main_in_sync(&self) -> bool {
+        let Some(id) = self.main_window_id else { return false };
+        let Some(ws) = self.windows.get(&id) else { return false };
+        ws.role == WindowRole::Terminal
+            && Arc::ptr_eq(&ws.cursor_visible, &self.cursor_visible)
+            && ws.cursor_pos == self.cursor_pos
+            && ws.mouse_down == self.mouse_down
+            && ws.selection == self.selection
+            && ws.copy_mode == self.copy_mode
+            && ws.modifiers == self.modifiers
+            && ws.last_render == self.last_render
+            && ws.pressed_tab == self.pressed_tab
+            && ws.scale_factor == self.scale_factor
+            && ws.hovered_url == self.hovered_url
+    }
+
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
@@ -2039,10 +2386,10 @@ impl App {
         let layout = TabBarLayout::compute_with_height(
             &child.tabs,
             logical_w,
-            child.renderer.tab_bar_logical_height(),
+            child.renderer.as_ref().unwrap().tab_bar_logical_height(),
         )
-        .with_top_offset(child.renderer.tab_bar_y_offset())
-        .with_visible(child.renderer.tab_bar_visible());
+        .with_top_offset(child.renderer.as_ref().unwrap().tab_bar_y_offset())
+        .with_visible(child.renderer.as_ref().unwrap().tab_bar_visible());
         let snap =
             os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);
         self.publish_os_drag_bar_snapshot(snap);
@@ -2300,6 +2647,10 @@ impl App {
         let app_had = self.drag_session.take().is_some();
         let mut win_had = false;
         for ws in self.windows.values_mut() {
+            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            if ws.renderer.is_none() {
+                continue;
+            }
             if ws.drag_session.take().is_some() {
                 win_had = true;
             }
@@ -2446,21 +2797,26 @@ pub enum TransferError {
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.do_resumed(el);
+        self.sync_shadow_main();
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         self.do_user_event(el, event);
+        self.sync_shadow_main();
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
         self.do_window_event(el, win_id, event);
+        self.sync_shadow_main();
     }
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
         self.do_new_events(_el, cause);
+        self.sync_shadow_main();
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.do_about_to_wait(el);
+        self.sync_shadow_main();
     }
 }

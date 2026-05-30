@@ -57,7 +57,11 @@ impl App {
         self.poll_config_reload();
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
-        if self.windows.contains_key(&win_id) {
+        // Phase B2 PR-A: the main window also lives in `self.windows`
+        // now (shadow entry, `Some(main_window_id)`), but its events
+        // must continue to flow through the legacy `App.*` paths
+        // below until PR-B swaps readers. Skip the shadow id explicitly.
+        if self.windows.contains_key(&win_id) && Some(win_id) != self.main_window_id {
             self.handle_child_window_event(el, win_id, event);
             return;
         }
@@ -67,7 +71,7 @@ impl App {
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
                 // running. Only exit when nothing else is alive.
-                if self.windows.is_empty() {
+                if self.child_window_count() == 0 {
                     if Self::should_exit_on_last_window_close(&self.config) {
                         el.exit();
                     } else {
@@ -627,7 +631,7 @@ impl App {
                             None => unreachable!("tab_action.is_some() checked above"),
                         }
                         if self.tabs.is_empty() {
-                            if self.windows.is_empty() {
+                            if self.child_window_count() == 0 {
                                 if Self::should_exit_on_last_window_close(&self.config) {
                                     el.exit();
                                 } else {

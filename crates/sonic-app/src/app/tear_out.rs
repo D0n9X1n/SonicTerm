@@ -4,6 +4,7 @@
 
 #![allow(unused_imports)]
 
+use sonic_ui::ime::ImeState;
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
@@ -167,7 +168,7 @@ impl App {
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
             window: window.clone(),
-            renderer,
+            renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
                 tree: state.tree,
@@ -186,6 +187,9 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
@@ -219,7 +223,7 @@ impl App {
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
         if self.tabs.is_empty() {
-            if !self.windows.is_empty() {
+            if self.child_window_count() > 0 {
                 self.hide_main_window();
             }
             return;
@@ -263,14 +267,15 @@ impl App {
                 continue;
             }
             let geom = window_geom(&c.window);
-            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
+            let bar_width = c.renderer.as_ref().unwrap().width() as f32
+                / c.renderer.as_ref().unwrap().scale_factor();
             let layout = TabBarLayout::compute_with_height(
                 &c.tabs,
                 bar_width,
-                c.renderer.tab_bar_logical_height(),
+                c.renderer.as_ref().unwrap().tab_bar_logical_height(),
             )
-            .with_top_offset(c.renderer.tab_bar_y_offset())
-            .with_visible(c.renderer.tab_bar_visible());
+            .with_top_offset(c.renderer.as_ref().unwrap().tab_bar_y_offset())
+            .with_visible(c.renderer.as_ref().unwrap().tab_bar_visible());
             candidates.push((*id, geom, layout));
         }
         crate::tab_drag::find_drop_target(global, candidates)
@@ -285,14 +290,15 @@ impl App {
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
         let candidates = self.windows.iter().map(|(id, c)| {
             let geom = window_geom(&c.window);
-            let bar_width = c.renderer.width() as f32 / c.renderer.scale_factor();
+            let bar_width = c.renderer.as_ref().unwrap().width() as f32
+                / c.renderer.as_ref().unwrap().scale_factor();
             let layout = TabBarLayout::compute_with_height(
                 &c.tabs,
                 bar_width,
-                c.renderer.tab_bar_logical_height(),
+                c.renderer.as_ref().unwrap().tab_bar_logical_height(),
             )
-            .with_top_offset(c.renderer.tab_bar_y_offset())
-            .with_visible(c.renderer.tab_bar_visible());
+            .with_top_offset(c.renderer.as_ref().unwrap().tab_bar_y_offset())
+            .with_visible(c.renderer.as_ref().unwrap().tab_bar_visible());
             (*id, geom, layout)
         });
         crate::tab_drag::find_drop_target(global, candidates)
@@ -508,7 +514,7 @@ impl App {
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
             window: window.clone(),
-            renderer,
+            renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
                 tree: state.tree,
@@ -527,6 +533,9 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
