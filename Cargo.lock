@@ -4567,6 +4567,7 @@ dependencies = [
  "serde_json",
  "sonic-core",
  "sonic-gpu",
+ "sonic-logging",
  "sonic-render-model",
  "sonic-shared",
  "sonic-text",
@@ -4660,6 +4661,7 @@ version = "0.3.0"
 dependencies = [
  "chrono",
  "filetime",
+ "libc",
  "parking_lot",
  "serde",
  "tempfile",

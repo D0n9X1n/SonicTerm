@@ -38,6 +38,10 @@ jobs:
       - name: fmt check
         run: cargo fmt --all -- --check
 
+      - name: no raw process exits
+        shell: bash
+        run: bash scripts/check-no-raw-process-exit.sh
+
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

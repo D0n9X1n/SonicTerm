@@ -16,6 +16,7 @@ ssh = ["sonic-core/ssh", "sonic-shared/ssh"]
 
 [dependencies]
 sonic-core.workspace = true
+sonic-logging.workspace = true
 sonic-text.workspace = true
 sonic-gpu.workspace = true
 sonic-ui.workspace = true

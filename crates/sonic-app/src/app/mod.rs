@@ -2463,4 +2463,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.do_about_to_wait(el);
     }
+
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        // Forward to sonic-logging so every Cmd+Q / WM_CLOSE /
+        // last-window exit lands in sonic.log. See
+        // `crates/sonic-logging/src/exit_trace.rs`.
+        sonic_logging::record_loop_exiting();
+    }
 }

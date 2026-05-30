@@ -1,0 +1,21 @@
+# Allowlist for `scripts/check-no-raw-process-exit.sh`.
+#
+# Each non-comment, non-blank line is a path prefix (matched against
+# `crates/...`). Files matching ANY prefix are permitted to call
+# `std::process::exit` directly.
+#
+# Rule of thumb: examples, benchmarks, and test-only binaries are
+# fine. Anything that ships in the user binary MUST go through
+# `sonic_logging::exit_with(code, reason)` so the exit reason lands
+# in sonic.log.
+
+# Demo / E2E binaries — not shipped in the user-facing app.
+crates/sonic-core/examples/
+crates/sonic-shared/examples/
+
+# Test-fixture child binary that intentionally exercises the raw
+# process::exit path to assert the documented bypass behaviour.
+crates/sonic-logging/examples/exit_test_child.rs
+
+# Integration tests (the grep gate is about shipped code only).
+crates/sonic-logging/tests/

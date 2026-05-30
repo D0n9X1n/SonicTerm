@@ -126,3 +126,50 @@ Please attach:
   freed.
 - Manual nuke: `rm -rf ~/Library/Logs/Sonic/*` (or the platform
   equivalent) — Sonic recreates the directory on next launch.
+
+## Exit and crash coverage
+
+Every process-termination path leaves a marker in `sonic.log`, and
+every crash also writes a file under `crashes/`. The matrix:
+
+| Path                               | Caught? | Marker in sonic.log                                          | Crash file? |
+|------------------------------------|---------|--------------------------------------------------------------|-------------|
+| Rust panic, main thread            | Yes     | "sonic exiting: after panic"                                 | Yes         |
+| Rust panic, spawned thread         | Yes     | "sonic exiting: after panic"                                 | Yes         |
+| Stack overflow                     | Yes     | "FATAL: SIGSEGV - sonic terminating ..."                     | No (.ips only) |
+| SIGSEGV / SIGBUS / SIGILL / SIGFPE | Yes     | "FATAL: <SIGNAME> - sonic terminating ..."                   | No (.ips only) |
+| SIGABRT (incl. allocator failure)  | Yes     | "FATAL: SIGABRT - sonic terminating ..."                     | No (.ips only) |
+| `LoopExiting` (Cmd+Q / WM_CLOSE)   | Yes     | "sonic exiting: winit LoopExiting ..." + "clean after LoopExiting" | No |
+| Last window closed                 | Yes     | Same as LoopExiting (winit drives the path)                  | No          |
+| `main` returns normally            | Yes     | "sonic exiting: clean main return"                           | No          |
+| `sonic_logging::exit_with(code)`   | Yes     | "sonic exiting: explicit process::exit" with reason field    | No          |
+| Raw `std::process::exit`           | No*     | nothing (drop guards do NOT run)                             | No          |
+| PTY child killed                   | Yes     | logged by `sonic-io` PTY shutdown path                       | No          |
+| SIGKILL                            | No      | nothing — absence of an "exiting" line near death implies SIGKILL or unrecoverable crash | No |
+| Power off / kernel panic           | No      | same as SIGKILL                                              | No          |
+
+*Raw `std::process::exit` is forbidden in shipped code by the CI grep
+gate `scripts/check-no-raw-process-exit.sh`. Allowlisted exceptions
+(example/demo binaries) live in `scripts/process-exit-allowlist.txt`.
+Production paths funnel through `sonic_logging::exit_with(code, reason)`
+which logs the reason before exiting.
+
+### Reading the markers
+
+If you see a death without any "exiting" line in the tail, suspect:
+1. SIGKILL (admin force-quit, OOM-killer, `kill -9`),
+2. an unrecoverable abort that ran before the signal handler could
+   `write(2)` (very rare — would also leave no `.ips`),
+3. host power loss or kernel panic.
+
+The signal-handler writes go through `write(2)` on a pre-opened fd
+and call `fsync(2)` before re-raising, so under normal conditions
+even an immediate hardware fault leaves the FATAL line on disk.
+
+### Source
+
+The implementation lives in `crates/sonic-logging/src/exit_trace.rs`.
+The integration tests in `crates/sonic-logging/tests/exit_trace.rs`
+spawn a child binary (`crates/sonic-logging/examples/exit_test_child.rs`)
+under `SONIC_EXIT_TEST_MODE=<mode>` and assert on the resulting log
+files.
