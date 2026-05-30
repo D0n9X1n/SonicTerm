@@ -245,7 +245,7 @@ impl App {
         let global = crate::tab_drag::local_to_global(src_origin, local_in_src);
         let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, Option<TabBarLayout>)> =
             Vec::new();
-        if let Some(main) = self.window.as_ref() {
+        if let Some(main) = self.main_window() {
             let geom = window_geom(main);
             let width =
                 self.renderer.as_ref().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
@@ -286,7 +286,7 @@ impl App {
         &self,
         local_in_main: (f64, f64),
     ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
-        let main_window = self.window.as_ref()?;
+        let main_window = self.main_window()?;
         let main_origin =
             main_window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
@@ -331,7 +331,7 @@ impl App {
         // + returns NotAcknowledged (the PR #59 data-loss fix).
         if self.os_drag_backend.is_some() {
             let payload_json = payload.to_json().unwrap_or_default();
-            let source_window = self.window.as_ref().map(|w| w.id());
+            let source_window = self.main_window().map(|w| w.id());
             if let Some(src_id) = source_window {
                 // Issue #296: render a small PNG thumbnail of the
                 // dragged tab so NSDraggingSession / OLE DoDragDrop
@@ -340,7 +340,7 @@ impl App {
                 // rationale behind the CPU-side renderer (vs the
                 // originally-spec'd offscreen wgpu readback).
                 let scale_factor =
-                    self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                    self.main_window().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
                 let thumb_inputs = crate::tab_thumbnail::tab_thumbnail_inputs_from_payload(
                     &payload.tab_title,
                     scale_factor,
@@ -397,7 +397,7 @@ impl App {
         })
     }
     pub(super) fn cursor_inside_any_window(&self) -> bool {
-        let Some(main) = self.window.as_ref() else { return false };
+        let Some(main) = self.main_window() else { return false };
         let main_origin = main.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, self.cursor_pos);
         if crate::tab_drag::global_to_local(window_geom(main), global).is_some() {
@@ -411,7 +411,7 @@ impl App {
         false
     }
     pub fn try_cross_window_merge(&mut self, index: usize) -> bool {
-        let main_id = self.window.as_ref().map(|w| w.id());
+        let main_id = self.main_window().map(|w| w.id());
         let Some(target) = self.drag_target.filter(|t| Some(t.window) != main_id) else {
             return false;
         };

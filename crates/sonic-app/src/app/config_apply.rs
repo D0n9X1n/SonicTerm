@@ -288,7 +288,7 @@ impl App {
         }
 
         self.config = new_cfg;
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
         for child in self.windows.values() {
@@ -339,7 +339,7 @@ impl App {
             }
             mark_all_panes_dirty(&child.panes);
         }
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
         for child in self.windows.values() {
@@ -385,7 +385,7 @@ impl App {
             let rects = App::compute_pane_rects_for(child);
             resize_panes_to_rects(&child.panes, &rects, cw, ch);
         }
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
         for child in self.windows.values() {
@@ -421,7 +421,7 @@ impl App {
                 resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
         }
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
         for child in self.windows.values() {

@@ -85,7 +85,7 @@ impl App {
         // `pending_redraw` here so the next render call services it
         // and stale flags can't keep the loop hot.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -124,7 +124,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.clear_shape_cache();
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
         for (id, child) in self.windows.iter_mut() {
@@ -244,7 +244,6 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
-        self.window = Some(window.clone());
         // Phase C2 / Haiku #295: register the main window's HWND with
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.

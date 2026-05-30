@@ -48,7 +48,7 @@ impl App {
         // inner Option to the child window's Arc<Window> so the VT
         // thread re-targets without restarting.
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
-            Arc::new(Mutex::new(self.window.clone()));
+            Arc::new(Mutex::new(self.main_window().cloned()));
         let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
             Arc::new(Mutex::new(Vec::new()));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
@@ -291,7 +291,7 @@ impl App {
             st.active_pane = new_id;
             self.panes.insert(new_id, new_pane);
             self.resize_visible_panes();
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -323,7 +323,7 @@ impl App {
         let Some(st) = self.tab_states.get_mut(i) else { return };
         if st.tree.toggle_zoom(st.active_pane) {
             self.resize_visible_panes();
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -332,7 +332,7 @@ impl App {
     pub(super) fn toggle_broadcast(&mut self, scope: sonic_core::keymap::BroadcastScope) {
         let Some(source_pane) = self.active_pane_id() else { return };
         self.broadcast = self.broadcast.toggled(scope, source_pane);
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
     }
@@ -342,7 +342,7 @@ impl App {
         let Some(st) = self.tab_states.get_mut(i) else { return };
         if st.tree.resize_split(st.active_pane, dir, 0.05) {
             self.resize_visible_panes();
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }

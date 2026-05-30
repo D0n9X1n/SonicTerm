@@ -124,12 +124,12 @@ impl App {
                 .is_some();
         if want_pointer != self.hover_link {
             self.hover_link = want_pointer;
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.set_cursor(if want_pointer { CursorIcon::Pointer } else { CursorIcon::Default });
             }
         }
         if changed {
-            if let Some(w) = &self.window {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -252,7 +252,7 @@ impl App {
         if let Some(top) = new_top {
             pane.viewport_top_abs = Some(top);
             tracing::info!(target = top, "scrolled to prompt row");
-            if let Some(w) = self.window.as_ref() {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -404,7 +404,7 @@ impl App {
         // the keyboard path so the first press is visible immediately.
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(w) = self.window.as_ref() {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -425,7 +425,7 @@ impl App {
         }
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(w) = self.window.as_ref() {
+            if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
         }
@@ -452,7 +452,7 @@ impl App {
             let bytes = wrap_paste(&quoted, bracketed);
             self.write_to_pty(bytes);
         }
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
     }

@@ -923,7 +923,6 @@ pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
     pub(super) keymap: Keymap,
-    pub(super) window: Option<Arc<Window>>,
     pub(super) renderer: Option<GpuRenderer>,
     pub(super) tabs: TabBar,
     /// Parallel to `tabs.tabs()` — same length, same order.
@@ -1252,7 +1251,6 @@ impl App {
             theme,
             config,
             keymap,
-            window: None,
             renderer: None,
             tabs: TabBar::new(),
             tab_states: Vec::new(),
@@ -1864,6 +1862,15 @@ impl App {
         self.windows.get_mut(&id)
     }
 
+    /// Phase B2 PR-B1a — borrow the main window's `Arc<Window>` from
+    /// the shadow [`WindowState`]. Sole source of truth for the main
+    /// window handle (the legacy `App.window` field was deleted in
+    /// PR-B1a). Returns `None` before `do_resumed` has run.
+    #[doc(hidden)]
+    pub fn main_window(&self) -> Option<&Arc<Window>> {
+        Some(&self.windows.get(&self.main_window_id?)?.window)
+    }
+
     /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
     /// window is OS-frontmost. Falls back to the main window when no
     /// frontmost has been recorded yet (matches the safe default in
@@ -1933,7 +1940,7 @@ impl App {
     #[doc(hidden)]
     pub fn frontmost_kind(&self) -> FrontmostKind {
         let Some(id) = self.frontmost_window else { return FrontmostKind::None };
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             if w.id() == id {
                 return FrontmostKind::Main;
             }
@@ -2346,7 +2353,7 @@ impl App {
     /// snapshot registry tracks every visible tab-bar state change.
     pub(super) fn publish_main_window_tab_bar(&self) {
         use sonic_ui::tabbar_view::TabBarLayout;
-        let Some(w) = self.window.as_ref() else { return };
+        let Some(w) = self.main_window() else { return };
         let Some(r) = self.renderer.as_ref() else { return };
         let inner_origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
         let inner_size = {
@@ -2489,13 +2496,12 @@ impl App {
                 // main window. Detect that by comparing against the
                 // App's `window` field.
                 let src_opt = self
-                    .window
-                    .as_ref()
+                    .main_window()
                     .map(|w| w.id())
                     .filter(|&id| id == src_win)
                     .map_or(Some(src_win), |_| None);
                 let tgt_opt = match target_window {
-                    Some(id) if self.window.as_ref().map(|w| w.id() == id).unwrap_or(false) => None,
+                    Some(id) if self.main_window().map(|w| w.id() == id).unwrap_or(false) => None,
                     other => other,
                 };
                 if let Err(e) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
@@ -2744,7 +2750,7 @@ impl App {
         // 3) focus target window + bookkeeping
         match target {
             None => {
-                if let Some(w) = self.window.as_ref() {
+                if let Some(w) = self.main_window().cloned() {
                     self.frontmost_window = Some(w.id());
                     w.request_redraw();
                 }
