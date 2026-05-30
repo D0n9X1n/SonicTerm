@@ -37,12 +37,14 @@
 pub mod cleanup;
 pub mod config;
 pub mod crash;
+pub mod exit_trace;
 pub mod path;
 pub mod sinks;
 
 pub use cleanup::{cleanup_old_files, cleanup_old_files_async, clear_all_rotated};
 pub use config::LoggingConfig;
 pub use crash::install_panic_hook;
+pub use exit_trace::{exit_with, install_exit_logging, record_loop_exiting, ExitGuard, ExitReason};
 pub use path::{crash_dir, log_dir, log_file_name};
 
 use std::io;

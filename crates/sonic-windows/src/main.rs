@@ -49,6 +49,9 @@ fn main() -> Result<()> {
     sonic_logging::install_panic_hook(sonic_logging::log_dir());
     let bootstrap_cfg = sonic_logging::LoggingConfig::default();
     sonic_logging::cleanup_old_files_async(sonic_logging::log_dir(), &bootstrap_cfg);
+    // Exit-path tracing — drop guard + (Unix only) signal handlers.
+    // See `crates/sonic-logging/src/exit_trace.rs`.
+    let _exit_guard = sonic_logging::install_exit_logging(&sonic_logging::log_dir());
 
     let config = match load_config() {
         Ok(c) => c,
