@@ -37,7 +37,6 @@ use super::{
     to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
-use crate::app::integrated_titlebar_inset;
 use crate::app::window_geom;
 
 impl App {
@@ -129,7 +128,7 @@ impl App {
         // window doesn't suddenly revert to default block/blink.
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
         // On macOS the freshly created window often reports
@@ -493,7 +492,7 @@ impl App {
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(integrated_titlebar_inset());
+        renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window.scale_factor() as f32;
         renderer.force_rebuild_for_scale(real_sf);

@@ -55,54 +55,6 @@ pub fn with_backdrop_transparency(
     }
 }
 
-/// Reserved height (in **logical pixels**) under the macOS native titlebar
-/// when [`with_integrated_titlebar`] is active. The content view extends
-/// under the titlebar (fullsize_content_view), so we must shift our tab
-/// bar and grid down by this amount or they paint underneath the traffic
-/// lights and window title.
-///
-/// 28pt matches AppKit's standard titlebar height (the value
-/// `NSWindow.titlebarHeight` returns for a window with the standard
-/// `NSWindowStyleMask::Titled`). Querying it from objc2 at runtime would
-/// give us the live value but adds a heavyweight dependency to
-/// `sonic-shared` for a number that is stable across every macOS release
-/// since 10.10. If Apple ever changes the default, bump this constant.
-pub const MACOS_INTEGRATED_TITLEBAR_INSET: f32 = 28.0;
-
-/// Returns the titlebar inset (logical px) the renderer should reserve
-/// above the grid for the current platform + window-style combination.
-/// The tab bar is always bottom-pinned and uses the normal OS titlebar,
-/// so no integrated titlebar band is reserved.
-pub fn integrated_titlebar_inset() -> f32 {
-    0.0
-}
-
-/// Windows-only integrated titlebar height (logical pixels) reserved for
-/// our custom caption strip (drag region + min/max/close buttons drawn by
-/// us when the HWND subclass zeros out the OS NC area).
-///
-/// Returns 0 on non-Windows platforms so the caption-button paint path
-/// in [`crate::quad`] is a no-op on macOS / Linux — the macOS integrated
-/// titlebar uses [`integrated_titlebar_inset`] (the AppKit traffic-light
-/// inset) instead.
-pub const WINDOWS_INTEGRATED_TITLEBAR_INSET: u32 = 32;
-
-/// Integer-pixel inset for the Windows custom titlebar strip. Used by
-/// `sonic-windows::chrome` (WM_NCHITTEST) and `sonic-shared::quad`
-/// (caption-button paint). Returns 0 elsewhere so call sites stay
-/// portable without per-platform branches.
-#[must_use]
-pub fn integrated_titlebar_inset_px() -> u32 {
-    #[cfg(target_os = "windows")]
-    {
-        WINDOWS_INTEGRATED_TITLEBAR_INSET
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        0
-    }
-}
-
 use crate::config_watch::ConfigWatcher;
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::broadcast::BroadcastState;

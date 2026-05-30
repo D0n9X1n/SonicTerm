@@ -492,10 +492,8 @@ pub struct GpuRenderer {
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
     /// Reserved height (logical px) above the tab bar for the OS native
-    /// titlebar. Non-zero on macOS when the window uses
-    /// `with_fullsize_content_view(true)` — without this the tab bar
-    /// would paint under the traffic lights + window title. See
-    /// [`crate::app::integrated_titlebar_inset`].
+    /// titlebar. Kept at zero while Sonic uses the normal OS titlebar with a
+    /// bottom-pinned tab bar.
     titlebar_inset: f32,
     /// Characters from the most recent `render()` call that the
     /// rasterizer could not produce a tile for (i.e. would draw as a
@@ -2974,9 +2972,6 @@ impl GpuRenderer {
                     surface: (sw, sh),
                 },
             );
-            // Custom min/max/close trio removed (#366): all platforms now
-            // use the OS-native window controls (macOS traffic lights,
-            // Windows native caption buttons). Nothing painted here.
             for t in &layout.tabs {
                 // Phase D D3 (Epic #289): if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to

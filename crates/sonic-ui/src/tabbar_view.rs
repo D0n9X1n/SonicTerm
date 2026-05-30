@@ -40,8 +40,8 @@ pub const TAB_MAX_WIDTH: f32 = 400.0;
 /// above `TAB_MIN_WIDTH` (so the common 2–4 tab case at 1000 px wide keeps
 /// shell titles like `Administrator: cmd.exe` / `pwsh` readable). When the
 /// tab count grows large enough that holding the floor would overflow the
-/// right edge of the bar (or the Windows caption-button gutter), the floor
-/// yields and tabs shrink to share the available space evenly.
+/// right edge of the bar, the floor yields and tabs shrink to share the
+/// available space evenly.
 pub const TAB_MIN_WIDTH: f32 = 200.0;
 
 /// Size of the close `×` square inside each tab.
@@ -282,9 +282,7 @@ impl TabBarLayout {
         }
 
         // Region available for tabs is from BAR_LEFT_PAD to the right edge
-        // of the bar, minus another BAR_LEFT_PAD of breathing room. The
-        // custom caption-button strip was removed (#366); native OS window
-        // controls live outside the client area on every platform.
+        // of the bar, minus another BAR_LEFT_PAD of breathing room.
         let tabs_region = (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
