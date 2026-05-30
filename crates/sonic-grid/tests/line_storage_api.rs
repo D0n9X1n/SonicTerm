@@ -5,7 +5,7 @@
 //! (empty, single, large).
 
 use sonic_grid::line::{Cluster, LineStorage};
-use sonic_types::cell::Cell;
+use sonic_types::cell::{Cell, CellFlags, Color};
 
 fn cell_with_ch(ch: char) -> Cell {
     let mut c = Cell::default();
@@ -60,6 +60,36 @@ fn get_cluster_crosses_runs() {
     assert_eq!(s.get(3).unwrap().ch, 'b');
     assert_eq!(s.get(4).unwrap().ch, 'b');
     assert!(s.get(5).is_none());
+}
+
+#[test]
+fn get_range_basic_flat() {
+    let s = LineStorage::Flat((0..10).map(|idx| cell_with_ch(char::from(b'0' + idx))).collect());
+    let chars: Vec<char> = s.get_range(2, 5).map(|cell| cell.ch).collect();
+    assert_eq!(chars, vec!['2', '3', '4']);
+}
+
+#[test]
+fn get_range_basic_cluster() {
+    let cell = Cell::plain('A', Color::Rgb(1, 2, 3), Color::Indexed(4), CellFlags::BOLD);
+    let s = LineStorage::Cluster(vec![Cluster { cell: cell.clone(), count: 10 }]);
+    let cells: Vec<Cell> = s.get_range(3, 7).collect();
+
+    assert_eq!(cells.len(), 4);
+    assert!(cells.iter().all(|actual| actual == &cell));
+}
+
+#[test]
+fn get_range_edge_cases() {
+    let s = flat_of("abcd");
+    assert!(s.get_range(3, 2).collect::<Vec<_>>().is_empty());
+    assert!(s.get_range(5, 6).collect::<Vec<_>>().is_empty());
+    assert!(s.get_range(2, 2).collect::<Vec<_>>().is_empty());
+    assert_eq!(s.get_range(2, 99).map(|cell| cell.ch).collect::<Vec<_>>(), vec!['c', 'd']);
+
+    let c = cluster_uniform('x', 4);
+    assert!(c.get_range(1, 1).collect::<Vec<_>>().is_empty());
+    assert!(c.get_range(9, 10).collect::<Vec<_>>().is_empty());
 }
 
 #[test]

@@ -132,6 +132,22 @@ impl LineStorage {
         }
     }
 
+    /// Iterate over cells in `[start, end)`, cloning cells for a uniform return
+    /// type across storage forms. `end` is clamped to `len()`; empty or reversed
+    /// ranges yield no cells.
+    pub fn get_range(&self, start: u16, end: u16) -> impl Iterator<Item = Cell> + '_ {
+        let start = usize::from(start);
+        let end = usize::from(end).min(self.len());
+        if start >= end {
+            return StorageRangeIter::Empty;
+        }
+
+        match self {
+            LineStorage::Flat(v) => StorageRangeIter::Flat(v[start..end].iter()),
+            LineStorage::Cluster(cs) => StorageRangeIter::cluster(cs, start, end),
+        }
+    }
+
     /// Set the cell at `idx`. Degrades to `Flat` on first write. Returns
     /// `true` if the index was in range.
     pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
@@ -311,6 +327,71 @@ impl<'a> Iterator for StorageIter<'a> {
                     *remaining = c.count;
                 }
                 *remaining -= 1;
+                current.cloned()
+            }
+        }
+    }
+}
+
+/// Transparent range iterator over either `LineStorage` form (clones cells for
+/// a uniform return type).
+pub enum StorageRangeIter<'a> {
+    Empty,
+    Flat(std::slice::Iter<'a, Cell>),
+    Cluster {
+        clusters: std::slice::Iter<'a, Cluster>,
+        current: Option<&'a Cell>,
+        remaining_in_cluster: usize,
+        remaining_total: usize,
+    },
+}
+
+impl<'a> StorageRangeIter<'a> {
+    fn cluster(clusters: &'a [Cluster], start: usize, end: usize) -> Self {
+        let total = end - start;
+        let mut off = 0;
+        let mut idx = 0;
+        while let Some(cluster) = clusters.get(idx) {
+            let next_off = off + cluster.count;
+            if start < next_off {
+                let skip_in_cluster = start - off;
+                return StorageRangeIter::Cluster {
+                    clusters: clusters[idx + 1..].iter(),
+                    current: Some(&cluster.cell),
+                    remaining_in_cluster: (cluster.count - skip_in_cluster).min(total),
+                    remaining_total: total,
+                };
+            }
+            off = next_off;
+            idx += 1;
+        }
+        StorageRangeIter::Empty
+    }
+}
+
+impl<'a> Iterator for StorageRangeIter<'a> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StorageRangeIter::Empty => None,
+            StorageRangeIter::Flat(it) => it.next().cloned(),
+            StorageRangeIter::Cluster {
+                clusters,
+                current,
+                remaining_in_cluster,
+                remaining_total,
+            } => {
+                if *remaining_total == 0 {
+                    return None;
+                }
+                if *remaining_in_cluster == 0 {
+                    let c = clusters.next()?;
+                    *current = Some(&c.cell);
+                    *remaining_in_cluster = c.count.min(*remaining_total);
+                }
+                *remaining_in_cluster -= 1;
+                *remaining_total -= 1;
                 current.cloned()
             }
         }
