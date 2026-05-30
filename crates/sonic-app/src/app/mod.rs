@@ -30,53 +30,14 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-/// Apply WezTerm-style integrated titlebar on macOS: the titlebar is
-/// transparent and the content view extends underneath it, so there is
-/// no visible separator line above our tab bar. Traffic lights remain
-/// native (decorations stay on) — only the chrome strip is fused into
-/// the content. No-op on non-macOS platforms.
+/// Apply WezTerm-style integrated titlebar on macOS.
 ///
-/// We keep this in one place so all three window-creation sites
-/// (main, tear-out, preferences) stay in sync.
+/// The tab bar is now always bottom-pinned, so there is no top tab strip to
+/// fuse with the native titlebar. Keep this helper as a no-op compatibility
+/// shim so all window creation sites stay in sync.
 #[doc(hidden)]
 pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
-    with_integrated_titlebar_for(attrs, sonic_core::config::TabBarPosition::Top)
-}
-
-/// Position-aware variant of [`with_integrated_titlebar`]. When the tab bar
-/// is at the top we extend the content view under the macOS titlebar so the
-/// bar visually replaces the OS chrome (the v0.x-and-current default). When
-/// the bar is at the bottom there is nothing to merge with the titlebar, so
-/// we leave the OS chrome alone — a normal titled NSWindow. Mirrors the
-/// `integrated_titlebar_inset()` behavior (which returns 0 when the bar is
-/// bottom-pinned) so layout and chrome stay consistent.
-#[doc(hidden)]
-pub fn with_integrated_titlebar_for(
-    attrs: WindowAttributes,
-    bar_pos: sonic_core::config::TabBarPosition,
-) -> WindowAttributes {
-    #[cfg(target_os = "macos")]
-    {
-        use winit::platform::macos::WindowAttributesExtMacOS;
-        match bar_pos {
-            sonic_core::config::TabBarPosition::Top => {
-                attrs.with_fullsize_content_view(true).with_titlebar_transparent(true)
-            }
-            // Bar at bottom: revert to a normal NSWindow titlebar so the
-            // OS draws its own title + traffic lights on top of the
-            // content area instead of us shifting the grid down by 28pt
-            // for an empty band.
-            sonic_core::config::TabBarPosition::Bottom => attrs,
-        }
-    }
-    // FUTURE: equivalent integration on Windows would require custom
-    // non-client area painting (WM_NCCALCSIZE); winit 0.30 does not
-    // expose this directly. Left as a no-op for now.
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = bar_pos;
-        attrs
-    }
+    attrs
 }
 
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop
@@ -109,30 +70,11 @@ pub fn with_backdrop_transparency(
 pub const MACOS_INTEGRATED_TITLEBAR_INSET: f32 = 28.0;
 
 /// Returns the titlebar inset (logical px) the renderer should reserve
-/// above the tab bar / grid for the current platform + window-style
-/// combination. Returns 0 on platforms that don't extend content under
-/// the titlebar (Windows, Linux), so non-macOS layout is unchanged.
+/// above the grid for the current platform + window-style combination.
+/// The tab bar is always bottom-pinned and uses the normal OS titlebar,
+/// so no integrated titlebar band is reserved.
 pub fn integrated_titlebar_inset() -> f32 {
-    integrated_titlebar_inset_for(sonic_core::config::TabBarPosition::Top)
-}
-
-/// Position-aware variant. Returns 0 when the bar is at the bottom — in
-/// that mode we use a normal NSWindow titlebar (see
-/// [`with_integrated_titlebar_for`]) so no reservation is needed above
-/// the grid.
-pub fn integrated_titlebar_inset_for(bar_pos: sonic_core::config::TabBarPosition) -> f32 {
-    #[cfg(target_os = "macos")]
-    {
-        match bar_pos {
-            sonic_core::config::TabBarPosition::Top => MACOS_INTEGRATED_TITLEBAR_INSET,
-            sonic_core::config::TabBarPosition::Bottom => 0.0,
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = bar_pos;
-        0.0
-    }
+    0.0
 }
 
 /// Windows-only integrated titlebar height (logical pixels) reserved for
@@ -1071,9 +1013,14 @@ impl App {
         let top = r.top_inset();
         let pl = r.padding_left();
         let pr = r.padding_right();
+        let bottom = r.bottom_inset();
         let pb = r.padding_bottom();
-        let outer =
-            sonic_ui::pane::Rect::new(pl, top, (w - pl - pr).max(0.0), (h - top - pb).max(0.0));
+        let outer = sonic_ui::pane::Rect::new(
+            pl,
+            top,
+            (w - pl - pr).max(0.0),
+            (h - top - bottom - pb).max(0.0),
+        );
         st.tree.layout(outer)
     }
 
@@ -1087,9 +1034,14 @@ impl App {
         let top = r.top_inset();
         let pl = r.padding_left();
         let pr = r.padding_right();
+        let bottom = r.bottom_inset();
         let pb = r.padding_bottom();
-        let outer =
-            sonic_ui::pane::Rect::new(pl, top, (w - pl - pr).max(0.0), (h - top - pb).max(0.0));
+        let outer = sonic_ui::pane::Rect::new(
+            pl,
+            top,
+            (w - pl - pr).max(0.0),
+            (h - top - bottom - pb).max(0.0),
+        );
         st.tree.layout(outer)
     }
 

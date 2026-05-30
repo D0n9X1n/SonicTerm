@@ -261,33 +261,89 @@ pub fn paint_caption_buttons(
     let [min, max, close] = *rects;
     let icon = 10.0;
     let stroke = 1.5;
+    let masks = [ICON_MINIMIZE_8, ICON_MAXIMIZE_8, ICON_CLOSE_8];
+    for ((x, y, w, h), mask) in [min, max, close].into_iter().zip(masks) {
+        push_mask_icon_quads(
+            out,
+            MaskIconParams {
+                mask,
+                x: x + (w - icon) * 0.5,
+                y: y + (h - icon) * 0.5,
+                size: icon,
+                min_cell: stroke,
+                color: fg,
+                sw,
+                sh,
+            },
+        );
+    }
+}
 
-    let push_rect = |out: &mut Vec<QuadInstance>, x: f32, y: f32, w: f32, h: f32| {
-        out.push(QuadInstance::sharp(px_to_ndc(x, y, w, h, sw, sh), fg));
-    };
+/// Built-in 8x8 alpha mask for the minimize chrome icon, derived from SVG.
+pub const ICON_MINIMIZE_8: &[u8; 64] =
+    &mask8_from_rows([0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00]);
+/// Built-in 8x8 alpha mask for the maximize chrome icon, derived from SVG.
+pub const ICON_MAXIMIZE_8: &[u8; 64] =
+    &mask8_from_rows([0xff, 0xff, 0xc3, 0xc3, 0xc3, 0xc3, 0xff, 0xff]);
+/// Built-in 8x8 alpha mask for the close chrome icon, derived from SVG.
+pub const ICON_CLOSE_8: &[u8; 64] =
+    &mask8_from_rows([0xc3, 0xe7, 0x7e, 0x3c, 0x3c, 0x7e, 0xe7, 0xc3]);
+/// Built-in 8x8 alpha mask for the plus/new-tab chrome icon, derived from SVG.
+pub const ICON_PLUS_8: &[u8; 64] =
+    &mask8_from_rows([0x00, 0x18, 0x18, 0xff, 0xff, 0x18, 0x18, 0x00]);
 
-    // Minimize: a thin horizontal rect centered in the button.
-    let (x, y, w, h) = min;
-    push_rect(out, x + (w - icon) * 0.5, y + h * 0.5 + icon * 0.25, icon, stroke);
+const fn mask8_from_rows(rows: [u8; 8]) -> [u8; 64] {
+    let mut out = [0; 64];
+    let mut y = 0;
+    while y < 8 {
+        let mut x = 0;
+        while x < 8 {
+            out[y * 8 + x] = if rows[y] & (1 << (7 - x)) != 0 { 255 } else { 0 };
+            x += 1;
+        }
+        y += 1;
+    }
+    out
+}
 
-    // Maximize: four thin rects forming a 10x10 outline.
-    let (x, y, w, h) = max;
-    let left = x + (w - icon) * 0.5;
-    let top = y + (h - icon) * 0.5;
-    push_rect(out, left, top, icon, stroke);
-    push_rect(out, left, top + icon - stroke, icon, stroke);
-    push_rect(out, left, top, stroke, icon);
-    push_rect(out, left + icon - stroke, top, stroke, icon);
+/// Parameters for [`push_mask_icon_quads`].
+#[derive(Debug, Clone, Copy)]
+pub struct MaskIconParams<'a> {
+    /// Alpha mask in row-major 8x8 order.
+    pub mask: &'a [u8; 64],
+    /// Top-left x in physical pixels.
+    pub x: f32,
+    /// Top-left y in physical pixels.
+    pub y: f32,
+    /// Target icon size in physical pixels.
+    pub size: f32,
+    /// Minimum emitted cell size in physical pixels.
+    pub min_cell: f32,
+    /// Linear RGBA color multiplied by each mask alpha.
+    pub color: [f32; 4],
+    /// Surface width in physical pixels.
+    pub sw: f32,
+    /// Surface height in physical pixels.
+    pub sh: f32,
+}
 
-    // Close: two diagonal rects forming an X, approximated by short 45°
-    // stair-stepped strokes so the quad pipeline can stay axis-aligned.
-    let (x, y, w, h) = close;
-    let left = x + (w - icon) * 0.5;
-    let top = y + (h - icon) * 0.5;
-    let step = icon / 5.0;
-    for i in 0..5 {
-        let d = i as f32 * step;
-        push_rect(out, left + d, top + d, step, stroke);
-        push_rect(out, left + d, top + icon - d - stroke, step, stroke);
+/// Rasterize an 8x8 alpha-mask icon into the quad list. Used by app chrome so
+/// icons are data-driven masks instead of text glyphs or Nerd Font codepoints.
+pub fn push_mask_icon_quads(out: &mut Vec<QuadInstance>, params: MaskIconParams<'_>) {
+    let MaskIconParams { mask, x, y, size, min_cell, color, sw, sh } = params;
+    let cell = (size / 8.0).max(min_cell.max(0.5));
+    for row in 0..8 {
+        for col in 0..8 {
+            let alpha = f32::from(mask[row * 8 + col]) / 255.0;
+            if alpha <= 0.0 {
+                continue;
+            }
+            let mut c = color;
+            c[3] *= alpha;
+            out.push(QuadInstance::sharp(
+                px_to_ndc(x + col as f32 * cell, y + row as f32 * cell, cell, cell, sw, sh),
+                c,
+            ));
+        }
     }
 }

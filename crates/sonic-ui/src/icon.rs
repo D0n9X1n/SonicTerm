@@ -22,7 +22,18 @@ pub const CURSOR: Icon =
 pub const ADVANCED: Icon =
     Icon { key: "advanced", svg: include_str!("../../../assets/icons/ui/advanced.svg") };
 
-pub const ALL: &[Icon] = &[FONT, THEME, KEYMAP, WINDOW, CURSOR, ADVANCED];
+// Chrome icons are app UI, not terminal cell content. Keep them in SVG form so
+// window/tab chrome never depends on Nerd Font or other font fallback coverage.
+pub const CLOSE: Icon =
+    Icon { key: "close", svg: include_str!("../../../assets/icons/ui/close.svg") };
+pub const PLUS: Icon = Icon { key: "plus", svg: include_str!("../../../assets/icons/ui/plus.svg") };
+pub const MINIMIZE: Icon =
+    Icon { key: "minimize", svg: include_str!("../../../assets/icons/ui/minimize.svg") };
+pub const MAXIMIZE: Icon =
+    Icon { key: "maximize", svg: include_str!("../../../assets/icons/ui/maximize.svg") };
+
+pub const ALL: &[Icon] =
+    &[FONT, THEME, KEYMAP, WINDOW, CURSOR, ADVANCED, CLOSE, PLUS, MINIMIZE, MAXIMIZE];
 
 pub fn for_category(cat: Category) -> &'static Icon {
     match cat {

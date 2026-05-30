@@ -34,9 +34,8 @@ fn click_in_bottom_strip_hits_tab_when_bar_anchored_to_bottom() {
     let bar_h = tab_bar_height(FONT_SIZE);
     let bottom_y_offset = (WINDOW_H - bar_h).max(0.0);
 
-    let layout = TabBarLayout::compute_with_height(&tabs, WINDOW_W, bar_h)
-        .with_top_offset(bottom_y_offset)
-        .with_visible(true);
+    let layout =
+        TabBarLayout::compute_at_y(&tabs, WINDOW_W, bar_h, bottom_y_offset).with_visible(true);
 
     // Click 10 px above the very bottom edge — squarely inside the
     // on-screen bar strip when the bar is bottom-pinned.
@@ -57,16 +56,10 @@ fn click_in_bottom_strip_hits_tab_when_bar_anchored_to_bottom() {
 }
 
 #[test]
-fn click_at_top_with_top_anchored_layout_hits_bar_as_before() {
-    // Sanity: Top-anchored behavior unchanged — this is the pre-#323
-    // default path.
+fn bottom_layout_bar_y_equals_window_minus_height() {
     let tabs = one_tab_bar();
     let bar_h = tab_bar_height(FONT_SIZE);
+    let layout = TabBarLayout::compute_at_y(&tabs, WINDOW_W, bar_h, WINDOW_H - bar_h);
 
-    let layout = TabBarLayout::compute_with_height(&tabs, WINDOW_W, bar_h)
-        .with_top_offset(0.0)
-        .with_visible(true);
-
-    let hit = layout.hit(60.0, 4.0);
-    assert!(matches!(hit, Some(TabHit::Activate(0))));
+    assert!((layout.bar.y - (WINDOW_H - bar_h)).abs() < f32::EPSILON);
 }

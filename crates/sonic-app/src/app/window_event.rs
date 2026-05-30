@@ -130,12 +130,13 @@ impl App {
                             let top = r.top_inset();
                             let pl = r.padding_left();
                             let pr = r.padding_right();
+                            let bottom = r.bottom_inset();
                             let pb = r.padding_bottom();
                             let outer = sonic_ui::pane::Rect::new(
                                 pl,
                                 top,
                                 (w - pl - pr).max(0.0),
-                                (h - top - pb).max(0.0),
+                                (h - top - bottom - pb).max(0.0),
                             );
                             st.tree.layout(outer)
                         } else {
@@ -682,12 +683,13 @@ impl App {
                                 let top = r.top_inset();
                                 let pl = r.padding_left();
                                 let pr = r.padding_right();
+                                let bottom = r.bottom_inset();
                                 let pb = r.padding_bottom();
                                 let outer = sonic_ui::pane::Rect::new(
                                     pl,
                                     top,
                                     (w - pl - pr).max(0.0),
-                                    (h - top - pb).max(0.0),
+                                    (h - top - bottom - pb).max(0.0),
                                 );
                                 st.tree.layout(outer)
                             })
