@@ -624,14 +624,6 @@ impl App {
                                     Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
                             Some(sonic_ui::tabbar_view::TabHit::Close(i)) => self.close_tab_at(i),
-                            Some(sonic_ui::tabbar_view::TabHit::NewTab) => {
-                                tracing::trace!(
-                                    coords = ?(px, py),
-                                    "new_tab_button hit at {:?}, dispatching",
-                                    (px, py)
-                                );
-                                self.run_action(&Action::NewTab);
-                            }
                             None => unreachable!("tab_action.is_some() checked above"),
                         }
                         if self.tabs.is_empty() {
@@ -650,8 +642,7 @@ impl App {
                         }
                         // Keep mouse_down=true when we recorded a tab
                         // press so cursor-move can promote it to a
-                        // tear-out. Other hits (Close, NewTab) consume
-                        // the click fully.
+                        // tear-out. Close hits consume the click fully.
                         if self.pressed_tab.is_none() {
                             self.mouse_down = false;
                         }

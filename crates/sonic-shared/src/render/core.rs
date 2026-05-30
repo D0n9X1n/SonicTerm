@@ -136,10 +136,7 @@ use crate::{
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
-    quad::{
-        push_close_x_quads, push_mask_icon_quads, px_to_ndc, CloseXParams, MaskIconParams,
-        QuadInstance, QuadPipeline, ICON_CLOSE_8, ICON_PLUS_8,
-    },
+    quad::{push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline, ICON_CLOSE_8},
     search::SearchState,
     selection::Selection,
     shape::{run_is_ascii_fast, RunStyle, ShapeCache},
@@ -2782,7 +2779,6 @@ impl GpuRenderer {
             let separator = tok::BORDER_SUBTLE();
             let border_subtle = tok::BORDER_SUBTLE();
             let muted = tok::TEXT_MUTED();
-            let secondary = tok::TEXT_SECONDARY();
             let primary = tok::TEXT_PRIMARY();
             let danger = tok::DANGER();
             // Bar background
@@ -2943,21 +2939,6 @@ impl GpuRenderer {
                     });
                 }
             }
-            // `+` new-tab button — 28×28, radius 8 pill, hover BG.
-            let nt = layout.new_tab;
-            // Hover detection: cursor inside the new-tab rect.
-            let nt_hover = self
-                .hover_cursor
-                .map(|(cx, cy)| cx >= nt.x && cx < nt.x + nt.w && cy >= nt.y && cy < nt.y + nt.h)
-                .unwrap_or(false);
-            build_new_tab_button_quads(
-                nt,
-                nt_hover,
-                NewTabButtonColors { hover_bg, primary, secondary },
-                sw,
-                sh,
-                &mut quads,
-            );
 
             // Tab titles: render as a single rich-text line where each tab title
             // is positioned by inserting padding spaces. This is approximate but
@@ -4537,56 +4518,6 @@ pub fn scale_glyphon_alpha(c: GColor, factor: f32) -> GColor {
 /// every existing `crate::render::terminal_font_attrs` call site keeps
 /// compiling unchanged.
 pub use sonic_text::terminal_font_attrs;
-
-/// Colors used when rendering the `+` new-tab button (extracted for testing).
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
-pub struct NewTabButtonColors {
-    pub hover_bg: [f32; 4],
-    pub primary: [f32; 4],
-    pub secondary: [f32; 4],
-}
-
-/// Emit the quads for the `+` new-tab button. When `hover` is true a
-/// rounded (radius 8) `hover_bg` background is drawn underneath the
-/// plus glyph and the glyph switches to `primary`; otherwise only the
-/// `secondary`-colored plus is drawn.
-///
-/// Exposed for unit tests in `tests/tab_new_tab_button.rs`.
-#[doc(hidden)]
-pub fn build_new_tab_button_quads(
-    nt: crate::tabbar_view::Rect,
-    hover: bool,
-    colors: NewTabButtonColors,
-    sw: f32,
-    sh: f32,
-    out: &mut Vec<QuadInstance>,
-) {
-    if hover {
-        out.push(QuadInstance {
-            rect: px_to_ndc(nt.x, nt.y, nt.w, nt.h, sw, sh),
-            color: colors.hover_bg,
-            size_px: [nt.w, nt.h],
-            radius_px: 8.0,
-            ..Default::default()
-        });
-    }
-    let plus_color = if hover { colors.primary } else { colors.secondary };
-    let plus_size = 12.0_f32;
-    push_mask_icon_quads(
-        out,
-        MaskIconParams {
-            mask: ICON_PLUS_8,
-            x: nt.x + (nt.w - plus_size) * 0.5,
-            y: nt.y + (nt.h - plus_size) * 0.5,
-            size: plus_size,
-            min_cell: 1.0,
-            color: plus_color,
-            sw,
-            sh,
-        },
-    );
-}
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink
 /// id, per row. Wide-cell continuations don't break a run (they inherit the

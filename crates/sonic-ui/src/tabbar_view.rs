@@ -40,22 +40,14 @@ pub const TAB_MAX_WIDTH: f32 = 400.0;
 /// above `TAB_MIN_WIDTH` (so the common 2–4 tab case at 1000 px wide keeps
 /// shell titles like `Administrator: cmd.exe` / `pwsh` readable). When the
 /// tab count grows large enough that holding the floor would overflow the
-/// `+` button gutter, the floor yields and tabs shrink to share the
-/// available space evenly — preserving the invariant that the strip never
-/// extends past the new-tab button.
+/// right edge of the bar (or the Windows caption-button gutter), the floor
+/// yields and tabs shrink to share the available space evenly.
 pub const TAB_MIN_WIDTH: f32 = 200.0;
-
-/// Width of the `+` new-tab button drawn after the last tab.
-/// Browser-style 28×28 hit/visual target with radius 8 (issue #112 Round 3).
-pub const NEW_TAB_BUTTON_WIDTH: f32 = 28.0;
-
-/// Height of the `+` new-tab button (square; centered vertically in bar).
-pub const NEW_TAB_BUTTON_HEIGHT: f32 = 28.0;
 
 /// Size of the close `×` square inside each tab.
 pub const CLOSE_BUTTON_SIZE: f32 = 14.0;
 
-/// Inset between tabs and from the right edge before the `+` button.
+/// Inset between tabs and from the right edge of the bar.
 pub const TAB_GAP: f32 = 6.0;
 
 /// Padding on the left edge of the bar before the first tab.
@@ -168,7 +160,6 @@ pub type TabRect = TabWidget;
 pub enum TabHit {
     Activate(usize),
     Close(usize),
-    NewTab,
 }
 
 impl From<TabAction> for TabHit {
@@ -212,13 +203,11 @@ pub fn detect_tear_out(press_tab_index: usize, current_pos: (f32, f32)) -> Optio
     }
 }
 
-/// Computed layout for the entire bar — bar background, every tab, and the
-/// `+` button.
+/// Computed layout for the entire bar — bar background and every tab.
 #[derive(Debug, Clone)]
 pub struct TabBarLayout {
     pub bar: Rect,
     pub tabs: Vec<TabWidget>,
-    pub new_tab: Rect,
     pub active: Option<usize>,
     /// When `false`, the tab bar is hidden and [`Self::hit`] /
     /// [`Self::point_over_bar`] always return as if the cursor missed
@@ -247,8 +236,7 @@ impl TabBarLayout {
     /// The gap is applied by shifting every tab at index ≥ slot right
     /// by [`Self::INSERTION_GAP_PX`] logical pixels — the close-box
     /// and title sub-rects shift with their parent so hit-testing
-    /// stays internally consistent. The `+` new-tab button is NOT
-    /// shifted because it's anchored to the right edge of the bar.
+    /// stays internally consistent.
     pub fn compute_with_insertion_slot(
         bar: &TabBar,
         window_width: f32,
@@ -281,54 +269,32 @@ impl TabBarLayout {
 
     /// Compute the tab bar layout anchored at an explicit `bar_y` position.
     /// The bottom-bar renderer passes `window_h - bar_h` so the strip, active
-    /// indicator, close buttons, and `+` button all share bottom coordinates.
+    /// indicator, and close buttons all share bottom coordinates.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
         let bar_h = bar_height.max(1.0);
         let bar_y = bar_y.max(0.0);
         let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
 
-        // Browser-style `+` button: a 28x28 square hit target floated at
-        // the right edge of the bar, vertically centered. The hit region
-        // returned in the layout stays 28x28 so cursor-shape and click
-        // routing land exactly on the visual.
-        //
-        // On Windows, the integrated titlebar paints three caption buttons
-        // (min/max/close, 46x32 logical px each = 138 px total) anchored
-        // to the right edge of the bar. The `+` button must sit to the
-        // LEFT of the caption-button strip, otherwise it overlaps them
-        // and either click target swallows the other (issue #189).
-        let nt_w = NEW_TAB_BUTTON_WIDTH.min(window_width.max(0.0));
-        let nt_h = NEW_TAB_BUTTON_HEIGHT.min(bar_h);
-        let right_reserved = caption_strip_reserved_width();
-        let nt_x = (window_width - nt_w - BAR_LEFT_PAD - right_reserved).max(0.0);
-        let nt_y = bar_y + ((bar_h - nt_h) * 0.5).max(0.0);
-        let new_tab = Rect { x: nt_x, y: nt_y, w: nt_w, h: nt_h };
-
         let n = bar.len();
         let mut tabs: Vec<TabWidget> = Vec::with_capacity(n);
         if n == 0 {
-            return Self { bar: bar_rect, tabs, new_tab, active: None, visible: true };
+            return Self { bar: bar_rect, tabs, active: None, visible: true };
         }
 
-        // Region available for tabs is from BAR_LEFT_PAD to the left edge of
-        // the new-tab button, minus a gap before the +. On Windows we also
-        // subtract the caption-button strip width reserved on the right
-        // (see new_tab.x computation above).
-        let tabs_region = (window_width
-            - BAR_LEFT_PAD
-            - NEW_TAB_BUTTON_WIDTH
-            - BAR_LEFT_PAD
-            - TAB_GAP
-            - caption_strip_reserved_width())
-        .max(0.0);
+        // Region available for tabs is from BAR_LEFT_PAD to the right edge
+        // of the bar, minus another BAR_LEFT_PAD of breathing room. On
+        // Windows we also subtract the caption-button strip width reserved
+        // on the right edge.
+        let tabs_region =
+            (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD - caption_strip_reserved_width()).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
         // clamp): tabs shrink to share the available space when the equal-
         // share allocation falls below it, so the strip never overflows the
-        // `+` button gutter. When the strip has surplus, use the available
-        // equal share up to TAB_MAX_WIDTH so maximized windows can show long
-        // titles instead of staying pinned to the old narrow cap.
+        // right edge of the bar. When the strip has surplus, use the
+        // available equal share up to TAB_MAX_WIDTH so maximized windows can
+        // show long titles instead of staying pinned to the old narrow cap.
         let per_tab = raw.min(TAB_MAX_WIDTH);
 
         let bg_y = bar_y + TAB_VERT_INSET;
@@ -361,15 +327,16 @@ impl TabBarLayout {
             x += per_tab + TAB_GAP;
         }
 
-        Self { bar: bar_rect, tabs, new_tab, active: Some(bar.active_index()), visible: true }
+        Self { bar: bar_rect, tabs, active: Some(bar.active_index()), visible: true }
     }
 
     /// Rect (in the same coordinate space as `self.tabs`) at which the
     /// renderer should paint the active-tab top-accent bar. Returns
     /// `None` when there is no active tab in the layout (empty bar) or
     /// when the active index points past the laid-out tabs (defensive —
-    /// stale state must never paint an accent floating in the new-tab
-    /// gutter, which was the user-reported bug in issue #171).
+    /// stale state must never paint an accent floating in the empty
+    /// right-edge area of the bar, which was the user-reported bug in
+    /// issue #171).
     ///
     /// The rect is anchored to the active tab's own `bg.x`/`bg.y` — it
     /// MUST NOT be derived from `active_idx * tab_w`, because the bar
@@ -429,7 +396,6 @@ impl TabBarLayout {
             return self;
         }
         self.bar.y += dy;
-        self.new_tab.y += dy;
         for t in &mut self.tabs {
             t.bg_rect.y += dy;
             t.close_x_rect.y += dy;
@@ -457,9 +423,6 @@ impl TabBarLayout {
         }
         if !self.bar.contains(px, py) {
             return None;
-        }
-        if self.new_tab.contains(px, py) {
-            return Some(TabHit::NewTab);
         }
         self.tabwidgets().iter().find_map(|t| t.hit(Point { x: px, y: py })).map(Into::into)
     }
@@ -521,8 +484,7 @@ impl TabBarLayout {
             return Some(self.tabs[0].bg_rect.x - TAB_GAP * 0.5);
         }
         if slot == n {
-            // After the last tab — between its right edge and the
-            // `+` button (if any).
+            // After the last tab — just past its right edge.
             let last = &self.tabs[n - 1];
             return Some(last.bg_rect.x + last.bg_rect.w + TAB_GAP * 0.5);
         }
@@ -556,8 +518,7 @@ pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
 /// integrated Win11 caption-button strip (min + max + close = 3 * 46 px).
 /// Returns 0.0 on non-Windows platforms, where the tab bar extends to the
 /// right edge of the window. Used by [`TabBarLayout::compute_with_height`]
-/// to place the `+` new-tab button to the LEFT of the caption buttons so
-/// they never overlap (issue #189).
+/// to keep tab widgets from overlapping the caption buttons.
 #[must_use]
 pub fn caption_strip_reserved_width() -> f32 {
     #[cfg(target_os = "windows")]

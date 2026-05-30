@@ -13,14 +13,13 @@ fn bar_with(n: usize) -> TabBar {
 }
 
 #[test]
-fn empty_bar_still_has_new_tab_button() {
+fn empty_bar_has_no_tabs_and_no_hits() {
     let bar = TabBar::new();
     let layout = TabBarLayout::compute(&bar, 800.0);
     assert!(layout.tabs.is_empty());
-    // Click squarely inside the 28×28 + button.
-    let cx = layout.new_tab.x + layout.new_tab.w / 2.0;
-    let cy = layout.new_tab.y + layout.new_tab.h / 2.0;
-    assert_eq!(layout.hit(cx, cy), Some(TabHit::NewTab));
+    // No `+` button anymore (issue #335): clicking anywhere on the bar
+    // must yield no hit when there are no tabs.
+    assert_eq!(layout.hit(400.0, layout.bar.y + layout.bar.h / 2.0), None);
 }
 
 #[test]
@@ -85,12 +84,16 @@ fn click_on_close_x_of_active_tab_closes_it() {
 }
 
 #[test]
-fn click_on_plus_button_returns_new_tab() {
+fn click_at_far_right_of_empty_strip_returns_none() {
+    // Issue #335: the `+` new-tab button is gone — a click past the last
+    // tab must return None, NOT a NewTab hit (the variant no longer
+    // exists). Cmd+T / Ctrl+Shift+T remain the only way to add a tab.
     let bar = bar_with(2);
     let layout = TabBarLayout::compute(&bar, 800.0);
-    let cx = layout.new_tab.x + 4.0;
-    let cy = layout.new_tab.y + 4.0;
-    assert_eq!(layout.hit(cx, cy), Some(TabHit::NewTab));
+    let last = layout.tabs.last().unwrap();
+    let cx = last.bg.x + last.bg.w + 50.0;
+    let cy = layout.bar.y + layout.bar.h / 2.0;
+    assert_eq!(layout.hit(cx, cy), None);
 }
 
 #[test]
@@ -105,7 +108,10 @@ fn tab_widths_shrink_when_many_tabs() {
     let bar = bar_with(20);
     let layout = TabBarLayout::compute(&bar, 800.0);
     let last = layout.tabs.last().unwrap();
-    assert!(last.bg.x + last.bg.w <= layout.new_tab.x + 1.0);
+    // Tabs must not overflow past the bar's right edge (minus the
+    // BAR_LEFT_PAD breathing room and the Windows caption strip).
+    let right_limit = layout.bar.w - BAR_LEFT_PAD - caption_strip_reserved_width();
+    assert!(last.bg.x + last.bg.w <= right_limit + 1.0);
 }
 
 #[test]
@@ -151,7 +157,7 @@ fn hidden_bar_does_not_capture_clicks() {
     let layout = TabBarLayout::compute(&bar, 800.0).with_visible(false);
     // (10, 5) would normally land squarely inside tab 0.
     assert_eq!(layout.hit(10.0, 5.0), None);
-    // The new-tab button region is also dead.
+    // The right-edge region is also dead.
     assert_eq!(layout.hit(790.0, 10.0), None);
     // And `point_over_bar` agrees.
     assert!(!layout.point_over_bar(10.0, 5.0));
@@ -176,7 +182,6 @@ fn with_top_offset_shifts_every_rect() {
     let base = TabBarLayout::compute(&bar, 800.0);
     let shifted = TabBarLayout::compute(&bar, 800.0).with_top_offset(28.0);
     assert_eq!(shifted.bar.y, base.bar.y + 28.0);
-    assert_eq!(shifted.new_tab.y, base.new_tab.y + 28.0);
     for (a, b) in shifted.tabs.iter().zip(base.tabs.iter()) {
         assert_eq!(a.bg.y, b.bg.y + 28.0);
         assert_eq!(a.close.y, b.close.y + 28.0);
@@ -317,20 +322,6 @@ fn inactive_tab_hover_bg_uses_white_6pct() {
     let c = sonic_shared::ui_tokens::color::BG_HOVER();
     let expected_a = 0x0F as f32 / 255.0; // hex "0F" ≈ 6 %
     assert!((c[3] - expected_a).abs() < 1e-3, "got alpha {}", c[3]);
-}
-
-#[test]
-fn new_tab_button_size_28x28() {
-    assert_eq!(NEW_TAB_BUTTON_WIDTH, 28.0);
-    assert_eq!(NEW_TAB_BUTTON_HEIGHT, 28.0);
-    // And the layout produces a 28x28 hit rect at the right edge of
-    // the bar, vertically centered in a 40px bar.
-    let bar = bar_with(2);
-    let layout = TabBarLayout::compute(&bar, 800.0);
-    assert!((layout.new_tab.w - 28.0).abs() < 0.01);
-    assert!((layout.new_tab.h - 28.0).abs() < 0.01);
-    // Centered vertically: y = (40 - 28) / 2 = 6.
-    assert!((layout.new_tab.y - 6.0).abs() < 0.01);
 }
 
 #[test]

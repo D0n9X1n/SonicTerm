@@ -392,14 +392,6 @@ impl App {
                                 }
                                 return;
                             }
-                            TabHit::NewTab => {
-                                let _ = child;
-                                self.spawn_tab_in_child(win_id);
-                                if let Some(c) = self.windows.get(&win_id) {
-                                    c.window.request_redraw();
-                                }
-                                return;
-                            }
                         }
                         child.window.request_redraw();
                         return;

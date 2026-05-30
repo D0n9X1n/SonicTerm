@@ -1053,27 +1053,26 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 ---
 
-## 38. Tab bar `+` new-tab button
+## 38. Tab bar new-tab affordance (keyboard-only after #335)
 
-**Setup:** launch Sonic with one tab; make the window narrow, then wide.
+**Setup:** launch Sonic with one tab.
 
 **Keystrokes / actions:**
 
 | macOS | Windows |
 |---|---|
-| Hover the `+` at the right edge of the tab strip, then click it three times. | Hover the `+` before the caption strip, then click it three times. |
-| Resize the window narrower and wider; repeat one click. | Resize narrower and wider; confirm it never overlaps `—` / `▢` / `✕`; repeat one click. |
-| Use `Cmd+T` once as a keyboard cross-check. | Use `Ctrl+Shift+T` once as a keyboard cross-check. |
+| Press `Cmd+T` three times. | Press `Ctrl+Shift+T` three times. |
+| Open the command palette (`Cmd+P`) → run `New Tab`. | Open the command palette (`Ctrl+P`) → run `New Tab`. |
+| Visually scan the tab strip for any leftover `+` glyph. | Same; also confirm tabs may now extend closer to the caption-button strip. |
 
 **Expected outcome:**
 
-- [ ] `+` is visible at the tab strip right edge (before caption buttons on Windows, before nothing on macOS).
-- [ ] Hover feedback appears before click.
-- [ ] Each click spawns exactly one new tab and focuses it.
-- [ ] Windows: `+` never overlaps caption buttons (#189 regression-guard).
-- [ ] Keyboard new-tab and mouse new-tab produce identical tab state.
+- [ ] No `+` button anywhere on the tab bar (issue #335 — removed; redundant with Cmd+T / palette).
+- [ ] Each `Cmd+T` / `Ctrl+Shift+T` spawns exactly one new tab and focuses it.
+- [ ] The command palette's `New Tab` entry still works.
+- [ ] Tab titles get the freed horizontal space (visibly wider than v0.x).
 
-**FAIL → block release.** Missing `+`, no hover state, no new tab, double-spawn, or Windows overlap.
+**FAIL → block release.** Any stray `+` glyph, missing keyboard new-tab, or palette entry that does nothing.
 
 ---
 
