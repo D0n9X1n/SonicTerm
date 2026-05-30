@@ -134,8 +134,10 @@ impl App {
             if Some(*id) == self.main_window_id {
                 continue;
             }
-            child.renderer.as_mut().unwrap().clear_shape_cache();
-            child.window.request_redraw();
+            if let Some(r) = child.renderer.as_mut() {
+                r.clear_shape_cache();
+                child.window.request_redraw();
+            }
         }
     }
 

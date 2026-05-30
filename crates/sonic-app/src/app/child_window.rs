@@ -39,6 +39,52 @@ use super::{
 };
 use crate::app::integrated_titlebar_inset;
 
+#[doc(hidden)]
+pub fn resize_renderer_and_panes_if_present(
+    renderer: &mut Option<GpuRenderer>,
+    panes: &HashMap<u64, PaneState>,
+    width: u32,
+    height: u32,
+) -> bool {
+    let Some(r) = renderer.as_mut() else { return false };
+    r.resize(width, height);
+    let (cols, rows) = r.cells();
+    for pane in panes.values() {
+        pane.parser.lock().grid_mut().resize(cols, rows);
+        if let Some(pty) = pane.pty.as_ref() {
+            (pty.resize)(cols, rows);
+        }
+    }
+    true
+}
+
+#[doc(hidden)]
+pub fn set_scale_factor_if_renderer_present(
+    renderer: &mut Option<GpuRenderer>,
+    scale_factor: f64,
+) -> bool {
+    let Some(r) = renderer.as_mut() else { return false };
+    r.set_scale_factor(scale_factor as f32);
+    true
+}
+
+#[doc(hidden)]
+pub fn child_window_resized_handles_no_renderer(child: &mut WindowState, width: u32, height: u32) {
+    if resize_renderer_and_panes_if_present(&mut child.renderer, &child.panes, width, height) {
+        child.window.request_redraw();
+    }
+}
+
+#[doc(hidden)]
+pub fn child_window_scale_factor_changed_handles_no_renderer(
+    child: &mut WindowState,
+    scale_factor: f64,
+) {
+    if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) {
+        child.window.request_redraw();
+    }
+}
+
 impl App {
     pub(super) fn handle_child_window_event(
         &mut self,
@@ -94,20 +140,21 @@ impl App {
                 let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = child
                     .tab_states
                     .get(tab_idx)
-                    .map(|st| {
-                        let (w, h) = child.renderer.as_mut().unwrap().logical_size();
-                        let top = child.renderer.as_mut().unwrap().top_inset();
-                        let pl = child.renderer.as_mut().unwrap().padding_left();
-                        let pr = child.renderer.as_mut().unwrap().padding_right();
-                        let bottom = child.renderer.as_mut().unwrap().bottom_inset();
-                        let pb = child.renderer.as_mut().unwrap().padding_bottom();
+                    .and_then(|st| {
+                        let r = child.renderer.as_ref()?;
+                        let (w, h) = r.logical_size();
+                        let top = r.top_inset();
+                        let pl = r.padding_left();
+                        let pr = r.padding_right();
+                        let bottom = r.bottom_inset();
+                        let pb = r.padding_bottom();
                         let outer = sonic_ui::pane::Rect::new(
                             pl,
                             top,
                             (w - pl - pr).max(0.0),
                             (h - top - bottom - pb).max(0.0),
                         );
-                        st.tree.layout(outer)
+                        Some(st.tree.layout(outer))
                     })
                     .unwrap_or_default();
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
@@ -195,26 +242,28 @@ impl App {
                             is_broadcast_receiver: false,
                         })
                         .collect();
-                    if let Err(e) = child.renderer.as_mut().unwrap().render(
-                        &mut panes_slice,
-                        &theme,
-                        child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
-                        child.selection.as_ref(),
-                        child.copy_mode.as_ref(),
-                        &child.tabs,
-                        search,
-                        // Epic #289 follow-up: render the app-level
-                        // command palette / cheat sheet HERE when they
-                        // were opened while this child window was OS
-                        // frontmost. Pre-fix these were hardcoded to
-                        // `None` so the palette silently appeared on
-                        // the main window instead.
-                        palette_for_render,
-                        cheatsheet_payload,
-                        None, // ime preedit: not exposed in child window yet
-                        pane.viewport_top_abs,
-                    ) {
-                        tracing::warn!("child render error: {e}");
+                    if let Some(r) = child.renderer.as_mut() {
+                        if let Err(e) = r.render(
+                            &mut panes_slice,
+                            &theme,
+                            child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
+                            child.selection.as_ref(),
+                            child.copy_mode.as_ref(),
+                            &child.tabs,
+                            search,
+                            // Epic #289 follow-up: render the app-level
+                            // command palette / cheat sheet HERE when they
+                            // were opened while this child window was OS
+                            // frontmost. Pre-fix these were hardcoded to
+                            // `None` so the palette silently appeared on
+                            // the main window instead.
+                            palette_for_render,
+                            cheatsheet_payload,
+                            None, // ime preedit: not exposed in child window yet
+                            pane.viewport_top_abs,
+                        ) {
+                            tracing::warn!("child render error: {e}");
+                        }
                     }
                     child.last_render = Instant::now();
                     // Epic #289 Phase C2 — publish this child's tab bar
@@ -228,13 +277,14 @@ impl App {
                         let inner_size = (isz.width, isz.height);
                         let sf = child.window.scale_factor() as f32;
                         let logical_w = inner_size.0 as f32 / sf.max(1.0);
+                        let Some(r) = child.renderer.as_ref() else { return };
                         let layout = TabBarLayout::compute_with_height(
                             &child.tabs,
                             logical_w,
-                            child.renderer.as_mut().unwrap().tab_bar_logical_height(),
+                            r.tab_bar_logical_height(),
                         )
-                        .with_top_offset(child.renderer.as_mut().unwrap().tab_bar_y_offset())
-                        .with_visible(child.renderer.as_mut().unwrap().tab_bar_visible());
+                        .with_top_offset(r.tab_bar_y_offset())
+                        .with_visible(r.tab_bar_visible());
                         let snap = crate::app::os_drag::TabBarSnapshot::from_layout(
                             Some(win_id),
                             inner_origin,
@@ -246,19 +296,19 @@ impl App {
                     }
                 }
             }
-            WindowEvent::Resized(size) => {
-                child.renderer.as_mut().unwrap().resize(size.width, size.height);
-                let (cols, rows) = child.renderer.as_mut().unwrap().cells();
-                for pane in child.panes.values() {
-                    pane.parser.lock().grid_mut().resize(cols, rows);
-                    if let Some(pty) = pane.pty.as_ref() {
-                        (pty.resize)(cols, rows);
-                    }
-                }
+            WindowEvent::Resized(size)
+                if resize_renderer_and_panes_if_present(
+                    &mut child.renderer,
+                    &child.panes,
+                    size.width,
+                    size.height,
+                ) =>
+            {
                 child.window.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                child.renderer.as_mut().unwrap().set_scale_factor(scale_factor as f32);
+            WindowEvent::ScaleFactorChanged { scale_factor, .. }
+                if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) =>
+            {
                 child.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -293,20 +343,23 @@ impl App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                let changed = child.renderer.as_mut().unwrap().set_hover_cursor(None);
-                if changed {
-                    child.window.request_redraw();
+                if let Some(r) = child.renderer.as_mut() {
+                    let changed = r.set_hover_cursor(None);
+                    if changed {
+                        child.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
-                let sf = child.renderer.as_mut().unwrap().scale_factor();
+                let Some(r) = child.renderer.as_mut() else { return };
+                let sf = r.scale_factor();
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 // Child window also drives the close-button hover dance
                 // through its OWN renderer — without this push the dim
                 // × stays the wrong brightness when the cursor crosses
                 // the glyph in a torn-out window.
-                if child.renderer.as_mut().unwrap().set_hover_cursor(Some((lx, ly))) {
+                if r.set_hover_cursor(Some((lx, ly))) {
                     child.window.request_redraw();
                 }
                 if let Some(s) = child.drag_session.as_mut() {
@@ -318,18 +371,17 @@ impl App {
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
                     let session_snapshot = *s;
-                    let bar_width = child.renderer.as_mut().unwrap().width() as f32
-                        / child.renderer.as_mut().unwrap().scale_factor();
+                    let bar_width = r.width() as f32 / r.scale_factor();
                     let layout = TabBarLayout::compute_with_height(
                         &child.tabs,
                         bar_width,
-                        child.renderer.as_mut().unwrap().tab_bar_logical_height(),
+                        r.tab_bar_logical_height(),
                     )
-                    .with_top_offset(child.renderer.as_mut().unwrap().tab_bar_y_offset())
-                    .with_visible(child.renderer.as_mut().unwrap().tab_bar_visible());
+                    .with_top_offset(r.tab_bar_y_offset())
+                    .with_visible(r.tab_bar_visible());
                     let chip =
                         crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
-                    child.renderer.as_mut().unwrap().set_drag_chip(chip);
+                    r.set_drag_chip(chip);
                 }
                 // Cross-window drag-merge from child: when a tab in the
                 // child's bar is held, look for a destination on another
@@ -347,11 +399,7 @@ impl App {
                     return;
                 }
                 if child.mouse_down {
-                    if let Some((row, col)) = child
-                        .renderer
-                        .as_mut()
-                        .unwrap()
-                        .pixel_to_cell(position.x as f32, position.y as f32)
+                    if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
                     {
                         if let Some(sel) = child.selection.as_mut() {
                             sel.extend(row, col);
@@ -363,16 +411,17 @@ impl App {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
-                    let sf = child.renderer.as_mut().unwrap().scale_factor();
+                    let Some(r) = child.renderer.as_ref() else { return };
+                    let sf = r.scale_factor();
                     let (px, py) = to_logical_pos(child.cursor_pos.0, child.cursor_pos.1, sf);
-                    let bar_width = child.renderer.as_mut().unwrap().width() as f32 / sf;
+                    let bar_width = r.width() as f32 / sf;
                     let layout = TabBarLayout::compute_with_height(
                         &child.tabs,
                         bar_width,
-                        child.renderer.as_mut().unwrap().tab_bar_logical_height(),
+                        r.tab_bar_logical_height(),
                     )
-                    .with_top_offset(child.renderer.as_mut().unwrap().tab_bar_y_offset())
-                    .with_visible(child.renderer.as_mut().unwrap().tab_bar_visible());
+                    .with_top_offset(r.tab_bar_y_offset())
+                    .with_visible(r.tab_bar_visible());
                     if let Some(hit) = layout.hit(px, py) {
                         match hit {
                             TabHit::Activate(i) => {
@@ -403,11 +452,8 @@ impl App {
                     child.mouse_down = true;
                     // `pixel_to_cell` still expects PHYSICAL px (it
                     // divides by scale_factor internally — PR #76).
-                    if let Some((row, col)) = child
-                        .renderer
-                        .as_ref()
-                        .unwrap()
-                        .pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
+                    if let Some((row, col)) =
+                        r.pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
                     {
                         child.selection = Some(Selection::new(row, col));
                         mark_all_panes_dirty(&child.panes);
@@ -419,7 +465,9 @@ impl App {
                     let foreign = child.drag_target.take();
                     let pressed = child.pressed_tab.take();
                     child.mouse_down = false;
-                    child.renderer.as_mut().unwrap().set_drag_chip(None);
+                    if let Some(r) = child.renderer.as_mut() {
+                        r.set_drag_chip(None);
+                    }
                     if let Some(sel) = child.selection.as_ref() {
                         if sel.is_empty() {
                             child.selection = None;
@@ -428,14 +476,15 @@ impl App {
                         }
                     }
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
-                        let sf = child.renderer.as_mut().unwrap().scale_factor();
-                        let bar_width = child.renderer.as_mut().unwrap().width() as f32 / sf;
+                        let Some(r) = child.renderer.as_ref() else { return };
+                        let sf = r.scale_factor();
+                        let bar_width = r.width() as f32 / sf;
                         let layout = TabBarLayout::compute_with_height(
                             &child.tabs,
                             bar_width,
-                            child.renderer.as_mut().unwrap().tab_bar_logical_height(),
+                            r.tab_bar_logical_height(),
                         )
-                        .with_top_offset(child.renderer.as_mut().unwrap().tab_bar_y_offset());
+                        .with_top_offset(r.tab_bar_y_offset());
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         // Release the child borrow before re-entering
                         // &mut self via the merge / tear path.
@@ -750,7 +799,10 @@ impl App {
             let Some(child) = self.windows.get_mut(&win_id) else {
                 return false;
             };
-            let (c, r) = child.renderer.as_mut().unwrap().cells();
+            let Some(renderer) = child.renderer.as_ref() else {
+                return false;
+            };
+            let (c, r) = renderer.cells();
             (c, r, child.window.clone(), child.cursor_visible.clone())
         };
         let pane_state =
@@ -925,7 +977,10 @@ impl App {
             let Some(child) = self.windows.get_mut(&win_id) else {
                 return false;
             };
-            let (c, r) = child.renderer.as_mut().unwrap().cells();
+            let Some(renderer) = child.renderer.as_ref() else {
+                return false;
+            };
+            let (c, r) = renderer.cells();
             (c, r, child.window.clone(), child.cursor_visible.clone())
         };
         let new_id = next_pane_id();
@@ -1031,7 +1086,8 @@ impl App {
 /// PTY winsize the same way.
 fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
-    let (cw, ch) = child.renderer.as_mut().unwrap().cell_size();
+    let Some(r) = child.renderer.as_ref() else { return };
+    let (cw, ch) = r.cell_size();
     crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch);
 }
 fn child_enter_copy_mode(child: &mut WindowState) {

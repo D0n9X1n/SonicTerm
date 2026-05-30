@@ -68,11 +68,9 @@ impl App {
                         r.set_theme(&t);
                     }
                     for child in self.windows.values_mut() {
-                        // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                        if child.renderer.is_none() {
-                            continue;
+                        if let Some(r) = child.renderer.as_mut() {
+                            r.set_theme(&t);
                         }
-                        child.renderer.as_mut().unwrap().set_theme(&t);
                     }
                     self.theme = t;
                     // Theme swap changes presentation (colors) without
@@ -107,11 +105,9 @@ impl App {
                 r.set_theme(&t);
             }
             for child in self.windows.values_mut() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_theme(&t);
                 }
-                child.renderer.as_mut().unwrap().set_theme(&t);
             }
             self.theme = t;
             mark_all_panes_dirty(&self.panes);
@@ -147,17 +143,10 @@ impl App {
             // change AND the matching pane resize against its own cell
             // metrics (its window can be a different size from main).
             for child in self.windows.values_mut() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
-                }
-                child.renderer.as_mut().unwrap().set_font(
-                    &new_cfg.font.family,
-                    new_cfg.font.size,
-                    new_cfg.font.line_height,
-                );
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                let (cw, ch) = r.cell_size();
                 let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = child.renderer.as_mut().unwrap().cell_size();
                 resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
             tracing::info!(
@@ -186,12 +175,10 @@ impl App {
             r.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
         for child in self.windows.values_mut() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
-            if child.renderer.is_none() {
-                continue;
+            if let Some(r) = child.renderer.as_mut() {
+                r.set_cursor_shape(new_cfg.terminal.cursor_shape);
+                r.set_cursor_blink(new_cfg.terminal.cursor_blink);
             }
-            child.renderer.as_mut().unwrap().set_cursor_shape(new_cfg.terminal.cursor_shape);
-            child.renderer.as_mut().unwrap().set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
 
         // Padding (per-side). A change to any of the four window-padding
@@ -224,13 +211,10 @@ impl App {
                 resize_panes_to_rects(&self.panes, &rects, cw, ch);
             }
             for child in self.windows.values_mut() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
-                }
-                child.renderer.as_mut().unwrap().set_padding(pad);
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_padding(pad);
+                let (cw, ch) = r.cell_size();
                 let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = child.renderer.as_mut().unwrap().cell_size();
                 resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
             tracing::info!(
@@ -247,15 +231,9 @@ impl App {
                 r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
             }
             for child in self.windows.values_mut() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
                 }
-                child
-                    .renderer
-                    .as_mut()
-                    .unwrap()
-                    .set_theme_with_opacity(&self.theme, new_cfg.appearance.opacity);
             }
             tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
         }
@@ -269,15 +247,9 @@ impl App {
                 r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             for child in self.windows.values_mut() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
                 }
-                child
-                    .renderer
-                    .as_mut()
-                    .unwrap()
-                    .set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             tracing::info!(
                 "live-reload: tab_close_button_color -> {:?}",
@@ -350,11 +322,9 @@ impl App {
             r.set_theme(&theme);
         }
         for child in self.windows.values_mut() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
-            if child.renderer.is_none() {
-                continue;
+            if let Some(r) = child.renderer.as_mut() {
+                r.set_theme(&theme);
             }
-            child.renderer.as_mut().unwrap().set_theme(&theme);
         }
         self.theme = theme;
         self.config.theme = name.to_string();
@@ -409,13 +379,10 @@ impl App {
             resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }
         for child in self.windows.values_mut() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
-            if child.renderer.is_none() {
-                continue;
-            }
-            child.renderer.as_mut().unwrap().set_font(&family, size, line_h);
+            let Some(r) = child.renderer.as_mut() else { continue };
+            r.set_font(&family, size, line_h);
+            let (cw, ch) = r.cell_size();
             let rects = App::compute_pane_rects_for(child);
-            let (cw, ch) = child.renderer.as_mut().unwrap().cell_size();
             resize_panes_to_rects(&child.panes, &rects, cw, ch);
         }
         if let Some(w) = self.window.as_ref() {
@@ -447,13 +414,10 @@ impl App {
             }
         }
         for child in self.windows.values_mut() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
-            if child.renderer.is_none() {
-                continue;
-            }
-            if child.renderer.as_mut().unwrap().set_tab_bar_visible(visible) {
+            let Some(r) = child.renderer.as_mut() else { continue };
+            if r.set_tab_bar_visible(visible) {
+                let (cw, ch) = r.cell_size();
                 let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = child.renderer.as_mut().unwrap().cell_size();
                 resize_panes_to_rects(&child.panes, &rects, cw, ch);
             }
         }
