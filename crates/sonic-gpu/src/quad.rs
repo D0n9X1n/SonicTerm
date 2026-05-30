@@ -100,6 +100,31 @@ impl QuadInstance {
     }
 }
 
+/// Blend descriptor for premultiplied-alpha sources. `QuadInstance::color`
+/// is documented as premultiplied (see field doc) and `ui_tokens.rs`
+/// constructs all chrome colors that way, so the pipeline must use
+/// `src=One, dst=OneMinusSrcAlpha` for both color and alpha (matching
+/// `text_pipeline`). Using `wgpu::BlendState::ALPHA_BLENDING` (straight-alpha
+/// factors `src=SrcAlpha, dst=OneMinusSrcAlpha`) double-multiplies the
+/// alpha, which on transparent Win11 Mica surfaces makes dark tab chrome
+/// blend nearly into the clear backdrop — the invisible-tab-bar bug
+/// tracked by #375.
+#[must_use]
+pub fn premultiplied_alpha_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
 /// wgpu render pipeline + a growable instance buffer for `QuadInstance`s.
 /// Constructed once at GPU init, drawn one `draw()` call per frame.
 pub struct QuadPipeline {
@@ -221,7 +246,7 @@ impl QuadPipeline {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(premultiplied_alpha_blend()),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
