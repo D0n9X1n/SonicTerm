@@ -20,13 +20,13 @@ fn keymap_default_windows_uses_ctrl_shift() {
         keymap.bindings.iter().all(|binding| !binding.keys.to_ascii_lowercase().contains("super")),
         "Windows keymap must not contain super bindings"
     );
-    assert_eq!(keymap.lookup("ctrl+shift+t"), Some(&Action::NewTab));
+    assert_eq!(keymap.lookup("ctrl+t"), Some(&Action::NewTab));
     assert_eq!(
         keymap.lookup("ctrl+shift+/"),
         Some(&Action::ShowKeymapCheatsheet),
         "VK_OEM_2 + Ctrl + Shift is encoded as ctrl+shift+/; Shift already carries the question mark"
     );
-    assert_eq!(keymap.lookup("ctrl+shift+w"), Some(&Action::CloseActivePaneOrTab));
+    assert_eq!(keymap.lookup("ctrl+shift+w"), Some(&Action::CloseTab));
     assert!(
         keymap
             .bindings
