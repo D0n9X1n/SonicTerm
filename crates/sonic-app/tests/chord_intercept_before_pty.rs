@@ -57,6 +57,13 @@ fn keymap() -> Keymap {
     }
 }
 
+fn keymap_with(binding: &str, action: Action) -> Keymap {
+    Keymap {
+        meta: Meta { name: "test".into(), version: "0".into() },
+        bindings: vec![Binding { keys: binding.into(), action: ActionWrapper(action) }],
+    }
+}
+
 #[test]
 fn ctrl_t_binding_dispatches_before_pty_control_byte() {
     let mut app = App::new(synth_theme(), Config::default(), keymap());
@@ -88,4 +95,37 @@ fn unbound_ctrl_t_still_encodes_control_byte() {
 
     assert_eq!(action, None);
     assert_eq!(pty_bytes, Some(vec![0x14]));
+}
+
+#[test]
+fn ctrl_shift_p_binding_dispatches_palette_before_pty_control_byte() {
+    let mut app = App::new(
+        synth_theme(),
+        Config::default(),
+        keymap_with("ctrl+shift+p", Action::OpenCommandPalette),
+    );
+    app.__test_seed_tab("alpha");
+
+    let (action, pty_bytes) = app.__test_dispatch_key_or_encode_pty(
+        &Key::Character(SmolStr::new("P")),
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+    );
+
+    assert_eq!(action, Some(Action::OpenCommandPalette));
+    assert_eq!(pty_bytes, None, "Ctrl+Shift+P must not leak ^P (0x10) to the PTY");
+}
+
+#[test]
+fn ctrl_shift_d_binding_dispatches_split_before_pty_control_byte() {
+    let mut app =
+        App::new(synth_theme(), Config::default(), keymap_with("ctrl+shift+d", Action::SplitRight));
+    app.__test_seed_tab("alpha");
+
+    let (action, pty_bytes) = app.__test_dispatch_key_or_encode_pty(
+        &Key::Character(SmolStr::new("D")),
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+    );
+
+    assert_eq!(action, Some(Action::SplitRight));
+    assert_eq!(pty_bytes, None, "Ctrl+Shift+D must not leak ^D (0x04) to the PTY");
 }

@@ -30,3 +30,10 @@ fn windows_ctrl_shift_slash_uses_unshifted_key_name() {
     let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert_eq!(shortcut("/", mods), "ctrl+shift+/");
 }
+
+#[test]
+fn windows_ctrl_shift_letter_prefers_lowercase_unshifted_key_name() {
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert_eq!(shortcut("P", mods), "ctrl+shift+p");
+    assert_eq!(shortcut("D", mods), "ctrl+shift+d");
+}
