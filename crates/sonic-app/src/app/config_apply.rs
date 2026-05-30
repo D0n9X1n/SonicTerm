@@ -38,6 +38,28 @@ use super::{
 };
 use crate::app::integrated_titlebar_inset;
 
+fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {
+    let fg = theme.colors.foreground.rgb();
+    let bg = theme.colors.background.rgb();
+    let cursor = theme.colors.cursor.rgb();
+
+    for pane in panes.values() {
+        // Config live-reload runs on the app thread, not the render hot path,
+        // so lock() is intentional here. Dropping this update would leave OSC
+        // 10/11/12 replies stale for shells already attached to the pane.
+        let mut parser = pane.parser.lock();
+        if let Some((r, g, b)) = fg {
+            parser.set_theme_fg(r, g, b);
+        }
+        if let Some((r, g, b)) = bg {
+            parser.set_theme_bg(r, g, b);
+        }
+        if let Some((r, g, b)) = cursor {
+            parser.set_theme_cursor(r, g, b);
+        }
+    }
+}
+
 /// True iff any field in `new_cfg.font` differs from `old_cfg.font`
 /// (family, size, or line_height) in a way that should drive a live
 /// renderer re-apply.
@@ -73,6 +95,10 @@ impl App {
                         }
                     }
                     self.theme = t;
+                    propagate_theme_to_pane_parsers(&self.panes, &self.theme);
+                    for child in self.windows.values() {
+                        propagate_theme_to_pane_parsers(&child.panes, &self.theme);
+                    }
                     // Theme swap changes presentation (colors) without
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
@@ -110,6 +136,10 @@ impl App {
                 }
             }
             self.theme = t;
+            propagate_theme_to_pane_parsers(&self.panes, &self.theme);
+            for child in self.windows.values() {
+                propagate_theme_to_pane_parsers(&child.panes, &self.theme);
+            }
             mark_all_panes_dirty(&self.panes);
             for child in self.windows.values() {
                 // Phase B2 PR-A: skip shadow main entry (renderer=None).
@@ -331,6 +361,10 @@ impl App {
         }
         self.theme = theme;
         self.config.theme = name.to_string();
+        propagate_theme_to_pane_parsers(&self.panes, &self.theme);
+        for child in self.windows.values() {
+            propagate_theme_to_pane_parsers(&child.panes, &self.theme);
+        }
         // Theme swap changes presentation (colors) without mutating
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.

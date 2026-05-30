@@ -30,6 +30,19 @@ fn osc_11_query_replies_with_theme_background() {
 }
 
 #[test]
+fn osc_11_query_uses_updated_theme_background() {
+    let (tx, rx) = unbounded();
+    let mut p = Parser::new_with_reply(Grid::new(10, 5), tx);
+    p.set_theme_bg(0x14, 0x16, 0x17);
+    p.advance(b"\x1b]11;?\x1b\\");
+    assert_eq!(drain(&rx), b"\x1b]11;rgb:1414/1616/1717\x1b\\");
+
+    p.set_theme_bg(0x28, 0x2a, 0x36);
+    p.advance(b"\x1b]11;?\x1b\\");
+    assert_eq!(drain(&rx), b"\x1b]11;rgb:2828/2a2a/3636\x1b\\");
+}
+
+#[test]
 fn osc_10_query_replies_with_theme_foreground() {
     let (tx, rx) = unbounded();
     let mut p = Parser::new_with_reply(Grid::new(10, 5), tx);
