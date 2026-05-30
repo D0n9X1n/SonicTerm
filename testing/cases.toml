@@ -1338,7 +1338,7 @@ setup = ["clear", "wait:0.3"]
 # rows stale because IL/DL were silently dropped into the wildcard arm.
 # Wrapped in ?2026 h/l (synchronized output) to also exercise the new mode-arm.
 keystrokes = [
-  { kind = "text", value = "printf '\\033[?2026hAAAAAAAAAA\\nBBBBBBBBBB\\nCCCCCCCCCC\\nDDDDDDDDDD\\nEEEEEEEEEE\\033[2;4r\\033[2;1H\\033[1M\\033[5;1HNEW\\033[?2026l\\n'" },
+  { kind = "text", value = "printf '\\033[?2026hAAAAAAAAAA\\nBBBBBBBBBB\\nCCCCCCCCCC\\nDDDDDDDDDD\\nEEEEEEEEEE\\033[2;4r\\033[2;1H\\033[1M\\033[4;1H\\033[1LNEW\\033[?2026l\\n'" },
   { kind = "key", value = "enter" },
   { kind = "wait", value = 1.0 },
 ]

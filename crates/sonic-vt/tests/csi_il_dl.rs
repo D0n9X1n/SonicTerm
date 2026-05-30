@@ -71,15 +71,17 @@ fn nvim_hold_j_batched_scroll_renders_no_stale_rows() {
     p.advance(b"\x1b[2;4r"); // DECSTBM body rows 1..3
     p.advance(b"\x1b[2;1H"); // CUP top of body
     p.advance(b"\x1b[1M"); // DL 1 -> body rows shift up
-    p.advance(b"\x1b[5;1H"); // CUP bottom row
+    p.advance(b"\x1b[4;1H"); // CUP bottom of body (inside DECSTBM)
+    p.advance(b"\x1b[1L"); // IL 1 -> blank line inserted at body bottom
     p.advance(b"NEW");
 
     assert_eq!(row_text(&p, 0), "AAAAAAAAAA");
     assert_eq!(row_text(&p, 1), "CCCCCCCCCC");
     assert_eq!(row_text(&p, 2), "DDDDDDDDDD");
-    assert_eq!(row_text(&p, 3), "          ");
-    // Row 4 is outside the scroll region; "NEW" overwrites its first 3 cols.
-    assert_eq!(&row_text(&p, 4)[..3], "NEW");
+    // IL creates the blank body-bottom line that the new nvim row then fills.
+    assert_eq!(row_text(&p, 3), "NEW       ");
+    // Row 4 is outside the scroll region and must remain untouched.
+    assert_eq!(row_text(&p, 4), "EEEEEEEEEE");
 }
 
 #[test]
