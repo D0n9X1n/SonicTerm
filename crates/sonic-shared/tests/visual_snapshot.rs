@@ -275,10 +275,9 @@ fn hamming(a: &[u8], b: &[u8]) -> u32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
 
-// Ignored by fix(text): P0 mac glyph blur — atlas / swash 1-byte vs
-// 4-byte coverage mismatch from PR #267 was concealed by baselines
-// Baselines were poisoned by PR #282 and the test was ignored while
-// PR #284 pinned the correct pixel-byte contract via
+// Baselines were poisoned by PR #282 (concealing the atlas / swash
+// 1-byte vs 4-byte coverage mismatch from #267) and the test was
+// ignored while PR #284 pinned the correct pixel-byte contract via
 // `mono_alpha_byte_layout` in sonic-text. Baselines refreshed on
 // 2026-05-29 from a corrected mac build (closes #283). If this test
 // drifts again, run `scripts/check-visual-snapshots.sh` for guidance.
