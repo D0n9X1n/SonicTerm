@@ -1721,9 +1721,26 @@ impl App {
         key: &winit::keyboard::Key,
         mods: winit::keyboard::ModifiersState,
     ) -> (Option<Action>, Option<Vec<u8>>) {
+        self.__test_dispatch_key_or_encode_pty_with_drain(key, mods, false)
+    }
+
+    /// Test-only mirror of the child-window KeyboardInput action path.
+    /// The production child handler drains `pending_new_window` immediately
+    /// after `run_action`; this helper exposes the same post-dispatch state
+    /// without requiring a live `ActiveEventLoop`.
+    #[doc(hidden)]
+    pub fn __test_dispatch_key_or_encode_pty_with_drain(
+        &mut self,
+        key: &winit::keyboard::Key,
+        mods: winit::keyboard::ModifiersState,
+        simulate_drain: bool,
+    ) -> (Option<Action>, Option<Vec<u8>>) {
         for key_str in key_to_strings(key, mods) {
             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                 if self.run_action(&action) {
+                    if simulate_drain && self.pending_new_window {
+                        self.pending_new_window = false;
+                    }
                     return (Some(action), None);
                 }
             }
