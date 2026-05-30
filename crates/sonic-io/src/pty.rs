@@ -4,9 +4,10 @@
 //! directly. `PtyHandle` owns the slave-side child and the master read/write
 //! pair, all decoupled by channels for use from the render thread.
 
+#[cfg(target_os = "windows")]
+use std::path::{Path, PathBuf};
 use std::{
     io::{Read, Write},
-    path::{Path, PathBuf},
     sync::Arc,
     thread,
 };

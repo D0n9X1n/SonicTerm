@@ -203,12 +203,14 @@ fn default_threshold_secs() -> u64 {
     10
 }
 
-/// Default for [`Config::quit_on_last_window_close`]: `false`. This
-/// matches the Chrome/Firefox/Safari behavior on macOS — the app stays
-/// alive after the last window closes so the user can re-open one
-/// without a cold start.
+/// Default for [`Config::quit_on_last_window_close`]: `true`.
+/// Traditional terminal behavior: closing the last window quits the
+/// app. Set `quit_on_last_window_close = false` in `sonic.toml` for
+/// Chrome/Firefox/Safari-style dock-alive behavior where the process
+/// stays running after the last window closes (macOS only — other
+/// platforms always exit since they have no dock concept).
 fn default_quit_on_last_window_close() -> bool {
-    false
+    true
 }
 
 impl Default for NotificationsConfig {

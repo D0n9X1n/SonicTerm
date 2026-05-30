@@ -768,6 +768,13 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
+    /// Deferred app-exit request. Set from `run_action` when the user's
+    /// Cmd+W chain has just closed the last tab of the last window AND
+    /// `Config::quit_on_last_window_close` is true (or non-macOS).
+    /// `do_about_to_wait` drains it by calling `el.exit()`. The flag is
+    /// needed because `run_action` does not have an `ActiveEventLoop`
+    /// handle.
+    pub(super) pending_exit: bool,
     /// IME composition state for CJK / other multi-key input methods.
     pub(super) ime: ImeState,
     /// Throttle for `Window::set_ime_cursor_area`. Without this every
@@ -1071,6 +1078,7 @@ impl App {
             hovered_url: None,
             cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_new_window: false,
+            pending_exit: false,
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
@@ -1264,9 +1272,9 @@ fn notify_command_done(body: String) {
 impl App {
     /// Returns `true` when closing the last window should exit the
     /// process, given a config. On macOS we honor
-    /// [`Config::quit_on_last_window_close`] (default `false` →
-    /// Chrome/Firefox-style: stay alive in the dock, waiting for
-    /// `Cmd+N`). On other platforms there is no dock concept, so we
+    /// [`Config::quit_on_last_window_close`] (default `true` →
+    /// traditional terminal: closing the last window quits the app;
+    /// set to `false` for Chrome/Firefox-style dock-alive). On other platforms there is no dock concept, so we
     /// always exit once the last window is gone — the config is
     /// ignored. Exposed (test-only) so behavior is verifiable without
     /// building a real winit event loop.
@@ -1455,6 +1463,40 @@ impl App {
     #[doc(hidden)]
     pub fn __test_main_hidden(&self) -> bool {
         self.main_hidden
+    }
+
+    /// Test-only: read the deferred-exit flag set by `run_action`
+    /// when the user's Cmd+W chain has drained the last tab of the
+    /// last window in `quit_on_last_window_close = true` mode.
+    #[doc(hidden)]
+    pub fn __test_pending_exit(&self) -> bool {
+        self.pending_exit
+    }
+
+    /// Unified "did this close just empty the affected window?" check
+    /// for the keymap path. Mirrors what the mouse-click close-button
+    /// path in `window_event.rs` and the OS `CloseRequested` arm do —
+    /// hide the main window (or exit, on the last window) when its
+    /// tabs vec is empty, and reap child windows the same way the drag-
+    /// merge path does. The flag set here is drained in
+    /// `do_about_to_wait`.
+    pub(super) fn reap_empty_main_window_after_close(&mut self) {
+        if !self.tabs.is_empty() {
+            return;
+        }
+        if self.windows.is_empty() {
+            if Self::should_exit_on_last_window_close(&self.config) {
+                self.pending_exit = true;
+            } else {
+                // Chrome-style: keep the process alive but hide the
+                // empty main window.
+                self.hide_main_window();
+            }
+        } else {
+            // Children still own tabs — just hide main; exit decision
+            // happens when the last child closes.
+            self.hide_main_window();
+        }
     }
 
     /// Test-only: force-set the `main_hidden` latch so post-merge

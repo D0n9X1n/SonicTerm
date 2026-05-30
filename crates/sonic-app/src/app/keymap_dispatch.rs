@@ -87,6 +87,7 @@ impl App {
                 }
                 let i = self.tabs.active_index();
                 self.close_tab_at(i);
+                self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -181,6 +182,13 @@ impl App {
                 } else {
                     self.close_tab_at(i);
                 }
+                // Unified reap path: if the main window's tabs vec is
+                // now empty, either hide it (Chrome-style) or set the
+                // deferred-exit flag (traditional terminal-style).
+                // `do_about_to_wait` drains `pending_exit` against the
+                // live `ActiveEventLoop`. Mirrors the mouse close-button
+                // path in `window_event.rs` (~line 637).
+                self.reap_empty_main_window_after_close();
             }
             Action::TogglePaneZoom => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {

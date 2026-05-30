@@ -28,6 +28,17 @@ use winit::event_loop::ControlFlow;
 
 impl App {
     pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // Deferred-exit drain: `run_action` (keymap dispatcher) sets
+        // `pending_exit` when the user's Cmd+W chain has just closed
+        // the last tab of the last window in
+        // `quit_on_last_window_close = true` mode. The dispatcher does
+        // not have an `ActiveEventLoop` handle, so honoring it here is
+        // the first opportunity to call `el.exit()`.
+        if self.pending_exit {
+            self.pending_exit = false;
+            el.exit();
+            return;
+        }
         // Schedule the next blink-only redraw via `WaitUntil(..)`
         // rather than `request_redraw()` from inside the render path
         // (which produced the tight redraw loop flagged on PR #81).
