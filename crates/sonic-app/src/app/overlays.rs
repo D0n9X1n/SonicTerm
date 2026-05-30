@@ -220,7 +220,7 @@ impl App {
         if let Some(st) = self.tab_states.get_mut(i) {
             st.search = Some(s);
         }
-        if let Some(w) = self.window.as_ref() {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
     }
@@ -259,7 +259,7 @@ impl App {
                 }
             }
             None => {
-                if let Some(w) = self.window.as_ref() {
+                if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }

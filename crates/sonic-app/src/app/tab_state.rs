@@ -70,7 +70,7 @@ impl App {
             if let Some(pty) = pane.pty.as_ref() {
                 (pty.resize)(cols, rows);
             }
-            *pane.redraw_target.lock() = self.window.clone();
+            *pane.redraw_target.lock() = self.main_window().cloned();
             self.panes.insert(id, pane);
         }
         let idx = index.min(self.tabs.len());

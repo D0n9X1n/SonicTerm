@@ -632,7 +632,7 @@ impl App {
         target: crate::tab_drag::DropTarget<WindowId>,
     ) {
         let Some((tab, state, panes)) = self.detach_from_child(src_id, src_idx) else { return };
-        let main_id = self.window.as_ref().map(|w| w.id());
+        let main_id = self.main_window().map(|w| w.id());
         let attached = if Some(target.window) == main_id {
             self.attach_tab_state(target.slot, tab, state, panes);
             // Receiving a tab back into main un-hides the window if it
@@ -651,7 +651,7 @@ impl App {
             );
         }
         self.reap_empty_child(src_id);
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
     }
@@ -695,19 +695,19 @@ impl App {
         if self.tabs.is_empty() && self.child_window_count() > 0 {
             self.hide_main_window();
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.request_redraw();
         }
     }
     pub(super) fn hide_main_window(&mut self) {
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.set_visible(false);
         }
         self.main_hidden = true;
         tracing::info!("main window hidden (drained); windows={}", self.windows.len());
     }
     pub(super) fn show_main_window(&mut self) {
-        if let Some(w) = &self.window {
+        if let Some(w) = self.main_window() {
             w.set_visible(true);
         }
         self.main_hidden = false;

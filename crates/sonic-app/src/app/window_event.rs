@@ -222,6 +222,12 @@ impl App {
                 let cheatsheet_render = (self.cheatsheet_open
                     && self.cheatsheet_attached_window.is_none())
                 .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
+                // PR-B1a: lift the main window Arc clone before the
+                // mut borrow on `self.renderer` below, so the IME
+                // cursor-area branch can still touch
+                // `self.ime_cursor_throttle` (mut) without re-borrowing
+                // `self`.
+                let main_window_for_ime = self.main_window().cloned();
                 if let (Some(r), Some(pane)) =
                     (self.renderer.as_mut(), self.panes.get_mut(&active_id))
                 {
@@ -328,7 +334,7 @@ impl App {
                     // immediately below the cell being edited — not
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
-                    if let Some(w) = &self.window {
+                    if let Some(w) = main_window_for_ime {
                         if self.ime_cursor_throttle.should_update(cursor_rc.0, cursor_rc.1) {
                             let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
                             let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
@@ -397,7 +403,7 @@ impl App {
                         }
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = self.main_window().cloned() {
                     // Intentionally do NOT toggle `set_ime_allowed` on
                     // focus transitions. macOS' IMK posts a runloop
                     // wake message on every toggle; doing it on every
@@ -437,7 +443,7 @@ impl App {
                 // unchanged, otherwise the OS candidate window stays
                 // pinned to the pre-resize pixel location.
                 self.ime_cursor_throttle.reset();
-                if let Some(w) = &self.window {
+                if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }
@@ -447,7 +453,7 @@ impl App {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_scale_factor(scale_factor as f32);
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }
@@ -461,7 +467,7 @@ impl App {
                 // so a subsequent re-press while still hovering brings
                 // the affordance back without needing a CursorMoved.
                 self.refresh_hovered_url();
-                if let Some(w) = &self.window {
+                if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }
@@ -476,7 +482,7 @@ impl App {
                     redraw = true;
                 }
                 if redraw {
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                 }
@@ -493,7 +499,7 @@ impl App {
                     // A bare hover-move over the tab bar must repaint —
                     // otherwise the muted × → bright × transition lags
                     // until the next unrelated event.
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                 }
@@ -509,8 +515,7 @@ impl App {
                         .unwrap_or_default();
                     let session_snapshot = *s;
                     let window_width = self
-                        .window
-                        .as_ref()
+                        .main_window()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
                     let (bar_h, top_off, visible) = self
@@ -556,7 +561,7 @@ impl App {
                             }
                         }
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
@@ -569,7 +574,7 @@ impl App {
                             if let Some(sel) = self.selection.as_mut() {
                                 sel.extend(row, col);
                                 mark_all_panes_dirty(&self.panes);
-                                if let Some(w) = &self.window {
+                                if let Some(w) = self.main_window() {
                                     w.request_redraw();
                                 }
                             }
@@ -593,14 +598,12 @@ impl App {
                     // can fire once for the new gesture.
                     self.os_drag_handoff_started = false;
                     let sf = self
-                        .window
-                        .as_ref()
+                        .main_window()
                         .map(|w| w.scale_factor() as f32)
                         .unwrap_or(self.scale_factor as f32);
                     let (px, py) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
                     let window_width = self
-                        .window
-                        .as_ref()
+                        .main_window()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
                     let layout = TabBarLayout::compute_with_height(
@@ -641,7 +644,7 @@ impl App {
                                 self.hide_main_window();
                             }
                         }
-                        if let Some(w) = &self.window {
+                        if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
                         // Keep mouse_down=true when we recorded a tab
@@ -734,7 +737,7 @@ impl App {
                             mark_all_panes_dirty(&self.panes);
                         }
                     }
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                 }
@@ -751,8 +754,7 @@ impl App {
                     }
                     if let (Some(s), Some(idx)) = (session, pressed) {
                         let window_width = self
-                            .window
-                            .as_ref()
+                            .main_window()
                             .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                             .unwrap_or(0.0);
                         let layout = TabBarLayout::compute_with_height(
@@ -782,7 +784,7 @@ impl App {
                                 self.tear_out_tab(el, idx);
                             }
                         }
-                        if let Some(w) = &self.window {
+                        if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
                     }
@@ -790,7 +792,7 @@ impl App {
                         if sel.is_empty() {
                             self.selection = None;
                             mark_all_panes_dirty(&self.panes);
-                            if let Some(w) = &self.window {
+                            if let Some(w) = self.main_window() {
                                 w.request_redraw();
                             }
                         }
@@ -814,7 +816,7 @@ impl App {
                         }
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }
@@ -829,7 +831,7 @@ impl App {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::ShowKeymapCheatsheet) {
                                 self.run_action(&action);
-                                if let Some(w) = &self.window {
+                                if let Some(w) = self.main_window() {
                                     w.request_redraw();
                                 }
                                 return;
@@ -838,7 +840,7 @@ impl App {
                     }
                     self.cheatsheet_handle_key(&event);
                     self.drain_pending_window_creates(el);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
@@ -851,7 +853,7 @@ impl App {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::OpenCommandPalette) {
                                 self.run_action(&action);
-                                if let Some(w) = &self.window {
+                                if let Some(w) = self.main_window() {
                                     w.request_redraw();
                                 }
                                 return;
@@ -860,7 +862,7 @@ impl App {
                     }
                     self.command_palette_handle_key(&event);
                     self.drain_pending_window_creates(el);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
@@ -873,7 +875,7 @@ impl App {
                 if self.ime.is_composing() {
                     if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                         self.ime.cancel();
-                        if let Some(w) = &self.window {
+                        if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
                     }
@@ -881,7 +883,7 @@ impl App {
                 }
                 if self.copy_mode.is_some() {
                     self.copy_mode_handle_key(&event);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
@@ -891,7 +893,7 @@ impl App {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if !matches!(action, Action::OpenSearch) {
                                 self.run_action(&action);
-                                if let Some(w) = &self.window {
+                                if let Some(w) = self.main_window() {
                                     w.request_redraw();
                                 }
                                 return;
@@ -899,7 +901,7 @@ impl App {
                         }
                     }
                     self.search_handle_key(&event, self.modifiers);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
@@ -908,7 +910,7 @@ impl App {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
                             self.drain_pending_window_creates(el);
-                            if let Some(w) = &self.window {
+                            if let Some(w) = self.main_window() {
                                 w.request_redraw();
                             }
                             return;
@@ -920,7 +922,7 @@ impl App {
                     if self.selection.is_some() {
                         self.selection = None;
                         mark_all_panes_dirty(&self.panes);
-                        if let Some(w) = &self.window {
+                        if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
                     }
