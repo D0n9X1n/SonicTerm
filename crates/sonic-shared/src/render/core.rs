@@ -1,13 +1,12 @@
 //! GPU renderer for the terminal grid using wgpu 29 + glyphon 0.11.
 #![allow(deprecated)] // PR #119 deprecated literal `color::*` helpers — one residual site (drop-line indicator) pending migration.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use sonic_core::{
     config::BackdropKind,
@@ -28,7 +27,6 @@ use super::drag_chip::{DragChipOverlay, DragChipVisual};
 use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
 use super::tab_spans::{
     build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
-    TabTitleRichTextSpans,
 };
 
 /// Renderer compositor settings that affect surface configuration.
@@ -130,7 +128,7 @@ use crate::{
     quad::{push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline, ICON_CLOSE_8},
     search::SearchState,
     selection::Selection,
-    shape::{run_is_ascii_fast, RunStyle, ShapeCache},
+    shape::{run_is_ascii_fast, shape_run, RunStyle, ShapeCache},
     swash_rasterizer::{self, SwashRasterizer},
     tabbar_view::{tab_bar_height, TabBarLayout, TAB_GAP},
     tabs::TabBar,
@@ -279,7 +277,6 @@ pub struct GpuRenderer {
     /// overlay glyphs always paint on top of terminal content (fix for
     /// PR #45 review: overlays were being undercut by terminal text).
     text_renderer_overlay: TextRenderer,
-    tab_buffer: Buffer,
     quad: QuadPipeline,
     /// Second QuadPipeline for overlay backgrounds / accents drawn AFTER
     /// terminal text. Same rationale as `text_renderer_overlay`: a single
@@ -510,6 +507,114 @@ struct FrameKey {
     broadcast_receivers_hash: u64,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabTitleGlyphDebug {
+    pub raster_px: f32,
+    pub rect: [f32; 4],
+    pub px_size: [u32; 2],
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn emit_tab_title_glyphs(
+    glyph_atlas: &mut GlyphAtlas,
+    font_family: &str,
+    raster_px: f32,
+    scale_factor: f32,
+    rasterizer: &mut SwashRasterizer,
+    spans: &[(&str, Attrs<'_>)],
+    baseline_y: f32,
+    avg_glyph_w: f32,
+    sw: f32,
+    sh: f32,
+    glyph_instances: &mut Vec<GlyphInstance>,
+    mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
+) {
+    let inv_s = 1.0 / scale_factor;
+    let mut pen_cols = 0_u16;
+    for (text, attrs) in spans {
+        if text.is_empty() {
+            continue;
+        }
+        let color = attrs.color_opt.unwrap_or(GColor::rgb(255, 255, 255));
+        let style = RunStyle {
+            bold: attrs.weight.0 >= glyphon::fontdb::Weight::BOLD.0,
+            italic: attrs.style == Style::Italic,
+        };
+        let cells: Vec<(u16, Cell)> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                (
+                    pen_cols.saturating_add(i as u16),
+                    Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()),
+                )
+            })
+            .collect();
+        let shaped = shape_run(rasterizer, font_family, raster_px, style, &cells);
+        let mut cell_by_col: HashMap<u16, Cell> = HashMap::with_capacity(cells.len());
+        for (col, cell) in &cells {
+            cell_by_col.insert(*col, cell.clone());
+        }
+        let rgba = glyphon_color_to_linear_rgba(color);
+        for g in shaped {
+            let Some(lead_cell) = cell_by_col.get(&g.lead_col) else {
+                continue;
+            };
+            if g.glyph_id == 0 && (lead_cell.ch == '\0' || lead_cell.ch.is_whitespace()) {
+                continue;
+            }
+            let key = if g.glyph_id == 0 {
+                let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic)
+                else {
+                    continue;
+                };
+                sonic_core::glyph_key::GlyphKey {
+                    ch: lead_cell.ch,
+                    font_slot: slot,
+                    weight_bold: style.bold,
+                    italic: style.italic,
+                    glyph_id: 0,
+                }
+            } else {
+                sonic_core::glyph_key::GlyphKey::shaped(
+                    g.ch,
+                    g.font_slot,
+                    g.glyph_id,
+                    style.bold,
+                    style.italic,
+                )
+            };
+            let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                continue;
+            };
+            if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                continue;
+            }
+            let gx = f32::from(g.lead_col) * avg_glyph_w + info.px_offset[0] as f32 * inv_s;
+            let gy = baseline_y + info.px_offset[1] as f32 * inv_s;
+            let gw = info.px_size[0] as f32 * inv_s;
+            let gh = info.px_size[1] as f32 * inv_s;
+            let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
+            let color = if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { rgba };
+            glyph_instances.push(GlyphInstance {
+                rect,
+                uv: info.uv,
+                color,
+                flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            });
+            if let Some(out) = debug.as_deref_mut() {
+                out.push(TabTitleGlyphDebug {
+                    raster_px,
+                    rect: [gx, gy, gw, gh],
+                    px_size: info.px_size,
+                });
+            }
+        }
+        pen_cols = pen_cols.saturating_add(text.chars().count() as u16);
+    }
+}
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
     /// device + pipelines, the cosmic-text font system, the glyph atlas,
@@ -622,19 +727,6 @@ impl GpuRenderer {
         // text_pipeline draws it directly. We still construct
         // `metrics` to share it with measure_cell below.
         let _ = metrics;
-
-        // A second buffer is used for the tab-bar titles. Tab titles use a
-        // tighter line height than the terminal grid; one buffer per bar
-        // means we only re-shape titles when the tab set changes.
-        //
-        // Tab title size = body font size + 1pt so the bar reads slightly
-        // heavier than the grid below it (design polish per PR
-        // "tabbar: centered title with config font, larger size").
-        let tab_font_size = tab_title_font_size(font_size);
-        let tab_metrics = Metrics::new(tab_font_size, tab_font_size * 1.2);
-        let mut tab_buffer = Buffer::new(&mut font_system, tab_metrics);
-        let bar_h = tab_bar_height(font_size);
-        tab_buffer.set_size(&mut font_system, Some(size.width as f32 / scale_factor), Some(bar_h));
 
         let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
 
@@ -758,7 +850,6 @@ impl GpuRenderer {
             atlas,
             text_renderer,
             text_renderer_overlay,
-            tab_buffer,
             quad,
             quad_overlay,
             glyph_atlas,
@@ -847,8 +938,6 @@ impl GpuRenderer {
         // give them 2× the room on Retina.
         let logical_w = self.config.width as f32 / self.scale_factor;
         let logical_h = self.config.height as f32 / self.scale_factor;
-        let bar_h = self.tab_bar_logical_height();
-        self.tab_buffer.set_size(&mut self.font_system, Some(logical_w), Some(bar_h));
         self.search_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
@@ -2985,21 +3074,37 @@ impl GpuRenderer {
                     }
                 }
             }
-            let TabTitleRichTextSpans { spans: spans2, default_attrs } =
-                build_tab_title_rich_text_spans(
-                    &title_text,
-                    &tab_spans,
-                    tab_family_name.as_str(),
-                    self.tab_inactive_fg,
-                );
-            self.tab_buffer.set_rich_text(
-                &mut self.font_system,
-                spans2,
-                &default_attrs,
-                Shaping::Advanced,
+            let spans2 = build_tab_title_rich_text_spans(
+                &title_text,
+                &tab_spans,
+                tab_family_name.as_str(),
+                self.tab_inactive_fg,
+            )
+            .spans;
+            let bar_h = self.tab_bar_logical_height();
+            let bar_y = self.tab_bar_y_offset();
+            let title_top = bar_y + ((bar_h - tab_font_size * 1.2) / 2.0).max(0.0);
+            let tab_raster_px = tab_font_size * self.scale_factor;
+            let tab_baseline_y = title_top + tab_font_size * 0.95;
+            let mut tab_rasterizer =
+                SwashRasterizer::new(&mut self.font_system, &self.font_family, tab_raster_px);
+            if let Some(loader) = self.async_loader.clone() {
+                tab_rasterizer.set_async_loader(loader);
+            }
+            emit_tab_title_glyphs(
+                &mut self.glyph_atlas,
+                &self.font_family,
+                tab_raster_px,
+                self.scale_factor,
+                &mut tab_rasterizer,
+                &spans2,
+                tab_baseline_y,
+                avg_glyph_w,
+                sw,
+                sh,
+                &mut glyph_instances,
                 None,
             );
-            self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
         }
         // -------- Search highlights + status bar ---------------------------
         // When search is active: paint a translucent yellow quad over every
@@ -3537,28 +3642,6 @@ impl GpuRenderer {
             },
         );
 
-        let bar_h = self.tab_bar_logical_height();
-        let bar_y = self.tab_bar_y_offset();
-        let title_top = bar_y + ((bar_h - self.font_size * 0.85 * 1.2) / 2.0).max(0.0);
-        let tab_area = if self.tab_bar_visible {
-            Some(TextArea {
-                buffer: &self.tab_buffer,
-                left: 0.0,
-                top: title_top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: bar_y as i32,
-                    right: self.config.width as i32,
-                    bottom: (bar_y + bar_h) as i32,
-                },
-                default_color: self.tab_inactive_fg,
-                custom_glyphs: &[],
-            })
-        } else {
-            None
-        };
-
         let search_area = if have_search_bar {
             Some(TextArea {
                 buffer: &self.search_buffer,
@@ -3736,13 +3819,10 @@ impl GpuRenderer {
             custom_glyphs: &[],
         });
 
-        // Pre-overlay text areas: tab bar titles + (legacy) bottom status bar.
-        // These render BEFORE overlay quads/text, so any overlay drawn on top
-        // will visually cover them — same as the terminal grid glyphs.
+        // Pre-overlay text areas: legacy bottom status bar. Tab titles are
+        // emitted into `glyph_instances` above so they use Sonic's
+        // nearest-sampled atlas path at device scale, matching the grid.
         let mut areas: Vec<TextArea> = Vec::new();
-        if let Some(a) = tab_area {
-            areas.push(a);
-        }
         if let Some(a) = search_area {
             areas.push(a);
         }
