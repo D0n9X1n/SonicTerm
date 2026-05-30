@@ -583,23 +583,63 @@ impl App {
                     }
                     return;
                 }
-                for key_str in key_to_strings(&event.logical_key, child.modifiers) {
+                // Issue #370: the previous narrow special-case only
+                // handled `EnterCopyMode` / `EnterQuickSelect` and
+                // dropped every other action (NextTab / PrevTab /
+                // ActivateTab / SplitRight / Cmd+T / Cmd+W / ...) into
+                // the PTY-byte path. Cmd+T appeared to work only because
+                // the macOS menubar bypassed this handler entirely.
+                //
+                // Mirror the main window handler (window_event.rs ~916):
+                // run the full keymap dispatch first, fall through to the
+                // PTY-byte path only when no binding matches. `run_action`
+                // already routes to the frontmost child via
+                // `frontmost_kind()` (see keymap_dispatch.rs), and the
+                // child-window Focused(true) arm sets
+                // `self.frontmost_window = Some(win_id)` (~line 329) so a
+                // chord typed in this child reaches THIS child's per-window
+                // helpers.
+                //
+                // EnterCopyMode / EnterQuickSelect keep their child-local
+                // entry helpers because they install copy/quick-select
+                // state on this specific child WindowState, which
+                // `App::run_action` (main-only) wouldn't touch.
+                let child_mods = child.modifiers;
+                let _ = child;
+                let mut handled = false;
+                for key_str in key_to_strings(&event.logical_key, child_mods) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         match action {
                             Action::EnterCopyMode => {
-                                child_enter_copy_mode(child);
-                                child.window.request_redraw();
+                                if let Some(c) = self.windows.get_mut(&win_id) {
+                                    child_enter_copy_mode(c);
+                                    c.window.request_redraw();
+                                }
                                 return;
                             }
                             Action::EnterQuickSelect => {
-                                child_enter_quick_select(child);
-                                child.window.request_redraw();
+                                if let Some(c) = self.windows.get_mut(&win_id) {
+                                    child_enter_quick_select(c);
+                                    c.window.request_redraw();
+                                }
                                 return;
                             }
-                            _ => {}
+                            _ => {
+                                if self.run_action(&action) {
+                                    if let Some(c) = self.windows.get(&win_id) {
+                                        c.window.request_redraw();
+                                    }
+                                    handled = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
+                if handled {
+                    return;
+                }
+                let Some(child) = self.windows.get_mut(&win_id) else { return };
                 let mods = child.modifiers;
                 let tab_idx = child.tabs.active_index();
                 let active_id = match child.tab_states.get(tab_idx) {

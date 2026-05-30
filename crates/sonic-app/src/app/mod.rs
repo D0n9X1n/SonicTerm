@@ -1791,6 +1791,16 @@ impl App {
         self.frontmost_window = id;
     }
 
+    /// Test-only: resolve a chord string through the App's keymap.
+    /// Used by `child_window_tab_actions_dispatch.rs` (issue #370) to
+    /// pin down that the chords the child-window handler now dispatches
+    /// (cmd+1, cmd+2, cmd+Right, cmd+Left) actually resolve to their
+    /// expected Action variants.
+    #[doc(hidden)]
+    pub fn __test_keymap_lookup(&self, keys: &str) -> Option<Action> {
+        self.keymap.lookup(keys).cloned()
+    }
+
     /// Test-only: read the window the command palette is currently
     /// attached to. `None` = main window OR closed; `Some(id)` = that
     /// child window. Used by overlay-routing regression tests.
