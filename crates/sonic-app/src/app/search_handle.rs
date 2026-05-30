@@ -20,7 +20,6 @@ use sonic_core::{
 };
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::pane::PaneTree;
-use sonic_ui::prefs::{PrefsHit, PrefsState};
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonic_ui::tabs::{Tab, TabBar};

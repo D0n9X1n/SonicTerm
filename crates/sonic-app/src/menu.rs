@@ -112,10 +112,10 @@ pub fn blueprint() -> MenuBlueprint {
                 },
                 sep(),
                 Item {
-                    title: "Preferences…",
+                    title: "Edit sonic.toml…",
                     key: ",",
                     mods: Cmd,
-                    binding: Action(sonic_core::keymap::Action::OpenPreferences),
+                    binding: Action(sonic_core::keymap::Action::EditConfigFile),
                 },
                 sep(),
                 Item { title: "Hide Sonic", key: "h", mods: Cmd, binding: System("hide:") },

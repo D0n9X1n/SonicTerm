@@ -37,7 +37,6 @@ use super::{
     WindowState,
 };
 use crate::app::integrated_titlebar_inset;
-use sonic_ui::prefs::PrefsHit;
 
 impl App {
     pub(super) fn spawn_pane(&self) -> PaneState {

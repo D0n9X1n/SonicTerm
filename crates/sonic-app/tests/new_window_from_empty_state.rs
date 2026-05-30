@@ -17,8 +17,8 @@
 //! last-window dock-alive case), `Action::NewWindow` must mark the
 //! pending flag so the next event-loop tick spawns a window. We can't
 //! construct a real `ActiveEventLoop` in a unit test, so we assert
-//! against the pending flag — the same testable seam that the prefs
-//! window uses (`__test_menubar_dispatch_open_preferences_sets_pending`).
+//! against the pending flag — the same testable seam window creation
+//! actions use before an `ActiveEventLoop` is available.
 
 use sonic_app::app::App;
 use sonic_core::{

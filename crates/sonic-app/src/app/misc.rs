@@ -20,7 +20,6 @@ use sonic_core::{
 };
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::pane::PaneTree;
-use sonic_ui::prefs::{PrefsHit, PrefsState};
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonic_ui::tabs::{Tab, TabBar};
@@ -258,10 +257,6 @@ impl App {
         }
     }
     pub(super) fn drain_pending_window_creates(&mut self, el: &ActiveEventLoop) {
-        if self.pending_prefs_open {
-            self.pending_prefs_open = false;
-            self.create_prefs_window(el);
-        }
         if self.pending_new_window {
             self.pending_new_window = false;
             self.create_new_terminal_window(el);
@@ -388,14 +383,9 @@ impl App {
             self.run_action(&action);
             ran_any = true;
         }
-        // Menubar dispatch can set window-creation flags (e.g.
-        // `pending_prefs_open` via OpenPreferences). The KeyboardInput
-        // path used to consume these inline; the menubar / UserEvent
-        // path didn't, so ⌘, from the macOS menubar — and from the
-        // keymap, since that path also flows through here when the
-        // EventLoopProxy delivers — silently dropped the request.
-        // Funnel through the single drain helper so every dispatch
-        // site is covered. See `drain_pending_window_creates`.
+        // Menubar dispatch can set window-creation flags. Funnel through
+        // the single drain helper so every dispatch site is covered. See
+        // `drain_pending_window_creates`.
         self.drain_pending_window_creates(el);
         // Request a redraw if any action ran. On macOS, NSMenu intercepts
         // chords like ⌘W and ⌘T before winit sees them and dispatches the

@@ -221,18 +221,18 @@ file in your editor and the change applies in the running window:
 Unknown keys are **preserved** rather than erased, so a newer Sonic
 config opened by an older Sonic doesn't lose data.
 
-### Preferences UI
+### Editing configuration
 
-`super+,` opens the Preferences panel. Every visible control is wired to
-the same persistence layer as `sonic.toml`. The Theme and Keymap dropdowns
-apply live; the Language dropdown re-loads Fluent translations without
-restart.
+Open the command palette and run `Edit sonic.toml` or `Edit keymap.toml`
+to open the editable user files in the OS default `.toml` handler. If
+`sonic.toml` does not exist yet, Sonic creates it with a short commented
+header first. Saved changes are picked up by the live-reload watcher.
 
 ---
 
 ## Themes
 
-Bundled themes (selectable from Preferences or `[appearance] theme = "…"`).
+Bundled themes (selectable from `sonic.toml`, for example `[appearance] theme = "…"`).
 The default is `wezterm` for out-of-box visual parity with WezTerm:
 
 - `wezterm` (default)
@@ -249,8 +249,8 @@ Custom themes can be dropped as `.toml` into the same directory as
 
 ## Internationalization (i18n)
 
-The Sonic UI (menu items, Preferences panel, command palette labels) is
-translated via [Fluent](https://projectfluent.org/). Three locales ship
+The Sonic UI (menu items and command palette labels) is translated via
+[Fluent](https://projectfluent.org/). Three locales ship
 today:
 
 - `en` — English
@@ -265,8 +265,7 @@ Locale selection order:
    Windows)
 4. Fallback to `en`
 
-The Preferences → Language dropdown switches locale live without a
-restart.
+Changing `locale` in `sonic.toml` switches locale live without a restart.
 
 ---
 
@@ -298,9 +297,8 @@ command palette shows them in their localized form.
 - **Copy:** `super+c` (also auto-copies on selection if
   `[appearance] copy_on_select = true`).
 - **Paste:** `super+v`.
-- **Window opacity:** Preferences → Appearance → Opacity slider, or
-  `[appearance] opacity = 0.96` in `sonic.toml`. Values from `0.5` to
-  `1.0`.
+- **Window opacity:** set `[appearance] opacity = 0.96` in `sonic.toml`.
+  Values from `0.5` to `1.0`.
 
 ---
 
@@ -400,10 +398,9 @@ the `\[ \]` brackets matter for bash; zsh uses `%{ %}`.
 **I see `task tools haven't been used recently` in the log.**
 That's a Claude Code reminder, not a Sonic message. Ignore.
 
-**Preferences won't open / `super+,` does nothing.**
-Some keyboards map `,` to a different key under modifiers. Open the
-command palette (`super+shift+p`) and type "Preferences" — that always
-works.
+**How do I edit settings?**
+Open the command palette (`super+shift+p`) and type `Edit sonic.toml`.
+Sonic opens the platform config file in your default `.toml` editor.
 
 ---
 

@@ -37,21 +37,13 @@ use super::{
     TabState, UserEvent, WindowState,
 };
 use crate::app::integrated_titlebar_inset;
-use sonic_ui::prefs::PrefsHit;
 
 /// True iff any field in `new_cfg.font` differs from `old_cfg.font`
 /// (family, size, or line_height) in a way that should drive a live
 /// renderer re-apply.
 ///
-/// Extracted as a free function so the prefs commit path
-/// (`App::commit_prefs_and_apply_live`) and the file-watcher path
-/// (`App::apply_new_config`) share one source of truth and so this
-/// classification can be unit-tested without a live `GpuRenderer`.
-///
-/// Regression cover: issue #167 — changing `font.size` in prefs had
-/// no live effect because the commit path only handled theme/keymap
-/// and the file-watcher's later diff saw the live `self.config`
-/// already updated (no-op).
+/// Extracted as a free function so the file-watcher path can be
+/// unit-tested without a live `GpuRenderer`.
 pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool {
     new_cfg.font.family != old_cfg.font.family
         || (new_cfg.font.size - old_cfg.font.size).abs() > f32::EPSILON
@@ -156,20 +148,13 @@ impl App {
             );
         }
 
-        // Language / i18n. Rebuild both the app-level bundle and the
-        // open prefs edit buffer's bundle so translated strings are
-        // re-derived on the next frame instead of requiring a restart.
+        // Language / i18n. Rebuild the app-level bundle so translated
+        // strings are re-derived on the next frame instead of requiring a
+        // restart.
         if new_cfg.locale != self.config.locale {
             let requested =
                 if new_cfg.locale.is_empty() { None } else { Some(new_cfg.locale.as_str()) };
             self.i18n.reload_locale(requested);
-            if let Some(prefs) = self.prefs_state.as_mut() {
-                prefs.i18n.reload_locale(requested);
-                prefs.rebuild_controls();
-            }
-            if let Some(w) = self.prefs_window.as_ref() {
-                w.request_redraw();
-            }
             tracing::info!(locale = %self.i18n.locale(), "live-reload: locale");
         }
 
@@ -259,9 +244,6 @@ impl App {
         if new_cfg.accessibility.reduced_motion != self.config.accessibility.reduced_motion
             || new_cfg.accessibility.strong_focus != self.config.accessibility.strong_focus
         {
-            if let Some(w) = self.prefs_window.as_ref() {
-                w.request_redraw();
-            }
             tracing::info!(
                 "live-reload: accessibility reduced_motion={} strong_focus={}",
                 new_cfg.accessibility.reduced_motion,
@@ -330,11 +312,6 @@ impl App {
         mark_all_panes_dirty(&self.panes);
         for child in self.windows.values() {
             mark_all_panes_dirty(&child.panes);
-        }
-        // Keep the prefs surface (if open) in sync — the Appearance
-        // Accent swatch and theme-derived chrome must follow live.
-        if let Some(prefs) = self.prefs_state.as_mut() {
-            prefs.set_theme(self.theme.clone());
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -420,6 +397,20 @@ impl App {
         match Config::load_or_default(&path) {
             Ok(cfg) => self.apply_new_config(cfg),
             Err(e) => tracing::warn!("force_reload_config: parse failed: {e:#}"),
+        }
+    }
+
+    pub(super) fn open_config_file(&mut self) {
+        match sonic_core::config::Config::open_user_config_file() {
+            Ok(path) => tracing::info!("opened config file {path:?}"),
+            Err(e) => tracing::warn!("open config file failed: {e:#}"),
+        }
+    }
+
+    pub(super) fn open_keymap_file(&mut self) {
+        match sonic_core::keymap::open_user_keymap_file() {
+            Ok(path) => tracing::info!("opened keymap file {path:?}"),
+            Err(e) => tracing::warn!("open keymap file failed: {e:#}"),
         }
     }
 }

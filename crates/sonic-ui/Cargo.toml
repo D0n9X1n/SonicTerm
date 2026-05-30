@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — pure-data UI state and layout (tabs, panes, selection, search, palette, overlays, prefs view, ui_tokens). No winit, no wgpu, no glyphon."
+description = "Sonic Terminal — pure-data UI state and layout (tabs, panes, selection, search, palette, overlays, ui_tokens). No winit, no wgpu, no glyphon."
 
 [lints]
 workspace = true
@@ -29,9 +29,6 @@ fluent-langneg = "0.13"
 unic-langid = { version = "0.9", features = ["macros"] }
 intl-memoizer = "0.5"
 sys-locale = "0.3"
-resvg = "0.43"
-usvg = "0.43"
-tiny-skia = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

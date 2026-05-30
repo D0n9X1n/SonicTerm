@@ -38,7 +38,6 @@ use super::{
     PaneState, TabState, UserEvent, WindowState,
 };
 use crate::app::integrated_titlebar_inset;
-use sonic_ui::prefs::PrefsHit;
 
 impl App {
     pub(super) fn handle_child_window_event(

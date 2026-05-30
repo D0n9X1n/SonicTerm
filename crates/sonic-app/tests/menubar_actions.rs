@@ -5,7 +5,7 @@
 //!
 //! We exercise the `App::run_action` arms directly (no live wgpu
 //! surface). Renderer side effects are already covered by the
-//! existing `font_live_reload.rs` + prefs/config-watch tests.
+//! existing `font_live_reload.rs` + config-watch tests.
 
 use sonic_app::app::App;
 use sonic_core::{
@@ -152,36 +152,4 @@ fn tab_bar_top_inset_drops_bar_band_when_hidden() {
     // padding is reserved above the grid even when the tab bar is
     // hidden, matching `window_padding.top` in WezTerm.
     assert_eq!(hidden, pad);
-}
-
-/// Regression: ⌘, (and macOS NSMenu > Preferences) routed through the
-/// menubar-bridge UserEvent path, ran `OpenPreferences`, set
-/// `pending_prefs_open = true`, and then nothing consumed the flag
-/// because the only consumer was inline in the KeyboardInput arm of
-/// `window_event`. The result: the log printed
-/// "awaiting resumed-event-loop hook" but the prefs window never
-/// appeared. The fix introduces `drain_pending_window_creates(el)`,
-/// called from `user_event` after `drain_menubar_actions`.
-///
-/// Full-loop verification needs a winit `ActiveEventLoop`, which we
-/// can't fabricate in a unit test. This test asserts the necessary
-/// pre-condition the bug violated: pushing `OpenPreferences` onto the
-/// menubar bridge and running the queued actions leaves
-/// `pending_prefs_open == true`, i.e. the drain helper has something
-/// to do on the next event-loop tick. The drain helper itself is
-/// trivial (`if flag { flag = false; create_window(el); }`).
-///
-/// Manual GUI smoke (PM runs on a real macOS display):
-/// ```text
-/// ./target/release/sonic-mac > /tmp/p.log 2>&1 &
-/// sleep 2.5
-/// osascript -e 'tell application "System Events" to keystroke "," using {command down}'
-/// sleep 1.5
-/// osascript -e 'tell application "System Events" to tell process "sonic-mac" \
-///     to count of windows'
-/// # expect 2
-/// ```
-#[test]
-fn menubar_dispatch_of_open_preferences_sets_pending_flag() {
-    assert!(sonic_app::app::__test_menubar_dispatch_open_preferences_sets_pending());
 }

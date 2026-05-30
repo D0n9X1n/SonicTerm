@@ -374,65 +374,20 @@ expect = [
 fail_on = "Palette remains visible"
 
 # ==========================================================================
-# §5 Preferences
+# §5 Configuration
 # ==========================================================================
 
 [[case]]
-id = "prefs-opens-super-comma"
+id = "edit-config-via-palette"
 section = 5
-title = "Cmd+, opens the preferences window"
-applies_to = ["mac"]
+title = "Edit config can be launched from the command palette"
+applies_to = ["mac", "windows"]
 covers_bugs = []
 covers_landmines = []
-setup = ["wait:0.3"]
-keystrokes = [
-  { kind = "key", value = "cmd+," },
-  { kind = "wait", value = 0.6 },
-]
-expect = [
-  { kind = "screenshot", region = "prefs-window" },
-  { kind = "window-count", value = 2 },
-]
-fail_on = "Prefs window does not open"
-
-[[case]]
-id = "prefs-sidebar-navigate"
-section = 5
-title = "Clicking sidebar entries swaps the content pane"
-applies_to = ["mac"]
-covers_bugs = []
-covers_landmines = []
-setup = ["open-prefs"]
-keystrokes = [
-  { kind = "click-region", region = "prefs-sidebar-font" },
-  { kind = "wait", value = 0.3 },
-  { kind = "click-region", region = "prefs-sidebar-theme" },
-  { kind = "wait", value = 0.3 },
-]
-expect = [
-  { kind = "screenshot", region = "prefs-window" },
-]
-fail_on = "Sidebar click is a no-op or content stays the same"
-
-[[case]]
-id = "prefs-apply-without-restart"
-section = 5
-title = "Theme change in prefs applies without restart"
-applies_to = ["mac"]
-covers_bugs = []
-covers_landmines = []
-setup = ["open-prefs"]
-keystrokes = [
-  { kind = "click-region", region = "prefs-sidebar-theme" },
-  { kind = "wait", value = 0.3 },
-  { kind = "click-region", region = "prefs-theme-dracula" },
-  { kind = "wait", value = 0.8 },
-]
-expect = [
-  { kind = "screenshot", region = "window" },
-  { kind = "pixel-near", x = 100, y = 300, rgba = [40, 42, 54, 255], tolerance = 30, note = "dracula bg" },
-]
-fail_on = "Theme change requires restart"
+setup = []
+keystrokes = []
+expect = []
+fail_on = "Edit config command is unavailable from the command palette"
 
 # ==========================================================================
 # §6 Tear-out

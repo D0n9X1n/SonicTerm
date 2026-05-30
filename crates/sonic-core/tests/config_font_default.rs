@@ -29,8 +29,7 @@ fn config_default_threads_font_family() {
 #[test]
 fn font_family_is_user_overridable() {
     // The Family is a free-form String — round-trip through TOML to make
-    // sure a user-supplied override is honored (the prefs UI dropdown is
-    // a convenience over the same field).
+    // sure a user-supplied override is honored.
     let toml = r#"
         theme = "tokyo-night"
         keymap = "wezterm"

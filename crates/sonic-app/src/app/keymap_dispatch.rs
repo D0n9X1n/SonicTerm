@@ -20,7 +20,6 @@ use sonic_core::{
 };
 use sonic_shared::render::GpuRenderer;
 use sonic_ui::pane::PaneTree;
-use sonic_ui::prefs::{PrefsHit, PrefsState};
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonic_ui::tabs::{Tab, TabBar};
@@ -239,7 +238,7 @@ impl App {
                 self.resize_active_split(Direction::Down);
             }
             Action::OpenSearch => self.open_search(),
-            Action::OpenPreferences => self.open_preferences(),
+            Action::EditConfigFile => self.open_config_file(),
             Action::OpenKeymapFile => self.open_keymap_file(),
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ShowKeymapCheatsheet => self.toggle_cheatsheet(),

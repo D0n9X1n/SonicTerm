@@ -287,7 +287,7 @@ fn ui_palette_dark_themes_select_dark_chrome_bg() {
 /// End-to-end: building a palette from gruvbox-dark-hard's actual
 /// values (as embedded in `assets/themes/gruvbox-dark-hard.toml`)
 /// must yield gold accent on dark gruvbox brown — i.e. the
-/// palette / tabs / prefs render in gruvbox colors, not Tokyo Night.
+/// palette / tabs render in gruvbox colors, not Tokyo Night.
 #[test]
 fn palette_render_uses_active_theme_accent() {
     let theme = test_theme("#fabd2f", "#1d2021", "#ebdbb2");

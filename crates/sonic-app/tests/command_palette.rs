@@ -139,17 +139,9 @@ fn all_actions_covers_every_variant_kind() {
     assert!(all.contains(&Action::NewTab));
     assert!(all.contains(&Action::OpenCommandPalette));
     assert!(all.contains(&Action::OpenSearch));
-    assert!(all.contains(&Action::OpenPreferences));
+    assert!(all.contains(&Action::EditConfigFile));
     assert!(all.contains(&Action::Scroll(ScrollAction::ToTop)));
     assert!(all.contains(&Action::FocusPane(Direction::Left)));
-}
-
-#[test]
-fn palette_dispatch_of_open_preferences_sets_pending_flag() {
-    // Regression for PR #41 review: palette-dispatched OpenPreferences
-    // must set the same `pending_prefs_open` flag that the keyboard path
-    // sets, so the next event-loop tick can create the prefs window.
-    assert!(sonic_app::app::__test_palette_dispatch_open_preferences_sets_pending());
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +171,7 @@ fn palette_lists_every_action_variant() {
 fn fuzzy_match_ranks_substring_before_subsequence() {
     // Typing "neta" should match "New Tab" (a subsequence: N-e-T-a)
     // and rank it ahead of any candidate where the chars only barely
-    // appear. "Open Preferences" has no 'n' followed by 'e' followed
+    // appear. "Edit sonic.toml" has no 'n' followed by 'e' followed
     // by 't' followed by 'a', so it must NOT match at all.
     let mut p = CommandPalette::new();
     p.open();
@@ -192,8 +184,8 @@ fn fuzzy_match_ranks_substring_before_subsequence() {
         "'neta' should match 'New Tab' as a subsequence: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l == "Open Preferences"),
-        "'neta' should NOT match 'Open Preferences': {labels:?}"
+        !labels.iter().any(|l| l == "Edit sonic.toml"),
+        "'neta' should NOT match 'Edit sonic.toml': {labels:?}"
     );
 
     // And against a query that exists as a contiguous substring in
@@ -221,11 +213,11 @@ fn enter_on_selected_dispatches_action() {
     let dispatched = p.current().cloned().expect("at least one match");
     assert!(matches!(dispatched, Action::OpenCommandPalette));
 
-    // OpenPreferences is reachable by name even though no keybinding
+    // EditConfigFile is reachable by alias even though no keybinding
     // is set for it in the default keymap.
     p.set_query("preferences");
     let dispatched = p.current().cloned().expect("at least one match");
-    assert!(matches!(dispatched, Action::OpenPreferences));
+    assert!(matches!(dispatched, Action::EditConfigFile));
 
     // ReloadConfig is also reachable.
     p.set_query("reload");
@@ -322,17 +314,16 @@ fn palette_arrow_up_from_first_wraps_to_last() {
 }
 
 #[test]
-fn palette_query_sett_matches_preferences() {
-    // The whole reason this PR exists: typing "sett" must surface
-    // Open Preferences via the keyword alias path.
+fn palette_query_sett_matches_edit_config() {
+    // Typing "sett" must surface the config editor via the keyword alias path.
     let mut p = CommandPalette::new();
     p.open();
     p.set_query("sett");
     let labels: Vec<String> =
         p.visible().iter().map(|a| sonic_shared::command_label::label(a)).collect();
     assert!(
-        labels.iter().any(|l| l == "Open Preferences"),
-        "'sett' should match 'Open Preferences' via keyword alias: {labels:?}"
+        labels.iter().any(|l| l == "Edit sonic.toml"),
+        "'sett' should match 'Edit sonic.toml' via keyword alias: {labels:?}"
     );
 }
 

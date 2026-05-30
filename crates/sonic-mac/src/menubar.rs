@@ -324,7 +324,7 @@ fn build_custom_item(
 /// Install the Sonic NSMenu as the application's main menu. The
 /// `_theme_names` argument is accepted for backward compatibility with
 /// existing call sites; the blueprint no longer surfaces themes in the
-/// menubar (they live in Preferences).
+/// menubar.
 pub fn install(_theme_names: &[String]) {
     if let Err(e) = MacMenu::new().install(Sender::new()) {
         tracing::error!("install_menubar: {e}");

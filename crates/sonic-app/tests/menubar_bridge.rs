@@ -12,11 +12,11 @@ fn push_then_drain_preserves_order() {
     let _ = __test_drain();
     push_action(Action::NewTab);
     push_action(Action::CloseTab);
-    push_action(Action::OpenPreferences);
+    push_action(Action::EditConfigFile);
     let drained = __test_drain();
     assert_eq!(drained.len(), 3);
     assert!(matches!(drained[0], Action::NewTab));
     assert!(matches!(drained[1], Action::CloseTab));
-    assert!(matches!(drained[2], Action::OpenPreferences));
+    assert!(matches!(drained[2], Action::EditConfigFile));
     assert!(__test_drain().is_empty());
 }

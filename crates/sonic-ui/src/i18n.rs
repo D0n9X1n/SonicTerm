@@ -6,8 +6,8 @@
 //!
 //! 1. Explicit `SONIC_LOCALE` env var (highest priority — used by tests and
 //!    by users who want a one-shot override without editing config).
-//! 2. Explicit `locale` value from `sonic.toml` (the prefs "Language"
-//!    dropdown writes this).
+//! 2. Explicit `locale` value from `sonic.toml` (for example,
+//!    `locale = "zh-CN"`).
 //! 3. OS locale via [`sys_locale::get_locale`].
 //! 4. `"en"` as the ultimate fallback.
 //!
@@ -63,7 +63,7 @@ impl I18n {
     }
 
     /// Replace the active locale bundle in-place. This is the runtime
-    /// live-reload hook for config/prefs language changes; existing `I18n`
+    /// live-reload hook for config language changes; existing `I18n`
     /// owners can keep their cached struct while all future lookups use the
     /// newly-negotiated bundle.
     pub fn reload_locale(&mut self, requested: Option<&str>) {

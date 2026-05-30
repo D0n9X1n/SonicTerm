@@ -135,8 +135,6 @@ pub struct TabEntry {
 pub struct OverlayData {
     /// Command palette overlay is open.
     pub palette_open: bool,
-    /// Preferences window overlay is open.
-    pub prefs_open: bool,
     /// In-pane search bar overlay is open.
     pub search_open: bool,
 }

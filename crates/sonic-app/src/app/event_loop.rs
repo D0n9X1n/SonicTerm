@@ -58,10 +58,6 @@ impl App {
                 };
             }
         }
-        if self.prefs_toggle_anim_in_flight() {
-            let frame = Instant::now() + Duration::from_millis(16);
-            next = Some(next.map_or(frame, |at| at.min(frame)));
-        }
         match next {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
@@ -80,11 +76,6 @@ impl App {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             if let Some(w) = &self.window {
                 w.request_redraw();
-            }
-            if self.prefs_toggle_anim_in_flight() {
-                if let Some(w) = &self.prefs_window {
-                    w.request_redraw();
-                }
             }
         }
     }
@@ -106,9 +97,8 @@ impl App {
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
         }
-        // Any path above that ran an action may have set
-        // `pending_prefs_open` — make sure the prefs window actually
-        // materializes regardless of the dispatch source.
+        // Any path above that ran an action may have requested a new
+        // top-level window; create it now that we have an ActiveEventLoop.
         self.drain_pending_window_creates(el);
     }
 

@@ -38,7 +38,6 @@ use super::{
 };
 use crate::app::integrated_titlebar_inset;
 use crate::app::window_geom;
-use sonic_ui::prefs::PrefsHit;
 
 impl App {
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {

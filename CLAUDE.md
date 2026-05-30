@@ -34,9 +34,9 @@ Pre-#145 the crates lived flat at the repo root. The reorganization in PR #145 m
 | `crates/sonic-io/` | PTY + process probes + SSH | `pty::PtyHandle`, `proc_info`, `foreground_proc` (Windows), `ssh` (feature-gated) (#152) |
 | `crates/sonic-text/` | Shaping + atlas | `shape` (LRU shape cache), `swash_rasterizer`, `glyph_atlas`, `row_glyph_cache` (#153) |
 | `crates/sonic-render-model/` | Renderer-agnostic frame model | `geometry`, `inputs`, `painter` traits — what to draw, not how (#155) |
-| `crates/sonic-ui/` | UI widgets & overlays | `tabs`, `tabbar_view`, `pane`, `selection`, `search`, `command_palette`, `ime`, `cursor`, `i18n`, `prefs/` (#154) |
+| `crates/sonic-ui/` | UI widgets & overlays | `tabs`, `tabbar_view`, `pane`, `selection`, `search`, `command_palette`, `ime`, `cursor`, `i18n` (#154) |
 | `crates/sonic-gpu/` | wgpu pipelines | `quad::QuadPipeline`, `text_pipeline`, `atlas_upload` (#156) |
-| `crates/sonic-app/` | Winit app loop + platform glue | `app::App` (winit ApplicationHandler) split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,prefs_window,config_apply,search_handle,misc}.rs`; `menu`, `os_drag`, `tab_drag`, `config_watch` (#158, #160) |
+| `crates/sonic-app/` | Winit app loop + platform glue | `app::App` (winit ApplicationHandler) split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; `menu`, `os_drag`, `tab_drag`, `config_watch` (#158, #160) |
 | `crates/sonic-core/` | **Deprecated façade** | re-exports `sonic_vt::vt`, `sonic_grid::{grid,hyperlink}`, `sonic_cfg::{config,theme,keymap,url_open}`, `sonic_io::{pty,proc_info,ssh,foreground_proc}` for back-compat |
 | `crates/sonic-shared/` | **Thin façade** | re-exports `sonic_ui::*` + `render/` module split across `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs` (#157) |
 | `crates/sonic-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonic_shared::run` |
@@ -108,7 +108,7 @@ bash scripts/bench.sh                                          # perf-bench subs
    │   split across app/*.rs (#160)
    │
    keys/mouse  ──▶ keymap dispatcher (sonic_cfg::keymap::Action)
-                   super+T new tab, super+D split, super+, prefs, etc.
+                   super+T new tab, super+D split, palette actions, etc.
 ```
 
 **Per-pane state** (since v0.3d): each pane in a tab owns its own `Grid + Parser + PtyHandle`. Splitting a pane spawns a new shell. `impl Drop for PtyHandle` explicitly kills the child to prevent orphans (caught by Haiku review of PR #21).
@@ -149,7 +149,6 @@ bash scripts/bench.sh                                          # perf-bench subs
 ## 5. Coding conventions
 
 - **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files; issue #190 finished the workspace migration. **New tests follow this pattern.** Documented exceptions (kept inline with a `// NOTE (CLAUDE.md §5):` comment naming the blocker):
-  - `sonic-shared/src/prefs_renderer.rs` — pokes wide crate-private surface and `include_str!`s itself.
   - `sonic-windows/src/os_drag_win.rs` — bin-only crate (no `lib.rs`), no `tests/` route.
   - `sonic-mac/src/menubar.rs` — small macOS-only surface, private `register`/`lookup`/`scan_themes`.
   - `sonic-io/src/foreground_proc.rs` — private `snapshot_processes`/`resolve_process_name`/`ProcEntry`.
@@ -266,7 +265,7 @@ git tag v1.0.0 && git push origin v1.0.0
 
 triggers `.github/workflows/release.yml` → first runs the `release-gate` job (which re-runs `scripts/check-release-testing.sh`) + full integration tests + both `pty_dump` e2e examples + `scripts/bench.sh` in CI mode, then produces a universal macOS `.dmg` + x64 Windows `.msi`. **All shipped artifacts are UNSIGNED.** Signing (Developer ID notarization for macOS, Azure Trusted Signing for Windows) has been removed from the release workflow pending cert procurement; when certs land, re-add the steps in a follow-up PR. The release workflow installs `librsvg + imagemagick` then runs `bash assets/icons/bake-icons.sh` so the bundles always carry the fresh icon.
 
-The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/prefs/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
+The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/config-edit/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
 `crates/sonic-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 

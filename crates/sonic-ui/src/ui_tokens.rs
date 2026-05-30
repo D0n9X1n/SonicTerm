@@ -5,7 +5,7 @@
 //!
 //! As of the theme-driven UI work, chrome colors are derived from the
 //! active terminal [`Theme`] via [`UiPalette::from_theme`] — the palette
-//! / prefs / tab bar inherit the user's chosen colors instead of being
+//! / tab bar inherit the user's chosen colors instead of being
 //! locked to Tokyo Night. The previous Tokyo-Night-derived constants
 //! (`color::ACCENT_BLUE`, `color::BG_BASE`, etc.) remain available but
 //! `#[deprecated]` for backward compatibility.
@@ -330,7 +330,7 @@ pub mod color {
     pub fn BG_BASE() -> [f32; 4] {
         hex("#0B0E14FF")
     }
-    /// `#10131A` @ 0.92 — elevated chrome (tab bar, prefs panel).
+    /// `#10131A` @ 0.92 — elevated chrome (tab bar, overlays).
     #[allow(non_snake_case)]
     #[deprecated(note = "Use UiPalette::from_theme(theme) — chrome now follows the active theme")]
     #[inline]

@@ -1,13 +1,13 @@
 //! Epic #289 Phase A follow-up — overlay actions (command palette,
-//! cheat sheet, search, preferences) route to the OS-frontmost window
-//! instead of unconditionally landing on the main window.
+//! cheat sheet, search) route to the OS-frontmost window instead of
+//! unconditionally landing on the main window.
 //!
 //! ## Bug being pinned
 //!
 //! With two windows open and the NEW (torn-out child) window focused,
 //! pressing the command-palette chord opened the palette on the
 //! ORIGINAL main window, not the focused one. Same class of bug for
-//! Cmd+F (search), super+? (cheat sheet), Cmd+, (preferences). Phase A
+//! Cmd+F (search) and super+? (cheat sheet). Phase A
 //! (PR #291) wired tab + pane actions through `frontmost_window` but
 //! the audit list did NOT include overlay actions, so they kept hitting
 //! hardcoded main-window paths.
@@ -25,9 +25,6 @@
 //!   * `open_search_in_child` is a no-op on a stale child id (safe
 //!     fallback to main, matching the contract used by
 //!     `close_active_tab_in_child` & friends in PR #291)
-//!   * `OpenPreferences` from a child-window context still sets the
-//!     pending flag (prefs is its own top-level window, no per-window
-//!     attachment)
 
 use sonic_app::app::App;
 use sonic_core::{
@@ -216,24 +213,4 @@ fn open_search_with_no_frontmost_opens_on_main() {
     // contract we're asserting is "did NOT panic and did NOT route to
     // a non-existent child". The presence-or-absence of a SearchState
     // on the seeded tab is exercised by existing search tests.
-}
-
-// ─── Preferences ─────────────────────────────────────────────────────
-
-#[test]
-fn open_preferences_from_child_frontmost_still_queues_pending() {
-    // Prefs is its own top-level window — there's no per-window
-    // "attach" concept. The contract is just "OpenPreferences from
-    // anywhere queues the pending-create flag so the event loop spawns
-    // the window on the next resume". This pins that the follow-up
-    // routing work didn't accidentally short-circuit prefs.
-    let mut app = make_app();
-    app.__test_set_frontmost_window(Some(WindowId::dummy()));
-    // run_action must not panic on the child-frontmost path. The actual
-    // prefs-window-creation flag is consumed by the event loop and is
-    // covered by the existing `prefs_*` tests; here we just guard
-    // against a regression where the overlay-routing rework
-    // accidentally short-circuits OpenPreferences when frontmost is a
-    // (stale) child id.
-    app.run_action(&Action::OpenPreferences);
 }

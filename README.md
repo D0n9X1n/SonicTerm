@@ -64,7 +64,7 @@ platforms than three mediocre ones.
   **St Helens** (not bundled — install system-wide; if missing, the
   renderer falls through to system mono and `Rec Mono Casual` ships
   under `assets/fonts/` as a guaranteed-present fallback). Override via
-  `[font] family = "..."` in `sonic.toml` or the prefs Font tab. The
+  `[font] family = "..."` in `sonic.toml`. The
   default theme is the WezTerm-style `wezterm` palette
   (out-of-box visual parity with WezTerm);
 - hate when their idle terminal eats 5% of a CPU core just to blink a
@@ -84,8 +84,8 @@ platforms than three mediocre ones.
   bindable action, in your language.
 - **5 bundled themes**: Tokyo Night, Dracula, Nord, Catppuccin Mocha,
   Gruvbox Dark Hard.
-- **Preferences UI** (`super+,`) for font, theme, opacity, keymap,
-  language — all persisted, all live-applied.
+- **Editable config files** from the command palette: `Edit sonic.toml`
+  and `Edit keymap.toml`; changes persist and live-apply.
 
 Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
 

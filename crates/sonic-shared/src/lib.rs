@@ -1,5 +1,4 @@
-//! sonic-shared — GPU rendering scaffolding shared by the app loop and
-//! the prefs window.
+//! sonic-shared — GPU rendering scaffolding shared by the app loop.
 //!
 //! Historically this crate held the entire app surface (winit loop, OS
 //! drag, menubar bridge, tabs, panes, etc.). PR 8a of the workspace
@@ -8,7 +7,7 @@
 //! app and the live-reload path).
 //!
 //! Pre-PR-5 this crate also held UI-shaped state (tabs, panes, palette,
-//! prefs view, overlays, etc.); those modules now live in [`sonic_ui`]
+//! overlays, etc.); those modules now live in [`sonic_ui`]
 //! and are re-exported here so legacy imports of the form
 //! `use sonic_shared::tabs::TabBar;` continue to work unchanged.
 
@@ -16,7 +15,6 @@
 #![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-pub mod prefs_renderer;
 pub mod render;
 
 // Re-exports from the extracted `sonic-gpu` crate (PR 7a of the workspace
@@ -29,8 +27,8 @@ pub use sonic_gpu::{atlas_upload, quad, text_pipeline};
 // refactor, issue #121). `sonic-ui` owns pure UI state + layout with no
 // winit / wgpu / glyphon deps.
 pub use sonic_ui::{
-    cheatsheet, command_label, command_palette, copy_mode, cursor, i18n, icon, ime, overlays, pane,
-    prefs, search, selection, tab_title, tabbar_view, tabs, ui_tokens,
+    cheatsheet, command_label, command_palette, copy_mode, cursor, i18n, ime, overlays, pane,
+    search, selection, tab_title, tabbar_view, tabs, ui_tokens,
 };
 
 // Re-exports from the extracted `sonic-text` crate so legacy import paths

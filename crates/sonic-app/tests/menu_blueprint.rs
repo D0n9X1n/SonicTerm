@@ -16,6 +16,7 @@ fn blueprint_has_five_top_level_submenus_in_order() {
 
 #[test]
 fn blueprint_action_bindings_round_trip_through_sender() {
+    let _ = sonic_app::menubar_bridge::__test_drain();
     // Find the New Tab item and confirm its binding decodes the way
     // platform code will read it.
     let bp = blueprint();
