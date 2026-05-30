@@ -40,7 +40,7 @@ use crate::app::integrated_titlebar_inset;
 
 impl App {
     pub(super) fn spawn_pane(&self) -> PaneState {
-        let (cols, rows) = self.renderer.as_ref().map(|r| r.cells()).unwrap_or((80, 24));
+        let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
         // Pre-create the redraw target Arc bound to the current parent
@@ -350,7 +350,7 @@ impl App {
 
     fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
-        if let Some(r) = self.renderer.as_ref() {
+        if let Some(r) = self.main_renderer() {
             let (cw, ch) = r.cell_size();
             crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
         }

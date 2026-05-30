@@ -122,7 +122,7 @@ impl App {
                     .tab_states
                     .get(tab_idx)
                     .map(|st| {
-                        if let Some(r) = self.renderer.as_ref() {
+                        if let Some(r) = self.main_renderer() {
                             let (w, h) = r.logical_size();
                             let top = r.top_inset();
                             let pl = r.padding_left();
@@ -215,7 +215,7 @@ impl App {
                         }
                     })
                     .collect();
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     r.set_inactive_pane_cursors(inactive_cursors);
                 }
 
@@ -228,9 +228,18 @@ impl App {
                 // `self.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
-                if let (Some(r), Some(pane)) =
-                    (self.renderer.as_mut(), self.panes.get_mut(&active_id))
-                {
+                // PR-B1b borrow-split: pull the renderer out via direct
+                // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
+                // which would borrow all of `self`). That keeps `self.panes`,
+                // `self.tabs`, `self.tab_states`, `self.command_palette`,
+                // `self.ime` available for the disjoint mut borrows the render
+                // call needs in the same expression scope.
+                let main_id_opt = self.main_window_id;
+                let renderer_opt = match main_id_opt {
+                    Some(id) => self.windows.get_mut(&id).and_then(|ws| ws.renderer.as_mut()),
+                    None => None,
+                };
+                if let (Some(r), Some(pane)) = (renderer_opt, self.panes.get_mut(&active_id)) {
                     let cursor_rc = {
                         // PR #199 Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
@@ -385,7 +394,7 @@ impl App {
                 // pane's block cursor flips between filled (focused) and
                 // hollow (unfocused) — wezterm/iTerm2 parity. PR #81
                 // review.
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     r.set_window_focused(focused);
                 }
                 // Focus transition flips the cursor between filled and
@@ -425,7 +434,7 @@ impl App {
             }
 
             WindowEvent::Resized(size) => {
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     r.resize(size.width, size.height);
                 }
                 // Per-pane sizing: each pane's grid + PTY is resized to
@@ -434,7 +443,7 @@ impl App {
                 // panes thought they were full-window-wide and TUIs drew
                 // past their visible border. See docs/specs/per-pane-grids.md.
                 let rects = self.compute_active_pane_rects();
-                if let Some(r) = self.renderer.as_ref() {
+                if let Some(r) = self.main_renderer() {
                     let (cw, ch) = r.cell_size();
                     crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
                 }
@@ -450,7 +459,7 @@ impl App {
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     r.set_scale_factor(scale_factor as f32);
                 }
                 if let Some(w) = self.main_window() {
@@ -475,7 +484,7 @@ impl App {
             // -- Mouse --
             WindowEvent::CursorLeft { .. } => {
                 let mut redraw = false;
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     redraw = r.set_hover_cursor(None);
                 }
                 if self.hovered_url.take().is_some() {
@@ -492,7 +501,7 @@ impl App {
                 let sf = self.scale_factor as f32;
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 let mut hover_redraw = false;
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.main_renderer_mut() {
                     hover_redraw = r.set_hover_cursor(Some((lx, ly)));
                 }
                 if hover_redraw {
@@ -519,8 +528,7 @@ impl App {
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
                     let (bar_h, top_off, visible) = self
-                        .renderer
-                        .as_ref()
+                        .main_renderer()
                         .map(|r| {
                             (r.tab_bar_logical_height(), r.tab_bar_y_offset(), r.tab_bar_visible())
                         })
@@ -530,7 +538,7 @@ impl App {
                         .with_visible(visible);
                     let chip =
                         crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
-                    if let Some(r) = self.renderer.as_mut() {
+                    if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(chip);
                     }
                 }
@@ -567,7 +575,7 @@ impl App {
                     return;
                 }
                 if self.mouse_down {
-                    if let Some(r) = self.renderer.as_ref() {
+                    if let Some(r) = self.main_renderer() {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
@@ -609,13 +617,12 @@ impl App {
                     let layout = TabBarLayout::compute_with_height(
                         &self.tabs,
                         window_width,
-                        self.renderer
-                            .as_ref()
+                        self.main_renderer()
                             .map(|r| r.tab_bar_logical_height())
                             .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                     )
                     .with_top_offset(
-                        self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
+                        self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                     )
                     .with_visible(self.tab_bar_visible);
                     let tab_action = layout.hit(px, py);
@@ -655,31 +662,34 @@ impl App {
                         }
                         return;
                     }
-                    if let Some(r) = self.renderer.as_ref() {
-                        // Click-to-focus: figure out which pane rect
-                        // contains the click and make it the active
-                        // pane. Without this, splitting a pane spawned
-                        // a working PTY that the user could never
-                        // type into — there was no way to move focus
-                        // off the originally-active pane other than
-                        // the (undiscoverable) keyboard shortcuts.
-                        // User report v0.6: "split window 这个功能是
-                        // 坏的，没有能够形成两个可以输入的 windows".
+                    // B1b borrow-split: snapshot renderer geometry up front so the
+                    // pane-rect compute can run alongside `self.tab_states.get_mut()`
+                    // and the hyperlink path can re-borrow `self`.
+                    let renderer_geom = self.main_renderer().map(|r| {
+                        let (w, h) = r.logical_size();
+                        (
+                            w,
+                            h,
+                            r.top_inset(),
+                            r.padding_left(),
+                            r.padding_right(),
+                            r.bottom_inset(),
+                            r.padding_bottom(),
+                        )
+                    });
+                    let pixel_to_cell = self.main_renderer().and_then(|r| {
+                        r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                    });
+                    if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
                         let tab_idx = self.tabs.active_index();
                         let pane_rects = self
                             .tab_states
                             .get(tab_idx)
                             .map(|st| {
-                                let (w, h) = r.logical_size();
-                                let top = r.top_inset();
-                                let pl = r.padding_left();
-                                let pr = r.padding_right();
-                                let bottom = r.bottom_inset();
-                                let pb = r.padding_bottom();
                                 let outer = sonic_ui::pane::Rect::new(
                                     pl,
                                     top,
-                                    (w - pl - pr).max(0.0),
+                                    (w - pl - pr_pad).max(0.0),
                                     (h - top - bottom - pb).max(0.0),
                                 );
                                 st.tree.layout(outer)
@@ -705,9 +715,7 @@ impl App {
                             }
                         }
                         // `pixel_to_cell` expects PHYSICAL px.
-                        if let Some((row, col)) =
-                            r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                        {
+                        if let Some((row, col)) = pixel_to_cell {
                             // Modifier-click on a hyperlink opens it.
                             // On macOS the modifier is Cmd (super); on
                             // Windows / Linux it's Ctrl. The parser lock
@@ -749,7 +757,7 @@ impl App {
                     let foreign = self.drag_target.take();
                     let pressed = self.pressed_tab.take();
                     self.mouse_down = false;
-                    if let Some(r) = self.renderer.as_mut() {
+                    if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(None);
                     }
                     if let (Some(s), Some(idx)) = (session, pressed) {
@@ -760,13 +768,12 @@ impl App {
                         let layout = TabBarLayout::compute_with_height(
                             &self.tabs,
                             window_width,
-                            self.renderer
-                                .as_ref()
+                            self.main_renderer()
                                 .map(|r| r.tab_bar_logical_height())
                                 .unwrap_or(sonic_ui::tabbar_view::TAB_BAR_HEIGHT),
                         )
                         .with_top_offset(
-                            self.renderer.as_ref().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
+                            self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                         );
                         let action = crate::tab_drag::compute_action(&s, foreign, &layout);
                         match action {
