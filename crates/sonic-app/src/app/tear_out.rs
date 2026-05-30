@@ -166,7 +166,7 @@ impl App {
         child_tabs.push(tab);
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
-            window: window.clone(),
+            window: Some(window.clone()),
             renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
@@ -239,8 +239,12 @@ impl App {
         local_in_src: (f64, f64),
     ) -> Option<crate::tab_drag::DropTarget<WindowId>> {
         let src_child = self.windows.get(&src_id)?;
-        let src_origin =
-            src_child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
+        let src_origin = src_child
+            .window
+            .as_ref()?
+            .inner_position()
+            .map(|p| (p.x, p.y))
+            .unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(src_origin, local_in_src);
         let mut candidates: Vec<(WindowId, crate::tab_drag::WindowGeom, Option<TabBarLayout>)> =
             Vec::new();
@@ -270,7 +274,10 @@ impl App {
             let Some(r) = c.renderer.as_ref() else {
                 continue;
             };
-            let geom = window_geom(&c.window);
+            let Some(cw) = c.window.as_ref() else {
+                continue;
+            };
+            let geom = window_geom(cw);
             let bar_width = r.width() as f32 / r.scale_factor();
             let layout =
                 TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
@@ -293,7 +300,8 @@ impl App {
                 return None;
             }
             let r = c.renderer.as_ref()?;
-            let geom = window_geom(&c.window);
+            let cw = c.window.as_ref()?;
+            let geom = window_geom(cw);
             let bar_width = r.width() as f32 / r.scale_factor();
             let layout =
                 TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
@@ -402,7 +410,8 @@ impl App {
             return true;
         }
         for c in self.windows.values() {
-            if crate::tab_drag::global_to_local(window_geom(&c.window), global).is_some() {
+            let Some(cw) = c.window.as_ref() else { continue };
+            if crate::tab_drag::global_to_local(window_geom(cw), global).is_some() {
                 return true;
             }
         }
@@ -513,7 +522,7 @@ impl App {
         child_tabs.push(tab);
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
-            window: window.clone(),
+            window: Some(window.clone()),
             renderer: Some(renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
@@ -575,7 +584,7 @@ impl App {
         if let Some(c) = self.windows.get_mut(&src_id) {
             let target = removed_idx.saturating_sub(1).min(c.tabs.len().saturating_sub(1));
             c.tabs.activate(target);
-            c.window.request_redraw();
+            c.request_redraw();
         }
     }
 }

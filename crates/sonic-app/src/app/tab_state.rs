@@ -112,13 +112,13 @@ impl App {
             if let Some(pty) = pane.pty.as_ref() {
                 (pty.resize)(cols, rows);
             }
-            *pane.redraw_target.lock() = Some(child.window.clone());
+            *pane.redraw_target.lock() = child.window.clone();
             child.panes.insert(id, pane);
         }
         let idx = index.min(child.tabs.len());
         child.tabs.insert(idx, tab);
         child.tab_states.insert(idx, state);
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 }

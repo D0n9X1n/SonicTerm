@@ -70,7 +70,7 @@ pub fn set_scale_factor_if_renderer_present(
 #[doc(hidden)]
 pub fn child_window_resized_handles_no_renderer(child: &mut WindowState, width: u32, height: u32) {
     if resize_renderer_and_panes_if_present(&mut child.renderer, &child.panes, width, height) {
-        child.window.request_redraw();
+        child.request_redraw();
     }
 }
 
@@ -80,7 +80,7 @@ pub fn child_window_scale_factor_changed_handles_no_renderer(
     scale_factor: f64,
 ) {
     if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) {
-        child.window.request_redraw();
+        child.request_redraw();
     }
 }
 
@@ -195,7 +195,7 @@ impl App {
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
-                    child.window.request_redraw();
+                    child.request_redraw();
                     return;
                 }
                 if let Some(pane) = child.panes.get_mut(&active_id) {
@@ -270,11 +270,12 @@ impl App {
                     // `App::publish_child_window_tab_bar` for the
                     // rationale on the main-window mirror.
                     {
+                        let Some(win) = child.window.as_ref() else { return };
                         let inner_origin =
-                            child.window.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
-                        let isz = child.window.inner_size();
+                            win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+                        let isz = win.inner_size();
                         let inner_size = (isz.width, isz.height);
-                        let sf = child.window.scale_factor() as f32;
+                        let sf = win.scale_factor() as f32;
                         let logical_w = inner_size.0 as f32 / sf.max(1.0);
                         let Some(r) = child.renderer.as_ref() else { return };
                         let layout = TabBarLayout::compute_with_height(
@@ -303,12 +304,12 @@ impl App {
                     size.height,
                 ) =>
             {
-                child.window.request_redraw();
+                child.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. }
                 if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) =>
             {
-                child.window.request_redraw();
+                child.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();
@@ -345,7 +346,7 @@ impl App {
                 if let Some(r) = child.renderer.as_mut() {
                     let changed = r.set_hover_cursor(None);
                     if changed {
-                        child.window.request_redraw();
+                        child.request_redraw();
                     }
                 }
             }
@@ -359,7 +360,9 @@ impl App {
                 // × stays the wrong brightness when the cursor crosses
                 // the glyph in a torn-out window.
                 if r.set_hover_cursor(Some((lx, ly))) {
-                    child.window.request_redraw();
+                    if let Some(w) = child.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
                 if let Some(s) = child.drag_session.as_mut() {
                     s.current_pos = (lx, ly);
@@ -393,7 +396,7 @@ impl App {
                     let tgt = self.compute_child_drag_target(win_id, local);
                     if let Some(c) = self.windows.get_mut(&win_id) {
                         c.drag_target = tgt;
-                        c.window.request_redraw();
+                        c.request_redraw();
                     }
                     return;
                 }
@@ -403,7 +406,7 @@ impl App {
                         if let Some(sel) = child.selection.as_mut() {
                             sel.extend(row, col);
                             mark_all_panes_dirty(&child.panes);
-                            child.window.request_redraw();
+                            child.request_redraw();
                         }
                     }
                 }
@@ -440,12 +443,12 @@ impl App {
                                 // needed at the call-site.
                                 self.close_tab_at_in_child(win_id, idx);
                                 if let Some(c) = self.windows.get(&win_id) {
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                                 return;
                             }
                         }
-                        child.window.request_redraw();
+                        child.request_redraw();
                         return;
                     }
                     child.mouse_down = true;
@@ -457,7 +460,7 @@ impl App {
                         child.selection = Some(Selection::new(row, col));
                         mark_all_panes_dirty(&child.panes);
                     }
-                    child.window.request_redraw();
+                    child.request_redraw();
                 }
                 ElementState::Released => {
                     let session = child.drag_session.take();
@@ -471,7 +474,7 @@ impl App {
                         if sel.is_empty() {
                             child.selection = None;
                             mark_all_panes_dirty(&child.panes);
-                            child.window.request_redraw();
+                            child.request_redraw();
                         }
                     }
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
@@ -502,7 +505,7 @@ impl App {
                                         let st = c.tab_states.remove(from);
                                         c.tab_states.insert(to, st);
                                     }
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
@@ -523,7 +526,7 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if child.copy_mode.is_some() {
                     child_copy_mode_handle_key(child, &event);
-                    child.window.request_redraw();
+                    child.request_redraw();
                     return;
                 }
                 // Epic #289 follow-up: when the cheat sheet / command
@@ -551,7 +554,7 @@ impl App {
                                 self.run_action(&action);
                                 self.drain_pending_window_creates(el);
                                 if let Some(c) = self.windows.get(&win_id) {
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                                 return;
                             }
@@ -559,7 +562,7 @@ impl App {
                     }
                     self.cheatsheet_handle_key(&event);
                     if let Some(c) = self.windows.get(&win_id) {
-                        c.window.request_redraw();
+                        c.request_redraw();
                     }
                     return;
                 }
@@ -572,7 +575,7 @@ impl App {
                                 self.run_action(&action);
                                 self.drain_pending_window_creates(el);
                                 if let Some(c) = self.windows.get(&win_id) {
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                                 return;
                             }
@@ -580,7 +583,7 @@ impl App {
                     }
                     self.command_palette_handle_key(&event);
                     if let Some(c) = self.windows.get(&win_id) {
-                        c.window.request_redraw();
+                        c.request_redraw();
                     }
                     return;
                 }
@@ -614,14 +617,14 @@ impl App {
                             Action::EnterCopyMode => {
                                 if let Some(c) = self.windows.get_mut(&win_id) {
                                     child_enter_copy_mode(c);
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                                 return;
                             }
                             Action::EnterQuickSelect => {
                                 if let Some(c) = self.windows.get_mut(&win_id) {
                                     child_enter_quick_select(c);
-                                    c.window.request_redraw();
+                                    c.request_redraw();
                                 }
                                 return;
                             }
@@ -629,7 +632,7 @@ impl App {
                                 if self.run_action(&action) {
                                     self.drain_pending_window_creates(el);
                                     if let Some(c) = self.windows.get(&win_id) {
-                                        c.window.request_redraw();
+                                        c.request_redraw();
                                     }
                                     handled = true;
                                     break;
@@ -657,7 +660,7 @@ impl App {
                     if child.selection.is_some() {
                         child.selection = None;
                         mark_all_panes_dirty(&child.panes);
-                        child.window.request_redraw();
+                        child.request_redraw();
                     }
                 }
             }
@@ -857,8 +860,11 @@ impl App {
             let Some(renderer) = child.renderer.as_ref() else {
                 return false;
             };
+            let Some(win) = child.window.as_ref() else {
+                return false;
+            };
             let (c, r) = renderer.cells();
-            (c, r, child.window.clone(), child.cursor_visible.clone())
+            (c, r, win.clone(), child.cursor_visible.clone())
         };
         let pane_state =
             self.spawn_pane_state_for_child(cols, rows, child_window.clone(), cursor_visible_arc);
@@ -872,7 +878,7 @@ impl App {
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -884,7 +890,7 @@ impl App {
     // window's owned (tabs / tab_states / panes) triple. Each helper:
     //   * returns `true` if it mutated state (so the caller knows to
     //     bump `redraw_request_count`),
-    //   * issues `child.window.request_redraw()` on the child handle
+    //   * issues `child.request_redraw()` on the child handle
     //     when state changed,
     //   * returns `false` (no-op + no redraw) when the recorded child
     //     no longer exists — the keymap_dispatch caller then falls
@@ -935,7 +941,7 @@ impl App {
             if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
                 child.tabs.close(tab_id);
             }
-            child.window.request_redraw();
+            child.request_redraw();
             child.tabs.is_empty()
         };
         if drained {
@@ -964,7 +970,7 @@ impl App {
         if st.tree.close(focus) {
             st.active_pane = new_focus;
             child.panes.remove(&focus);
-            child.window.request_redraw();
+            child.request_redraw();
             return true;
         }
         false
@@ -974,7 +980,7 @@ impl App {
     pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.next();
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -982,7 +988,7 @@ impl App {
     pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.prev();
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -990,7 +996,7 @@ impl App {
     pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.activate(idx);
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -999,7 +1005,7 @@ impl App {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -1035,8 +1041,11 @@ impl App {
             let Some(renderer) = child.renderer.as_ref() else {
                 return false;
             };
+            let Some(win) = child.window.as_ref() else {
+                return false;
+            };
             let (c, r) = renderer.cells();
-            (c, r, child.window.clone(), child.cursor_visible.clone())
+            (c, r, win.clone(), child.cursor_visible.clone())
         };
         let new_id = next_pane_id();
         let pane_state =
@@ -1053,7 +1062,7 @@ impl App {
         st.active_pane = new_id;
         child.panes.insert(new_id, pane_state);
         resize_visible_panes_in_child(child);
-        child.window.request_redraw();
+        child.request_redraw();
         true
     }
 
@@ -1077,7 +1086,7 @@ impl App {
             st.active_pane = new_focus;
             child.panes.remove(&focus);
             resize_visible_panes_in_child(child);
-            child.window.request_redraw();
+            child.request_redraw();
             return true;
         }
         false
@@ -1091,7 +1100,7 @@ impl App {
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
             st.active_pane = next;
-            child.window.request_redraw();
+            child.request_redraw();
             true
         } else {
             // Recognized as the right child, but no neighbor existed in
@@ -1109,7 +1118,7 @@ impl App {
         let active = st.active_pane;
         if st.tree.toggle_zoom(active) {
             resize_visible_panes_in_child(child);
-            child.window.request_redraw();
+            child.request_redraw();
         }
         // Routed regardless of toggle result so the action does not leak
         // to the main window.
@@ -1128,7 +1137,7 @@ impl App {
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         if st.tree.resize_split(st.active_pane, dir, 0.05) {
             resize_visible_panes_in_child(child);
-            child.window.request_redraw();
+            child.request_redraw();
         }
         // Routed regardless of resize result.
         true

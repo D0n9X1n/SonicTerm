@@ -328,7 +328,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.window.request_redraw();
+            child.request_redraw();
         }
     }
 }
@@ -383,7 +383,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.window.request_redraw();
+            child.request_redraw();
         }
         tracing::info!("theme -> {name}");
     }
@@ -429,7 +429,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.window.request_redraw();
+            child.request_redraw();
         }
         tracing::info!("font size -> {size}pt");
     }
@@ -465,7 +465,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.window.request_redraw();
+            child.request_redraw();
         }
     }
     pub(super) fn force_reload_config(&mut self) {

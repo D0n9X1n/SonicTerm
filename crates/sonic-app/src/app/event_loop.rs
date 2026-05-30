@@ -125,7 +125,7 @@ impl App {
         for child in self.windows.values_mut() {
             if let Some(r) = child.renderer.as_mut() {
                 r.clear_shape_cache();
-                child.window.request_redraw();
+                child.request_redraw();
             }
         }
     }
@@ -261,7 +261,7 @@ impl App {
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
             role: super::WindowRole::Terminal,
-            window: window.clone(),
+            window: Some(window.clone()),
             renderer: Some(renderer),
             tabs: sonic_ui::tabs::TabBar::new(),
             tab_states: Vec::new(),

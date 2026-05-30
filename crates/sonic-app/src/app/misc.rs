@@ -348,7 +348,7 @@ impl App {
         let win_id = window.id();
         let child = WindowState {
             role: crate::app::WindowRole::Terminal,
-            window: window.clone(),
+            window: Some(window.clone()),
             renderer: Some(renderer),
             tabs,
             tab_states: vec![TabState::new(PaneTree::leaf(pane_id), pane_id)],
