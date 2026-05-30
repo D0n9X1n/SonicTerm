@@ -178,11 +178,7 @@ fn tabs_hold_min_width_when_room_allows() {
     // and the bar shares space evenly — that overflow-avoidance behavior
     // is exercised separately by `tabbar_view::tab_widths_shrink_when_many_tabs`.
     //
-    // On Windows the integrated titlebar reserves ~138 logical px on the
-    // right for the min/max/close caption-button strip (see
-    // `caption_strip_reserved_width`). To keep the *available* tabs region
-    // at parity with non-Windows, widen the window by that reserved amount.
-    let window_width = 1000.0 + sonic_ui::tabbar_view::caption_strip_reserved_width();
+    let window_width = 1000.0;
     for n in 2..=4 {
         let bar = bar_with_active(n, 0);
         let layout = TabBarLayout::compute(&bar, window_width);

@@ -64,6 +64,16 @@ fn removing_plus_button_widens_tabs() {
     let layout = TabBarLayout::compute(&bar, 800.0);
     let w0 = layout.tabs[0].bg.w;
     let w1 = layout.tabs[1].bg.w;
-    assert!(w0 > 380.0, "tab0 should be wider after +-button removal, got {w0}");
-    assert!(w1 > 380.0, "tab1 should be wider after +-button removal, got {w1}");
+    #[cfg(target_os = "windows")]
+    {
+        // Windows reserves the native caption-button strip on the right edge,
+        // so the reclaimed `+` space is bounded by that OS chrome gutter.
+        assert!(w0 > 300.0, "tab0 should reclaim available client chrome space, got {w0}");
+        assert!(w1 > 300.0, "tab1 should reclaim available client chrome space, got {w1}");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert!(w0 > 380.0, "tab0 should be wider after +-button removal, got {w0}");
+        assert!(w1 > 380.0, "tab1 should be wider after +-button removal, got {w1}");
+    }
 }

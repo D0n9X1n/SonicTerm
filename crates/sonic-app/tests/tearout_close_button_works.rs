@@ -3,7 +3,7 @@
 //!
 //! Root cause (pre-fix): the `MouseInput::Pressed` arm in
 //! `crates/sonic-app/src/app/child_window.rs` matched
-//! `TabHit::Close(_) | TabHit::NewTab` and **swallowed both** with a
+//! `TabHit::Close(_)` and **swallowed it** with a
 //! `// single-tab children today` comment. After Epic #289 Phase D
 //! allowed multi-tab child windows the comment was stale and the ×
 //! glyph became a no-op.

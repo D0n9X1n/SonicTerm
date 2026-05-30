@@ -107,19 +107,10 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
     out
 }
 
-/// Integer-pixel inset for the Windows custom titlebar strip; 0
-/// elsewhere. Duplicated (in tiny form) from `sonic_app::app` so this
-/// module can stay independent of the app crate.
+#[cfg(target_os = "macos")]
 #[inline]
 fn integrated_titlebar_inset_px() -> u32 {
-    #[cfg(target_os = "windows")]
-    {
-        32
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        0
-    }
+    32
 }
 
 use crate::{
@@ -2800,11 +2791,10 @@ impl GpuRenderer {
                 color: border_subtle,
                 ..Default::default()
             });
-            // Win11-style caption buttons — only painted when the
-            // integrated titlebar inset is non-zero (Windows). On macOS the
-            // inset is 0 and this is a no-op there. The symbols are geometric
-            // primitives in `paint_caption_buttons`, avoiding Unicode caption
-            // glyphs that may be absent from the bundled font.
+            // macOS integrated titlebar still needs painted traffic-light
+            // affordances. Windows uses native Win11 chrome and must not paint
+            // duplicate caption buttons in the client area.
+            #[cfg(target_os = "macos")]
             if integrated_titlebar_inset_px() > 0 {
                 let rects = crate::tabbar_view::caption_button_rects(sw as u32, 1.0);
                 let tuples = [
