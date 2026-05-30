@@ -12,8 +12,8 @@
 use bytemuck::{Pod, Zeroable};
 
 /// One quad instance — what the vertex stage reads per draw — packing a
-/// rectangle, color, and optional rounded-rect SDF parameters into the layout
-/// the WGSL shader expects.
+/// rectangle, color, and optional rounded-rect / line-segment SDF parameters
+/// into the layout the WGSL shader expects.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct QuadInstance {
@@ -27,13 +27,32 @@ pub struct QuadInstance {
     /// Corner radius in physical pixels. `0.0` (default) skips the SDF
     /// rounded-rect path and the quad renders sharp like before.
     pub radius_px: f32,
-    /// Padding so the layout stays 16-byte aligned for WGSL `vec4` ergonomics.
-    pub _pad: f32,
+    /// Line-segment stroke thickness in physical pixels. When `> 0` the
+    /// fragment shader takes the line-SDF path and renders an
+    /// anti-aliased capsule between [`Self::line_a`] and [`Self::line_b`]
+    /// instead of the rounded-rect path. `0.0` (default) keeps the
+    /// legacy behaviour.
+    pub line_thickness_px: f32,
+    /// Line segment endpoint A, in local pixel coordinates **relative to
+    /// the rect center** (same frame as the shader's `local` varying).
+    /// Only consulted when `line_thickness_px > 0`.
+    pub line_a: [f32; 2],
+    /// Line segment endpoint B, in local pixel coordinates **relative to
+    /// the rect center**. Only consulted when `line_thickness_px > 0`.
+    pub line_b: [f32; 2],
 }
 
 impl Default for QuadInstance {
     fn default() -> Self {
-        Self { rect: [0.0; 4], color: [0.0; 4], size_px: [0.0; 2], radius_px: 0.0, _pad: 0.0 }
+        Self {
+            rect: [0.0; 4],
+            color: [0.0; 4],
+            size_px: [0.0; 2],
+            radius_px: 0.0,
+            line_thickness_px: 0.0,
+            line_a: [0.0; 2],
+            line_b: [0.0; 2],
+        }
     }
 }
 
@@ -48,7 +67,36 @@ impl QuadInstance {
     /// in physical pixels (must match the NDC `rect` size).
     #[must_use]
     pub fn rounded(rect: [f32; 4], color: [f32; 4], size_px: [f32; 2], radius_px: f32) -> Self {
-        Self { rect, color, size_px, radius_px, _pad: 0.0 }
+        Self { rect, color, size_px, radius_px, ..Default::default() }
+    }
+
+    /// Anti-aliased line segment (rounded-cap capsule) inside the given
+    /// bounding-box quad. `rect`/`size_px` describe a bounding box that
+    /// fully contains the stroked segment (endpoints +/- thickness/2 +
+    /// 1 px AA padding). `line_a` and `line_b` are pixel offsets from the
+    /// rect's center. `thickness_px` is the stroke width.
+    ///
+    /// The fragment shader computes the signed distance to the segment
+    /// and smoothsteps a 1-pixel AA band, so diagonals render smooth on
+    /// HiDPI without the staircase artifacts a binary 8x8 mask produces.
+    #[must_use]
+    pub fn line(
+        rect: [f32; 4],
+        color: [f32; 4],
+        size_px: [f32; 2],
+        line_a: [f32; 2],
+        line_b: [f32; 2],
+        thickness_px: f32,
+    ) -> Self {
+        Self {
+            rect,
+            color,
+            size_px,
+            radius_px: 0.0,
+            line_thickness_px: thickness_px,
+            line_a,
+            line_b,
+        }
     }
 }
 
@@ -64,7 +112,8 @@ const SHADER: &str = r#"
 struct Instance {
     @location(0) rect:    vec4<f32>,
     @location(1) color:   vec4<f32>,
-    @location(2) params:  vec4<f32>, // size_px.x, size_px.y, radius_px, pad
+    @location(2) params:  vec4<f32>, // size_px.x, size_px.y, radius_px, line_thickness_px
+    @location(3) line:    vec4<f32>, // line_a.x, line_a.y, line_b.x, line_b.y
 }
 
 struct VsOut {
@@ -72,6 +121,7 @@ struct VsOut {
     @location(0)        color: vec4<f32>,
     @location(1)        local: vec2<f32>, // pixel offset from rect center
     @location(2)        params: vec4<f32>,
+    @location(3)        line:   vec4<f32>,
 }
 
 @vertex
@@ -93,11 +143,32 @@ fn vs_main(@builtin(vertex_index) vid: u32, inst: Instance) -> VsOut {
     let size = inst.params.xy;
     out.local = (c - vec2<f32>(0.5, 0.5)) * size;
     out.params = inst.params;
+    out.line = inst.line;
     return out;
+}
+
+// Signed distance from point p to segment a-b. Returns negative inside the
+// "thickness" capsule when combined with a stroke half-width.
+fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * h);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let thickness = in.params.w;
+    if (thickness > 0.0) {
+        // Anti-aliased line / capsule SDF. Used for the tab close ×,
+        // which would otherwise stair-step on HiDPI as a binary 8x8 mask.
+        let a = in.line.xy;
+        let b = in.line.zw;
+        let d = sd_segment(in.local, a, b) - thickness * 0.5;
+        let w = fwidth(d);
+        let aa = 1.0 - smoothstep(-w, w, d);
+        return vec4<f32>(in.color.rgb, in.color.a * aa);
+    }
     let r = in.params.z;
     if (r <= 0.0) {
         return in.color;
@@ -139,7 +210,8 @@ impl QuadPipeline {
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x4,
                         1 => Float32x4,
-                        2 => Float32x4
+                        2 => Float32x4,
+                        3 => Float32x4
                     ],
                 }],
             },
@@ -304,6 +376,54 @@ const fn mask8_from_rows(rows: [u8; 8]) -> [u8; 64] {
         y += 1;
     }
     out
+}
+
+/// Parameters for [`push_close_x_quads`].
+#[derive(Debug, Clone, Copy)]
+pub struct CloseXParams {
+    /// Top-left x of the icon bounding box in physical pixels.
+    pub x: f32,
+    /// Top-left y of the icon bounding box in physical pixels.
+    pub y: f32,
+    /// Width / height of the (square) icon bounding box in physical pixels.
+    pub size: f32,
+    /// Stroke thickness in physical pixels. Clamped to >= 1.0.
+    pub thickness: f32,
+    /// Premultiplied-straight RGBA stroke color.
+    pub color: [f32; 4],
+    /// Surface width in physical pixels.
+    pub sw: f32,
+    /// Surface height in physical pixels.
+    pub sh: f32,
+}
+
+/// Render a tab "close ×" as two anti-aliased SVG-style diagonal strokes,
+/// using the QuadPipeline's line-SDF path. Replaces the legacy 8x8 binary
+/// mask whose diagonals stair-stepped visibly on macOS Retina.
+///
+/// Each stroke is a capsule (rounded caps) inside a quad whose bounding box
+/// fully contains it (segment + half-thickness + 1 px AA padding). The
+/// fragment shader does the actual anti-aliasing via `fwidth(d)`, so the
+/// edge stays a clean 1-pixel band at any DPI.
+pub fn push_close_x_quads(out: &mut Vec<QuadInstance>, params: CloseXParams) {
+    let CloseXParams { x, y, size, thickness, color, sw, sh } = params;
+    let t = thickness.max(1.0);
+    // The icon's drawing-space spans [0, size] on each axis; segment
+    // endpoints land at the icon corners with a half-thickness padding
+    // so the rounded cap stays inside the bounding box.
+    let pad = t * 0.5;
+    // Bounding box covers the full square. `local` in the shader is in
+    // pixels from the rect's center, so put the segment endpoints
+    // relative to (size/2, size/2).
+    let half = size * 0.5;
+    let a1 = [-half + pad, -half + pad];
+    let b1 = [half - pad, half - pad];
+    let a2 = [half - pad, -half + pad];
+    let b2 = [-half + pad, half - pad];
+    let rect_ndc = px_to_ndc(x, y, size, size, sw, sh);
+    let size_px = [size, size];
+    out.push(QuadInstance::line(rect_ndc, color, size_px, a1, b1, t));
+    out.push(QuadInstance::line(rect_ndc, color, size_px, a2, b2, t));
 }
 
 /// Parameters for [`push_mask_icon_quads`].

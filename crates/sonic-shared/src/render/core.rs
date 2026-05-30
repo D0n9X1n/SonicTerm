@@ -137,8 +137,8 @@ use crate::{
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     quad::{
-        push_mask_icon_quads, px_to_ndc, MaskIconParams, QuadInstance, QuadPipeline, ICON_CLOSE_8,
-        ICON_PLUS_8,
+        push_close_x_quads, push_mask_icon_quads, px_to_ndc, CloseXParams, MaskIconParams,
+        QuadInstance, QuadPipeline, ICON_CLOSE_8, ICON_PLUS_8,
     },
     search::SearchState,
     selection::Selection,
@@ -2903,22 +2903,29 @@ impl GpuRenderer {
                     // 14×14 hit, 8×8 glyph (inset 3px each side).
                     let inset = (t.close_x_rect.w - 8.0) * 0.5;
                     let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
-                    let thick = 1.5_f32;
-                    // SVG-source close icon, represented at render time as
-                    // an alpha mask so chrome never depends on font fallback.
-                    push_mask_icon_quads(
+                    let thick = (glyph * 0.14).max(1.25);
+                    // SVG-style close icon: two anti-aliased diagonal
+                    // capsule strokes through the QuadPipeline's
+                    // line-SDF path. Replaces the previous 8x8 binary
+                    // alpha mask whose diagonals stair-stepped visibly
+                    // on Retina (per-pixel alpha was binary 0/255, so
+                    // every "off the diagonal" cell snapped flat).
+                    push_close_x_quads(
                         &mut quads,
-                        MaskIconParams {
-                            mask: ICON_CLOSE_8,
+                        CloseXParams {
                             x: cx + inset,
                             y: cy + inset,
                             size: glyph,
-                            min_cell: thick,
+                            thickness: thick,
                             color: close_color,
                             sw,
                             sh,
                         },
                     );
+                    // Keep the constant referenced so the mask table
+                    // stays accessible to other call sites without an
+                    // unused-import warning.
+                    let _ = ICON_CLOSE_8;
                 }
                 // Phase D D3 (Epic #289): if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to
