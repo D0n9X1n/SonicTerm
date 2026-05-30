@@ -30,26 +30,31 @@ fn caption_buttons_scale_with_dpi() {
 }
 
 #[test]
-fn new_tab_button_does_not_overlap_caption_buttons() {
+fn tabs_do_not_overlap_caption_buttons() {
+    // Issue #335: the `+` new-tab button was removed. The remaining
+    // constraint is that the last tab's right edge must not overlap
+    // the caption-button strip on Windows.
     let mut bar = TabBar::new();
     bar.push(Tab::new("one"));
     let layout = TabBarLayout::compute(&bar, 1000.0);
     let [min, _, _] = caption_button_rects(1000, 1.0);
-    let nt_right = layout.new_tab.x + layout.new_tab.w;
+    let last = layout.tabs.last().unwrap();
+    let last_right = last.bg.x + last.bg.w;
     #[cfg(target_os = "windows")]
     {
         assert!(
-            nt_right <= min.x,
-            "new-tab button (right edge {nt_right}) overlaps caption buttons (min.x = {})",
+            last_right <= min.x,
+            "last tab (right edge {last_right}) overlaps caption buttons (min.x = {})",
             min.x,
         );
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // On non-Windows the bar runs to within BAR_LEFT_PAD of the
+        // right edge (a hair of breathing room).
         assert!(
-            (nt_right - (1000.0 - BAR_LEFT_PAD)).abs() < 0.5,
-            "new-tab button right edge {nt_right} not at expected right edge {}",
-            1000.0 - BAR_LEFT_PAD,
+            last_right <= 1000.0 - BAR_LEFT_PAD + 0.5,
+            "last tab right edge {last_right} crossed right padding",
         );
         let _ = min;
     }

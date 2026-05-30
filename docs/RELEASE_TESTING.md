@@ -77,7 +77,6 @@ How to use:
 35. [Drag-drop edge cases](#35-drag-drop-edge-cases)
 36. [Config validation](#36-config-validation)
 37. [Tab bar caption strip (per-OS chrome parity)](#37-tab-bar-caption-strip-per-os-chrome-parity)
-38. [Tab bar `+` new-tab button](#38-tab-bar--new-tab-button)
 39. [Tab title slack-distribution](#39-tab-title-slack-distribution)
 40. [Cell grid padding](#40-cell-grid-padding)
 41. [Per-OS default keymap chord prefix](#41-per-os-default-keymap-chord-prefix)
@@ -1050,30 +1049,6 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 - [ ] Tab content and PTY survive minimize/restore and maximize/restore.
 
 **FAIL → block release.** Any button missing, no hover state, wrong hover color on Windows close, or click no-op.
-
----
-
-## 38. Tab bar `+` new-tab button
-
-**Setup:** launch Sonic with one tab; make the window narrow, then wide.
-
-**Keystrokes / actions:**
-
-| macOS | Windows |
-|---|---|
-| Hover the `+` at the right edge of the tab strip, then click it three times. | Hover the `+` before the caption strip, then click it three times. |
-| Resize the window narrower and wider; repeat one click. | Resize narrower and wider; confirm it never overlaps `—` / `▢` / `✕`; repeat one click. |
-| Use `Cmd+T` once as a keyboard cross-check. | Use `Ctrl+Shift+T` once as a keyboard cross-check. |
-
-**Expected outcome:**
-
-- [ ] `+` is visible at the tab strip right edge (before caption buttons on Windows, before nothing on macOS).
-- [ ] Hover feedback appears before click.
-- [ ] Each click spawns exactly one new tab and focuses it.
-- [ ] Windows: `+` never overlaps caption buttons (#189 regression-guard).
-- [ ] Keyboard new-tab and mouse new-tab produce identical tab state.
-
-**FAIL → block release.** Missing `+`, no hover state, no new tab, double-spawn, or Windows overlap.
 
 ---
 

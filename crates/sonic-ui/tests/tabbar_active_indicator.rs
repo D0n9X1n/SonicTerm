@@ -32,11 +32,12 @@ fn assert_accent_on_active(layout: &TabBarLayout, active_idx: usize) {
 
     // And explicitly: NOT the off-by-one position the bug report
     // showed. When active_idx is the last tab we check against the
-    // `+` button rect; for inner tabs we check against the next tab.
+    // right edge of the bar; for inner tabs we check against the
+    // next tab.
     let bug_x = if active_idx + 1 < layout.tabs.len() {
         layout.tabs[active_idx + 1].bg.x
     } else {
-        layout.new_tab.x
+        layout.bar.w - 28.0
     };
     assert!(
         (acc.x - bug_x).abs() > 1.0,
@@ -116,10 +117,11 @@ fn accent_never_drifts_off_its_own_active_tab() {
     // Walk a range of window widths and tab counts that span the
     // narrow / typical / wide regimes. For each combo the accent
     // MUST stay anchored to its own active tab's `bg` rect — never
-    // drift onto a neighbouring tab or into the `+` button gutter.
+    // drift onto a neighbouring tab or into the right-edge empty
+    // area of the bar.
     //
-    // Note: under the TAB_MIN_WIDTH floor the bar may overflow the
-    // gutter on the right when many tabs don't fit; that is OK and
+    // Note: under the TAB_MIN_WIDTH floor the bar may overflow on
+    // the right when many tabs don't fit; that is OK and
     // intentional (issue #171 second bug). The accent just has to
     // ride on its own tab, wherever that tab ends up.
     for n in 1..=6 {

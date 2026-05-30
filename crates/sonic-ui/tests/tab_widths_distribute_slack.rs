@@ -19,5 +19,5 @@ fn single_tab_in_wide_strip_grows_beyond_legacy_small_cap() {
         (width - TAB_MAX_WIDTH).abs() < 0.5,
         "single tab should grow to the configured max width {TAB_MAX_WIDTH}, got {width}"
     );
-    assert!(layout.tabs[0].bg.x + width <= layout.new_tab.x);
+    assert!(layout.tabs[0].bg.x + width <= layout.bar.w);
 }
