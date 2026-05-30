@@ -821,6 +821,11 @@ pub fn run_with_os_drag_pending_and_window_hook(
 }
 
 mod child_window;
+pub use child_window::{
+    child_window_resized_handles_no_renderer,
+    child_window_scale_factor_changed_handles_no_renderer, resize_renderer_and_panes_if_present,
+    set_scale_factor_if_renderer_present,
+};
 mod config_apply;
 mod event_loop;
 pub mod hovered_url;
@@ -1209,7 +1214,7 @@ impl App {
     pub(crate) fn compute_pane_rects_for(child: &WindowState) -> Vec<(u64, sonic_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
-        let r = child.renderer.as_ref().unwrap();
+        let Some(r) = child.renderer.as_ref() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
         let pl = r.padding_left();
@@ -2383,13 +2388,11 @@ impl App {
         };
         let sf = child.window.scale_factor() as f32;
         let logical_w = inner_size.0 as f32 / sf;
-        let layout = TabBarLayout::compute_with_height(
-            &child.tabs,
-            logical_w,
-            child.renderer.as_ref().unwrap().tab_bar_logical_height(),
-        )
-        .with_top_offset(child.renderer.as_ref().unwrap().tab_bar_y_offset())
-        .with_visible(child.renderer.as_ref().unwrap().tab_bar_visible());
+        let Some(r) = child.renderer.as_ref() else { return };
+        let layout =
+            TabBarLayout::compute_with_height(&child.tabs, logical_w, r.tab_bar_logical_height())
+                .with_top_offset(r.tab_bar_y_offset())
+                .with_visible(r.tab_bar_visible());
         let snap =
             os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);
         self.publish_os_drag_bar_snapshot(snap);

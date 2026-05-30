@@ -106,7 +106,8 @@ impl App {
         panes: HashMap<u64, PaneState>,
     ) -> bool {
         let Some(child) = self.windows.get_mut(&dst_id) else { return false };
-        let (cols, rows) = child.renderer.as_mut().unwrap().cells();
+        let Some(renderer) = child.renderer.as_ref() else { return false };
+        let (cols, rows) = renderer.cells();
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);
             if let Some(pty) = pane.pty.as_ref() {
