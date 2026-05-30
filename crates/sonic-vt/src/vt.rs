@@ -130,6 +130,11 @@ impl Parser {
                             self.performer.current_hyperlink,
                         );
                     }
+                    // REP (CSI b) needs the most-recent printable; the fast
+                    // path bypasses Performer::print so update it here.
+                    if let Some(&b) = bytes[i..i + run_end].last() {
+                        self.performer.last_printed_char = Some(b as char);
+                    }
                     i += run_end;
                     continue;
                 }
@@ -243,6 +248,10 @@ struct Performer {
     /// The ASCII fast-path in `Parser::advance` is only taken when this is
     /// `true`.
     ground: bool,
+    /// Most-recently-printed graphic character, for CSI `b` (REP).
+    /// ECMA-48: REP repeats the GRAPHIC CHARACTER which is the most recent
+    /// in the data stream. Reset on cursor motion / erase / scroll.
+    last_printed_char: Option<char>,
 }
 
 impl Performer {
@@ -265,6 +274,7 @@ impl Performer {
             scroll_top: None,
             scroll_bottom: None,
             ground: true,
+            last_printed_char: None,
         }
     }
 
@@ -435,6 +445,7 @@ fn parse_ext_color(iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
 impl Perform for Performer {
     fn print(&mut self, c: char) {
         self.grid.put_char_linked(c, self.fg, self.bg, self.flags, self.current_hyperlink);
+        self.last_printed_char = Some(c);
         self.ground = true;
     }
 
@@ -570,6 +581,61 @@ impl Perform for Performer {
                 }
             }
             'm' => self.apply_sgr(params),
+            '@' => {
+                // ICH — Insert n blank cells at the cursor on the current
+                // row, shifting trailing cells right and dropping overflow.
+                let n = p0().max(1) as usize;
+                let cur = self.grid.cursor;
+                self.grid.insert_cells(cur.row, cur.col, n);
+                self.last_printed_char = None;
+            }
+            'P' => {
+                // DCH — Delete n cells at the cursor, shifting trailing
+                // cells left and filling the right edge with blanks.
+                let n = p0().max(1) as usize;
+                let cur = self.grid.cursor;
+                self.grid.delete_cells(cur.row, cur.col, n);
+                self.last_printed_char = None;
+            }
+            'X' => {
+                // ECH — Erase n cells starting at the cursor with the
+                // default (blank) cell. Cursor is unchanged. neo-tree's
+                // per-row tail-clear pattern depends on this (#359).
+                let n = p0().max(1) as usize;
+                let cur = self.grid.cursor;
+                self.grid.erase_cells(cur.row, cur.col, n);
+                self.last_printed_char = None;
+            }
+            'G' | '`' => {
+                // CHA (G) / HPA (`) — Cursor to column p0 (1-based) on the
+                // current row.
+                let col_1 = p0().max(1);
+                let row = self.grid.cursor.row;
+                self.grid.goto(row, col_1.saturating_sub(1));
+                self.last_printed_char = None;
+            }
+            'd' => {
+                // VPA — Cursor to row p0 (1-based), column unchanged.
+                let row_1 = p0().max(1);
+                let col = self.grid.cursor.col;
+                self.grid.goto(row_1.saturating_sub(1), col);
+                self.last_printed_char = None;
+            }
+            'b' => {
+                // REP — Repeat last printable character n times at cursor.
+                let n = p0().max(1) as usize;
+                if let Some(ch) = self.last_printed_char {
+                    for _ in 0..n {
+                        self.grid.put_char_linked(
+                            ch,
+                            self.fg,
+                            self.bg,
+                            self.flags,
+                            self.current_hyperlink,
+                        );
+                    }
+                }
+            }
             'n' => match p0() {
                 5 => self.reply(b"\x1b[0n"),
                 6 => {

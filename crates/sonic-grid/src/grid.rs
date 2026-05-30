@@ -708,6 +708,67 @@ impl Grid {
         self.bump();
     }
 
+    /// Erase `n` cells starting at (`row`, `col`), overwriting with the
+    /// default (blank) Cell. Cursor unchanged. Used by CSI `X` (ECH).
+    /// ECMA-48 §8.3.38: erased cells become BLANK with the current SGR
+    /// rendition; we approximate by writing `Cell::default()` which keeps
+    /// behaviour aligned with the existing erase_line family.
+    pub fn erase_cells(&mut self, row: u16, col: u16, n: usize) {
+        if row >= self.rows || col >= self.cols || n == 0 {
+            return;
+        }
+        let r = row as usize;
+        let start = col as usize;
+        let end = (start + n).min(self.cols as usize);
+        for c in start..end {
+            self.visible[r][c] = Cell::default();
+        }
+        self.mark_row(row);
+        self.bump();
+    }
+
+    /// Insert `n` blank cells at (`row`, `col`); shift trailing cells of
+    /// the row right and drop the overflow at the right edge. Used by
+    /// CSI `@` (ICH).
+    pub fn insert_cells(&mut self, row: u16, col: u16, n: usize) {
+        if row >= self.rows || col >= self.cols || n == 0 {
+            return;
+        }
+        let r = row as usize;
+        let start = col as usize;
+        let cols = self.cols as usize;
+        let n = n.min(cols - start);
+        // Shift right: dest = start+n..cols, src = start..cols-n.
+        for dst in (start + n..cols).rev() {
+            self.visible[r][dst] = self.visible[r][dst - n].clone();
+        }
+        for c in start..start + n {
+            self.visible[r][c] = Cell::default();
+        }
+        self.mark_row(row);
+        self.bump();
+    }
+
+    /// Delete `n` cells at (`row`, `col`); shift trailing cells of the row
+    /// left and fill the right edge with blanks. Used by CSI `P` (DCH).
+    pub fn delete_cells(&mut self, row: u16, col: u16, n: usize) {
+        if row >= self.rows || col >= self.cols || n == 0 {
+            return;
+        }
+        let r = row as usize;
+        let start = col as usize;
+        let cols = self.cols as usize;
+        let n = n.min(cols - start);
+        for c in start..cols - n {
+            self.visible[r][c] = self.visible[r][c + n].clone();
+        }
+        for c in cols - n..cols {
+            self.visible[r][c] = Cell::default();
+        }
+        self.mark_row(row);
+        self.bump();
+    }
+
     /// Move cursor to (row, col), clamping to grid bounds.
     pub fn goto(&mut self, row: u16, col: u16) {
         let old_row = self.cursor.row;

@@ -1347,3 +1347,30 @@ expect = [
   { kind = "text-in-region", region = "body", value = "NEW" },
 ]
 fail_on = "Body rows still show the original B/C/D layout — IL/DL silently dropped, stale rows above NEW."
+
+# ==========================================================================
+# §4 / land-mines  (covers #359 CSI ECH/CHA/REP/VPA/DCH/ICH —
+# nvim+neo-tree per-row tail-clear smear)
+# ==========================================================================
+
+[[case]]
+id = "csi-ech-tail-clear-no-smear"
+section = 4
+title = "ECH clears row tail (neo-tree per-row repaint pattern, #359)"
+applies_to = ["mac"]
+covers_bugs = ["#359"]
+covers_landmines = ["csi-ech-not-noop"]
+setup = ["clear", "wait:0.3"]
+# Replay the synthetic byte pattern neo-tree emits per row: write a long
+# stale string, jump to mid-row, write a short label, then ECH the tail.
+# Pre-fix the ECH was a no-op and the tail of the old string showed through.
+keystrokes = [
+  { kind = "text", value = "printf 'OLDOLDOLDOLDOLD\\033[1;4HNEW\\033[12X\\n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "text-in-region", region = "body", value = "OLDNEW" },
+]
+fail_on = "Row still shows OLDOLD suffix after NEW — ECH silently dropped, neo-tree-style tail-clear no-op'd."
