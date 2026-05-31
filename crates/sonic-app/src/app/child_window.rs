@@ -241,11 +241,17 @@ impl App {
                             is_broadcast_receiver: false,
                         })
                         .collect();
+                    // PR #400: cursor_visible is per-pane (lives on
+                    // PaneState). Read from the active pane (already
+                    // borrowed mutably above) so the DECTCEM flag
+                    // survives tear-out of this child.
+                    let cursor_visible_now =
+                        pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed);
                     if let Some(r) = child.renderer.as_mut() {
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &theme,
-                            child.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
+                            cursor_visible_now,
                             child.selection.as_ref(),
                             child.copy_mode.as_ref(),
                             &child.tabs,
@@ -759,16 +765,18 @@ impl App {
     }
 
     /// Build a fresh `PaneState` bound to the given child window's
-    /// (cols, rows, Arc<Window>, cursor_visible) snapshot. Extracted
+    /// (cols, rows, Arc<Window>) snapshot. Extracted
     /// from `spawn_tab_in_child` so `split_active_pane_in_child` can
     /// reuse the same VT-loop + reply-forwarder setup without
     /// duplicating ~50 lines of thread-spawn boilerplate.
+    ///
+    /// PR #400: cursor_visible is now a fresh per-pane Arc owned by
+    /// `PaneState`, no longer threaded in from the WindowState.
     pub(super) fn spawn_pane_state_for_child(
         &self,
         cols: u16,
         rows: u16,
         child_window: Arc<Window>,
-        cursor_visible_arc: Arc<std::sync::atomic::AtomicBool>,
     ) -> PaneState {
         use sonic_core::{grid::Grid, vt::Parser};
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
@@ -788,13 +796,16 @@ impl App {
         }
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
             Arc::new(Mutex::new(Some(child_window)));
+        // PR #400: per-pane cursor_visible Arc.
+        let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(true));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
-                let cursor_visible = cursor_visible_arc;
+                let cursor_visible = cursor_visible_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 std::thread::Builder::new()
                     .name("sonic-vt-reply-child".into())
@@ -841,6 +852,7 @@ impl App {
         };
         let mut pane_state = PaneState::new(parser, pty);
         pane_state.redraw_target = redraw_target;
+        pane_state.cursor_visible = cursor_visible_pane;
         pane_state
     }
 
@@ -853,7 +865,7 @@ impl App {
         // Snapshot everything we need from the child up-front so the
         // mutable borrow ends before we spawn the VT thread (which
         // captures clones), then re-borrow to install the new tab.
-        let (cols, rows, child_window, cursor_visible_arc) = {
+        let (cols, rows, child_window) = {
             let Some(child) = self.windows.get_mut(&win_id) else {
                 return false;
             };
@@ -864,10 +876,9 @@ impl App {
                 return false;
             };
             let (c, r) = renderer.cells();
-            (c, r, win.clone(), child.cursor_visible.clone())
+            (c, r, win.clone())
         };
-        let pane_state =
-            self.spawn_pane_state_for_child(cols, rows, child_window.clone(), cursor_visible_arc);
+        let pane_state = self.spawn_pane_state_for_child(cols, rows, child_window.clone());
         let pane_id = next_pane_id();
         let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
@@ -1038,20 +1049,19 @@ impl App {
             return false;
         };
         let new_id = next_pane_id();
-        let pane_state = if let (Some(renderer), Some(win)) =
-            (child.renderer.as_ref(), child.window.as_ref())
-        {
-            let (cols, rows) = renderer.cells();
-            self.spawn_pane_state_for_child(cols, rows, win.clone(), child.cursor_visible.clone())
-        } else if child.renderer.is_none() && child.window.is_none() {
-            // Test-only synthetic child windows intentionally have no
-            // renderer/window, but they still need to exercise pane
-            // ownership/routing without falling through to main.
-            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-            PaneState::new(parser, None)
-        } else {
-            return false;
-        };
+        let pane_state =
+            if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
+                let (cols, rows) = renderer.cells();
+                self.spawn_pane_state_for_child(cols, rows, win.clone())
+            } else if child.renderer.is_none() && child.window.is_none() {
+                // Test-only synthetic child windows intentionally have no
+                // renderer/window, but they still need to exercise pane
+                // ownership/routing without falling through to main.
+                let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+                PaneState::new(parser, None)
+            } else {
+                return false;
+            };
         let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };

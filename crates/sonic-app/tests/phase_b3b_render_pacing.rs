@@ -1,25 +1,31 @@
 //! Phase B2 PR-B3b (#365) — render-pacing scalars (`last_render`,
-//! `cursor_visible`, `hover_link`) live on `WindowState`, not `App`.
+//! `hover_link`) live on `WindowState`, not `App`.
+//!
+//! PR #400 follow-up: `cursor_visible` moved off `WindowState` and onto
+//! `PaneState` (per-pane Arc, travels with tear-out). The Arc-sharing
+//! and per-window/per-pane assertions below are updated accordingly.
 //!
 //! Pins:
 //! - `last_render` accessible via `self.main()`.
-//! - `cursor_visible` Arc sharing semantics preserved (mutating through
-//!   `main()?.cursor_visible.store(false)` is reflected in any held
-//!   `Arc` clone — the VT thread captures one of these clones in
-//!   `spawn_pane`).
+//! - `cursor_visible` Arc sharing semantics preserved on PaneState
+//!   (mutating through a held clone is observed by the same pane).
 //! - `hover_link` defaults to `false` in test mode.
-//! - Multi-window: each `WindowState` owns its own scalars.
+//! - Multi-window/multi-pane: each PaneState owns its own
+//!   `cursor_visible` Arc.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sonic_app::app::{App, WindowRole, WindowState};
+use parking_lot::Mutex;
+use sonic_app::app::{App, PaneState, WindowRole, WindowState};
 use sonic_core::{
     config::Config,
+    grid::Grid,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
+    vt::Parser,
 };
 use sonic_ui::ime::ImeState;
 use sonic_ui::tabs::TabBar;
@@ -84,7 +90,6 @@ fn make_synth_ws() -> WindowState {
         selection: None,
         copy_mode: None,
         modifiers: Default::default(),
-        cursor_visible: Arc::new(AtomicBool::new(true)),
         last_render: Instant::now(),
         hover_link: false,
         pressed_tab: None,
@@ -94,6 +99,11 @@ fn make_synth_ws() -> WindowState {
         ime: ImeState::new(),
         hovered_url: None,
     }
+}
+
+fn make_synth_pane() -> PaneState {
+    let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+    PaneState::new(parser, None)
 }
 
 #[test]
@@ -106,24 +116,17 @@ fn last_render_accessible_via_main() {
 }
 
 #[test]
-fn cursor_visible_arc_sharing_preserved() {
-    let mut app = synth_app();
-    // Force synthetic main creation.
-    app.set_last_render_for_test(Instant::now());
-
-    // Pull the Arc clone that the VT thread would capture in `spawn_pane`.
-    let captured: Arc<AtomicBool> = app.main().expect("synthetic main").cursor_visible.clone();
+fn cursor_visible_arc_sharing_preserved_on_pane() {
+    // PR #400: cursor_visible now lives on PaneState. A clone of the
+    // pane's Arc (what the VT thread captures in spawn_pane) MUST
+    // observe stores to the same pane's Arc.
+    let pane = make_synth_pane();
+    let captured: Arc<AtomicBool> = pane.cursor_visible.clone();
     assert!(captured.load(Ordering::Relaxed), "default is visible");
-
-    // Mutate via `main_mut()?.cursor_visible.store(false)`.
-    app.main_mut().expect("synthetic main").cursor_visible.store(false, Ordering::Relaxed);
-
-    // The clone we captured before the mutation MUST observe the new
-    // value — that is the Arc-by-pointer sharing semantic the migration
-    // promised to preserve.
+    pane.cursor_visible.store(false, Ordering::Relaxed);
     assert!(
         !captured.load(Ordering::Relaxed),
-        "Arc clone captured by VT thread must observe store via main_mut()?.cursor_visible",
+        "Arc clone captured by VT thread must observe store on the same PaneState",
     );
 }
 
@@ -139,11 +142,6 @@ fn hover_link_defaults_false_in_test_mode() {
 fn multi_window_each_owns_its_render_pacing_scalars() {
     let mut a = make_synth_ws();
     let mut b = make_synth_ws();
-    // Two distinct Arc allocations — Arc::ptr_eq must be false.
-    assert!(
-        !Arc::ptr_eq(&a.cursor_visible, &b.cursor_visible),
-        "each WindowState owns its own cursor_visible Arc (per-window blink)",
-    );
 
     let ta = Instant::now() - Duration::from_secs(10);
     let tb = Instant::now() - Duration::from_millis(1);
@@ -155,12 +153,24 @@ fn multi_window_each_owns_its_render_pacing_scalars() {
     b.hover_link = false;
     assert!(a.hover_link);
     assert!(!b.hover_link, "hover_link is per-window");
+}
 
-    // Cursor blink on `a` must not flip `b`.
-    a.cursor_visible.store(false, Ordering::Relaxed);
-    assert!(!a.cursor_visible.load(Ordering::Relaxed));
+#[test]
+fn multi_pane_each_owns_its_cursor_visible() {
+    // PR #400: cursor_visible is per-pane (lives on PaneState, not
+    // WindowState). Two panes must own distinct Arc allocations so the
+    // DECTCEM flag tracks each pane independently — and so the Arc
+    // travels with the pane when a tab is torn out into a new window.
+    let p1 = make_synth_pane();
+    let p2 = make_synth_pane();
     assert!(
-        b.cursor_visible.load(Ordering::Relaxed),
-        "b.cursor_visible must NOT see the store on a (no shared Arc)",
+        !Arc::ptr_eq(&p1.cursor_visible, &p2.cursor_visible),
+        "each PaneState owns its own cursor_visible Arc",
+    );
+    p1.cursor_visible.store(false, Ordering::Relaxed);
+    assert!(!p1.cursor_visible.load(Ordering::Relaxed));
+    assert!(
+        p2.cursor_visible.load(Ordering::Relaxed),
+        "p2.cursor_visible must NOT see the store on p1 (no shared Arc)",
     );
 }

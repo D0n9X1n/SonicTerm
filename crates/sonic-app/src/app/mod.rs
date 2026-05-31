@@ -124,7 +124,9 @@ pub struct WindowState {
     pub selection: Option<Selection>,
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
+    // Arc travels with tear-out). Read from
+    // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
     /// Phase B2 PR-B3b (#365): pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
@@ -854,6 +856,14 @@ pub struct PaneState {
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
     pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
+    /// Per-pane DECTCEM cursor-visibility flag (`CSI ?25h/l`). Written
+    /// by the VT loop, read by the render path for the active pane.
+    /// **Per-pane (not per-window)** so the Arc travels with the pane
+    /// when a tab is torn out into a new window — pre-fix #400 the Arc
+    /// lived on `WindowState`, so tear-out's destination got a fresh
+    /// Arc and the moved pane's VT thread kept writing to an orphaned
+    /// AtomicBool that nobody read. Init `true`.
+    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -873,6 +883,7 @@ impl PaneState {
             viewport_top_abs: None,
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
+            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 }
@@ -1809,7 +1820,6 @@ impl App {
             selection: None,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
-            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,
@@ -2368,7 +2378,6 @@ impl App {
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
-            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,

@@ -5,7 +5,6 @@
 //! now short-circuit when it's `None` — i.e. no panic.
 
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
 
 use sonic_app::app::{WindowRole, WindowState};
@@ -25,7 +24,6 @@ fn make_ws_with_no_window() -> WindowState {
         selection: None,
         copy_mode: None,
         modifiers: Default::default(),
-        cursor_visible: Arc::new(AtomicBool::new(true)),
         last_render: Instant::now(),
         hover_link: false,
         pressed_tab: None,

@@ -352,9 +352,7 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
-        let cursor_visible_arc = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let pane_state =
-            self.spawn_pane_state_for_child(cols, rows, window.clone(), cursor_visible_arc.clone());
+        let pane_state = self.spawn_pane_state_for_child(cols, rows, window.clone());
         let pane_id = super::next_pane_id();
         let mut panes = HashMap::new();
         panes.insert(pane_id, pane_state);
@@ -375,7 +373,6 @@ impl App {
             selection: None,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
-            cursor_visible: cursor_visible_arc,
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,

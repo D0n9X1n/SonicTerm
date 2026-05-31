@@ -62,9 +62,18 @@ impl App {
             }
         }
         if let Some(r) = self.main_renderer() {
+            // PR #400: cursor_visible is per-pane — read from the
+            // active pane of the active tab so the DECTCEM flag
+            // survives tear-out.
             let cursor_visible = self
                 .main()
-                .map(|ws| ws.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                .and_then(|ws| {
+                    let i = ws.tabs.active_index();
+                    let active_id = ws.tab_states.get(i).map(|t| t.active_pane)?;
+                    ws.panes
+                        .get(&active_id)
+                        .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                })
                 .unwrap_or(true);
             if cursor_visible {
                 let blink = r.next_blink_redraw_at();
@@ -283,7 +292,6 @@ impl App {
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
-            cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: std::time::Instant::now(),
             hover_link: false,
             pressed_tab: None,

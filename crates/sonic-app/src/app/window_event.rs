@@ -267,14 +267,25 @@ impl App {
                     bool,
                     Option<&mut Instant>,
                 ) = match ws_opt {
-                    Some(ws) => (
-                        ws.renderer.as_mut(),
-                        Some(&mut ws.tabs),
-                        Some(&mut ws.tab_states),
-                        Some(&mut ws.panes),
-                        ws.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
-                        Some(&mut ws.last_render),
-                    ),
+                    Some(ws) => {
+                        // PR #400: cursor_visible is now per-pane; read
+                        // it from the active pane before splitting the
+                        // mut borrow of `ws.panes`. Bool read, no
+                        // lasting borrow.
+                        let cv = ws
+                            .panes
+                            .get(&active_id)
+                            .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(true);
+                        (
+                            ws.renderer.as_mut(),
+                            Some(&mut ws.tabs),
+                            Some(&mut ws.tab_states),
+                            Some(&mut ws.panes),
+                            cv,
+                            Some(&mut ws.last_render),
+                        )
+                    }
                     None => (None, None, None, None, true, None),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
