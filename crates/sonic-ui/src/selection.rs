@@ -54,7 +54,7 @@ impl Selection {
             let col_start = if r == a.0 { a.1 as usize } else { 0 };
             let col_end = if r == b.0 { (b.1 as usize + 1).min(row.len()) } else { row.len() };
             let mut line = String::new();
-            for cell in &row[col_start..col_end] {
+            for cell in row.get_range(col_start, col_end) {
                 if cell.flags.contains(CellFlags::WIDE_CONT) {
                     continue;
                 }

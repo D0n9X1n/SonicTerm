@@ -517,26 +517,53 @@ impl Line {
         }
     }
 
-    /// Iterator over cells in logical order. Cheap regardless of storage.
+    /// Iterator over cells in logical order. Cluster-transparent: yields
+    /// `&Cell` regardless of storage form without materializing the flat
+    /// representation.
     ///
-    /// **PR-B2 (#319):** returns `std::slice::Iter` so callers retain
-    /// `DoubleEndedIterator` / `ExactSizeIterator`. Materializes Cluster
-    /// storage to Flat on first call (rare; in PR-B2 the grid only
-    /// produces Flat). Use `iter_storage()` to avoid materialization in
-    /// post-PR-C cluster-heavy paths.
-    pub fn iter(&self) -> std::slice::Iter<'_, Cell> {
-        self.as_flat_slice().iter()
+    /// **PR-B2 follow-up (Haiku review on #381):** previously routed
+    /// through `as_flat_slice()` which panicked on Cluster lines via
+    /// `as_vec()`. That made PR-C's premise — actually produce Cluster
+    /// lines from scrollback eject — impossible without rewriting every
+    /// downstream call site. The iterator now lazily walks either form
+    /// and implements `DoubleEndedIterator` + `ExactSizeIterator` so the
+    /// existing `iter().rev()` / `iter().len()` call sites (copy_mode,
+    /// search, etc.) keep working unchanged.
+    pub fn iter(&self) -> LineIter<'_> {
+        self.iter_storage()
     }
 
-    /// Transparent cluster-or-flat iterator. Reserved for the post-PR-C
-    /// hot paths that want to fast-path over Cluster runs without
-    /// materializing the flat form.
+    /// Transparent cluster-or-flat iterator. Same as [`Self::iter`] —
+    /// kept as an explicit name for the post-PR-C hot paths that want
+    /// to call it for clarity.
     pub fn iter_storage(&self) -> LineIter<'_> {
         match &self.storage {
             LineStorage::Flat(v) => LineIter::Flat(v.iter()),
             LineStorage::Cluster(cs) => {
-                LineIter::Cluster { clusters: cs.iter(), current: None, remaining: 0 }
+                let total: usize = cs.iter().map(|c| c.count).sum();
+                LineIter::new_cluster(cs, total)
             }
+        }
+    }
+
+    /// Iterator over cells in `[start, end)` returning `&Cell` references
+    /// without cloning. `end` is clamped to `len()`. Empty / reversed
+    /// ranges yield no cells. Replaces the removed `Index<Range<usize>>`
+    /// impl: that one couldn't return a real `&[Cell]` slice from a
+    /// Cluster line without materialising, so the trait surface was
+    /// fundamentally incompatible with Cluster storage. Callers that
+    /// truly need a `&[Cell]` slice should `as_flat_slice_after_materialise()`
+    /// instead.
+    pub fn get_range(&self, start: usize, end: usize) -> LineIter<'_> {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return LineIter::empty();
+        }
+        let take = end - start;
+        match &self.storage {
+            LineStorage::Flat(v) => LineIter::Flat(v[start..end].iter()),
+            LineStorage::Cluster(cs) => LineIter::cluster_range(cs, start, take),
         }
     }
 
@@ -564,14 +591,27 @@ impl Line {
     // Cluster yet) and expose the inner Vec directly so the lifetime chain
     // `&Grid → &VecDeque<Line> → &Line → &Vec<Cell>` works without copies.
 
-    /// Borrow the underlying flat `Vec<Cell>`. Forces Flat first; in B1 this
-    /// is a no-op because no Cluster lines are produced. The returned
-    /// reference is only valid until the next `&mut self` call.
+    /// Borrow the underlying flat `Vec<Cell>`. **PANICS** on Cluster storage:
+    /// there is no `Vec<Cell>` to lend without first materialising into
+    /// Flat, which requires `&mut self`. Use [`Self::iter`] / [`Self::get`] /
+    /// [`Self::get_range`] for read-only access that works for either form,
+    /// or call [`Self::as_vec_mut`] / [`Self::degrade_to_flat`] first if a
+    /// borrowed `Vec` reference is truly needed.
+    ///
+    /// **PR-B2 (Haiku review on #381):** all of `iter` / `Hash` /
+    /// range-index used to silently go through this method and panic on
+    /// Cluster lines. They now use cluster-transparent paths; this method
+    /// remains for the few legitimately-flat-only callers (e.g.
+    /// `as_flat_slice_mut` for mutation), but reading it on a Cluster line
+    /// is a programming error.
     pub fn as_vec(&self) -> &Vec<Cell> {
         match &self.storage {
             LineStorage::Flat(v) => v,
             LineStorage::Cluster(_) => {
-                unreachable!("PR-B1 Grid never produces Cluster storage")
+                unreachable!(
+                    "Line::as_vec()/as_flat_slice() requires Flat storage; \
+                     call iter()/get()/get_range() for cluster-transparent access"
+                )
             }
         }
     }
@@ -613,9 +653,9 @@ impl Line {
 
 impl<'a> IntoIterator for &'a Line {
     type Item = &'a Cell;
-    type IntoIter = std::slice::Iter<'a, Cell>;
+    type IntoIter = LineIter<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        self.as_flat_slice().iter()
+        self.iter()
     }
 }
 
@@ -630,7 +670,7 @@ impl<'a> IntoIterator for &'a mut Line {
 impl std::ops::Index<usize> for Line {
     type Output = Cell;
     fn index(&self, idx: usize) -> &Cell {
-        &self.as_vec()[idx]
+        self.get(idx).expect("Line index out of bounds")
     }
 }
 
@@ -640,46 +680,127 @@ impl std::ops::IndexMut<usize> for Line {
     }
 }
 
-impl std::ops::Index<std::ops::Range<usize>> for Line {
-    type Output = [Cell];
-    fn index(&self, idx: std::ops::Range<usize>) -> &[Cell] {
-        &self.as_flat_slice()[idx]
-    }
-}
-
-impl std::ops::Index<std::ops::RangeFrom<usize>> for Line {
-    type Output = [Cell];
-    fn index(&self, idx: std::ops::RangeFrom<usize>) -> &[Cell] {
-        &self.as_flat_slice()[idx]
-    }
-}
-
-impl std::ops::Index<std::ops::RangeTo<usize>> for Line {
-    type Output = [Cell];
-    fn index(&self, idx: std::ops::RangeTo<usize>) -> &[Cell] {
-        &self.as_flat_slice()[idx]
-    }
-}
-
-impl std::ops::Index<std::ops::RangeFull> for Line {
-    type Output = [Cell];
-    fn index(&self, _: std::ops::RangeFull) -> &[Cell] {
-        self.as_flat_slice()
-    }
-}
+// NOTE (Haiku review on #381): `Index<Range<usize>>` and friends were
+// removed because they fundamentally cannot return a real `&[Cell]` slice
+// from a Cluster line without materialising. Callers that want a windowed
+// view must use `Line::get_range(start, end)` which returns a
+// cluster-transparent iterator. Call sites updated: selection.rs,
+// window_event.rs, child_window.rs, render_line_direct_smoke.rs.
 
 impl std::hash::Hash for Line {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Hash the materialised flat sequence so cluster vs flat storage
-        // produces the same hash for the same logical content.
-        self.as_flat_slice().hash(state);
+        // Hash the materialised cell sequence so cluster vs flat storage
+        // produces the same hash for the same logical content. We
+        // emulate `<[Cell]>::hash`: length prefix + each element, so a
+        // Flat line and an equivalent Cluster line hash identically.
+        self.len().hash(state);
+        for cell in self.iter() {
+            cell.hash(state);
+        }
     }
 }
 
-/// Transparent iterator over either storage form.
+/// Transparent iterator over either storage form. Yields `&Cell` without
+/// materialising the flat form for Cluster storage. Implements
+/// `DoubleEndedIterator` + `ExactSizeIterator` so the existing
+/// `iter().rev()` / `iter().len()` call sites keep working unchanged.
 pub enum LineIter<'a> {
+    Empty,
     Flat(std::slice::Iter<'a, Cell>),
-    Cluster { clusters: std::slice::Iter<'a, Cluster>, current: Option<&'a Cell>, remaining: usize },
+    /// Bi-directional walk over a slice of clusters covering exactly
+    /// `total` cells, with `head_*` tracking the next-from-front cluster
+    /// position and `tail_*` tracking the next-from-back cluster
+    /// position. Front and back may chase into the same cluster, at
+    /// which point `total` reaching 0 terminates iteration.
+    Cluster {
+        clusters: &'a [Cluster],
+        /// Index of the next cluster to consume from the front.
+        head_idx: usize,
+        /// Number of cells still to yield from the current head cluster.
+        head_remaining: usize,
+        /// Index of the next cluster to consume from the back
+        /// (inclusive — i.e. `clusters[tail_idx]` still has cells to
+        /// yield from the back side).
+        tail_idx: usize,
+        /// Number of cells still to yield from the current tail cluster
+        /// (consumed in reverse from its tail).
+        tail_remaining: usize,
+        /// Total cells still to yield (front + back combined).
+        total: usize,
+    },
+}
+
+impl<'a> LineIter<'a> {
+    fn empty() -> Self {
+        LineIter::Empty
+    }
+
+    /// Build a Cluster iterator covering the full cluster list.
+    fn new_cluster(clusters: &'a [Cluster], total: usize) -> Self {
+        if clusters.is_empty() || total == 0 {
+            return LineIter::Empty;
+        }
+        LineIter::Cluster {
+            clusters,
+            head_idx: 0,
+            head_remaining: clusters[0].count,
+            tail_idx: clusters.len() - 1,
+            tail_remaining: clusters[clusters.len() - 1].count,
+            total,
+        }
+    }
+
+    /// Build a Cluster iterator over a windowed range `[start, start+take)`.
+    /// Walks `clusters` to find the cluster containing `start`, then
+    /// configures head/tail bookkeeping so exactly `take` cells are
+    /// yielded.
+    fn cluster_range(clusters: &'a [Cluster], start: usize, take: usize) -> Self {
+        if take == 0 {
+            return LineIter::Empty;
+        }
+        // Find head: cluster containing `start`.
+        let mut off = 0;
+        let mut head_idx = 0;
+        let mut head_remaining = 0;
+        while head_idx < clusters.len() {
+            let c = &clusters[head_idx];
+            if start < off + c.count {
+                head_remaining = (off + c.count) - start;
+                break;
+            }
+            off += c.count;
+            head_idx += 1;
+        }
+        if head_idx >= clusters.len() {
+            return LineIter::Empty;
+        }
+        // Find tail: cluster containing `start + take - 1`.
+        let end_inclusive = start + take - 1;
+        let mut off2 = 0;
+        let mut tail_idx = 0;
+        let mut tail_remaining = 0;
+        for (i, c) in clusters.iter().enumerate() {
+            if end_inclusive < off2 + c.count {
+                tail_idx = i;
+                tail_remaining = end_inclusive - off2 + 1;
+                break;
+            }
+            off2 += c.count;
+        }
+        if tail_idx == head_idx {
+            // Same cluster — the window lives entirely inside it. Reconcile.
+            head_remaining = take;
+            tail_remaining = take;
+        }
+        LineIter::Cluster {
+            clusters,
+            head_idx,
+            head_remaining,
+            tail_idx,
+            tail_remaining,
+            total: take,
+        }
+    }
 }
 
 impl<'a> Iterator for LineIter<'a> {
@@ -687,16 +808,95 @@ impl<'a> Iterator for LineIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
+            LineIter::Empty => None,
             LineIter::Flat(it) => it.next(),
-            LineIter::Cluster { clusters, current, remaining } => {
-                if *remaining == 0 {
-                    let c = clusters.next()?;
-                    *current = Some(&c.cell);
-                    *remaining = c.count;
+            LineIter::Cluster {
+                clusters,
+                head_idx,
+                head_remaining,
+                tail_idx,
+                tail_remaining,
+                total,
+            } => {
+                if *total == 0 {
+                    return None;
                 }
-                *remaining -= 1;
-                *current
+                // Advance head if exhausted in current cluster.
+                while *head_remaining == 0 {
+                    *head_idx += 1;
+                    if *head_idx > *tail_idx {
+                        return None;
+                    }
+                    *head_remaining = if *head_idx == *tail_idx {
+                        *tail_remaining
+                    } else {
+                        clusters[*head_idx].count
+                    };
+                }
+                let cell = &clusters[*head_idx].cell;
+                *head_remaining -= 1;
+                *total -= 1;
+                // Keep tail bookkeeping consistent when head and tail
+                // share a cluster.
+                if *head_idx == *tail_idx {
+                    *tail_remaining = (*tail_remaining).saturating_sub(1);
+                }
+                Some(cell)
             }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len();
+        (n, Some(n))
+    }
+}
+
+impl<'a> DoubleEndedIterator for LineIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            LineIter::Empty => None,
+            LineIter::Flat(it) => it.next_back(),
+            LineIter::Cluster {
+                clusters,
+                head_idx,
+                head_remaining,
+                tail_idx,
+                tail_remaining,
+                total,
+            } => {
+                if *total == 0 {
+                    return None;
+                }
+                while *tail_remaining == 0 {
+                    if *tail_idx == 0 || *tail_idx <= *head_idx {
+                        return None;
+                    }
+                    *tail_idx -= 1;
+                    *tail_remaining = if *tail_idx == *head_idx {
+                        *head_remaining
+                    } else {
+                        clusters[*tail_idx].count
+                    };
+                }
+                let cell = &clusters[*tail_idx].cell;
+                *tail_remaining -= 1;
+                *total -= 1;
+                if *head_idx == *tail_idx {
+                    *head_remaining = (*head_remaining).saturating_sub(1);
+                }
+                Some(cell)
+            }
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for LineIter<'a> {
+    fn len(&self) -> usize {
+        match self {
+            LineIter::Empty => 0,
+            LineIter::Flat(it) => it.len(),
+            LineIter::Cluster { total, .. } => *total,
         }
     }
 }

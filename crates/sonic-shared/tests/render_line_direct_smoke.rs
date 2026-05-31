@@ -30,9 +30,8 @@ fn row_accessor_returns_line_with_identical_cells() {
     assert!(collected.starts_with("hello"));
     // Indexing via Line::Index<usize>
     assert_eq!(row[0].ch, 'h');
-    // Range indexing via Line::Index<Range<usize>>
-    let slice: &[Cell] = &row[..5];
-    let prefix: String = slice.iter().map(|c| c.ch).collect();
+    // Range access via Line::get_range (Index<Range> removed for cluster-transparency)
+    let prefix: String = row.get_range(0, 5).map(|c| c.ch).collect();
     assert_eq!(prefix, "hello");
 }
 
