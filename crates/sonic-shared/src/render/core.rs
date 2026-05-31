@@ -1354,6 +1354,29 @@ impl GpuRenderer {
         self.tab_bar_visible
     }
 
+    /// Update scrollbar visibility policy from live config reload.
+    ///
+    /// `render()` folds this cached mode into the per-pane scrollbar emit
+    /// path, so config changes must invalidate the frame key explicitly;
+    /// otherwise an idle window could keep the previous scrollbar quads
+    /// until some unrelated grid/theme/input change forced a redraw.
+    pub fn set_scrollbar_mode(&mut self, mode: sonic_cfg::config::ScrollbarMode) -> bool {
+        if self.scrollbar_mode == mode {
+            return false;
+        }
+        self.scrollbar_mode = mode;
+        self.last_frame_key = None;
+        true
+    }
+
+    /// Current scrollbar visibility policy. Test-only inspector for the
+    /// live-reload path; production code pushes updates via
+    /// [`Self::set_scrollbar_mode`].
+    #[doc(hidden)]
+    pub fn scrollbar_mode(&self) -> sonic_cfg::config::ScrollbarMode {
+        self.scrollbar_mode
+    }
+
     /// Update the cursor shape. Invalidates the cached frame so the
     /// next render redraws with the new geometry.
     pub fn set_cursor_shape(&mut self, shape: CursorShape) {

@@ -71,6 +71,17 @@ pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool 
         || (new_cfg.font.line_height - old_cfg.font.line_height).abs() > f32::EPSILON
 }
 
+/// True iff `appearance.scrollbar` changed and existing renderers need
+/// their cached scrollbar policy updated.
+///
+/// Kept as a small public test seam because integration tests cannot
+/// reliably construct a live `GpuRenderer` + wgpu surface headlessly;
+/// `apply_new_config` uses the same comparison before calling
+/// `GpuRenderer::set_scrollbar_mode` on every live window.
+pub fn renderer_scrollbar_mode_differs(old_cfg: &Config, new_cfg: &Config) -> bool {
+    old_cfg.appearance.scrollbar != new_cfg.appearance.scrollbar
+}
+
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
@@ -254,6 +265,18 @@ impl App {
                 }
             }
             tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
+        }
+
+        if renderer_scrollbar_mode_differs(&self.config, &new_cfg) {
+            if let Some(r) = self.main_renderer_mut() {
+                r.set_scrollbar_mode(new_cfg.appearance.scrollbar);
+            }
+            for child in self.windows.values_mut() {
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_scrollbar_mode(new_cfg.appearance.scrollbar);
+                }
+            }
+            tracing::info!(?new_cfg.appearance.scrollbar, "live-reload: appearance scrollbar");
         }
 
         // Tab close-button override (wezterm `tab_close_button_color`).

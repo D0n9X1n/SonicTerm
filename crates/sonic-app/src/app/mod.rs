@@ -724,7 +724,7 @@ mod tab_state;
 pub mod tab_transfer;
 mod tear_out;
 mod window_event;
-pub use config_apply::config_diff_needs_font_apply;
+pub use config_apply::{config_diff_needs_font_apply, renderer_scrollbar_mode_differs};
 pub use key_encoding::{encode_logical, key_name, key_to_string, key_to_strings, KeyName};
 
 fn init_tracing() {
