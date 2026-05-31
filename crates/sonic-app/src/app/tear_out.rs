@@ -188,6 +188,7 @@ impl App {
             drag_target: None,
             scale_factor: 1.0,
             ime: ImeState::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
         };
         self.windows.insert(win_id, child);
@@ -423,11 +424,13 @@ impl App {
     }
     pub fn try_cross_window_merge(&mut self, index: usize) -> bool {
         let main_id = self.main_window().map(|w| w.id());
-        let Some(target) = self.drag_target.filter(|t| Some(t.window) != main_id) else {
+        let Some(target) =
+            self.main().and_then(|ws| ws.drag_target).filter(|t| Some(t.window) != main_id)
+        else {
             return false;
         };
-        self.drag_target = None;
         if let Some(ws) = self.main_mut() {
+            ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
         }
@@ -550,6 +553,7 @@ impl App {
             drag_target: None,
             scale_factor: 1.0,
             ime: ImeState::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
         };
         self.windows.insert(win_id, child);

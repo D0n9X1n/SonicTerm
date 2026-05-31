@@ -151,6 +151,14 @@ pub struct WindowState {
     /// independently. The legacy `App.ime` continues to exist and is
     /// kept in sync on the main window until PR-B.
     pub ime: ImeState,
+    /// Phase B2 PR-B3d (#365) — per-window throttle for
+    /// `Window::set_ime_cursor_area`. Promoted from `App.ime_cursor_throttle`
+    /// so each torn-out window can throttle its own IMK runloop traffic
+    /// independently. The legacy field stayed in lock-step on the main
+    /// window via the shadow snapshot prior to PR-B3d; with the field
+    /// deleted from `App`, every read path now goes through
+    /// `self.main()?.ime_cursor_throttle`.
+    pub ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle,
     /// Per-window hovered URL (Cmd-held underline + pointer cursor).
     /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
     /// stays in lock-step on the main window until PR-B.
@@ -235,38 +243,27 @@ pub fn synthetic_main_window_id() -> WindowId {
 /// appear in this snapshot — they were deleted from `App` in this PR.
 /// PR-B3c (#365): `selection`, `copy_mode`, and `modifiers` likewise
 /// promoted to `WindowState` and removed from this snapshot.
+/// PR-B3d (#365): `drag_session`, `drag_target`, and `ime` likewise
+/// promoted (and `ime_cursor_throttle` joined them on `WindowState`),
+/// removed from this snapshot. Only `scale_factor` and `hovered_url`
+/// remain mirrored here.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ShadowMainSnapshot {
-    pub drag_session: Option<crate::tab_drag::DragSession>,
-    pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     pub scale_factor: f64,
-    /// Compared via `Debug`-string equality (the IME state machine
-    /// does not implement `PartialEq` upstream).
-    pub ime: ImeState,
     pub hovered_url: Option<hovered_url::HoveredUrl>,
 }
 
 impl PartialEq for ShadowMainSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        format!("{:?}", self.drag_session) == format!("{:?}", other.drag_session)
-            && format!("{:?}", self.drag_target) == format!("{:?}", other.drag_target)
-            && self.scale_factor == other.scale_factor
-            && format!("{:?}", self.ime) == format!("{:?}", other.ime)
-            && self.hovered_url == other.hovered_url
+        self.scale_factor == other.scale_factor && self.hovered_url == other.hovered_url
     }
 }
 
 /// Build a [`ShadowMainSnapshot`] from a shadow `WindowState` entry.
 #[doc(hidden)]
 pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
-    ShadowMainSnapshot {
-        drag_session: ws.drag_session,
-        drag_target: ws.drag_target,
-        scale_factor: ws.scale_factor,
-        ime: ws.ime.clone(),
-        hovered_url: ws.hovered_url.clone(),
-    }
+    ShadowMainSnapshot { scale_factor: ws.scale_factor, hovered_url: ws.hovered_url.clone() }
 }
 
 /// Apply a snapshot to the shadow `WindowState` entry — the pure half
@@ -276,10 +273,7 @@ pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
 /// `tests/clear_shape_cache_event.rs`).
 #[doc(hidden)]
 pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot) {
-    ws.drag_session = snap.drag_session;
-    ws.drag_target = snap.drag_target;
     ws.scale_factor = snap.scale_factor;
-    ws.ime = snap.ime;
     ws.hovered_url = snap.hovered_url;
 }
 
@@ -296,16 +290,10 @@ pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot
 #[doc(hidden)]
 pub fn apply_shadow_main_sync(
     ws: &mut WindowState,
-    drag_session: Option<crate::tab_drag::DragSession>,
-    drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     scale_factor: f64,
-    ime: ImeState,
     hovered_url: Option<hovered_url::HoveredUrl>,
 ) {
-    apply_shadow_main_snapshot(
-        ws,
-        ShadowMainSnapshot { drag_session, drag_target, scale_factor, ime, hovered_url },
-    );
+    apply_shadow_main_snapshot(ws, ShadowMainSnapshot { scale_factor, hovered_url });
 }
 
 /// Epic #289 Phase A — classification of which terminal window currently
@@ -932,14 +920,9 @@ pub struct App {
     /// needed because `run_action` does not have an `ActiveEventLoop`
     /// handle.
     pub(super) pending_exit: bool,
-    /// IME composition state for CJK / other multi-key input methods.
-    pub(super) ime: ImeState,
-    /// Throttle for `Window::set_ime_cursor_area`. Without this every
-    /// render frame posts a message to macOS' InputMethodKit runloop and
-    /// stderr fills with `IMKCFRunLoopWakeUpReliable` errors that users
-    /// see as "Sonic is hanging". Only fire the winit call when the
-    /// terminal cursor moves to a different cell.
-    pub(super) ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle,
+    // PR-B3d (#365): `App.ime` and `App.ime_cursor_throttle` fields
+    // removed; now owned by `self.windows[main_window_id]`. Access via
+    // `self.main()?.ime` / `self.main_mut()?.ime_cursor_throttle`.
     pub(super) command_palette: CommandPalette,
     /// Epic #289 Phase A follow-up — which window the (single, modal)
     /// command palette is currently attached to. `None` means it's
@@ -957,11 +940,9 @@ pub struct App {
     /// overlay (super+?). Same rationale: the overlay is App-level and
     /// modal, so a tag is enough — we don't need per-window state.
     pub(super) cheatsheet_attached_window: Option<WindowId>,
-    /// Live drag session for the held-tab gesture in the MAIN window.
-    /// Tracks press + current cursor position so the renderer can draw
-    /// the translucent drag chip and `compute_action` can pick a
-    /// commit-on-release outcome. `None` when no tab is being dragged.
-    pub(super) drag_session: Option<crate::tab_drag::DragSession>,
+    // PR-B3d (#365): `App.drag_session` field removed; per-window
+    // drag sessions live on `WindowState`. Access via
+    // `self.main_mut()?.drag_session` / per-window iteration.
     /// Phase C2 (PR #295 review fix): set the moment a held-tab drag
     /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
     /// before the user releases the button. Guards
@@ -1012,11 +993,9 @@ pub struct App {
     ///   * #2: Cmd+T after tear-out opens tab in WRONG window
     ///   * #3: Cmd+W in new window closes OLD window's tab
     pub(super) frontmost_window: Option<WindowId>,
-    /// Pending cross-window drag-merge target chosen on the most recent
-    /// `CursorMoved` while a tab is held. On mouse-up we use this to
-    /// decide between "tear out into new window" (None) and "merge into
-    /// destination window at slot" (Some).
-    pub(super) drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    // PR-B3d (#365): `App.drag_target` field removed; per-window
+    // pending drop target lives on `WindowState`. Access via
+    // `self.main_mut()?.drag_target`.
     /// OS-drag tab payloads received before the main [`WindowState`] exists.
     /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
     /// inserts `main_window_id`; queue them so the destination tab is created
@@ -1249,20 +1228,16 @@ impl App {
             hovered_url: None,
             pending_new_window: false,
             pending_exit: false,
-            ime: ImeState::new(),
-            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             command_palette: CommandPalette::new(),
             palette_attached_window: None,
             cheatsheet_open: false,
             cheatsheet: CheatsheetState::new(),
             cheatsheet_attached_window: None,
-            drag_session: None,
             os_drag_handoff_started: false,
             windows: HashMap::new(),
             main_window_id: None,
             focused_child: None,
             frontmost_window: None,
-            drag_target: None,
             pending_os_drag_payloads: Vec::new(),
             main_hidden: false,
             theme_loader: None,
@@ -1820,6 +1795,7 @@ impl App {
             drag_target: None,
             scale_factor: 1.0,
             ime: ImeState::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
         };
         self.windows.insert(id, child);
@@ -2093,13 +2069,10 @@ impl App {
     #[doc(hidden)]
     pub fn sync_shadow_main(&mut self) {
         let Some(id) = self.main_window_id else { return };
-        let drag_session = self.drag_session;
-        let drag_target = self.drag_target;
         let scale_factor = self.scale_factor;
-        let ime = self.ime.clone();
         let hovered_url = self.hovered_url.clone();
         if let Some(ws) = self.windows.get_mut(&id) {
-            apply_shadow_main_sync(ws, drag_session, drag_target, scale_factor, ime, hovered_url);
+            apply_shadow_main_sync(ws, scale_factor, hovered_url);
         }
     }
 
@@ -2289,7 +2262,10 @@ impl App {
         &mut self,
         target: Option<crate::tab_drag::DropTarget<WindowId>>,
     ) {
-        self.drag_target = target;
+        self.__test_synthetic_main();
+        if let Some(ws) = self.main_mut() {
+            ws.drag_target = target;
+        }
     }
 
     #[doc(hidden)]
@@ -2344,10 +2320,7 @@ impl App {
     #[doc(hidden)]
     pub fn shadow_main_snapshot(&self) -> ShadowMainSnapshot {
         ShadowMainSnapshot {
-            drag_session: self.drag_session,
-            drag_target: self.drag_target,
             scale_factor: self.scale_factor,
-            ime: self.ime.clone(),
             hovered_url: self.hovered_url.clone(),
         }
     }
@@ -2413,10 +2386,11 @@ impl App {
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,
-            drag_session: self.drag_session,
-            drag_target: self.drag_target,
+            drag_session: None,
+            drag_target: None,
             scale_factor: self.scale_factor,
-            ime: self.ime.clone(),
+            ime: ImeState::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: self.hovered_url.clone(),
         };
         self.windows.insert(id, ws);
@@ -2938,19 +2912,14 @@ impl App {
     /// when no drag was in progress.
     #[doc(hidden)]
     pub fn cancel_drag_session(&mut self) -> bool {
-        let app_had = self.drag_session.take().is_some();
-        let mut win_had = false;
-        for (id, ws) in self.windows.iter_mut() {
-            // Phase B2 PR-B1b: skip shadow main entry by id (renderer
-            // is now Some on main — `is_none()` no longer identifies it).
-            if Some(*id) == self.main_window_id {
-                continue;
-            }
+        let mut had = false;
+        for ws in self.windows.values_mut() {
             if ws.drag_session.take().is_some() {
-                win_had = true;
+                had = true;
             }
+            ws.drag_target = None;
         }
-        // pressed_tab / mouse_down / drag_target are the gesture
+        // pressed_tab / mouse_down are the gesture
         // residue from `tear_out`; clearing them prevents an ESC mid-
         // drag from leaving the next mouse-up still believing a drag
         // is in flight (Haiku-flagged regression class).
@@ -2960,9 +2929,8 @@ impl App {
             ws.pressed_tab = None;
             ws.mouse_down = false;
         }
-        self.drag_target = None;
         self.os_drag_handoff_started = false;
-        app_had || win_had
+        had
     }
 
     /// Epic #289 Phase C — pure cross-window transfer API. Operates

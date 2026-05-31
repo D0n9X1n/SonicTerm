@@ -82,6 +82,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
         drag_target: None,
         scale_factor: 1.0,
         ime: ImeState::new(),
+        ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
         hovered_url: None,
     };
 
