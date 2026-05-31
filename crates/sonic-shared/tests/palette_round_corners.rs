@@ -79,27 +79,33 @@ fn palette_row_buffer_line_height_matches_stride() {
 #[test]
 fn palette_footer_positioned_in_footer_rect() {
     let src = render_src();
-    // There must be a dedicated footer buffer + TextArea that targets
-    // `layout.footer.{x,y}`, not the rows buffer.
+    // #384: footer text is now emitted via `emit_overlay_text_glyphs`
+    // (Sonic atlas device-scale path), no longer via a glyphon
+    // TextArea. The contract this test enforces is unchanged: the
+    // footer label MUST anchor on `layout.footer.{x,y}` (so the hint
+    // sits inside the footer strip, not pushed up into the rows list)
+    // and MUST NOT be concatenated onto the rows buffer.
     assert!(
-        src.contains("palette_footer_buffer"),
-        "render.rs must own a dedicated palette_footer_buffer"
+        src.contains("emit_overlay_text_glyphs"),
+        "render.rs must emit palette text through the Sonic atlas device-scale path (#384)"
     );
-    assert!(
-        src.contains("palette_footer_area"),
-        "render.rs must construct a palette_footer_area TextArea"
-    );
-    // The TextArea anchor uses layout.footer (not the rows buffer's
-    // first-row y).
-    let area_idx = src.find("palette_footer_area =").expect("palette_footer_area declared");
-    let after = &src[area_idx..area_idx + 1200.min(src.len() - area_idx)];
+    // Locate the footer emitter call. It's preceded by a `// Footer`
+    // marker comment so the search is stable to formatter reflow.
+    let footer_idx = src
+        .find("// Footer hint")
+        .expect("render.rs must mark the palette footer emitter call");
+    let after = &src[footer_idx..footer_idx + 2000.min(src.len() - footer_idx)];
     assert!(
         after.contains("layout.footer.x"),
-        "palette_footer_area must position via layout.footer.x"
+        "palette footer emitter must anchor origin_x on layout.footer.x"
     );
     assert!(
         after.contains("layout.footer.y"),
-        "palette_footer_area must position via layout.footer.y"
+        "palette footer emitter must anchor baseline_y on layout.footer.y"
+    );
+    assert!(
+        after.contains("emit_overlay_text_glyphs"),
+        "the Footer hint block must call emit_overlay_text_glyphs (#384)"
     );
 
     // And the rows buffer no longer carries the footer label.

@@ -385,6 +385,12 @@ pub struct GpuRenderer {
     glyph_atlas: GlyphAtlas,
     glyph_upload: AtlasUpload,
     text_pipeline: TextPipeline,
+    /// Second instance buffer used for overlay glyphs (palette text, etc.)
+    /// drawn AFTER `quad_overlay` so they sit on top of the modal chrome.
+    /// `text_pipeline` cannot be `draw()`ed twice per frame without
+    /// clobbering its instance buffer, so overlays get their own pipeline
+    /// — same shader + atlas bind group, separate instance storage.
+    text_pipeline_overlay: TextPipeline,
 
     font_family: String,
     font_size: f32,
@@ -710,6 +716,143 @@ pub fn emit_tab_title_glyphs(
         pen_cols = pen_cols.saturating_add(text.chars().count() as u16);
     }
 }
+
+/// Debug record emitted by [`emit_overlay_text_glyphs`] so tests can
+/// assert the device-scaled atlas path was taken (see #384).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayTextGlyphDebug {
+    pub raster_px: f32,
+    pub font_size: f32,
+    pub scale_factor: f32,
+    pub rect: [f32; 4],
+    pub px_size: [u32; 2],
+}
+
+/// Emit overlay text (palette query / rows / footer, etc.) as Sonic-atlas
+/// glyph instances at device pixel scale. Mirrors [`emit_tab_title_glyphs`]
+/// but takes an explicit pixel `origin_x` and `baseline_y` plus a clipping
+/// rect, so the caller can position multi-line overlays (one call per
+/// line, advancing baseline_y by `line_stride` each time).
+///
+/// Logical-pixel inputs (`origin_x`, `baseline_y`, `font_size`,
+/// `bounds_*`); physical rasterization derived as
+/// `raster_px = font_size * scale_factor`; emitted GlyphInstance rects
+/// are in LOGICAL pixels (atlas px / scale_factor), matching how
+/// [`emit_tab_title_glyphs`] feeds [`px_to_ndc`].
+///
+/// Glyphs whose logical rect falls entirely outside `bounds_*` are
+/// skipped so the renderer doesn't paint outside the palette modal.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn emit_overlay_text_glyphs(
+    glyph_atlas: &mut GlyphAtlas,
+    font_family: &str,
+    font_size: f32,
+    scale_factor: f32,
+    rasterizer: &mut SwashRasterizer,
+    text: &str,
+    color: GColor,
+    origin_x: f32,
+    baseline_y: f32,
+    bounds: [f32; 4], // [x, y, w, h] in LOGICAL px; glyphs outside are clipped
+    sw: f32,
+    sh: f32,
+    glyph_instances: &mut Vec<GlyphInstance>,
+    mut debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let raster_px = font_size * scale_factor;
+    let inv_s = 1.0 / scale_factor;
+    let style = RunStyle { bold: false, italic: false };
+    // Build a synthetic cell sequence so we can reuse `shape_run`'s
+    // cluster/ligature handling. Variable-width text rendered with a
+    // monospace family advances by `avg_glyph_w` per char — matches
+    // what the previous glyphon path produced visually (cosmic-text
+    // also lays out monospace text on a fixed advance).
+    let cells: Vec<(u16, Cell)> = text
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| {
+            (i as u16, Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+        })
+        .collect();
+    let shaped = shape_run(rasterizer, font_family, raster_px, style, &cells);
+    let mut cell_by_col: HashMap<u16, Cell> = HashMap::with_capacity(cells.len());
+    for (col, cell) in &cells {
+        cell_by_col.insert(*col, cell.clone());
+    }
+    let rgba = glyphon_color_to_linear_rgba(color);
+    // Advance width per "cell". Match the previous glyphon path's
+    // monospace stride: one glyph box per char at font_size * 0.6 — the
+    // empirical advance for the Recursive / St Helens fonts at the
+    // palette's font_size. The exact value isn't load-bearing: palette
+    // strings are short and the bounds clip prevents over-paint.
+    let advance = font_size * 0.6;
+    let [bx, by, bw, bh] = bounds;
+    for g in shaped {
+        let Some(lead_cell) = cell_by_col.get(&g.lead_col) else {
+            continue;
+        };
+        if g.glyph_id == 0 && (lead_cell.ch == '\0' || lead_cell.ch.is_whitespace()) {
+            continue;
+        }
+        let key = if g.glyph_id == 0 {
+            let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic) else {
+                continue;
+            };
+            sonic_core::glyph_key::GlyphKey {
+                ch: lead_cell.ch,
+                font_slot: slot,
+                weight_bold: style.bold,
+                italic: style.italic,
+                glyph_id: 0,
+            }
+        } else {
+            sonic_core::glyph_key::GlyphKey::shaped(
+                g.ch,
+                g.font_slot,
+                g.glyph_id,
+                style.bold,
+                style.italic,
+            )
+        };
+        let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+            continue;
+        };
+        if info.px_size[0] == 0 || info.px_size[1] == 0 {
+            continue;
+        }
+        let gx = origin_x + f32::from(g.lead_col) * advance + info.px_offset[0] as f32 * inv_s;
+        let gy = baseline_y + info.px_offset[1] as f32 * inv_s;
+        let gw = info.px_size[0] as f32 * inv_s;
+        let gh = info.px_size[1] as f32 * inv_s;
+        // Cheap rect-vs-bounds reject so palette glyphs that scroll past
+        // the modal edge don't bleed onto the terminal underneath.
+        if gx + gw < bx || gx > bx + bw || gy + gh < by || gy > by + bh {
+            continue;
+        }
+        let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
+        let inst_color = if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { rgba };
+        glyph_instances.push(GlyphInstance {
+            rect,
+            uv: info.uv,
+            color: inst_color,
+            flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        });
+        if let Some(out) = debug.as_deref_mut() {
+            out.push(OverlayTextGlyphDebug {
+                raster_px,
+                font_size,
+                scale_factor,
+                rect: [gx, gy, gw, gh],
+                px_size: info.px_size,
+            });
+        }
+    }
+}
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
     /// device + pipelines, the cosmic-text font system, the glyph atlas,
@@ -802,6 +945,7 @@ impl GpuRenderer {
         let mut glyph_atlas =
             GlyphAtlas::new(atlas_dim_for_scale(scale_factor), atlas_dim_for_scale(scale_factor));
         let text_pipeline = TextPipeline::new(&device, format, 4096);
+        let text_pipeline_overlay = TextPipeline::new(&device, format, 512);
         // Pre-bake box-drawing + Powerline glyphs into the atlas before
         // the first frame so TUIs that draw a wall of │ ─ ┌ ┐ chars on
         // launch don't pay the font-fallback charmap-walk cost per cell
@@ -950,6 +1094,7 @@ impl GpuRenderer {
             glyph_atlas,
             glyph_upload,
             text_pipeline,
+            text_pipeline_overlay,
             font_family: font_family.to_string(),
             font_size,
             line_height,
@@ -2142,6 +2287,13 @@ impl GpuRenderer {
         let mut underlines: Vec<(f32, f32, u16, u16, u16)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
+        // Overlay glyph instances — palette text + (future) other modals.
+        // Kept separate so they can be drawn AFTER `quad_overlay` paints
+        // the modal backdrop, otherwise they'd be hidden by their own
+        // background. (#384 — palette text was previously routed through
+        // glyphon's TextRenderer which bypassed the device-scale atlas
+        // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
+        let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
         // Drawn via the quad pipeline after the text instances.
         let mut missing_tofu: Vec<(f32, f32, f32, f32, glyphon::Color)> = Vec::new();
@@ -3279,62 +3431,147 @@ impl GpuRenderer {
             });
             // Shape the query row text. The renderer paints either the
             // placeholder (empty query) or the typed text + cursor.
+            //
+            // #384: emit through the Sonic glyph atlas at device pixel
+            // scale (mirrors `emit_tab_title_glyphs`) so the palette text
+            // is crisp on HiDPI. The previous glyphon TextRenderer path
+            // bypassed `scale_factor` and rendered blurry on Windows.
             let query_text = if let Some(ph) = &layout.query_placeholder {
                 ph.clone()
             } else {
                 layout.query_label.clone()
             };
-            self.palette_query_buffer.set_text(
-                &mut self.font_system,
+            let palette_font_size = self.font_size;
+            let palette_raster_px = palette_font_size * self.scale_factor;
+            let mut palette_rasterizer =
+                SwashRasterizer::new(&mut self.font_system, &self.font_family, palette_raster_px);
+            if let Some(loader) = self.async_loader.clone() {
+                palette_rasterizer.set_async_loader(loader);
+            }
+            // Query: vertically centre inside the query_row chrome.
+            let query_origin_x = layout.query_row.x + crate::overlays::PALETTE_ROW_PAD_X;
+            let query_baseline_y =
+                layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
+            emit_overlay_text_glyphs(
+                &mut self.glyph_atlas,
+                &self.font_family,
+                palette_font_size,
+                self.scale_factor,
+                &mut palette_rasterizer,
                 &query_text,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
+                self.search_fg,
+                query_origin_x,
+                query_baseline_y,
+                [layout.query_row.x, layout.query_row.y, layout.query_row.w, layout.query_row.h],
+                sw,
+                sh,
+                &mut overlay_glyph_instances,
                 None,
             );
-            self.palette_query_buffer.shape_until_scroll(&mut self.font_system, false);
 
-            // Shape the action-list as one multi-line buffer; the renderer
-            // positions it at the first row's y and lets glyphon stack
-            // lines at the buffer's line height (set to PALETTE_ROW_HEIGHT
-            // so each label aligns with its row background quad). When
-            // there are no matches, paint the empty-state placeholder +
-            // hint instead.
-            let mut rows_text = String::new();
+            // Rows: emit each visible row label as its own line so the
+            // baseline aligns with the row's highlight quad. Stride
+            // matches PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP (the buffer's
+            // line_height pre-fix).
+            let row_h = crate::overlays::PALETTE_ROW_HEIGHT;
+            let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
             for (i, label) in layout.row_labels.iter().enumerate() {
-                if i > 0 {
-                    rows_text.push('\n');
-                }
-                rows_text.push_str(label);
+                let Some(row) = layout.rows.get(i) else { continue };
+                let origin_x = row.rect.x + crate::overlays::PALETTE_ROW_PAD_X;
+                let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    &self.font_family,
+                    palette_font_size,
+                    self.scale_factor,
+                    &mut palette_rasterizer,
+                    label,
+                    self.search_fg,
+                    origin_x,
+                    baseline_y,
+                    bounds_bg,
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
             }
+            // Empty-state placeholder + hint sit just below the query
+            // row when there are no matches.
             if let Some(ph) = &layout.empty_label {
-                rows_text.push_str(ph);
+                let empty_x = layout.bg.x
+                    + crate::overlays::PALETTE_INNER_PAD
+                    + crate::overlays::PALETTE_ROW_PAD_X;
+                let empty_y_top =
+                    layout.query_row.y + layout.query_row.h + crate::overlays::PALETTE_INNER_PAD;
+                let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    &self.font_family,
+                    palette_font_size,
+                    self.scale_factor,
+                    &mut palette_rasterizer,
+                    ph,
+                    self.search_fg,
+                    empty_x,
+                    empty_baseline_y,
+                    bounds_bg,
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
                 if let Some(hint) = &layout.empty_hint {
-                    rows_text.push('\n');
-                    rows_text.push_str(hint);
+                    let hint_baseline_y = empty_baseline_y
+                        + crate::overlays::PALETTE_ROW_HEIGHT
+                        + crate::overlays::PALETTE_ROW_GAP;
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        &self.font_family,
+                        palette_font_size,
+                        self.scale_factor,
+                        &mut palette_rasterizer,
+                        hint,
+                        self.search_fg,
+                        empty_x,
+                        hint_baseline_y,
+                        bounds_bg,
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
                 }
             }
-            self.palette_rows_buffer.set_text(
-                &mut self.font_system,
-                &rows_text,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.palette_rows_buffer.shape_until_scroll(&mut self.font_system, false);
 
-            // Footer hint — rendered into a dedicated buffer positioned in
-            // `layout.footer` (see palette_footer_area below). Painting it
-            // here rather than appending to `palette_rows_buffer` means
-            // the hint always sits inside the footer strip instead of
-            // being pushed up into the action list.
-            self.palette_footer_buffer.set_text(
-                &mut self.font_system,
+            // Footer hint — slightly smaller (0.85×) so it reads as
+            // secondary text, matching the previous glyphon metrics.
+            let footer_font_size = self.font_size * 0.85;
+            let footer_raster_px = footer_font_size * self.scale_factor;
+            let mut footer_rasterizer =
+                SwashRasterizer::new(&mut self.font_system, &self.font_family, footer_raster_px);
+            if let Some(loader) = self.async_loader.clone() {
+                footer_rasterizer.set_async_loader(loader);
+            }
+            let footer_origin_x = layout.footer.x + 12.0;
+            let footer_baseline_y =
+                layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
+            emit_overlay_text_glyphs(
+                &mut self.glyph_atlas,
+                &self.font_family,
+                footer_font_size,
+                self.scale_factor,
+                &mut footer_rasterizer,
                 &layout.footer_label,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
+                self.search_fg,
+                footer_origin_x,
+                footer_baseline_y,
+                [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
+                sw,
+                sh,
+                &mut overlay_glyph_instances,
                 None,
             );
-            self.palette_footer_buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
         // -------- Keyboard shortcuts cheat sheet overlay --------------------
@@ -3652,80 +3889,14 @@ impl GpuRenderer {
             None
         };
 
-        let palette_query_area = palette_layout.as_ref().map(|layout| TextArea {
-            buffer: &self.palette_query_buffer,
-            // Left padding inside the query field — matches PALETTE_ROW_PAD_X so the
-            // placeholder/typed text doesn't hug the rounded left edge.
-            left: layout.query_row.x + crate::overlays::PALETTE_ROW_PAD_X,
-            top: layout.query_row.y + 2.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.query_row.x as i32,
-                top: layout.query_row.y as i32,
-                right: (layout.query_row.x + layout.query_row.w) as i32,
-                bottom: (layout.query_row.y + layout.query_row.h) as i32,
-            },
-            default_color: self.search_fg,
-            custom_glyphs: &[],
-        });
-        let palette_rows_area = palette_layout.as_ref().and_then(|layout| {
-            // Pick the y-position: first real row when there are matches,
-            // otherwise just below the query row for the empty placeholder.
-            let (row_x, row_y) = if let Some(first) = layout.rows.first() {
-                (first.rect.x, first.rect.y)
-            } else if layout.empty_label.is_some() {
-                let y = layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD;
-                (layout.bg.x + PALETTE_INNER_PAD, y)
-            } else {
-                return None;
-            };
-            // Vertically center the row text inside its 40 px background
-            // rect. The rows buffer's line_height is set to
-            // (PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP), so consecutive
-            // lines stack at the same stride as the highlight rects.
-            // glyphon places each line so its line-box (of size
-            // line_height) starts at `top`. To center that line-box
-            // inside the 40 px highlight, shift `top` up by half the
-            // difference — i.e. offset = (HEIGHT - line_height) * 0.5,
-            // which is negative when line_height > HEIGHT (the case here:
-            // 40 - 44 = -2). The previous formula derived the offset from
-            // `font_size`, which let the visual baseline sit BELOW the
-            // highlight rect at any non-default font size — that was the
-            // shipped regression where the gold highlight floated ABOVE
-            // the row's text instead of wrapping it.
-            let line_height =
-                crate::overlays::PALETTE_ROW_HEIGHT + crate::overlays::PALETTE_ROW_GAP;
-            let text_top_offset = (crate::overlays::PALETTE_ROW_HEIGHT - line_height) * 0.5;
-            Some(TextArea {
-                buffer: &self.palette_rows_buffer,
-                // Match PALETTE_ROW_PAD_X — 4px hugged the rounded highlight edge.
-                left: row_x + crate::overlays::PALETTE_ROW_PAD_X,
-                top: row_y + text_top_offset,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.bg.x as i32,
-                    top: (row_y + text_top_offset).floor() as i32,
-                    right: (layout.bg.x + layout.bg.w) as i32,
-                    bottom: (layout.bg.y + layout.bg.h) as i32,
-                },
-                default_color: self.search_fg,
-                custom_glyphs: &[],
-            })
-        });
-        let palette_footer_area = palette_layout.as_ref().map(|layout| TextArea {
-            buffer: &self.palette_footer_buffer,
-            left: layout.footer.x + 12.0,
-            top: layout.footer.y + 8.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.footer.x as i32,
-                top: layout.footer.y as i32,
-                right: (layout.footer.x + layout.footer.w) as i32,
-                bottom: (layout.footer.y + layout.footer.h) as i32,
-            },
-            default_color: self.search_fg,
-            custom_glyphs: &[],
-        });
+        // #384: palette query / rows / footer are now emitted as
+        // device-scaled Sonic-atlas glyph instances above (see the palette
+        // overlay block earlier in this function) and drawn via
+        // `text_pipeline_overlay` after `quad_overlay`. No TextArea is
+        // needed for them — leaving these as None.
+        let palette_query_area: Option<TextArea<'_>> = None;
+        let palette_rows_area: Option<TextArea<'_>> = None;
+        let palette_footer_area: Option<TextArea<'_>> = None;
         let cheatsheet_query_area = cheatsheet_layout.as_ref().map(|layout| TextArea {
             buffer: &self.cheatsheet_query_buffer,
             left: layout.query_row.x + 12.0,
@@ -3970,6 +4141,18 @@ impl GpuRenderer {
             // search badge and IME preedit on top. (PR #45 review fix.)
             self.quad_overlay.draw(&self.device, &self.queue, &mut pass, &quads_overlay);
             self.text_renderer_overlay.render(&self.atlas, &self.viewport, &mut pass)?;
+            // #384: palette / overlay glyph instances rendered through
+            // the Sonic atlas device-scale path. Drawn AFTER
+            // `quad_overlay` and `text_renderer_overlay` so they sit on
+            // top of the modal background and any legacy glyphon-routed
+            // overlays (cheatsheet, IME, search) below them.
+            self.text_pipeline_overlay.draw(
+                &self.device,
+                &self.queue,
+                &mut pass,
+                self.glyph_upload.bind_group(),
+                &overlay_glyph_instances,
+            );
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
