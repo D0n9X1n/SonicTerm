@@ -1162,6 +1162,16 @@ pub struct App {
     /// release builds whose tests don't touch it.
     #[doc(hidden)]
     pub reap_call_count: std::sync::atomic::AtomicUsize,
+    /// Test-only viewport override (PR #393 follow-up for #387). When
+    /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
+    /// uses `outer` instead of fetching the renderer's logical size and
+    /// [`Self::resize_visible_panes`] uses `(cell_w, cell_h)` instead of
+    /// the renderer's `cell_size()`. Lets tests exercise the production
+    /// `close_active_pane` path (Grid + PtyHandle resize wiring) without
+    /// a live wgpu surface. Stays `None` in release builds whose tests
+    /// don't touch it.
+    #[doc(hidden)]
+    pub test_viewport_override: Option<(sonic_ui::pane::Rect, f32, f32)>,
 }
 
 impl sonic_ui::broadcast::BroadcastTab for TabState {
@@ -1181,6 +1191,13 @@ impl App {
         let Some(ws) = self.main() else { return Vec::new() };
         let tab_idx = ws.tabs.active_index();
         let Some(st) = ws.tab_states.get(tab_idx) else { return Vec::new() };
+        // Test-only viewport override (PR #393 follow-up for #387) — lets
+        // tests exercise this path without a live wgpu renderer. Production
+        // leaves `test_viewport_override` at `None` and falls through to the
+        // renderer-derived metrics below.
+        if let Some((outer, _, _)) = self.test_viewport_override {
+            return st.tree.layout(outer);
+        }
         let Some(r) = self.main_renderer() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
@@ -1290,6 +1307,7 @@ impl App {
             on_window_ready: None,
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
+            test_viewport_override: None,
         }
     }
 
@@ -2167,6 +2185,17 @@ impl App {
     #[doc(hidden)]
     pub fn __test_invoke_close_active_pane_in_child(&mut self, id: WindowId) -> bool {
         self.close_active_pane_in_child(id)
+    }
+
+    /// Test-only invoker for [`Self::close_active_pane`] (the main-window
+    /// pane close path). Pairs with [`Self::test_viewport_override`] so
+    /// tests can exercise the production close path — including the #387
+    /// post-close `resize_visible_panes` call that re-fits the surviving
+    /// sibling's Grid + PtyHandle — without a live wgpu renderer.
+    /// See `crates/sonic-app/tests/per_pane_resize.rs`.
+    #[doc(hidden)]
+    pub fn __test_invoke_close_active_pane(&mut self) {
+        self.close_active_pane();
     }
 
     /// Test-only invoker for [`Self::focus_pane_dir_in_child`].
