@@ -139,6 +139,22 @@ pub enum BackdropKind {
     Tabbed,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+/// Scrollbar visibility policy (PR-A of #386).
+pub enum ScrollbarMode {
+    /// Show only on hover / active scroll (default). Auto-hide logic
+    /// lives in the render layer (PR-B/D); the model treats Auto the
+    /// same as Always — the caller decides whether to draw the
+    /// returned geometry.
+    #[default]
+    Auto,
+    /// Don't auto-hide; still suppressed when there's nothing to scroll.
+    Always,
+    /// Never show the scrollbar.
+    Never,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Appearance and compositor backdrop settings.
@@ -147,11 +163,13 @@ pub struct AppearanceConfig {
     pub backdrop: BackdropKind,
     /// Terminal background opacity in the range 0.0..=1.0.
     pub opacity: f32,
+    /// Scrollbar visibility policy.
+    pub scrollbar: ScrollbarMode,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
-        Self { backdrop: BackdropKind::Opaque, opacity: 1.0 }
+        Self { backdrop: BackdropKind::Opaque, opacity: 1.0, scrollbar: ScrollbarMode::default() }
     }
 }
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]

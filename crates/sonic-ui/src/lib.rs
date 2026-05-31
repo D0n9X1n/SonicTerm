@@ -34,6 +34,7 @@ pub mod i18n;
 pub mod ime;
 pub mod overlays;
 pub mod pane;
+pub mod scrollbar;
 pub mod search;
 pub mod selection;
 pub mod tab_title;
