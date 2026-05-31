@@ -174,6 +174,10 @@ pub struct WindowState {
     /// thumb mouse-down and the matching release; cursor moves while
     /// set route to the scrollbar instead of extending a selection.
     pub scrollbar_drag: Option<scrollbar_input::ScrollbarDragState>,
+    /// Per-pane scrollbar visibility/fade state (#386 PR-D). Inserted
+    /// lazily on first interaction; entries for closed panes are
+    /// pruned opportunistically on the next render.
+    pub scrollbar_vis: HashMap<u64, scrollbar_visibility::ScrollbarVisState>,
 }
 
 impl WindowState {
@@ -723,6 +727,7 @@ mod misc;
 pub mod os_drag;
 mod overlays;
 pub mod scrollbar_input;
+pub mod scrollbar_visibility;
 mod search_handle;
 mod spawn_pane;
 mod tab_state;
@@ -1748,6 +1753,7 @@ impl App {
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            scrollbar_vis: HashMap::new(),
         };
         self.windows.insert(id, child);
         id
@@ -2302,6 +2308,7 @@ impl App {
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            scrollbar_vis: HashMap::new(),
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);

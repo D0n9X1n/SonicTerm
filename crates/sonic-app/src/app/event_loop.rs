@@ -304,6 +304,7 @@ impl App {
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            scrollbar_vis: std::collections::HashMap::new(),
         };
         self.windows.insert(main_id, shadow);
 

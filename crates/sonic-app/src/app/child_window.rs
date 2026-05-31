@@ -239,6 +239,7 @@ impl App {
                             is_active: *id == active_id,
                             cursor_style: sonic_render_model::CursorStyle::default(),
                             is_broadcast_receiver: false,
+                            scrollbar_alpha: 0.0,
                         })
                         .collect();
                     // PR #400: cursor_visible is per-pane (lives on

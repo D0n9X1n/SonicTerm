@@ -75,11 +75,13 @@ fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
-/// PR-A geometry model. No-op when the pane has nothing to scroll or the
-/// mode is `Never`. Returns the number of quads emitted (for tests).
+/// PR-A geometry model. No-op when the pane has nothing to scroll, the
+/// mode is `Never`, or `alpha` is at or below the emit floor (PR-D).
+/// Returns the number of quads emitted (for tests).
 ///
-/// Auto-hide for `ScrollbarMode::Auto` is deferred to PR-D — until then
-/// `Auto` behaves identically to `Always` (always-on when scrollable).
+/// `alpha` in `[0.0, 1.0]` scales both track + thumb tint alphas; the
+/// caller (app loop) feeds the lerped per-pane fade value from
+/// `sonic_app::app::scrollbar_visibility::tick`.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_pane_scrollbar(
@@ -92,8 +94,15 @@ pub fn emit_pane_scrollbar(
     theme: &Theme,
     sw: f32,
     sh: f32,
+    alpha: f32,
 ) -> usize {
-    // Bar width in logical px. Held local to the emitter; PR-D will lift
+    // PR-D: hidden / nearly-hidden early-out. Mirrors
+    // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
+    if alpha <= 0.01 {
+        return 0;
+    }
+    let alpha = alpha.clamp(0.0, 1.0);
+    // Bar width in logical px. Held local to the emitter; PR-D may lift
     // this into config once hover-driven width animation lands.
     const SCROLLBAR_WIDTH_PX: f32 = 8.0;
     let geom_rect =
@@ -109,8 +118,8 @@ pub fn emit_pane_scrollbar(
         return 0;
     };
     let fg_hex = theme.colors.foreground.0.as_str();
-    let track_color = premultiply(scrollbar_tint(fg_hex, 0.10));
-    let thumb_color = premultiply(scrollbar_tint(fg_hex, 0.30));
+    let track_color = premultiply(scrollbar_tint(fg_hex, 0.10 * alpha));
+    let thumb_color = premultiply(scrollbar_tint(fg_hex, 0.30 * alpha));
     quads_overlay.push(QuadInstance::sharp(
         px_to_ndc(
             geom.track_rect.x,
@@ -2141,6 +2150,7 @@ impl GpuRenderer {
             rect_w: f32,
             rect_h: f32,
             is_active: bool,
+            scrollbar_alpha: f32,
         }
         let pane_views: Vec<PaneView<'_>> = panes
             .iter()
@@ -2152,6 +2162,7 @@ impl GpuRenderer {
                 rect_w: p.rect_px.w as f32,
                 rect_h: p.rect_px.h as f32,
                 is_active: p.is_active,
+                scrollbar_alpha: p.scrollbar_alpha,
             })
             .collect();
         // Pre-compute pane revisions for FrameKey from the safe borrows.
@@ -2783,6 +2794,7 @@ impl GpuRenderer {
                 theme,
                 sw,
                 sh,
+                pv.scrollbar_alpha,
             );
         }
 

@@ -391,6 +391,7 @@ impl App {
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            scrollbar_vis: std::collections::HashMap::new(),
         };
         self.windows.insert(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);
