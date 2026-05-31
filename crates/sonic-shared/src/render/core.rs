@@ -2242,7 +2242,7 @@ impl GpuRenderer {
                     let key = crate::row_glyph_cache::row_hash(
                         view_top_abs,
                         r as usize,
-                        row,
+                        row.as_flat_slice(),
                         self.style_rev,
                         cell_w,
                         cell_h,
@@ -2455,7 +2455,7 @@ impl GpuRenderer {
                 let key = crate::render::row_quad_cache::row_quad_hash(
                     view_top_abs_bg,
                     r as usize,
-                    row_cells,
+                    row_cells.as_flat_slice(),
                     self.style_rev,
                     cell_w,
                     cell_h,

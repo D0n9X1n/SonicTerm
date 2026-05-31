@@ -50,7 +50,7 @@ fn iteration_results_identical_across_storage_forms() {
 
     assert_eq!(flat.len(), clustered.len());
     let flat_iter: Vec<_> = flat.iter().cloned().collect();
-    let clust_iter: Vec<_> = clustered.iter().cloned().collect();
+    let clust_iter: Vec<_> = clustered.iter_storage().cloned().collect();
     assert_eq!(flat_iter, clust_iter);
     assert_eq!(flat_iter, cells);
 
@@ -65,7 +65,7 @@ fn iteration_results_identical_across_storage_forms() {
         LineStorage::Cluster(c) => c,
         _ => unreachable!(),
     });
-    let rebuilt_iter: Vec<_> = rebuilt_line.iter().cloned().collect();
+    let rebuilt_iter: Vec<_> = rebuilt_line.iter_storage().cloned().collect();
     assert_eq!(rebuilt_iter, cells);
 }
 

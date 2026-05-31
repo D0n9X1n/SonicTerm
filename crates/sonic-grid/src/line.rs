@@ -518,7 +518,20 @@ impl Line {
     }
 
     /// Iterator over cells in logical order. Cheap regardless of storage.
-    pub fn iter(&self) -> LineIter<'_> {
+    ///
+    /// **PR-B2 (#319):** returns `std::slice::Iter` so callers retain
+    /// `DoubleEndedIterator` / `ExactSizeIterator`. Materializes Cluster
+    /// storage to Flat on first call (rare; in PR-B2 the grid only
+    /// produces Flat). Use `iter_storage()` to avoid materialization in
+    /// post-PR-C cluster-heavy paths.
+    pub fn iter(&self) -> std::slice::Iter<'_, Cell> {
+        self.as_flat_slice().iter()
+    }
+
+    /// Transparent cluster-or-flat iterator. Reserved for the post-PR-C
+    /// hot paths that want to fast-path over Cluster runs without
+    /// materializing the flat form.
+    pub fn iter_storage(&self) -> LineIter<'_> {
         match &self.storage {
             LineStorage::Flat(v) => LineIter::Flat(v.iter()),
             LineStorage::Cluster(cs) => {
@@ -624,6 +637,42 @@ impl std::ops::Index<usize> for Line {
 impl std::ops::IndexMut<usize> for Line {
     fn index_mut(&mut self, idx: usize) -> &mut Cell {
         &mut self.as_vec_mut()[idx]
+    }
+}
+
+impl std::ops::Index<std::ops::Range<usize>> for Line {
+    type Output = [Cell];
+    fn index(&self, idx: std::ops::Range<usize>) -> &[Cell] {
+        &self.as_flat_slice()[idx]
+    }
+}
+
+impl std::ops::Index<std::ops::RangeFrom<usize>> for Line {
+    type Output = [Cell];
+    fn index(&self, idx: std::ops::RangeFrom<usize>) -> &[Cell] {
+        &self.as_flat_slice()[idx]
+    }
+}
+
+impl std::ops::Index<std::ops::RangeTo<usize>> for Line {
+    type Output = [Cell];
+    fn index(&self, idx: std::ops::RangeTo<usize>) -> &[Cell] {
+        &self.as_flat_slice()[idx]
+    }
+}
+
+impl std::ops::Index<std::ops::RangeFull> for Line {
+    type Output = [Cell];
+    fn index(&self, _: std::ops::RangeFull) -> &[Cell] {
+        self.as_flat_slice()
+    }
+}
+
+impl std::hash::Hash for Line {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the materialised flat sequence so cluster vs flat storage
+        // produces the same hash for the same logical content.
+        self.as_flat_slice().hash(state);
     }
 }
 
