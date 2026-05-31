@@ -154,6 +154,7 @@ impl PtyHandle {
 /// for `PtyHandle`'s `Drop` + `kill` paths to be no-ops. Exists only so
 /// `PtyHandle::for_test` can construct a handle without spawning a real
 /// process. Not exposed: lives behind `for_test`.
+#[doc(hidden)]
 #[derive(Debug)]
 struct NoopChild;
 

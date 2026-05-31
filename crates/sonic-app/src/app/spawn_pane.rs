@@ -420,9 +420,16 @@ impl App {
 
     fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
-        let (cw, ch) = match self.main_renderer() {
-            Some(r) => r.cell_size(),
-            None => return,
+        let (cw, ch) = match self.test_viewport_override {
+            // Test-only viewport override (PR #393 follow-up for #387) —
+            // lets tests exercise close_active_pane's resize wiring
+            // without a live wgpu renderer. Production stays `None` and
+            // falls through to the renderer-derived metrics below.
+            Some((_, cw, ch)) => (cw, ch),
+            None => match self.main_renderer() {
+                Some(r) => r.cell_size(),
+                None => return,
+            },
         };
         if let Some(panes) = self.main_panes() {
             crate::app::resize_panes_to_rects(panes, &rects, cw, ch);

@@ -103,28 +103,87 @@ fn subcell_rect_floors_to_one() {
 
 #[test]
 fn close_sibling_pane_resizes_survivor_to_full_width() {
-    // Regression for #387: after `PaneTree::close` removes one leaf of a
-    // horizontal split, the surviving leaf's rect covers the whole
-    // parent. The close path in `App::close_active_pane` must re-run
-    // `resize_panes_to_rects` so the survivor's Grid + PTY grow to the
-    // reclaimed area. Pre-fix the survivor kept its half-window cols and
-    // shell output wrapped at the narrow split-time width.
+    // Regression for #387: after the active pane is closed in a
+    // horizontal split, the surviving sibling's PaneRect grows to cover
+    // the whole parent. `App::close_active_pane` must re-run the layout
+    // -> resize_panes_to_rects flow so the survivor's Grid + PtyHandle
+    // grow to the reclaimed area. Pre-fix the survivor kept its
+    // split-time half-width grid AND its PTY was never told the new
+    // size, so shell output wrapped at the narrow column count until the
+    // OS window was resized.
     //
-    // This test drives the exact sequence `App::close_active_pane`
-    // performs in the surviving-sibling branch (`PaneTree::close` →
-    // `panes.remove` → `resize_visible_panes` → `resize_panes_to_rects`)
-    // and uses `PtyHandle::for_test` so it can assert the survivor's
-    // `pty.resize` closure actually fires with the post-close cell
-    // count — the property pre-fix code silently broke and that the
-    // earlier `pty = None` version of this test could not catch.
+    // This test goes through the production entry point
+    // `App::close_active_pane` (via the doc-hidden
+    // `__test_invoke_close_active_pane` shim, matching the pattern of
+    // every other test-only invoker on `App`). The renderer-derived
+    // viewport metrics that `compute_active_pane_rects` and
+    // `resize_visible_panes` normally read from `main_renderer()` are
+    // substituted via `App::test_viewport_override` so the test runs
+    // without a live wgpu surface — the close + resize wiring under
+    // test is the same production code path either way (PR #393
+    // cycle 3 review feedback: previous cycles bypassed
+    // close_active_pane by calling PaneTree::close + resize_panes_to_rects
+    // directly; this cycle drives the real entry point).
+    use sonic_app::app::{App, TabState};
+    use sonic_core::config::Config;
+    use sonic_core::keymap::{Keymap, Meta};
     use sonic_core::pty::PtyHandle;
+    use sonic_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    use sonic_ui::tabs::Tab;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    // Mirror `make_pane` but with a spy-pty whose resize() bumps an
-    // atomic counter and records the last (cols, rows) it was called
-    // with. Built from `PtyHandle::for_test` (doc-hidden, test-only).
-    type SpyPane = (PaneState, Arc<Mutex<Parser>>, Arc<AtomicU32>, Arc<Mutex<(u16, u16)>>);
-    fn make_pane_with_spy_pty(cols: u16, rows: u16) -> SpyPane {
+    fn hex() -> Hex {
+        Hex("#000000".to_string())
+    }
+    fn ansi() -> AnsiColors {
+        AnsiColors {
+            black: hex(),
+            red: hex(),
+            green: hex(),
+            yellow: hex(),
+            blue: hex(),
+            magenta: hex(),
+            cyan: hex(),
+            white: hex(),
+        }
+    }
+    fn synth_theme() -> Theme {
+        Theme {
+            name: "test".into(),
+            appearance: Appearance::Dark,
+            colors: Palette {
+                background: hex(),
+                foreground: hex(),
+                cursor: hex(),
+                cursor_text: hex(),
+                selection_bg: hex(),
+                selection_fg: hex(),
+                ansi: ansi(),
+                bright: ansi(),
+                tab: TabColors {
+                    bar_bg: hex(),
+                    active_bg: hex(),
+                    active_fg: hex(),
+                    inactive_bg: hex(),
+                    inactive_fg: hex(),
+                    hover_bg: hex(),
+                    hover_fg: hex(),
+                    close_button_fg: hex(),
+                },
+            },
+        }
+    }
+    fn synth_app() -> App {
+        let keymap =
+            Keymap { meta: Meta { name: "test".into(), version: "0".into() }, bindings: vec![] };
+        App::new(synth_theme(), Config::default(), keymap)
+    }
+
+    // Build a spy PtyHandle whose `resize` closure increments a counter
+    // and records the last (cols, rows). Production close path is the
+    // only thing that should bump this after split-time setup.
+    type Spy = (PaneState, Arc<Mutex<Parser>>, Arc<AtomicU32>, Arc<Mutex<(u16, u16)>>);
+    fn make_pane_with_spy_pty(cols: u16, rows: u16) -> Spy {
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
         let calls = Arc::new(AtomicU32::new(0));
         let last = Arc::new(Mutex::new((0u16, 0u16)));
@@ -137,67 +196,93 @@ fn close_sibling_pane_resizes_survivor_to_full_width() {
         (PaneState::new(parser.clone(), Some(pty)), parser, calls, last)
     }
 
-    let mut tree = PaneTree::leaf(1);
-    assert!(tree.split(1, Direction::Right, 2));
-    let outer = Rect::new(0.0, 0.0, 1000.0, 700.0);
-    let split_rects = tree.layout(outer);
+    // === Set up an App with one tab whose pane tree is a horizontal
+    // split of two leaves (pane ids 1 and 2). Pane 2 is active — the
+    // one close_active_pane should close. ===
+    let mut app = synth_app();
+    // __test_synthetic_main creates the main WindowState entry without
+    // a real winit window / wgpu renderer; viewport metrics come from
+    // test_viewport_override below.
+    app.__test_synthetic_main();
 
-    // After the split each pane is half-width. Each pane gets a spy
-    // PtyHandle that records resize calls.
     let (pane_a, parser_a, calls_a, last_a) = make_pane_with_spy_pty(100, 35);
     let (pane_b, _parser_b, _calls_b, _last_b) = make_pane_with_spy_pty(100, 35);
-    let mut panes: HashMap<u64, PaneState> = HashMap::new();
-    panes.insert(1, pane_a);
-    panes.insert(2, pane_b);
 
-    // Initial split-time resize lays both grids at 50 cols and fires
-    // resize() on each spy PTY once.
-    resize_panes_to_rects(&panes, &split_rects, 10.0, 20.0);
+    // Build the split tree directly: PaneTree::leaf(1) then split right
+    // to add pane 2 — the same shape that App::split_active_pane would
+    // produce after a Cmd+D on a single-pane tab.
+    let mut tree = PaneTree::leaf(1);
+    assert!(tree.split(1, Direction::Right, 2));
+
+    let ws = app.main_mut().expect("synthetic main exists");
+    ws.tabs.push(Tab::new("test"));
+    ws.tab_states.push(TabState::new(tree, /*active_pane=*/ 2));
+    ws.panes.insert(1, pane_a);
+    ws.panes.insert(2, pane_b);
+
+    // Inject the viewport: 1000x700 logical, 10x20 cell metrics. This is
+    // what production code would read from main_renderer().
+    let outer = Rect::new(0.0, 0.0, 1000.0, 700.0);
+    app.test_viewport_override = Some((outer, 10.0, 20.0));
+
+    // Split-time resize: route through the SAME production helper
+    // (window_event.rs / config_apply.rs use resize_panes_to_rects on
+    // the layout produced by PaneTree::layout). After this pane_a is 50
+    // cols wide and its spy PTY has fired exactly once.
+    let split_rects = {
+        let st = &app.main().unwrap().tab_states[0];
+        st.tree.layout(outer)
+    };
+    resize_panes_to_rects(app.main_panes().unwrap(), &split_rects, 10.0, 20.0);
     assert_eq!(parser_a.lock().grid().cols, 50, "left starts at half width");
     assert_eq!(calls_a.load(Ordering::SeqCst), 1, "split-time PTY resize fired once");
     assert_eq!(*last_a.lock(), (50, 35));
 
-    // === Exercise the post-close path. ===
-    // This is exactly what App::close_active_pane does in the
-    // surviving-sibling branch (spawn_pane.rs::close_active_pane):
-    //   1. PaneTree::close removes the closed leaf.
-    //   2. panes.remove drops its PaneState (and PtyHandle, which Drop
-    //      kills the child).
-    //   3. resize_visible_panes recomputes the layout and routes
-    //      through resize_panes_to_rects against the new rects.
-    assert!(tree.close(2));
-    panes.remove(&2);
-    let post_close_rects = tree.layout(outer);
-    assert_eq!(post_close_rects.len(), 1, "tree collapsed to surviving leaf");
-    assert_eq!(post_close_rects[0].0, 1);
-    assert_eq!(post_close_rects[0].1.w, 1000.0, "survivor reclaims full width");
+    // === Exercise the production close path. ===
+    // __test_invoke_close_active_pane calls App::close_active_pane
+    // directly — the same entry point Cmd+W reaches via keymap dispatch
+    // (keymap_dispatch.rs::Action::CloseActivePane). It:
+    //   1. Removes the focused (=pane 2) leaf from the tree.
+    //   2. Drops pane 2's PaneState (Drop on PtyHandle kills the child).
+    //   3. Calls resize_visible_panes -> compute_active_pane_rects ->
+    //      resize_panes_to_rects on the new layout, which MUST fire the
+    //      survivor's Grid.resize + PtyHandle.resize.
+    //   4. Requests a redraw on the main window (no-op here — synthetic
+    //      WindowState has window=None, which `if let Some(w) = ...`
+    //      tolerates).
+    let pre_close_calls = calls_a.load(Ordering::SeqCst);
+    app.__test_invoke_close_active_pane();
+    let post_close_calls = calls_a.load(Ordering::SeqCst);
 
-    // The fix: resize_panes_to_rects gets called with the post-close
-    // layout. Pre-fix this call was missing entirely from
-    // close_active_pane — the survivor kept its half-width grid AND
-    // its PTY was never told the new size.
-    resize_panes_to_rects(&panes, &post_close_rects, 10.0, 20.0);
-
-    // Both halves of the fix:
-    // (a) Grid widened to full pane width.
+    // Both halves of the #387 fix:
+    // (a) Spy PTY's resize was called exactly once more by the production
+    //     close path. This is the property the previous pty=None test
+    //     could not verify.
+    assert_eq!(
+        post_close_calls - pre_close_calls,
+        1,
+        "App::close_active_pane must invoke survivor's PtyHandle::resize exactly once"
+    );
+    // (b) The PTY received the survivor's full-pane dims (100x35 — the
+    //     reclaimed full window).
+    assert_eq!(
+        *last_a.lock(),
+        (100, 35),
+        "PtyHandle::resize must receive the post-close (cols, rows)"
+    );
+    // (c) Grid widened to full pane width.
     assert_eq!(
         parser_a.lock().grid().cols,
         100,
         "survivor's Grid must reflow to full pane width after sibling close (#387)"
     );
     assert_eq!(parser_a.lock().grid().rows, 35);
-    // (b) PTY was actually told about the resize (the part the
-    //     previous pty = None test could not verify).
-    assert_eq!(
-        calls_a.load(Ordering::SeqCst),
-        2,
-        "survivor's PtyHandle::resize must fire again after sibling close (#387)"
-    );
-    assert_eq!(
-        *last_a.lock(),
-        (100, 35),
-        "PtyHandle::resize must receive the post-close (cols, rows)"
-    );
+
+    // Tree collapsed and the closed pane's state was dropped.
+    let ws = app.main().unwrap();
+    let st = &ws.tab_states[0];
+    assert_eq!(st.tree.leaves(), vec![1], "tree collapsed to surviving leaf");
+    assert!(!ws.panes.contains_key(&2), "closed pane's PaneState dropped");
 }
 
 #[test]
