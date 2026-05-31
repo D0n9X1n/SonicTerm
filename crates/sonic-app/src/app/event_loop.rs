@@ -184,7 +184,7 @@ impl App {
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
-        self.scale_factor = window.scale_factor();
+        let scale_factor = window.scale_factor();
 
         // Perf audit #9: gate redraws to the monitor's vsync cadence.
         // `refresh_rate_millihertz` returns e.g. 60_000 for 60Hz,
@@ -297,10 +297,10 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: self.scale_factor,
+            scale_factor,
             ime: sonic_ui::ime::ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
-            hovered_url: self.hovered_url.clone(),
+            hovered_url: None,
             hidden: false,
         };
         self.windows.insert(main_id, shadow);
@@ -308,10 +308,6 @@ impl App {
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
         self.drain_pending_os_drag_payloads();
-
-        // Seed-sync immediately so the first event-tick observer sees a
-        // populated shadow rather than the all-zeros constructor state.
-        self.sync_shadow_main();
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(

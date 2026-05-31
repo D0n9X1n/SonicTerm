@@ -541,7 +541,9 @@ impl App {
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.scale_factor = scale_factor;
+                if let Some(ws) = self.main_mut() {
+                    ws.scale_factor = scale_factor;
+                }
                 if let Some(r) = self.main_renderer_mut() {
                     r.set_scale_factor(scale_factor as f32);
                 }
@@ -572,7 +574,7 @@ impl App {
                 if let Some(r) = self.main_renderer_mut() {
                     redraw = r.set_hover_cursor(None);
                 }
-                if self.hovered_url.take().is_some() {
+                if self.main_mut().and_then(|ws| ws.hovered_url.take()).is_some() {
                     redraw = true;
                 }
                 if redraw {
@@ -585,7 +587,7 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.cursor_pos = (position.x, position.y);
                 }
-                let sf = self.scale_factor as f32;
+                let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 let mut hover_redraw = false;
                 if let Some(r) = self.main_renderer_mut() {
@@ -716,10 +718,10 @@ impl App {
                     // handoff gate so the CursorMoved threshold check
                     // can fire once for the new gesture.
                     self.os_drag_handoff_started = false;
-                    let sf = self
-                        .main_window()
-                        .map(|w| w.scale_factor() as f32)
-                        .unwrap_or(self.scale_factor as f32);
+                    let sf =
+                        self.main_window().map(|w| w.scale_factor() as f32).unwrap_or_else(|| {
+                            self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0)
+                        });
                     let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                     let (px, py) = to_logical_pos(cursor_pos.0, cursor_pos.1, sf);
                     let window_width = self
@@ -816,7 +818,7 @@ impl App {
                             })
                             .unwrap_or_default();
                         if pane_rects.len() > 1 {
-                            let sf = self.scale_factor as f32;
+                            let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
                             for (id, rect) in &pane_rects {

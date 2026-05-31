@@ -133,11 +133,12 @@ fn child_windows_carry_independent_scalars() {
 
 #[test]
 fn shadow_main_in_sync_after_b3() {
-    // PR-B3 removed cursor_pos/mouse_down/pressed_tab from App and the
-    // sync comparator. The remaining shadow-mirrored fields must still
-    // report in-sync immediately after construction.
-    let app = make_app();
-    assert!(app.__test_shadow_main_in_sync());
+    // #404: shadow-sync infrastructure deleted; this test is now a
+    // no-op stub kept only to preserve the historical anchor name.
+    // The underlying invariant (scale_factor/hovered_url live on
+    // WindowState) is enforced statically by the field absence on App,
+    // and dynamically by `shadow_main_snapshot_deleted.rs`.
+    let _ = make_app();
 }
 
 #[test]
