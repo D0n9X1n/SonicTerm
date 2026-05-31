@@ -4118,6 +4118,9 @@ impl GpuRenderer {
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
+                // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
+                let (gx, gy, gw, gh) =
+                    crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba = glyphon_color_to_linear_rgba(color);
                 glyph_instances.push(GlyphInstance {
@@ -4243,6 +4246,9 @@ impl GpuRenderer {
                 } else {
                     glyphon_color_to_linear_rgba(color)
                 };
+                // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
+                let (gx, gy, gw, gh) =
+                    crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4298,6 +4304,9 @@ impl GpuRenderer {
             } else {
                 glyphon_color_to_linear_rgba(color)
             };
+            // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
+            let (gx, gy, gw, gh) =
+                crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,
