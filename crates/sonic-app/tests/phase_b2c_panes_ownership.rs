@@ -16,12 +16,17 @@
 //!   * Per-window isolation: tabs/panes seeded on the synthetic main
 //!     entry are NOT mirrored to any other `windows` entry.
 
-use sonic_app::app::App;
+use parking_lot::Mutex;
+use sonic_app::app::{App, PaneState};
 use sonic_core::{
     config::Config,
-    keymap::{Keymap, Meta},
+    grid::Grid,
+    keymap::{Action, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
+    vt::Parser,
 };
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 fn hex() -> Hex {
     Hex("#000000".to_string())
@@ -73,6 +78,15 @@ fn empty_keymap() -> Keymap {
 
 fn make_app() -> App {
     App::new(synth_theme(), Config::default(), empty_keymap())
+}
+
+fn fake_pane() -> PaneState {
+    let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+    PaneState::new(parser, None)
+}
+
+fn ids(ids: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
+    ids.into_iter().collect()
 }
 
 #[test]
@@ -136,4 +150,67 @@ fn main_pane_seed_does_not_leak_into_other_window_entries() {
     let main_id = app.main().expect("synthetic main present");
     let main_pane_count = main_id.panes.len();
     assert_eq!(main_pane_count, 2, "main has the two seeded panes");
+}
+
+#[test]
+fn panes_isolated_per_window() {
+    let mut app = make_app();
+    let main_a = app.__test_seed_tab("main-alpha");
+    let main_b = app.__test_seed_tab("main-bravo");
+    let child_id = app.__test_seed_child_window(&["child-alpha", "child-bravo"]);
+
+    let main = app.main().expect("synthetic main present");
+    assert_eq!(main.panes.len(), 2, "main owns exactly its two panes");
+    assert_eq!(ids(main.panes.keys().copied()), ids([main_a, main_b]));
+
+    let child_panes = app.__test_child_pane_ids(child_id).expect("synthetic child present");
+    assert_eq!(child_panes.len(), 2, "child owns exactly its two panes");
+    assert!(
+        ids([main_a, main_b]).is_disjoint(&ids(child_panes.iter().copied())),
+        "main and child pane maps must not overlap"
+    );
+}
+
+#[test]
+fn main_panes_mut_only_mutates_main() {
+    let mut app = make_app();
+    let main_a = app.__test_seed_tab("main-alpha");
+    let main_b = app.__test_seed_tab("main-bravo");
+    let child_id = app.__test_seed_child_window(&["child-alpha", "child-bravo"]);
+    let child_before = ids(app.__test_child_pane_ids(child_id).expect("child panes"));
+
+    app.main_panes_mut().expect("main panes").insert(99, fake_pane());
+
+    let main_after = app.main_panes().expect("main panes after insert");
+    assert_eq!(main_after.len(), 3, "main_panes_mut insert adds one main pane");
+    assert_eq!(ids(main_after.keys().copied()), ids([main_a, main_b, 99]));
+    assert_eq!(
+        ids(app.__test_child_pane_ids(child_id).expect("child panes after insert")),
+        child_before,
+        "main_panes_mut must not mutate the child window's pane map"
+    );
+}
+
+#[test]
+fn child_pane_split_does_not_touch_main() {
+    let mut app = make_app();
+    let main_a = app.__test_seed_tab("main-alpha");
+    let main_b = app.__test_seed_tab("main-bravo");
+    let child_id = app.__test_seed_child_window(&["child-alpha"]);
+    app.__test_set_frontmost_window(Some(child_id));
+    let main_before = ids(app.main_panes().expect("main panes").keys().copied());
+
+    app.run_action(&Action::SplitRight);
+
+    assert_eq!(
+        ids(app.main_panes().expect("main panes after child split").keys().copied()),
+        main_before,
+        "splitting the child window must not add/remove main panes"
+    );
+    assert_eq!(
+        app.__test_child_pane_count(child_id),
+        Some(2),
+        "split action must land in the frontmost child window"
+    );
+    assert_eq!(ids(app.main_panes().expect("main panes").keys().copied()), ids([main_a, main_b]));
 }

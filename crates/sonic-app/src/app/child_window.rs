@@ -1034,22 +1034,24 @@ impl App {
         // captures clones of (pty_burst_gen, window, cursor_visible) and
         // we want the borrow checker happy when we re-borrow `child`
         // below to install the new pane.
-        let (cols, rows, child_window, cursor_visible_arc) = {
-            let Some(child) = self.windows.get_mut(&win_id) else {
-                return false;
-            };
-            let Some(renderer) = child.renderer.as_ref() else {
-                return false;
-            };
-            let Some(win) = child.window.as_ref() else {
-                return false;
-            };
-            let (c, r) = renderer.cells();
-            (c, r, win.clone(), child.cursor_visible.clone())
+        let Some(child) = self.windows.get(&win_id) else {
+            return false;
         };
         let new_id = next_pane_id();
-        let pane_state =
-            self.spawn_pane_state_for_child(cols, rows, child_window.clone(), cursor_visible_arc);
+        let pane_state = if let (Some(renderer), Some(win)) =
+            (child.renderer.as_ref(), child.window.as_ref())
+        {
+            let (cols, rows) = renderer.cells();
+            self.spawn_pane_state_for_child(cols, rows, win.clone(), child.cursor_visible.clone())
+        } else if child.renderer.is_none() && child.window.is_none() {
+            // Test-only synthetic child windows intentionally have no
+            // renderer/window, but they still need to exercise pane
+            // ownership/routing without falling through to main.
+            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+            PaneState::new(parser, None)
+        } else {
+            return false;
+        };
         let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };

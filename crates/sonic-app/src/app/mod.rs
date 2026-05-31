@@ -185,6 +185,15 @@ impl WindowState {
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SYNTHETIC_CHILD_WINDOW_TAG: AtomicU64 = AtomicU64::new(1);
+
+fn next_synthetic_child_window_id() -> WindowId {
+    let tag = NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: WindowId is `#[repr(transparent)] pub struct WindowId(u64)`
+    // in winit; use values below the synthetic main id so test-only child
+    // entries never collide with `synthetic_main_window_id()`.
+    unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
+}
 
 /// Phase B2 PR-B2a (#365): stable synthetic `WindowId` used by the
 /// test-only [`App::__test_synthetic_main`] seam so the main entry in
@@ -1783,6 +1792,61 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
         self.windows.get(&id).map(|c| c.tabs.len())
+    }
+
+    /// Test-only: how many panes the named child window currently owns.
+    #[doc(hidden)]
+    pub fn __test_child_pane_count(&self, id: WindowId) -> Option<usize> {
+        self.windows.get(&id).map(|c| c.panes.len())
+    }
+
+    /// Test-only: pane ids owned by the named child window.
+    #[doc(hidden)]
+    pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
+        self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
+    }
+
+    /// Test-only: seed a synthetic child WindowState without constructing a
+    /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
+    /// tear-out child, but `window` and `renderer` stay `None` so cargo-test
+    /// can exercise App-level multi-window ownership invariants headlessly.
+    #[doc(hidden)]
+    pub fn __test_seed_child_window(&mut self, titles: &[&str]) -> WindowId {
+        self.__test_synthetic_main();
+        let id = next_synthetic_child_window_id();
+        let mut tabs = TabBar::new();
+        let mut tab_states = Vec::new();
+        let mut panes = HashMap::new();
+        for title in titles {
+            let pane_id = next_pane_id();
+            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+            panes.insert(pane_id, PaneState::new(parser, None));
+            tabs.push(Tab::new(*title));
+            tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
+        let child = WindowState {
+            role: WindowRole::Terminal,
+            window: None,
+            renderer: None,
+            tabs,
+            tab_states,
+            panes,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            selection: None,
+            copy_mode: None,
+            modifiers: ModifiersState::empty(),
+            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_render: Instant::now(),
+            pressed_tab: None,
+            drag_session: None,
+            drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
+        };
+        self.windows.insert(id, child);
+        id
     }
 
     /// Test-only: install a `focused_child` id without going through a
