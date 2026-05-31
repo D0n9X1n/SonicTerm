@@ -685,7 +685,7 @@ impl App {
                     // selection extension while a thumb is held. Match
                     // CLAUDE.md §4 — keep this branch fast; no parser
                     // lock is needed (geometry was snapshotted at press).
-                    if let Some((pane_id, new_view_top)) = self.scrollbar_drag_apply(lx) {
+                    if let Some((pane_id, new_view_top)) = self.scrollbar_drag_apply(lx, ly) {
                         // Resolve `live_top` for the dragged pane (not
                         // necessarily the active one — keep the gesture
                         // pinned to the press pane even if focus shifted).

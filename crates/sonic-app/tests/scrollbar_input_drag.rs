@@ -9,7 +9,8 @@
 //! break the drag.
 
 use sonic_app::app::scrollbar_input::{
-    apply_drag, hit, page_down, page_up, HitOutcome, ScrollbarDragState, SCROLLBAR_WIDTH_PX,
+    apply_drag, apply_drag_at, hit, page_down, page_up, HitOutcome, ScrollbarDragState,
+    SCROLLBAR_WIDTH_PX,
 };
 use sonic_core::config::ScrollbarMode;
 use sonic_ui::scrollbar::{Point, Rect};
@@ -75,6 +76,45 @@ fn drag_changes_view_top_proportionally() {
     assert!(
         mid.abs_diff(half) <= max_view_top / 10,
         "midpoint drag landed at {mid}, expected near {half}"
+    );
+}
+
+#[test]
+fn y_only_drag_changes_view_top() {
+    let start_x = track_x();
+    let press_y = 5.0;
+    let HitOutcome::StartDrag(state) = hit(
+        PANE,
+        VP_ROWS,
+        TOTAL_ROWS,
+        0,
+        ScrollbarMode::Always,
+        PANE_ID,
+        Point::new(start_x, press_y),
+    ) else {
+        panic!("expected StartDrag");
+    };
+
+    let initial = apply_drag_at(&state, Point::new(start_x, press_y));
+    let after_y_only_move = apply_drag_at(&state, Point::new(start_x, PANE.h * 0.5));
+
+    assert_eq!(initial, 0);
+    assert!(
+        after_y_only_move > initial,
+        "vertical thumb drag with unchanged x must update view_top; got {after_y_only_move}"
+    );
+}
+
+#[test]
+fn cursor_moved_handler_routes_scrollbar_drag_with_mouse_y() {
+    let window_event_src = include_str!("../src/app/window_event.rs");
+    assert!(
+        window_event_src.contains("scrollbar_drag_apply(lx, ly)"),
+        "CursorMoved scrollbar drag must pass logical y, not x, into scrollbar_drag_apply"
+    );
+    assert!(
+        !window_event_src.contains("scrollbar_drag_apply(lx)"),
+        "regression guard: passing lx as the only drag coordinate ignores vertical motion"
     );
 }
 

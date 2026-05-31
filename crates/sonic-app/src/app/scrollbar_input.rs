@@ -100,12 +100,19 @@ pub fn hit(
     }
 }
 
+/// Translate a `CursorMoved` cursor position (logical px) during a drag
+/// back into a `view_top` row. The thumb's `grab_offset` keeps the
+/// cursor's pixel position constant relative to the thumb.
+pub fn apply_drag_at(state: &ScrollbarDragState, cursor: Point) -> u64 {
+    let thumb_y = cursor.y - state.grab_offset;
+    scrollbar::thumb_to_view_top(&state.geometry, thumb_y, state.viewport_rows, state.total_rows)
+}
+
 /// Translate a `CursorMoved` y (logical px) during a drag back into a
 /// `view_top` row. The thumb's `grab_offset` keeps the cursor's pixel
 /// position constant relative to the thumb.
 pub fn apply_drag(state: &ScrollbarDragState, cursor_y: f32) -> u64 {
-    let thumb_y = cursor_y - state.grab_offset;
-    scrollbar::thumb_to_view_top(&state.geometry, thumb_y, state.viewport_rows, state.total_rows)
+    apply_drag_at(state, Point::new(state.geometry.thumb_rect.x, cursor_y))
 }
 
 /// Track-click jump: page up by the viewport size, clamped to 0.
@@ -162,12 +169,12 @@ impl App {
     }
 
     /// Compute the new `view_top` for an in-flight scrollbar drag, given
-    /// the latest logical-px cursor y. Returns `None` if no drag is
-    /// active on the main window.
-    pub(crate) fn scrollbar_drag_apply(&self, cursor_y: f32) -> Option<(u64, u64)> {
+    /// the latest logical-px cursor position. Returns `None` if no drag
+    /// is active on the main window.
+    pub(crate) fn scrollbar_drag_apply(&self, cursor_x: f32, cursor_y: f32) -> Option<(u64, u64)> {
         let ws = self.main()?;
         let state = ws.scrollbar_drag.as_ref()?;
-        Some((state.pane_id, apply_drag(state, cursor_y)))
+        Some((state.pane_id, apply_drag_at(state, Point::new(cursor_x, cursor_y))))
     }
 
     /// Apply a track-click page jump on the active pane.
