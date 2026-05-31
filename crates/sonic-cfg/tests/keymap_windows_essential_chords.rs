@@ -14,5 +14,5 @@ fn windows_essential_chords_are_bound() {
     assert_eq!(keymap.lookup("ctrl+shift+p"), Some(&Action::OpenCommandPalette));
     assert_eq!(keymap.lookup("ctrl+shift+/"), Some(&Action::ShowKeymapCheatsheet));
     assert_eq!(keymap.lookup("ctrl+shift+d"), Some(&Action::SplitRight));
-    assert_eq!(keymap.lookup("ctrl+shift+w"), Some(&Action::CloseTab));
+    assert_eq!(keymap.lookup("ctrl+shift+w"), Some(&Action::CloseActivePaneOrTab));
 }
