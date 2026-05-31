@@ -94,14 +94,12 @@ impl App {
                         }
                     }
                     self.theme = t;
-                    propagate_theme_to_pane_parsers(&self.panes, &self.theme);
                     for child in self.windows.values() {
                         propagate_theme_to_pane_parsers(&child.panes, &self.theme);
                     }
                     // Theme swap changes presentation (colors) without
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
-                    mark_all_panes_dirty(&self.panes);
                     for child in self.windows.values() {
                         // Phase B2 PR-A: skip shadow main entry (renderer=None).
                         if child.renderer.is_none() {
@@ -135,11 +133,9 @@ impl App {
                 }
             }
             self.theme = t;
-            propagate_theme_to_pane_parsers(&self.panes, &self.theme);
             for child in self.windows.values() {
                 propagate_theme_to_pane_parsers(&child.panes, &self.theme);
             }
-            mark_all_panes_dirty(&self.panes);
             for child in self.windows.values() {
                 // Phase B2 PR-A: skip shadow main entry (renderer=None).
                 if child.renderer.is_none() {
@@ -162,15 +158,9 @@ impl App {
             // Cell metrics changed → resize each pane to its own PaneRect.
             // See docs/specs/per-pane-grids.md for why this is per-pane,
             // not whole-window.
-            let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.main_renderer() {
-                let (cw, ch) = r.cell_size();
-                resize_panes_to_rects(&self.panes, &rects, cw, ch);
-            }
-            // Apply the same swap to every torn-out child window. Each
-            // child owns its own GpuRenderer, so it needs the font
-            // change AND the matching pane resize against its own cell
-            // metrics (its window can be a different size from main).
+            // PR-B2c (#365): main is in self.windows so the loop below
+            // covers main + every torn-out child. Each owns its own
+            // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
                 let Some(r) = child.renderer.as_mut() else { continue };
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
@@ -234,11 +224,7 @@ impl App {
             if let Some(r) = self.main_renderer_mut() {
                 r.set_padding(pad);
             }
-            let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.main_renderer() {
-                let (cw, ch) = r.cell_size();
-                resize_panes_to_rects(&self.panes, &rects, cw, ch);
-            }
+            // PR-B2c (#365): the loop below covers main + every child.
             for child in self.windows.values_mut() {
                 let Some(r) = child.renderer.as_mut() else { continue };
                 r.set_padding(pad);
@@ -360,14 +346,12 @@ impl App {
         }
         self.theme = theme;
         self.config.theme = name.to_string();
-        propagate_theme_to_pane_parsers(&self.panes, &self.theme);
         for child in self.windows.values() {
             propagate_theme_to_pane_parsers(&child.panes, &self.theme);
         }
         // Theme swap changes presentation (colors) without mutating
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
-        mark_all_panes_dirty(&self.panes);
         for child in self.windows.values() {
             // Phase B2 PR-A: skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
@@ -409,11 +393,7 @@ impl App {
         if let Some(r) = self.main_renderer_mut() {
             r.set_font(&family, size, line_h);
         }
-        let rects = self.compute_active_pane_rects();
-        if let Some(r) = self.main_renderer() {
-            let (cw, ch) = r.cell_size();
-            resize_panes_to_rects(&self.panes, &rects, cw, ch);
-        }
+        // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let Some(r) = child.renderer.as_mut() else { continue };
             r.set_font(&family, size, line_h);
@@ -437,18 +417,7 @@ impl App {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
-        let main_changed = if let Some(r) = self.main_renderer_mut() {
-            r.set_tab_bar_visible(visible)
-        } else {
-            false
-        };
-        if main_changed {
-            let rects = self.compute_active_pane_rects();
-            if let Some(r) = self.main_renderer() {
-                let (cw, ch) = r.cell_size();
-                resize_panes_to_rects(&self.panes, &rects, cw, ch);
-            }
-        }
+        // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let Some(r) = child.renderer.as_mut() else { continue };
             if r.set_tab_bar_visible(visible) {

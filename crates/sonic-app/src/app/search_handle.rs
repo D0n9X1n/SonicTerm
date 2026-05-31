@@ -59,8 +59,8 @@ impl App {
                 None => return false,
             }
         };
-        let pane = match self.panes.get(&pane_id) {
-            Some(p) => p,
+        let parser_arc = match self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+            Some(p) => p.parser.clone(),
             None => {
                 // Restore so we don't drop user state on a missing pane.
                 if let Some(ws) = self.main_mut() {
@@ -71,7 +71,7 @@ impl App {
                 return false;
             }
         };
-        let grid_guard = pane.parser.lock();
+        let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
 
         let (handled, keep_search) = match &event.logical_key {

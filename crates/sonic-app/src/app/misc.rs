@@ -184,7 +184,9 @@ impl App {
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
         self.copy_mode = Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor));
-        mark_all_panes_dirty(&self.panes);
+        if let Some(panes) = self.main_panes() {
+            mark_all_panes_dirty(panes);
+        }
     }
 
     pub(super) fn enter_quick_select(&mut self) {
@@ -197,7 +199,9 @@ impl App {
             state
         };
         self.copy_mode = Some(state);
-        mark_all_panes_dirty(&self.panes);
+        if let Some(panes) = self.main_panes() {
+            mark_all_panes_dirty(panes);
+        }
     }
 
     pub(super) fn copy_selection(&mut self) {
@@ -237,20 +241,27 @@ impl App {
         }
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
-        let Some(ws) = self.main() else { return };
-        let i = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(i) else { return };
-        let pane_id = st.active_pane;
-        let Some(pane) = self.panes.get_mut(&pane_id) else { return };
-        let new_top = {
-            let guard = pane.parser.lock();
-            let grid = guard.grid();
-            let cur = pane.viewport_top_abs.unwrap_or_else(|| grid.scrollback_len() as u64);
-            pick_prompt_target(grid, cur, forward)
+        let updated = {
+            let Some(ws) = self.main_mut() else { return };
+            let i = ws.tabs.active_index();
+            let Some(st) = ws.tab_states.get(i) else { return };
+            let pane_id = st.active_pane;
+            let Some(pane) = ws.panes.get_mut(&pane_id) else { return };
+            let new_top = {
+                let guard = pane.parser.lock();
+                let grid = guard.grid();
+                let cur = pane.viewport_top_abs.unwrap_or_else(|| grid.scrollback_len() as u64);
+                pick_prompt_target(grid, cur, forward)
+            };
+            if let Some(top) = new_top {
+                pane.viewport_top_abs = Some(top);
+                tracing::info!(target = top, "scrolled to prompt row");
+                true
+            } else {
+                false
+            }
         };
-        if let Some(top) = new_top {
-            pane.viewport_top_abs = Some(top);
-            tracing::info!(target = top, "scrolled to prompt row");
+        if updated {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
@@ -459,8 +470,8 @@ impl App {
     pub(super) fn new_tab(&mut self, title: impl Into<String>) {
         let pane_id = next_pane_id();
         let pane = self.spawn_pane();
-        self.panes.insert(pane_id, pane);
         if let Some(ws) = self.main_mut() {
+            ws.panes.insert(pane_id, pane);
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
@@ -476,7 +487,7 @@ impl App {
             ws.tabs.close(id);
         }
         for id in st.tree.leaves() {
-            self.panes.remove(&id);
+            ws.panes.remove(&id);
         }
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {

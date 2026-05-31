@@ -302,17 +302,22 @@ impl App {
         let did_split = {
             let Some(ws) = self.main_mut() else { return };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else { return };
-            let focus = st.active_pane;
-            if st.tree.split(focus, dir, new_id) {
-                st.active_pane = new_id;
-                true
-            } else {
-                false
+            let split_ok = {
+                let Some(st) = ws.tab_states.get_mut(i) else { return };
+                let focus = st.active_pane;
+                if st.tree.split(focus, dir, new_id) {
+                    st.active_pane = new_id;
+                    true
+                } else {
+                    false
+                }
+            };
+            if split_ok {
+                ws.panes.insert(new_id, new_pane);
             }
+            split_ok
         };
         if did_split {
-            self.panes.insert(new_id, new_pane);
             self.resize_visible_panes();
             if let Some(w) = self.main_window() {
                 w.request_redraw();
@@ -323,27 +328,29 @@ impl App {
         let outcome = {
             let Some(ws) = self.main_mut() else { return };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else { return };
-            let focus = st.active_pane;
-            if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
-                (Some(i), None)
-            } else {
-                let new_focus =
-                    st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
-                if st.tree.close(focus) {
-                    st.active_pane = new_focus;
-                    (None, Some(focus))
+            let inner = {
+                let Some(st) = ws.tab_states.get_mut(i) else { return };
+                let focus = st.active_pane;
+                if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
+                    (Some(i), None)
                 } else {
-                    (None, None)
+                    let new_focus =
+                        st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
+                    if st.tree.close(focus) {
+                        st.active_pane = new_focus;
+                        (None, Some(focus))
+                    } else {
+                        (None, None)
+                    }
                 }
+            };
+            if let (_, Some(focus)) = inner {
+                ws.panes.remove(&focus);
             }
+            inner
         };
-        match outcome {
-            (Some(i), _) => self.close_tab_at(i),
-            (_, Some(focus)) => {
-                self.panes.remove(&focus);
-            }
-            _ => {}
+        if let (Some(i), _) = outcome {
+            self.close_tab_at(i);
         }
     }
     pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
@@ -395,9 +402,12 @@ impl App {
 
     fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
-        if let Some(r) = self.main_renderer() {
-            let (cw, ch) = r.cell_size();
-            crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
+        let (cw, ch) = match self.main_renderer() {
+            Some(r) => r.cell_size(),
+            None => return,
+        };
+        if let Some(panes) = self.main_panes() {
+            crate::app::resize_panes_to_rects(panes, &rects, cw, ch);
         }
     }
 }

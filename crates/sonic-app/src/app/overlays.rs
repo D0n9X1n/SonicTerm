@@ -214,7 +214,7 @@ impl App {
             (i, t.active_pane)
         };
         let mut s = SearchState::new();
-        if let Some(pane) = self.panes.get(&pane_id) {
+        if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
             s.refresh(pane.parser.lock().grid());
         }
         if let Some(ws) = self.main_mut() {

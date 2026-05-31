@@ -52,7 +52,7 @@ impl App {
         let leaves: Vec<u64> = state.tree.leaves();
         let mut panes: HashMap<u64, PaneState> = HashMap::new();
         for id in leaves {
-            if let Some(p) = self.panes.remove(&id) {
+            if let Some(p) = ws.panes.remove(&id) {
                 panes.insert(id, p);
             }
         }
@@ -67,15 +67,15 @@ impl App {
     ) {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let main_window = self.main_window().cloned();
-        for (id, pane) in panes {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
-            *pane.redraw_target.lock() = main_window.clone();
-            self.panes.insert(id, pane);
-        }
         if let Some(ws) = self.main_mut() {
+            for (id, pane) in panes {
+                pane.parser.lock().grid_mut().resize(cols, rows);
+                if let Some(pty) = pane.pty.as_ref() {
+                    (pty.resize)(cols, rows);
+                }
+                *pane.redraw_target.lock() = main_window.clone();
+                ws.panes.insert(id, pane);
+            }
             let idx = index.min(ws.tabs.len());
             ws.tabs.insert(idx, tab);
             ws.tab_states.insert(idx, state);
