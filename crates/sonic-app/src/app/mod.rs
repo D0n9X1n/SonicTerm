@@ -1040,6 +1040,11 @@ pub struct App {
     /// decide between "tear out into new window" (None) and "merge into
     /// destination window at slot" (Some).
     pub(super) drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    /// OS-drag tab payloads received before the main [`WindowState`] exists.
+    /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
+    /// inserts `main_window_id`; queue them so the destination tab is created
+    /// after main is available instead of silently dropping the payload.
+    pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
     /// True when the main window has been drained (its last tab moved
     /// out via cross-window merge) or its close button was clicked
     /// while child windows still owned tabs. In that state the main
@@ -1274,6 +1279,7 @@ impl App {
             focused_child: None,
             frontmost_window: None,
             drag_target: None,
+            pending_os_drag_payloads: Vec::new(),
             main_hidden: false,
             theme_loader: None,
             keymap_loader: None,
@@ -2426,6 +2432,20 @@ impl App {
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
         self.main_tabs().map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Test-only: pending OS-drag payload count.
+    #[doc(hidden)]
+    pub fn __test_pending_os_drag_payload_count(&self) -> usize {
+        self.pending_os_drag_payloads.len()
+    }
+
+    /// Test-only: drain queued OS-drag payloads after a synthetic main has
+    /// been inserted. Mirrors the production `do_resumed` drain point without
+    /// constructing a real winit window.
+    #[doc(hidden)]
+    pub fn __test_drain_pending_os_drag_payloads(&mut self) {
+        self.drain_pending_os_drag_payloads();
     }
 
     /// Test-only: number of leaf panes in the given tab. Returns

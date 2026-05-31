@@ -434,6 +434,7 @@ impl App {
             let idx = self.new_tab_from_payload(&payload);
             tracing::info!(idx, "spawned tab from OS-drag payload");
         }
+        self.drain_pending_os_drag_payloads();
         let drops = crate::os_drag_bridge::drain_file_drops();
         if drops.is_empty() {
             return;
@@ -478,7 +479,27 @@ impl App {
             self.panes.remove(&id);
         }
     }
+    pub(super) fn drain_pending_os_drag_payloads(&mut self) {
+        if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_os_drag_payloads);
+        for payload in pending {
+            let idx = self.new_tab_from_payload(&payload);
+            tracing::info!(idx, "spawned queued OS-drag payload");
+        }
+    }
+
     pub fn new_tab_from_payload(&mut self, payload: &crate::os_drag::TabPayload) -> usize {
+        if self.main_mut().is_none() {
+            self.pending_os_drag_payloads.push(payload.clone());
+            tracing::info!(
+                tab = %payload.tab_title,
+                "os_drag: queued payload until main WindowState exists"
+            );
+            return self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0);
+        }
+
         let title = if payload.tab_title.is_empty() {
             "received tab".to_string()
         } else {
