@@ -48,6 +48,10 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 static CRASH_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Pre-opened raw fd for sonic.log (best-effort) so async-signal-safe
 /// handlers can `write(2)` without going through tracing/alloc.
+///
+/// Only read/written by the Unix signal-handler path; on Windows it
+/// stays at `-1` and is otherwise unused.
+#[cfg_attr(not(unix), allow(dead_code))]
 static LOG_FD: AtomicI32 = AtomicI32::new(-1);
 
 use std::sync::atomic::AtomicI32;
