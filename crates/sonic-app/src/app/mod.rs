@@ -163,6 +163,13 @@ pub struct WindowState {
     /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
     /// stays in lock-step on the main window until PR-B.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
+    /// Phase B2 PR-B4 (#365): "this window is hidden / drained" latch.
+    /// Promoted from the App-level `main_hidden` bool so the visibility
+    /// state lives next to the `Window` Arc it gates. Today only the main
+    /// window flips this to `true` (when its last tab is torn out and
+    /// child windows keep the event loop alive); child windows leave it
+    /// `false` and reap on empty instead.
+    pub hidden: bool,
 }
 
 impl WindowState {
@@ -962,20 +969,15 @@ pub struct App {
     /// legacy `App.window`/`renderer`/`tabs`/... fields — PR-B will
     /// switch them to read off `self.windows[main_window_id]`.
     pub(super) main_window_id: Option<WindowId>,
-    /// Most-recently-focused window's id. `None` means the main window
-    /// is focused (or no window has been focused yet). Set/cleared in
-    /// the `WindowEvent::Focused` handler on both the main and child
-    /// windows so menubar-driven actions (Cmd+T, Cmd+W, …) — which the
-    /// OS delivers to the App, not the window — can be routed to the
-    /// window the user is actually looking at. Without this routing,
-    /// Cmd+T pressed in a torn-out child opened a new tab in the main
-    /// window every time. User report v0.6: "拖拽形成新的窗口后，再新
-    /// 的窗口按 ctrl+t 还是在原来的窗口打开新tab".
-    pub(super) focused_child: Option<WindowId>,
+    // PR-B4 (#365): `App.focused_child` removed; its job
+    // ("which torn-out child currently owns focus, or None for main")
+    // is now strictly a subset of `frontmost_window` (which discriminates
+    // main vs child via `frontmost_kind()`). All readers route through
+    // `frontmost_window` / `frontmost_kind()`.
     /// Epic #289 Phase A — most-recently-OS-frontmost window id, INCLUDING
-    /// the main window. Where [`Self::focused_child`] historically only
-    /// tracked torn-out windows (`None` meaning "main is focused"), the
-    /// frontmost field tracks *every* sonic-owned terminal window with a
+    /// the main window. The frontmost field tracks *every* sonic-owned
+    /// terminal window with a single non-`Option` discriminant once the
+    /// first focus arrives:
     /// single non-`Option` discriminant once the first focus arrives:
     ///
     ///   * `Some(main_window_id)`  → main window is OS-frontmost
@@ -1001,12 +1003,10 @@ pub struct App {
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    /// True when the main window has been drained (its last tab moved
-    /// out via cross-window merge) or its close button was clicked
-    /// while child windows still owned tabs. In that state the main
-    /// window is hidden but the event loop keeps spinning so live
-    /// child windows continue to run.
-    pub(super) main_hidden: bool,
+    // PR-B4 (#365): `App.main_hidden` removed; the "main window is
+    // drained / hidden" latch lives on `WindowState.hidden`. Access via
+    // `self.main_is_hidden()` (true when the field is set OR the main
+    // entry is gone — both shapes mean "no visible main").
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(super) theme_loader: Option<ThemeLoader>,
@@ -1236,10 +1236,8 @@ impl App {
             os_drag_handoff_started: false,
             windows: HashMap::new(),
             main_window_id: None,
-            focused_child: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
-            main_hidden: false,
             theme_loader: None,
             keymap_loader: None,
             config_watcher: None,
@@ -1601,7 +1599,7 @@ impl App {
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
         let main_alive =
-            !self.main_hidden && !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
+            !self.main_is_hidden() && !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
         // Phase B2 PR-A: subtract the shadow main entry so
         // "no torn-out children" still tips this to true.
         !main_alive && self.child_window_count() == 0
@@ -1616,10 +1614,23 @@ impl App {
         !main_alive && child_count == 0
     }
 
-    /// Test-only: read the `main_hidden` latch.
+    /// PR-B4 (#365): is the main window currently hidden / drained?
+    /// `true` when the main `WindowState` is gone OR its `hidden` latch
+    /// is set. The two shapes mean the same thing operationally — no
+    /// visible main — so callers don't need to discriminate.
+    #[doc(hidden)]
+    pub fn main_is_hidden(&self) -> bool {
+        match self.main() {
+            Some(ws) => ws.hidden,
+            None => true,
+        }
+    }
+
+    /// Test-only: read the main window's `hidden` latch via the unified
+    /// accessor.
     #[doc(hidden)]
     pub fn __test_main_hidden(&self) -> bool {
-        self.main_hidden
+        self.main_is_hidden()
     }
 
     /// Test-only: read the deferred-exit flag set by `run_action`
@@ -1656,12 +1667,15 @@ impl App {
         }
     }
 
-    /// Test-only: force-set the `main_hidden` latch so post-merge
-    /// drain-policy tests can simulate the "main already retired" state
-    /// without driving a real winit close event.
+    /// Test-only: force-set the main window's `hidden` latch so
+    /// post-merge drain-policy tests can simulate the "main already
+    /// retired" state without driving a real winit close event.
     #[doc(hidden)]
     pub fn __test_set_main_hidden(&mut self, v: bool) {
-        self.main_hidden = v;
+        self.__test_synthetic_main();
+        if let Some(ws) = self.main_mut() {
+            ws.hidden = v;
+        }
     }
 
     fn active_pane_id(&self) -> Option<u64> {
@@ -1797,26 +1811,32 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            hidden: false,
         };
         self.windows.insert(id, child);
         id
     }
 
-    /// Test-only: install a `focused_child` id without going through a
+    /// Test-only: install a frontmost child id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// Used by `tearout_newtab_routing.rs` to confirm `Action::NewTab`
-    /// falls back to the main App when the recorded child no longer
-    /// exists (and clears the stale `focused_child`).
+    /// PR-B4 (#365) replaced `focused_child` with `frontmost_window`;
+    /// this kept the old name so the existing regression tests don't
+    /// need touching, but it now drives the unified tracker.
     #[doc(hidden)]
     pub fn __test_set_focused_child(&mut self, id: Option<WindowId>) {
         self.__test_synthetic_main();
-        self.focused_child = id;
+        self.frontmost_window = id;
     }
 
-    /// Test-only: read back the current `focused_child`.
+    /// Test-only: read back the current frontmost-child id.
+    /// PR-B4 (#365) — returns `Some(id)` when `frontmost_window` points
+    /// at a non-main entry, mirroring the old `focused_child` semantics.
     #[doc(hidden)]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
-        self.focused_child
+        match self.frontmost_kind() {
+            FrontmostKind::Child(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// Test-only: read back the current `frontmost_window`.
@@ -2392,6 +2412,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: self.hovered_url.clone(),
+            hidden: false,
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);

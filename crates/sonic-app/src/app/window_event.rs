@@ -440,15 +440,13 @@ impl App {
             }
 
             WindowEvent::Focused(focused) => {
-                // Main window gained focus → clear `focused_child` so
-                // menubar-routed actions (NewTab, …) target the main
-                // App again. See `App::focused_child` doc for context.
                 if focused {
-                    self.focused_child = None;
                     // Epic #289 Phase A — record the main window as
                     // OS-frontmost so keymap_dispatch / menubar drain
                     // route subsequent Cmd+T / Cmd+W / Cmd+\\ to the
-                    // main window's tabs vec.
+                    // main window's tabs vec. PR-B4 (#365) removed the
+                    // sibling `focused_child` clear — `frontmost_window`
+                    // discriminates main vs child via `frontmost_kind()`.
                     self.frontmost_window = Some(win_id);
                 } else if self.frontmost_window == Some(win_id) {
                     // Only clear if WE were the recorded frontmost.
