@@ -726,6 +726,7 @@ mod keymap_dispatch;
 mod misc;
 pub mod os_drag;
 mod overlays;
+mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
 mod search_handle;
@@ -2370,6 +2371,37 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_ids(&self) -> Vec<u64> {
         self.main().map(|ws| ws.panes.keys().copied().collect()).unwrap_or_default()
+    }
+
+    /// Test-only: read a pane's current `viewport_top_abs`. Used by #412
+    /// scrollback-scroll wiring tests to assert wheel + Scroll-keymap
+    /// dispatch actually mutates the canonical field.
+    #[doc(hidden)]
+    pub fn __test_pane_viewport_top_abs(&self, pane_id: u64) -> Option<Option<u64>> {
+        self.main()?.panes.get(&pane_id).map(|p| p.viewport_top_abs)
+    }
+
+    /// Test-only: synthesize scrollback by feeding `n` numbered lines and
+    /// returns the resulting `scrollback_len()`. Each line is 4 chars +
+    /// CRLF so callers can predict the row count.
+    #[doc(hidden)]
+    pub fn __test_grow_pane_scrollback(&self, pane_id: u64, n: u32) -> u64 {
+        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else { return 0 };
+        let mut buf = Vec::with_capacity((n as usize) * 8);
+        for i in 0..n {
+            use std::io::Write;
+            let _ = write!(&mut buf, "{:04}\r\n", i % 10_000);
+        }
+        let mut parser = pane.parser.lock();
+        parser.advance(&buf);
+        parser.grid().scrollback_len() as u64
+    }
+
+    /// Test-only: viewport rows of a pane (for #412 PageUp/Down asserts).
+    #[doc(hidden)]
+    pub fn __test_pane_viewport_rows(&self, pane_id: u64) -> Option<u16> {
+        let pane = self.main()?.panes.get(&pane_id)?;
+        Some(pane.parser.lock().grid().rows)
     }
 
     /// Test-only: id of the active pane in a given tab. Returns `None`

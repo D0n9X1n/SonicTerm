@@ -275,7 +275,24 @@ impl App {
                 // bug Haiku flagged on PR #297.
                 self.pending_new_window = true;
             }
-            Action::Scroll(_) | Action::ToggleFullscreen | Action::ResizePane { .. } => {
+            Action::Scroll(kind) => {
+                // #412: replace the "not yet wired up" stub. Translate
+                // ScrollAction → signed line delta and route through the
+                // canonical `scroll_pane` mutator (which also handles
+                // alt-screen no-op + clamping + auto-follow snap-back).
+                let Some(pane_id) = self.active_pane_id() else { return true };
+                let viewport_rows = self.active_pane_viewport_rows().unwrap_or(24);
+                let delta: i32 = match kind {
+                    ScrollAction::LineUp => -1,
+                    ScrollAction::LineDown => 1,
+                    ScrollAction::PageUp => -(viewport_rows as i32),
+                    ScrollAction::PageDown => viewport_rows as i32,
+                    ScrollAction::ToTop => i32::MIN,
+                    ScrollAction::ToBottom => i32::MAX,
+                };
+                self.scroll_pane(pane_id, delta);
+            }
+            Action::ToggleFullscreen | Action::ResizePane { .. } => {
                 tracing::info!("action {action:?} accepted but not yet wired up");
             }
         }
