@@ -810,6 +810,53 @@ impl Grid {
         self.scrollback.len()
     }
 
+    /// #319 PR-F: debug introspection — count (Cluster, Flat) lines in
+    /// scrollback. Used by `tests/scrollback_compression_ratio.rs` and the
+    /// `examples/scrollback_memory_report.rs` validation example to prove
+    /// the ≥40% RAM reduction promise of the Epic #300 P5 LineStorage work.
+    #[doc(hidden)]
+    pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
+        let mut cluster = 0usize;
+        let mut flat = 0usize;
+        for row in &self.scrollback {
+            if row.is_clustered() {
+                cluster += 1;
+            } else {
+                flat += 1;
+            }
+        }
+        (cluster, flat)
+    }
+
+    /// #319 PR-F: sum of per-row `approx_byte_size()` across scrollback. This
+    /// is a payload-only metric used by internal compression policy tests.
+    /// User-visible heap reporting should use [`Self::scrollback_heap_bytes`]
+    /// so it counts reserved `Vec::capacity()` bytes and container overhead.
+    #[doc(hidden)]
+    pub fn scrollback_approx_bytes(&self) -> usize {
+        self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
+    }
+
+    /// #399 review fix: reserved row slots in the scrollback container.
+    #[doc(hidden)]
+    pub fn scrollback_capacity(&self) -> usize {
+        self.scrollback.capacity()
+    }
+
+    /// #399 review fix: approximate scrollback heap footprint for reporting.
+    /// Counts the scrollback `VecDeque` ring, reserved outer row slots, one
+    /// inner `Vec` header per live row, plus each inner storage buffer's
+    /// reserved capacity. This intentionally reports user-visible heap shape
+    /// rather than the smaller payload-only byte count used by compaction
+    /// decisions.
+    #[doc(hidden)]
+    pub fn scrollback_heap_bytes(&self) -> usize {
+        std::mem::size_of::<std::collections::VecDeque<Line>>()
+            + self.scrollback_capacity() * std::mem::size_of::<Line>()
+            + self.scrollback.len() * std::mem::size_of::<Vec<Cell>>()
+            + self.scrollback.iter().map(|r| r.approx_capacity_byte_size()).sum::<usize>()
+    }
+
     /// Absolute row of the cursor (= `scrollback_len() + cursor.row`). Used
     /// by OSC 133 marker recording so prompt regions survive scrolling.
     #[inline]
