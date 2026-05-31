@@ -206,7 +206,6 @@ pub fn synthetic_main_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX) }
 }
 
-
 /// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
 /// the legacy `App.*` main-window fields into the shadow `WindowState`
 /// entry. Built by [`App::shadow_main_snapshot`] for the legacy side
