@@ -176,6 +176,9 @@ RSS_MB=$(measure_rss_mb)
 echo "[bench] scrollback memory report (#319 PR-F)…"
 SCROLLBACK_RAM_MB=$(cargo run --quiet --example scrollback_memory_report -p sonic-grid --release 2>/dev/null \
   | awk '/^BENCH scrollback_ram_mb/ {print $3; exit}')
+echo "[bench] cold first-frame icons (#415)…"
+COLD_ICONS_MS=$(cargo run --quiet --example cold_first_frame_icons -p sonic-text --release 2>/dev/null \
+  | awk '/^BENCH cold_first_frame_icons_ms/ {print $3; exit}')
 echo "[bench] vtebench (optional)…"
 VTE_DENSE=$(run_vtebench dense_cells)
 VTE_SCROLL=$(run_vtebench scrolling)
@@ -191,7 +194,8 @@ cat > "$CURRENT" <<JSON
     "cat_4mb_ansi_sec":        $(null_or_num "$CAT_ANSI"),
     "rss_mb":                  $(null_or_num "$RSS_MB"),
     "idle_cpu_pct":            $(null_or_num "$IDLE_CPU"),
-    "scrollback_ram_mb":       $(null_or_num "$SCROLLBACK_RAM_MB")
+    "scrollback_ram_mb":       $(null_or_num "$SCROLLBACK_RAM_MB"),
+    "cold_first_frame_icons_ms": $(null_or_num "$COLD_ICONS_MS")
   }
 }
 JSON
