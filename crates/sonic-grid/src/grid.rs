@@ -486,6 +486,11 @@ impl Grid {
                 self.visible.push_back(row);
                 continue;
             }
+            // PR-C (#319): try to compress the ejected line into a
+            // single Cluster (whole-line uniform attrs). No-op when the
+            // line is non-uniform — it stays Flat. Multi-Cluster
+            // segmentation of partially-uniform lines is PR-D scope.
+            row.try_compress();
             if self.scrollback.len() == self.scrollback_limit {
                 // Reuse the oldest scrollback row as the new blank line
                 // (avoids both an allocation and a free).
@@ -494,6 +499,9 @@ impl Grid {
                 // this branch when `scrollback_limit > 0`, and a non-empty
                 // VecDeque always yields `Some` from `pop_front`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
+                // Recycled may itself have been compressed when it was
+                // ejected — force back to Flat before we mutate cells.
+                recycled.ensure_flat();
                 for cell in recycled.iter_mut() {
                     *cell = Cell::default();
                 }
