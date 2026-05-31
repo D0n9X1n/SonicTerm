@@ -462,18 +462,74 @@ impl Line {
         }
     }
 
-    /// Set the cell at logical column `idx`. Degrades the storage to `Flat`
-    /// on the first call (and stays Flat). Returns `true` if the index was
-    /// in range.
+    /// Set the cell at logical column `idx`.
+    ///
+    /// PR-D (#319) smart-degrade: when the storage is a single uniform
+    /// Cluster and the new cell is byte-identical to the cluster's
+    /// representative, this is a no-op and storage stays in Cluster form.
+    /// Otherwise the storage is degraded to Flat before the write. This
+    /// preserves the RAM win for the very common pattern of pty-output
+    /// rewriting already-blank cells (cursor repositioning, repeated
+    /// prompts, clearing a region that's already cleared).
+    ///
+    /// Multi-cluster split (the "punch a hole" optimisation) is
+    /// intentionally not attempted here — the full-Flat fallback is
+    /// always correct and is simpler. Returns `true` if `idx` was in
+    /// range.
     pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
+        if idx >= self.len() {
+            return false;
+        }
+        // Smart-degrade fast path: same-cell write on a uniform Cluster
+        // stays Cluster.
+        if let Some(rep) = self.cluster_representative() {
+            if rep == cell {
+                return true;
+            }
+        }
         self.degrade_to_flat();
         match &mut self.storage {
             LineStorage::Flat(v) => {
-                if let Some(slot) = v.get_mut(idx) {
-                    *slot = cell;
-                    true
-                } else {
-                    false
+                v[idx] = cell;
+                true
+            }
+            LineStorage::Cluster(_) => unreachable!("just degraded"),
+        }
+    }
+
+    /// If the line is currently a single uniform Cluster (one entry),
+    /// return a clone of its representative cell. `None` for Flat
+    /// storage, empty storage, or multi-Cluster storage.
+    pub fn cluster_representative(&self) -> Option<Cell> {
+        match &self.storage {
+            LineStorage::Cluster(cs) if cs.len() == 1 => Some(cs[0].cell.clone()),
+            _ => None,
+        }
+    }
+
+    /// Fill cells in `[start, end)` with `cell`. `end` is clamped to
+    /// `len()`; empty/reversed ranges are no-ops.
+    ///
+    /// PR-D smart-degrade: matches [`Self::set`]'s policy. If the line
+    /// is a single uniform Cluster whose representative equals `cell`,
+    /// the write is a no-op and storage stays Cluster. Otherwise
+    /// degrade to Flat then bulk-fill the range.
+    pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return;
+        }
+        if let Some(rep) = self.cluster_representative() {
+            if rep == cell {
+                return;
+            }
+        }
+        self.degrade_to_flat();
+        match &mut self.storage {
+            LineStorage::Flat(v) => {
+                for slot in &mut v[start..end] {
+                    *slot = cell.clone();
                 }
             }
             LineStorage::Cluster(_) => unreachable!("just degraded"),
