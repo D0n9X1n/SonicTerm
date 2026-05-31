@@ -18,10 +18,8 @@ fn none_when_mode_never_even_with_huge_scrollback() {
 }
 
 #[test]
-fn some_when_mode_always_even_without_scrollback() {
-    let g = compute(40, 40, 0, pane(), ScrollbarMode::Always, 6.0).unwrap();
-    // Full-height thumb when nothing to scroll.
-    assert!((g.thumb_rect.h - g.track_rect.h).abs() < 0.001);
+fn none_when_mode_always_without_scrollback() {
+    assert!(compute(40, 40, 0, pane(), ScrollbarMode::Always, 6.0).is_none());
 }
 
 #[test]

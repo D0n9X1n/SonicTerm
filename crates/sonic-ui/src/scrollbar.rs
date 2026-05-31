@@ -67,7 +67,7 @@ pub enum HitTarget {
 ///
 /// Returns `None` when the scrollbar should not be drawn:
 /// - `mode == ScrollbarMode::Never`
-/// - `total_rows <= viewport_rows as u64` AND `mode != Always`
+/// - `total_rows <= viewport_rows as u64`
 /// - `viewport_rows == 0` (degenerate pane)
 /// - `width_px <= 0.0` or `pane_rect` has zero area
 ///
@@ -88,12 +88,10 @@ pub fn compute(
         return None;
     }
     let vp = viewport_rows as u64;
-    if total_rows <= vp && !matches!(mode, ScrollbarMode::Always) {
+    if total_rows <= vp {
         return None;
     }
-    // Effective totals for the math: when Always but no scrollback, draw a
-    // full-height thumb at the top.
-    let total = total_rows.max(vp);
+    let total = total_rows;
 
     let track_w = width_px.min(pane_rect.w);
     let track_rect =

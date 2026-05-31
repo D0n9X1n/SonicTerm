@@ -149,7 +149,7 @@ pub enum ScrollbarMode {
     /// returned geometry.
     #[default]
     Auto,
-    /// Always show the scrollbar, even when scrollback fits the viewport.
+    /// Don't auto-hide; still suppressed when there's nothing to scroll.
     Always,
     /// Never show the scrollbar.
     Never,
