@@ -121,8 +121,11 @@ impl App {
                 .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
                 .and_then(|(row, col)| self.osc8_uri_at(row, col))
                 .is_some();
-        if want_pointer != self.hover_link {
-            self.hover_link = want_pointer;
+        let current_hover_link = self.main().map(|ws| ws.hover_link).unwrap_or(false);
+        if want_pointer != current_hover_link {
+            if let Some(ws) = self.main_mut() {
+                ws.hover_link = want_pointer;
+            }
             if let Some(w) = self.main_window() {
                 w.set_cursor(if want_pointer { CursorIcon::Pointer } else { CursorIcon::Default });
             }
@@ -374,6 +377,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_visible: cursor_visible_arc,
             last_render: Instant::now(),
+            hover_link: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,

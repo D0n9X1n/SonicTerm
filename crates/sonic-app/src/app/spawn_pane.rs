@@ -72,7 +72,10 @@ impl App {
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
-                let cursor_visible = self.cursor_visible.clone();
+                let cursor_visible =
+                    self.main().map(|ws| ws.cursor_visible.clone()).unwrap_or_else(|| {
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+                    });
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty

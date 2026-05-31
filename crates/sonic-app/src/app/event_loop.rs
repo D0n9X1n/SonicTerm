@@ -57,10 +57,16 @@ impl App {
         // redraw at frame_period in the future is the tightest budget
         // that still preserves vsync alignment.
         if self.pending_redraw {
-            next = Some(self.last_render + self.frame_period);
+            if let Some(last_render) = self.main().map(|ws| ws.last_render) {
+                next = Some(last_render + self.frame_period);
+            }
         }
         if let Some(r) = self.main_renderer() {
-            if self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed) {
+            let cursor_visible = self
+                .main()
+                .map(|ws| ws.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(true);
+            if cursor_visible {
                 let blink = r.next_blink_redraw_at();
                 next = match (next, blink) {
                     (Some(a), Some(b)) => Some(a.min(b)),
@@ -277,8 +283,9 @@ impl App {
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
-            cursor_visible: self.cursor_visible.clone(),
-            last_render: self.last_render,
+            cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_render: std::time::Instant::now(),
+            hover_link: false,
             pressed_tab: None,
             drag_session: self.drag_session,
             drag_target: self.drag_target,

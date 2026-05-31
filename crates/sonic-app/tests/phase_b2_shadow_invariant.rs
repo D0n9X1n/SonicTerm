@@ -147,13 +147,13 @@ fn snapshot_field_coverage_is_stable() {
     // Mutate one field in app2's legacy `App` state via the public
     // test seam, then re-snapshot — the two snapshots MUST differ.
     app2.__test_set_frontmost_window(None); // no-op to exercise a known seam
-    let mut s1 = app1.shadow_main_snapshot();
+    let s1 = app1.shadow_main_snapshot();
     let s2 = app2.shadow_main_snapshot();
-    // `last_render` is `Instant::now()` per-constructor and will
-    // legitimately differ between two App::new instances. Normalize.
-    s1.last_render = s2.last_render;
+    // PR-B3b (#365): `last_render` was moved to `WindowState` and dropped
+    // from the snapshot, so two `App::new` instances now produce exactly
+    // equal snapshots with no normalization required.
     // Both apps are otherwise in identical default state, so snapshots are equal.
-    assert_eq!(s1, s2, "two App::new instances must produce equal snapshots (modulo last_render)");
+    assert_eq!(s1, s2, "two App::new instances must produce equal snapshots");
 }
 
 /// `apply_shadow_main_snapshot` is the write half of the sync; ensure

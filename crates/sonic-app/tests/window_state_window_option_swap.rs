@@ -27,6 +27,7 @@ fn make_ws_with_no_window() -> WindowState {
         modifiers: Default::default(),
         cursor_visible: Arc::new(AtomicBool::new(true)),
         last_render: Instant::now(),
+        hover_link: false,
         pressed_tab: None,
         drag_session: None,
         drag_target: None,

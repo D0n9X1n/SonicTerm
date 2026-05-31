@@ -77,6 +77,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
         modifiers: Default::default(),
         cursor_visible: Arc::new(AtomicBool::new(true)),
         last_render: Instant::now(),
+        hover_link: false,
         pressed_tab: None,
         drag_session: None,
         drag_target: None,
