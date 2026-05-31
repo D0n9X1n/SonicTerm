@@ -17,7 +17,7 @@ action = "show_keymap_cheatsheet"
 
 [[binding]]
 keys = "ctrl+shift+w"
-action = "close_tab"
+action = "close_active_pane_or_tab"
 
 # Windows-native tab navigation alternatives avoid arrow/resize/scroll chords.
 [[binding]]
@@ -35,6 +35,18 @@ action = "next_tab"
 [[binding]]
 keys = "ctrl+shift+tab"
 action = "prev_tab"
+
+# Ctrl+Shift+Left / Ctrl+Shift+Right — tab navigation arrows on Windows.
+# Mirrors macOS Cmd+Left/Right (bound via super+left/right in the shared keymap).
+# Plain Ctrl+Arrow is intentionally NOT used: shells/readline use Ctrl+Left/Right
+# to jump words, and stealing them would break that muscle memory.
+[[binding]]
+keys = "ctrl+shift+left"
+action = "prev_tab"
+
+[[binding]]
+keys = "ctrl+shift+right"
+action = "next_tab"
 
 [[binding]]
 keys = "ctrl+shift+1"
