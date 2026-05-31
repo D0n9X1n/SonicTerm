@@ -1044,6 +1044,11 @@ impl GpuRenderer {
                 SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
             let _inserted =
                 swash_rasterizer::prebake_box_and_powerline(&mut prebake_raster, &mut glyph_atlas);
+            // Issue #415: also pre-warm ASCII + common Nerd Font icons
+            // so the first frame of nvim / lazygit / status-line TUIs
+            // doesn't pay 3.3 ms per first-encounter PUA codepoint.
+            let _prewarmed =
+                sonic_text::prewarm::prewarm_ascii_and_nerd(&mut prebake_raster, &mut glyph_atlas);
         }
         let glyph_upload =
             AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
@@ -1849,6 +1854,10 @@ impl GpuRenderer {
                 &mut prebake_raster,
                 &mut self.glyph_atlas,
             );
+            let _prewarmed = sonic_text::prewarm::prewarm_ascii_and_nerd(
+                &mut prebake_raster,
+                &mut self.glyph_atlas,
+            );
         }
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -1910,6 +1919,10 @@ impl GpuRenderer {
                 self.font_size * self.scale_factor,
             );
             let _inserted = swash_rasterizer::prebake_box_and_powerline(
+                &mut prebake_raster,
+                &mut self.glyph_atlas,
+            );
+            let _prewarmed = sonic_text::prewarm::prewarm_ascii_and_nerd(
                 &mut prebake_raster,
                 &mut self.glyph_atlas,
             );
