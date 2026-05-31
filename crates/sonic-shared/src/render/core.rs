@@ -2945,10 +2945,19 @@ impl GpuRenderer {
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
             use crate::ui_tokens::color as tok;
-            let bar_bg = tok::BG_BASE();
+            let ui_palette = crate::ui_tokens::UiPalette::from_theme(theme);
+            // Issue #383: `tok::BG_BASE()` is a hardcoded near-black
+            // (`#0B0E14`) that is indistinguishable from most dark
+            // themes' `theme.background` — the tab bar drew correctly
+            // (PR #391 diagnostic confirmed 6 quads pinned at NDC
+            // bottom with alpha 1.0) but the bar bg was the *same
+            // pixel value* as the cell-grid bg, so it disappeared.
+            // Switch to `ui_palette.bg_base` which is theme-derived
+            // (`theme.background` shifted -8% lightness) so every
+            // theme gets visible contrast automatically.
+            let bar_bg = ui_palette.bg_base;
             let active_bg = tok::BG_ELEVATED();
             let hover_bg = tok::BG_HOVER();
-            let ui_palette = crate::ui_tokens::UiPalette::from_theme(theme);
             // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
             let accent_blue = ui_palette.accent;
             let separator = tok::BORDER_SUBTLE();
