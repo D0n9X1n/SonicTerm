@@ -141,19 +141,12 @@ fn app_struct_has_no_legacy_scale_factor_field() {
     // Find the `pub struct App {` block and confirm the legacy field
     // bindings are gone. We scan from the struct opening to the next
     // closing brace at column 0.
-    let app_start =
-        stripped.find("pub struct App {").expect("App struct must exist in mod.rs");
+    let app_start = stripped.find("pub struct App {").expect("App struct must exist in mod.rs");
     let tail = &stripped[app_start..];
     let app_end = tail.find("\n}\n").unwrap_or(tail.len());
     let body = &tail[..app_end];
-    assert!(
-        !body.contains("scale_factor: f64"),
-        "#404: App.scale_factor field must be removed"
-    );
-    assert!(
-        !body.contains("hovered_url: Option<"),
-        "#404: App.hovered_url field must be removed"
-    );
+    assert!(!body.contains("scale_factor: f64"), "#404: App.scale_factor field must be removed");
+    assert!(!body.contains("hovered_url: Option<"), "#404: App.hovered_url field must be removed");
 }
 
 #[test]
@@ -165,9 +158,8 @@ fn window_state_still_owns_scale_factor_and_hovered_url() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/mod.rs");
     let text = fs::read_to_string(&path).expect("read mod.rs");
     let stripped = strip_comments(&text);
-    let ws_start = stripped
-        .find("pub struct WindowState {")
-        .expect("WindowState struct must exist in mod.rs");
+    let ws_start =
+        stripped.find("pub struct WindowState {").expect("WindowState struct must exist in mod.rs");
     let tail = &stripped[ws_start..];
     let ws_end = tail.find("\n}\n").unwrap_or(tail.len());
     let body = &tail[..ws_end];
