@@ -4809,6 +4809,7 @@ dependencies = [
  "memchr",
  "sonic-grid",
  "sonic-types",
+ "tracing",
  "vte",
 ]
 

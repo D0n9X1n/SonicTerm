@@ -17,3 +17,4 @@ sonic-grid.workspace = true
 vte.workspace = true
 crossbeam-channel.workspace = true
 memchr = "2"
+tracing.workspace = true

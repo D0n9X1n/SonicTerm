@@ -391,13 +391,55 @@ impl Performer {
             match code {
                 25 => self.events.push(VtEvent::CursorVisibility(set)),
                 47 => {
+                    let before = self.grid.is_alt();
                     if set {
                         self.grid.enter_alt_screen();
                     } else {
                         self.grid.leave_alt_screen();
                     }
+                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let after = self.grid.is_alt();
+                    let sr = if set { "h" } else { "l" };
+                    tracing::debug!(
+                        target: "sonic_vt::alt",
+                        "private mode CSI ?47{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                    );
+                }
+                1047 => {
+                    // Same as ?47 — alt-screen switch WITHOUT cursor save/restore.
+                    // Distinct from ?1049 (which also saves/restores the cursor)
+                    // and from ?1048 (cursor save/restore only).
+                    let before = self.grid.is_alt();
+                    if set {
+                        self.grid.enter_alt_screen();
+                    } else {
+                        self.grid.leave_alt_screen();
+                    }
+                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let after = self.grid.is_alt();
+                    let sr = if set { "h" } else { "l" };
+                    tracing::debug!(
+                        target: "sonic_vt::alt",
+                        "private mode CSI ?1047{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                    );
+                }
+                1048 => {
+                    // Save / restore cursor only (DECSC / DECRC equivalent).
+                    let before = self.grid.is_alt();
+                    if set {
+                        self.saved_cursor = Some(self.grid.cursor);
+                    } else if let Some(c) = self.saved_cursor {
+                        self.grid.goto(c.row, c.col);
+                    }
+                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let sr = if set { "h" } else { "l" };
+                    tracing::debug!(
+                        target: "sonic_vt::alt",
+                        "private mode CSI ?1048{sr}: alt_screen_active={before}→{before}, cursor=({r},{c})"
+                    );
                 }
                 1049 => {
+                    let before = self.grid.is_alt();
                     if set {
                         // Guard against repeated ?1049h while already in alt
                         // screen — must not clobber the previously saved
@@ -413,6 +455,13 @@ impl Performer {
                             self.grid.goto(c.row, c.col);
                         }
                     }
+                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let after = self.grid.is_alt();
+                    let sr = if set { "h" } else { "l" };
+                    tracing::debug!(
+                        target: "sonic_vt::alt",
+                        "private mode CSI ?1049{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                    );
                 }
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
