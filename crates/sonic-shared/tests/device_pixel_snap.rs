@@ -14,11 +14,7 @@ fn fractional_scale_snaps_all_edges_to_device_pixel() {
     let (x, y, w, h) = snap_to_device_pixels((10.3, 20.2, 7.4, 13.6), scale);
     // All four device-pixel edges must have zero fractional part.
     let eps = 1e-4;
-    assert!(
-        (x * scale).fract().abs() < eps,
-        "x_dev fractional: {}",
-        (x * scale).fract()
-    );
+    assert!((x * scale).fract().abs() < eps, "x_dev fractional: {}", (x * scale).fract());
     assert!((y * scale).fract().abs() < eps);
     assert!(((x + w) * scale).fract().abs() < eps);
     assert!(((y + h) * scale).fract().abs() < eps);
@@ -36,12 +32,7 @@ fn snap_uses_edge_based_width_not_independent_w() {
     let (_, _, w, _) = snap_to_device_pixels((10.3, 20.0, 7.4, 5.0), 1.5);
     let edge_based = ((10.3_f32 + 7.4) * 1.5).round() - (10.3_f32 * 1.5).round();
     let edge_based_logical = edge_based / 1.5;
-    assert!(
-        (w - edge_based_logical).abs() < 1e-4,
-        "w={} edge_based={}",
-        w,
-        edge_based_logical
-    );
+    assert!((w - edge_based_logical).abs() < 1e-4, "w={} edge_based={}", w, edge_based_logical);
 }
 
 #[test]

@@ -49,10 +49,5 @@ pub fn snap_to_device_pixels(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f3
     let r_dev = ((x + w) * scale).round();
     let b_dev = ((y + h) * scale).round();
     let inv = 1.0 / scale;
-    (
-        x_dev * inv,
-        y_dev * inv,
-        (r_dev - x_dev) * inv,
-        (b_dev - y_dev) * inv,
-    )
+    (x_dev * inv, y_dev * inv, (r_dev - x_dev) * inv, (b_dev - y_dev) * inv)
 }

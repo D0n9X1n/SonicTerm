@@ -36,6 +36,12 @@ pub struct SurfaceAppearance {
     pub backdrop: BackdropKind,
     /// Theme background opacity.
     pub opacity: f32,
+    /// Scrollbar visibility policy (#386 PR-B). `Auto` and `Always` both
+    /// draw the bar when the pane has scrollback beyond the viewport;
+    /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
+    /// deferred to PR-D — until then `Auto` behaves like Always-when-
+    /// scrollable.
+    pub scrollbar: sonic_cfg::config::ScrollbarMode,
 }
 
 /// Renderer initialization settings derived from config.
@@ -57,6 +63,77 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
     let bg = theme.colors.background.color().unwrap_or_else(|| ThemeColor::rgb(0, 0, 0));
     let fg = theme.colors.foreground.color().unwrap_or_else(|| ThemeColor::rgb(255, 255, 255));
     bg.shift_toward(fg, 0.18).to_rgba_f32_linear(1.0)
+}
+
+/// Resolve a scrollbar tint from the theme foreground at `derived_alpha`.
+/// Theme-customizable explicit scrollbar colors are intentionally deferred
+/// to a later PR (would require updating ~50 `Palette { .. }` literals in
+/// tests for no shipped benefit yet). Returns straight-alpha linear RGBA;
+/// the caller premultiplies before stuffing into a [`QuadInstance`].
+fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
+    hex_to_rgba(fg, derived_alpha)
+}
+
+/// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
+/// PR-A geometry model. No-op when the pane has nothing to scroll or the
+/// mode is `Never`. Returns the number of quads emitted (for tests).
+///
+/// Auto-hide for `ScrollbarMode::Auto` is deferred to PR-D — until then
+/// `Auto` behaves identically to `Always` (always-on when scrollable).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn emit_pane_scrollbar(
+    quads_overlay: &mut Vec<QuadInstance>,
+    pane_rect: PaneRect,
+    viewport_rows: u16,
+    total_rows: u64,
+    view_top: u64,
+    mode: sonic_cfg::config::ScrollbarMode,
+    theme: &Theme,
+    sw: f32,
+    sh: f32,
+) -> usize {
+    // Bar width in logical px. Held local to the emitter; PR-D will lift
+    // this into config once hover-driven width animation lands.
+    const SCROLLBAR_WIDTH_PX: f32 = 8.0;
+    let geom_rect =
+        sonic_ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
+    let Some(geom) = sonic_ui::scrollbar::compute(
+        viewport_rows,
+        total_rows,
+        view_top,
+        geom_rect,
+        mode,
+        SCROLLBAR_WIDTH_PX,
+    ) else {
+        return 0;
+    };
+    let fg_hex = theme.colors.foreground.0.as_str();
+    let track_color = premultiply(scrollbar_tint(fg_hex, 0.10));
+    let thumb_color = premultiply(scrollbar_tint(fg_hex, 0.30));
+    quads_overlay.push(QuadInstance::sharp(
+        px_to_ndc(
+            geom.track_rect.x,
+            geom.track_rect.y,
+            geom.track_rect.w,
+            geom.track_rect.h,
+            sw,
+            sh,
+        ),
+        track_color,
+    ));
+    quads_overlay.push(QuadInstance::sharp(
+        px_to_ndc(
+            geom.thumb_rect.x,
+            geom.thumb_rect.y,
+            geom.thumb_rect.w,
+            geom.thumb_rect.h,
+            sw,
+            sh,
+        ),
+        thumb_color,
+    ));
+    2
 }
 
 fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> Vec<SplitterRect> {
@@ -411,6 +488,9 @@ pub struct GpuRenderer {
     padding_bottom: f32,
     bg: wgpu::Color,
     bg_opacity: f32,
+    /// Scrollbar visibility policy from config (PR-B of #386). Read on
+    /// every frame in the per-pane scrollbar emit loop.
+    scrollbar_mode: sonic_cfg::config::ScrollbarMode,
     fg_default: GColor,
     cursor_color: [f32; 4],
     /// Theme background as straight RGBA. Used to recolor the glyph
@@ -1107,6 +1187,7 @@ impl GpuRenderer {
             padding_bottom,
             bg,
             bg_opacity: appearance.opacity.clamp(0.0, 1.0),
+            scrollbar_mode: appearance.scrollbar,
             fg_default,
             cursor_color,
             bg_rgba,
@@ -1271,6 +1352,29 @@ impl GpuRenderer {
     /// Whether the tab bar is currently shown.
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
+    }
+
+    /// Update scrollbar visibility policy from live config reload.
+    ///
+    /// `render()` folds this cached mode into the per-pane scrollbar emit
+    /// path, so config changes must invalidate the frame key explicitly;
+    /// otherwise an idle window could keep the previous scrollbar quads
+    /// until some unrelated grid/theme/input change forced a redraw.
+    pub fn set_scrollbar_mode(&mut self, mode: sonic_cfg::config::ScrollbarMode) -> bool {
+        if self.scrollbar_mode == mode {
+            return false;
+        }
+        self.scrollbar_mode = mode;
+        self.last_frame_key = None;
+        true
+    }
+
+    /// Current scrollbar visibility policy. Test-only inspector for the
+    /// live-reload path; production code pushes updates via
+    /// [`Self::set_scrollbar_mode`].
+    #[doc(hidden)]
+    pub fn scrollbar_mode(&self) -> sonic_cfg::config::ScrollbarMode {
+        self.scrollbar_mode
     }
 
     /// Update the cursor shape. Invalidates the cached frame so the
@@ -2644,6 +2748,42 @@ impl GpuRenderer {
                     crate::render::row_quad_cache::CachedRowQuads { quads: row_quads },
                 );
             }
+        }
+
+        // #386 PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
+        // the per-row bg quads so the bar paints above any colored cell
+        // background but below selection / cursor / modal overlays
+        // (those land in `quads_overlay` later in the function). Auto
+        // mode behaves like Always-when-scrollable here — hover-driven
+        // auto-hide is PR-D.
+        for pv in &pane_views {
+            let pane_rect = pane_rects
+                .iter()
+                .find(|(id, _)| *id == pv.pane_id)
+                .map(|(_, rect)| *rect)
+                .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
+            let pv_grid: &Grid = pv.grid;
+            let viewport_rows = pv_grid.rows;
+            let total_rows = pv_grid.scrollback_len() as u64 + viewport_rows as u64;
+            // Only the active pane carries an explicit `viewport_top_abs`
+            // from copy mode / prompt-nav; inactive panes always render
+            // their live tail.
+            let view_top = if pv.is_active {
+                Self::resolved_view_top_abs(pv_grid, viewport_top_abs)
+            } else {
+                pv_grid.scrollback_len() as u64
+            };
+            emit_pane_scrollbar(
+                &mut quads_overlay,
+                pane_rect,
+                viewport_rows,
+                total_rows,
+                view_top,
+                self.scrollbar_mode,
+                theme,
+                sw,
+                sh,
+            );
         }
 
         if let Some(sel) = selection {
