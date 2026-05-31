@@ -42,18 +42,20 @@ impl App {
         &mut self,
         index: usize,
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
-        if index >= self.tab_states.len() || index >= self.tabs.len() {
+        let ws = self.main_mut()?;
+        if index >= ws.tab_states.len() || index >= ws.tabs.len() {
             return None;
         }
-        let tab = self.tabs.tabs().get(index).cloned()?;
-        let state = self.tab_states.remove(index);
+        let tab = ws.tabs.tabs().get(index).cloned()?;
+        let state = ws.tab_states.remove(index);
+        ws.tabs.close(tab.id);
+        let leaves: Vec<u64> = state.tree.leaves();
         let mut panes: HashMap<u64, PaneState> = HashMap::new();
-        for id in state.tree.leaves() {
+        for id in leaves {
             if let Some(p) = self.panes.remove(&id) {
                 panes.insert(id, p);
             }
         }
-        self.tabs.close(tab.id);
         Some((tab, state, panes))
     }
     pub fn attach_tab_state(
@@ -64,17 +66,20 @@ impl App {
         panes: HashMap<u64, PaneState>,
     ) {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
+        let main_window = self.main_window().cloned();
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);
             if let Some(pty) = pane.pty.as_ref() {
                 (pty.resize)(cols, rows);
             }
-            *pane.redraw_target.lock() = self.main_window().cloned();
+            *pane.redraw_target.lock() = main_window.clone();
             self.panes.insert(id, pane);
         }
-        let idx = index.min(self.tabs.len());
-        self.tabs.insert(idx, tab);
-        self.tab_states.insert(idx, state);
+        if let Some(ws) = self.main_mut() {
+            let idx = index.min(ws.tabs.len());
+            ws.tabs.insert(idx, tab);
+            ws.tab_states.insert(idx, state);
+        }
     }
     pub fn detach_from_child(
         &mut self,

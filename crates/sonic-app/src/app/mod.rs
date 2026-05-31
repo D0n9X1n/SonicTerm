@@ -914,9 +914,12 @@ pub struct App {
     // PR-B1b (#293): `App.renderer` field removed; the main window's
     // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
     // Access via `Self::main_renderer()` / `Self::main_renderer_mut()`.
-    pub(super) tabs: TabBar,
-    /// Parallel to `tabs.tabs()` — same length, same order.
-    pub(super) tab_states: Vec<TabState>,
+    // PR-B2b (#365): `App.tabs` + `App.tab_states` fields removed; the
+    // main window's TabBar + TabState vec are now owned by
+    // `self.windows[main_window_id]`. Access via `Self::main_tabs()` /
+    // `Self::main_tabs_mut()` / `Self::main_tab_states()` /
+    // `Self::main_tab_states_mut()`. Callers needing both at once should
+    // go through `self.main_mut()` directly to avoid double-borrow.
     pub(super) panes: HashMap<u64, PaneState>,
     pub(super) modifiers: ModifiersState,
     pub(super) last_render: Instant,
@@ -1037,6 +1040,11 @@ pub struct App {
     /// decide between "tear out into new window" (None) and "merge into
     /// destination window at slot" (Some).
     pub(super) drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
+    /// OS-drag tab payloads received before the main [`WindowState`] exists.
+    /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
+    /// inserts `main_window_id`; queue them so the destination tab is created
+    /// after main is available instead of silently dropping the payload.
+    pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
     /// True when the main window has been drained (its last tab moved
     /// out via cross-window merge) or its close button was clicked
     /// while child windows still owned tabs. In that state the main
@@ -1180,8 +1188,9 @@ impl App {
     /// `window_event.rs` (~line 110); factored so resize/config-reload
     /// call sites stay one-liners.
     pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonic_ui::pane::Rect)> {
-        let tab_idx = self.tabs.active_index();
-        let Some(st) = self.tab_states.get(tab_idx) else { return Vec::new() };
+        let Some(ws) = self.main() else { return Vec::new() };
+        let tab_idx = ws.tabs.active_index();
+        let Some(st) = ws.tab_states.get(tab_idx) else { return Vec::new() };
         let Some(r) = self.main_renderer() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
@@ -1241,8 +1250,6 @@ impl App {
             theme,
             config,
             keymap,
-            tabs: TabBar::new(),
-            tab_states: Vec::new(),
             panes: HashMap::new(),
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -1272,6 +1279,7 @@ impl App {
             focused_child: None,
             frontmost_window: None,
             drag_target: None,
+            pending_os_drag_payloads: Vec::new(),
             main_hidden: false,
             theme_loader: None,
             keymap_loader: None,
@@ -1301,16 +1309,19 @@ impl App {
 
     #[doc(hidden)]
     pub fn poll_command_events_for_all_tabs(&mut self) {
-        for tab_idx in 0..self.tab_states.len() {
+        let n = self.main_tab_states().map(|ts| ts.len()).unwrap_or(0);
+        for tab_idx in 0..n {
             self.poll_command_events_for_tab(tab_idx);
         }
     }
 
     pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
+        let Some(id) = self.main_window_id else { return };
+        let Some(ws) = self.windows.get_mut(&id) else { return };
         poll_command_events_for_tab_state(
             &self.panes,
-            &mut self.tab_states,
-            &mut self.tabs,
+            &mut ws.tab_states,
+            &mut ws.tabs,
             &self.config,
             tab_idx,
         );
@@ -1331,15 +1342,15 @@ impl App {
 
     #[doc(hidden)]
     pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
-        self.tab_states.get(tab_idx).map(|st| st.command.clone())
+        self.main_tab_states()?.get(tab_idx).map(|st| st.command.clone())
     }
 
     #[doc(hidden)]
     pub fn __test_tab_badge(&self, tab_idx: usize, now: Instant) -> Option<&'static str> {
-        self.tabs
-            .tabs()
+        let tabs = self.main_tabs()?;
+        tabs.tabs()
             .get(tab_idx)
-            .and_then(|tab| tab.command.clone().badge(now, tab_idx == self.tabs.active_index()))
+            .and_then(|tab| tab.command.clone().badge(now, tab_idx == tabs.active_index()))
     }
 }
 
@@ -1625,7 +1636,8 @@ impl App {
     /// the app.
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
-        let main_alive = !self.main_hidden && !self.tabs.is_empty();
+        let main_alive =
+            !self.main_hidden && !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
         // Phase B2 PR-A: subtract the shadow main entry so
         // "no torn-out children" still tips this to true.
         !main_alive && self.child_window_count() == 0
@@ -1662,7 +1674,7 @@ impl App {
     /// merge path does. The flag set here is drained in
     /// `do_about_to_wait`.
     pub(super) fn reap_empty_main_window_after_close(&mut self) {
-        if !self.tabs.is_empty() {
+        if !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
             return;
         }
         if self.child_window_count() == 0 {
@@ -1689,8 +1701,9 @@ impl App {
     }
 
     fn active_pane_id(&self) -> Option<u64> {
-        let i = self.tabs.active_index();
-        self.tab_states.get(i).map(|t| t.active_pane)
+        let ws = self.main()?;
+        let i = ws.tabs.active_index();
+        ws.tab_states.get(i).map(|t| t.active_pane)
     }
 
     fn active_pane(&self) -> Option<&PaneState> {
@@ -1758,7 +1771,8 @@ impl App {
     }
 
     pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
-        self.broadcast.receiving_panes(&self.tab_states, self.tabs.active_index())
+        let Some(ws) = self.main() else { return Default::default() };
+        self.broadcast.receiving_panes(&ws.tab_states, ws.tabs.active_index())
     }
 
     /// Test-only: how many tabs the named child window currently owns.
@@ -1902,6 +1916,36 @@ impl App {
     pub fn main_renderer_mut(&mut self) -> Option<&mut GpuRenderer> {
         let id = self.main_window_id?;
         self.windows.get_mut(&id)?.renderer.as_mut()
+    }
+
+    /// Phase B2 PR-B2b (#365) — borrow the main window's [`TabBar`] from
+    /// its [`WindowState`]. Sole source of truth (legacy `App.tabs` was
+    /// deleted in PR-B2b). Returns `None` before `do_resumed` /
+    /// `__test_synthetic_main` has populated the shadow entry.
+    #[doc(hidden)]
+    pub fn main_tabs(&self) -> Option<&TabBar> {
+        Some(&self.windows.get(&self.main_window_id?)?.tabs)
+    }
+
+    /// Mutable counterpart of [`Self::main_tabs`].
+    #[doc(hidden)]
+    pub fn main_tabs_mut(&mut self) -> Option<&mut TabBar> {
+        let id = self.main_window_id?;
+        Some(&mut self.windows.get_mut(&id)?.tabs)
+    }
+
+    /// Phase B2 PR-B2b (#365) — borrow the main window's `Vec<TabState>`
+    /// from its [`WindowState`]. Sole source of truth.
+    #[doc(hidden)]
+    pub fn main_tab_states(&self) -> Option<&[TabState]> {
+        Some(self.windows.get(&self.main_window_id?)?.tab_states.as_slice())
+    }
+
+    /// Mutable counterpart of [`Self::main_tab_states`].
+    #[doc(hidden)]
+    pub fn main_tab_states_mut(&mut self) -> Option<&mut Vec<TabState>> {
+        let id = self.main_window_id?;
+        Some(&mut self.windows.get_mut(&id)?.tab_states)
     }
 
     /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
@@ -2098,7 +2142,7 @@ impl App {
     /// Test-only: count of tabs in the main App.
     #[doc(hidden)]
     pub fn __test_main_tab_count(&self) -> usize {
-        self.tabs.len()
+        self.main_tabs().map(|t| t.len()).unwrap_or(0)
     }
 
     /// Test-only: read the `pending_new_window` flag. Set by the
@@ -2249,8 +2293,6 @@ impl App {
         let pane_id = next_pane_id();
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
         self.panes.insert(pane_id, PaneState::new(parser.clone(), None));
-        self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, PaneState::new(parser, None));
             ws.tabs.push(Tab::new(title));
@@ -2304,12 +2346,16 @@ impl App {
         &mut self,
         title: &str,
     ) -> (u64, crossbeam_channel::Receiver<Vec<u8>>) {
+        self.__test_synthetic_main();
         let pane_id = next_pane_id();
         let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(80, 24), tx)));
-        self.panes.insert(pane_id, PaneState::new(parser, None));
-        self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        self.panes.insert(pane_id, PaneState::new(parser.clone(), None));
+        if let Some(ws) = self.main_mut() {
+            ws.panes.insert(pane_id, PaneState::new(parser, None));
+            ws.tabs.push(Tab::new(title));
+            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
         (pane_id, rx)
     }
 
@@ -2358,7 +2404,7 @@ impl App {
     /// actually flips the focused leaf.
     #[doc(hidden)]
     pub fn __test_active_pane_in_tab(&self, tab_idx: usize) -> Option<u64> {
-        self.tab_states.get(tab_idx).map(|st| st.active_pane)
+        self.main_tab_states()?.get(tab_idx).map(|st| st.active_pane)
     }
 
     /// Test-only: set the active pane in `tab_idx` to `pane_id`. The
@@ -2367,7 +2413,7 @@ impl App {
     /// driving a synthetic winit `MouseInput` event.
     #[doc(hidden)]
     pub fn __test_set_active_pane(&mut self, tab_idx: usize, pane_id: u64) -> bool {
-        if let Some(st) = self.tab_states.get_mut(tab_idx) {
+        if let Some(st) = self.main_tab_states_mut().and_then(|ts| ts.get_mut(tab_idx)) {
             st.active_pane = pane_id;
             true
         } else {
@@ -2385,7 +2431,21 @@ impl App {
     /// Test-only: tab count.
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
-        self.tabs.len()
+        self.main_tabs().map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Test-only: pending OS-drag payload count.
+    #[doc(hidden)]
+    pub fn __test_pending_os_drag_payload_count(&self) -> usize {
+        self.pending_os_drag_payloads.len()
+    }
+
+    /// Test-only: drain queued OS-drag payloads after a synthetic main has
+    /// been inserted. Mirrors the production `do_resumed` drain point without
+    /// constructing a real winit window.
+    #[doc(hidden)]
+    pub fn __test_drain_pending_os_drag_payloads(&mut self) {
+        self.drain_pending_os_drag_payloads();
     }
 
     /// Test-only: number of leaf panes in the given tab. Returns
@@ -2395,7 +2455,7 @@ impl App {
     /// tree rather than the tab bar when the tab still has > 1 pane.
     #[doc(hidden)]
     pub fn __test_pane_count_in_tab(&self, tab_idx: usize) -> Option<usize> {
-        self.tab_states.get(tab_idx).map(|st| st.tree.leaves().len())
+        self.main_tab_states()?.get(tab_idx).map(|st| st.tree.leaves().len())
     }
 
     /// Test-only: install an `OsDragSink` so [`Self::try_os_drag_handoff`]
@@ -2491,10 +2551,14 @@ impl App {
         };
         let sf = w.scale_factor() as f32;
         let logical_w = inner_size.0 as f32 / sf;
-        let layout =
-            TabBarLayout::compute_with_height(&self.tabs, logical_w, r.tab_bar_logical_height())
-                .with_top_offset(r.tab_bar_y_offset())
-                .with_visible(r.tab_bar_visible());
+        let empty_tabs_pub = sonic_ui::tabs::TabBar::new();
+        let layout = TabBarLayout::compute_with_height(
+            self.main_tabs().unwrap_or(&empty_tabs_pub),
+            logical_w,
+            r.tab_bar_logical_height(),
+        )
+        .with_top_offset(r.tab_bar_y_offset())
+        .with_visible(r.tab_bar_visible());
         let snap = os_drag::TabBarSnapshot::from_layout(
             Some(w.id()),
             inner_origin,
@@ -2836,7 +2900,8 @@ impl App {
         //    child shell via `PtyHandle::Drop`.
         match source {
             None => {
-                if source_idx >= self.tab_states.len() || source_idx >= self.tabs.len() {
+                let main = self.main().ok_or(TransferError::SourceMissing)?;
+                if source_idx >= main.tab_states.len() || source_idx >= main.tabs.len() {
                     return Err(TransferError::SourceIndexOutOfBounds);
                 }
             }
@@ -2899,7 +2964,7 @@ impl App {
 
         // 4) source-empty → close source window
         let source_empty = match source {
-            None => self.tabs.is_empty(),
+            None => self.main_tabs().map(|t| t.is_empty()).unwrap_or(true),
             Some(id) => self.windows.get(&id).map(|w| w.tabs.is_empty()).unwrap_or(true),
         };
         if source_empty {

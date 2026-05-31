@@ -290,6 +290,7 @@ impl App {
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
+        self.drain_pending_os_drag_payloads();
 
         // Seed-sync immediately so the first event-tick observer sees a
         // populated shadow rather than the all-zeros constructor state.

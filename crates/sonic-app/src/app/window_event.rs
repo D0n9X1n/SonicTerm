@@ -21,7 +21,7 @@ use winit::{
 };
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
-use super::{mark_all_panes_dirty, to_logical_pos, App};
+use super::{mark_all_panes_dirty, to_logical_pos, App, TabState};
 
 impl App {
     pub(super) fn do_window_event(
@@ -111,16 +111,21 @@ impl App {
                     return;
                 }
                 self.pending_redraw = false;
-                self.tabs.clear_expired_command_badges(Instant::now());
+                let main_id_opt = self.main_window_id;
+                if let Some(id) = main_id_opt {
+                    if let Some(ws) = self.windows.get_mut(&id) {
+                        ws.tabs.clear_expired_command_badges(Instant::now());
+                    }
+                }
                 self.poll_command_events_for_all_tabs();
-                let tab_idx = self.tabs.active_index();
+                let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
                 // the focused pane). The active pane's grid is rendered into
                 // the full content area; per-pane Buffer rendering is v0.4.
                 let pane_rects: Vec<(u64, sonic_ui::pane::Rect)> = self
-                    .tab_states
-                    .get(tab_idx)
+                    .main_tab_states()
+                    .and_then(|ts| ts.get(tab_idx))
                     .map(|st| {
                         if let Some(r) = self.main_renderer() {
                             let (w, h) = r.logical_size();
@@ -141,7 +146,11 @@ impl App {
                         }
                     })
                     .unwrap_or_default();
-                let active_id = self.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                let active_id = self
+                    .main_tab_states()
+                    .and_then(|ts| ts.get(tab_idx))
+                    .map(|st| st.active_pane)
+                    .unwrap_or(0);
                 let broadcast_receivers = self.broadcast_receivers();
 
                 // PR #199 Fix 1: try_lock EVERY pane in the tab and pass
@@ -235,11 +244,20 @@ impl App {
                 // `self.ime` available for the disjoint mut borrows the render
                 // call needs in the same expression scope.
                 let main_id_opt = self.main_window_id;
-                let renderer_opt = match main_id_opt {
-                    Some(id) => self.windows.get_mut(&id).and_then(|ws| ws.renderer.as_mut()),
-                    None => None,
+                let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
+                let (renderer_opt, tabs_opt, tab_states_opt): (
+                    Option<&mut GpuRenderer>,
+                    Option<&mut sonic_ui::tabs::TabBar>,
+                    Option<&mut Vec<TabState>>,
+                ) = match ws_opt {
+                    Some(ws) => {
+                        (ws.renderer.as_mut(), Some(&mut ws.tabs), Some(&mut ws.tab_states))
+                    }
+                    None => (None, None, None),
                 };
-                if let (Some(r), Some(pane)) = (renderer_opt, self.panes.get_mut(&active_id)) {
+                if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) =
+                    (renderer_opt, self.panes.get_mut(&active_id), tabs_opt, tab_states_opt)
+                {
                     let cursor_rc = {
                         // PR #199 Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
@@ -267,17 +285,17 @@ impl App {
                         // previously stuck on the literal "shell N"
                         // placeholder set at spawn time).
                         let _ = crate::app::refresh_active_tab_title(
-                            &mut self.tabs,
+                            tabs_mref,
                             pane,
                             &guards[active_pos].1,
                             tab_idx,
                         );
                         if let Some(search) =
-                            self.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
+                            tab_states_mref.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                         {
                             search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                         }
-                        let search = self.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                        let search = tab_states_mref.get(tab_idx).and_then(|t| t.search.as_ref());
                         // PR #199 Fix 1: build the slice from ALL panes
                         // (was previously a single-element slice for the
                         // active pane only). The renderer's per-pane loop
@@ -305,7 +323,7 @@ impl App {
                             self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
                             self.selection.as_ref(),
                             self.copy_mode.as_ref(),
-                            &self.tabs,
+                            tabs_mref,
                             search,
                             // Epic #289 follow-up: only feed the palette
                             // to the main window when it's actually
@@ -516,13 +534,12 @@ impl App {
                 // can follow the cursor in the renderer overlay.
                 if let Some(s) = self.drag_session.as_mut() {
                     s.current_pos = (lx, ly);
-                    let title = self
-                        .tabs
-                        .tabs()
-                        .get(s.press_tab_index)
-                        .map(|t| t.title.clone())
-                        .unwrap_or_default();
+                    let press_idx = s.press_tab_index;
                     let session_snapshot = *s;
+                    let title = self
+                        .main_tabs()
+                        .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
+                        .unwrap_or_default();
                     let window_width = self
                         .main_window()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
@@ -533,9 +550,14 @@ impl App {
                             (r.tab_bar_logical_height(), r.tab_bar_y_offset(), r.tab_bar_visible())
                         })
                         .unwrap_or((sonic_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
-                    let layout = TabBarLayout::compute_with_height(&self.tabs, window_width, bar_h)
-                        .with_top_offset(top_off)
-                        .with_visible(visible);
+                    let empty_tabs = sonic_ui::tabs::TabBar::new();
+                    let layout = TabBarLayout::compute_with_height(
+                        self.main_tabs().unwrap_or(&empty_tabs),
+                        window_width,
+                        bar_h,
+                    )
+                    .with_top_offset(top_off)
+                    .with_visible(visible);
                     let chip =
                         crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
                     if let Some(r) = self.main_renderer_mut() {
@@ -614,8 +636,9 @@ impl App {
                         .main_window()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                         .unwrap_or(0.0);
+                    let empty_tabs2 = sonic_ui::tabs::TabBar::new();
                     let layout = TabBarLayout::compute_with_height(
-                        &self.tabs,
+                        self.main_tabs().unwrap_or(&empty_tabs2),
                         window_width,
                         self.main_renderer()
                             .map(|r| r.tab_bar_logical_height())
@@ -629,7 +652,9 @@ impl App {
                     if tab_action.is_some() {
                         match tab_action {
                             Some(sonic_ui::tabbar_view::TabHit::Activate(i)) => {
-                                self.tabs.activate(i);
+                                if let Some(t) = self.main_tabs_mut() {
+                                    t.activate(i);
+                                }
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
                                 // tear-out gesture.
@@ -640,7 +665,7 @@ impl App {
                             Some(sonic_ui::tabbar_view::TabHit::Close(i)) => self.close_tab_at(i),
                             None => unreachable!("tab_action.is_some() checked above"),
                         }
-                        if self.tabs.is_empty() {
+                        if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
                             if self.child_window_count() == 0 {
                                 if Self::should_exit_on_last_window_close(&self.config) {
                                     el.exit();
@@ -681,10 +706,10 @@ impl App {
                         r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
                     });
                     if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
-                        let tab_idx = self.tabs.active_index();
+                        let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                         let pane_rects = self
-                            .tab_states
-                            .get(tab_idx)
+                            .main_tab_states()
+                            .and_then(|ts| ts.get(tab_idx))
                             .map(|st| {
                                 let outer = sonic_ui::pane::Rect::new(
                                     pl,
@@ -704,7 +729,10 @@ impl App {
                                     && ly >= rect.y
                                     && ly < rect.y + rect.h
                                 {
-                                    if let Some(st) = self.tab_states.get_mut(tab_idx) {
+                                    if let Some(st) = self
+                                        .main_tab_states_mut()
+                                        .and_then(|ts| ts.get_mut(tab_idx))
+                                    {
                                         if st.active_pane != *id {
                                             st.active_pane = *id;
                                             mark_all_panes_dirty(&self.panes);
@@ -765,8 +793,9 @@ impl App {
                             .main_window()
                             .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
                             .unwrap_or(0.0);
+                        let empty_tabs3 = sonic_ui::tabs::TabBar::new();
                         let layout = TabBarLayout::compute_with_height(
-                            &self.tabs,
+                            self.main_tabs().unwrap_or(&empty_tabs3),
                             window_width,
                             self.main_renderer()
                                 .map(|r| r.tab_bar_logical_height())
@@ -782,7 +811,9 @@ impl App {
                                 // bar before releasing cancels the drag.
                             }
                             crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                self.tabs.reorder(from, to);
+                                if let Some(t) = self.main_tabs_mut() {
+                                    t.reorder(from, to);
+                                }
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
                                 self.merge_main_into_child(idx, target);
