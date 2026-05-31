@@ -271,6 +271,14 @@ impl Grid {
         for row in &mut self.visible {
             row.resize(cols as usize, Cell::default());
         }
+        // PR-E (#319): keep scrollback consistent with the new column count.
+        // `Line::resize` is now Cluster-preserving, so uniform blank
+        // scrollback rows (the bulk of typical scrollback) stay compressed.
+        if cols != self.cols {
+            for row in &mut self.scrollback {
+                row.resize(cols as usize, Cell::default());
+            }
+        }
         if rows > self.rows {
             for _ in self.rows..rows {
                 self.visible.push_back(make_row(cols));
