@@ -154,10 +154,11 @@ impl App {
     /// True iff the platform "open this in the browser" modifier is held.
     /// macOS: Cmd (super). Windows / Linux: Ctrl.
     pub(super) fn url_open_modifier_held(&self) -> bool {
+        let mods = self.main_modifiers();
         if cfg!(target_os = "macos") {
-            self.modifiers.super_key()
+            mods.super_key()
         } else {
-            self.modifiers.control_key()
+            mods.control_key()
         }
     }
     pub(super) fn open_ssh_pane(&mut self, target: &str) {
@@ -188,7 +189,7 @@ impl App {
             let grid = guard.grid();
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
-        self.copy_mode = Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor));
+        self.copy_mode_set(Some(sonic_ui::copy_mode::CopyModeState::new_at(cursor)));
         if let Some(panes) = self.main_panes() {
             mark_all_panes_dirty(panes);
         }
@@ -203,15 +204,16 @@ impl App {
             state.quick_select = Some(sonic_ui::copy_mode::QuickSelectState::from_grid(grid));
             state
         };
-        self.copy_mode = Some(state);
+        self.copy_mode_set(Some(state));
         if let Some(panes) = self.main_panes() {
             mark_all_panes_dirty(panes);
         }
     }
 
     pub(super) fn copy_selection(&mut self) {
-        let Some(sel) = self.selection.as_ref() else {
-            return;
+        let sel = match self.main().and_then(|ws| ws.selection) {
+            Some(s) => s,
+            None => return,
         };
         if sel.is_empty() {
             return;
