@@ -106,7 +106,8 @@ impl App {
                 // perceptible latency to typing/resize/theme changes.
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
-                if !was_dirty && !pty_burst && self.last_render.elapsed() < self.frame_period {
+                let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
+                if !was_dirty && !pty_burst && last_render.elapsed() < self.frame_period {
                     self.pending_redraw = true;
                     return;
                 }
@@ -250,19 +251,42 @@ impl App {
                 // pulled from the same field-disjoint split borrow.
                 let main_id_opt = self.main_window_id;
                 let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
-                let (renderer_opt, tabs_opt, tab_states_opt, panes_opt): (
+                #[allow(clippy::type_complexity)]
+                let (
+                    renderer_opt,
+                    tabs_opt,
+                    tab_states_opt,
+                    panes_opt,
+                    cursor_visible_now,
+                    last_render_slot,
+                ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonic_ui::tabs::TabBar>,
                     Option<&mut Vec<TabState>>,
                     Option<&mut std::collections::HashMap<u64, crate::app::PaneState>>,
+                    bool,
+                    Option<&mut Instant>,
                 ) = match ws_opt {
-                    Some(ws) => (
-                        ws.renderer.as_mut(),
-                        Some(&mut ws.tabs),
-                        Some(&mut ws.tab_states),
-                        Some(&mut ws.panes),
-                    ),
-                    None => (None, None, None, None),
+                    Some(ws) => {
+                        // PR #400: cursor_visible is now per-pane; read
+                        // it from the active pane before splitting the
+                        // mut borrow of `ws.panes`. Bool read, no
+                        // lasting borrow.
+                        let cv = ws
+                            .panes
+                            .get(&active_id)
+                            .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(true);
+                        (
+                            ws.renderer.as_mut(),
+                            Some(&mut ws.tabs),
+                            Some(&mut ws.tab_states),
+                            Some(&mut ws.panes),
+                            cv,
+                            Some(&mut ws.last_render),
+                        )
+                    }
+                    None => (None, None, None, None, true, None),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
                     renderer_opt,
@@ -332,7 +356,7 @@ impl App {
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &self.theme,
-                            self.cursor_visible.load(std::sync::atomic::Ordering::Relaxed),
+                            cursor_visible_now,
                             self.selection.as_ref(),
                             self.copy_mode.as_ref(),
                             tabs_mref,
@@ -357,7 +381,9 @@ impl App {
                         // counter ahead of last_seen_burst_gen so the
                         // next redraw bypasses the vsync gate.
                         self.last_seen_burst_gen = pty_burst_snapshot;
-                        self.last_render = Instant::now();
+                        if let Some(lr) = last_render_slot {
+                            *lr = Instant::now();
+                        }
                         let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };

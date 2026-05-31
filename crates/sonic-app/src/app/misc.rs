@@ -121,8 +121,11 @@ impl App {
                 .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
                 .and_then(|(row, col)| self.osc8_uri_at(row, col))
                 .is_some();
-        if want_pointer != self.hover_link {
-            self.hover_link = want_pointer;
+        let current_hover_link = self.main().map(|ws| ws.hover_link).unwrap_or(false);
+        if want_pointer != current_hover_link {
+            if let Some(ws) = self.main_mut() {
+                ws.hover_link = want_pointer;
+            }
             if let Some(w) = self.main_window() {
                 w.set_cursor(if want_pointer { CursorIcon::Pointer } else { CursorIcon::Default });
             }
@@ -349,9 +352,7 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
-        let cursor_visible_arc = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let pane_state =
-            self.spawn_pane_state_for_child(cols, rows, window.clone(), cursor_visible_arc.clone());
+        let pane_state = self.spawn_pane_state_for_child(cols, rows, window.clone());
         let pane_id = super::next_pane_id();
         let mut panes = HashMap::new();
         panes.insert(pane_id, pane_state);
@@ -372,8 +373,8 @@ impl App {
             selection: None,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
-            cursor_visible: cursor_visible_arc,
             last_render: Instant::now(),
+            hover_link: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,

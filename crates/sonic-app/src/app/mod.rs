@@ -124,8 +124,14 @@ pub struct WindowState {
     pub selection: Option<Selection>,
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
+    // Arc travels with tear-out). Read from
+    // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
+    /// Phase B2 PR-B3b (#365): pointer-cursor-is-link latch. Mirrors
+    /// `App.hover_link` (now deleted). Per-window so a torn-out child can
+    /// flip its own cursor independently of the main window.
+    pub hover_link: bool,
     /// Tab index pressed in the child's bar — same role as
     /// `App::pressed_tab` but for the child window. Used for
     /// drag-from-child merging.
@@ -224,16 +230,15 @@ pub fn synthetic_main_window_id() -> WindowId {
 /// Heavy fields (`renderer`, `tabs`, `tab_states`, `panes`) are NOT
 /// part of this snapshot — they move from `App` into the shadow in
 /// PR-B; the shadow holds `None` / empty placeholders for them until
-/// then. The snapshot deliberately excludes `cursor_visible` because
-/// it's an `Arc<AtomicBool>` shared by pointer (see the dedicated
-/// `Arc::ptr_eq` check on [`App::__test_shadow_main_in_sync`]).
+/// then. Phase B2 PR-B3b (#365): `cursor_visible`, `last_render`, and
+/// `hover_link` are now owned by `WindowState` directly and no longer
+/// appear in this snapshot — they were deleted from `App` in this PR.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ShadowMainSnapshot {
     pub selection: Option<Selection>,
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    pub last_render: Instant,
     pub drag_session: Option<crate::tab_drag::DragSession>,
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     pub scale_factor: f64,
@@ -248,7 +253,6 @@ impl PartialEq for ShadowMainSnapshot {
         self.selection == other.selection
             && self.copy_mode == other.copy_mode
             && self.modifiers == other.modifiers
-            && self.last_render == other.last_render
             && format!("{:?}", self.drag_session) == format!("{:?}", other.drag_session)
             && format!("{:?}", self.drag_target) == format!("{:?}", other.drag_target)
             && self.scale_factor == other.scale_factor
@@ -264,7 +268,6 @@ pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
         selection: ws.selection,
         copy_mode: ws.copy_mode.clone(),
         modifiers: ws.modifiers,
-        last_render: ws.last_render,
         drag_session: ws.drag_session,
         drag_target: ws.drag_target,
         scale_factor: ws.scale_factor,
@@ -283,7 +286,6 @@ pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot
     ws.selection = snap.selection;
     ws.copy_mode = snap.copy_mode;
     ws.modifiers = snap.modifiers;
-    ws.last_render = snap.last_render;
     ws.drag_session = snap.drag_session;
     ws.drag_target = snap.drag_target;
     ws.scale_factor = snap.scale_factor;
@@ -305,25 +307,21 @@ pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot
 #[allow(clippy::too_many_arguments)]
 pub fn apply_shadow_main_sync(
     ws: &mut WindowState,
-    cursor_visible: Arc<std::sync::atomic::AtomicBool>,
     selection: Option<Selection>,
     copy_mode: Option<CopyModeState>,
     modifiers: ModifiersState,
-    last_render: Instant,
     drag_session: Option<crate::tab_drag::DragSession>,
     drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     scale_factor: f64,
     ime: ImeState,
     hovered_url: Option<hovered_url::HoveredUrl>,
 ) {
-    ws.cursor_visible = cursor_visible;
     apply_shadow_main_snapshot(
         ws,
         ShadowMainSnapshot {
             selection,
             copy_mode,
             modifiers,
-            last_render,
             drag_session,
             drag_target,
             scale_factor,
@@ -858,6 +856,14 @@ pub struct PaneState {
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
     pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
+    /// Per-pane DECTCEM cursor-visibility flag (`CSI ?25h/l`). Written
+    /// by the VT loop, read by the render path for the active pane.
+    /// **Per-pane (not per-window)** so the Arc travels with the pane
+    /// when a tab is torn out into a new window — pre-fix #400 the Arc
+    /// lived on `WindowState`, so tear-out's destination got a fresh
+    /// Arc and the moved pane's VT thread kept writing to an orphaned
+    /// AtomicBool that nobody read. Init `true`.
+    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -877,6 +883,7 @@ impl PaneState {
             viewport_top_abs: None,
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
+            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 }
@@ -917,19 +924,21 @@ pub struct App {
     // panes + tabs/tab_states/renderer together should go through
     // `self.main_mut()` and split-borrow the fields disjointly.
     pub(super) modifiers: ModifiersState,
-    pub(super) last_render: Instant,
+    // PR-B3b (#365): `App.last_render`, `App.cursor_visible`, and
+    // `App.hover_link` fields removed; now owned by
+    // `self.windows[main_window_id]`. Access via
+    // `self.main()?.last_render` / `self.main()?.cursor_visible` /
+    // `self.main()?.hover_link`.
     pub(super) selection: Option<Selection>,
     pub(super) copy_mode: Option<CopyModeState>,
     pub(super) clipboard: Option<Clipboard>,
     pub(super) scale_factor: f64,
-    pub(super) hover_link: bool,
     /// Currently-hovered auto-detected URL (focused pane only), with
     /// row + char-col span. Drives the Cmd-held underline overlay and
     /// the pointer-cursor transition. `None` when the cursor isn't on
     /// a URL OR the open-URL modifier isn't held. See
     /// `crate::app::hovered_url` for the pure helpers.
     pub(super) hovered_url: Option<hovered_url::HoveredUrl>,
-    pub(super) cursor_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
     /// `create_new_terminal_window(el)`. Window creation requires an
@@ -1258,14 +1267,11 @@ impl App {
             config,
             keymap,
             modifiers: ModifiersState::empty(),
-            last_render: Instant::now(),
             selection: None,
             copy_mode: None,
             clipboard: Clipboard::new().ok(),
             scale_factor: 1.0,
-            hover_link: false,
             hovered_url: None,
-            cursor_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_new_window: false,
             pending_exit: false,
             ime: ImeState::new(),
@@ -1491,9 +1497,10 @@ impl App {
     /// predicate used in the `WindowEvent::RedrawRequested` arm.
     #[doc(hidden)]
     pub fn would_coalesce_redraw(&self) -> bool {
+        let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
         !self.input_dirty
             && self.pty_burst_gen.load(Ordering::Acquire) == self.last_seen_burst_gen
-            && self.last_render.elapsed() < self.frame_period
+            && last_render.elapsed() < self.frame_period
     }
 
     /// Test-only snapshot of the PTY-burst generation counter.
@@ -1534,7 +1541,10 @@ impl App {
     /// just rendered" without driving an actual frame.
     #[doc(hidden)]
     pub fn set_last_render_for_test(&mut self, t: Instant) {
-        self.last_render = t;
+        self.__test_synthetic_main();
+        if let Some(ws) = self.main_mut() {
+            ws.last_render = t;
+        }
     }
 
     /// Test-only accessor: returns the current `pending_redraw` flag.
@@ -1828,8 +1838,8 @@ impl App {
             selection: None,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
-            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_render: Instant::now(),
+            hover_link: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
@@ -2061,11 +2071,9 @@ impl App {
     #[doc(hidden)]
     pub fn sync_shadow_main(&mut self) {
         let Some(id) = self.main_window_id else { return };
-        let cursor_visible = self.cursor_visible.clone();
         let selection = self.selection;
         let copy_mode = self.copy_mode.clone();
         let modifiers = self.modifiers;
-        let last_render = self.last_render;
         let drag_session = self.drag_session;
         let drag_target = self.drag_target;
         let scale_factor = self.scale_factor;
@@ -2074,11 +2082,9 @@ impl App {
         if let Some(ws) = self.windows.get_mut(&id) {
             apply_shadow_main_sync(
                 ws,
-                cursor_visible,
                 selection,
                 copy_mode,
                 modifiers,
-                last_render,
                 drag_session,
                 drag_target,
                 scale_factor,
@@ -2332,7 +2338,6 @@ impl App {
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
-            last_render: self.last_render,
             drag_session: self.drag_session,
             drag_target: self.drag_target,
             scale_factor: self.scale_factor,
@@ -2352,11 +2357,9 @@ impl App {
         let Some(id) = self.main_window_id else { return false };
         let Some(ws) = self.windows.get(&id) else { return false };
         ws.role == WindowRole::Terminal
-            && Arc::ptr_eq(&ws.cursor_visible, &self.cursor_visible)
             && ws.selection == self.selection
             && ws.copy_mode == self.copy_mode
             && ws.modifiers == self.modifiers
-            && ws.last_render == self.last_render
             && ws.scale_factor == self.scale_factor
             && ws.hovered_url == self.hovered_url
     }
@@ -2404,8 +2407,8 @@ impl App {
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
-            cursor_visible: self.cursor_visible.clone(),
-            last_render: self.last_render,
+            last_render: Instant::now(),
+            hover_link: false,
             pressed_tab: None,
             drag_session: self.drag_session,
             drag_target: self.drag_target,

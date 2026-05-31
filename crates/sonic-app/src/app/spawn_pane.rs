@@ -66,13 +66,23 @@ impl App {
             Arc::new(Mutex::new(self.main_window().cloned()));
         let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
             Arc::new(Mutex::new(Vec::new()));
+        // PR #400 fix: per-pane cursor_visible Arc lives outside the
+        // pty-spawn match so we can store it on PaneState even if pty
+        // spawn failed (and so a no-pty pane still has a valid Arc).
+        let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(true));
         let pty = match PtyHandle::spawn_default_shell(cols, rows) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
-                let cursor_visible = self.cursor_visible.clone();
+                // PR #400 fix: VT thread captures the same Arc that
+                // PaneState below will own. Pre-fix this read
+                // `self.main().cursor_visible` on WindowState, which
+                // got replaced with a fresh Arc on tear-out — leaving
+                // the VT thread writing into an orphan AtomicBool.
+                let cursor_visible = cursor_visible_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
@@ -291,6 +301,7 @@ impl App {
         let mut state = PaneState::new(parser, pty);
         state.redraw_target = redraw_target;
         state.command_events = command_events;
+        state.cursor_visible = cursor_visible_pane;
         state
     }
 }

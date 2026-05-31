@@ -35,7 +35,7 @@ fn resize_and_scale_factor_paths_tolerate_missing_renderer() {
 #[cfg(target_os = "macos")]
 #[test]
 fn document_windowstate_none_renderer_resize_scale_paths() {
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use sonic_app::app::{
@@ -75,8 +75,8 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
         selection: None,
         copy_mode: None,
         modifiers: Default::default(),
-        cursor_visible: Arc::new(AtomicBool::new(true)),
         last_render: Instant::now(),
+        hover_link: false,
         pressed_tab: None,
         drag_session: None,
         drag_target: None,
