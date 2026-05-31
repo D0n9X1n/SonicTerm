@@ -224,6 +224,7 @@ impl App {
                 appearance: sonic_shared::render::SurfaceAppearance {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
+                    scrollbar: self.config.appearance.scrollbar,
                 },
             },
         )

@@ -4741,6 +4741,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sonic-cfg",
  "sonic-core",
  "sonic-gpu",
  "sonic-grid",
