@@ -143,9 +143,11 @@ pub fn is_animating(state: &ScrollbarVisState, mode: ScrollbarMode, drag_active:
     let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
     let target = if visible_now { 1.0 } else { 0.0 };
     (state.alpha - target).abs() > f32::EPSILON
-        // Even when alpha is currently parked, the idle window may
-        // close shortly and trigger a fade-out — so callers should
-        // keep ticking while we're inside the idle window too.
+        // Even when alpha is currently parked at 1.0, the idle window may
+        // close shortly and trigger a fade-out. Keep scheduling frames until
+        // that boundary passes so Auto mode does not freeze fully visible
+        // until the next unrelated terminal event.
+        || idle_ms < IDLE_HIDE_MS
         || (visible_now && state.alpha < 1.0)
         || (!visible_now && state.alpha > 0.0)
 }
@@ -182,22 +184,93 @@ pub fn update_and_collect(
     out
 }
 
-use super::App;
+/// Update only the right-edge hover flags from a cursor move. Returns
+/// `true` if any pane crossed the proximity threshold and therefore needs
+/// a redraw to start the Auto-mode fade immediately.
+pub fn update_hover_states(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+    panes: &[(u64, f32, f32, f32, f32)],
+    cursor: (f32, f32),
+    now: Instant,
+) -> bool {
+    let live_ids: std::collections::HashSet<u64> = panes.iter().map(|(id, ..)| *id).collect();
+    vis.retain(|id, _| live_ids.contains(id));
+
+    let mut changed = false;
+    for &(id, px, py, pw, ph) in panes {
+        let state = vis.entry(id).or_insert_with(|| ScrollbarVisState::new(now));
+        let near = is_mouse_near_right_edge(px, py, pw, ph, cursor.0, cursor.1);
+        if state.mouse_near_right_edge != near {
+            state.mouse_near_right_edge = near;
+            if near {
+                state.last_active = now;
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+use super::{to_logical_pos, App};
 
 impl App {
+    fn request_scrollbar_redraw(&self) {
+        self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+    }
+
+    /// Refresh Auto-mode right-edge hover state from the last cursor
+    /// position. Returns `true` when any pane crosses the threshold.
+    pub(crate) fn refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
+        if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
+            return false;
+        }
+        let pane_rects = self.compute_active_pane_rects();
+        if pane_rects.is_empty() {
+            return false;
+        }
+        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+        let (cx_phys, cy_phys) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+        let cursor = to_logical_pos(cx_phys, cy_phys, sf);
+        let rects: Vec<(u64, f32, f32, f32, f32)> =
+            pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+        let changed = self
+            .main_mut()
+            .map(|ws| update_hover_states(&mut ws.scrollbar_vis, &rects, cursor, Instant::now()))
+            .unwrap_or(false);
+        if changed {
+            self.request_scrollbar_redraw();
+        }
+        changed
+    }
+
+    /// Test-only shim for the CursorMoved scrollbar-hover branch. Tests set
+    /// `WindowState::cursor_pos`, provide `test_viewport_override`, then call
+    /// this to exercise the same production state update + redraw request.
+    #[doc(hidden)]
+    pub fn __test_refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
+        self.refresh_scrollbar_hover_from_cursor()
+    }
+
     /// Mark a pane's scrollbar as "actively in use" so its alpha
     /// resets to fully-visible and the idle hide timer restarts.
     /// Called from PR-D update points (scroll, drag, view_top jump).
     pub(crate) fn mark_scrollbar_active(&mut self, pane_id: u64) {
         let now = Instant::now();
-        if let Some(ws) = self.main_mut() {
-            ws.scrollbar_vis
-                .entry(pane_id)
-                .or_insert_with(|| ScrollbarVisState::new(now))
-                .mark_active(now);
-            if let Some(w) = ws.window.as_ref() {
-                w.request_redraw();
-            }
+        let marked = self
+            .main_mut()
+            .map(|ws| {
+                ws.scrollbar_vis
+                    .entry(pane_id)
+                    .or_insert_with(|| ScrollbarVisState::new(now))
+                    .mark_active(now);
+                true
+            })
+            .unwrap_or(false);
+        if marked {
+            self.request_scrollbar_redraw();
         }
     }
 }

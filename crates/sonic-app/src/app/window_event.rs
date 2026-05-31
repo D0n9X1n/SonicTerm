@@ -662,6 +662,11 @@ impl App {
                         w.request_redraw();
                     }
                 }
+                // Auto scrollbar hover is also pure cursor state. Terminal
+                // cursor moves from normal PTY output do not wake the renderer,
+                // so request a frame exactly when the pointer crosses the
+                // right-edge proximity threshold.
+                let _ = self.refresh_scrollbar_hover_from_cursor();
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 let drag_snapshot = self.main_mut().and_then(|ws| {
