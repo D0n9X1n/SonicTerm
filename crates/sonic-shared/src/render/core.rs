@@ -2926,6 +2926,26 @@ impl GpuRenderer {
         }
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
+            // ISSUE #383 INSTRUMENTATION — DIAGNOSTIC ONLY, REVERT WITH FIX PR.
+            // Capture every input to the tab-bar emit path so we can confirm
+            // whether the quads are even being generated on Windows.
+            let bar_h_dbg = self.tab_bar_logical_height();
+            let bar_y_dbg = self.tab_bar_y_offset();
+            let quads_before = quads.len();
+            tracing::debug!(
+                target: "sonic::render::tabbar",
+                tab_bar_visible = self.tab_bar_visible,
+                sw,
+                sh,
+                config_width = self.config.width,
+                config_height = self.config.height,
+                scale_factor = self.scale_factor,
+                bar_h = bar_h_dbg,
+                bar_y = bar_y_dbg,
+                tabs_len = tabs.tabs().len(),
+                quads_len_before = quads_before,
+                "tab-bar emit path entered"
+            );
             // Phase D (Epic #289): open an 8 px insertion gap at the
             // current drop slot when a drag is active over this bar.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
@@ -2971,6 +2991,18 @@ impl GpuRenderer {
                     hover_close_hit,
                     surface: (sw, sh),
                 },
+            );
+            // ISSUE #383 INSTRUMENTATION — DIAGNOSTIC ONLY, REVERT WITH FIX PR.
+            let emitted = quads.len() - quads_before;
+            let first_emitted_rect = quads.get(quads_before).map(|q| q.rect);
+            let first_emitted_color = quads.get(quads_before).map(|q| q.color);
+            tracing::debug!(
+                target: "sonic::render::tabbar",
+                quads_emitted = emitted,
+                quads_len_after = quads.len(),
+                ?first_emitted_rect,
+                ?first_emitted_color,
+                "tab-bar emit path returned"
             );
             for t in &layout.tabs {
                 // Phase D D3 (Epic #289): if this tab is the source of

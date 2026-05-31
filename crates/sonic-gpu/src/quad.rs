@@ -302,8 +302,28 @@ impl QuadPipeline {
         instances: &[QuadInstance],
     ) {
         if instances.is_empty() {
+            // ISSUE #383 INSTRUMENTATION — DIAGNOSTIC ONLY, REVERT WITH FIX PR.
+            tracing::debug!(
+                target: "sonic::render::tabbar",
+                "quad.draw: instances empty — no GPU draw issued"
+            );
             return;
         }
+        // ISSUE #383 INSTRUMENTATION — DIAGNOSTIC ONLY, REVERT WITH FIX PR.
+        // Report total quads being drawn this frame + NDC y-range of the
+        // LAST quad (in render order, tab-bar quads are appended after the
+        // grid quads so the last instance is most likely a tab-bar one).
+        let last_y_bottom = instances.last().map(|q| q.rect[1]);
+        let last_y_top = instances.last().map(|q| q.rect[1] + q.rect[3]);
+        let last_alpha = instances.last().map(|q| q.color[3]);
+        tracing::debug!(
+            target: "sonic::render::tabbar",
+            quad_count = instances.len(),
+            ?last_y_bottom,
+            ?last_y_top,
+            ?last_alpha,
+            "quad.draw: issuing GPU draw"
+        );
         if instances.len() as u64 > self.capacity {
             // Power-of-two grow. Allocate the FULL capacity in bytes — not
             // just enough for the live prefix — otherwise a later draw with
