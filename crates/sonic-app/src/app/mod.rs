@@ -185,6 +185,15 @@ impl WindowState {
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SYNTHETIC_CHILD_WINDOW_TAG: AtomicU64 = AtomicU64::new(1);
+
+fn next_synthetic_child_window_id() -> WindowId {
+    let tag = NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: WindowId is `#[repr(transparent)] pub struct WindowId(u64)`
+    // in winit; use values below the synthetic main id so test-only child
+    // entries never collide with `synthetic_main_window_id()`.
+    unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
+}
 
 /// Phase B2 PR-B2a (#365): stable synthetic `WindowId` used by the
 /// test-only [`App::__test_synthetic_main`] seam so the main entry in
@@ -920,7 +929,11 @@ pub struct App {
     // `Self::main_tabs_mut()` / `Self::main_tab_states()` /
     // `Self::main_tab_states_mut()`. Callers needing both at once should
     // go through `self.main_mut()` directly to avoid double-borrow.
-    pub(super) panes: HashMap<u64, PaneState>,
+    // PR-B2c (#365): `App.panes` field removed; the main window's pane
+    // map is now owned by `self.windows[main_window_id]`. Access via
+    // `Self::main_panes()` / `Self::main_panes_mut()`. Callers needing
+    // panes + tabs/tab_states/renderer together should go through
+    // `self.main_mut()` and split-borrow the fields disjointly.
     pub(super) modifiers: ModifiersState,
     pub(super) last_render: Instant,
     pub(super) cursor_pos: (f64, f64),
@@ -1250,7 +1263,6 @@ impl App {
             theme,
             config,
             keymap,
-            panes: HashMap::new(),
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
             cursor_pos: (0.0, 0.0),
@@ -1319,7 +1331,7 @@ impl App {
         let Some(id) = self.main_window_id else { return };
         let Some(ws) = self.windows.get_mut(&id) else { return };
         poll_command_events_for_tab_state(
-            &self.panes,
+            &ws.panes,
             &mut ws.tab_states,
             &mut ws.tabs,
             &self.config,
@@ -1335,7 +1347,7 @@ impl App {
         at: Instant,
         duration: Option<Duration>,
     ) {
-        if let Some(pane) = self.panes.get(&pane_id) {
+        if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
             pane.command_events.lock().push(PaneCommandEvent { event, at, duration });
         }
     }
@@ -1707,7 +1719,8 @@ impl App {
     }
 
     fn active_pane(&self) -> Option<&PaneState> {
-        self.active_pane_id().and_then(|id| self.panes.get(&id))
+        let id = self.active_pane_id()?;
+        self.main()?.panes.get(&id)
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
@@ -1752,7 +1765,7 @@ impl App {
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
-        if let Some(p) = self.panes.get(&pane_id) {
+        if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
             if let Some(pty) = p.pty.as_ref() {
                 let _ = pty.in_tx.send(bytes);
             }
@@ -1779,6 +1792,61 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
         self.windows.get(&id).map(|c| c.tabs.len())
+    }
+
+    /// Test-only: how many panes the named child window currently owns.
+    #[doc(hidden)]
+    pub fn __test_child_pane_count(&self, id: WindowId) -> Option<usize> {
+        self.windows.get(&id).map(|c| c.panes.len())
+    }
+
+    /// Test-only: pane ids owned by the named child window.
+    #[doc(hidden)]
+    pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
+        self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
+    }
+
+    /// Test-only: seed a synthetic child WindowState without constructing a
+    /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
+    /// tear-out child, but `window` and `renderer` stay `None` so cargo-test
+    /// can exercise App-level multi-window ownership invariants headlessly.
+    #[doc(hidden)]
+    pub fn __test_seed_child_window(&mut self, titles: &[&str]) -> WindowId {
+        self.__test_synthetic_main();
+        let id = next_synthetic_child_window_id();
+        let mut tabs = TabBar::new();
+        let mut tab_states = Vec::new();
+        let mut panes = HashMap::new();
+        for title in titles {
+            let pane_id = next_pane_id();
+            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+            panes.insert(pane_id, PaneState::new(parser, None));
+            tabs.push(Tab::new(*title));
+            tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
+        let child = WindowState {
+            role: WindowRole::Terminal,
+            window: None,
+            renderer: None,
+            tabs,
+            tab_states,
+            panes,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
+            selection: None,
+            copy_mode: None,
+            modifiers: ModifiersState::empty(),
+            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_render: Instant::now(),
+            pressed_tab: None,
+            drag_session: None,
+            drag_target: None,
+            scale_factor: 1.0,
+            ime: ImeState::new(),
+            hovered_url: None,
+        };
+        self.windows.insert(id, child);
+        id
     }
 
     /// Test-only: install a `focused_child` id without going through a
@@ -1946,6 +2014,26 @@ impl App {
     pub fn main_tab_states_mut(&mut self) -> Option<&mut Vec<TabState>> {
         let id = self.main_window_id?;
         Some(&mut self.windows.get_mut(&id)?.tab_states)
+    }
+
+    /// Phase B2 PR-B2c (#365) — borrow the main window's pane map from
+    /// its [`WindowState`]. Sole source of truth (legacy `App.panes`
+    /// was deleted in PR-B2c). Returns `None` before `do_resumed` /
+    /// `__test_synthetic_main` has populated the shadow entry.
+    #[doc(hidden)]
+    pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {
+        Some(&self.windows.get(&self.main_window_id?)?.panes)
+    }
+
+    /// Mutable counterpart of [`Self::main_panes`]. NOTE: this borrows
+    /// the full main [`WindowState`] mutably via `windows.get_mut`, so
+    /// callers needing panes + tabs/tab_states/renderer in one expression
+    /// must instead `let ws = self.main_mut()?;` and field-disjoint
+    /// split-borrow.
+    #[doc(hidden)]
+    pub fn main_panes_mut(&mut self) -> Option<&mut HashMap<u64, PaneState>> {
+        let id = self.main_window_id?;
+        Some(&mut self.windows.get_mut(&id)?.panes)
     }
 
     /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
@@ -2292,7 +2380,6 @@ impl App {
         self.__test_synthetic_main();
         let pane_id = next_pane_id();
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-        self.panes.insert(pane_id, PaneState::new(parser.clone(), None));
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, PaneState::new(parser, None));
             ws.tabs.push(Tab::new(title));
@@ -2350,7 +2437,6 @@ impl App {
         let pane_id = next_pane_id();
         let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(80, 24), tx)));
-        self.panes.insert(pane_id, PaneState::new(parser.clone(), None));
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, PaneState::new(parser, None));
             ws.tabs.push(Tab::new(title));
@@ -2364,7 +2450,7 @@ impl App {
     /// requiring a live PTY or reply-forwarder thread.
     #[doc(hidden)]
     pub fn __test_seed_pane_theme_colors(&mut self, pane_id: u64) -> bool {
-        let Some(pane) = self.panes.get(&pane_id) else {
+        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
             return false;
         };
         let mut parser = pane.parser.lock();
@@ -2384,7 +2470,7 @@ impl App {
     /// tests that need to assert reply bytes from the real pane parser.
     #[doc(hidden)]
     pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
-        let Some(pane) = self.panes.get(&pane_id) else {
+        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
             return false;
         };
         pane.parser.lock().advance(bytes);
@@ -2395,7 +2481,7 @@ impl App {
     /// can assert "this pane id is gone after detach".
     #[doc(hidden)]
     pub fn __test_pane_ids(&self) -> Vec<u64> {
-        self.panes.keys().copied().collect()
+        self.main().map(|ws| ws.panes.keys().copied().collect()).unwrap_or_default()
     }
 
     /// Test-only: id of the active pane in a given tab. Returns `None`
@@ -2761,14 +2847,16 @@ impl App {
     /// state transfers.
     #[doc(hidden)]
     pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<Arc<Window>>>>> {
-        self.panes.get(&id).map(|p| p.redraw_target.clone())
+        self.main()?.panes.get(&id).map(|p| p.redraw_target.clone())
     }
 
     /// Test-only: install or clear a pane's PTY handle so tear-out tests
     /// can verify ownership moves without spawning a real shell.
     #[doc(hidden)]
     pub fn __test_set_pane_pty(&mut self, id: u64, pty: Option<PtyHandle>) -> bool {
-        let Some(pane) = self.panes.get_mut(&id) else { return false };
+        let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) else {
+            return false;
+        };
         pane.pty = pty;
         true
     }
@@ -2776,7 +2864,7 @@ impl App {
     /// Test-only: report whether a pane still has a PTY handle.
     #[doc(hidden)]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
-        self.panes.get(&id).map(|pane| pane.pty.is_some())
+        self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
     }
 
     /// Drain the config-watcher channel and apply any incoming config/keymap.

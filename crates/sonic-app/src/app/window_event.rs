@@ -167,6 +167,7 @@ impl App {
                 // multi-pane view, and a re-locked sub-pane would
                 // produce torn output. Order is pane_rects order;
                 // active position is recorded separately.
+                let main_panes_for_arcs = self.main_panes();
                 let parser_arcs: Vec<(
                     u64,
                     std::sync::Arc<parking_lot::Mutex<sonic_core::vt::Parser>>,
@@ -174,7 +175,9 @@ impl App {
                 )> = pane_rects
                     .iter()
                     .filter_map(|(id, rect)| {
-                        self.panes.get(id).map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
+                        main_panes_for_arcs
+                            .and_then(|panes| panes.get(id))
+                            .map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
                     })
                     .collect();
                 let mut guards: Vec<(
@@ -239,25 +242,34 @@ impl App {
                 let main_window_for_ime = self.main_window().cloned();
                 // PR-B1b borrow-split: pull the renderer out via direct
                 // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
-                // which would borrow all of `self`). That keeps `self.panes`,
-                // `self.tabs`, `self.tab_states`, `self.command_palette`,
-                // `self.ime` available for the disjoint mut borrows the render
-                // call needs in the same expression scope.
+                // which would borrow all of `self`). That keeps
+                // `self.command_palette`, `self.ime` available for the
+                // disjoint mut borrows the render call needs in the same
+                // expression scope.
+                // PR-B2c (#365): panes now live in `ws` too, so they're
+                // pulled from the same field-disjoint split borrow.
                 let main_id_opt = self.main_window_id;
                 let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
-                let (renderer_opt, tabs_opt, tab_states_opt): (
+                let (renderer_opt, tabs_opt, tab_states_opt, panes_opt): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonic_ui::tabs::TabBar>,
                     Option<&mut Vec<TabState>>,
+                    Option<&mut std::collections::HashMap<u64, crate::app::PaneState>>,
                 ) = match ws_opt {
-                    Some(ws) => {
-                        (ws.renderer.as_mut(), Some(&mut ws.tabs), Some(&mut ws.tab_states))
-                    }
-                    None => (None, None, None),
+                    Some(ws) => (
+                        ws.renderer.as_mut(),
+                        Some(&mut ws.tabs),
+                        Some(&mut ws.tab_states),
+                        Some(&mut ws.panes),
+                    ),
+                    None => (None, None, None, None),
                 };
-                if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) =
-                    (renderer_opt, self.panes.get_mut(&active_id), tabs_opt, tab_states_opt)
-                {
+                if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
+                    renderer_opt,
+                    panes_opt.and_then(|p| p.get_mut(&active_id)),
+                    tabs_opt,
+                    tab_states_opt,
+                ) {
                     let cursor_rc = {
                         // PR #199 Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
@@ -418,7 +430,9 @@ impl App {
                 // Focus transition flips the cursor between filled and
                 // hollow — that's a presentation change only, so mark
                 // every pane dirty without bumping grid revision.
-                mark_all_panes_dirty(&self.panes);
+                if let Some(panes) = self.main_panes() {
+                    mark_all_panes_dirty(panes);
+                }
                 // Forward focus in/out to the active pane if it asked for
                 // focus reporting via DECSET ?1004 (CSI ?1004h).
                 if let Some(pane) = self.active_pane() {
@@ -461,9 +475,9 @@ impl App {
                 // panes thought they were full-window-wide and TUIs drew
                 // past their visible border. See docs/specs/per-pane-grids.md.
                 let rects = self.compute_active_pane_rects();
-                if let Some(r) = self.main_renderer() {
-                    let (cw, ch) = r.cell_size();
-                    crate::app::resize_panes_to_rects(&self.panes, &rects, cw, ch);
+                let cell = self.main_renderer().map(|r| r.cell_size());
+                if let (Some((cw, ch)), Some(panes)) = (cell, self.main_panes()) {
+                    crate::app::resize_panes_to_rects(panes, &rects, cw, ch);
                 }
                 // Cell geometry changed — force the next render to
                 // re-publish the IME cursor area even if (row, col) is
@@ -603,7 +617,9 @@ impl App {
                         {
                             if let Some(sel) = self.selection.as_mut() {
                                 sel.extend(row, col);
-                                mark_all_panes_dirty(&self.panes);
+                                if let Some(panes) = self.main_panes() {
+                                    mark_all_panes_dirty(panes);
+                                }
                                 if let Some(w) = self.main_window() {
                                     w.request_redraw();
                                 }
@@ -735,7 +751,9 @@ impl App {
                                     {
                                         if st.active_pane != *id {
                                             st.active_pane = *id;
-                                            mark_all_panes_dirty(&self.panes);
+                                            if let Some(panes) = self.main_panes() {
+                                                mark_all_panes_dirty(panes);
+                                            }
                                         }
                                     }
                                     break;
@@ -770,7 +788,9 @@ impl App {
                                 return;
                             }
                             self.selection = Some(Selection::new(row, col));
-                            mark_all_panes_dirty(&self.panes);
+                            if let Some(panes) = self.main_panes() {
+                                mark_all_panes_dirty(panes);
+                            }
                         }
                     }
                     if let Some(w) = self.main_window() {
@@ -829,7 +849,9 @@ impl App {
                     if let Some(sel) = self.selection.as_ref() {
                         if sel.is_empty() {
                             self.selection = None;
-                            mark_all_panes_dirty(&self.panes);
+                            if let Some(panes) = self.main_panes() {
+                                mark_all_panes_dirty(panes);
+                            }
                             if let Some(w) = self.main_window() {
                                 w.request_redraw();
                             }
@@ -959,7 +981,9 @@ impl App {
                     self.write_to_pty(bytes);
                     if self.selection.is_some() {
                         self.selection = None;
-                        mark_all_panes_dirty(&self.panes);
+                        if let Some(panes) = self.main_panes() {
+                            mark_all_panes_dirty(panes);
+                        }
                         if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
@@ -978,7 +1002,9 @@ impl App {
         let mut should_exit = false;
 
         let active_pane_id = self.active_pane_id();
-        if let Some(pane) = active_pane_id.and_then(|id| self.panes.get(&id)) {
+        if let Some(pane) =
+            active_pane_id.and_then(|id| self.main().and_then(|ws| ws.panes.get(&id)))
+        {
             let guard = pane.parser.lock();
             let grid = guard.grid();
             if let Some(quick_select) = state.quick_select.as_ref() {
@@ -1002,7 +1028,9 @@ impl App {
                 if !should_exit {
                     self.copy_mode = Some(state);
                 }
-                mark_all_panes_dirty(&self.panes);
+                if let Some(panes) = self.main_panes() {
+                    mark_all_panes_dirty(panes);
+                }
                 return;
             }
             match &event.logical_key {
@@ -1038,7 +1066,7 @@ impl App {
                     GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
                 drop(guard);
                 if let Some(id) = active_pane_id {
-                    if let Some(pane) = self.panes.get_mut(&id) {
+                    if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) {
                         pane.viewport_top_abs = new_view_top;
                     }
                 }
@@ -1050,7 +1078,9 @@ impl App {
         } else {
             self.copy_mode = Some(state);
         }
-        mark_all_panes_dirty(&self.panes);
+        if let Some(panes) = self.main_panes() {
+            mark_all_panes_dirty(panes);
+        }
     }
 }
 
