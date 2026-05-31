@@ -9,8 +9,19 @@ use std::collections::VecDeque;
 pub use sonic_types::{Cell, CellFlags, Color, Pos};
 
 use crate::hyperlink::HyperlinkId;
+use crate::line::Line;
 
 /// A row of cells.
+///
+/// **PR-B1 (#319):** the public type alias remains `Vec<Cell>` so downstream
+/// callers compile unchanged. Internally, `Grid::visible` and
+/// `Grid::scrollback` now store `Line` (PR-A's `LineStorage`-backed
+/// container). Public accessors (`row`, `row_mut`, `rows_iter`,
+/// `scrollback_row`, `scrollback_iter`, `row_at_abs`) shim through
+/// `Line::as_vec` / `Line::as_vec_mut` to expose the inner `&Vec<Cell>` /
+/// `&mut Vec<Cell>`. In B1 every Line is Flat (Cluster production lands in
+/// PR-C), so these shims are zero-cost pointer derefs. PR-B2 will migrate
+/// downstream callers to consume `&Line` directly.
 pub type Row = Vec<Cell>;
 
 /// A single shell prompt region recorded from OSC 133 markers. Rows are
@@ -48,9 +59,9 @@ pub struct Grid {
     /// rows this turns a 200-row × N-cell memcpy into a pointer bump.
     /// The indexing API is unchanged: `VecDeque` implements `Index<usize>`
     /// and `IntoIterator`, so all existing callers compile untouched.
-    visible: VecDeque<Row>,
+    visible: VecDeque<Line>,
     /// Scrollback buffer (oldest at front).
-    scrollback: VecDeque<Row>,
+    scrollback: VecDeque<Line>,
     scrollback_limit: usize,
     /// Cursor position within the visible region.
     pub cursor: Pos,
@@ -287,30 +298,30 @@ impl Grid {
     /// Borrow a visible row.
     #[inline]
     pub fn row(&self, r: u16) -> &Row {
-        &self.visible[r as usize]
+        self.visible[r as usize].as_vec()
     }
 
     /// Mutably borrow a visible row.
     #[inline]
     pub fn row_mut(&mut self, r: u16) -> &mut Row {
-        &mut self.visible[r as usize]
+        self.visible[r as usize].as_vec_mut()
     }
 
     /// Iterate visible rows.
     pub fn rows_iter(&self) -> impl Iterator<Item = &Row> {
-        self.visible.iter()
+        self.visible.iter().map(|l| l.as_vec())
     }
 
     /// Borrow a scrollback row by index (0 = oldest). Returns `None` if out
     /// of range.
     #[inline]
     pub fn scrollback_row(&self, r: usize) -> Option<&Row> {
-        self.scrollback.get(r)
+        self.scrollback.get(r).map(|l| l.as_vec())
     }
 
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
-        self.scrollback.iter()
+        self.scrollback.iter().map(|l| l.as_vec())
     }
 
     /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
@@ -325,10 +336,10 @@ impl Grid {
     pub fn row_at_abs(&self, abs: u64) -> Option<&Row> {
         let sb = self.scrollback.len() as u64;
         if abs < sb {
-            self.scrollback.get(abs as usize)
+            self.scrollback.get(abs as usize).map(|l| l.as_vec())
         } else {
             let r = (abs - sb) as usize;
-            self.visible.get(r)
+            self.visible.get(r).map(|l| l.as_vec())
         }
     }
 
@@ -861,6 +872,6 @@ impl Grid {
     }
 }
 
-fn make_row(cols: u16) -> Row {
-    vec![Cell::default(); cols as usize]
+fn make_row(cols: u16) -> Line {
+    Line::flat_filled(cols as usize, Cell::default())
 }
