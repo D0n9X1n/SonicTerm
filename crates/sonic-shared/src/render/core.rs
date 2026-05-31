@@ -119,7 +119,7 @@ use crate::{
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
-    quad::{push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
+    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
     shape::{run_is_ascii_fast, shape_run, RunStyle, ShapeCache},
@@ -3251,7 +3251,7 @@ impl GpuRenderer {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
-                        color: [accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16],
+                        color: premultiply([accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16]),
                         size_px: [row.rect.w, row.rect.h],
                         radius_px: PALETTE_ROW_RADIUS,
                         ..Default::default()
@@ -3395,7 +3395,7 @@ impl GpuRenderer {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.x, row.y, row.w, row.h, sw, sh),
-                        color: [accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16],
+                        color: premultiply([accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16]),
                         size_px: [row.w, row.h],
                         radius_px: PALETTE_ROW_RADIUS,
                         ..Default::default()
@@ -3442,7 +3442,7 @@ impl GpuRenderer {
         if let (Some(state), Some(layout)) = (ime, &ime_layout) {
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: [0.10, 0.11, 0.14, 0.95],
+                color: premultiply([0.10, 0.11, 0.14, 0.95]),
                 ..Default::default()
             });
             // Clip the preedit underline to the active pane (PR #270

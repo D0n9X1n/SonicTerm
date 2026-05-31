@@ -100,6 +100,54 @@ impl QuadInstance {
     }
 }
 
+/// Convert a straight-alpha `[r, g, b, a]` color into premultiplied form
+/// (`[r*a, g*a, b*a, a]`).
+///
+/// [`QuadInstance::color`] is documented as premultiplied and the
+/// pipeline blends with `src=One, dst=OneMinusSrcAlpha` (see
+/// [`premultiplied_alpha_blend`]). Call sites that author colors as
+/// straight-alpha — e.g. the command-palette selected-row highlight
+/// (`[accent.r, accent.g, accent.b, 0.16]`) or the IME pre-edit
+/// background (`[0.10, 0.11, 0.14, 0.95]`) — must wrap them with this
+/// helper before stuffing them into a `QuadInstance`, otherwise the
+/// chrome renders much brighter than intended (the #375 regression
+/// caught in PR #377 review).
+///
+/// Opaque colors (`a == 1.0`) pass through unchanged — premultiplying
+/// by 1.0 is the identity, so it's safe (and a no-op) to wrap every
+/// call site if in doubt.
+#[must_use]
+#[inline]
+pub fn premultiply(rgba: [f32; 4]) -> [f32; 4] {
+    let a = rgba[3];
+    [rgba[0] * a, rgba[1] * a, rgba[2] * a, a]
+}
+
+/// Blend descriptor for premultiplied-alpha sources. `QuadInstance::color`
+/// is documented as premultiplied (see field doc) and `ui_tokens.rs`
+/// constructs all chrome colors that way, so the pipeline must use
+/// `src=One, dst=OneMinusSrcAlpha` for both color and alpha (matching
+/// `text_pipeline`). Using `wgpu::BlendState::ALPHA_BLENDING` (straight-alpha
+/// factors `src=SrcAlpha, dst=OneMinusSrcAlpha`) double-multiplies the
+/// alpha, which on transparent Win11 Mica surfaces makes dark tab chrome
+/// blend nearly into the clear backdrop — the invisible-tab-bar bug
+/// tracked by #375.
+#[must_use]
+pub fn premultiplied_alpha_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
 /// wgpu render pipeline + a growable instance buffer for `QuadInstance`s.
 /// Constructed once at GPU init, drawn one `draw()` call per frame.
 pub struct QuadPipeline {
@@ -167,7 +215,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let d = sd_segment(in.local, a, b) - thickness * 0.5;
         let w = fwidth(d);
         let aa = 1.0 - smoothstep(-w, w, d);
-        return vec4<f32>(in.color.rgb, in.color.a * aa);
+        return in.color * aa;
     }
     let r = in.params.z;
     if (r <= 0.0) {
@@ -180,7 +228,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 1-pixel antialias band: alpha = 1 inside, 0 outside, smooth in between.
     let w = fwidth(d);
     let aa = 1.0 - smoothstep(-w, w, d);
-    return vec4<f32>(in.color.rgb, in.color.a * aa);
+    return in.color * aa;
 }
 "#;
 
@@ -221,7 +269,7 @@ impl QuadPipeline {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(premultiplied_alpha_blend()),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
