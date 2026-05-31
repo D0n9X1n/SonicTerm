@@ -85,6 +85,16 @@ impl LineStorage {
         }
     }
 
+    /// Approximate reserved heap payload bytes for the inner storage Vec.
+    /// Unlike [`Self::approx_byte_size`], this uses `Vec::capacity()` so
+    /// reporting code counts bytes actually reserved from the allocator.
+    pub fn approx_capacity_byte_size(&self) -> usize {
+        match self {
+            LineStorage::Flat(v) => v.capacity() * std::mem::size_of::<Cell>(),
+            LineStorage::Cluster(cs) => cs.capacity() * std::mem::size_of::<Cluster>(),
+        }
+    }
+
     // --- PR-A: API completeness (#319). Pure additive on the primitive.
     // These methods cover every operation `Line` callers will need in PR-B
     // (the Line::cells alias swap). Line itself is intentionally unchanged.
@@ -438,6 +448,11 @@ impl Line {
     /// Approximate payload byte size.
     pub fn approx_byte_size(&self) -> usize {
         self.storage.approx_byte_size()
+    }
+
+    /// Approximate reserved heap payload bytes for this line's storage.
+    pub fn approx_capacity_byte_size(&self) -> usize {
+        self.storage.approx_capacity_byte_size()
     }
 
     /// Returns `true` if the line is currently in cluster form.

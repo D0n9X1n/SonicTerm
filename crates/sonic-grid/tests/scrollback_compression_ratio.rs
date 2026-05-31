@@ -17,7 +17,12 @@
 //!      `LineStorage::try_compress`; we verify the policy still holds
 //!      end-to-end via Grid::scroll_up.
 
-use sonic_grid::grid::{CellFlags, Color, Grid};
+use std::collections::VecDeque;
+
+use sonic_grid::{
+    grid::{Cell, CellFlags, Color, Grid},
+    line::Line,
+};
 
 #[test]
 fn uniform_scrollback_lines_are_overwhelmingly_cluster() {
@@ -70,12 +75,10 @@ fn non_uniform_scrollback_lines_stay_flat() {
 
 #[test]
 fn cluster_scrollback_bytes_below_60pct_of_dense_baseline() {
-    // Headline #319 promise: cluster-encoded uniform scrollback
-    // occupies <=60% of the bytes a dense `Vec<Vec<Cell>>` would for
-    // the same row count + width.  In practice the ratio is closer to
-    // 1% (one Cluster per row vs `cols` Cells per row), so 60% leaves
-    // generous slack for the per-Line/per-Vec overheads we don't
-    // count in `approx_byte_size`.
+    // Headline #319 promise, using honest heap accounting: compare the
+    // actual clustered scrollback footprint (Vec capacity + Line/Vec/container
+    // overhead) against an equivalent dense Vec<Vec<Cell>>-shaped baseline.
+    // This is intentionally larger than the payload-only compaction metric.
     let cols: u16 = 120;
     let rows: u16 = 24;
     let mut g = Grid::new(cols, rows);
@@ -83,12 +86,15 @@ fn cluster_scrollback_bytes_below_60pct_of_dense_baseline() {
     for _ in 0..N {
         g.scroll_up(1);
     }
-    let measured = g.scrollback_approx_bytes();
-    let cell_sz = std::mem::size_of::<sonic_grid::grid::Cell>();
-    let dense = N * cols as usize * cell_sz;
+    let measured = g.scrollback_heap_bytes();
+    let dense_row_capacity = Vec::<Cell>::with_capacity(cols as usize).capacity();
+    let dense = std::mem::size_of::<VecDeque<Line>>()
+        + g.scrollback_capacity() * std::mem::size_of::<Line>()
+        + N * std::mem::size_of::<Vec<Cell>>()
+        + N * dense_row_capacity * std::mem::size_of::<Cell>();
     let ratio_pct = (measured as f64) / (dense as f64) * 100.0;
     assert!(
         measured * 10 <= dense * 6,
-        "expected scrollback bytes <=60% of dense baseline, got {ratio_pct:.2}% ({measured} / {dense} bytes)",
+        "expected scrollback heap bytes <=60% of dense baseline, got {ratio_pct:.2}% ({measured} / {dense} bytes)",
     );
 }

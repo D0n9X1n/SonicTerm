@@ -828,13 +828,33 @@ impl Grid {
         (cluster, flat)
     }
 
-    /// #319 PR-F: sum of per-row `approx_byte_size()` across scrollback. The
-    /// equivalent dense `Vec<Vec<Cell>>` baseline is
-    /// `scrollback_len() * cols * size_of::<Cell>()`. The ratio of these two
-    /// is the headline compression number reported by the validation example.
+    /// #319 PR-F: sum of per-row `approx_byte_size()` across scrollback. This
+    /// is a payload-only metric used by internal compression policy tests.
+    /// User-visible heap reporting should use [`Self::scrollback_heap_bytes`]
+    /// so it counts reserved `Vec::capacity()` bytes and container overhead.
     #[doc(hidden)]
     pub fn scrollback_approx_bytes(&self) -> usize {
         self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
+    }
+
+    /// #399 review fix: reserved row slots in the scrollback container.
+    #[doc(hidden)]
+    pub fn scrollback_capacity(&self) -> usize {
+        self.scrollback.capacity()
+    }
+
+    /// #399 review fix: approximate scrollback heap footprint for reporting.
+    /// Counts the scrollback `VecDeque` ring, reserved outer row slots, one
+    /// inner `Vec` header per live row, plus each inner storage buffer's
+    /// reserved capacity. This intentionally reports user-visible heap shape
+    /// rather than the smaller payload-only byte count used by compaction
+    /// decisions.
+    #[doc(hidden)]
+    pub fn scrollback_heap_bytes(&self) -> usize {
+        std::mem::size_of::<std::collections::VecDeque<Line>>()
+            + self.scrollback_capacity() * std::mem::size_of::<Line>()
+            + self.scrollback.len() * std::mem::size_of::<Vec<Cell>>()
+            + self.scrollback.iter().map(|r| r.approx_capacity_byte_size()).sum::<usize>()
     }
 
     /// Absolute row of the cursor (= `scrollback_len() + cursor.row`). Used
