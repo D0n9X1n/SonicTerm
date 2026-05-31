@@ -349,8 +349,26 @@ impl App {
             }
             inner
         };
-        if let (Some(i), _) = outcome {
-            self.close_tab_at(i);
+        match outcome {
+            (Some(i), _) => self.close_tab_at(i),
+            (_, Some(_focus)) => {
+                // #387: the surviving sibling's PaneRect just grew to cover
+                // the closed pane's area. Push the new layout into its Grid
+                // + PtyHandle (matches split / zoom / resize-split paths and
+                // mirrors `close_active_pane_in_child`). Without this the
+                // survivor keeps its narrow split-time column count and
+                // shell output wraps at the old width until the OS window
+                // is resized. The actual resize is delegated to
+                // `resize_visible_panes` which routes through the pure
+                // helper `resize_panes_to_rects` — the path tested by
+                // `close_sibling_pane_resizes_survivor_to_full_width` in
+                // `crates/sonic-app/tests/per_pane_resize.rs`.
+                self.resize_visible_panes();
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            }
+            _ => {}
         }
     }
     pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
