@@ -14,7 +14,7 @@ use sonic_ui::copy_mode::CopyModeState;
 use sonic_ui::selection::Selection;
 use sonic_ui::tabbar_view::TabBarLayout;
 use winit::{
-    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
     window::WindowId,
@@ -807,6 +807,43 @@ impl App {
                     // v1.0 Cmd-held-hover affordance; OSC 8 keeps its
                     // unconditional pointer affordance.
                     self.refresh_hovered_url();
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                // #412: route wheel events to the pane under the cursor.
+                // Default 3 lines per LineDelta tick (matches stock GTK
+                // / Cocoa wheel feel). PixelDelta divides by the live
+                // cell height so trackpad scrolls match font size.
+                let (cursor_pos, sf) = self
+                    .main()
+                    .map(|ws| (ws.cursor_pos, ws.scale_factor as f32))
+                    .unwrap_or(((0.0, 0.0), 1.0));
+                let (lx, ly) = to_logical_pos(cursor_pos.0, cursor_pos.1, sf);
+                let cell_h = self
+                    .main_renderer()
+                    .map(|r| r.cell_size().1)
+                    .filter(|h| *h > 0.0)
+                    .unwrap_or(16.0);
+                let lines_per_tick: f32 = 3.0;
+                let delta_lines_f: f32 = match delta {
+                    // winit's y is positive when scrolling UP (away from
+                    // user); we want negative delta_lines for "scroll
+                    // back into history".
+                    MouseScrollDelta::LineDelta(_x, y) => -y * lines_per_tick,
+                    MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
+                };
+                // Round away from zero so a tiny trackpad nudge still
+                // produces at least one line of motion.
+                let delta_lines = if delta_lines_f >= 0.0 {
+                    delta_lines_f.ceil() as i32
+                } else {
+                    delta_lines_f.floor() as i32
+                };
+                if delta_lines != 0 {
+                    if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
+                        self.scroll_pane(pane_id, delta_lines);
+                    }
                 }
             }
 
