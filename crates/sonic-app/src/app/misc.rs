@@ -390,6 +390,7 @@ impl App {
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
+            scrollbar_drag: None,
         };
         self.windows.insert(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);

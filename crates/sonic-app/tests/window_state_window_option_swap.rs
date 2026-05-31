@@ -34,6 +34,7 @@ fn make_ws_with_no_window() -> WindowState {
         ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
         hovered_url: None,
         hidden: false,
+        scrollbar_drag: None,
     }
 }
 

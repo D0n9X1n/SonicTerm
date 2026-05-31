@@ -170,6 +170,10 @@ pub struct WindowState {
     /// child windows keep the event loop alive); child windows leave it
     /// `false` and reap on empty instead.
     pub hidden: bool,
+    /// Active scrollbar-drag gesture (#386 PR-C). `Some(_)` between a
+    /// thumb mouse-down and the matching release; cursor moves while
+    /// set route to the scrollbar instead of extending a selection.
+    pub scrollbar_drag: Option<scrollbar_input::ScrollbarDragState>,
 }
 
 impl WindowState {
@@ -718,6 +722,7 @@ mod keymap_dispatch;
 mod misc;
 pub mod os_drag;
 mod overlays;
+pub mod scrollbar_input;
 mod search_handle;
 mod spawn_pane;
 mod tab_state;
@@ -1742,6 +1747,7 @@ impl App {
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
+            scrollbar_drag: None,
         };
         self.windows.insert(id, child);
         id
@@ -2295,6 +2301,7 @@ impl App {
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
+            scrollbar_drag: None,
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);
