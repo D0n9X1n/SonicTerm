@@ -303,6 +303,7 @@ impl App {
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
+            scrollbar_drag: None,
         };
         self.windows.insert(main_id, shadow);
 

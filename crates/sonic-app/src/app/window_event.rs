@@ -681,6 +681,39 @@ impl App {
                     return;
                 }
                 if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
+                    // #386 PR-C: scrollbar drag takes priority over
+                    // selection extension while a thumb is held. Match
+                    // CLAUDE.md §4 — keep this branch fast; no parser
+                    // lock is needed (geometry was snapshotted at press).
+                    if let Some((pane_id, new_view_top)) = self.scrollbar_drag_apply(lx) {
+                        // Resolve `live_top` for the dragged pane (not
+                        // necessarily the active one — keep the gesture
+                        // pinned to the press pane even if focus shifted).
+                        let live_top_opt = self.main().and_then(|ws| {
+                            ws.panes.get(&pane_id).and_then(|p| {
+                                p.parser.try_lock().map(|parser| {
+                                    let g = parser.grid();
+                                    g.scrollback_len() as u64
+                                })
+                            })
+                        });
+                        if let Some(live_top) = live_top_opt {
+                            if let Some(ws) = self.main_mut() {
+                                if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                                    pane.viewport_top_abs = if new_view_top >= live_top {
+                                        None
+                                    } else {
+                                        Some(new_view_top)
+                                    };
+                                }
+                                super::mark_all_panes_dirty(&ws.panes);
+                                if let Some(w) = ws.window.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                        return;
+                    }
                     if let Some(r) = self.main_renderer() {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
@@ -802,6 +835,43 @@ impl App {
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                         self.main_renderer().and_then(|r| r.pixel_to_cell(cp.0 as f32, cp.1 as f32))
                     };
+                    // #386 PR-C: scrollbar input has priority over
+                    // selection start. Done BEFORE the pane-focus switch
+                    // and selection-anchor path so a thumb-drag never
+                    // doubles as a text drag. `scrollbar_hit_at` returns
+                    // `Miss` for any click outside the active pane's bar,
+                    // including clicks on inactive panes' bars (those
+                    // need a focus-switch click first — matches the
+                    // behaviour of other terminals).
+                    {
+                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        match self.scrollbar_hit_at(lx, ly) {
+                            crate::app::scrollbar_input::HitOutcome::Miss => {}
+                            crate::app::scrollbar_input::HitOutcome::StartDrag(state) => {
+                                if let Some(ws) = self.main_mut() {
+                                    ws.scrollbar_drag = Some(state);
+                                    // Suppress the residual selection-drag
+                                    // path: mouse_down stays true (so
+                                    // CursorMoved routes here) but no
+                                    // Selection was created.
+                                }
+                                if let Some(w) = self.main_window() {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                            crate::app::scrollbar_input::HitOutcome::PageUp => {
+                                self.scrollbar_track_page(false);
+                                return;
+                            }
+                            crate::app::scrollbar_input::HitOutcome::PageDown => {
+                                self.scrollbar_track_page(true);
+                                return;
+                            }
+                        }
+                    }
                     if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
                         let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                         let pane_rects = self
@@ -882,6 +952,12 @@ impl App {
                     }
                 }
                 ElementState::Released => {
+                    // #386 PR-C: end any active scrollbar drag — do this
+                    // unconditionally on release so a drag that ended
+                    // outside the bar still clears state.
+                    if let Some(ws) = self.main_mut() {
+                        ws.scrollbar_drag = None;
+                    }
                     // Commit-on-release: read the live drag session and
                     // foreign drop target, decide what to do via the
                     // pure compute_action helper, then execute.

@@ -85,6 +85,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
         ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
         hovered_url: None,
         hidden: false,
+        scrollbar_drag: None,
     };
 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
