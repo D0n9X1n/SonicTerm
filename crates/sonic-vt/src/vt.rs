@@ -638,18 +638,54 @@ impl Perform for Performer {
                 let col = p1().saturating_sub(1);
                 self.grid.goto(row, col);
             }
-            'J' => match p0() {
-                0 => self.grid.erase_below(),
-                1 => self.grid.erase_above(),
-                2 | 3 => self.grid.erase_screen(),
-                _ => {}
-            },
-            'K' => match p0() {
-                0 => self.grid.erase_line_to_end(),
-                1 => self.grid.erase_line_to_start(),
-                2 => self.grid.erase_line(),
-                _ => {}
-            },
+            'J' => {
+                let mode = p0();
+                let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                let (rows, cols) = (self.grid.rows, self.grid.cols);
+                let will_blank = match mode {
+                    0 => format!(
+                        "rows ({r},{c})..({r},{}) + ({},0)..({},{})",
+                        cols.saturating_sub(1),
+                        r + 1,
+                        rows.saturating_sub(1),
+                        cols.saturating_sub(1)
+                    ),
+                    1 => format!("(0,0)..({r},{c}) inclusive"),
+                    2 | 3 => "entire screen".to_string(),
+                    _ => "<unknown mode, no-op>".to_string(),
+                };
+                tracing::debug!(
+                    target: "sonic_vt::erase",
+                    "CSI {mode}J: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
+                );
+                match mode {
+                    0 => self.grid.erase_below(),
+                    1 => self.grid.erase_above(),
+                    2 | 3 => self.grid.erase_screen(),
+                    _ => {}
+                }
+            }
+            'K' => {
+                let mode = p0();
+                let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                let (rows, cols) = (self.grid.rows, self.grid.cols);
+                let will_blank = match mode {
+                    0 => format!("cells ({r},{c})..({r},{})", cols.saturating_sub(1)),
+                    1 => format!("cells ({r},0)..({r},{c}) inclusive"),
+                    2 => format!("cells ({r},0)..({r},{})", cols.saturating_sub(1)),
+                    _ => "<unknown mode, no-op>".to_string(),
+                };
+                tracing::debug!(
+                    target: "sonic_vt::erase",
+                    "CSI {mode}K: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
+                );
+                match mode {
+                    0 => self.grid.erase_line_to_end(),
+                    1 => self.grid.erase_line_to_start(),
+                    2 => self.grid.erase_line(),
+                    _ => {}
+                }
+            }
             'L' => {
                 // CSI Ps L — IL (Insert Line). Insert n blank lines at the
                 // cursor row, pushing the rest of the scroll region down.
@@ -763,17 +799,25 @@ impl Perform for Performer {
                 let rows = self.grid.rows;
                 let top_p = p0();
                 let bot_p = p1();
+                let cur_before = (self.grid.cursor.row, self.grid.cursor.col);
                 let new_top = if top_p == 0 { 0 } else { top_p.saturating_sub(1) };
                 let new_bot =
                     if bot_p == 0 { rows.saturating_sub(1) } else { bot_p.saturating_sub(1) };
-                if new_top < new_bot && new_bot < rows {
+                let (applied_top, applied_bot) = if new_top < new_bot && new_bot < rows {
                     self.scroll_top = Some(new_top);
                     self.scroll_bottom = Some(new_bot);
+                    (new_top, new_bot)
                 } else {
                     self.scroll_top = None;
                     self.scroll_bottom = None;
-                }
+                    (0, rows.saturating_sub(1))
+                };
                 self.grid.goto(0, 0);
+                tracing::debug!(
+                    target: "sonic_vt::stbm",
+                    "CSI {top_p};{bot_p}r DECSTBM: parsed=({new_top},{new_bot}), applied=({applied_top},{applied_bot}), grid_rows={rows}, cursor {:?}→(0,0)",
+                    cur_before
+                );
             }
             _ => {}
         }
