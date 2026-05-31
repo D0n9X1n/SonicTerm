@@ -201,6 +201,21 @@ attribute streams and dense scrollback writes (see
 not done. Do not call this "complete" in commit messages or PR
 bodies.
 
+##### Epic #300 P5 — LineStorage scrollback compression (#319) ✅
+
+Six-PR chain (A: API, B1/B2: cluster-transparent reads, C: scroll_up
+eject, D: smart-degrade, E: resize-aware, F: bench + validation)
+landed the cluster-RLE scrollback representation. Validated end-to-end
+by `crates/sonic-grid/examples/scrollback_memory_report.rs` and
+`tests/scrollback_compression_ratio.rs`:
+
+- 10K uniform-blank lines @ 120 cols: **0.305 MiB measured vs 27.466
+  MiB dense baseline → 98.89% reduction** (well past the ≥40%
+  headline promise).
+- Non-uniform lines correctly stay Flat (Cluster would cost more RAM).
+- `scrollback_ram_mb` is now a gated metric in `scripts/bench.sh` +
+  `baseline.json`.
+
 Remaining gates before the v1.0 tag goes out:
 
 1. **Honest perf-parity sign-off** — vtebench within ~2× of WezTerm

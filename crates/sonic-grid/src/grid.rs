@@ -810,6 +810,33 @@ impl Grid {
         self.scrollback.len()
     }
 
+    /// #319 PR-F: debug introspection — count (Cluster, Flat) lines in
+    /// scrollback. Used by `tests/scrollback_compression_ratio.rs` and the
+    /// `examples/scrollback_memory_report.rs` validation example to prove
+    /// the ≥40% RAM reduction promise of the Epic #300 P5 LineStorage work.
+    #[doc(hidden)]
+    pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
+        let mut cluster = 0usize;
+        let mut flat = 0usize;
+        for row in &self.scrollback {
+            if row.is_clustered() {
+                cluster += 1;
+            } else {
+                flat += 1;
+            }
+        }
+        (cluster, flat)
+    }
+
+    /// #319 PR-F: sum of per-row `approx_byte_size()` across scrollback. The
+    /// equivalent dense `Vec<Vec<Cell>>` baseline is
+    /// `scrollback_len() * cols * size_of::<Cell>()`. The ratio of these two
+    /// is the headline compression number reported by the validation example.
+    #[doc(hidden)]
+    pub fn scrollback_approx_bytes(&self) -> usize {
+        self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
+    }
+
     /// Absolute row of the cursor (= `scrollback_len() + cursor.row`). Used
     /// by OSC 133 marker recording so prompt regions survive scrolling.
     #[inline]

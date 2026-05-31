@@ -11,7 +11,8 @@
     "cat_10mb_ascii_sec",
     "cat_4mb_ansi_sec",
     "rss_mb",
-    "idle_cpu_pct"
+    "idle_cpu_pct",
+    "scrollback_ram_mb"
   ],
   "metrics": {
     "vtebench_dense_cells_ms": 39.22,
@@ -20,6 +21,7 @@
     "cat_10mb_ascii_sec": 0.162,
     "cat_4mb_ansi_sec": 0.065,
     "rss_mb": 200.0,
-    "idle_cpu_pct": 1.0
+    "idle_cpu_pct": 1.0,
+    "scrollback_ram_mb": 0.3052
   }
 }
