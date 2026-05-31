@@ -259,6 +259,8 @@ impl App {
                     panes_opt,
                     cursor_visible_now,
                     last_render_slot,
+                    ws_selection_ref,
+                    ws_copy_mode_ref,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonic_ui::tabs::TabBar>,
@@ -266,6 +268,8 @@ impl App {
                     Option<&mut std::collections::HashMap<u64, crate::app::PaneState>>,
                     bool,
                     Option<&mut Instant>,
+                    Option<&Selection>,
+                    Option<&CopyModeState>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -277,6 +281,11 @@ impl App {
                             .get(&active_id)
                             .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
                             .unwrap_or(true);
+                        // PR-B3c (#365): selection + copy_mode now live on
+                        // `ws`. Pull immutable refs disjoint from the mut
+                        // borrows of `ws.{renderer,tabs,tab_states,panes,last_render}`.
+                        let sel_ref = ws.selection.as_ref();
+                        let cm_ref = ws.copy_mode.as_ref();
                         (
                             ws.renderer.as_mut(),
                             Some(&mut ws.tabs),
@@ -284,9 +293,11 @@ impl App {
                             Some(&mut ws.panes),
                             cv,
                             Some(&mut ws.last_render),
+                            sel_ref,
+                            cm_ref,
                         )
                     }
-                    None => (None, None, None, None, true, None),
+                    None => (None, None, None, None, true, None, None, None),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
                     renderer_opt,
@@ -357,8 +368,8 @@ impl App {
                             &mut panes_slice,
                             &self.theme,
                             cursor_visible_now,
-                            self.selection.as_ref(),
-                            self.copy_mode.as_ref(),
+                            ws_selection_ref,
+                            ws_copy_mode_ref,
                             tabs_mref,
                             search,
                             // Epic #289 follow-up: only feed the palette
@@ -526,7 +537,9 @@ impl App {
             }
 
             WindowEvent::ModifiersChanged(m) => {
-                self.modifiers = m.state();
+                if let Some(ws) = self.main_mut() {
+                    ws.modifiers = m.state();
+                }
                 // Releasing the open-URL modifier must clear any
                 // visible Cmd+hover URL underline (and revert the
                 // pointer to default if it was previously shown). We
@@ -647,13 +660,16 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
-                            if let Some(sel) = self.selection.as_mut() {
-                                sel.extend(row, col);
-                                if let Some(panes) = self.main_panes() {
-                                    mark_all_panes_dirty(panes);
-                                }
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
+                            // PR-B3c (#365): selection lives on WindowState.
+                            // Split-borrow `ws.selection` and `ws.panes`
+                            // disjointly.
+                            if let Some(ws) = self.main_mut() {
+                                if let Some(sel) = ws.selection.as_mut() {
+                                    sel.extend(row, col);
+                                    mark_all_panes_dirty(&ws.panes);
+                                    if let Some(w) = ws.window.as_ref() {
+                                        w.request_redraw();
+                                    }
                                 }
                             }
                         }
@@ -830,7 +846,7 @@ impl App {
                                 }
                                 return;
                             }
-                            self.selection = Some(Selection::new(row, col));
+                            self.selection_set(Some(Selection::new(row, col)));
                             if let Some(panes) = self.main_panes() {
                                 mark_all_panes_dirty(panes);
                             }
@@ -892,9 +908,11 @@ impl App {
                             w.request_redraw();
                         }
                     }
-                    if let Some(sel) = self.selection.as_ref() {
-                        if sel.is_empty() {
-                            self.selection = None;
+                    if let Some(sel_present) =
+                        self.main().map(|ws| ws.selection.as_ref().map(|s| s.is_empty()))
+                    {
+                        if sel_present == Some(true) {
+                            self.selection_set(None);
                             if let Some(panes) = self.main_panes() {
                                 mark_all_panes_dirty(panes);
                             }
@@ -933,7 +951,7 @@ impl App {
                     // Let the toggle binding (super+?) still close the cheat
                     // sheet; everything else routes into overlay state and is
                     // NOT forwarded to the pty.
-                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::ShowKeymapCheatsheet) {
                                 self.run_action(&action);
@@ -955,7 +973,7 @@ impl App {
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette
                     // state and is NOT forwarded to the pty.
-                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::OpenCommandPalette) {
                                 self.run_action(&action);
@@ -987,7 +1005,7 @@ impl App {
                     }
                     return;
                 }
-                if self.copy_mode.is_some() {
+                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
                     self.copy_mode_handle_key(&event);
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
@@ -995,7 +1013,7 @@ impl App {
                     return;
                 }
                 if self.search_active() {
-                    if let Some(key_str) = key_event_to_string(&event, self.modifiers) {
+                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if !matches!(action, Action::OpenSearch) {
                                 self.run_action(&action);
@@ -1006,13 +1024,13 @@ impl App {
                             }
                         }
                     }
-                    self.search_handle_key(&event, self.modifiers);
+                    self.search_handle_key(&event, self.main_modifiers());
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
                     return;
                 }
-                for key_str in key_to_strings(&event.logical_key, self.modifiers) {
+                for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         if self.run_action(&action) {
                             self.drain_pending_window_creates(el);
@@ -1023,10 +1041,10 @@ impl App {
                         }
                     }
                 }
-                if let Some(bytes) = encode_key(&event, self.modifiers) {
+                if let Some(bytes) = encode_key(&event, self.main_modifiers()) {
                     self.write_to_pty(bytes);
-                    if self.selection.is_some() {
-                        self.selection = None;
+                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
+                        self.selection_set(None);
                         if let Some(panes) = self.main_panes() {
                             mark_all_panes_dirty(panes);
                         }
@@ -1043,7 +1061,7 @@ impl App {
 }
 impl App {
     fn copy_mode_handle_key(&mut self, event: &KeyEvent) {
-        let Some(mut state) = self.copy_mode.take() else { return };
+        let Some(mut state) = self.main_mut().and_then(|ws| ws.copy_mode.take()) else { return };
         let mut should_copy = false;
         let mut should_exit = false;
 
@@ -1072,7 +1090,7 @@ impl App {
                     self.set_clipboard_text(text);
                 }
                 if !should_exit {
-                    self.copy_mode = Some(state);
+                    self.copy_mode_set(Some(state));
                 }
                 if let Some(panes) = self.main_panes() {
                     mark_all_panes_dirty(panes);
@@ -1120,9 +1138,9 @@ impl App {
         }
 
         if should_exit {
-            self.copy_mode = None;
+            self.copy_mode_set(None);
         } else {
-            self.copy_mode = Some(state);
+            self.copy_mode_set(Some(state));
         }
         if let Some(panes) = self.main_panes() {
             mark_all_panes_dirty(panes);

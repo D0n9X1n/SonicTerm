@@ -233,12 +233,11 @@ pub fn synthetic_main_window_id() -> WindowId {
 /// then. Phase B2 PR-B3b (#365): `cursor_visible`, `last_render`, and
 /// `hover_link` are now owned by `WindowState` directly and no longer
 /// appear in this snapshot — they were deleted from `App` in this PR.
+/// PR-B3c (#365): `selection`, `copy_mode`, and `modifiers` likewise
+/// promoted to `WindowState` and removed from this snapshot.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ShadowMainSnapshot {
-    pub selection: Option<Selection>,
-    pub copy_mode: Option<CopyModeState>,
-    pub modifiers: ModifiersState,
     pub drag_session: Option<crate::tab_drag::DragSession>,
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     pub scale_factor: f64,
@@ -250,10 +249,7 @@ pub struct ShadowMainSnapshot {
 
 impl PartialEq for ShadowMainSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.selection == other.selection
-            && self.copy_mode == other.copy_mode
-            && self.modifiers == other.modifiers
-            && format!("{:?}", self.drag_session) == format!("{:?}", other.drag_session)
+        format!("{:?}", self.drag_session) == format!("{:?}", other.drag_session)
             && format!("{:?}", self.drag_target) == format!("{:?}", other.drag_target)
             && self.scale_factor == other.scale_factor
             && format!("{:?}", self.ime) == format!("{:?}", other.ime)
@@ -265,9 +261,6 @@ impl PartialEq for ShadowMainSnapshot {
 #[doc(hidden)]
 pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
     ShadowMainSnapshot {
-        selection: ws.selection,
-        copy_mode: ws.copy_mode.clone(),
-        modifiers: ws.modifiers,
         drag_session: ws.drag_session,
         drag_target: ws.drag_target,
         scale_factor: ws.scale_factor,
@@ -283,9 +276,6 @@ pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
 /// `tests/clear_shape_cache_event.rs`).
 #[doc(hidden)]
 pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot) {
-    ws.selection = snap.selection;
-    ws.copy_mode = snap.copy_mode;
-    ws.modifiers = snap.modifiers;
     ws.drag_session = snap.drag_session;
     ws.drag_target = snap.drag_target;
     ws.scale_factor = snap.scale_factor;
@@ -304,12 +294,8 @@ pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot
 /// `App` into the shadow during PR-B; until then the shadow holds
 /// `None` / empty placeholders for them and the test does not compare.
 #[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
 pub fn apply_shadow_main_sync(
     ws: &mut WindowState,
-    selection: Option<Selection>,
-    copy_mode: Option<CopyModeState>,
-    modifiers: ModifiersState,
     drag_session: Option<crate::tab_drag::DragSession>,
     drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
     scale_factor: f64,
@@ -318,16 +304,7 @@ pub fn apply_shadow_main_sync(
 ) {
     apply_shadow_main_snapshot(
         ws,
-        ShadowMainSnapshot {
-            selection,
-            copy_mode,
-            modifiers,
-            drag_session,
-            drag_target,
-            scale_factor,
-            ime,
-            hovered_url,
-        },
+        ShadowMainSnapshot { drag_session, drag_target, scale_factor, ime, hovered_url },
     );
 }
 
@@ -923,14 +900,15 @@ pub struct App {
     // `Self::main_panes()` / `Self::main_panes_mut()`. Callers needing
     // panes + tabs/tab_states/renderer together should go through
     // `self.main_mut()` and split-borrow the fields disjointly.
-    pub(super) modifiers: ModifiersState,
     // PR-B3b (#365): `App.last_render`, `App.cursor_visible`, and
     // `App.hover_link` fields removed; now owned by
     // `self.windows[main_window_id]`. Access via
     // `self.main()?.last_render` / `self.main()?.cursor_visible` /
     // `self.main()?.hover_link`.
-    pub(super) selection: Option<Selection>,
-    pub(super) copy_mode: Option<CopyModeState>,
+    // PR-B3c (#365): `App.selection`, `App.copy_mode`, and `App.modifiers`
+    // fields removed; now owned by `self.windows[main_window_id]`.
+    // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
+    // direct field access through `self.main()?.copy_mode` etc.
     pub(super) clipboard: Option<Clipboard>,
     pub(super) scale_factor: f64,
     /// Currently-hovered auto-detected URL (focused pane only), with
@@ -1266,9 +1244,6 @@ impl App {
             theme,
             config,
             keymap,
-            modifiers: ModifiersState::empty(),
-            selection: None,
-            copy_mode: None,
             clipboard: Clipboard::new().ok(),
             scale_factor: 1.0,
             hovered_url: None,
@@ -2038,6 +2013,53 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.panes)
     }
 
+    /// Phase B2 PR-B3c (#365) — borrow the main window's selection
+    /// `Option<Selection>` from its [`WindowState`]. Sole source of
+    /// truth (legacy `App.selection` field was deleted in PR-B3c).
+    /// Returns `None` (no main window) — `Some(None)` (no selection)
+    /// — `Some(Some(_))` (active selection).
+    #[doc(hidden)]
+    pub fn main_selection(&self) -> Option<&Option<Selection>> {
+        Some(&self.windows.get(&self.main_window_id?)?.selection)
+    }
+
+    /// Mutable counterpart of [`Self::main_selection`].
+    #[doc(hidden)]
+    pub fn main_selection_mut(&mut self) -> Option<&mut Option<Selection>> {
+        let id = self.main_window_id?;
+        Some(&mut self.windows.get_mut(&id)?.selection)
+    }
+
+    /// Phase B2 PR-B3c (#365) — borrow the main window's
+    /// `ModifiersState` from its [`WindowState`]. Returns
+    /// `ModifiersState::empty()` if the main window does not yet
+    /// exist (safe default — no modifiers held).
+    #[doc(hidden)]
+    pub fn main_modifiers(&self) -> ModifiersState {
+        self.main_window_id
+            .and_then(|id| self.windows.get(&id))
+            .map(|ws| ws.modifiers)
+            .unwrap_or_else(ModifiersState::empty)
+    }
+
+    /// PR-B3c (#365) — replace the main window's selection.
+    /// No-op when the main window does not yet exist.
+    #[doc(hidden)]
+    pub fn selection_set(&mut self, sel: Option<Selection>) {
+        if let Some(ws) = self.main_mut() {
+            ws.selection = sel;
+        }
+    }
+
+    /// PR-B3c (#365) — replace the main window's copy-mode state.
+    /// No-op when the main window does not yet exist.
+    #[doc(hidden)]
+    pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
+        if let Some(ws) = self.main_mut() {
+            ws.copy_mode = st;
+        }
+    }
+
     /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
     /// window is OS-frontmost. Falls back to the main window when no
     /// frontmost has been recorded yet (matches the safe default in
@@ -2071,26 +2093,13 @@ impl App {
     #[doc(hidden)]
     pub fn sync_shadow_main(&mut self) {
         let Some(id) = self.main_window_id else { return };
-        let selection = self.selection;
-        let copy_mode = self.copy_mode.clone();
-        let modifiers = self.modifiers;
         let drag_session = self.drag_session;
         let drag_target = self.drag_target;
         let scale_factor = self.scale_factor;
         let ime = self.ime.clone();
         let hovered_url = self.hovered_url.clone();
         if let Some(ws) = self.windows.get_mut(&id) {
-            apply_shadow_main_sync(
-                ws,
-                selection,
-                copy_mode,
-                modifiers,
-                drag_session,
-                drag_target,
-                scale_factor,
-                ime,
-                hovered_url,
-            );
+            apply_shadow_main_sync(ws, drag_session, drag_target, scale_factor, ime, hovered_url);
         }
     }
 
@@ -2335,9 +2344,6 @@ impl App {
     #[doc(hidden)]
     pub fn shadow_main_snapshot(&self) -> ShadowMainSnapshot {
         ShadowMainSnapshot {
-            selection: self.selection,
-            copy_mode: self.copy_mode.clone(),
-            modifiers: self.modifiers,
             drag_session: self.drag_session,
             drag_target: self.drag_target,
             scale_factor: self.scale_factor,
@@ -2357,9 +2363,6 @@ impl App {
         let Some(id) = self.main_window_id else { return false };
         let Some(ws) = self.windows.get(&id) else { return false };
         ws.role == WindowRole::Terminal
-            && ws.selection == self.selection
-            && ws.copy_mode == self.copy_mode
-            && ws.modifiers == self.modifiers
             && ws.scale_factor == self.scale_factor
             && ws.hovered_url == self.hovered_url
     }
@@ -2404,9 +2407,9 @@ impl App {
             panes: HashMap::new(),
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
-            selection: self.selection,
-            copy_mode: self.copy_mode.clone(),
-            modifiers: self.modifiers,
+            selection: None,
+            copy_mode: None,
+            modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,
