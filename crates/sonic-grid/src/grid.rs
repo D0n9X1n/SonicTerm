@@ -13,16 +13,13 @@ use crate::line::Line;
 
 /// A row of cells.
 ///
-/// **PR-B1 (#319):** the public type alias remains `Vec<Cell>` so downstream
-/// callers compile unchanged. Internally, `Grid::visible` and
-/// `Grid::scrollback` now store `Line` (PR-A's `LineStorage`-backed
-/// container). Public accessors (`row`, `row_mut`, `rows_iter`,
-/// `scrollback_row`, `scrollback_iter`, `row_at_abs`) shim through
-/// `Line::as_vec` / `Line::as_vec_mut` to expose the inner `&Vec<Cell>` /
-/// `&mut Vec<Cell>`. In B1 every Line is Flat (Cluster production lands in
-/// PR-C), so these shims are zero-cost pointer derefs. PR-B2 will migrate
-/// downstream callers to consume `&Line` directly.
-pub type Row = Vec<Cell>;
+/// **PR-B2 (#319):** the public type alias is now `Line`. Public accessors
+/// (`row`, `row_mut`, `rows_iter`, `scrollback_row`, `scrollback_iter`,
+/// `row_at_abs`) return `&Line` / `&mut Line` directly. Callers index cells
+/// via `Line::Index<usize>` / `Index<Range<usize>>`, iterate via
+/// `Line::iter`, and use `Line::len`. Helpers that still take `&[Cell]`
+/// (e.g. `row_hash`, `row_quad_hash`) get fed `row.as_flat_slice()`.
+pub type Row = Line;
 
 /// A single shell prompt region recorded from OSC 133 markers. Rows are
 /// expressed in **scrollback-absolute coordinates** — `scrollback_len() +
@@ -298,30 +295,30 @@ impl Grid {
     /// Borrow a visible row.
     #[inline]
     pub fn row(&self, r: u16) -> &Row {
-        self.visible[r as usize].as_vec()
+        &self.visible[r as usize]
     }
 
     /// Mutably borrow a visible row.
     #[inline]
     pub fn row_mut(&mut self, r: u16) -> &mut Row {
-        self.visible[r as usize].as_vec_mut()
+        &mut self.visible[r as usize]
     }
 
     /// Iterate visible rows.
     pub fn rows_iter(&self) -> impl Iterator<Item = &Row> {
-        self.visible.iter().map(|l| l.as_vec())
+        self.visible.iter()
     }
 
     /// Borrow a scrollback row by index (0 = oldest). Returns `None` if out
     /// of range.
     #[inline]
     pub fn scrollback_row(&self, r: usize) -> Option<&Row> {
-        self.scrollback.get(r).map(|l| l.as_vec())
+        self.scrollback.get(r)
     }
 
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
-        self.scrollback.iter().map(|l| l.as_vec())
+        self.scrollback.iter()
     }
 
     /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
@@ -336,10 +333,10 @@ impl Grid {
     pub fn row_at_abs(&self, abs: u64) -> Option<&Row> {
         let sb = self.scrollback.len() as u64;
         if abs < sb {
-            self.scrollback.get(abs as usize).map(|l| l.as_vec())
+            self.scrollback.get(abs as usize)
         } else {
             let r = (abs - sb) as usize;
-            self.visible.get(r).map(|l| l.as_vec())
+            self.visible.get(r)
         }
     }
 

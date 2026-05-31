@@ -1066,7 +1066,7 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
         let col_start = if row_idx == start.1 { start.0 } else { 0 };
         let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
         let mut line = String::new();
-        for cell in &row[col_start.min(row.len())..col_end] {
+        for cell in row.get_range(col_start.min(row.len()), col_end) {
             if cell.flags.contains(sonic_core::grid::CellFlags::WIDE_CONT) {
                 continue;
             }
