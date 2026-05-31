@@ -649,6 +649,46 @@ impl Line {
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
         self.as_flat_slice_mut().iter_mut()
     }
+
+    /// PR-C (#319): try to compress this line into a single Cluster when
+    /// the entire row is uniform (every cell byte-identical). Called by
+    /// `Grid::scroll_up` as a Line is ejected from visible into
+    /// scrollback. Multi-Cluster compression of partially-uniform lines
+    /// is intentionally deferred to PR-D.
+    ///
+    /// Returns `true` if storage changed.
+    ///
+    /// * No-op if already Cluster.
+    /// * No-op on empty Flat (nothing to compress).
+    /// * No-op if any two cells differ — keeps Flat to avoid degrading
+    ///   on the first edit.
+    pub fn try_compress(&mut self) -> bool {
+        let flat = match &self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => return false,
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let first = &flat[0];
+        if !flat.iter().all(|c| c == first) {
+            return false;
+        }
+        let count = flat.len();
+        let cell = first.clone();
+        self.storage = LineStorage::Cluster(vec![Cluster { cell, count }]);
+        true
+    }
+
+    /// PR-C (#319): force the storage to Flat. Use at any mutation site
+    /// that may operate on a scrollback Line that could now be in
+    /// Cluster form (since PR-C produces Cluster lines on eject). All
+    /// existing `as_vec_mut` / `set` / `iter_mut` paths already degrade,
+    /// but call sites that hold a `&mut Line` and intend to do bulk
+    /// in-place edits can call this once up front for clarity.
+    pub fn ensure_flat(&mut self) {
+        self.degrade_to_flat();
+    }
 }
 
 impl<'a> IntoIterator for &'a Line {
