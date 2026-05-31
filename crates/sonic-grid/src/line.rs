@@ -692,12 +692,74 @@ impl Line {
         self.as_vec_mut().as_mut_slice()
     }
 
-    /// Resize to `new_len`, padding with `fill` when growing. Forwards to
-    /// the underlying Vec for the Flat case.
+    /// Resize to `new_len`, padding with `fill` when growing.
+    ///
+    /// PR-E (#319): Cluster-preserving resize. When the line is in Cluster
+    /// form, this avoids degrading to Flat in the common cases:
+    ///
+    /// * **Shrink** — truncate the cluster's run-len; if the resulting
+    ///   length is 0, clear to empty Flat.
+    /// * **Grow, fill matches trailing cluster** — bump the trailing
+    ///   cluster's count. Stays Cluster.
+    /// * **Grow, fill differs from trailing cluster** — append a new
+    ///   cluster covering the padding. Stays Cluster (multi-cluster).
+    ///
+    /// Flat storage uses the underlying `Vec::resize` path unchanged.
     pub fn resize(&mut self, new_len: usize, fill: Cell) {
-        self.degrade_to_flat();
-        if let LineStorage::Flat(v) = &mut self.storage {
-            v.resize(new_len, fill);
+        let cur = self.len();
+        if new_len == cur {
+            return;
+        }
+        if new_len < cur {
+            // Shrink: delegate to truncate which is cluster-aware.
+            self.truncate(new_len);
+            return;
+        }
+        // Grow.
+        match &mut self.storage {
+            LineStorage::Flat(v) => v.resize(new_len, fill),
+            LineStorage::Cluster(cs) => {
+                let extra = new_len - cur;
+                match cs.last_mut() {
+                    Some(last) if last.cell == fill => last.count += extra,
+                    _ => cs.push(Cluster { cell: fill, count: extra }),
+                }
+            }
+        }
+    }
+
+    /// Truncate the line to `new_len`. No-op if already shorter or
+    /// equal. Cluster-preserving: reduces the trailing cluster's run-len
+    /// and drops any clusters past the new boundary.
+    pub fn truncate(&mut self, new_len: usize) {
+        let cur = self.len();
+        if new_len >= cur {
+            return;
+        }
+        if new_len == 0 {
+            self.storage = LineStorage::Flat(Vec::new());
+            return;
+        }
+        match &mut self.storage {
+            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Cluster(cs) => {
+                let mut remaining = new_len;
+                let mut keep = 0;
+                for c in cs.iter_mut() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if c.count <= remaining {
+                        remaining -= c.count;
+                        keep += 1;
+                    } else {
+                        c.count = remaining;
+                        remaining = 0;
+                        keep += 1;
+                    }
+                }
+                cs.truncate(keep);
+            }
         }
     }
 
