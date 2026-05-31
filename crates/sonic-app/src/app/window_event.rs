@@ -238,7 +238,7 @@ impl App {
                 // PR-B1a: lift the main window Arc clone before the
                 // mut borrow on `self.renderer` below, so the IME
                 // cursor-area branch can still touch
-                // `self.ime_cursor_throttle` (mut) without re-borrowing
+                // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
                 // PR-B1b borrow-split: pull the renderer out via direct
@@ -261,6 +261,8 @@ impl App {
                     last_render_slot,
                     ws_selection_ref,
                     ws_copy_mode_ref,
+                    ws_ime_ref,
+                    ws_ime_throttle_ref,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonic_ui::tabs::TabBar>,
@@ -270,6 +272,8 @@ impl App {
                     Option<&mut Instant>,
                     Option<&Selection>,
                     Option<&CopyModeState>,
+                    Option<&sonic_ui::ime::ImeState>,
+                    Option<&mut sonic_ui::ime::ImeCursorThrottle>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -284,6 +288,8 @@ impl App {
                         // PR-B3c (#365): selection + copy_mode now live on
                         // `ws`. Pull immutable refs disjoint from the mut
                         // borrows of `ws.{renderer,tabs,tab_states,panes,last_render}`.
+                        // PR-B3d (#365): ime + ime_cursor_throttle also live
+                        // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
                         (
@@ -295,9 +301,11 @@ impl App {
                             Some(&mut ws.last_render),
                             sel_ref,
                             cm_ref,
+                            Some(&ws.ime),
+                            Some(&mut ws.ime_cursor_throttle),
                         )
                     }
-                    None => (None, None, None, None, true, None, None, None),
+                    None => (None, None, None, None, true, None, None, None, None, None),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
                     renderer_opt,
@@ -380,7 +388,7 @@ impl App {
                                 .is_none()
                                 .then_some(&mut self.command_palette),
                             cheatsheet_render,
-                            Some(&self.ime),
+                            ws_ime_ref,
                             pane.viewport_top_abs,
                         ) {
                             tracing::warn!("render error: {e}");
@@ -411,15 +419,17 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
-                        if self.ime_cursor_throttle.should_update(cursor_rc.0, cursor_rc.1) {
-                            let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
-                            let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
-                            let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
-                            let size = winit::dpi::PhysicalSize::new(
-                                r.cell_w.ceil() as u32,
-                                r.cell_h.ceil() as u32,
-                            );
-                            w.set_ime_cursor_area(pos, size);
+                        if let Some(throttle) = ws_ime_throttle_ref {
+                            if throttle.should_update(cursor_rc.0, cursor_rc.1) {
+                                let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
+                                let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
+                                let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
+                                let size = winit::dpi::PhysicalSize::new(
+                                    r.cell_w.ceil() as u32,
+                                    r.cell_h.ceil() as u32,
+                                );
+                                w.set_ime_cursor_area(pos, size);
+                            }
                         }
                     }
                 }
@@ -456,7 +466,9 @@ impl App {
                 // stale composition state on the next focus-in. Toggling
                 // `set_ime_allowed` nudges the OS to re-attach the input
                 // context cleanly on macOS / Windows.
-                self.ime.cancel();
+                if let Some(ws) = self.main_mut() {
+                    ws.ime.cancel();
+                }
                 // Propagate window focus to the renderer so the active
                 // pane's block cursor flips between filled (focused) and
                 // hollow (unfocused) — wezterm/iTerm2 parity. PR #81
@@ -496,7 +508,9 @@ impl App {
                     // first redraw after refocus re-teaches the OS the
                     // current cell position.
                     if focused {
-                        self.ime_cursor_throttle.reset();
+                        if let Some(ws) = self.main_mut() {
+                            ws.ime_cursor_throttle.reset();
+                        }
                     }
                     w.request_redraw();
                 }
@@ -520,7 +534,9 @@ impl App {
                 // re-publish the IME cursor area even if (row, col) is
                 // unchanged, otherwise the OS candidate window stays
                 // pinned to the pre-resize pixel location.
-                self.ime_cursor_throttle.reset();
+                if let Some(ws) = self.main_mut() {
+                    ws.ime_cursor_throttle.reset();
+                }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
@@ -587,10 +603,13 @@ impl App {
                 }
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
-                if let Some(s) = self.drag_session.as_mut() {
-                    s.current_pos = (lx, ly);
-                    let press_idx = s.press_tab_index;
-                    let session_snapshot = *s;
+                let drag_snapshot = self.main_mut().and_then(|ws| {
+                    ws.drag_session.as_mut().map(|s| {
+                        s.current_pos = (lx, ly);
+                        (s.press_tab_index, *s)
+                    })
+                });
+                if let Some((press_idx, session_snapshot)) = drag_snapshot {
                     let title = self
                         .main_tabs()
                         .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
@@ -628,7 +647,10 @@ impl App {
                     .map(|ws| (ws.mouse_down, ws.pressed_tab.is_some()))
                     .unwrap_or((false, false));
                 if mouse_down && has_press {
-                    self.drag_target = self.compute_main_drag_target((position.x, position.y));
+                    let target = self.compute_main_drag_target((position.x, position.y));
+                    if let Some(ws) = self.main_mut() {
+                        ws.drag_target = target;
+                    }
                     // Phase C2 (PR #295 review fix): start the OS-level
                     // drag session AS SOON AS the cursor crosses the
                     // drag-start threshold from its press point, not on
@@ -642,12 +664,15 @@ impl App {
                     // gesture end-to-end (Windows) or has already
                     // written the pasteboard (macOS).
                     if !self.os_drag_handoff_started {
-                        if let Some(session) = self.drag_session.as_ref() {
-                            if crate::tab_drag::drag_moved_enough(session) {
-                                let idx = session.press_tab_index;
-                                self.os_drag_handoff_started = true;
-                                let _ = self.try_os_drag_handoff(idx);
-                            }
+                        let started_idx = self.main().and_then(|ws| {
+                            ws.drag_session
+                                .as_ref()
+                                .filter(|s| crate::tab_drag::drag_moved_enough(s))
+                                .map(|s| s.press_tab_index)
+                        });
+                        if let Some(idx) = started_idx {
+                            self.os_drag_handoff_started = true;
+                            let _ = self.try_os_drag_handoff(idx);
                         }
                     }
                     if let Some(w) = self.main_window() {
@@ -727,9 +752,9 @@ impl App {
                                 // tear-out gesture.
                                 if let Some(ws) = self.main_mut() {
                                     ws.pressed_tab = Some(i);
+                                    ws.drag_session =
+                                        Some(crate::tab_drag::DragSession::new(i, (px, py)));
                                 }
-                                self.drag_session =
-                                    Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
                             Some(sonic_ui::tabbar_view::TabHit::Close(i)) => self.close_tab_at(i),
                             None => unreachable!("tab_action.is_some() checked above"),
@@ -860,13 +885,16 @@ impl App {
                     // Commit-on-release: read the live drag session and
                     // foreign drop target, decide what to do via the
                     // pure compute_action helper, then execute.
-                    let session = self.drag_session.take();
-                    let foreign = self.drag_target.take();
-                    let pressed = self.main_mut().and_then(|ws| {
-                        let p = ws.pressed_tab.take();
-                        ws.mouse_down = false;
-                        p
-                    });
+                    let (session, foreign, pressed) = self
+                        .main_mut()
+                        .map(|ws| {
+                            let s = ws.drag_session.take();
+                            let f = ws.drag_target.take();
+                            let p = ws.pressed_tab.take();
+                            ws.mouse_down = false;
+                            (s, f, p)
+                        })
+                        .unwrap_or((None, None, None));
                     if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(None);
                     }
@@ -926,19 +954,30 @@ impl App {
 
             // -- IME (CJK / multi-key input methods) --
             WindowEvent::Ime(ime_event) => {
-                match ime_event {
-                    Ime::Enabled => self.ime.handle_enabled(),
-                    Ime::Disabled => self.ime.handle_disabled(),
-                    Ime::Preedit(text, cursor) => {
-                        self.ime.handle_preedit(&text, cursor);
-                    }
-                    Ime::Commit(text) => {
-                        self.ime.handle_commit(&text);
-                        let committed = self.ime.take_commits();
-                        if !committed.is_empty() {
-                            self.write_to_pty(committed.into_bytes());
+                let committed = if let Some(ws) = self.main_mut() {
+                    match ime_event {
+                        Ime::Enabled => {
+                            ws.ime.handle_enabled();
+                            String::new()
+                        }
+                        Ime::Disabled => {
+                            ws.ime.handle_disabled();
+                            String::new()
+                        }
+                        Ime::Preedit(text, cursor) => {
+                            ws.ime.handle_preedit(&text, cursor);
+                            String::new()
+                        }
+                        Ime::Commit(text) => {
+                            ws.ime.handle_commit(&text);
+                            ws.ime.take_commits()
                         }
                     }
+                } else {
+                    String::new()
+                };
+                if !committed.is_empty() {
+                    self.write_to_pty(committed.into_bytes());
                 }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -996,9 +1035,11 @@ impl App {
                 // instead. Forwarding them here would double-type. Esc
                 // cancels the in-flight composition (preedit dropped, no
                 // bytes sent to the PTY) instead of being forwarded.
-                if self.ime.is_composing() {
+                if self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false) {
                     if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                        self.ime.cancel();
+                        if let Some(ws) = self.main_mut() {
+                            ws.ime.cancel();
+                        }
                         if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }

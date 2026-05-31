@@ -295,10 +295,11 @@ impl App {
             last_render: std::time::Instant::now(),
             hover_link: false,
             pressed_tab: None,
-            drag_session: self.drag_session,
-            drag_target: self.drag_target,
+            drag_session: None,
+            drag_target: None,
             scale_factor: self.scale_factor,
-            ime: self.ime.clone(),
+            ime: sonic_ui::ime::ImeState::new(),
+            ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: self.hovered_url.clone(),
         };
         self.windows.insert(main_id, shadow);

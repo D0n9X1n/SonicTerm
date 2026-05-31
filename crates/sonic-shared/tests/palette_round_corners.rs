@@ -91,9 +91,8 @@ fn palette_footer_positioned_in_footer_rect() {
     );
     // Locate the footer emitter call. It's preceded by a `// Footer`
     // marker comment so the search is stable to formatter reflow.
-    let footer_idx = src
-        .find("// Footer hint")
-        .expect("render.rs must mark the palette footer emitter call");
+    let footer_idx =
+        src.find("// Footer hint").expect("render.rs must mark the palette footer emitter call");
     let after = &src[footer_idx..footer_idx + 2000.min(src.len() - footer_idx)];
     assert!(
         after.contains("layout.footer.x"),
