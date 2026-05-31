@@ -207,17 +207,20 @@ impl App {
             // Child id was stale — fall through to main, clear stale.
             self.frontmost_window = None;
         }
-        let i = self.tabs.active_index();
-        let pane_id = match self.tab_states.get(i) {
-            Some(t) => t.active_pane,
-            None => return,
+        let (i, pane_id) = {
+            let Some(ws) = self.main() else { return };
+            let i = ws.tabs.active_index();
+            let Some(t) = ws.tab_states.get(i) else { return };
+            (i, t.active_pane)
         };
         let mut s = SearchState::new();
         if let Some(pane) = self.panes.get(&pane_id) {
             s.refresh(pane.parser.lock().grid());
         }
-        if let Some(st) = self.tab_states.get_mut(i) {
-            st.search = Some(s);
+        if let Some(ws) = self.main_mut() {
+            if let Some(st) = ws.tab_states.get_mut(i) {
+                st.search = Some(s);
+            }
         }
         if let Some(w) = self.main_window() {
             w.request_redraw();
@@ -266,7 +269,8 @@ impl App {
     }
 
     pub(super) fn search_active(&self) -> bool {
-        let i = self.tabs.active_index();
-        self.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+        let Some(ws) = self.main() else { return false };
+        let i = ws.tabs.active_index();
+        ws.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
     }
 }

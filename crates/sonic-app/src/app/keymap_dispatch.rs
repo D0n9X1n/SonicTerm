@@ -73,7 +73,7 @@ impl App {
                     }
                     self.focused_child = None;
                 }
-                let n = self.tabs.len() + 1;
+                let n = self.main_tabs().map(|t| t.len() + 1).unwrap_or(1);
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
@@ -84,7 +84,7 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                let i = self.tabs.active_index();
+                let i = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 self.close_tab_at(i);
                 self.reap_empty_main_window_after_close();
             }
@@ -95,7 +95,9 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                self.tabs.next();
+                if let Some(t) = self.main_tabs_mut() {
+                    t.next();
+                }
             }
             Action::PrevTab => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -104,7 +106,9 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                self.tabs.prev();
+                if let Some(t) = self.main_tabs_mut() {
+                    t.prev();
+                }
             }
             Action::ActivateTab(i) => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -113,7 +117,9 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                self.tabs.activate(*i);
+                if let Some(t) = self.main_tabs_mut() {
+                    t.activate(*i);
+                }
             }
             Action::ActivateLastTab => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -122,8 +128,10 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                let last = self.tabs.len().saturating_sub(1);
-                self.tabs.activate(last);
+                if let Some(t) = self.main_tabs_mut() {
+                    let last = t.len().saturating_sub(1);
+                    t.activate(last);
+                }
             }
             Action::SplitRight => {
                 // Epic #289 Phase A — route to frontmost window so Cmd+D
@@ -173,9 +181,15 @@ impl App {
                 // is purely documentation of intent. The explicit branch
                 // also keeps the dispatcher honest if `close_active_pane`
                 // ever changes its fall-through.
-                let i = self.tabs.active_index();
-                let pane_count =
-                    self.tab_states.get(i).map(|st| st.tree.leaves().len()).unwrap_or(0);
+                let (i, pane_count) = {
+                    let ws = self.main();
+                    let i = ws.map(|w| w.tabs.active_index()).unwrap_or(0);
+                    let pc = ws
+                        .and_then(|w| w.tab_states.get(i))
+                        .map(|st| st.tree.leaves().len())
+                        .unwrap_or(0);
+                    (i, pc)
+                };
                 if pane_count > 1 {
                     self.close_active_pane();
                 } else {

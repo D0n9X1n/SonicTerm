@@ -737,7 +737,7 @@ impl App {
         }
         // If main has been drained but child windows are still alive,
         // hide the main window without exiting the app.
-        if self.tabs.is_empty() && self.child_window_count() > 0 {
+        if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) && self.child_window_count() > 0 {
             self.hide_main_window();
         }
         if let Some(w) = self.main_window() {

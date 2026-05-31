@@ -39,54 +39,70 @@ use super::{
 
 impl App {
     pub(super) fn search_handle_key(&mut self, event: &KeyEvent, mods: ModifiersState) -> bool {
-        let i = self.tabs.active_index();
-        let pane_id = match self.tab_states.get(i) {
-            Some(t) if t.search.is_some() => t.active_pane,
-            _ => return false,
+        let (i, pane_id) = {
+            let Some(ws) = self.main() else { return false };
+            let i = ws.tabs.active_index();
+            let Some(t) = ws.tab_states.get(i) else { return false };
+            if t.search.is_none() {
+                return false;
+            }
+            (i, t.active_pane)
+        };
+        // Take the search state out of the tab so we can hold its
+        // `&mut SearchState` alongside the parser's grid borrow without
+        // double-borrowing through `self.main_mut()` and `self.panes`.
+        let mut search = {
+            let Some(ws) = self.main_mut() else { return false };
+            let Some(st) = ws.tab_states.get_mut(i) else { return false };
+            match st.search.take() {
+                Some(s) => s,
+                None => return false,
+            }
         };
         let pane = match self.panes.get(&pane_id) {
             Some(p) => p,
-            None => return false,
+            None => {
+                // Restore so we don't drop user state on a missing pane.
+                if let Some(ws) = self.main_mut() {
+                    if let Some(st) = ws.tab_states.get_mut(i) {
+                        st.search = Some(search);
+                    }
+                }
+                return false;
+            }
         };
         let grid_guard = pane.parser.lock();
         let grid = grid_guard.grid();
 
-        let Some(st) = self.tab_states.get_mut(i) else { return false };
-        let Some(search) = st.search.as_mut() else { return false };
-
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                st.search = None;
-                true
-            }
+        let (handled, keep_search) = match &event.logical_key {
+            Key::Named(NamedKey::Escape) => (true, false),
             Key::Named(NamedKey::Enter) => {
                 if mods.shift_key() {
                     search.prev();
                 } else {
                     search.next();
                 }
-                true
+                (true, true)
             }
             Key::Named(NamedKey::Backspace) => {
                 search.backspace(grid);
-                true
+                (true, true)
             }
             Key::Named(NamedKey::Space) => {
                 search.input_char(' ', grid);
-                true
+                (true, true)
             }
             Key::Character(s) => {
-                // Cmd+I toggles case sensitivity; Cmd+R toggles regex
-                // mode; Cmd+G / Cmd+Shift+G jump to next/prev match.
+                let mut consumed = false;
                 if mods.super_key() {
                     match s.as_ref() {
                         "i" | "I" => {
                             search.toggle_case_sensitive(grid);
-                            return true;
+                            consumed = true;
                         }
                         "r" | "R" => {
                             search.toggle_regex(grid);
-                            return true;
+                            consumed = true;
                         }
                         "g" | "G" => {
                             if mods.shift_key() {
@@ -94,17 +110,28 @@ impl App {
                             } else {
                                 search.next();
                             }
-                            return true;
+                            consumed = true;
                         }
                         _ => {}
                     }
                 }
-                for ch in s.chars() {
-                    search.input_char(ch, grid);
+                if !consumed {
+                    for ch in s.chars() {
+                        search.input_char(ch, grid);
+                    }
                 }
-                true
+                (true, true)
             }
-            _ => false,
+            _ => (false, true),
+        };
+        drop(grid_guard);
+        if keep_search {
+            if let Some(ws) = self.main_mut() {
+                if let Some(st) = ws.tab_states.get_mut(i) {
+                    st.search = Some(search);
+                }
+            }
         }
+        handled
     }
 }

@@ -221,14 +221,17 @@ impl App {
     /// tab was removed. Phase B overrides to consistently pick the
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
-        if self.tabs.is_empty() {
+        let is_empty = self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
+        if is_empty {
             if self.child_window_count() > 0 {
                 self.hide_main_window();
             }
             return;
         }
-        let target = removed_idx.saturating_sub(1).min(self.tabs.len().saturating_sub(1));
-        self.tabs.activate(target);
+        if let Some(t) = self.main_tabs_mut() {
+            let target = removed_idx.saturating_sub(1).min(t.len().saturating_sub(1));
+            t.activate(target);
+        }
     }
 }
 
@@ -260,11 +263,11 @@ impl App {
             candidates.push((
                 main.id(),
                 geom,
-                Some(
-                    TabBarLayout::compute_with_height(&self.tabs, width, bar_h)
+                self.main_tabs().map(|t| {
+                    TabBarLayout::compute_with_height(t, width, bar_h)
                         .with_top_offset(inset)
-                        .with_visible(self.tab_bar_visible),
-                ),
+                        .with_visible(self.tab_bar_visible)
+                }),
             ));
         }
         for (id, c) in &self.windows {
@@ -387,7 +390,7 @@ impl App {
         }
     }
     pub(super) fn build_payload_for_tab(&self, index: usize) -> Option<crate::os_drag::TabPayload> {
-        let tab = self.tabs.tabs().get(index)?.clone();
+        let tab = self.main_tabs()?.tabs().get(index)?.clone();
         // Scrollback extraction TBD — Grid does not yet expose a
         // "give me the full visible+scrollback text" accessor. v1
         // ships an empty buffer (the destination shell starts with a

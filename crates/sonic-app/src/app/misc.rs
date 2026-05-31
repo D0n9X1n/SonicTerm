@@ -237,8 +237,9 @@ impl App {
         }
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
-        let i = self.tabs.active_index();
-        let Some(st) = self.tab_states.get(i) else { return };
+        let Some(ws) = self.main() else { return };
+        let i = ws.tabs.active_index();
+        let Some(st) = ws.tab_states.get(i) else { return };
         let pane_id = st.active_pane;
         let Some(pane) = self.panes.get_mut(&pane_id) else { return };
         let new_top = {
@@ -458,19 +459,23 @@ impl App {
         let pane_id = next_pane_id();
         let pane = self.spawn_pane();
         self.panes.insert(pane_id, pane);
-        self.tabs.push(Tab::new(title));
-        self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        if let Some(ws) = self.main_mut() {
+            ws.tabs.push(Tab::new(title));
+            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
-        if index >= self.tab_states.len() {
+        let Some(ws) = self.main_mut() else { return };
+        if index >= ws.tab_states.len() {
             return;
         }
-        let st = self.tab_states.remove(index);
+        let st = ws.tab_states.remove(index);
+        let tab_id = ws.tabs.tabs().get(index).map(|t| t.id);
+        if let Some(id) = tab_id {
+            ws.tabs.close(id);
+        }
         for id in st.tree.leaves() {
             self.panes.remove(&id);
-        }
-        if let Some(id) = self.tabs.tabs().get(index).map(|t| t.id) {
-            self.tabs.close(id);
         }
     }
     pub fn new_tab_from_payload(&mut self, payload: &crate::os_drag::TabPayload) -> usize {
@@ -484,6 +489,6 @@ impl App {
             tab = %payload.tab_title,
             "os_drag: received payload; spawned destination tab"
         );
-        self.tabs.len().saturating_sub(1)
+        self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0)
     }
 }
