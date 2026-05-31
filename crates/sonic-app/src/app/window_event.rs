@@ -154,6 +154,63 @@ impl App {
                     .unwrap_or(0);
                 let broadcast_receivers = self.broadcast_receivers();
 
+                // #386 PR-D: per-pane scrollbar visibility/fade tick.
+                // Built BEFORE the try_lock pass since it only needs
+                // logical-px rects (already in `pane_rects`) and the
+                // already-captured cursor pos / scrollbar_drag — no
+                // parser lock needed. Result feeds each PaneRender's
+                // `scrollbar_alpha` below.
+                let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
+                    let mode = self.config.appearance.scrollbar;
+                    let drag_pane =
+                        self.main().and_then(|ws| ws.scrollbar_drag.as_ref().map(|s| s.pane_id));
+                    let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                    let (cx_phys, cy_phys) =
+                        self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                    let cursor = to_logical_pos(cx_phys, cy_phys, sf);
+                    let rects: Vec<(u64, f32, f32, f32, f32)> =
+                        pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+                    let now = Instant::now();
+                    if let Some(ws) = self.main_mut() {
+                        crate::app::scrollbar_visibility::update_and_collect(
+                            &mut ws.scrollbar_vis,
+                            &rects,
+                            cursor,
+                            active_id,
+                            drag_pane,
+                            mode,
+                            now,
+                        )
+                    } else {
+                        std::collections::HashMap::new()
+                    }
+                };
+                // Keep redrawing while any pane's scrollbar fade is
+                // animating so a paused mouse-leave still completes the
+                // 300 ms fade-out (otherwise the bar would stay frozen
+                // mid-fade until the next external event).
+                let scrollbar_needs_more_frames = {
+                    let mode = self.config.appearance.scrollbar;
+                    let drag_pane =
+                        self.main().and_then(|ws| ws.scrollbar_drag.as_ref().map(|s| s.pane_id));
+                    self.main()
+                        .map(|ws| {
+                            ws.scrollbar_vis.iter().any(|(id, st)| {
+                                crate::app::scrollbar_visibility::is_animating(
+                                    st,
+                                    mode,
+                                    drag_pane == Some(*id),
+                                )
+                            })
+                        })
+                        .unwrap_or(false)
+                };
+                if scrollbar_needs_more_frames {
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                    }
+                }
+
                 // PR #199 Fix 1: try_lock EVERY pane in the tab and pass
                 // them ALL through to the renderer. The previous single-
                 // element slice meant the per-pane loop inside
@@ -370,6 +427,10 @@ impl App {
                                 is_active: *id == active_id,
                                 cursor_style: sonic_render_model::CursorStyle::default(),
                                 is_broadcast_receiver: broadcast_receivers.contains(id),
+                                scrollbar_alpha: scrollbar_alpha_map
+                                    .get(id)
+                                    .copied()
+                                    .unwrap_or(0.0),
                             })
                             .collect();
                         if let Err(e) = r.render(
@@ -601,6 +662,11 @@ impl App {
                         w.request_redraw();
                     }
                 }
+                // Auto scrollbar hover is also pure cursor state. Terminal
+                // cursor moves from normal PTY output do not wake the renderer,
+                // so request a frame exactly when the pointer crosses the
+                // right-edge proximity threshold.
+                let _ = self.refresh_scrollbar_hover_from_cursor();
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 let drag_snapshot = self.main_mut().and_then(|ws| {
@@ -712,6 +778,8 @@ impl App {
                                 }
                             }
                         }
+                        // #386 PR-D: drag also counts as scrollbar activity.
+                        self.mark_scrollbar_active(pane_id);
                         return;
                     }
                     if let Some(r) = self.main_renderer() {

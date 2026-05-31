@@ -217,6 +217,9 @@ impl App {
         if let Some(w) = ws.window.as_ref() {
             w.request_redraw();
         }
+        // #386 PR-D: any view_top jump (track click, prompt-nav, copy
+        // mode scroll, mouse-wheel) counts as scrollbar activity.
+        self.mark_scrollbar_active(active_id);
     }
 
     /// Test-only inspector for the live scrollbar-drag state.

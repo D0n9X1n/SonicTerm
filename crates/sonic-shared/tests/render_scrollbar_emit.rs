@@ -70,6 +70,7 @@ fn emits_track_and_thumb_when_scrollable() {
         &test_theme(),
         /* sw */ 800.0,
         /* sh */ 600.0,
+        /* alpha */ 1.0,
     );
     assert_eq!(n, 2, "expected 2 quads (track + thumb), got {n}");
     assert_eq!(quads.len(), 2);
@@ -97,6 +98,7 @@ fn no_emit_when_total_le_viewport() {
         &test_theme(),
         800.0,
         600.0,
+        1.0,
     );
     assert_eq!(n, 0);
     assert!(quads.is_empty());
@@ -116,6 +118,7 @@ fn no_emit_when_mode_never() {
         &test_theme(),
         800.0,
         600.0,
+        1.0,
     );
     assert_eq!(n, 0);
     assert!(quads.is_empty());
@@ -135,6 +138,7 @@ fn always_mode_also_emits_when_scrollable() {
         &test_theme(),
         800.0,
         600.0,
+        1.0,
     );
     assert_eq!(n, 2);
 }

@@ -44,6 +44,10 @@ pub struct PaneRender<'a> {
     /// True when this pane is receiving mirrored broadcast input from the
     /// active/source pane and therefore needs prominent safety chrome.
     pub is_broadcast_receiver: bool,
+    /// Per-pane scrollbar alpha (PR-D, #386). `1.0` = fully visible,
+    /// `0.0` = hidden. The renderer multiplies the scrollbar tint
+    /// alphas by this and skips the emit entirely below the floor.
+    pub scrollbar_alpha: f32,
 }
 
 /// Cursor presentation style. Mirrors the legacy enum in `sonic-ui::cursor`

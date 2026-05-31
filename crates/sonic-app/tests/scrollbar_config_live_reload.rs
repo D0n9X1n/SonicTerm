@@ -73,6 +73,7 @@ fn emitted_scrollbar_quads(mode: ScrollbarMode) -> usize {
         &test_theme(),
         /* sw */ 800.0,
         /* sh */ 600.0,
+        /* alpha */ 1.0,
     );
     quads.len()
 }

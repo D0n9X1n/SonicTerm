@@ -35,6 +35,7 @@ fn make_ws_with_no_window() -> WindowState {
         hovered_url: None,
         hidden: false,
         scrollbar_drag: None,
+        scrollbar_vis: std::collections::HashMap::new(),
     }
 }
 
