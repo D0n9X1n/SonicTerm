@@ -326,19 +326,12 @@ impl App {
                 // Release the child borrow before touching `self`.
                 let _ = child;
                 if focused {
-                    self.focused_child = Some(win_id);
-                    // Epic #289 Phase A — also update the unified
-                    // frontmost tracker. Unlike `focused_child`, this
-                    // discriminates between "main is frontmost" and
-                    // "nothing is frontmost yet"; main's Focused(true)
-                    // overwrites with main's id.
+                    // Epic #289 Phase A — unified frontmost tracker;
+                    // discriminates main vs child via `frontmost_kind()`.
+                    // PR-B4 (#365): `focused_child` removed — the child-only
+                    // subset is now derivable from `frontmost_window`.
                     self.frontmost_window = Some(win_id);
                 } else {
-                    if self.focused_child == Some(win_id) {
-                        // Lost focus → clear; if another window claims it,
-                        // its own Focused(true) arm will set it.
-                        self.focused_child = None;
-                    }
                     if self.frontmost_window == Some(win_id) {
                         // Same rule for frontmost: only clear if WE were
                         // the recorded one. A sibling sonic window's
@@ -688,7 +681,7 @@ impl App {
             self.attach_tab_state(target.slot, tab, state, panes);
             // Receiving a tab back into main un-hides the window if it
             // had been drained.
-            if self.main_hidden {
+            if self.main_is_hidden() {
                 self.show_main_window();
             }
             true
@@ -754,14 +747,18 @@ impl App {
         if let Some(w) = self.main_window() {
             w.set_visible(false);
         }
-        self.main_hidden = true;
+        if let Some(ws) = self.main_mut() {
+            ws.hidden = true;
+        }
         tracing::info!("main window hidden (drained); windows={}", self.windows.len());
     }
     pub(super) fn show_main_window(&mut self) {
         if let Some(w) = self.main_window() {
             w.set_visible(true);
         }
-        self.main_hidden = false;
+        if let Some(ws) = self.main_mut() {
+            ws.hidden = false;
+        }
     }
 
     /// Build a fresh `PaneState` bound to the given child window's

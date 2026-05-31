@@ -99,6 +99,7 @@ fn make_synth_ws() -> WindowState {
         ime: ImeState::new(),
         ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
         hovered_url: None,
+        hidden: false,
     }
 }
 

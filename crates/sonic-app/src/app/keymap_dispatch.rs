@@ -53,25 +53,18 @@ impl App {
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 // Epic #289 Phase A — route through the unified
-                // `frontmost_window` discriminator first so a Cmd+T
-                // typed in a torn-out child opens a tab in THAT child,
-                // not in the main window. Falls back to the existing
-                // `focused_child` logic for back-compat with any focus
-                // event that updated only the old field, and finally
-                // to the main App (safe default).
+                // `frontmost_window` discriminator so a Cmd+T typed in a
+                // torn-out child opens a tab in THAT child, not in the
+                // main window. PR-B4 (#365) removed the `focused_child`
+                // fallback — `frontmost_window` is set by the same focus
+                // event so the back-compat path was redundant.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.spawn_tab_in_child(id) {
                         return true;
                     }
                     // Child vanished between focus and dispatch — clear
-                    // both trackers and fall through.
+                    // tracker and fall through.
                     self.frontmost_window = None;
-                    self.focused_child = None;
-                } else if let Some(win_id) = self.focused_child {
-                    if self.spawn_tab_in_child(win_id) {
-                        return true;
-                    }
-                    self.focused_child = None;
                 }
                 let n = self.main_tabs().map(|t| t.len() + 1).unwrap_or(1);
                 self.new_tab(format!("shell {n}"));

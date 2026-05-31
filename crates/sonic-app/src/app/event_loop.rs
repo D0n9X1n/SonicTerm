@@ -301,6 +301,7 @@ impl App {
             ime: sonic_ui::ime::ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
             hovered_url: self.hovered_url.clone(),
+            hidden: false,
         };
         self.windows.insert(main_id, shadow);
 
