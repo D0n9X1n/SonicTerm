@@ -408,7 +408,8 @@ impl App {
     pub(super) fn cursor_inside_any_window(&self) -> bool {
         let Some(main) = self.main_window() else { return false };
         let main_origin = main.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
-        let global = crate::tab_drag::local_to_global(main_origin, self.cursor_pos);
+        let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+        let global = crate::tab_drag::local_to_global(main_origin, cursor_pos);
         if crate::tab_drag::global_to_local(window_geom(main), global).is_some() {
             return true;
         }
@@ -426,8 +427,10 @@ impl App {
             return false;
         };
         self.drag_target = None;
-        self.pressed_tab = None;
-        self.mouse_down = false;
+        if let Some(ws) = self.main_mut() {
+            ws.pressed_tab = None;
+            ws.mouse_down = false;
+        }
         self.merge_main_into_child(index, target);
         true
     }

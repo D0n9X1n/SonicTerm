@@ -114,10 +114,11 @@ impl App {
         self.hovered_url = new_hover;
         // Pointer-cursor transition: auto-detected URL needs the
         // open-URL modifier held; OSC 8 keeps its always-on pointer.
+        let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
         let want_pointer = self.hovered_url.is_some()
             || self
                 .main_renderer()
-                .and_then(|r| r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
+                .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
                 .and_then(|(row, col)| self.osc8_uri_at(row, col))
                 .is_some();
         if want_pointer != self.hover_link {
@@ -137,8 +138,9 @@ impl App {
         if !self.url_open_modifier_held() {
             return None;
         }
+        let cursor_pos = self.main()?.cursor_pos;
         let r = self.main_renderer()?;
-        let (row, col) = r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)?;
+        let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
         // OSC 8 has its own affordance — don't double up.
         if self.osc8_uri_at(row, col).is_some() {
             return None;

@@ -936,8 +936,8 @@ pub struct App {
     // `self.main_mut()` and split-borrow the fields disjointly.
     pub(super) modifiers: ModifiersState,
     pub(super) last_render: Instant,
-    pub(super) cursor_pos: (f64, f64),
-    pub(super) mouse_down: bool,
+    // PR-B3 (#365): `cursor_pos` / `mouse_down` migrated to
+    // `WindowState`. Read/write through `self.main()?.cursor_pos` etc.
     pub(super) selection: Option<Selection>,
     pub(super) copy_mode: Option<CopyModeState>,
     pub(super) clipboard: Option<Clipboard>,
@@ -992,7 +992,8 @@ pub struct App {
     pub(super) cheatsheet_attached_window: Option<WindowId>,
     /// Tab index recorded on left-mouse-press inside a tab. Used to
     /// detect the tear-out gesture (press → drag below bar → release).
-    pub(super) pressed_tab: Option<usize>,
+    /// PR-B3 (#365): migrated to [`WindowState::pressed_tab`].
+    // pressed_tab removed — use `self.main()?.pressed_tab`.
     /// Live drag session for the held-tab gesture in the MAIN window.
     /// Tracks press + current cursor position so the renderer can draw
     /// the translucent drag chip and `compute_action` can pick a
@@ -1265,8 +1266,6 @@ impl App {
             keymap,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
-            cursor_pos: (0.0, 0.0),
-            mouse_down: false,
             selection: None,
             copy_mode: None,
             clipboard: Clipboard::new().ok(),
@@ -1283,7 +1282,6 @@ impl App {
             cheatsheet_open: false,
             cheatsheet: CheatsheetState::new(),
             cheatsheet_attached_window: None,
-            pressed_tab: None,
             drag_session: None,
             os_drag_handoff_started: false,
             windows: HashMap::new(),
@@ -2070,13 +2068,22 @@ impl App {
     pub fn sync_shadow_main(&mut self) {
         let Some(id) = self.main_window_id else { return };
         let cursor_visible = self.cursor_visible.clone();
-        let cursor_pos = self.cursor_pos;
-        let mouse_down = self.mouse_down;
+        // PR-B3 (#365): cursor_pos / mouse_down / pressed_tab live on
+        // the shadow already — no need to mirror them back from App.
+        let cursor_pos;
+        let mouse_down;
+        let pressed_tab;
+        if let Some(ws) = self.windows.get(&id) {
+            cursor_pos = ws.cursor_pos;
+            mouse_down = ws.mouse_down;
+            pressed_tab = ws.pressed_tab;
+        } else {
+            return;
+        }
         let selection = self.selection;
         let copy_mode = self.copy_mode.clone();
         let modifiers = self.modifiers;
         let last_render = self.last_render;
-        let pressed_tab = self.pressed_tab;
         let drag_session = self.drag_session;
         let drag_target = self.drag_target;
         let scale_factor = self.scale_factor;
@@ -2331,14 +2338,20 @@ impl App {
     /// invariant the test pins.
     #[doc(hidden)]
     pub fn shadow_main_snapshot(&self) -> ShadowMainSnapshot {
+        // PR-B3 (#365): cursor_pos / mouse_down / pressed_tab now live
+        // on WindowState; source them from there when present.
+        let (cursor_pos, mouse_down, pressed_tab) = self
+            .main()
+            .map(|ws| (ws.cursor_pos, ws.mouse_down, ws.pressed_tab))
+            .unwrap_or(((0.0, 0.0), false, None));
         ShadowMainSnapshot {
-            cursor_pos: self.cursor_pos,
-            mouse_down: self.mouse_down,
+            cursor_pos,
+            mouse_down,
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
             last_render: self.last_render,
-            pressed_tab: self.pressed_tab,
+            pressed_tab,
             drag_session: self.drag_session,
             drag_target: self.drag_target,
             scale_factor: self.scale_factor,
@@ -2359,13 +2372,10 @@ impl App {
         let Some(ws) = self.windows.get(&id) else { return false };
         ws.role == WindowRole::Terminal
             && Arc::ptr_eq(&ws.cursor_visible, &self.cursor_visible)
-            && ws.cursor_pos == self.cursor_pos
-            && ws.mouse_down == self.mouse_down
             && ws.selection == self.selection
             && ws.copy_mode == self.copy_mode
             && ws.modifiers == self.modifiers
             && ws.last_render == self.last_render
-            && ws.pressed_tab == self.pressed_tab
             && ws.scale_factor == self.scale_factor
             && ws.hovered_url == self.hovered_url
     }
@@ -2408,14 +2418,14 @@ impl App {
             tabs: TabBar::new(),
             tab_states: Vec::new(),
             panes: HashMap::new(),
-            cursor_pos: self.cursor_pos,
-            mouse_down: self.mouse_down,
+            cursor_pos: (0.0, 0.0),
+            mouse_down: false,
             selection: self.selection,
             copy_mode: self.copy_mode.clone(),
             modifiers: self.modifiers,
             cursor_visible: self.cursor_visible.clone(),
             last_render: self.last_render,
-            pressed_tab: self.pressed_tab,
+            pressed_tab: None,
             drag_session: self.drag_session,
             drag_target: self.drag_target,
             scale_factor: self.scale_factor,
@@ -2824,22 +2834,28 @@ impl App {
     /// window" without needing a live winit `ActiveEventLoop`.
     #[doc(hidden)]
     pub fn __test_pressed_tab(&self) -> Option<usize> {
-        self.pressed_tab
+        self.main().and_then(|ws| ws.pressed_tab)
     }
 
     #[doc(hidden)]
     pub fn __test_mouse_down(&self) -> bool {
-        self.mouse_down
+        self.main().map(|ws| ws.mouse_down).unwrap_or(false)
     }
 
     #[doc(hidden)]
     pub fn __test_set_pressed_tab(&mut self, v: Option<usize>) {
-        self.pressed_tab = v;
+        self.__test_synthetic_main();
+        if let Some(ws) = self.main_mut() {
+            ws.pressed_tab = v;
+        }
     }
 
     #[doc(hidden)]
     pub fn __test_set_mouse_down(&mut self, v: bool) {
-        self.mouse_down = v;
+        self.__test_synthetic_main();
+        if let Some(ws) = self.main_mut() {
+            ws.mouse_down = v;
+        }
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,
@@ -2951,8 +2967,12 @@ impl App {
         // residue from `tear_out`; clearing them prevents an ESC mid-
         // drag from leaving the next mouse-up still believing a drag
         // is in flight (Haiku-flagged regression class).
-        self.pressed_tab = None;
-        self.mouse_down = false;
+        // PR-B3 (#365): pressed_tab + mouse_down live on the main
+        // WindowState now.
+        if let Some(ws) = self.main_mut() {
+            ws.pressed_tab = None;
+            ws.mouse_down = false;
+        }
         self.drag_target = None;
         self.os_drag_handoff_started = false;
         app_had || win_had

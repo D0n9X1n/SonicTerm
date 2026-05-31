@@ -529,7 +529,9 @@ impl App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = (position.x, position.y);
+                if let Some(ws) = self.main_mut() {
+                    ws.cursor_pos = (position.x, position.y);
+                }
                 let sf = self.scale_factor as f32;
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
                 let mut hover_redraw = false;
@@ -582,7 +584,11 @@ impl App {
                 // pending drop target based on the global cursor
                 // position. The actual decision (tear / merge / cancel)
                 // is deferred to mouse-up via `compute_action`.
-                if self.mouse_down && self.pressed_tab.is_some() {
+                let (mouse_down, has_press) = self
+                    .main()
+                    .map(|ws| (ws.mouse_down, ws.pressed_tab.is_some()))
+                    .unwrap_or((false, false));
+                if mouse_down && has_press {
                     self.drag_target = self.compute_main_drag_target((position.x, position.y));
                     // Phase C2 (PR #295 review fix): start the OS-level
                     // drag session AS SOON AS the cursor crosses the
@@ -610,7 +616,7 @@ impl App {
                     }
                     return;
                 }
-                if self.mouse_down {
+                if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
                     if let Some(r) = self.main_renderer() {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
@@ -638,7 +644,9 @@ impl App {
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
-                    self.mouse_down = true;
+                    if let Some(ws) = self.main_mut() {
+                        ws.mouse_down = true;
+                    }
                     // Phase C2 (PR #295 review fix): re-arm the OS-drag
                     // handoff gate so the CursorMoved threshold check
                     // can fire once for the new gesture.
@@ -647,7 +655,8 @@ impl App {
                         .main_window()
                         .map(|w| w.scale_factor() as f32)
                         .unwrap_or(self.scale_factor as f32);
-                    let (px, py) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
+                    let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                    let (px, py) = to_logical_pos(cursor_pos.0, cursor_pos.1, sf);
                     let window_width = self
                         .main_window()
                         .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
@@ -674,7 +683,9 @@ impl App {
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
                                 // tear-out gesture.
-                                self.pressed_tab = Some(i);
+                                if let Some(ws) = self.main_mut() {
+                                    ws.pressed_tab = Some(i);
+                                }
                                 self.drag_session =
                                     Some(crate::tab_drag::DragSession::new(i, (px, py)));
                             }
@@ -698,8 +709,10 @@ impl App {
                         // Keep mouse_down=true when we recorded a tab
                         // press so cursor-move can promote it to a
                         // tear-out. Close hits consume the click fully.
-                        if self.pressed_tab.is_none() {
-                            self.mouse_down = false;
+                        if let Some(ws) = self.main_mut() {
+                            if ws.pressed_tab.is_none() {
+                                ws.mouse_down = false;
+                            }
                         }
                         return;
                     }
@@ -718,9 +731,10 @@ impl App {
                             r.padding_bottom(),
                         )
                     });
-                    let pixel_to_cell = self.main_renderer().and_then(|r| {
-                        r.pixel_to_cell(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                    });
+                    let pixel_to_cell = {
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        self.main_renderer().and_then(|r| r.pixel_to_cell(cp.0 as f32, cp.1 as f32))
+                    };
                     if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
                         let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                         let pane_rects = self
@@ -738,7 +752,8 @@ impl App {
                             .unwrap_or_default();
                         if pane_rects.len() > 1 {
                             let sf = self.scale_factor as f32;
-                            let (lx, ly) = to_logical_pos(self.cursor_pos.0, self.cursor_pos.1, sf);
+                            let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                            let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
                             for (id, rect) in &pane_rects {
                                 if lx >= rect.x
                                     && lx < rect.x + rect.w
@@ -784,7 +799,9 @@ impl App {
                                 },
                             );
                             if opened.is_some() {
-                                self.mouse_down = false;
+                                if let Some(ws) = self.main_mut() {
+                                    ws.mouse_down = false;
+                                }
                                 return;
                             }
                             self.selection = Some(Selection::new(row, col));
@@ -803,8 +820,11 @@ impl App {
                     // pure compute_action helper, then execute.
                     let session = self.drag_session.take();
                     let foreign = self.drag_target.take();
-                    let pressed = self.pressed_tab.take();
-                    self.mouse_down = false;
+                    let pressed = self.main_mut().and_then(|ws| {
+                        let p = ws.pressed_tab.take();
+                        ws.mouse_down = false;
+                        p
+                    });
                     if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(None);
                     }
