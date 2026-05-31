@@ -186,6 +186,26 @@ impl WindowState {
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Phase B2 PR-B2a (#365): stable synthetic `WindowId` used by the
+/// test-only [`App::__test_synthetic_main`] seam so the main entry in
+/// `App.windows` can be addressed without a live winit window. winit's
+/// `WindowId` is `#[repr(transparent)] struct WindowId(u64)` so a
+/// transmute from `u64::MAX` is a stable, collision-free id (real OS
+/// window ids never reach `u64::MAX` in practice; the existing
+/// per-test `synth_window_id(tag)` helpers also use the transmute
+/// pattern — see `tests/os_drag_dispatch_flow.rs`). Production never
+/// constructs this id — `do_resumed` always uses the real
+/// `window.id()` and explicitly clears any pre-existing synthetic
+/// entry first.
+#[doc(hidden)]
+pub fn synthetic_main_window_id() -> WindowId {
+    // SAFETY: WindowId is `#[repr(transparent)] pub struct WindowId(u64)`
+    // in winit; this mirrors the test-only transmute pattern already in
+    // use under crates/sonic-app/tests/. Production code never reaches
+    // this function.
+    unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX) }
+}
+
 /// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
 /// the legacy `App.*` main-window fields into the shadow `WindowState`
 /// entry. Built by [`App::shadow_main_snapshot`] for the legacy side
@@ -1754,6 +1774,7 @@ impl App {
     /// exists (and clears the stale `focused_child`).
     #[doc(hidden)]
     pub fn __test_set_focused_child(&mut self, id: Option<WindowId>) {
+        self.__test_synthetic_main();
         self.focused_child = id;
     }
 
@@ -2220,12 +2241,60 @@ impl App {
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
+        // Phase B2 PR-B2a (#365): ensure the synthetic main WindowState
+        // entry exists before seeding. Future PRs B2b/c/d delete the
+        // App.tabs/tab_states/panes fields outright, so seed writes
+        // MUST land in `self.main_mut()` to survive that migration.
+        self.__test_synthetic_main();
         let pane_id = next_pane_id();
         let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-        self.panes.insert(pane_id, PaneState::new(parser, None));
+        self.panes.insert(pane_id, PaneState::new(parser.clone(), None));
         self.tabs.push(Tab::new(title));
         self.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        if let Some(ws) = self.main_mut() {
+            ws.panes.insert(pane_id, PaneState::new(parser, None));
+            ws.tabs.push(Tab::new(title));
+            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
         pane_id
+    }
+
+    /// Phase B2 PR-B2a (#365): for tests that build an `App` without
+    /// `do_resumed` running, insert a synthetic main `WindowState`
+    /// entry (window=None, renderer=None) under a stable synthetic
+    /// `WindowId` so test seeders can route writes through
+    /// [`Self::main_mut`]. No-op if `main_window_id` is already set.
+    /// In production [`Self::do_resumed`] detects the synthetic entry
+    /// and removes it before inserting the real one.
+    #[doc(hidden)]
+    pub fn __test_synthetic_main(&mut self) {
+        if self.main_window_id.is_some() {
+            return;
+        }
+        let id = synthetic_main_window_id();
+        let ws = WindowState {
+            role: WindowRole::Terminal,
+            window: None,
+            renderer: None,
+            tabs: TabBar::new(),
+            tab_states: Vec::new(),
+            panes: HashMap::new(),
+            cursor_pos: self.cursor_pos,
+            mouse_down: self.mouse_down,
+            selection: self.selection,
+            copy_mode: self.copy_mode.clone(),
+            modifiers: self.modifiers,
+            cursor_visible: self.cursor_visible.clone(),
+            last_render: self.last_render,
+            pressed_tab: self.pressed_tab,
+            drag_session: self.drag_session,
+            drag_target: self.drag_target,
+            scale_factor: self.scale_factor,
+            ime: self.ime.clone(),
+            hovered_url: self.hovered_url.clone(),
+        };
+        self.windows.insert(id, ws);
+        self.main_window_id = Some(id);
     }
 
     /// tests exercise tab/pane bookkeeping with a reply-capable parser but

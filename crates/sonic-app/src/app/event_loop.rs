@@ -258,6 +258,12 @@ impl App {
         // PR-B1b (#293): renderer is now owned by `WindowState.renderer`.
         // Insert the main entry BEFORE `new_tab` so `spawn_pane` (which
         // reads cell size through `self.main_renderer()`) sees it.
+        // PR-B2a (#365): drop any synthetic main entry seeded by tests
+        // (`App::__test_synthetic_main`); production `do_resumed` is
+        // the authoritative source for `main_window_id`.
+        if let Some(prev) = self.main_window_id.take() {
+            self.windows.remove(&prev);
+        }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
             role: super::WindowRole::Terminal,
