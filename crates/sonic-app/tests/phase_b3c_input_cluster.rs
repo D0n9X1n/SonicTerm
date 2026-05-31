@@ -189,11 +189,9 @@ fn multi_window_each_owns_its_input_cluster() {
 
 #[test]
 fn shadow_snapshot_no_longer_carries_input_cluster() {
-    // PR-B3c removed selection/copy_mode/modifiers from the snapshot;
-    // building one from a freshly-seeded synthetic main must still
-    // round-trip equal to itself (sanity check the shrunk struct still
-    // implements PartialEq).
-    let app = synth_app();
-    let snap = app.shadow_main_snapshot();
-    assert_eq!(snap, snap.clone(), "ShadowMainSnapshot equality must hold post-shrink");
+    // #404: ShadowMainSnapshot deleted entirely; the input-cluster
+    // fields (selection/copy_mode/modifiers) live on WindowState and
+    // the snapshot helper no longer exists. Stub retained for the
+    // historical anchor name.
+    let _ = synth_app();
 }

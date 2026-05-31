@@ -237,72 +237,6 @@ pub fn synthetic_main_window_id() -> WindowId {
 }
 
 /// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
-/// the legacy `App.*` main-window fields into the shadow `WindowState`
-/// entry. Built by [`App::shadow_main_snapshot`] for the legacy side
-/// and by [`shadow_main_snapshot_from`] for the shadow side; equality
-/// of the two snapshots is the invariant the test pins.
-///
-/// Heavy fields (`renderer`, `tabs`, `tab_states`, `panes`) are NOT
-/// part of this snapshot — they move from `App` into the shadow in
-/// PR-B; the shadow holds `None` / empty placeholders for them until
-/// then. Phase B2 PR-B3b (#365): `cursor_visible`, `last_render`, and
-/// `hover_link` are now owned by `WindowState` directly and no longer
-/// appear in this snapshot — they were deleted from `App` in this PR.
-/// PR-B3c (#365): `selection`, `copy_mode`, and `modifiers` likewise
-/// promoted to `WindowState` and removed from this snapshot.
-/// PR-B3d (#365): `drag_session`, `drag_target`, and `ime` likewise
-/// promoted (and `ime_cursor_throttle` joined them on `WindowState`),
-/// removed from this snapshot. Only `scale_factor` and `hovered_url`
-/// remain mirrored here.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub struct ShadowMainSnapshot {
-    pub scale_factor: f64,
-    pub hovered_url: Option<hovered_url::HoveredUrl>,
-}
-
-impl PartialEq for ShadowMainSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        self.scale_factor == other.scale_factor && self.hovered_url == other.hovered_url
-    }
-}
-
-/// Build a [`ShadowMainSnapshot`] from a shadow `WindowState` entry.
-#[doc(hidden)]
-pub fn shadow_main_snapshot_from(ws: &WindowState) -> ShadowMainSnapshot {
-    ShadowMainSnapshot { scale_factor: ws.scale_factor, hovered_url: ws.hovered_url.clone() }
-}
-
-/// Apply a snapshot to the shadow `WindowState` entry — the pure half
-/// of [`App::sync_shadow_main`]. Exposed for the invariant test so it
-/// can drive sync without constructing a real winit window (`cargo
-/// test` can't on headless macOS — same as
-/// `tests/clear_shape_cache_event.rs`).
-#[doc(hidden)]
-pub fn apply_shadow_main_snapshot(ws: &mut WindowState, snap: ShadowMainSnapshot) {
-    ws.scale_factor = snap.scale_factor;
-    ws.hovered_url = snap.hovered_url;
-}
-
-/// Phase B2 PR-A — pure helper that copies the cheap scalar fields
-/// from the legacy `App.*` snapshot into the shadow main `WindowState`
-/// entry. Factored out of [`App::sync_shadow_main`] so the invariant
-/// test can drive it on a synthetic `WindowState` without needing a
-/// real winit window.
-///
-/// Heavy fields (`renderer`, `tabs`, `tab_states`, `panes`, `window`,
-/// `role`) are NOT touched: ownership of those moves wholesale from
-/// `App` into the shadow during PR-B; until then the shadow holds
-/// `None` / empty placeholders for them and the test does not compare.
-#[doc(hidden)]
-pub fn apply_shadow_main_sync(
-    ws: &mut WindowState,
-    scale_factor: f64,
-    hovered_url: Option<hovered_url::HoveredUrl>,
-) {
-    apply_shadow_main_snapshot(ws, ShadowMainSnapshot { scale_factor, hovered_url });
-}
-
 /// Epic #289 Phase A — classification of which terminal window currently
 /// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
@@ -905,13 +839,11 @@ pub struct App {
     // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
     // direct field access through `self.main()?.copy_mode` etc.
     pub(super) clipboard: Option<Clipboard>,
-    pub(super) scale_factor: f64,
-    /// Currently-hovered auto-detected URL (focused pane only), with
-    /// row + char-col span. Drives the Cmd-held underline overlay and
-    /// the pointer-cursor transition. `None` when the cursor isn't on
-    /// a URL OR the open-URL modifier isn't held. See
-    /// `crate::app::hovered_url` for the pure helpers.
-    pub(super) hovered_url: Option<hovered_url::HoveredUrl>,
+    // #404: `App.scale_factor` and `App.hovered_url` deleted — both
+    // now live exclusively on `WindowState`. Readers go through
+    // `self.main()?.scale_factor` / `self.main()?.hovered_url`
+    // (with safe-default fallbacks at call sites). The shadow-sync
+    // path was deleted as the final Phase B2 leftover.
     /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
     /// `create_new_terminal_window(el)`. Window creation requires an
@@ -1224,8 +1156,6 @@ impl App {
             config,
             keymap,
             clipboard: Clipboard::new().ok(),
-            scale_factor: 1.0,
-            hovered_url: None,
             pending_new_window: false,
             pending_exit: false,
             command_palette: CommandPalette::new(),
@@ -2073,29 +2003,6 @@ impl App {
         self.windows.get_mut(&id)
     }
 
-    /// Phase B2 PR-A — copy every cheaply-cloneable scalar from the
-    /// legacy `App` main-window fields into the shadow `WindowState`
-    /// entry in [`Self::windows`]. Called at the end of every event
-    /// tick (window event, user event, redraw) so the shadow stays
-    /// indistinguishable from the legacy authoritative copy. PR-B will
-    /// invert this — readers move to the shadow, the legacy fields go
-    /// away, and this helper is deleted.
-    ///
-    /// Fields NOT mirrored in PR-A (move in PR-B): `renderer` (owns a
-    /// GpuRenderer, can't be cloned), `tabs` / `tab_states` / `panes`
-    /// (own PtyHandle / Parser; ownership moves wholesale in PR-B).
-    /// The shadow keeps `renderer: None` and empty collections until
-    /// then; the invariant test does NOT compare those fields.
-    #[doc(hidden)]
-    pub fn sync_shadow_main(&mut self) {
-        let Some(id) = self.main_window_id else { return };
-        let scale_factor = self.scale_factor;
-        let hovered_url = self.hovered_url.clone();
-        if let Some(ws) = self.windows.get_mut(&id) {
-            apply_shadow_main_sync(ws, scale_factor, hovered_url);
-        }
-    }
-
     #[doc(hidden)]
     pub fn frontmost_kind(&self) -> FrontmostKind {
         let Some(id) = self.frontmost_window else { return FrontmostKind::None };
@@ -2332,33 +2239,8 @@ impl App {
         self.main_window_id
     }
 
-    /// Phase B2 PR-A — snapshot of the cheap scalar fields the shadow
-    /// `WindowState` must mirror. Built from the legacy `App.*` main
-    /// fields; the shadow side is built via
-    /// [`shadow_main_snapshot_from`]. Equality of the two is the
-    /// invariant the test pins.
-    #[doc(hidden)]
-    pub fn shadow_main_snapshot(&self) -> ShadowMainSnapshot {
-        ShadowMainSnapshot {
-            scale_factor: self.scale_factor,
-            hovered_url: self.hovered_url.clone(),
-        }
-    }
-
-    /// Phase B2 PR-A invariant probe: returns `true` iff every
-    /// cheaply-mirrored field on the shadow `windows[main]` entry equals
-    /// the legacy `App.*` field. Heavy fields (`renderer`, `tabs`,
-    /// `tab_states`, `panes`) are intentionally NOT compared — they
-    /// move from `App` into the shadow in PR-B; until then the shadow
-    /// holds `None` / empty placeholders.
-    #[doc(hidden)]
-    pub fn __test_shadow_main_in_sync(&self) -> bool {
-        let Some(id) = self.main_window_id else { return false };
-        let Some(ws) = self.windows.get(&id) else { return false };
-        ws.role == WindowRole::Terminal
-            && ws.scale_factor == self.scale_factor
-            && ws.hovered_url == self.hovered_url
-    }
+    // #404: ShadowMainSnapshot helpers deleted — scale_factor + hovered_url
+    // now live exclusively on WindowState.
 
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
@@ -2408,10 +2290,10 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: self.scale_factor,
+            scale_factor: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonic_ui::ime::ImeCursorThrottle::new(),
-            hovered_url: self.hovered_url.clone(),
+            hovered_url: None,
             hidden: false,
         };
         self.windows.insert(id, ws);
@@ -3088,27 +2970,22 @@ pub enum TransferError {
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.do_resumed(el);
-        self.sync_shadow_main();
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         self.do_user_event(el, event);
-        self.sync_shadow_main();
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
         self.do_window_event(el, win_id, event);
-        self.sync_shadow_main();
     }
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
         self.do_new_events(_el, cause);
-        self.sync_shadow_main();
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.do_about_to_wait(el);
-        self.sync_shadow_main();
     }
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {

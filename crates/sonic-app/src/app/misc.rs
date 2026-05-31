@@ -104,18 +104,22 @@ impl App {
         Some(s)
     }
 
-    /// Recompute `self.hovered_url` from the current cursor position
-    /// and modifier state. Called on every `CursorMoved` and every
-    /// `ModifiersChanged` so press / release / drift transitions all
-    /// converge to the same source of truth.
+    /// Recompute hovered URL on the main window from the current cursor
+    /// position and modifier state. Called on every `CursorMoved` and
+    /// every `ModifiersChanged` so press / release / drift transitions
+    /// all converge to the same source of truth.
     pub(super) fn refresh_hovered_url(&mut self) {
         let new_hover = self.compute_current_hovered_url();
-        let changed = new_hover != self.hovered_url;
-        self.hovered_url = new_hover;
+        let prev = self.main().and_then(|ws| ws.hovered_url.clone());
+        let changed = new_hover != prev;
+        if let Some(ws) = self.main_mut() {
+            ws.hovered_url = new_hover;
+        }
         // Pointer-cursor transition: auto-detected URL needs the
         // open-URL modifier held; OSC 8 keeps its always-on pointer.
         let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let want_pointer = self.hovered_url.is_some()
+        let has_hover = self.main().and_then(|ws| ws.hovered_url.as_ref()).is_some();
+        let want_pointer = has_hover
             || self
                 .main_renderer()
                 .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
