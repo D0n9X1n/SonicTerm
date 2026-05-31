@@ -215,7 +215,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let d = sd_segment(in.local, a, b) - thickness * 0.5;
         let w = fwidth(d);
         let aa = 1.0 - smoothstep(-w, w, d);
-        return vec4<f32>(in.color.rgb, in.color.a * aa);
+        return in.color * aa;
     }
     let r = in.params.z;
     if (r <= 0.0) {
@@ -228,7 +228,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 1-pixel antialias band: alpha = 1 inside, 0 outside, smooth in between.
     let w = fwidth(d);
     let aa = 1.0 - smoothstep(-w, w, d);
-    return vec4<f32>(in.color.rgb, in.color.a * aa);
+    return in.color * aa;
 }
 "#;
 
