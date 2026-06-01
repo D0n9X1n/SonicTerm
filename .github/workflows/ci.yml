@@ -48,15 +48,15 @@ jobs:
       - name: unit + bin tests (skip integration tests/ folders)
         run: cargo test --workspace --lib --bins
 
-      - name: contract docs drift (M8: fail)
+      - name: 'contract docs drift (M8 fail)'
         shell: bash
         run: bash tools/check-contract-docs.sh fail
 
-      - name: landmines (M8: fail)
+      - name: 'landmines (M8 fail)'
         shell: bash
         run: bash tools/check-landmines.sh fail
 
-      - name: ownership (M8: fail)
+      - name: 'ownership (M8 fail)'
         shell: bash
         run: bash tools/check-ownership.sh fail
 
