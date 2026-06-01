@@ -26,7 +26,9 @@ fn load_bundled_fonts_actually_loads_st_helens() {
     let mut fs = FontSystem::new();
     load_bundled_fonts(&mut fs);
     let has_st_helens = fs.db().faces().any(|f| {
-        f.families.iter().any(|(name, _)| name.contains("St.Helens") || name.contains("St Helens"))
+        f.families
+            .iter()
+            .any(|(name, _)| name.contains("St.Helens") || name.contains("St Helens"))
     });
     assert!(
         has_st_helens,
@@ -80,7 +82,9 @@ fn st_helens_rasterizes_powerline_e0b0_to_nonempty_tile() {
     load_bundled_fonts(&mut fs);
     let mut r = make_rasterizer(&mut fs);
     let key = GlyphKey::with_slot('\u{e0b0}', 0, false, false);
-    let tile = r.rasterize(key).expect("U+E0B0 MUST rasterize from bundled St.Helens slot 0");
+    let tile = r
+        .rasterize(key)
+        .expect("U+E0B0 MUST rasterize from bundled St.Helens slot 0");
     assert!(
         tile.width > 0 && tile.height > 0,
         "U+E0B0 MUST produce non-empty tile from slot 0, got {}x{}",
@@ -95,7 +99,9 @@ fn st_helens_rasterizes_filled_arrow_25b6_to_nonempty_tile() {
     load_bundled_fonts(&mut fs);
     let mut r = make_rasterizer(&mut fs);
     let key = GlyphKey::with_slot('\u{25b6}', 0, false, false);
-    let tile = r.rasterize(key).expect("U+25B6 MUST rasterize from bundled St.Helens slot 0");
+    let tile = r
+        .rasterize(key)
+        .expect("U+25B6 MUST rasterize from bundled St.Helens slot 0");
     assert!(
         tile.width > 0 && tile.height > 0,
         "U+25B6 MUST produce non-empty tile from slot 0, got {}x{}",
@@ -110,8 +116,9 @@ fn st_helens_rasterizes_nf_pua_f0001_to_nonempty_tile() {
     load_bundled_fonts(&mut fs);
     let mut r = make_rasterizer(&mut fs);
     let key = GlyphKey::with_slot('\u{f0001}', 0, false, false);
-    let tile =
-        r.rasterize(key).expect("U+F0001 MUST rasterize from bundled St.Helens slot 0 (no skip)");
+    let tile = r
+        .rasterize(key)
+        .expect("U+F0001 MUST rasterize from bundled St.Helens slot 0 (no skip)");
     assert!(
         tile.width > 0 && tile.height > 0,
         "U+F0001 MUST produce non-empty tile from slot 0, got {}x{}",

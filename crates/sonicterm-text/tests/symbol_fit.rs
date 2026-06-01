@@ -45,6 +45,22 @@ fn classify_filled_arrows_return_icon_cell_fit() {
 }
 
 #[test]
+fn classify_filled_arrows_full_range_returns_icon_cell_fit() {
+    // PR #456 cycle 2: full U+25B6..=U+25C1 range (12 codepoints), not
+    // just the original 4. Catches Haiku review finding that 25B8..25BF
+    // were silently falling through to Natural.
+    for cp in 0x25B6u32..=0x25C1u32 {
+        let ch = char::from_u32(cp).expect("valid scalar");
+        assert_eq!(
+            classify_symbol(ch),
+            SymbolFit::IconCellFit,
+            "U+{:04X} should be IconCellFit",
+            cp
+        );
+    }
+}
+
+#[test]
 fn classify_text_returns_natural() {
     for ch in ['a', 'A', '中', '中', '🍅'] {
         assert_eq!(classify_symbol(ch), SymbolFit::Natural, "{:?} should be Natural", ch);

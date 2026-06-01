@@ -162,8 +162,8 @@ const ICON_FIT_TARGET: f32 = 0.95;
 ///   `IconCellFit`.
 /// * `U+F0000..=U+FFFFD` — Plane-1 PUA-A (NerdFont MDI, etc.) →
 ///   `IconCellFit`.
-/// * `U+25B6, U+25B7, U+25C0, U+25C1` — filled / outlined geometric
-///   triangle arrows commonly used in TUI prompts → `IconCellFit`.
+/// * `U+25B6..=U+25C1` — filled / outlined geometric triangle arrows
+///   commonly used in TUI prompts (full 12-codepoint range) → `IconCellFit`.
 /// * Everything else → `Natural`.
 #[inline]
 pub fn classify_symbol(ch: char) -> SymbolFit {
@@ -174,8 +174,9 @@ pub fn classify_symbol(ch: char) -> SymbolFit {
         0xE000..=0xE0AF | 0xE0C0..=0xF8FF => SymbolFit::IconCellFit,
         // Plane-1 PUA-A — NerdFont Material Design Icons etc.
         0xF0000..=0xFFFFD => SymbolFit::IconCellFit,
-        // Filled / outlined triangle arrows common in TUI prompts.
-        0x25B6 | 0x25B7 | 0x25C0 | 0x25C1 => SymbolFit::IconCellFit,
+        // Filled geometric arrows commonly used in TUI prompts (full range,
+        // not just 4 codepoints — Haiku review of PR #456 cycle 1).
+        0x25B6..=0x25C1 => SymbolFit::IconCellFit,
         _ => SymbolFit::Natural,
     }
 }
