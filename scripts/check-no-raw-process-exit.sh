@@ -12,7 +12,10 @@ cd "$ROOT"
 ALLOWLIST="scripts/process-exit-allowlist.txt"
 
 # Find every occurrence in crates/, then strip allowlisted files.
-hits=$(grep -rn --include='*.rs' 'std::process::exit\|process::exit(' crates/ || true)
+# Note: macOS BSD grep emits `crates//foo/...` (double slash) when given
+# `crates/` as the path arg; pass `crates` (no trailing /) so paths come
+# out as `crates/foo/...` consistently with the allowlist prefixes.
+hits=$(grep -rn --include='*.rs' 'std::process::exit\|process::exit(' crates || true)
 
 if [[ -z "$hits" ]]; then
     echo "check-no-raw-process-exit: 0 occurrences. OK."
