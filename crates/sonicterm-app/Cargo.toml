@@ -16,6 +16,7 @@ ssh = ["sonicterm-core/ssh", "sonicterm-shared/ssh"]
 
 [dependencies]
 sonicterm-core.workspace = true
+sonicterm-types.workspace = true
 sonicterm-logging.workspace = true
 sonicterm-text.workspace = true
 sonicterm-gpu.workspace = true

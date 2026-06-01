@@ -4571,6 +4571,7 @@ dependencies = [
  "sonicterm-render-model",
  "sonicterm-shared",
  "sonicterm-text",
+ "sonicterm-types",
  "sonicterm-ui",
  "swash",
  "tempfile",

@@ -409,6 +409,108 @@ impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub mod sonicterm_types::mod_key
+pub struct sonicterm_types::mod_key::ModKey(_)
+impl sonicterm_types::mod_key::ModKey
+pub const sonicterm_types::mod_key::ModKey::ALT: Self
+pub const sonicterm_types::mod_key::ModKey::CTRL: Self
+pub const sonicterm_types::mod_key::ModKey::SHIFT: Self
+pub const sonicterm_types::mod_key::ModKey::SUPER: Self
+impl sonicterm_types::mod_key::ModKey
+pub const fn sonicterm_types::mod_key::ModKey::all() -> Self
+pub const fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
+pub const fn sonicterm_types::mod_key::ModKey::complement(self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::contains(&self, Self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::difference(self, Self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::empty() -> Self
+pub const fn sonicterm_types::mod_key::ModKey::from_bits(u32) -> core::option::Option<Self>
+pub const fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::from_bits_truncate(u32) -> Self
+pub fn sonicterm_types::mod_key::ModKey::from_name(&str) -> core::option::Option<Self>
+pub fn sonicterm_types::mod_key::ModKey::insert(&mut self, Self)
+pub const fn sonicterm_types::mod_key::ModKey::intersection(self, Self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::intersects(&self, Self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::is_all(&self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::is_empty(&self) -> bool
+pub fn sonicterm_types::mod_key::ModKey::remove(&mut self, Self)
+pub fn sonicterm_types::mod_key::ModKey::set(&mut self, Self, bool)
+pub const fn sonicterm_types::mod_key::ModKey::symmetric_difference(self, Self) -> Self
+pub fn sonicterm_types::mod_key::ModKey::toggle(&mut self, Self)
+pub const fn sonicterm_types::mod_key::ModKey::union(self, Self) -> Self
+impl sonicterm_types::mod_key::ModKey
+pub const fn sonicterm_types::mod_key::ModKey::iter(&self) -> bitflags::iter::Iter<sonicterm_types::mod_key::ModKey>
+pub const fn sonicterm_types::mod_key::ModKey::iter_names(&self) -> bitflags::iter::IterNames<sonicterm_types::mod_key::ModKey>
+impl bitflags::traits::Flags for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Bits = u32
+pub const sonicterm_types::mod_key::ModKey::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::mod_key::ModKey>]
+pub fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
+pub fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> sonicterm_types::mod_key::ModKey
+impl bitflags::traits::PublicFlags for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Internal = InternalBitFlags
+pub type sonicterm_types::mod_key::ModKey::Primitive = u32
+impl core::clone::Clone for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::clone(&self) -> sonicterm_types::mod_key::ModKey
+impl core::cmp::Eq for sonicterm_types::mod_key::ModKey
+impl core::cmp::PartialEq for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::eq(&self, &sonicterm_types::mod_key::ModKey) -> bool
+impl core::default::Default for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::default() -> sonicterm_types::mod_key::ModKey
+impl core::fmt::Binary for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Debug for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::LowerHex for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Octal for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::UpperHex for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::iter::traits::collect::Extend<sonicterm_types::mod_key::ModKey> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::extend<T: core::iter::traits::collect::IntoIterator<Item = Self>>(&mut self, T)
+impl core::iter::traits::collect::FromIterator<sonicterm_types::mod_key::ModKey> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::from_iter<T: core::iter::traits::collect::IntoIterator<Item = Self>>(T) -> Self
+impl core::iter::traits::collect::IntoIterator for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::IntoIter = bitflags::iter::Iter<sonicterm_types::mod_key::ModKey>
+pub type sonicterm_types::mod_key::ModKey::Item = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::into_iter(self) -> Self::IntoIter
+impl core::marker::Copy for sonicterm_types::mod_key::ModKey
+impl core::marker::StructuralPartialEq for sonicterm_types::mod_key::ModKey
+impl core::ops::arith::Sub for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::sub(self, Self) -> Self
+impl core::ops::arith::SubAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::sub_assign(&mut self, Self)
+impl core::ops::bit::BitAnd for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitand(self, Self) -> Self
+impl core::ops::bit::BitAndAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitand_assign(&mut self, Self)
+impl core::ops::bit::BitOr for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitor(self, sonicterm_types::mod_key::ModKey) -> Self
+impl core::ops::bit::BitOrAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitor_assign(&mut self, Self)
+impl core::ops::bit::BitXor for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitxor(self, Self) -> Self
+impl core::ops::bit::BitXorAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitxor_assign(&mut self, Self)
+impl core::ops::bit::Not for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::not(self) -> Self
+impl serde_core::ser::Serialize for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::mod_key::ModKey
+impl core::marker::Send for sonicterm_types::mod_key::ModKey
+impl core::marker::Sync for sonicterm_types::mod_key::ModKey
+impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
+impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
 pub mod sonicterm_types::traits
 pub mod sonicterm_types::traits::clipboard
 pub enum sonicterm_types::traits::clipboard::ClipboardError
@@ -489,6 +591,37 @@ pub fn sonicterm_types::traits::WindowBackend::inner_size_px(&self) -> (u32, u32
 pub fn sonicterm_types::traits::WindowBackend::request_redraw(&self)
 pub fn sonicterm_types::traits::WindowBackend::scale_factor(&self) -> f64
 pub fn sonicterm_types::traits::WindowBackend::set_title(&self, &str)
+pub mod sonicterm_types::window_key
+pub struct sonicterm_types::window_key::WindowKey(pub u64)
+impl sonicterm_types::window_key::WindowKey
+pub const fn sonicterm_types::window_key::WindowKey::new(u64) -> Self
+pub const fn sonicterm_types::window_key::WindowKey::raw(self) -> u64
+impl core::clone::Clone for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::clone(&self) -> sonicterm_types::window_key::WindowKey
+impl core::cmp::Eq for sonicterm_types::window_key::WindowKey
+impl core::cmp::PartialEq for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::eq(&self, &sonicterm_types::window_key::WindowKey) -> bool
+impl core::convert::From<u64> for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::from(u64) -> Self
+impl core::fmt::Debug for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::window_key::WindowKey
+impl core::marker::StructuralPartialEq for sonicterm_types::window_key::WindowKey
+impl serde_core::ser::Serialize for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::window_key::WindowKey
+impl core::marker::Send for sonicterm_types::window_key::WindowKey
+impl core::marker::Sync for sonicterm_types::window_key::WindowKey
+impl core::marker::Unpin for sonicterm_types::window_key::WindowKey
+impl core::marker::UnsafeUnpin for sonicterm_types::window_key::WindowKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::window_key::WindowKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::window_key::WindowKey
 pub enum sonicterm_types::Action
 pub sonicterm_types::Action::ActivateLastTab
 pub sonicterm_types::Action::ActivateTab(usize)
@@ -884,6 +1017,107 @@ impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub struct sonicterm_types::ModKey(_)
+impl sonicterm_types::mod_key::ModKey
+pub const sonicterm_types::mod_key::ModKey::ALT: Self
+pub const sonicterm_types::mod_key::ModKey::CTRL: Self
+pub const sonicterm_types::mod_key::ModKey::SHIFT: Self
+pub const sonicterm_types::mod_key::ModKey::SUPER: Self
+impl sonicterm_types::mod_key::ModKey
+pub const fn sonicterm_types::mod_key::ModKey::all() -> Self
+pub const fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
+pub const fn sonicterm_types::mod_key::ModKey::complement(self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::contains(&self, Self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::difference(self, Self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::empty() -> Self
+pub const fn sonicterm_types::mod_key::ModKey::from_bits(u32) -> core::option::Option<Self>
+pub const fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::from_bits_truncate(u32) -> Self
+pub fn sonicterm_types::mod_key::ModKey::from_name(&str) -> core::option::Option<Self>
+pub fn sonicterm_types::mod_key::ModKey::insert(&mut self, Self)
+pub const fn sonicterm_types::mod_key::ModKey::intersection(self, Self) -> Self
+pub const fn sonicterm_types::mod_key::ModKey::intersects(&self, Self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::is_all(&self) -> bool
+pub const fn sonicterm_types::mod_key::ModKey::is_empty(&self) -> bool
+pub fn sonicterm_types::mod_key::ModKey::remove(&mut self, Self)
+pub fn sonicterm_types::mod_key::ModKey::set(&mut self, Self, bool)
+pub const fn sonicterm_types::mod_key::ModKey::symmetric_difference(self, Self) -> Self
+pub fn sonicterm_types::mod_key::ModKey::toggle(&mut self, Self)
+pub const fn sonicterm_types::mod_key::ModKey::union(self, Self) -> Self
+impl sonicterm_types::mod_key::ModKey
+pub const fn sonicterm_types::mod_key::ModKey::iter(&self) -> bitflags::iter::Iter<sonicterm_types::mod_key::ModKey>
+pub const fn sonicterm_types::mod_key::ModKey::iter_names(&self) -> bitflags::iter::IterNames<sonicterm_types::mod_key::ModKey>
+impl bitflags::traits::Flags for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Bits = u32
+pub const sonicterm_types::mod_key::ModKey::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::mod_key::ModKey>]
+pub fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
+pub fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> sonicterm_types::mod_key::ModKey
+impl bitflags::traits::PublicFlags for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Internal = InternalBitFlags
+pub type sonicterm_types::mod_key::ModKey::Primitive = u32
+impl core::clone::Clone for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::clone(&self) -> sonicterm_types::mod_key::ModKey
+impl core::cmp::Eq for sonicterm_types::mod_key::ModKey
+impl core::cmp::PartialEq for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::eq(&self, &sonicterm_types::mod_key::ModKey) -> bool
+impl core::default::Default for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::default() -> sonicterm_types::mod_key::ModKey
+impl core::fmt::Binary for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Debug for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::LowerHex for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Octal for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::UpperHex for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::iter::traits::collect::Extend<sonicterm_types::mod_key::ModKey> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::extend<T: core::iter::traits::collect::IntoIterator<Item = Self>>(&mut self, T)
+impl core::iter::traits::collect::FromIterator<sonicterm_types::mod_key::ModKey> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::from_iter<T: core::iter::traits::collect::IntoIterator<Item = Self>>(T) -> Self
+impl core::iter::traits::collect::IntoIterator for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::IntoIter = bitflags::iter::Iter<sonicterm_types::mod_key::ModKey>
+pub type sonicterm_types::mod_key::ModKey::Item = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::into_iter(self) -> Self::IntoIter
+impl core::marker::Copy for sonicterm_types::mod_key::ModKey
+impl core::marker::StructuralPartialEq for sonicterm_types::mod_key::ModKey
+impl core::ops::arith::Sub for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::sub(self, Self) -> Self
+impl core::ops::arith::SubAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::sub_assign(&mut self, Self)
+impl core::ops::bit::BitAnd for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitand(self, Self) -> Self
+impl core::ops::bit::BitAndAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitand_assign(&mut self, Self)
+impl core::ops::bit::BitOr for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitor(self, sonicterm_types::mod_key::ModKey) -> Self
+impl core::ops::bit::BitOrAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitor_assign(&mut self, Self)
+impl core::ops::bit::BitXor for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitxor(self, Self) -> Self
+impl core::ops::bit::BitXorAssign for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::bitxor_assign(&mut self, Self)
+impl core::ops::bit::Not for sonicterm_types::mod_key::ModKey
+pub type sonicterm_types::mod_key::ModKey::Output = sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::not(self) -> Self
+impl serde_core::ser::Serialize for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::mod_key::ModKey
+pub fn sonicterm_types::mod_key::ModKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::mod_key::ModKey
+impl core::marker::Send for sonicterm_types::mod_key::ModKey
+impl core::marker::Sync for sonicterm_types::mod_key::ModKey
+impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
+impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
 pub struct sonicterm_types::Pos
 pub sonicterm_types::Pos::col: u16
 pub sonicterm_types::Pos::row: u16
@@ -907,6 +1141,36 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub struct sonicterm_types::WindowKey(pub u64)
+impl sonicterm_types::window_key::WindowKey
+pub const fn sonicterm_types::window_key::WindowKey::new(u64) -> Self
+pub const fn sonicterm_types::window_key::WindowKey::raw(self) -> u64
+impl core::clone::Clone for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::clone(&self) -> sonicterm_types::window_key::WindowKey
+impl core::cmp::Eq for sonicterm_types::window_key::WindowKey
+impl core::cmp::PartialEq for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::eq(&self, &sonicterm_types::window_key::WindowKey) -> bool
+impl core::convert::From<u64> for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::from(u64) -> Self
+impl core::fmt::Debug for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::window_key::WindowKey
+impl core::marker::StructuralPartialEq for sonicterm_types::window_key::WindowKey
+impl serde_core::ser::Serialize for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::window_key::WindowKey
+pub fn sonicterm_types::window_key::WindowKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::window_key::WindowKey
+impl core::marker::Send for sonicterm_types::window_key::WindowKey
+impl core::marker::Sync for sonicterm_types::window_key::WindowKey
+impl core::marker::Unpin for sonicterm_types::window_key::WindowKey
+impl core::marker::UnsafeUnpin for sonicterm_types::window_key::WindowKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::window_key::WindowKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::window_key::WindowKey
 pub trait sonicterm_types::ClipboardBackend: core::marker::Send
 pub fn sonicterm_types::ClipboardBackend::get_text(&mut self) -> core::option::Option<alloc::string::String>
 pub fn sonicterm_types::ClipboardBackend::set_text(&mut self, &str) -> core::result::Result<(), sonicterm_types::traits::clipboard::ClipboardError>
