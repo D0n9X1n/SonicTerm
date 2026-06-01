@@ -589,6 +589,21 @@ impl Grid {
         if top_i > bot_i {
             return;
         }
+        // When the scroll region covers the entire visible grid, the
+        // semantic operation is identical to a full-screen scroll —
+        // and that means ejected lines MUST be pushed into scrollback.
+        // Without this routing, a DECSTBM that explicitly sets margins
+        // equal to the full screen (e.g. `ESC[1;Nr`, or the historical
+        // `ESC[r` lowering bug where omitted params were stored as
+        // `Some(0)..Some(rows-1)`) silently drops every line that
+        // scrolls off the top — breaking interactive TUIs like Claude
+        // Code that briefly set full-screen margins and then redraw,
+        // leaving stale text bleeding through behind their UI. Fixes
+        // #425 (and the real cause behind #414).
+        if top_i == 0 && bot_i == rows.saturating_sub(1) {
+            self.scroll_up(n);
+            return;
+        }
         let region_len = bot_i - top_i + 1;
         let n = (n as usize).min(region_len);
         if n == 0 {
