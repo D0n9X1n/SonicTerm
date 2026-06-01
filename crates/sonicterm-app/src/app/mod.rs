@@ -1765,6 +1765,53 @@ impl App {
         id
     }
 
+    /// Test-only (#438): inspect drag-gesture residue on a specific
+    /// child window so an integration test can assert
+    /// [`Self::cancel_drag_session`] clears EVERY window's state, not
+    /// just the main one.
+    #[doc(hidden)]
+    pub fn __test_child_pressed_tab(&self, id: WindowId) -> Option<Option<usize>> {
+        self.windows.get(&id).map(|ws| ws.pressed_tab)
+    }
+
+    #[doc(hidden)]
+    pub fn __test_child_mouse_down(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).map(|ws| ws.mouse_down)
+    }
+
+    #[doc(hidden)]
+    pub fn __test_child_has_drag_session(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).map(|ws| ws.drag_session.is_some())
+    }
+
+    #[doc(hidden)]
+    pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).map(|ws| ws.drag_target.is_some())
+    }
+
+    /// Test-only (#438): seed drag-gesture residue on a specific child
+    /// window — `pressed_tab`, `mouse_down`, and a synthetic
+    /// `drag_session` — without driving a real winit pointer event
+    /// sequence. Returns true on success.
+    #[doc(hidden)]
+    pub fn __test_seed_child_drag_residue(
+        &mut self,
+        id: WindowId,
+        pressed_tab: Option<usize>,
+        mouse_down: bool,
+        with_drag_session: bool,
+    ) -> bool {
+        let Some(ws) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        ws.pressed_tab = pressed_tab;
+        ws.mouse_down = mouse_down;
+        if with_drag_session {
+            ws.drag_session = Some(crate::tab_drag::DragSession::new(0, (0.0, 0.0)));
+        }
+        true
+    }
+
     /// Test-only: install a frontmost child id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
     /// PR-B4 (#365) replaced `focused_child` with `frontmost_window`;
@@ -2867,21 +2914,37 @@ impl App {
     #[doc(hidden)]
     pub fn cancel_drag_session(&mut self) -> bool {
         let mut had = false;
+        // Issue #438: clear ALL per-window drag residue, not just
+        // drag_session / drag_target. Previously `pressed_tab` and
+        // `mouse_down` were only cleared on the main window, and the
+        // renderer's `drag_chip` overlay was never cleared by this path
+        // at all — so an OS-drag end (which bypasses the normal
+        // MouseInput::Released handlers in window_event.rs / child_window.rs
+        // that DO clear drag_chip) left a stale grey chip rectangle
+        // floating in empty pane space until the next render forced a
+        // refresh. Iterate every WindowState (main + children) and wipe
+        // the lot.
         for ws in self.windows.values_mut() {
             if ws.drag_session.take().is_some() {
                 had = true;
             }
             ws.drag_target = None;
-        }
-        // pressed_tab / mouse_down are the gesture
-        // residue from `tear_out`; clearing them prevents an ESC mid-
-        // drag from leaving the next mouse-up still believing a drag
-        // is in flight (Haiku-flagged regression class).
-        // PR-B3 (#365): pressed_tab + mouse_down live on the main
-        // WindowState now.
-        if let Some(ws) = self.main_mut() {
             ws.pressed_tab = None;
             ws.mouse_down = false;
+            // Wipe the renderer's persistent drag-chip overlay. The
+            // per-frame emitter at render/core.rs:3945+ keeps drawing
+            // whatever Some(_) value sits here, so leaving it behind
+            // ships a stale chip until something else triggers a
+            // set_drag_chip(None). For headless test windows the
+            // renderer is None and this is a no-op.
+            if let Some(r) = ws.renderer.as_mut() {
+                r.set_drag_chip(None);
+            }
+            // Force a repaint so the cleared chip actually leaves the
+            // screen instead of waiting for the next external event.
+            if let Some(w) = ws.window.as_ref() {
+                w.request_redraw();
+            }
         }
         self.os_drag_handoff_started = false;
         had
