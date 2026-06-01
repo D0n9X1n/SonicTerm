@@ -38,11 +38,13 @@ Context: https://github.com/D0n9X1n/sonic/issues/419
 
 Rec Mono St.Helens is committed in-tree (no fetch step needed).
 
-If you need Nerd Font / Powerline PUA coverage, install a Nerd Font
-system-wide (e.g. JetBrainsMono Nerd Font, Symbols Nerd Font Mono); the
-platform fallback chain in `sonicterm_text::swash_rasterizer` resolves
-through it automatically. The previously-bundled JetBrainsMono Nerd Font
-TTFs and Rec Mono Casual were dropped in R1 of the rename epic (#419).
+The bundled `RecMonoSt.Helens-*.ttf` files are **Nerd-Font-patched**,
+so Powerline + Nerd Font icon coverage works out of the box with no
+system install required. Covered codepoint ranges include Powerline
+separators (U+E0B0–U+E0BF), the Nerd Font PUA block
+(U+E000–U+F8FF), and Material Design icons (U+F0001+). The platform
+fallback chain in `sonicterm_text::swash_rasterizer` is still used for
+non-Latin scripts (CJK, emoji) that the primary doesn't cover.
 
 ## License
 

@@ -306,9 +306,11 @@ impl Default for Config {
 /// v1.2.2 and distributed under the SIL Open Font License 1.1. The
 /// font-family string registered by fontdb is `"Rec Mono St.Helens"`
 /// (with the dot) — that's the exact name to use here. When the family is
-/// missing the renderer falls through to the system mono chain;
-/// `JetBrainsMono Nerd Font` is also bundled and serves as the implicit
-/// fallback. Users can override via `[font] family = "..."` in `sonicterm.toml`.
+/// missing the renderer falls through to the system mono chain. The
+/// bundled `Rec Mono St.Helens` TTFs are Nerd-Font-patched, so Powerline
+/// (U+E0B0–U+E0BF) and Nerd Font PUA (U+E000–U+F8FF) glyphs resolve in
+/// the primary slot without needing a system Nerd Font install. Users can
+/// override via `[font] family = "..."` in `sonicterm.toml`.
 pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {

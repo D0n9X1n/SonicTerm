@@ -792,7 +792,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-26-wide-N.png`.
 - [ ] Emoji ZWJ family renders as a SINGLE glyph (not 4 separate emoji).
 - [ ] Flag pairs render as flag (not as letters R/I + R/I).
 - [ ] Combining accents render on the base char (single cell), not as standalone marks.
-- [ ] Powerline PUA glyphs render (font: `Rec Mono Casual` fallback per CLAUDE.md §1).
+- [ ] Powerline PUA glyphs render (bundled `Rec Mono St.Helens` is Nerd-Font-patched per CLAUDE.md §1).
 - [ ] Cursor advances by the correct cell count after each char.
 
 **FAIL → block release** (Unicode capability matrix from §11 must also be green).
@@ -895,7 +895,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-30-a11y-N.png`.
 - [ ] First launch creates the config dir without prompting.
 - [ ] Default theme + keymap (wezterm) apply (CLAUDE.md §1).
 - [ ] No error dialog about missing config.
-- [ ] Default font resolves (`St Helens` system, falls back to `Rec Mono Casual` bundled) — no tofu in welcome shell prompt.
+- [ ] Default font resolves (bundled `Rec Mono St.Helens`, Nerd-Font-patched) — no tofu in welcome shell prompt.
 - [ ] `sonicterm.toml` exists after first quit (or is generated lazily on first edit — verify against current design and note which).
 
 **FAIL → block release.**
