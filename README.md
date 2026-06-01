@@ -1,12 +1,10 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm Terminal" width="160" height="160"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm" width="160" height="160"/>
 
-# SonicTerm Terminal
+# SonicTerm
 
-**SonicTerm is what you'd build if you started a terminal in 2026: GPU-native,
-fast at idle, correct on every script, and you can drag tabs between
-windows.**
+**A GPU-accelerated cross-platform terminal that ships in MB, not GB.**
 
 [![CI](https://github.com/D0n9X1n/sonic/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/sonic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -17,163 +15,170 @@ windows.**
 
 ---
 
-## Why SonicTerm?
+## Why SonicTerm
 
-There are good terminals. There are even good *GPU* terminals. What there
-isn't, yet, is a GPU terminal that:
-
-- draws **0% CPU** when nothing is happening,
-- renders CJK + color emoji + programming ligatures **correctly out of the
-  box**,
-- lets you **tear a tab into its own window** with a drag,
-- carries a **built-in multiplexer** so a closed window doesn't kill your
-  shell, and
-- ships a **localized UI** (English / 简体中文 / 日本語) the first time you
-  launch it.
-
-SonicTerm does all of that on macOS and Windows.
-
-### How it compares
-
-| Capability | SonicTerm | WezTerm | Alacritty | Kitty | iTerm2 |
-|---|:---:|:---:|:---:|:---:|:---:|
-| GPU rendering (wgpu/OpenGL) | ✅ | ✅ | ✅ | ✅ | ⚠️ Metal only |
-| Idle CPU when nothing happens | **0%** | ~1% | ~1% | ~1% | varies |
-| Color emoji | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Programming ligatures | ✅ | ✅ | ❌ | ✅ | ✅ |
-| End-to-end CJK IME (Pinyin / 日本語 / 한글) | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Multiplexer built in | ✅ (`sonicterm-mux`) | ✅ | ❌ | ❌ | ❌ |
-| SSH client built in | ✅ (optional) | ✅ (`wezterm ssh`) | ❌ | ⚠️ (`kitten ssh`) | ❌ |
-| Tab tear-out → new window | ✅ in-process | ⚠️ via CLI | ❌ | ❌ | ✅ |
-| Cross-window tab merge | ✅ | ⚠️ via CLI | ❌ | ❌ | ✅ |
-| **Cross-process** tab drag (macOS) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Live config reload | ✅ | ✅ | ❌ | ✅ | ❌ |
-| Localized UI (en / zh-CN / ja) | ✅ | ❌ | ❌ | ❌ | ⚠️ macOS only |
-| Cross-platform | mac + win¹ | mac + win + linux | mac + linux | all | mac only |
-
-¹ Linux support is deliberately deferred to v1.0 — see
-[`docs/ROADMAP.md`](docs/ROADMAP.md). We'd rather ship two great
-platforms than three mediocre ones.
-
-### Built for people who…
-
-- speak CJK as a first language and are tired of broken IME, mis-measured
-  wide chars, and the wrong fallback font;
-- want a clean default that **works without configuration** — the
-  bundled keymap is WezTerm-compatible, the brand-default font is
-  **St Helens** (not bundled — install system-wide; if missing, the
-  renderer falls through to system mono and `Rec Mono Casual` ships
-  under `assets/fonts/` as a guaranteed-present fallback). Override via
-  `[font] family = "..."` in `sonicterm.toml`. The
-  default theme is the WezTerm-style `wezterm` palette
-  (out-of-box visual parity with WezTerm);
-- hate when their idle terminal eats 5% of a CPU core just to blink a
-  cursor;
-- need both a **GPU terminal** and a **multiplexer** without running two
-  separate processes glued together with config files.
-
-### A short feature tour
-
-- **Search** the visible grid + full scrollback (substring or regex,
-  case toggle, `N/M` indicator).
-- **Shell integration** via OSC 133 — jump prompt-to-prompt with
-  `super+shift+↑/↓`, with a gutter caret beside each prompt.
-- **Cmd+click hyperlinks** (OSC 8), with a strict allow-list so a hostile
-  pty can't run arbitrary commands.
-- **Command palette** (`super+shift+P`) — fuzzy filter over every
-  bindable action, in your language.
-- **5 bundled themes**: Tokyo Night, Dracula, Nord, Catppuccin Mocha,
-  Gruvbox Dark Hard.
-- **Editable config files** from the command palette: `Edit sonicterm.toml`
-  and `Edit keymap.toml`; changes persist and live-apply.
-
-Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
-
-### What SonicTerm doesn't have (yet)
-
-Being honest about the gaps so you can pick the right tool:
-
-- **No Linux build.** Deferred to v1.0 — see
-  [`docs/ROADMAP.md`](docs/ROADMAP.md). WezTerm, Alacritty, and Kitty
-  all run on Linux today; SonicTerm does not.
-- **No code signing.** macOS `.dmg` and Windows `.msi` are unsigned —
-  signing certs aren't configured yet. You'll see Gatekeeper /
-  SmartScreen warnings on first launch.
-- **No auto-update.** Grab new releases manually from the Releases page.
-- **No remote multiplexer / network protocol.** `sonicterm-mux` is in-process
-  only — there's no `wezterm connect`-style remote attach yet.
-- **Younger and less battle-tested** than WezTerm, Alacritty, Kitty, or
-  iTerm2. Expect rough edges; please file issues.
-
----
+- **GPU-accelerated rendering** via `wgpu` — Metal on macOS, DirectX 12 on
+  Windows. Glyphs are rasterized once and uploaded into an atlas; redraws
+  are quad batches, not CPU blits.
+- **Truly native binaries** on macOS and Windows. No Electron, no JVM, no
+  bundled Python. The macOS `.dmg` is ~22 MB; idle RSS sits below 30 MB.
+- **WezTerm-compatible default keymap.** If your fingers already know
+  `Cmd+T`, `Cmd+D`, `Cmd+K`, `Cmd+F`, `Cmd+[` — they'll work here on day
+  one. Zero relearn.
+- **Batteries-included UX** out of the box: tabs, split panes, scrollback,
+  incremental search, command palette, copy mode, IME, OSC 8 hyperlinks,
+  OSC 133 command boundaries, drag-out tabs, broadcast input.
+- **Correct first, fast second.** Every rendering / VT / grid change is
+  gated on a Unicode-aware end-to-end suite (CJK, emoji, Powerline PUA,
+  fullwidth, box-drawing) plus a dHash visual-regression baseline.
+- **MIT licensed.** Read the source, fork it, ship it.
 
 ## Install
 
-### Release binaries
+> Pre-built `.dmg` and `.msi` artifacts are produced by the release
+> workflow on every `v*` tag. All shipped artifacts are currently
+> **unsigned** (signing arrives once cert procurement lands).
 
-Each tagged release publishes a universal macOS `.dmg` and an x64 Windows
-`.msi`. Grab the latest from
-[**Releases**](https://github.com/D0n9X1n/sonic/releases).
+**macOS** (Apple Silicon + Intel universal):
 
-> Builds are **not code-signed yet** (see roadmap). On macOS you may need
-> `xattr -dr com.apple.quarantine /Applications/SonicTerm.app` the first
-> time; on Windows, Defender SmartScreen may want a "More info → Run
-> anyway."
+```sh
+# Once v1.0 lands:
+brew install --cask sonicterm        # planned, not yet published
 
-### From source
+# Today:
+# Download SonicTerm-<version>-universal.dmg from
+# https://github.com/D0n9X1n/sonic/releases
+```
 
-You'll need a stable Rust toolchain (see `rust-toolchain.toml`).
+**Windows** (x64):
 
-```bash
-git clone https://github.com/D0n9X1n/sonic
+```powershell
+# Once v1.0 lands:
+winget install SonicTerm.SonicTerm   # planned, not yet published
+
+# Today:
+# Download SonicTerm-<version>-x64.msi from
+# https://github.com/D0n9X1n/sonic/releases
+```
+
+**From source** (requires Rust stable):
+
+```sh
+git clone https://github.com/D0n9X1n/sonic.git
 cd sonic
 
 # macOS
-cargo run --release -p sonicterm-mac
+cargo build --release -p sonicterm-mac
+open target/release/sonicterm-mac
 
 # Windows
-cargo run --release -p sonicterm-windows
+cargo build --release -p sonicterm-windows
+./target/release/sonicterm-windows.exe
 ```
 
-Add `--features ssh` to either platform crate to enable the built-in SSH
-client.
+## Quick start
 
----
+A handful of keystrokes that show off the surface area:
 
-## Documentation
+| Keystroke           | What it does                                  |
+|---------------------|-----------------------------------------------|
+| `Cmd+T` / `Ctrl+T`  | New tab                                       |
+| `Cmd+D` / `Ctrl+D`  | Split pane (vertical)                         |
+| `Cmd+Shift+D`       | Split pane (horizontal)                       |
+| `Cmd+K` / `Ctrl+K`  | Command palette (everything is searchable)    |
+| `Cmd+F` / `Ctrl+F`  | Incremental search through scrollback         |
+| `Cmd+[` / `Ctrl+[`  | Enter copy mode (vi-like navigation)          |
+| `Cmd+W` / `Ctrl+W`  | Close pane (or tab if it's the last pane)     |
+| `Cmd+,` / `Ctrl+,`  | Open `sonicterm.toml` in your editor          |
 
-- 📖 **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)** — every visible
-  feature, with keybindings.
-- 🗺️ **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — what's shipped, what's
-  next, what's deferred.
-- 🏗 **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the 10-crate
-  dependency graph and where to put new modules.
-- 🐚 **[`docs/shell-integration.md`](docs/shell-integration.md)** —
-  one-line snippets to enable OSC 133 prompt marks in bash / zsh / fish /
-  PowerShell.
-- 🔏 **[`docs/release/signing.md`](docs/release/signing.md)** — how the
-  release pipeline handles codesign / notarize / signtool (gated on
-  secrets).
+Drag a tab out of the tab bar to tear it into its own window. Drop it
+back to re-attach.
 
----
+## Compared to
+
+Honest snapshot of where SonicTerm sits today. We are still racing on
+the perf axis (see [docs/ROADMAP.md](docs/ROADMAP.md) for the current
+gap vs WezTerm on `vtebench`).
+
+| Feature                | SonicTerm        | WezTerm         | iTerm2          | Alacritty       |
+|------------------------|------------------|-----------------|-----------------|-----------------|
+| GPU rendering          | Yes (wgpu)       | Yes (wgpu)      | Metal           | Yes (OpenGL)    |
+| Tabs                   | Yes              | Yes             | Yes             | No              |
+| Split panes            | Yes              | Yes             | Yes             | No              |
+| Scrollback search      | Yes              | Yes             | Yes             | No              |
+| Command palette        | Yes              | No              | No              | No              |
+| Tear-out tabs          | Yes              | No              | Yes             | No              |
+| SSH multiplexing       | Post-v1.0        | Yes             | No              | No              |
+| Cross-platform         | macOS + Windows  | mac/win/linux   | macOS only      | mac/win/linux   |
+| Binary size (mac)      | ~22 MB           | ~80 MB          | ~70 MB          | ~12 MB          |
+| Idle RSS               | < 30 MB          | ~80 MB          | ~120 MB         | ~30 MB          |
+| Config language        | TOML             | Lua             | GUI / plist     | YAML            |
+
+If you live in Lua and want every escape hatch in the book, WezTerm is
+the right answer. If you want a native, batteries-included terminal
+that boots fast, sits quiet, and stays out of your way — try
+SonicTerm.
+
+## Configure
+
+User config lives at:
+
+- macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
+- Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
+
+A minimal example:
+
+```toml
+[font]
+family = "St Helens"
+size   = 14
+
+[theme]
+name = "tokyo-night"
+
+[window]
+opacity = 0.97
+```
+
+The full reference — every option, every theme, every keybinding — is
+in [docs/USER_GUIDE.md](docs/USER_GUIDE.md). Edits hot-reload; you'll
+see the change on the next keystroke.
+
+## Project status
+
+**v1.0 in progress.** macOS + Windows are the supported targets and
+both produce nightly builds via the release workflow. Linux, code
+signing, auto-update, and session restore are explicitly deferred
+past v1.0 — see [docs/ROADMAP.md](docs/ROADMAP.md) for the full
+post-v1.0 plan.
+
+Performance honesty: we are not yet at WezTerm parity on the worst
+`vtebench` cases. The gap is closing PR by PR; see §14 of
+[CLAUDE.md](CLAUDE.md) and `baseline.json` at the repo root for the
+current numbers.
+
+## Screenshots
+
+![SonicTerm dark theme](docs/img/screenshot-dark.png)
+
+![SonicTerm split panes + command palette](docs/img/screenshot-panes.png)
+
+> Screenshots regenerated on every release via the visual harness
+> (`just visual mac`). If the images above are missing, the release
+> upload step ran without them — please file an issue.
 
 ## Contributing
 
-SonicTerm is built with an agent-driven PR pipeline (see `CLAUDE.md`). The
-local gate before any commit is:
+Start with [CLAUDE.md](CLAUDE.md) — it's the dense, opinionated
+onboarding doc that any contributor (human or agent) should read
+before editing anything. The crate-by-crate dependency graph and the
+"why is it factored this way" rationale live in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo run --example pty_dump -p sonicterm-core --release   # must print [e2e] OK
-cargo build --release -p sonicterm-mac
-```
-
-Test count is monotonic — no PR may reduce the workspace test total.
-
----
+Bug reports should include the last 200 lines of the most recent log
+file (see [docs/LOGGING.md](docs/LOGGING.md) for paths) and, for
+rendering / VT bugs, a screenshot.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+SonicTerm is released under the [MIT License](LICENSE).
