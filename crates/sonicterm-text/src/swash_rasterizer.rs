@@ -313,8 +313,17 @@ pub fn load_bundled_fonts(fs: &mut FontSystem) {
     candidates
         .push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
 
-    for dir in candidates {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+    let mut total: usize = 0;
+    let mut n_dirs: usize = 0;
+    for dir in &candidates {
+        tracing::debug!("load_bundled_fonts: checking candidate {dir:?}");
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("load_bundled_fonts: read_dir failed for {dir:?}: {e}");
+                continue;
+            }
+        };
         let mut n = 0;
         for e in entries.flatten() {
             let p = e.path();
@@ -327,9 +336,17 @@ pub fn load_bundled_fonts(fs: &mut FontSystem) {
             }
         }
         if n > 0 {
-            tracing::info!("loaded {n} bundled font(s) from {dir:?}");
-            return;
+            tracing::debug!("load_bundled_fonts: loaded {n} font(s) from {dir:?}");
+            total += n;
+            n_dirs += 1;
+            // First populated dir wins — preserves prior behaviour that
+            // an installed bundle shadows the in-repo source tree.
+            break;
         }
+    }
+    tracing::info!("load_bundled_fonts: loaded {total} font(s) across {n_dirs} dirs");
+    if total == 0 {
+        tracing::warn!("load_bundled_fonts: NO bundled fonts found; checked: {candidates:?}");
     }
 }
 
