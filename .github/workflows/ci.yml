@@ -48,6 +48,10 @@ jobs:
       - name: unit + bin tests (skip integration tests/ folders)
         run: cargo test --workspace --lib --bins
 
+      - name: contract docs drift (warn-only, M1)
+        shell: bash
+        run: bash tools/check-contract-docs.sh warn
+
   deny:
     name: cargo-deny (supply-chain)
     runs-on: ubuntu-latest
