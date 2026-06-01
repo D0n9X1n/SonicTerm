@@ -18,7 +18,9 @@ file_globs = [
   "crates/sonicterm-app/src/app/child_window.rs",
   "crates/sonicterm-app/src/app/misc.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "render_path_blocking_lock_trips_invariant",
+]
 clauseref = "CLAUDE.md §4 'Render uses try_lock'"
 severity = "block"
 
@@ -28,7 +30,11 @@ description = "PTY-thread redraw coalescer = 3 ms min + 128 KB byte flush; never
 file_globs = [
   "crates/sonicterm-app/src/app/spawn_pane.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "production_constants_match_spec",
+  "trickle_burst_coalesces_to_three_ms_cadence",
+  "fat_burst_flushes_immediately_via_byte_threshold",
+]
 clauseref = "CLAUDE.md §4 'PTY-thread redraw coalescing'"
 severity = "block"
 
@@ -39,7 +45,9 @@ file_globs = [
   "crates/sonicterm-app/src/app/window_event.rs",
   "crates/sonicterm-app/src/app/spawn_pane.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "burst_gen_backwards_trips_invariant",
+]
 clauseref = "CLAUDE.md §4 'PTY burst flag'"
 severity = "block"
 
@@ -49,7 +57,9 @@ description = "no unconditional heartbeat redraw at end of window_event (feedbac
 file_globs = [
   "crates/sonicterm-app/src/app/window_event.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "window_event_has_no_unconditional_heartbeat_redraw",
+]
 clauseref = "CLAUDE.md §4 'No unconditional heartbeat redraw'"
 severity = "block"
 
@@ -83,7 +93,9 @@ description = "PtyHandle::Drop must kill the child explicitly to avoid orphans"
 file_globs = [
   "crates/sonicterm-io/src/pty.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "pty_drop_kills_child",
+]
 clauseref = "CLAUDE.md §4 'PtyHandle::Drop kills the child'"
 severity = "block"
 
@@ -93,6 +105,11 @@ description = "url_open::validate() mandatory before spawning anything (OSC 8 fr
 file_globs = [
   "crates/sonicterm-cfg/src/url_open.rs",
 ]
-required_test_paths = []
+required_test_paths = [
+  "validate_rejects_shell_metachars",
+  "validate_rejects_control_chars",
+  "validate_rejects_javascript_scheme",
+  "validate_accepts_allowed_schemes",
+]
 clauseref = "CLAUDE.md §4 'url_open::validate() is mandatory'"
 severity = "block"
