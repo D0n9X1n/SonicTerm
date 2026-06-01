@@ -11,10 +11,12 @@ fn new_wraps_initial_state() {
 }
 
 #[test]
-fn handle_returns_empty_for_stub_reducer() {
+fn handle_returns_quit_for_exit() {
+    // M6a-expand-2b: Exit is a routed leaf and now emits AppEffect::Quit.
     let mut sm = AppStateMachine::new(AppState::default());
     let out = sm.handle(AppIntent::Exit);
-    assert!(out.is_empty(), "stub reducer must return empty Effect batch");
+    assert_eq!(out.len(), 1);
+    assert!(matches!(out[0], AppEffect::Quit));
 }
 
 #[test]

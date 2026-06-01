@@ -1081,6 +1081,14 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
+    /// M6a-expand-2b — winit-agnostic state machine. Routed Intents
+    /// (PTY write, scroll, hyperlink open, …) flow through here and
+    /// the platform shell's [`Self::dispatch_effects`] translates the
+    /// resulting [`AppEffect`] batch into concrete calls against the
+    /// existing renderer / clipboard / PTY plumbing. Non-leaf paths
+    /// (tab/pane/window lifecycle) continue to take the legacy direct
+    /// route until M6a-expand-2c lifts those into the reducer.
+    pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
@@ -1205,6 +1213,9 @@ impl App {
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
+            machine: sonicterm_app_core::AppStateMachine::new(
+                sonicterm_app_core::AppState::default(),
+            ),
         }
     }
 
@@ -1677,11 +1688,106 @@ impl App {
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
-        if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-            if let Some(pty) = p.pty.as_ref() {
-                let _ = pty.in_tx.send(bytes);
+        // M6a-expand-2b leaf-routing demonstration: the keystroke /
+        // broadcast / encoded-input path now flows through the
+        // winit-agnostic `AppStateMachine`. The reducer translates
+        // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane,
+        // data }`, and `dispatch_pty_write_effect` is the boundary
+        // method that performs the actual `pty.in_tx.send(...)`. The
+        // net behaviour is identical to the pre-2b direct call; the
+        // boundary is what changes so subsequent migration PRs
+        // (2c+) can lift more state into the reducer without
+        // touching this call site again.
+        let intent = sonicterm_app_core::AppIntent::PtyWrite {
+            pane: sonicterm_app_core::PaneId(pane_id),
+            bytes: bytes::Bytes::from(bytes),
+        };
+        // The state machine is owned by `&mut self` in production
+        // code paths; `write_to_pane` is `&self` because broadcast
+        // fan-out borrows immutably. Run the reducer through a
+        // throwaway transient machine — the reducer for PtyWrite is
+        // pure (it does not touch `AppState`), so this is
+        // semantically equivalent to dispatching through `self.machine`
+        // and avoids a structural borrow refactor (deferred to 2c).
+        let mut transient =
+            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+        for effect in transient.handle(intent) {
+            self.dispatch_pty_write_effect(&effect);
+        }
+    }
+
+    /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
+    ///
+    /// Resolves the pane id back to a live [`PtyHandle`] on the main
+    /// window and forwards the bytes. M6a-expand-2b boundary layer
+    /// per spec §9.
+    pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
+        if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
+            let pane_id = pane.0;
+            if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+                if let Some(pty) = p.pty.as_ref() {
+                    let _ = pty.in_tx.send(data.to_vec());
+                }
             }
         }
+    }
+
+    /// Generic boundary dispatcher for an Effect batch produced by the
+    /// state machine. M6a-expand-2b handles the leaf classes (PTY,
+    /// clipboard set, OpenURL, Quit, Render-reasons that map to a
+    /// redraw request). Non-leaf classes (WindowOpen, ChildSpawn,
+    /// MenubarUpdate, …) intentionally fall through to a tracing
+    /// debug — they land in 2c.
+    pub(crate) fn dispatch_effects(
+        &mut self,
+        effects: smallvec::SmallVec<[sonicterm_app_core::AppEffect; 4]>,
+    ) {
+        use sonicterm_app_core::AppEffect;
+        for effect in effects {
+            match effect {
+                AppEffect::PtyWrite { .. } => {
+                    self.dispatch_pty_write_effect(&effect);
+                }
+                AppEffect::ClipboardSet { text } => {
+                    if !text.is_empty() {
+                        if let Some(cb) = self.clipboard.as_mut() {
+                            let _ = cb.set_text(text);
+                        }
+                    }
+                    // Empty text sentinel (M6a-expand-2b CopySelection):
+                    // the boundary's existing `copy_selection` already
+                    // resolved the selection; the sentinel exists so
+                    // the Intent→Effect contract is observable in
+                    // tests. Real text payloads land in 2c.
+                }
+                AppEffect::OpenURL { url } => {
+                    if sonicterm_core::url_open::validate(&url).is_ok() {
+                        let _ = sonicterm_core::url_open::open(&url);
+                    }
+                }
+                AppEffect::Quit => {
+                    self.pending_exit = true;
+                }
+                AppEffect::Render { .. } | AppEffect::RenderDirtyRect { .. } => {
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                        self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                _ => {
+                    tracing::trace!(target: "state_machine", "dispatch_effects: unrouted effect {:?}", effect);
+                }
+            }
+        }
+    }
+
+    /// Drive a single [`AppIntent`] through the state machine and
+    /// dispatch the resulting Effects through the boundary layer.
+    /// M6a-expand-2b entry point — wires the winit-flavoured shell
+    /// into the winit-agnostic reducer.
+    pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
+        let effects = self.machine.handle(intent);
+        self.dispatch_effects(effects);
     }
 
     fn broadcast_from(&self, active_id: u64, bytes: Vec<u8>) {

@@ -20,6 +20,7 @@
 mod app_state;
 mod effect;
 mod intent;
+mod reducer;
 mod state_machine;
 mod supporting;
 

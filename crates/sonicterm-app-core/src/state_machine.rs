@@ -47,12 +47,11 @@ impl AppStateMachine {
     /// M6a-expand-2a stub: every Intent returns `SmallVec::new()`.
     /// Per-Intent reducer arms land in 2b/2c (see spec §9 + §3).
     pub fn handle(&mut self, intent: AppIntent) -> SmallVec<[AppEffect; 4]> {
-        let _ = intent; // silence unused while the stub reducer is in place
         let mut out: SmallVec<[AppEffect; 4]> = SmallVec::new();
-        // Reducer body intentionally empty for 2a. The dispatch contract
-        // (sort-by-class) still runs so downstream consumers can rely on
-        // the ordering invariant from day one — a trivially-sorted
-        // empty batch satisfies it.
+        crate::reducer::reduce_leaf(&mut self.state, intent, &mut out);
+        // Dispatch contract: stable sort by class so downstream
+        // consumers see PtyWrite < Render < OsDrag < Clipboard <
+        // WindowOp < MenubarUpdate < Log (spec §6).
         out.sort_by_key(AppEffect::effect_class);
         out
     }
