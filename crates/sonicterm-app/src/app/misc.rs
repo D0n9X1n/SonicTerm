@@ -304,7 +304,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title("Sonic")
+                    .with_title("SonicTerm")
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),

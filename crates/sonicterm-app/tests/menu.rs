@@ -10,7 +10,7 @@ use sonicterm_app::menu::{blueprint, Sender};
 fn blueprint_top_level_order_is_canonical() {
     let bp = blueprint();
     let titles: Vec<&str> = bp.iter().map(|s| s.title).collect();
-    assert_eq!(titles, vec!["Sonic", "Shell", "Edit", "View", "Help"]);
+    assert_eq!(titles, vec!["SonicTerm", "Shell", "Edit", "View", "Help"]);
 }
 
 #[test]

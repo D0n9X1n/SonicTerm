@@ -30,7 +30,10 @@ fn cleanup_caps_rotated_file_count() {
         .filter(|e| e.file_name().to_string_lossy().starts_with("sonicterm.log."))
         .collect();
     assert_eq!(rotated.len(), 3, "expected 3 rotated survivors, got {}", rotated.len());
-    assert!(dir.path().join("sonicterm.log").exists(), "active sonicterm.log must never be removed");
+    assert!(
+        dir.path().join("sonicterm.log").exists(),
+        "active sonicterm.log must never be removed"
+    );
 }
 
 #[test]

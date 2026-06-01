@@ -92,7 +92,7 @@ pub trait PlatformMenu {
 }
 
 /// The canonical menubar blueprint. Pure: no platform calls; safe in
-/// tests. Top-level order is **Sonic / Shell / Edit / View / Help**.
+/// tests. Top-level order is **SonicTerm / Shell / Edit / View / Help**.
 /// macOS prepends the system "Apple" menu automatically.
 pub fn blueprint() -> MenuBlueprint {
     use Binding::*;
@@ -102,23 +102,23 @@ pub fn blueprint() -> MenuBlueprint {
 
     vec![
         Submenu {
-            title: "Sonic",
+            title: "SonicTerm",
             items: vec![
                 Item {
-                    title: "About Sonic",
+                    title: "About SonicTerm",
                     key: "",
                     mods: None,
                     binding: System("orderFrontStandardAboutPanel:"),
                 },
                 sep(),
                 Item {
-                    title: "Edit sonic.toml…",
+                    title: "Edit sonicterm.toml…",
                     key: ",",
                     mods: Cmd,
                     binding: Action(sonicterm_core::keymap::Action::EditConfigFile),
                 },
                 sep(),
-                Item { title: "Hide Sonic", key: "h", mods: Cmd, binding: System("hide:") },
+                Item { title: "Hide SonicTerm", key: "h", mods: Cmd, binding: System("hide:") },
                 Item {
                     title: "Hide Others",
                     key: "h",
@@ -132,7 +132,12 @@ pub fn blueprint() -> MenuBlueprint {
                     binding: System("unhideAllApplications:"),
                 },
                 sep(),
-                Item { title: "Quit Sonic", key: "q", mods: Cmd, binding: System("terminate:") },
+                Item {
+                    title: "Quit SonicTerm",
+                    key: "q",
+                    mods: Cmd,
+                    binding: System("terminate:"),
+                },
             ],
         },
         Submenu {
@@ -229,7 +234,7 @@ pub fn blueprint() -> MenuBlueprint {
             title: "Help",
             items: vec![
                 Item {
-                    title: "Sonic Help",
+                    title: "SonicTerm Help",
                     key: "",
                     mods: None,
                     binding: Url("https://github.com/D0n9X1n/sonic"),

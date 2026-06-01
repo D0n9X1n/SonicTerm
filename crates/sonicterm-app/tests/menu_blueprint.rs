@@ -11,7 +11,7 @@ use sonicterm_core::keymap::Action;
 fn blueprint_has_five_top_level_submenus_in_order() {
     let bp = blueprint();
     let titles: Vec<&str> = bp.iter().map(|s| s.title).collect();
-    assert_eq!(titles, vec!["Sonic", "Shell", "Edit", "View", "Help"]);
+    assert_eq!(titles, vec!["SonicTerm", "Shell", "Edit", "View", "Help"]);
 }
 
 #[test]

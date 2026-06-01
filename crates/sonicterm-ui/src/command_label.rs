@@ -176,7 +176,7 @@ pub fn label(a: &Action) -> String {
 ///
 /// Example: typing `sett` in the palette must surface
 /// [`Action::EditConfigFile`] even though its label is
-/// "Edit sonic.toml" (no `sett` subsequence). We expose
+/// "Edit sonicterm.toml" (no `sett` subsequence). We expose
 /// `["settings", "config", "options", "prefs"]` so any of those land it.
 #[must_use]
 pub fn keywords(a: &Action) -> &'static [&'static str] {
