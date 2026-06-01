@@ -52,8 +52,8 @@ fn main() -> Result<()> {
         // `event_loop.run_app` leaves AppKit with only the default
         // `Apple, sonicterm-mac` menu bar (release-binary smoke caught
         // this on PR #114). The menubar_bridge proxy is installed by
-        // `run_with_os_drag_pending_and_hook` BEFORE the hook fires,
-        // so NSMenu selectors can wake the loop on first click.
+        // `MacShell::run` BEFORE the hook fires, so NSMenu selectors
+        // can wake the loop on first click.
         //
         // Theme list is built once from the bundled `assets/themes/`
         // directory — adding a theme file requires a restart, matching
@@ -67,18 +67,21 @@ fn main() -> Result<()> {
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        sonicterm_app::app::run_with_os_drag_pending_and_window_hook(
-            theme,
-            config,
-            keymap,
-            os_drag_mac::MacOsDragSink::arc(),
-            Some(theme_loader),
-            Some(keymap_loader),
-            pending,
-            Some(on_resumed),
-            None,
-            Some(tab_drag_os::MacOsTabDragBackend::boxed()),
-        )
+        // M6b: construct the AppStateMachine in the bin and hand it
+        // to the platform shell. State mutation routes through the
+        // reducer the shell owns — the bin no longer reaches into
+        // the monolithic `App` directly via `run_with_*`.
+        let machine =
+            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+        let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)
+            .with_asset_loaders(theme_loader, keymap_loader)
+            .with_os_drag_sink(os_drag_mac::MacOsDragSink::arc())
+            .with_os_drag_backend(tab_drag_os::MacOsTabDragBackend::boxed())
+            .with_on_resumed(on_resumed);
+        if let Some(p) = pending {
+            shell = shell.with_pending_payload(p);
+        }
+        shell.run()
     }
     #[cfg(not(target_os = "macos"))]
     {

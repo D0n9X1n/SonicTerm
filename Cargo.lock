@@ -4693,6 +4693,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "sonicterm-app",
+ "sonicterm-app-core",
  "sonicterm-core",
  "sonicterm-logging",
  "sonicterm-shared",

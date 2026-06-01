@@ -744,6 +744,13 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
+/// Public re-export of [`init_tracing`] for the M6b platform shell
+/// (`crate::shell::MacShell::run`). Same idempotent `try_init`
+/// behaviour — no-op if a subscriber is already installed.
+pub fn init_tracing_public() {
+    init_tracing();
+}
+
 /// Per-pane runtime state. The parser is shared with a per-pane VT thread
 /// that drains the pty out-channel; the pty handle owns the writer side.
 ///
@@ -952,9 +959,9 @@ pub struct App {
     // entry is gone — both shapes mean "no visible main").
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
-    pub(super) theme_loader: Option<ThemeLoader>,
+    pub(crate) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
-    pub(super) keymap_loader: Option<KeymapLoader>,
+    pub(crate) keymap_loader: Option<KeymapLoader>,
     /// Live-reload watcher for the user's `sonicterm.toml`. Spawned in
     /// `resumed`; `None` if the config path could not be resolved or
     /// the watcher failed to start (e.g. parent dir unwritable).
@@ -1006,7 +1013,7 @@ pub struct App {
     /// outside every SonicTerm-owned window; if so, it invokes the sink
     /// and KILLS the local tab instead of spawning a child window.
     /// Installed by the platform bin via [`run_with_os_drag`].
-    pub(super) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
+    pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
     /// Phase C2 OS-level drag *session* backend. Distinct from
     /// `os_drag_sink` (cross-process wire format): this drives the
     /// NSDraggingSession / OLE DoDragDrop call that captures the
@@ -1046,7 +1053,7 @@ pub struct App {
     /// NSMenu; calling `setMainMenu` earlier (before winit builds the
     /// AppKit loop) leaves AppKit with only the default
     /// `Apple, sonicterm-mac` menubar.
-    pub(super) on_resumed: Option<Box<dyn FnOnce() + Send>>,
+    pub(crate) on_resumed: Option<Box<dyn FnOnce() + Send>>,
 
     /// One-shot hook fired the moment the main window has been created
     /// (immediately after `el.create_window` succeeds, before the first
@@ -1161,10 +1168,32 @@ impl App {
 
     #[doc(hidden)]
     pub fn new_with_proxy(
+        theme: Theme,
+        config: Config,
+        keymap: Keymap,
+        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    ) -> Self {
+        Self::new_with_proxy_and_machine(
+            theme,
+            config,
+            keymap,
+            event_loop_proxy,
+            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
+        )
+    }
+
+    /// M6b: constructor that accepts an externally-built
+    /// [`sonicterm_app_core::AppStateMachine`]. The platform shell
+    /// ([`crate::shell::MacShell`]) constructs the machine first,
+    /// then hands it in so all state mutation routes through the
+    /// reducer that the shell already owns — instead of `App`
+    /// silently building a parallel machine inside its `new_with_proxy`.
+    pub fn new_with_proxy_and_machine(
         mut theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+        machine: sonicterm_app_core::AppStateMachine,
     ) -> Self {
         theme.apply_accessibility(&config.accessibility);
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
@@ -1213,9 +1242,7 @@ impl App {
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
-            machine: sonicterm_app_core::AppStateMachine::new(
-                sonicterm_app_core::AppState::default(),
-            ),
+            machine,
         }
     }
 
