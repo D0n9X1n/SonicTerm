@@ -17,7 +17,10 @@ pub mod cursor;
 pub mod drag_chip;
 #[deprecated(since = "0.9.0", note = "import from sonicterm_render_model::geometry directly")]
 pub use sonicterm_render_model::geometry;
-pub mod metrics;
+#[deprecated(since = "0.9.0", note = "use sonicterm_text::metrics directly")]
+pub use sonicterm_text::metrics;
+#[deprecated(since = "0.9.0", note = "use sonicterm_ui::tabbar_view directly")]
+pub use sonicterm_ui::tabbar_view::{tab_bar_top_inset, tab_bar_top_inset_with_titlebar};
 pub mod row_quad_cache;
 pub mod tab_spans;
 

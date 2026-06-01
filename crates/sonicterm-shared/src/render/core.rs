@@ -24,10 +24,10 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu_with_alpha};
 use super::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
 use super::drag_chip::{DragChipOverlay, DragChipVisual};
-use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
 use super::tab_spans::{
     build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
 };
+use sonicterm_text::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]

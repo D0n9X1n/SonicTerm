@@ -14,6 +14,7 @@
 
 pub mod async_fallback;
 pub mod glyph_atlas;
+pub mod metrics;
 pub mod prewarm;
 pub mod row_glyph_cache;
 pub mod shape;
