@@ -125,9 +125,11 @@ User config lives at:
 
 A minimal example:
 
+Ships with **Rec Mono St.Helens** — a Nerd-Font-patched monospace, so Powerline prompts and icon-heavy CLIs (Claude Code, lazygit, k9s, btop) render correctly without configuring fallbacks.
+
 ```toml
 [font]
-family = "St Helens"
+family = "Rec Mono St.Helens"
 size   = 14
 
 [theme]

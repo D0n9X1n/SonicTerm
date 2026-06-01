@@ -58,8 +58,8 @@ every script you're likely to type:
 
 | Platform | Chain (in order) |
 |---|---|
-| macOS  | JetBrains Mono Nerd Font → PingFang SC → Hiragino → Apple SD Gothic Neo → Apple Color Emoji |
-| Windows | JetBrains Mono Nerd Font → Microsoft YaHei → MS Gothic → Malgun Gothic → Segoe UI Emoji |
+| macOS  | Rec Mono St.Helens (bundled, Nerd-patched — Powerline + NF PUA) → PingFang SC → Hiragino → Apple SD Gothic Neo → Apple Color Emoji |
+| Windows | Rec Mono St.Helens (bundled, Nerd-patched — Powerline + NF PUA) → Microsoft YaHei → MS Gothic → Malgun Gothic → Segoe UI Emoji |
 
 What works out of the box:
 
