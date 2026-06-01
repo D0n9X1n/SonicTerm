@@ -1,7 +1,44 @@
-# Default owners
-* @D0n9X1n
+# Default owner — every file routes here unless overridden below.
+*                                       @D0n9X1n
 
-# Platform-specific
-/crates/sonicterm-mac/      @D0n9X1n
-/crates/sonicterm-windows/  @D0n9X1n
-/.github/        @D0n9X1n
+# Documentation: PM-owned (no agent-author confusion)
+/CLAUDE.md                              @D0n9X1n
+/docs/                                  @D0n9X1n
+/docs/ROADMAP.md                        @D0n9X1n
+/docs/RELEASE_TESTING.md                @D0n9X1n
+/docs/HOT_FILES.md                      @D0n9X1n
+/docs/CONTRACTS.md                      @D0n9X1n
+/CHANGELOG.md                           @D0n9X1n
+
+# Contract crate — every change ripples; PM reviews
+/crates/sonicterm-types/                @D0n9X1n
+/crates/sonicterm-types/api-snapshot.txt @D0n9X1n
+/landmines.toml                         @D0n9X1n
+
+# macOS-only paths — mac-PM owns; only mac-PM can §13 smoke
+/crates/sonicterm-mac/                  @D0n9X1n-dev-mac
+
+# Windows-only paths — win-PM owns; only win-PM can §13 smoke
+/crates/sonicterm-windows/              @D0n9X1n-dev-windows
+
+# Hot files — both PMs review (cross-platform regressions hide here)
+/crates/sonicterm-app/src/app/window_event.rs   @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-app/src/app/spawn_pane.rs     @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-app/src/app/event_loop.rs     @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-app/src/app/keymap_dispatch.rs @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-vt/src/vt.rs          @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-grid/src/grid.rs      @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-cfg/src/keymap.rs     @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-cfg/src/url_open.rs   @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-io/src/pty.rs         @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-shared/src/render/core.rs     @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-gpu/src/text_pipeline.rs      @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-text/src/glyph_atlas.rs       @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+/crates/sonicterm-text/src/swash_rasterizer.rs  @D0n9X1n-dev-mac @D0n9X1n-dev-windows
+
+# CI + release workflows — PM owns
+/.github/                               @D0n9X1n
+/scripts/                               @D0n9X1n
+/tools/                                 @D0n9X1n
+/baseline.json                          @D0n9X1n
+/deny.toml                              @D0n9X1n

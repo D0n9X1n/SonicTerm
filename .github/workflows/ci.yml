@@ -56,6 +56,10 @@ jobs:
         shell: bash
         run: bash tools/check-landmines.sh warn
 
+      - name: ownership (warn-only, M5)
+        shell: bash
+        run: bash tools/check-ownership.sh warn
+
   deny:
     name: cargo-deny (supply-chain)
     runs-on: ubuntu-latest
