@@ -61,9 +61,9 @@ fn render_source_has_no_hardcoded_monospace_family() {
         include_str!("../src/render/core.rs"),
         include_str!("../../sonicterm-gpu/src/color.rs"),
         include_str!("../../sonicterm-text/src/metrics.rs"),
-        include_str!("../src/render/tab_spans.rs"),
+        include_str!("../../sonicterm-ui/src/tab_spans.rs"),
         include_str!("../src/render/cursor.rs"),
-        include_str!("../src/render/drag_chip.rs"),
+        include_str!("../../sonicterm-ui/src/drag_chip.rs"),
         include_str!("../src/render/mod.rs"),
     );
     // Strip comments and doc-strings first (we mention Monospace in a
@@ -93,9 +93,9 @@ fn render_source_has_no_hardcoded_font_name_literal() {
         include_str!("../src/render/core.rs"),
         include_str!("../../sonicterm-gpu/src/color.rs"),
         include_str!("../../sonicterm-text/src/metrics.rs"),
-        include_str!("../src/render/tab_spans.rs"),
+        include_str!("../../sonicterm-ui/src/tab_spans.rs"),
         include_str!("../src/render/cursor.rs"),
-        include_str!("../src/render/drag_chip.rs"),
+        include_str!("../../sonicterm-ui/src/drag_chip.rs"),
         include_str!("../src/render/mod.rs"),
     );
     let mut code_only = String::new();
@@ -126,7 +126,7 @@ fn render_source_has_no_hardcoded_font_name_literal() {
 fn no_attrs_new_family_outside_helper() {
     for (path, src) in [
         ("sonicterm-shared/src/render/core.rs", include_str!("../src/render/core.rs")),
-        ("sonicterm-shared/src/render/tab_spans.rs", include_str!("../src/render/tab_spans.rs")),
+        ("sonicterm-ui/src/tab_spans.rs", include_str!("../../sonicterm-ui/src/tab_spans.rs")),
         (
             "sonicterm-shared/src/tabbar_view.rs",
             include_str!("../../sonicterm-ui/src/tabbar_view.rs"),

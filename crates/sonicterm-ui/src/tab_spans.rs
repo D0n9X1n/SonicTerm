@@ -123,9 +123,9 @@ pub fn build_tab_title_spans(
 
         let (anchor_col, raw) = if t.is_active {
             let mut s = String::with_capacity(leading_pad + body.len() + trailing_pad);
-            s.extend(std::iter::repeat_n(' ', leading_pad));
+            s.extend(std::iter::repeat(' ').take(leading_pad));
             s.push_str(&body);
-            s.extend(std::iter::repeat_n(' ', trailing_pad));
+            s.extend(std::iter::repeat(' ').take(trailing_pad));
             (rect_left_col, s)
         } else {
             (center_col, body)
