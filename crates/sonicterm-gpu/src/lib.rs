@@ -24,6 +24,12 @@
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
+/// Color / sRGB conversion helpers — produce `wgpu::Color` / linear RGBA arrays
+/// from glyphon colors and `#rrggbb` hex strings. Moved here from
+/// `sonicterm-shared::render::color` in M7b of the workspace refactor; the
+/// helpers consume `glyphon::Color` and produce `wgpu::Color`, so they belong
+/// on the GPU side of the layer split.
+pub mod color;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;

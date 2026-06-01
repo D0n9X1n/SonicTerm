@@ -11,7 +11,8 @@
 
 mod core;
 
-pub mod color;
+#[deprecated(since = "0.9.0", note = "import from sonicterm_gpu::color directly")]
+pub use sonicterm_gpu::color;
 pub mod cursor;
 pub mod drag_chip;
 #[deprecated(since = "0.9.0", note = "import from sonicterm_render_model::geometry directly")]
