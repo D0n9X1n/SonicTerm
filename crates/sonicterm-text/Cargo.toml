@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — headless text layer: shaping, swash rasterization, glyph atlas, per-row cache"
+description = "SonicTerm Terminal — headless text layer: shaping, swash rasterization, glyph atlas, per-row cache"
 
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-//! Sonic Terminal — macOS entry point.
+//! SonicTerm Terminal — macOS entry point.
 
 use std::path::PathBuf;
 
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &bootstrap_cfg);
     // Install signal + drop-guard exit tracing immediately after the
     // panic hook so EVERY exit path (panic / signal / clean /
-    // LoopExiting / exit_with) leaves a marker in sonic.log. See
+    // LoopExiting / exit_with) leaves a marker in sonicterm.log. See
     // `crates/sonicterm-logging/src/exit_trace.rs` for the full matrix.
     let _exit_guard = sonicterm_logging::install_exit_logging(&sonicterm_logging::log_dir());
 

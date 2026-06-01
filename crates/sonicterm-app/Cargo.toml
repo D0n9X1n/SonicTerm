@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — app loop, windowing glue, OS drag, menubar bridge"
+description = "SonicTerm Terminal — app loop, windowing glue, OS drag, menubar bridge"
 
 [lints]
 workspace = true

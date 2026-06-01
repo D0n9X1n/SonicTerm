@@ -4,7 +4,7 @@
 //! against a renderer that has lost every non-ASCII glyph (the PR #42
 //! B3-cutover regression). This binary feeds the user's real shell a
 //! `printf` line containing one representative character from each
-//! class Sonic claims to support, then verifies the resulting `Grid`
+//! class SonicTerm claims to support, then verifies the resulting `Grid`
 //! contains the literal codepoints — NOT `?` substitution, NOT
 //! U+FFFD, NOT silent drops.
 //!

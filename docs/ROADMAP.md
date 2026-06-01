@@ -1,4 +1,4 @@
-# Sonic Terminal Roadmap
+# SonicTerm Terminal Roadmap
 
 Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
@@ -194,7 +194,7 @@ PRs landed this session:
 
 The 8 perf wins closed ~30–60% of the gap on cat-large-file and
 tail-f hot paths. They did **not** achieve WezTerm parity. Current
-`vtebench` numbers vs WezTerm on the same hardware show Sonic
+`vtebench` numbers vs WezTerm on the same hardware show SonicTerm
 **6×–302× slower** depending on the benchmark — worst on heavy SGR
 attribute streams and dense scrollback writes (see
 `/tmp/sonic-vs-wezterm.md` notes). Phase E (perf parity) is ongoing,

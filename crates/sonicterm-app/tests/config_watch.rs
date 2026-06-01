@@ -28,7 +28,7 @@ fn write_atomic(path: &std::path::Path, body: &str) {
 #[test]
 fn modified_toml_delivers_new_config_within_500ms() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     write_atomic(
         &path,
         r#"
@@ -73,7 +73,7 @@ line_height = 1.25
 #[test]
 fn malformed_toml_does_not_crash_and_keeps_silence() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     write_atomic(&path, "theme = \"dracula\"\n");
 
     let w = ConfigWatcher::spawn(path.clone()).expect("spawn watcher");
@@ -101,7 +101,7 @@ fn delete_then_create_pattern_still_delivers() {
     // on Linux as Modify(Name). The watcher listens on the parent dir
     // so both cases are covered.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     write_atomic(&path, "theme = \"dracula\"\n");
 
     let w = ConfigWatcher::spawn(path.clone()).expect("spawn watcher");
@@ -109,7 +109,7 @@ fn delete_then_create_pattern_still_delivers() {
     while w.recv_timeout(Duration::from_millis(50)).is_some() {}
 
     // Rename-over pattern.
-    let tmp = dir.path().join("sonic.toml.tmp");
+    let tmp = dir.path().join("sonicterm.toml.tmp");
     write_atomic(&tmp, "theme = \"catppuccin-mocha\"\n");
     fs::rename(&tmp, &path).expect("atomic rename");
 
@@ -141,7 +141,7 @@ fn config_parses_round_trip_through_watcher() {
     // Defensive: defaults that the watcher would deliver on first
     // load must equal `Config::default()` (i.e. no fields shift).
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     write_atomic(&path, &Config::default().to_toml().expect("serialize default"));
 
     let w = ConfigWatcher::spawn(path.clone()).expect("spawn watcher");

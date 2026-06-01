@@ -56,7 +56,7 @@ use crate::swash_rasterizer::SwashRasterizer;
 use crate::terminal_font_attrs;
 
 /// Characters that commonly participate in programming ligatures across
-/// the fonts Sonic ships (Rec Mono Casual, JetBrains Mono). If a run
+/// the fonts SonicTerm ships (Rec Mono Casual, JetBrains Mono). If a run
 /// contains ANY of these, the ASCII fast path must defer to the shaper
 /// so contextual GSUB substitutions (`=>`, `!=`, `>=`, `->`, `<-`,
 /// `::`, `||`, `&&`, etc.) actually render as the composed ligature

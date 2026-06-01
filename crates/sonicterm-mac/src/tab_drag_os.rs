@@ -10,7 +10,7 @@
 //!
 //! 1. Builds the same-process drag identifier JSON
 //!    (`{"src_window_id":..,"src_tab_idx":..}`) so peer
-//!    NSDraggingDestination handlers on other Sonic windows can
+//!    NSDraggingDestination handlers on other SonicTerm windows can
 //!    recognise it as ours via the `com.sonic-terminal.tab.v1`
 //!    pasteboard type.
 //! 2. Writes that JSON to the general `NSPasteboard` under
@@ -27,7 +27,7 @@
 //!    `UserEvent::DragEnded` wake and clears `os_drag_source`. If a
 //!    peer NSDraggingDestination subsequently picks up the
 //!    pasteboard, the Phase C cross-process path takes over —
-//!    identical observable user behavior ("drag tab to other Sonic
+//!    identical observable user behavior ("drag tab to other SonicTerm
 //!    window, it appears").
 //!
 //! ## Known integration constraint (tracked separately)
@@ -89,7 +89,7 @@ impl Default for MacOsTabDragBackend {
 
 /// Serialize the in-process drag identifier carried on the
 /// `com.sonic-terminal.tab.v1` pasteboard type. Peer
-/// NSDraggingDestination instances on other Sonic windows read this
+/// NSDraggingDestination instances on other SonicTerm windows read this
 /// to confirm the payload is one of ours.
 #[allow(dead_code)]
 fn build_payload_json(source_window: WindowId, source_tab_idx: usize) -> String {
@@ -142,7 +142,7 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         };
 
         // Real pasteboard write — identical to the cross-process
-        // Phase C1 path. This is the part that makes peer Sonic
+        // Phase C1 path. This is the part that makes peer SonicTerm
         // windows able to pick up the dragged tab.
         let wrote = write_payload_to_pasteboard(&json);
 

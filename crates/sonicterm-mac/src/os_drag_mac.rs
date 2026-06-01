@@ -3,12 +3,12 @@
 //! ## What this does on real hardware
 //!
 //! When `sonicterm-shared` detects a tab tear-out whose cursor has left
-//! every Sonic window, it calls [`MacOsDragSink::begin_drag`] with a
+//! every SonicTerm window, it calls [`MacOsDragSink::begin_drag`] with a
 //! serialized [`TabPayload`]. We write the JSON to the **general
 //! NSPasteboard** under the custom type
 //! [`sonicterm_app::os_drag::PASTEBOARD_TYPE`] (`com.sonic-terminal.tab.v1`).
 //!
-//! A second running `Sonic.app` instance polls the pasteboard on
+//! A second running `SonicTerm.app` instance polls the pasteboard on
 //! window focus (`NSApplicationDidBecomeActive`) and consumes any
 //! pending payload by spawning a fresh tab with the supplied
 //! cwd/cmd/env. Source kills its local tab BEFORE the destination
@@ -27,7 +27,7 @@
 //! `NSEvent`, swizzling winit's delegate) are large and fragile.
 //!
 //! v1 ships pasteboard-based handoff: same observable user behavior
-//! ("drag tab out → it appears in the other Sonic"), no drag preview
+//! ("drag tab out → it appears in the other SonicTerm"), no drag preview
 //! image follows the cursor across the screen. We file the preview
 //! image work as a v2 follow-up.
 //
@@ -93,8 +93,8 @@ impl OsDragSink for MacOsDragSink {
 }
 
 /// Read any pending payload off the general pasteboard, returning it
-/// and clearing the slot only after a valid Sonic payload is
-/// observed. Returns `None` when no Sonic payload is present (the
+/// and clearing the slot only after a valid SonicTerm payload is
+/// observed. Returns `None` when no SonicTerm payload is present (the
 /// common case — most pasteboard writes are unrelated text). Called
 /// by the destination process on application activation.
 ///

@@ -15,7 +15,7 @@ use crate::sinks::ROTATED_PREFIX;
 ///
 /// - Rotates the active log file when it exceeds
 ///   `cfg.max_file_size_mb` MiB (renamed to
-///   `sonic.log.<unix-seconds>` so daily rotation doesn't collide).
+///   `sonicterm.log.<unix-seconds>` so daily rotation doesn't collide).
 /// - Caps rotated log files at `cfg.max_rotated_files` (oldest mtime
 ///   evicted first).
 /// - Deletes rotated log files older than `cfg.max_age_days`
@@ -24,7 +24,7 @@ use crate::sinks::ROTATED_PREFIX;
 /// - Deletes crash dumps older than `cfg.max_crash_age_days`
 ///   (`0` disables age eviction).
 ///
-/// The active `sonic.log` is never *deleted*, only renamed when it
+/// The active `sonicterm.log` is never *deleted*, only renamed when it
 /// exceeds the size cap.
 pub fn cleanup_old_files(log_dir: &Path, cfg: &LoggingConfig) {
     enforce_size_rotation(log_dir, cfg);
@@ -45,7 +45,7 @@ pub fn cleanup_old_files_async(log_dir: PathBuf, cfg: &LoggingConfig) {
 
 /// Aggressive cleanup invoked from the Help → Clear Old Logs menu
 /// item: removes **every** rotated log file (i.e., every file whose
-/// name starts with `sonic.log.` *except* the most recent one — the
+/// name starts with `sonicterm.log.` *except* the most recent one — the
 /// active file `tracing-appender` is writing to) and **every** crash
 /// dump. Returns a `(files_removed, bytes_removed)` pair for the UI
 /// toast.
@@ -95,7 +95,7 @@ pub fn clear_all_rotated(log_dir: &Path) -> (usize, u64) {
 }
 
 /// The `tracing-appender::rolling::daily` appender never produces a
-/// bare `sonic.log` — every file is named `sonic.log.YYYY-MM-DD`. The
+/// bare `sonicterm.log` — every file is named `sonicterm.log.YYYY-MM-DD`. The
 /// active file (the one being written to right now) is, by
 /// construction, the one with the most recent mtime. We never delete
 /// that file from cleanup paths.
@@ -118,7 +118,7 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
 }
 
 /// If the active log file is larger than `cfg.max_file_size_mb` MiB,
-/// rename it to `sonic.log.<unix-seconds>` so the next write opens a
+/// rename it to `sonicterm.log.<unix-seconds>` so the next write opens a
 /// fresh file. `max_file_size_mb = 0` disables this check.
 ///
 /// Rationale: `tracing-appender::rolling::daily` only rotates on the
@@ -127,7 +127,7 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
 /// best-effort second axis — when it fires the actively-open file
 /// handle inside the appender keeps writing to the inode under its
 /// new name; the next `daily` boundary then opens a fresh
-/// `sonic.log.YYYY-MM-DD` and subsequent cleanups evict the
+/// `sonicterm.log.YYYY-MM-DD` and subsequent cleanups evict the
 /// timestamp-suffixed file via [`enforce_rotated_logs`].
 fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
     if cfg.max_file_size_mb == 0 {

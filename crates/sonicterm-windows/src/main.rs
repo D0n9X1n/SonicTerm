@@ -1,4 +1,4 @@
-//! Sonic Terminal — Windows entry point.
+//! SonicTerm Terminal — Windows entry point.
 //!
 //! Hides the console window on release builds so we don't get a stray
 //! conhost behind the GPU window.

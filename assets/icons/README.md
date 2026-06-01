@@ -1,6 +1,6 @@
 # Icons
 
-Live SVG masters + baked exports for the Sonic Terminal icon.
+Live SVG masters + baked exports for the SonicTerm Terminal icon.
 
 ## Layout
 

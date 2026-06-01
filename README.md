@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="Sonic Terminal" width="160" height="160"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm Terminal" width="160" height="160"/>
 
-# Sonic Terminal
+# SonicTerm Terminal
 
-**Sonic is what you'd build if you started a terminal in 2026: GPU-native,
+**SonicTerm is what you'd build if you started a terminal in 2026: GPU-native,
 fast at idle, correct on every script, and you can drag tabs between
 windows.**
 
@@ -17,7 +17,7 @@ windows.**
 
 ---
 
-## Why Sonic?
+## Why SonicTerm?
 
 There are good terminals. There are even good *GPU* terminals. What there
 isn't, yet, is a GPU terminal that:
@@ -31,11 +31,11 @@ isn't, yet, is a GPU terminal that:
 - ships a **localized UI** (English / 简体中文 / 日本語) the first time you
   launch it.
 
-Sonic does all of that on macOS and Windows.
+SonicTerm does all of that on macOS and Windows.
 
 ### How it compares
 
-| Capability | Sonic | WezTerm | Alacritty | Kitty | iTerm2 |
+| Capability | SonicTerm | WezTerm | Alacritty | Kitty | iTerm2 |
 |---|:---:|:---:|:---:|:---:|:---:|
 | GPU rendering (wgpu/OpenGL) | ✅ | ✅ | ✅ | ✅ | ⚠️ Metal only |
 | Idle CPU when nothing happens | **0%** | ~1% | ~1% | ~1% | varies |
@@ -89,13 +89,13 @@ platforms than three mediocre ones.
 
 Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
 
-### What Sonic doesn't have (yet)
+### What SonicTerm doesn't have (yet)
 
 Being honest about the gaps so you can pick the right tool:
 
 - **No Linux build.** Deferred to v1.0 — see
   [`docs/ROADMAP.md`](docs/ROADMAP.md). WezTerm, Alacritty, and Kitty
-  all run on Linux today; Sonic does not.
+  all run on Linux today; SonicTerm does not.
 - **No code signing.** macOS `.dmg` and Windows `.msi` are unsigned —
   signing certs aren't configured yet. You'll see Gatekeeper /
   SmartScreen warnings on first launch.
@@ -159,7 +159,7 @@ client.
 
 ## Contributing
 
-Sonic is built with an agent-driven PR pipeline (see `CLAUDE.md`). The
+SonicTerm is built with an agent-driven PR pipeline (see `CLAUDE.md`). The
 local gate before any commit is:
 
 ```bash

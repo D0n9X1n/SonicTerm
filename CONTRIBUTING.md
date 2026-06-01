@@ -1,6 +1,6 @@
-# Contributing to Sonic Terminal
+# Contributing to SonicTerm Terminal
 
-Thanks for your interest! Sonic is in early development — issues, ideas, and
+Thanks for your interest! SonicTerm is in early development — issues, ideas, and
 PRs are all welcome.
 
 ## Development setup

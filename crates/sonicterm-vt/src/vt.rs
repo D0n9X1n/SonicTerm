@@ -20,7 +20,7 @@ use sonicterm_grid::grid::{CellFlags, Color, Grid, Pos};
 use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
-pub const SONIC_VERSION: &str = "Sonic 0.7";
+pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -260,7 +260,7 @@ struct Performer {
     /// Theme default background (sRGB), used to answer OSC 11 `?` queries.
     /// nvim queries this to colour cells painted with `bg=NONE` (e.g.
     /// neo-tree icon cells); without a reply nvim guesses (27,29,30)
-    /// instead of Sonic's actual theme bg — see issue #369.
+    /// instead of SonicTerm's actual theme bg — see issue #369.
     theme_bg: Option<(u8, u8, u8)>,
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
@@ -878,7 +878,7 @@ impl Perform for Performer {
                 //
                 // Without this reply nvim falls back to a hard-coded
                 // guess for the bg (NeoTreeNormal 27,29,30), which
-                // doesn't match Sonic's actual theme bg — neo-tree
+                // doesn't match SonicTerm's actual theme bg — neo-tree
                 // icon cells (painted with `bg=NONE`) then visibly
                 // differ from the surrounding theme-clear surface.
                 // See issue #369.
@@ -920,7 +920,7 @@ impl Perform for Performer {
                 // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
                 // integration. Kinds:
                 //   A → prompt start
-                //   B → command-line edit start / command start in Sonic
+                //   B → command-line edit start / command start in SonicTerm
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|s| s.first().copied());

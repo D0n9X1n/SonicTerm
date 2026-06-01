@@ -11,7 +11,7 @@ use tempfile::TempDir;
 #[test]
 fn save_load_roundtrip_preserves_all_fields() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("nested/dir/sonic.toml");
+    let path = dir.path().join("nested/dir/sonicterm.toml");
     let cfg = Config {
         theme: "tokyo-night".to_string(),
         keymap: "wezterm".to_string(),
@@ -40,10 +40,10 @@ fn save_load_roundtrip_preserves_all_fields() {
 #[test]
 fn save_is_atomic_no_tmp_left_behind() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     Config::default().save(&path).unwrap();
     let mut tmp = path.clone();
-    tmp.set_file_name("sonic.toml.tmp");
+    tmp.set_file_name("sonicterm.toml.tmp");
     assert!(!tmp.exists());
     assert!(path.exists());
 }
@@ -51,10 +51,10 @@ fn save_is_atomic_no_tmp_left_behind() {
 #[test]
 fn ensure_user_config_file_creates_header() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("nested/sonic.toml");
+    let path = dir.path().join("nested/sonicterm.toml");
     Config::ensure_user_config_file(&path).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("# Sonic config"));
+    assert!(text.starts_with("# SonicTerm config"));
     assert!(text.contains("https://github.com/D0n9X1n/sonic"));
 }
 
@@ -85,7 +85,7 @@ fn cursor_shape_parses_case_insensitive() {
 #[test]
 fn save_writes_blink_false_into_file() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     let cfg = Config {
         terminal: TerminalConfig {
             cursor_blink: false,

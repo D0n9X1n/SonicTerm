@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# visual_diff.sh — reproducible side-by-side capture of WezTerm vs Sonic
+# visual_diff.sh — reproducible side-by-side capture of WezTerm vs SonicTerm
 # for visual-parity regression checking.
 #
 # Output:
 #   /tmp/parity-wezterm.png    full WezTerm window screenshot
-#   /tmp/parity-sonic.png      full Sonic window screenshot
+#   /tmp/parity-sonic.png      full SonicTerm window screenshot
 #   /tmp/parity-wezterm-crop.png   content area (titlebar removed via sips)
 #   /tmp/parity-sonic-crop.png     same
 #
@@ -130,7 +130,7 @@ crop_titlebar() {
 # Sanity checks
 # ---------------------------------------------------------------------------
 if [[ -z "$WEZTERM_BIN" ]]; then
-  echo "warn: wezterm not installed; will only capture Sonic" >&2
+  echo "warn: wezterm not installed; will only capture SonicTerm" >&2
 fi
 if [[ ! -x "$SONIC_BIN" ]]; then
   echo "error: sonic binary not found at $SONIC_BIN" >&2
@@ -151,7 +151,7 @@ fi
 "$SONIC_BIN" >/dev/null 2>&1 &
 SONIC_PID=$!
 sleep 1.5
-# Sonic's process name in System Events is "sonicterm-mac"
+# SonicTerm's process name in System Events is "sonicterm-mac"
 position_front_window "sonicterm-mac" "$SONIC_X" "$SONIC_Y" || true
 paste_payload "sonicterm-mac" || true
 

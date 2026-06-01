@@ -44,7 +44,7 @@ fn inner_logical_size(
 
 #[test]
 fn default_window_padding_keeps_text_off_window_edge() {
-    // Out-of-box Sonic should not regress to 0 padding: left/right need
+    // Out-of-box SonicTerm should not regress to 0 padding: left/right need
     // enough room to keep text off the window edge, with slimmer vertical
     // padding to preserve rows.
     let w = WindowConfig::default();

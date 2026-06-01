@@ -250,7 +250,7 @@ pub fn synthetic_main_window_id() -> WindowId {
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
 /// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
 ///
-/// `Other` covers any non-terminal Sonic window; it explicitly does NOT
+/// `Other` covers any non-terminal SonicTerm window; it explicitly does NOT
 /// route terminal actions and falls back to main as a safe default.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +262,7 @@ pub enum FrontmostKind {
     /// A torn-out child terminal window is OS-frontmost. Carries the
     /// window id so the caller can index `windows`.
     Child(WindowId),
-    /// A non-terminal Sonic window is frontmost. Terminal actions fall
+    /// A non-terminal SonicTerm window is frontmost. Terminal actions fall
     /// back to main.
     Other,
 }
@@ -504,14 +504,14 @@ pub fn run_with(
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
 /// Currently the only variant is [`UserEvent::ConfigChanged`], sent by
-/// the [`ConfigWatcher`] thread whenever a fresh `sonic.toml` parse is
+/// the [`ConfigWatcher`] thread whenever a fresh `sonicterm.toml` parse is
 /// available. The handler wakes the loop, drains the watcher channel,
 /// and applies the new config (theme/font/keymap). Without this the
 /// channel-based delivery would sit queued under `ControlFlow::Wait`
 /// until an unrelated event arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
-    /// A new `sonic.toml` parse is ready on the watcher channel.
+    /// A new `sonicterm.toml` parse is ready on the watcher channel.
     ConfigChanged,
     /// A pending action arrived from the macOS native menubar. The
     /// payload itself is queued in the static
@@ -583,7 +583,7 @@ pub fn build_async_fallback_loader_for_proxy(
 /// Same as [`run`] but installs a platform-specific OS-drag sink.
 /// `sonicterm-mac` calls this with a `NSPasteboard`-backed impl; future
 /// `sonicterm-windows` work will pass an `IDataObject`/`DoDragDrop` impl.
-/// When the cursor leaves every Sonic window during a tab tear-out,
+/// When the cursor leaves every SonicTerm window during a tab tear-out,
 /// the sink is invoked with a serialized [`crate::os_drag::TabPayload`]
 /// instead of spawning a child window.
 pub fn run_with_os_drag(
@@ -955,12 +955,12 @@ pub struct App {
     pub(super) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
     pub(super) keymap_loader: Option<KeymapLoader>,
-    /// Live-reload watcher for the user's `sonic.toml`. Spawned in
+    /// Live-reload watcher for the user's `sonicterm.toml`. Spawned in
     /// `resumed`; `None` if the config path could not be resolved or
     /// the watcher failed to start (e.g. parent dir unwritable).
     pub(super) config_watcher: Option<ConfigWatcher>,
     /// Proxy used by the watcher thread to wake the idle event loop
-    /// on `sonic.toml` changes. `None` in tests that construct `App`
+    /// on `sonicterm.toml` changes. `None` in tests that construct `App`
     /// directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
@@ -1003,7 +1003,7 @@ pub struct App {
     /// hands it off to the OS-level drag-and-drop system
     /// (`NSPasteboard` on macOS, OLE `DoDragDrop` on Windows). When
     /// set, [`Self::tear_out_tab`] checks whether the cursor sits
-    /// outside every Sonic-owned window; if so, it invokes the sink
+    /// outside every SonicTerm-owned window; if so, it invokes the sink
     /// and KILLS the local tab instead of spawning a child window.
     /// Installed by the platform bin via [`run_with_os_drag`].
     pub(super) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
@@ -3041,7 +3041,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         // Forward to sonicterm-logging so every Cmd+Q / WM_CLOSE /
-        // last-window exit lands in sonic.log. See
+        // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.
         sonicterm_logging::record_loop_exiting();
     }

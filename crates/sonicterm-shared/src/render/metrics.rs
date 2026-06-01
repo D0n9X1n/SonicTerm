@@ -56,7 +56,7 @@ pub(super) fn measure_cell(
 /// font's hhea/OS-2 tables via cosmic-text → skrifa.
 ///
 /// This is the value WezTerm multiplies by `line_height` to derive its
-/// cell pitch. Sonic prior to this change used `size * line_height`,
+/// cell pitch. SonicTerm prior to this change used `size * line_height`,
 /// which silently dropped the font's intrinsic line gap and produced
 /// cells that were ~88% of WezTerm's at otherwise-identical config
 /// (font_size=14, line_height=1.1 on a typical monospace).

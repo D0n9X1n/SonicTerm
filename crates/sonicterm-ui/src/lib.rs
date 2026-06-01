@@ -1,4 +1,4 @@
-//! sonicterm-ui — pure-data UI state and layout for Sonic Terminal.
+//! sonicterm-ui — pure-data UI state and layout for SonicTerm Terminal.
 //!
 //! Extracted from `sonicterm-shared` in PR-5 of the workspace refactor
 //! (issue #121). This crate carries only *state* and *layout* — no

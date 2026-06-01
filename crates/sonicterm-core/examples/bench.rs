@@ -1,6 +1,6 @@
 //! Headless performance harness.
 //!
-//! Runs the full Sonic stack (PTY + Parser + Grid + spans-builder) without
+//! Runs the full SonicTerm stack (PTY + Parser + Grid + spans-builder) without
 //! a window or GPU and measures every interesting number. Emits one JSON
 //! line so callers can diff `before.json` vs `after.json`.
 //!

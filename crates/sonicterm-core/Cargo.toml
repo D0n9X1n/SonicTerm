@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — deprecated façade re-exporting sonic-{vt,grid,cfg,io}"
+description = "SonicTerm Terminal — deprecated façade re-exporting sonic-{vt,grid,cfg,io}"
 
 [lints]
 workspace = true

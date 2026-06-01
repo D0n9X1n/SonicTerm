@@ -541,7 +541,7 @@ pub mod motion {
     /// parameter rather than solving for it from `x`. For the easing curves
     /// below this matches game-engine convention; the visual difference vs.
     /// the browser's `x`-solving form is imperceptible for animations on the
-    /// 90–200 ms timescale used by Sonic chrome.
+    /// 90–200 ms timescale used by SonicTerm chrome.
     #[inline]
     fn bezier_y(t: f32, y1: f32, y2: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);

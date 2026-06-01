@@ -1,6 +1,6 @@
 //! Regression for PR #96 review:
 //!
-//! 1. `tab_close_button_color` set in sonic.toml must reach the
+//! 1. `tab_close_button_color` set in sonicterm.toml must reach the
 //!    application config at startup (so the renderer-init code path
 //!    in `App` can apply it BEFORE the first frame, not on the first
 //!    live-reload).
@@ -21,7 +21,7 @@ use tempfile::TempDir;
 #[test]
 fn startup_with_custom_tab_close_button_color_parses_into_config() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     fs::write(
         &path,
         r##"
@@ -47,7 +47,7 @@ line_height = 1.2
 #[test]
 fn live_reload_change_to_tab_close_button_color_is_observable() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     fs::write(
         &path,
         r##"

@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — macOS app"
+description = "SonicTerm Terminal — macOS app"
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@
 //! here document the *intent* so downstream code (and reviewers) have
 //! a single named home for them.
 
-/// Suffix appended to the active `sonic.log` by `tracing-appender`'s
+/// Suffix appended to the active `sonicterm.log` by `tracing-appender`'s
 /// daily rotation. Exposed so [`crate::cleanup`] can recognise rotated
 /// files unambiguously.
 pub const ROTATED_PREFIX: &str = "sonicterm.log.";

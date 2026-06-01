@@ -3,8 +3,8 @@
 //! nvim sends `OSC 11 ; ? ST` at startup to learn the terminal's default
 //! background so it can render cells declared with `bg=NONE` (e.g.
 //! neo-tree icon cells) using the same colour as the theme clear. Before
-//! this fix Sonic silently dropped the query and nvim fell back to the
-//! NeoTreeNormal default `(27,29,30)`, which differs from Sonic's actual
+//! this fix SonicTerm silently dropped the query and nvim fell back to the
+//! NeoTreeNormal default `(27,29,30)`, which differs from SonicTerm's actual
 //! theme bg `(20,22,23)` — the visible darker rectangles in #369.
 
 use crossbeam_channel::unbounded;
@@ -23,7 +23,7 @@ fn drain(rx: &crossbeam_channel::Receiver<Vec<u8>>) -> Vec<u8> {
 fn osc_11_query_replies_with_theme_background() {
     let (tx, rx) = unbounded();
     let mut p = Parser::new_with_reply(Grid::new(10, 5), tx);
-    // (20, 22, 23) = 0x14, 0x16, 0x17 — Sonic's default theme bg.
+    // (20, 22, 23) = 0x14, 0x16, 0x17 — SonicTerm's default theme bg.
     p.set_theme_bg(0x14, 0x16, 0x17);
     p.advance(b"\x1b]11;?\x1b\\");
     assert_eq!(drain(&rx), b"\x1b]11;rgb:1414/1616/1717\x1b\\");

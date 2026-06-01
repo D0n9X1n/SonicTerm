@@ -2,7 +2,7 @@
 //!
 //! Every test spawns the `exit_test_child` example binary with
 //! `SONIC_EXIT_TEST_MODE` set, points it at a fresh tempdir via
-//! `SONIC_LOG_DIR`, then asserts on the contents of `sonic.log` and
+//! `SONIC_LOG_DIR`, then asserts on the contents of `sonicterm.log` and
 //! `crashes/` after the child terminates.
 //!
 //! These tests are non-trivial because they exercise process-wide

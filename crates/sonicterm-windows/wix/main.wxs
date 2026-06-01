@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  Sonic Terminal — Windows installer (cargo-wix / Wix3).
+  SonicTerm Terminal — Windows installer (cargo-wix / Wix3).
 
   Builds an MSI that:
     - installs sonicterm-windows.exe under "Program Files\SonicTerm\"

@@ -1,6 +1,6 @@
 //! Regression test for the PR #94 review fix:
 //!
-//! When `sonic.toml`'s `[window].padding_{left,right,top,bottom}`
+//! When `sonicterm.toml`'s `[window].padding_{left,right,top,bottom}`
 //! values change, the live-reload path (`App::apply_new_config`) must
 //!   1. push the new four-tuple into every active `GpuRenderer`
 //!      (main window + every torn-out child window) via

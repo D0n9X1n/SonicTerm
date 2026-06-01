@@ -72,7 +72,7 @@ fn tab_title_glyphs_use_device_scaled_sonic_atlas() {
         Some(&mut debug),
     );
 
-    assert!(!glyphs.is_empty(), "tab title must emit Sonic atlas glyph instances");
+    assert!(!glyphs.is_empty(), "tab title must emit SonicTerm atlas glyph instances");
     let first = debug.first().expect("debug record for first tab-title glyph");
     assert_eq!(first.raster_px, raster_px, "tab title rasterizer must use device-scale px");
     assert!(

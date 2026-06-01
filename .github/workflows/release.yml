@@ -188,7 +188,7 @@ jobs:
             echo "## Changes since $PREV" > body.md
             git log --pretty=format:"- %s (%h)" "${PREV}..${{ github.ref_name }}" >> body.md
           else
-            echo "Initial Sonic Terminal release." > body.md
+            echo "Initial SonicTerm Terminal release." > body.md
           fi
           {
             echo ""
@@ -200,7 +200,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Sonic ${{ github.ref_name }}
+          name: SonicTerm ${{ github.ref_name }}
           body_path: body.md
           files: dist/*
           draft: false

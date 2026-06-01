@@ -1,8 +1,8 @@
 # Shell integration (OSC 133)
 
-Sonic understands the [FinalTerm / WezTerm OSC 133 prompt-marking
+SonicTerm understands the [FinalTerm / WezTerm OSC 133 prompt-marking
 protocol](https://wezfurlong.org/wezterm/shell-integration.html). When your
-shell emits these markers, Sonic records each prompt's start row, end row,
+shell emits these markers, SonicTerm records each prompt's start row, end row,
 and exit code in the grid and:
 
 - Draws a small caret in the left gutter at every visible prompt row.
@@ -63,7 +63,7 @@ end
 
 ## Notes
 
-- Sonic keeps the **last 256** prompt regions per pane. Older ones are
+- SonicTerm keeps the **last 256** prompt regions per pane. Older ones are
   discarded silently.
 - A repeated `A` on the same row is coalesced — emitting the marker more
   than once per prompt is safe.

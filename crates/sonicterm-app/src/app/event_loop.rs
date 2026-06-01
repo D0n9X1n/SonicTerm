@@ -162,7 +162,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(format!("Sonic Terminal — {}", self.theme.name))
+                    .with_title(format!("SonicTerm Terminal — {}", self.theme.name))
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(
                         f32::from(cols) * 9.0
@@ -244,7 +244,7 @@ impl App {
         }
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Subsequent
-        // edits to sonic.toml take effect through the config-watch hook
+        // edits to sonicterm.toml take effect through the config-watch hook
         // (see apply_config below).
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
@@ -266,7 +266,7 @@ impl App {
             }
         }
         renderer.set_titlebar_inset(0.0);
-        // Apply the user's `tab_close_button_color` from sonic.toml
+        // Apply the user's `tab_close_button_color` from sonicterm.toml
         // BEFORE the first frame so a custom always-visible × shows
         // up on the very first paint, not after a config edit.
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
@@ -314,7 +314,7 @@ impl App {
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(
-            "Sonic ready. theme={} keymap={} bindings={} grid={}x{}",
+            "SonicTerm ready. theme={} keymap={} bindings={} grid={}x{}",
             self.theme.name,
             self.keymap.meta.name,
             self.keymap.bindings.len(),
@@ -323,7 +323,7 @@ impl App {
         );
         window.request_redraw();
 
-        // Spawn the sonic.toml live-reload watcher (best-effort; if the
+        // Spawn the sonicterm.toml live-reload watcher (best-effort; if the
         // user has no config path or the parent dir is unreadable, the
         // app still runs — just without live reload).
         if self.config_watcher.is_none() {

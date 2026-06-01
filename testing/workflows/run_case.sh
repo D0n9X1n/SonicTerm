@@ -60,7 +60,7 @@ sleep 0.4
 # was previously misreading that bash-emitted notification as a test
 # failure even though the case itself had completed cleanly. We still
 # track the PID explicitly via $SONIC_PID for kill/wait below.
-"$SONIC_BIN" > "$CASE_OUT/sonic.log" 2>&1 &
+"$SONIC_BIN" > "$CASE_OUT/sonicterm.log" 2>&1 &
 SONIC_PID=$!
 disown "$SONIC_PID" 2>/dev/null || true
 log "spawned sonicterm-mac pid=$SONIC_PID"
@@ -401,7 +401,7 @@ for e in expectations:
                   'tab-count-in-window', 'scrollback-min-lines',
                   'padding-min', 'process-spawned', 'process-not-spawned',
                   'process-cpu-max', 'file-absent'):
-        # Best-effort heuristics; many require Sonic-internal hooks we don't have yet.
+        # Best-effort heuristics; many require SonicTerm-internal hooks we don't have yet.
         if kind == 'file-absent':
             ok = (not os.path.exists(e.get('path', '')))
             reason = f"absent={ok} path={e.get('path')}"

@@ -23,7 +23,7 @@ use tracing_subscriber::Layer;
 /// Was 200 pre-v0.8.1; lowered to 50 to claw back ~30 MB of steady-state
 /// RSS that the larger ring kept allocated for the lifetime of the
 /// process. 50 events is still enough context for the post-mortem of
-/// nearly every observed Sonic panic.
+/// nearly every observed SonicTerm panic.
 pub const RING_CAPACITY: usize = 50;
 
 /// Captured rendering of a single tracing event.
@@ -113,7 +113,7 @@ static PANIC_DIR: OnceLock<PathBuf> = OnceLock::new();
 ///
 /// In addition to the file dump, a single-line summary is emitted at
 /// `ERROR` level on the `tracing` dispatcher so the rolling
-/// `sonic.log` carries an index entry even when the crash file write
+/// `sonicterm.log` carries an index entry even when the crash file write
 /// itself fails (e.g. read-only home, ENOSPC). The non-blocking
 /// appender may drop the marker if the process dies inside the same
 /// tick, but in practice the dump file is the authoritative artifact

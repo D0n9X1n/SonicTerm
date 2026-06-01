@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — GPU pipeline primitives (quad, text, atlas upload)"
+description = "SonicTerm Terminal — GPU pipeline primitives (quad, text, atlas upload)"
 
 [lints]
 workspace = true

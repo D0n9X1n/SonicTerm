@@ -219,7 +219,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-04-palette-N.png`.
 1. Open command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
 2. Type `edit sonic` and press Enter.
 3. If prompted, let the OS open the `.toml` file in the default handler.
-4. Change a harmless live-reload setting in `sonicterm.toml` (for example theme or font size), save, and return to Sonic.
+4. Change a harmless live-reload setting in `sonicterm.toml` (for example theme or font size), save, and return to SonicTerm.
 5. Re-open command palette, type `edit keymap`, and press Enter.
 
 Screenshots: `/tmp/rel-vX.Y.Z-05-edit-config-N.png`.
@@ -227,7 +227,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-05-edit-config-N.png`.
 **Expected outcome:**
 
 - [ ] Palette contains `Edit sonicterm.toml` and opens the platform user config file.
-- [ ] If `sonicterm.toml` did not exist, Sonic creates it with a commented header first.
+- [ ] If `sonicterm.toml` did not exist, SonicTerm creates it with a commented header first.
 - [ ] Saving `sonicterm.toml` live-reloads without restart.
 - [ ] Palette contains `Edit keymap.toml` and opens the editable user keymap file.
 
@@ -263,7 +263,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-06-tearout-N.png`.
 
 **Setup:** fresh launch; single pane.
 
-**Commands (inside Sonic):**
+**Commands (inside SonicTerm):**
 ```bash
 yes "the quick brown fox jumps over the lazy dog 0123456789" | head -2000000 > /tmp/big.txt
 ls -lh /tmp/big.txt   # should be ≥ 50 MB
@@ -282,7 +282,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-07-nvim-N.png`.
 
 **Expected outcome:**
 
-- [ ] Sonic does NOT crash during open, scroll, or substitution (#194 regression-guard).
+- [ ] SonicTerm does NOT crash during open, scroll, or substitution (#194 regression-guard).
 - [ ] No tofu boxes appear at any point.
 - [ ] Substitution completes (`:%s` reports replacements).
 - [ ] After nvim exits, idle CPU returns to < 5% within 5 s.
@@ -455,7 +455,7 @@ ps -p $(pgrep sonicterm-mac | head -1) -o %cpu
 
 **Expected outcome:**
 
-- [ ] Sonic pastes the absolute path of the file at the cursor.
+- [ ] SonicTerm pastes the absolute path of the file at the cursor.
 - [ ] Spaces in the path are properly shell-quoted (either single-quoted whole, or backslash-escaped) — the shell must accept the path verbatim on `Enter`.
 - [ ] No crash; no path written to a different pane than the focused one.
 
@@ -465,7 +465,7 @@ ps -p $(pgrep sonicterm-mac | head -1) -o %cpu
 
 ## 15. Clean quit
 
-**Setup:** Sonic running with 2 windows × 2 tabs × 2 panes each (8 shells total).
+**Setup:** SonicTerm running with 2 windows × 2 tabs × 2 panes each (8 shells total).
 
 **Actions:**
 1. Note shell PIDs: `pgrep -fl '/bin/zsh|/bin/bash' | tee /tmp/rel-shells-before.txt`.
@@ -476,7 +476,7 @@ ps -p $(pgrep sonicterm-mac | head -1) -o %cpu
 **Expected outcome:**
 
 - [ ] `Cmd+Q` exits the app cleanly within ~1 s (no spinning beachball).
-- [ ] All 8 shell PIDs spawned by Sonic are gone from the diff (`PtyHandle::Drop` correctness, CLAUDE.md §4).
+- [ ] All 8 shell PIDs spawned by SonicTerm are gone from the diff (`PtyHandle::Drop` correctness, CLAUDE.md §4).
 - [ ] `pgrep -f sonicterm-mac` returns nothing.
 
 **FAIL → block release.**
@@ -571,7 +571,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-18-resize-N.png`.
 **Setup:** machine with at least one Retina display; second external monitor at a different scale factor if available.
 
 **Actions:**
-1. Launch Sonic on the Retina display. Confirm text sharpness against Section 1.
+1. Launch SonicTerm on the Retina display. Confirm text sharpness against Section 1.
 2. Drag the window to the external monitor.
 3. Drag back to the Retina display.
 4. If macOS has "scaled" resolution options, change display scale via System Settings → Displays.
@@ -610,7 +610,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-20-livereload-N.png`.
 - [ ] Theme change applies without restart and without window flicker beyond a single repaint.
 - [ ] Font family change applies live; no tofu in the post-reload screenshot.
 - [ ] Font size change rescales the grid and reflows the active shell (SIGWINCH fires).
-- [ ] Bad config does NOT crash Sonic; previous good config remains in effect; error is logged to `/tmp/gui-smoke.log`.
+- [ ] Bad config does NOT crash SonicTerm; previous good config remains in effect; error is logged to `/tmp/gui-smoke.log`.
 
 **FAIL → block release.**
 
@@ -635,7 +635,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-21-shellexit-N.png`.
 - [ ] `kill -9 $$` likewise — the parent shell death is noticed within 1 s.
 - [ ] `Ctrl+C` interrupts the sleep without killing the shell; prompt returns.
 - [ ] `Ctrl+D` on empty `cat` terminates cat; shell stays alive.
-- [ ] After `Cmd+Q`: `pgrep -fl '/bin/zsh|/bin/bash'` shows none of the Sonic-spawned PIDs (PtyHandle::Drop, CLAUDE.md §4).
+- [ ] After `Cmd+Q`: `pgrep -fl '/bin/zsh|/bin/bash'` shows none of the SonicTerm-spawned PIDs (PtyHandle::Drop, CLAUDE.md §4).
 
 **FAIL → block release.**
 
@@ -761,7 +761,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-25-mouse-N.png`.
 - [ ] Tmux drag-resizes splits using mouse.
 - [ ] Vim cursor jumps to clicked cell; visual mode selects on drag.
 - [ ] Mode enable/disable toggles raw mouse reporting in real time.
-- [ ] Scroll wheel inside tmux/vim sends arrow keys (or scroll, per app); does NOT touch Sonic scrollback (alt-screen behavior).
+- [ ] Scroll wheel inside tmux/vim sends arrow keys (or scroll, per app); does NOT touch SonicTerm scrollback (alt-screen behavior).
 
 **FAIL → block release.**
 
@@ -855,7 +855,7 @@ Session restore is explicitly out of scope until post-v1.0 (CLAUDE.md North Star
 - [ ] Re-launch after kill works without complaint (no half-written state file blocking startup).
 - [ ] If a panic occurred, the backtrace is captured (RUST_BACKTRACE-enabled binary in dev; in release at least a one-line panic message in `/tmp/gui-smoke.log` or stderr).
 - [ ] No corrupted user config after force-kill (validate by re-reading `sonicterm.toml` and confirming app starts).
-- [ ] No "Sonic quit unexpectedly" dialog from macOS for a normal `Cmd+Q` quit.
+- [ ] No "SonicTerm quit unexpectedly" dialog from macOS for a normal `Cmd+Q` quit.
 
 **FAIL → block release.**
 
@@ -876,7 +876,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-30-a11y-N.png`.
 
 **Expected outcome:**
 
-- [ ] Sonic does not crash under any accessibility toggle.
+- [ ] SonicTerm does not crash under any accessibility toggle.
 - [ ] VoiceOver at minimum reads the window title; menu items announce correctly.
 - [ ] Increase-contrast does not render the cursor or text invisible.
 - [ ] Reduce-motion suppresses any animated overlay if implemented.
@@ -916,7 +916,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-32-locale-N.png`.
 
 **Expected outcome:**
 
-- [ ] UTF-8 byte input still renders correctly regardless of `$LANG` (Sonic treats stream as UTF-8 with replacement for invalid bytes).
+- [ ] UTF-8 byte input still renders correctly regardless of `$LANG` (SonicTerm treats stream as UTF-8 with replacement for invalid bytes).
 - [ ] Binary garbage does not crash the VT parser (`cargo test -p sonicterm-core --test vt_fuzz` mirror).
 - [ ] Invalid UTF-8 bytes show U+FFFD replacement, not silent corruption.
 - [ ] Returning to UTF-8 locale produces identical rendering to baseline.
@@ -931,12 +931,12 @@ Screenshots: `/tmp/rel-vX.Y.Z-32-locale-N.png`.
 
 **Actions:**
 1. First launch — observe any TCC prompts (Input Monitoring, Screen Recording, Accessibility, Full Disk Access).
-2. Decline a prompt; observe Sonic continues to function for unrelated features.
+2. Decline a prompt; observe SonicTerm continues to function for unrelated features.
 3. Re-launch after granting; confirm the feature that needed the permission now works.
 
 **Expected outcome:**
 
-- [ ] Sonic only prompts for permissions it actually requires (no unjustified Accessibility / FDA request).
+- [ ] SonicTerm only prompts for permissions it actually requires (no unjustified Accessibility / FDA request).
 - [ ] Declined permission does not crash the app; degraded feature surfaces a clear message.
 - [ ] Granted permission is honored on next launch without re-prompt.
 
@@ -1010,7 +1010,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-35-drop-N.png`.
 7. Empty file.
 8. UTF-8 BOM at start.
 
-For each: launch Sonic, observe behavior, then restore the good config.
+For each: launch SonicTerm, observe behavior, then restore the good config.
 
 Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
@@ -1031,7 +1031,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 ## 37. Tab bar caption strip (per-OS chrome parity)
 
-**Setup:** launch Sonic in a fresh window and keep an OS-level process/window inspector ready (`ps` + Accessibility Inspector on macOS; Task Manager/Spy++ or PowerShell on Windows).
+**Setup:** launch SonicTerm in a fresh window and keep an OS-level process/window inspector ready (`ps` + Accessibility Inspector on macOS; Task Manager/Spy++ or PowerShell on Windows).
 
 **Keystrokes / actions:**
 
@@ -1109,7 +1109,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 | Confirm default keymap is `wezterm`; press `Cmd+T`. | Confirm default keymap is `wezterm-windows`; press `Ctrl+Shift+T`. |
 | Press another primary default chord such as `Cmd+D` for split. | Press another primary default chord such as `Ctrl+Shift+D` for split. |
 | Press `Cmd+W` / the active close-tab chord. | Press `Ctrl+Shift+W` and confirm the active tab closes (`Ctrl+W` remains shell word-delete). |
-| Verify Linux remains documented as `wezterm` with Super=Meta; no macOS run required. | Press common Win-key chords (for example `Win+T`, `Win+D`) and confirm Sonic does not bind or swallow them. |
+| Verify Linux remains documented as `wezterm` with Super=Meta; no macOS run required. | Press common Win-key chords (for example `Win+T`, `Win+D`) and confirm SonicTerm does not bind or swallow them. |
 
 **Expected outcome:**
 
@@ -1119,7 +1119,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 - [ ] Windows default bindings do not use Win-key chords that collide with the OS shell (#236 guard).
 - [ ] Linux default remains `wezterm` with Super=Meta documented for release notes.
 
-**FAIL → block release.** Wrong default keymap, wrong chord prefix, or OS-reserved chord captured by Sonic.
+**FAIL → block release.** Wrong default keymap, wrong chord prefix, or OS-reserved chord captured by SonicTerm.
 
 ---
 

@@ -47,10 +47,10 @@ impl App {
             return true;
         }
         // OS-level cross-process drag: if a sink is installed AND the
-        // cursor has left every Sonic-owned window, hand the tab off
+        // cursor has left every SonicTerm-owned window, hand the tab off
         // to the OS (NSPasteboard / OLE) and KILL the local copy
         // (dropping the panes runs PtyHandle::Drop which signals the
-        // child). The destination Sonic process picks up the payload
+        // child). The destination SonicTerm process picks up the payload
         // from its own pasteboard read and spawns a fresh tab with
         // the same cwd/cmd/env, showing scrollback as history.
         //
@@ -72,7 +72,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(format!("Sonic — {}", tab.title))
+                    .with_title(format!("SonicTerm — {}", tab.title))
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
@@ -468,7 +468,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(format!("Sonic — {}", tab.title))
+                    .with_title(format!("SonicTerm — {}", tab.title))
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),

@@ -6,7 +6,7 @@ fn keymap_path_resolves_under_appdata_on_windows() {
 
     let path = sonicterm_cfg::keymap::default_user_keymap_path().expect("keymap path");
 
-    assert!(path.ends_with(std::path::Path::new(r"Sonic\keymap.toml")), "got {path:?}");
+    assert!(path.ends_with(std::path::Path::new(r"SonicTerm\keymap.toml")), "got {path:?}");
 }
 
 #[cfg(not(target_os = "windows"))]

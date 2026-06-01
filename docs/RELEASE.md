@@ -1,4 +1,4 @@
-# Releasing Sonic
+# Releasing SonicTerm
 
 Tagging `vX.Y.Z` triggers `.github/workflows/release.yml`, which builds a
 macOS universal `.dmg` and a Windows x64 `.msi` and publishes a GitHub

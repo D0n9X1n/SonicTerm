@@ -6,7 +6,7 @@
 > retained as a historical reference for whoever revives this work; it
 > does NOT reflect the current workflow.
 
-This document describes how to flip on signing for Sonic's release pipeline once
+This document describes how to flip on signing for SonicTerm's release pipeline once
 the appropriate certificates are in hand. The release workflow
 (`.github/workflows/release.yml`) is already wired to detect signing secrets
 and produce signed + notarized artifacts when they exist; if any secret is
@@ -67,7 +67,7 @@ When `MACOS_NOTARY_USER` is also set:
 # Should print "Developer ID Application: …" and "satisfies its Designated Requirement"
 codesign -dv --verbose=4 /Applications/SonicTerm.app
 spctl --assess --type execute --verbose /Applications/SonicTerm.app    # accepted
-xcrun stapler validate Sonic-<version>-mac-universal.dmg            # validated
+xcrun stapler validate SonicTerm-<version>-mac-universal.dmg            # validated
 ```
 
 ## Windows
@@ -104,7 +104,7 @@ When `WINDOWS_CERT_PFX_BASE64` is set:
 - The `.pfx` is decoded to a temp file on the runner.
 - `signtool.exe` (auto-detected under the Windows 10 SDK) signs every
   `dist/*.msi` with SHA-256, RFC 3161 timestamping via
-  `http://timestamp.sectigo.com`, and the description `Sonic Terminal`.
+  `http://timestamp.sectigo.com`, and the description `SonicTerm Terminal`.
 - `signtool verify /pa /v` confirms the signature chain.
 - The `.pfx` is deleted.
 
@@ -112,10 +112,10 @@ When `WINDOWS_CERT_PFX_BASE64` is set:
 
 ```powershell
 # /pa = use default Authenticode policy; /v = verbose
-signtool verify /pa /v Sonic-<version>.msi
+signtool verify /pa /v SonicTerm-<version>.msi
 
 # Or via PowerShell
-Get-AuthenticodeSignature .\Sonic-<version>.msi
+Get-AuthenticodeSignature .\SonicTerm-<version>.msi
 # Status should be "Valid", SignerCertificate should match your cert
 ```
 

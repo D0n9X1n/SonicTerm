@@ -334,7 +334,7 @@ pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
 sleep 2.5
 PID=$(pgrep -f sonicterm-mac | head -1)
 
-# 1. Bring to front + position (so the screenshot actually captures Sonic, not whatever was front)
+# 1. Bring to front + position (so the screenshot actually captures SonicTerm, not whatever was front)
 osascript <<EOF
 tell application "System Events"
   tell process "sonicterm-mac"
@@ -389,7 +389,7 @@ comments present.
 
 ## 14. Honest perf status (v1.0-RC)
 
-We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows Sonic **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
+We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows SonicTerm **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
 
 **Rule:** do not describe perf work as "done" in commit messages or PR bodies. Phase E (perf parity) is ongoing. Concrete remaining items live in the v1.x section of `docs/ROADMAP.md`.
 
@@ -532,7 +532,7 @@ but does NOT commit on the owner's open branches without invitation.
 
 ---
 
-## 15. Filing bugs against Sonic
+## 15. Filing bugs against SonicTerm
 
 When filing a bug, attach the last 200 lines of the most recent log file:
 

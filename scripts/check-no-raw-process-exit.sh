@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuses raw `std::process::exit(` calls in production crate sources.
 # All shipped binaries must funnel through `sonicterm_logging::exit_with(code, reason)`
-# so the exit reason lands in sonic.log. See CLAUDE.md "exit and crash coverage"
+# so the exit reason lands in sonicterm.log. See CLAUDE.md "exit and crash coverage"
 # and `crates/sonicterm-logging/src/exit_trace.rs`.
 
 set -euo pipefail

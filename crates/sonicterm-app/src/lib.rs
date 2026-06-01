@@ -1,5 +1,5 @@
 //! sonicterm-app — winit app loop, OS drag-and-drop glue, menubar bridge,
-//! config watcher, and top-level event-loop wiring for Sonic Terminal.
+//! config watcher, and top-level event-loop wiring for SonicTerm Terminal.
 //!
 //! Extracted from `sonicterm-shared` in refactor PR 8a. The previous
 //! `sonicterm_shared::app`, `sonicterm_shared::menu`, `sonicterm_shared::menubar_bridge`,

@@ -1,6 +1,6 @@
 //! Regression: scrollbar rendering must be opt-out via config (PR-B of #386).
 //!
-//! Original purpose (pre-#386): assert that Sonic never drew a scrollbar
+//! Original purpose (pre-#386): assert that SonicTerm never drew a scrollbar
 //! at all, matching WezTerm's `enable_scroll_bar = false` default by
 //! source-scanning for forbidden tokens.
 //!

@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — VT/ANSI parser (Performer that drives sonicterm-grid)"
+description = "SonicTerm Terminal — VT/ANSI parser (Performer that drives sonicterm-grid)"
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
-/// Top-level user configuration loaded from `sonic.toml`.
+/// Top-level user configuration loaded from `sonicterm.toml`.
 pub struct Config {
     /// Font selection and metrics.
     pub font: FontConfig,
@@ -85,7 +85,7 @@ pub struct WindowConfig {
     pub rows: u16,
     /// Legacy single-value padding (logical px). When non-`None` on load,
     /// it is splatted onto all four per-side fields below as a backward-
-    /// compatibility shim so existing `sonic.toml` files keep working.
+    /// compatibility shim so existing `sonicterm.toml` files keep working.
     /// Always serialized as `None` on save; the per-side fields are the
     /// canonical surface.
     #[serde(default, skip_serializing)]
@@ -128,7 +128,7 @@ impl WindowConfig {
 #[serde(rename_all = "lowercase")]
 /// OS compositor backdrop behind the terminal surface.
 pub enum BackdropKind {
-    /// Draw an opaque Sonic background with no system material.
+    /// Draw an opaque SonicTerm background with no system material.
     #[default]
     Opaque,
     /// Windows 11 Mica material.
@@ -223,7 +223,7 @@ fn default_threshold_secs() -> u64 {
 
 /// Default for [`Config::quit_on_last_window_close`]: `true`.
 /// Traditional terminal behavior: closing the last window quits the
-/// app. Set `quit_on_last_window_close = false` in `sonic.toml` for
+/// app. Set `quit_on_last_window_close = false` in `sonicterm.toml` for
 /// Chrome/Firefox/Safari-style dock-alive behavior where the process
 /// stays running after the last window closes (macOS only — other
 /// platforms always exit since they have no dock concept).
@@ -308,7 +308,7 @@ impl Default for Config {
 /// (with the dot) — that's the exact name to use here. When the family is
 /// missing the renderer falls through to the system mono chain;
 /// `JetBrainsMono Nerd Font` is also bundled and serves as the implicit
-/// fallback. Users can override via `[font] family = "..."` in `sonic.toml`.
+/// fallback. Users can override via `[font] family = "..."` in `sonicterm.toml`.
 pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
@@ -377,7 +377,7 @@ impl Config {
             }
         }
         const HEADER: &str =
-            "# Sonic config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
+            "# SonicTerm config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
         std::fs::write(path, HEADER).with_context(|| format!("write {path:?}"))
     }
 

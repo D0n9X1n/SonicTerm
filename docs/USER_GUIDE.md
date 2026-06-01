@@ -1,6 +1,6 @@
-# Sonic User Guide
+# SonicTerm User Guide
 
-Everything Sonic does today, with the keybinding or config line you need to
+Everything SonicTerm does today, with the keybinding or config line you need to
 make it happen. Keys are written WezTerm-style: `super` is `⌘` on macOS and
 `Ctrl` on Windows unless otherwise noted.
 
@@ -32,11 +32,11 @@ make it happen. Keys are written WezTerm-style: `super` is `⌘` on macOS and
 
 ## Performance
 
-Sonic is GPU-native. Every glyph goes through an atlas-backed cache rendered
+SonicTerm is GPU-native. Every glyph goes through an atlas-backed cache rendered
 by `wgpu`, and the event loop only redraws when something actually changed.
 
 - **Idle CPU: 0%.** When the grid hasn't changed, the renderer skips the
-  frame entirely. Move the mouse over an idle Sonic window in Activity
+  frame entirely. Move the mouse over an idle SonicTerm window in Activity
   Monitor and you'll see it drop to zero.
 - **Scroll throughput: ~34k lines/sec** on an M2 Air at 1440p.
 - **Mailbox present mode** keeps input-to-screen latency low by always
@@ -47,13 +47,13 @@ by `wgpu`, and the event loop only redraws when something actually changed.
   bumps the revision (a write to the grid), the next frame is forced; when
   it doesn't, the previous frame is kept.
 
-You don't have to enable any of this. It's how Sonic always runs.
+You don't have to enable any of this. It's how SonicTerm always runs.
 
 ---
 
 ## Rendering
 
-Sonic ships a single font fallback chain that has been tuned by hand for
+SonicTerm ships a single font fallback chain that has been tuned by hand for
 every script you're likely to type:
 
 | Platform | Chain (in order) |
@@ -89,7 +89,7 @@ cover.
 
 ### IME (Pinyin / Japanese / Korean)
 
-Sonic implements the full winit IME protocol. The preedit string renders
+SonicTerm implements the full winit IME protocol. The preedit string renders
 **at the cursor**, and the OS candidate window is positioned via
 `set_ime_cursor_area` so it never floats off to the corner of the screen.
 
@@ -98,7 +98,7 @@ Google Japanese Input, 한글 etc.) and start typing.
 
 ### Bracketed paste
 
-Sonic advertises DECSET 2004, so pasted text from the OS clipboard is
+SonicTerm advertises DECSET 2004, so pasted text from the OS clipboard is
 wrapped in `\e[200~ ... \e[201~`. Shells that support it (bash 4+, zsh,
 fish, nushell, PowerShell 7) will not run the paste as a command — it
 arrives as one literal block.
@@ -107,7 +107,7 @@ arrives as one literal block.
 
 ### Shell integration (OSC 133)
 
-When your shell emits OSC 133 prompt marks, Sonic draws a small **gutter
+When your shell emits OSC 133 prompt marks, SonicTerm draws a small **gutter
 caret** beside each prompt and lets you jump between prompts:
 
 - Previous prompt: `super+shift+up`
@@ -160,12 +160,12 @@ echoes new output the indicator updates immediately — no stale results.
 
 - **Drag a tab below the tab bar** to tear it out into a new in-process
   window. The shell keeps running — no PTY restart, no disconnect.
-- **Drag a tab from one Sonic window onto another's tab bar** to merge
+- **Drag a tab from one SonicTerm window onto another's tab bar** to merge
   windows. The source window stays open if it has other tabs; if it was
   the last tab, the source drains rather than exits, so the application
   remains alive.
 - **macOS:** tabs can be dragged **across processes** via NSPasteboard —
-  drop a Sonic tab onto a second SonicTerm.app instance. (Windows support is
+  drop a SonicTerm tab onto a second SonicTerm.app instance. (Windows support is
   stubbed but not wired yet.)
 
 ### Panes
@@ -211,21 +211,21 @@ locale = "auto"
 
 ### Live reload
 
-Sonic watches `sonicterm.toml` and the bundled theme / keymap files. Save the
+SonicTerm watches `sonicterm.toml` and the bundled theme / keymap files. Save the
 file in your editor and the change applies in the running window:
 
 - Font family / size: re-rasterizes the atlas on next frame.
 - Theme: recomputes colors immediately.
 - Keymap: rebinds without restart.
 
-Unknown keys are **preserved** rather than erased, so a newer Sonic
-config opened by an older Sonic doesn't lose data.
+Unknown keys are **preserved** rather than erased, so a newer SonicTerm
+config opened by an older SonicTerm doesn't lose data.
 
 ### Editing configuration
 
 Open the command palette and run `Edit sonicterm.toml` or `Edit keymap.toml`
 to open the editable user files in the OS default `.toml` handler. If
-`sonicterm.toml` does not exist yet, Sonic creates it with a short commented
+`sonicterm.toml` does not exist yet, SonicTerm creates it with a short commented
 header first. Saved changes are picked up by the live-reload watcher.
 
 ---
@@ -249,7 +249,7 @@ Custom themes can be dropped as `.toml` into the same directory as
 
 ## Internationalization (i18n)
 
-The Sonic UI (menu items and command palette labels) is translated via
+The SonicTerm UI (menu items and command palette labels) is translated via
 [Fluent](https://projectfluent.org/). Three locales ship
 today:
 
@@ -304,7 +304,7 @@ command palette shows them in their localized form.
 
 ## SSH client (optional)
 
-Sonic includes an in-process SSH client built on
+SonicTerm includes an in-process SSH client built on
 [`russh`](https://crates.io/crates/russh). It is **feature-gated** — build
 with:
 
@@ -327,7 +327,7 @@ command.
 ## Multiplexer (`sonicterm-mux`)
 
 `sonicterm-mux` is a separate daemon binary that owns persistent PTY sessions.
-Sonic's GUI can attach as a thin client — close the window, reopen it,
+SonicTerm's GUI can attach as a thin client — close the window, reopen it,
 and your shells are still running.
 
 ```bash
@@ -360,7 +360,7 @@ procedure if/when this work is revived.
 
 ## Regression net
 
-If you're hacking on Sonic and want a one-shot sanity check that nothing
+If you're hacking on SonicTerm and want a one-shot sanity check that nothing
 visible has regressed:
 
 ```bash
@@ -381,7 +381,7 @@ expected characters in the expected style.
 
 **My font looks wrong / I can't see emoji.**
 Check `[font] family = "…"` — if you point at a font missing CJK or emoji,
-Sonic falls back to the per-OS chain, but a non-existent family will be
+SonicTerm falls back to the per-OS chain, but a non-existent family will be
 ignored entirely. Run with `RUST_LOG=sonicterm_shared=info` to see what got
 loaded.
 
@@ -396,11 +396,11 @@ Your shell isn't recognizing the OSC 133 sequence as non-printing. See
 the `\[ \]` brackets matter for bash; zsh uses `%{ %}`.
 
 **I see `task tools haven't been used recently` in the log.**
-That's a Claude Code reminder, not a Sonic message. Ignore.
+That's a Claude Code reminder, not a SonicTerm message. Ignore.
 
 **How do I edit settings?**
 Open the command palette (`super+shift+p`) and type `Edit sonicterm.toml`.
-Sonic opens the platform config file in your default `.toml` editor.
+SonicTerm opens the platform config file in your default `.toml` editor.
 
 ---
 

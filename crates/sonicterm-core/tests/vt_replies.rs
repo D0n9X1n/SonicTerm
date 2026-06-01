@@ -2,7 +2,7 @@
 //! and DECSET ?1004 focus-reporting flag.
 //!
 //! These regressions cover the nvim hang where the editor blocked at "Did not
-//! detect DSR response from terminal" because Sonic never answered the
+//! detect DSR response from terminal" because SonicTerm never answered the
 //! VT220-standard status queries.
 
 use crossbeam_channel::unbounded;

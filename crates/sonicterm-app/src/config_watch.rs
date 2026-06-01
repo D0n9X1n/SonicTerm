@@ -1,4 +1,4 @@
-//! Live-reload watcher for `sonic.toml`.
+//! Live-reload watcher for `sonicterm.toml`.
 //!
 //! Spawns a background thread that uses [`notify::RecommendedWatcher`] to
 //! observe the parent directory of the config file (editors often
@@ -53,7 +53,7 @@ impl ConfigWatcher {
     /// main loop sits in `ControlFlow::Wait` between events, so a
     /// `try_latest()` call only runs on the next OS-driven event
     /// (key, mouse, pty bytes, resize). If the terminal is idle when
-    /// `sonic.toml` changes, the reload would sit queued indefinitely
+    /// `sonicterm.toml` changes, the reload would sit queued indefinitely
     /// without an external nudge. `wake` is how the App wires its
     /// [`winit::event_loop::EventLoopProxy`] in so the loop is woken
     /// immediately on every delivery. Passing a no-op closure (as
@@ -195,7 +195,7 @@ fn spawn_inner(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("sonic.toml reload failed: {e:#}");
+                        tracing::warn!("sonicterm.toml reload failed: {e:#}");
                     }
                 }
             }

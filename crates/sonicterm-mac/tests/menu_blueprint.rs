@@ -116,7 +116,7 @@ fn menu_lists_all_documented_items() {
         other => panic!("expected URL binding, got {other:?}"),
     }
 
-    // ---- Sonic (existing menu preserved) ----
+    // ---- SonicTerm (existing menu preserved) ----
     assert!(bp
         .iter()
         .find(|s| s.title == "SonicTerm")

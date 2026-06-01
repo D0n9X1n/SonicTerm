@@ -1,6 +1,6 @@
-//! Native macOS `NSMenu` for Sonic Terminal.
+//! Native macOS `NSMenu` for SonicTerm Terminal.
 //!
-//! Top-level submenus (in order): **Sonic / Shell / Edit / View / Help**.
+//! Top-level submenus (in order): **SonicTerm / Shell / Edit / View / Help**.
 //! Items dispatch to `sonicterm_core::keymap::Action`s via the
 //! [`sonicterm_app::menubar_bridge`] queue; the winit loop drains and
 //! routes through `App::run_action` — the same path used by keybindings.
@@ -42,7 +42,7 @@ pub enum MenuEntry {
     Act(Action),
     /// Open `url` via `NSWorkspace::openURL:` from the AppKit thread.
     Url(String),
-    /// Reveal the Sonic log directory in Finder.
+    /// Reveal the SonicTerm log directory in Finder.
     ShowLogsInFinder,
     /// Run the aggressive "clear all rotated logs + crashes" pass and
     /// show an AppKit alert with the count and bytes freed.
@@ -86,7 +86,7 @@ pub fn __test_register(entry: MenuEntry) -> isize {
 /// we can simulate an AppKit click without spinning AppKit.
 pub fn dispatch_tag(tag: isize) -> bool {
     let Some(entry) = lookup(tag) else {
-        tracing::warn!("SonicMenuTarget: tag {tag} has no registered entry");
+        tracing::warn!("SonicTermMenuTarget: tag {tag} has no registered entry");
         return false;
     };
     match entry {
@@ -112,9 +112,11 @@ pub fn dispatch_tag(tag: isize) -> bool {
             tracing::info!(files = n, mb, "menubar: cleared old logs");
             // Best-effort native notification: a banner via osascript
             // so we don't add a heavyweight NSAlert dependency.
-            let body = format!("Cleared {n} files ({mb:.2} MB) from Sonic logs.");
-            let script =
-                format!("display notification \"{}\" with title \"Sonic\"", body.replace('"', ""));
+            let body = format!("Cleared {n} files ({mb:.2} MB) from SonicTerm logs.");
+            let script = format!(
+                "display notification \"{}\" with title \"SonicTerm\"",
+                body.replace('"', "")
+            );
             let _ = std::process::Command::new("osascript").arg("-e").arg(&script).spawn();
             true
         }
@@ -145,7 +147,7 @@ fn open_url(url: &str) {
 define_class!(
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[name = "SonicMenuTarget"]
+    #[name = "SonicTermMenuTarget"]
     #[ivars = ()]
     struct MenuTarget;
 
@@ -321,7 +323,7 @@ fn build_custom_item(
     nsi
 }
 
-/// Install the Sonic NSMenu as the application's main menu. The
+/// Install the SonicTerm NSMenu as the application's main menu. The
 /// `_theme_names` argument is accepted for backward compatibility with
 /// existing call sites; the blueprint no longer surfaces themes in the
 /// menubar.

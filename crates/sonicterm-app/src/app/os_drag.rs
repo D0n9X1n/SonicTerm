@@ -5,14 +5,14 @@
 //!
 //! * [`crate::os_drag`] (top-level) defines the **wire payload**
 //!   ([`crate::os_drag::TabPayload`], [`crate::os_drag::PASTEBOARD_TYPE`])
-//!   carried between two Sonic *processes* via NSPasteboard / OLE
+//!   carried between two SonicTerm *processes* via NSPasteboard / OLE
 //!   clipboard. That's the Phase C1 work that already shipped.
 //!
 //! * **This module** ([`crate::app::os_drag`]) defines the
 //!   [`OsTabDragBackend`] trait that lets the App start an OS-level
 //!   *drag session* (NSDraggingSession / OLE DoDragDrop) so the cursor
 //!   stays captured across window boundaries even while the user is
-//!   physically dragging a tab between two Sonic windows of the *same*
+//!   physically dragging a tab between two SonicTerm windows of the *same*
 //!   process.
 //!
 //! Phase C ([`crate::app::tab_transfer`]) added the pure
@@ -102,7 +102,7 @@ pub const OS_DRAG_THRESHOLD_PX: f32 = 5.0;
 /// and [`crate::app::App::cancel_drag_session`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragOutcome {
-    /// User let go over a Sonic window's tab bar — perform a transfer.
+    /// User let go over a SonicTerm window's tab bar — perform a transfer.
     /// `target_window == None` means the App's main window; `Some(id)`
     /// means a torn-out child window. `target_slot` is the insertion
     /// index in the destination bar (`[0, len]`). This is the "real"
@@ -110,7 +110,7 @@ pub enum DragOutcome {
     /// test the destination bar and post the resolved slot rather than
     /// a placeholder zero.
     DroppedOnBar { target_window: Option<WindowId>, target_slot: usize },
-    /// User let go over empty space (no Sonic tab bar under the
+    /// User let go over empty space (no SonicTerm tab bar under the
     /// cursor) — Phase C semantics: tear out to a new floating child
     /// window. The backend includes the screen-global drop position so
     /// the App can place the new window's origin sensibly.
@@ -145,7 +145,7 @@ pub trait OsTabDragBackend: Send {
     /// pasteboard / OLE clipboard under
     /// [`crate::os_drag::PASTEBOARD_TYPE`] /
     /// `CF_SONIC_TAB`. Backends MUST write the full schema so peer
-    /// Sonic windows / processes can parse it via
+    /// SonicTerm windows / processes can parse it via
     /// [`crate::os_drag::TabPayload::from_json`].
     ///
     /// `drag_image_png` is an optional rasterized preview of the
@@ -303,7 +303,7 @@ impl TabBarSnapshot {
 }
 
 /// Registry of currently-published [`TabBarSnapshot`]s, one per live
-/// Sonic window in this process. The App publishes into it on every
+/// SonicTerm window in this process. The App publishes into it on every
 /// resize / tab add-or-remove / window-move; the platform OS-drag
 /// backend reads from it inside its drop callback to translate a
 /// raw screen-coordinate drop into a `(WindowId, slot)` pair.

@@ -1,4 +1,4 @@
-# WezTerm-compatible default keymap for Sonic Terminal.
+# WezTerm-compatible default keymap for SonicTerm Terminal.
 # On macOS, `cmd` is used; on Windows, `ctrl` is the equivalent — `ctrl+shift`
 # matches both. Keys not listed fall through to the terminal.
 

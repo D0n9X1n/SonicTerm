@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sonic GUI performance harness — drives a real built .app via osascript
+# SonicTerm GUI performance harness — drives a real built .app via osascript
 # keystrokes and samples its CPU / RSS over time. Outputs JSON-ish summary.
 #
 # Requires (one-time): grant Terminal.app or whoever is running this
@@ -13,7 +13,7 @@
 #   ./scripts/gui_bench.sh scroll             # huge `seq 5000` burst
 #   ./scripts/gui_bench.sh all                # all of the above (default)
 #
-# Each scenario kills any prior Sonic, opens a fresh bundle from the
+# Each scenario kills any prior SonicTerm, opens a fresh bundle from the
 # repo's `target/release/sonicterm-mac`, focuses it, runs the scenario,
 # samples, kills it.
 
@@ -38,7 +38,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>SonicBench</string>
+<key>CFBundleName</key><string>SonicTermBench</string>
 <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 <key>CFBundleVersion</key><string>0.0.0</string>
 <key>CFBundleShortVersionString</key><string>0.0.0</string>
@@ -50,7 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-pkill -9 -f "Sonic" 2>/dev/null || true
+pkill -9 -f "SonicTerm" 2>/dev/null || true
 sleep 0.3
 
 open "$APP"
@@ -151,4 +151,4 @@ echo "  \"final_rss_kb\": $RSS" >&2
 echo "}" >&2
 
 # Cleanup
-pkill -9 -f "Sonic" 2>/dev/null || true
+pkill -9 -f "SonicTerm" 2>/dev/null || true

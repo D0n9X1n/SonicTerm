@@ -1,6 +1,6 @@
 //! User-tunable knobs for the logging subsystem.
 //!
-//! All fields are exposed in `sonic.toml` under `[logging]`.
+//! All fields are exposed in `sonicterm.toml` under `[logging]`.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// Soft cap (megabytes) for the active `sonic.log` before the
+    /// Soft cap (megabytes) for the active `sonicterm.log` before the
     /// cleanup pass treats older daily-rotated files as evictable.
     /// Default: 10.
     pub max_file_size_mb: u64,
     /// Maximum number of *rotated* (non-active) log files to keep on
-    /// disk. The active `sonic.log` is never counted or deleted by
+    /// disk. The active `sonicterm.log` is never counted or deleted by
     /// cleanup. Default: 3.
     pub max_rotated_files: usize,
     /// Delete rotated log files whose mtime is older than this many

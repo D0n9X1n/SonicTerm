@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sonic headless-friendly GUI perf harness.
+# SonicTerm headless-friendly GUI perf harness.
 #
 # Unlike `gui_bench.sh`, this script does NOT require `cliclick`. It uses
 # `osascript`'s "System Events keystroke" path, which still needs

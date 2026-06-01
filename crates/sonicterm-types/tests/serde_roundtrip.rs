@@ -1,5 +1,5 @@
 //! Confirm value types serialize/deserialize round-trip via the canonical
-//! formats Sonic uses on disk and on the wire: TOML for keymaps (Action),
+//! formats SonicTerm uses on disk and on the wire: TOML for keymaps (Action),
 //! JSON for diagnostics (Cell). If either breaks, the keymap loader or
 //! a tracing dump will silently drop data.
 

@@ -83,7 +83,7 @@ fn watcher_wakes_loop_on_delivery() {
     // that flips a flag. If the wake hook fires, the flag is true
     // within the same delivery window the channel publishes.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     write_atomic(
         &path,
         r#"

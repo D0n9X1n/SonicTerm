@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — tracing init, rolling file sinks, retention, and crash dumps"
+description = "SonicTerm Terminal — tracing init, rolling file sinks, retention, and crash dumps"
 
 [lints]
 workspace = true
