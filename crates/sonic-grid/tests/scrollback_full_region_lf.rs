@@ -80,11 +80,7 @@ fn middle_region_scroll_does_not_push_to_scrollback() {
     // Equivalent to `CSI 5;15 r` followed by LF at row 14.
     g.scroll_region_up(4, 14, 1);
 
-    assert_eq!(
-        g.scrollback_len(),
-        0,
-        "middle-screen DECSTBM scrolls must NOT touch scrollback"
-    );
+    assert_eq!(g.scrollback_len(), 0, "middle-screen DECSTBM scrolls must NOT touch scrollback");
 }
 
 /// Sanity: multi-line full-screen scroll pushes N lines.
