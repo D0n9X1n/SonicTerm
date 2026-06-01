@@ -6,6 +6,28 @@ The intent of this file is that **any Claude agent dropped into this repo can be
 
 ---
 
+## Routing table (load only what you need)
+
+Most agents do NOT need to read this whole file. Pick the docs that
+match the files you're touching:
+
+| You're touching… | Load these (in order) |
+|---|---|
+| Anything | `CLAUDE.md` (this file, §0–§2, §15), `docs/agents/_common.md` |
+| `crates/sonicterm-<x>/...` | + `crates/sonicterm-<x>/CLAUDE.md` |
+| A trait or `pub` item in `sonicterm-types` | + `docs/CONTRACTS.md` |
+| A landmine-flagged file | + `landmines.toml` entry for the LM-ID |
+| Render / VT / app pipeline | + §11, §13, §14 of this file |
+| Release tag | + `docs/RELEASE_TESTING.md`, §9 |
+
+Crate-local CLAUDE.md files live next to each crate's `src/` and stay
+≤ 80 lines each. If one grows past, the crate is probably too big — file
+a split.
+
+---
+
+---
+
 ## 0. North Star (do not violate without asking)
 
 A **GPU-accelerated, cross-platform terminal** for macOS + Windows.
