@@ -11,4 +11,4 @@ visual-case id platform="mac":
 
 # Release build of the mac binary (used by the visual harness)
 build:
-    cargo build --release -p sonic-mac
+    cargo build --release -p sonicterm-mac

@@ -1,0 +1,54 @@
+[package]
+name = "sonicterm-windows"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — Windows app"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-core.workspace = true
+sonicterm-shared.workspace = true
+sonicterm-app.workspace = true
+sonicterm-logging.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_System_DataExchange",
+    "Win32_System_SystemServices",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+] }
+windows-implement = "0.60"
+windows-core = "0.62"
+muda = "0.19"
+window-vibrancy = "0.5"
+raw-window-handle = { workspace = true }
+serde_json = "1"
+
+[[bin]]
+name = "sonic-windows"
+path = "src/main.rs"
+
+[package.metadata.wix]
+upgrade-guid = "B9F8C0F4-1F4F-4F2E-AE3C-7A9D7D6E3F11"
+path-guid    = "8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22"
+license      = false
+eula         = false
+product-icon = "../../assets/icons/exports/sonic.ico"

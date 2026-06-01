@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Refuses raw `std::process::exit(` calls in production crate sources.
-# All shipped binaries must funnel through `sonic_logging::exit_with(code, reason)`
+# All shipped binaries must funnel through `sonicterm_logging::exit_with(code, reason)`
 # so the exit reason lands in sonic.log. See CLAUDE.md "exit and crash coverage"
-# and `crates/sonic-logging/src/exit_trace.rs`.
+# and `crates/sonicterm-logging/src/exit_trace.rs`.
 
 set -euo pipefail
 
@@ -34,12 +34,12 @@ while IFS= read -r line; do
         fi
     done <<<"$patterns"
     # Also allow the canonical helper that wraps process::exit by design.
-    if [[ "$file" == "crates/sonic-logging/src/exit_trace.rs" ]]; then
+    if [[ "$file" == "crates/sonicterm-logging/src/exit_trace.rs" ]]; then
         allowed=1
     fi
     if [[ $allowed -eq 0 ]]; then
         echo "FORBIDDEN raw process::exit: $line"
-        echo "  → use sonic_logging::exit_with(code, reason) or add the file to $ALLOWLIST with justification."
+        echo "  → use sonicterm_logging::exit_with(code, reason) or add the file to $ALLOWLIST with justification."
         fail=1
     fi
 done <<<"$hits"

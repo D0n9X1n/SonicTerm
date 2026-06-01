@@ -1,0 +1,11 @@
+[package]
+name = "sonicterm-render-model"
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+sonicterm-types = { workspace = true }
+sonicterm-text = { workspace = true }
+sonicterm-cfg = { workspace = true }
+sonicterm-grid = { workspace = true }

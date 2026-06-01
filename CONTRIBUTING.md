@@ -14,12 +14,12 @@ PRs are all welcome.
    ```
 3. Run on your platform:
    ```bash
-   cargo run -p sonic-mac        # macOS
-   cargo run -p sonic-windows    # Windows
+   cargo run -p sonicterm-mac        # macOS
+   cargo run -p sonicterm-windows    # Windows
    ```
 
-Crates live at the top level of the repo (`sonic-core/`, `sonic-shared/`,
-`sonic-mac/`, `sonic-windows/`) — there is **no** `crates/` directory.
+Crates live at the top level of the repo (`sonicterm-core/`, `sonicterm-shared/`,
+`sonicterm-mac/`, `sonicterm-windows/`) — there is **no** `crates/` directory.
 
 ## Before opening a PR
 
@@ -36,9 +36,9 @@ cargo deny check                # optional locally; required in CI
 Headless smoke examples (handy when GPU/window aren't available):
 
 ```bash
-cargo run --example pty_dump        -p sonic-core   --release   # prints "[e2e] OK"
-cargo run --example altscreen_smoke -p sonic-core
-cargo run --example pane_smoke      -p sonic-shared
+cargo run --example pty_dump        -p sonicterm-core   --release   # prints "[e2e] OK"
+cargo run --example altscreen_smoke -p sonicterm-core
+cargo run --example pane_smoke      -p sonicterm-shared
 ```
 
 ## Branches

@@ -1,0 +1,39 @@
+[package]
+name = "sonicterm-mac"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — macOS app"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-core.workspace = true
+sonicterm-shared.workspace = true
+sonicterm-app.workspace = true
+sonicterm-ui.workspace = true
+sonicterm-logging.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSPasteboard",
+    "NSApplication",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSWorkspace",
+] }
+
+[[bin]]
+name = "sonic-mac"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tempfile = "3"

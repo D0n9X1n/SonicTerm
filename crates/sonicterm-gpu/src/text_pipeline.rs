@@ -1,0 +1,247 @@
+//! Instanced text pipeline for the GPU glyph atlas.
+//!
+//! Consumes one [`GlyphInstance`] per visible cell and draws a single
+//! triangle-strip per instance, sampling the atlas alpha and modulating
+//! by the per-instance color. This is the half of B3 that replaces
+//! glyphon's per-frame text shape + atlas-rebuild on the terminal grid.
+//!
+//! `render.rs` calls `draw()` once per frame, after the quad pass and
+//! before the glyphon `TextRenderer::render` pass that draws the tab
+//! bar + search bar.
+
+use wgpu::{
+    BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
+    BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
+    PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, TextureFormat, VertexAttribute,
+    VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+};
+
+// `GlyphInstance` moved to `sonicterm-text` (it's a pure bytemuck struct used by
+// the row-glyph cache, which lives below the GPU layer). Re-exported here so
+// `sonicterm_shared::text_pipeline::GlyphInstance` still resolves.
+pub use sonicterm_text::GlyphInstance;
+
+/// WGSL for the text pass. The vertex shader builds a quad from a
+/// triangle-strip's vertex_index, mapping (0,1,2,3) -> the four
+/// corners of `rect` and corresponding `uv` corners. The fragment
+/// shader samples the alpha and outputs `color.rgb * coverage,
+/// color.a * coverage` — premultiplied so the standard "src1, 1-srcA"
+/// blend produces correct text-on-background.
+const SHADER: &str = r#"
+struct InstanceIn {
+    @location(0) rect:  vec4<f32>,
+    @location(1) uv:    vec4<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) flags: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv:    vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) flags: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32, inst: InstanceIn) -> VsOut {
+    var corners = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let c = corners[vid];
+    let x = inst.rect.x + c.x * inst.rect.z;
+    let y = inst.rect.y + c.y * inst.rect.w;
+    let u = mix(inst.uv.x, inst.uv.z, c.x);
+    let v = mix(inst.uv.w, inst.uv.y, c.y);
+    var out: VsOut;
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>(u, v);
+    out.color = inst.color;
+    out.flags = inst.flags;
+    return out;
+}
+
+@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(1) var atlas_smp: sampler;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let sample = textureSample(atlas_tex, atlas_smp, in.uv);
+    if (in.flags.x >= 0.5) {
+        // Color glyph: atlas already holds premultiplied BGRA from the
+        // emoji strike (Bgra8Unorm). wgpu's Bgra8Unorm format swizzles
+        // BGRA → RGBA at sample time, so `sample` is already
+        // (r, g, b, a) premultiplied. Return as-is.
+        //
+        // NOTE: PR #267 added a `* in.color` tint here to LCD-tint
+        // subpixel masks, but LCD masks are flagged `is_color: false`
+        // (see `lcd_glyph_not_marked_color`), so they go through the
+        // monochrome branch below — the tint here only affected
+        // emoji glyphs and broke the macOS visual_snapshot baseline.
+        return sample;
+    }
+    // Monochrome glyph: atlas stores replicated coverage in all four
+    // channels. Modulate by the per-instance foreground color and
+    // emit premultiplied (color.rgb * cov, color.a * cov).
+    let cov = sample.a;
+    return vec4<f32>(in.color.rgb * cov, in.color.a * cov);
+}
+"#;
+
+/// GPU pipeline + instance buffer for the text pass. Created once at
+/// startup; per-frame the caller writes new instances and issues a
+/// single `draw(0..4, 0..N)`.
+pub struct TextPipeline {
+    pipeline: RenderPipeline,
+    /// Bind group layout the caller uses to construct the atlas bind group
+    /// passed to `draw()` — slot 0 = atlas texture, slot 1 = sampler.
+    pub bind_group_layout: BindGroupLayout,
+    instances: Buffer,
+    capacity: u64,
+}
+
+impl TextPipeline {
+    /// Build the pipeline against the given color target format.
+    /// `initial_capacity` is the number of `GlyphInstance` slots
+    /// preallocated; the buffer grows on demand.
+    pub fn new(device: &Device, format: TextureFormat, initial_capacity: u64) -> Self {
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("sonicterm-text-pipeline"),
+            source: ShaderSource::Wgsl(SHADER.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sonicterm-text-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("sonicterm-text-pl"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("sonicterm-text-pipeline"),
+            layout: Some(&layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GlyphInstance>() as u64,
+                    step_mode: VertexStepMode::Instance,
+                    attributes: &INSTANCE_ATTRS,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState {
+                        color: BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::OneMinusSrcAlpha,
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::OneMinusSrcAlpha,
+                            operation: BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sonicterm-text-instances"),
+            size: initial_capacity.max(1) * std::mem::size_of::<GlyphInstance>() as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, bind_group_layout, instances, capacity: initial_capacity.max(1) }
+    }
+
+    /// Upload + draw. Reallocates the instance buffer if it's too
+    /// small. `bind_group` must wrap `bind_group_layout` and bind the
+    /// atlas texture + sampler.
+    pub fn draw<'p>(
+        &'p mut self,
+        device: &Device,
+        queue: &Queue,
+        pass: &mut RenderPass<'p>,
+        bind_group: &'p BindGroup,
+        instances: &[GlyphInstance],
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        let needed = instances.len() as u64;
+        if needed > self.capacity {
+            // Power-of-two grow. Allocate the FULL capacity, not just the
+            // live prefix — otherwise a subsequent draw with
+            // needed <= self.capacity but > instances.len() would slip
+            // past the actual buffer end on write_buffer and trip wgpu
+            // validation.
+            let mut cap = self.capacity.max(1);
+            while cap < needed {
+                cap *= 2;
+            }
+            let stride = std::mem::size_of::<GlyphInstance>() as u64;
+            self.instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sonicterm-text-instances"),
+                size: cap * stride,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+            self.capacity = cap;
+        } else {
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..4, 0..instances.len() as u32);
+    }
+
+    /// Current instance buffer capacity (for diagnostics + tests).
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+}
+
+const INSTANCE_ATTRS: [VertexAttribute; 4] = [
+    VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 0 },
+    VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 1 },
+    VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 2 },
+    VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 3 },
+];

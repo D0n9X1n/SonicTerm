@@ -45,9 +45,9 @@ mkdir -p "$OUT"
 # ------------------------------------------------------------------
 # Build
 # ------------------------------------------------------------------
-if [[ $DO_BUILD -eq 1 || ! -x target/release/sonic-mac ]]; then
-  echo "[build] cargo build --release -p sonic-mac"
-  cargo build --release -p sonic-mac
+if [[ $DO_BUILD -eq 1 || ! -x target/release/sonicterm-mac ]]; then
+  echo "[build] cargo build --release -p sonicterm-mac"
+  cargo build --release -p sonicterm-mac
 fi
 
 # ------------------------------------------------------------------

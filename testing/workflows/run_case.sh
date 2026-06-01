@@ -44,15 +44,15 @@ if [[ ",$APPLIES_TO," == *",mac-manual,"* && ",$APPLIES_TO," != *",mac,"* ]]; th
 fi
 
 # ------------------------------------------------------------------
-# Start sonic-mac fresh, position the window, capture window id
+# Start sonicterm-mac fresh, position the window, capture window id
 # ------------------------------------------------------------------
-SONIC_BIN="./target/release/sonic-mac"
+SONIC_BIN="./target/release/sonicterm-mac"
 if [[ ! -x "$SONIC_BIN" ]]; then
   log "FATAL: $SONIC_BIN not built"
   exit 1
 fi
 
-pkill -9 -f "sonic-mac" 2>/dev/null || true
+pkill -9 -f "sonicterm-mac" 2>/dev/null || true
 sleep 0.4
 # `disown` the backgrounded child so bash does not write its own
 # "Terminated: 15" job-notification text to stderr when we later signal
@@ -63,12 +63,12 @@ sleep 0.4
 "$SONIC_BIN" > "$CASE_OUT/sonic.log" 2>&1 &
 SONIC_PID=$!
 disown "$SONIC_PID" 2>/dev/null || true
-log "spawned sonic-mac pid=$SONIC_PID"
+log "spawned sonicterm-mac pid=$SONIC_PID"
 
 # Wait for window — poll until AppleScript reports a window count > 0.
 WINDOW_READY=0
 for _ in $(seq 1 40); do
-  count=$(osascript -e 'tell application "System Events" to count windows of (first process whose name is "sonic-mac")' 2>/dev/null || echo 0)
+  count=$(osascript -e 'tell application "System Events" to count windows of (first process whose name is "sonicterm-mac")' 2>/dev/null || echo 0)
   if [[ "${count:-0}" -gt 0 ]]; then
     WINDOW_READY=1
     break
@@ -76,12 +76,12 @@ for _ in $(seq 1 40); do
   sleep 0.1
 done
 if [[ $WINDOW_READY -ne 1 ]]; then
-  log "WARN: sonic-mac window did not appear within 4s — case may be flaky"
+  log "WARN: sonicterm-mac window did not appear within 4s — case may be flaky"
 fi
 
 osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
-  tell process "sonic-mac"
+  tell process "sonicterm-mac"
     set frontmost to true
     set position of window 1 to {500, 200}
     set size of window 1 to {1000, 700}
@@ -95,18 +95,18 @@ focus_sonic() {
   for try in 1 2 3; do
     osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
-  set frontmost of (first process whose name is "sonic-mac") to true
+  set frontmost of (first process whose name is "sonicterm-mac") to true
 end tell
 EOF
     sleep 0.2
     local front
     front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
-    if [[ "$front" == "sonic-mac" ]]; then
+    if [[ "$front" == "sonicterm-mac" ]]; then
       return 0
     fi
     log "focus retry $try (front was: $front)"
   done
-  log "WARN: could not bring sonic-mac to front"
+  log "WARN: could not bring sonicterm-mac to front"
   return 1
 }
 
@@ -114,7 +114,7 @@ focus_sonic || true
 
 # Capture the actual sonic window id (used for window-only screenshots)
 WINDOW_ID=""
-WIN_ID_RAW=$(osascript -e 'tell application "System Events" to tell process "sonic-mac" to get id of window 1' 2>/dev/null || echo "")
+WIN_ID_RAW=$(osascript -e 'tell application "System Events" to tell process "sonicterm-mac" to get id of window 1' 2>/dev/null || echo "")
 if [[ -n "$WIN_ID_RAW" ]]; then
   WINDOW_ID="$WIN_ID_RAW"
 fi
@@ -246,7 +246,7 @@ for k in c.get('keystrokes', []):
     elif kind == 'shell-cmd':
         out.append(k['value'])
     elif kind == 'snapshot-sonic-shells':
-        # Snapshot every shell descendant of the live sonic-mac process.
+        # Snapshot every shell descendant of the live sonicterm-mac process.
         # Used by orphan-shells-from-sonic expect kind to verify
         # PtyHandle::Drop actually kills children on Cmd+Q.
         out.append('bash testing/workflows/check_orphans.sh snapshot "$SONIC_PID" "$CASE_OUT/sonic-shells.txt" 2>>"$LOG" || true')
@@ -262,7 +262,7 @@ for k in c.get('keystrokes', []):
         for w, h in k.get('sequence', []):
             out.append(
                 "osascript -e " + shlex.quote(
-                    f'tell application "System Events" to tell process "sonic-mac" to set size of window 1 to {{{w}, {h}}}'
+                    f'tell application "System Events" to tell process "sonicterm-mac" to set size of window 1 to {{{w}, {h}}}'
                 ) + " >/dev/null 2>&1 || true"
             )
             out.append("sleep 0.15")
@@ -363,12 +363,12 @@ for e in expectations:
         ok = (r.returncode == e['value'])
         reason = f"cmd '{cmd}' rc={r.returncode}"
     elif kind == 'no-orphan-shells':
-        # Best-effort: after sonic-mac is gone, no orphan zsh/bash with PPID=1 that were spawned by it.
-        r = subprocess.run(['pgrep', '-a', 'sonic-mac'], capture_output=True, text=True)
-        ok = (not r.stdout.strip())  # sonic-mac is gone -> children should be too
-        reason = f"sonic-mac live? '{r.stdout.strip()}'"
+        # Best-effort: after sonicterm-mac is gone, no orphan zsh/bash with PPID=1 that were spawned by it.
+        r = subprocess.run(['pgrep', '-a', 'sonicterm-mac'], capture_output=True, text=True)
+        ok = (not r.stdout.strip())  # sonicterm-mac is gone -> children should be too
+        reason = f"sonicterm-mac live? '{r.stdout.strip()}'"
     elif kind == 'orphan-shells-from-sonic':
-        # Real check: read the pre-Cmd+Q snapshot of sonic-mac's shell
+        # Real check: read the pre-Cmd+Q snapshot of sonicterm-mac's shell
         # descendants, then verify each is dead. Snapshot is produced by
         # the 'snapshot-sonic-shells' keystroke kind. Without that snapshot
         # the case authoring is wrong; treat as FAIL so a mis-authored
@@ -393,10 +393,10 @@ for e in expectations:
             stderr_tail = r.stderr.strip().replace('\n', ' | ')[:300]
             reason = f"orphans={n} expected={expected} snap={snap} stderr='{stderr_tail}'"
     elif kind == 'responsive-within':
-        # Heuristic: confirm sonic-mac process exists and is not zombie.
-        n = proc_count('sonic-mac')
+        # Heuristic: confirm sonicterm-mac process exists and is not zombie.
+        n = proc_count('sonicterm-mac')
         ok = (n >= 1)
-        reason = f"sonic-mac processes alive={n}"
+        reason = f"sonicterm-mac processes alive={n}"
     elif kind in ('tab-count', 'pane-count', 'window-count',
                   'tab-count-in-window', 'scrollback-min-lines',
                   'padding-min', 'process-spawned', 'process-not-spawned',
@@ -443,7 +443,7 @@ expect_rc=$?
 # still finishing their last keystroke, producing spurious
 # "Terminated: 15" entries that the harness counted as failures.
 # ------------------------------------------------------------------
-osascript -e 'tell application "sonic-mac" to quit' >/dev/null 2>&1 || true
+osascript -e 'tell application "sonicterm-mac" to quit' >/dev/null 2>&1 || true
 for _ in $(seq 1 10); do
   kill -0 "$SONIC_PID" 2>/dev/null || break
   sleep 0.1
@@ -460,7 +460,7 @@ wait "$SONIC_PID" 2>/dev/null || true
 # Belt-and-suspenders: any orphans from setup steps that spawned extra
 # windows should also be reaped, but quietly — we don't want their
 # termination signals to leak into the next case's capture.
-pkill -9 -f "sonic-mac" 2>/dev/null || true
+pkill -9 -f "sonicterm-mac" 2>/dev/null || true
 
 if [[ $expect_rc -eq 0 ]]; then
   log "RESULT: PASS"

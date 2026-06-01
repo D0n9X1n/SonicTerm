@@ -12,7 +12,7 @@
 #
 # Requirements (macOS):
 #   - wezterm     (brew install --cask wezterm)
-#   - sonic-mac   (cargo build --release -p sonic-mac, then we use the binary)
+#   - sonicterm-mac   (cargo build --release -p sonicterm-mac, then we use the binary)
 #   - osascript   (built-in)
 #   - screencapture (built-in)
 #   - sips        (built-in, optional crop step)
@@ -39,7 +39,7 @@ SONIC_X=${SONIC_X:-980}     # WEZ_X + WIN_W + 40 gutter
 SONIC_Y=${SONIC_Y:-80}
 TITLEBAR_PX=${TITLEBAR_PX:-28}  # macOS standard titlebar height for sips crop
 
-SONIC_BIN=${SONIC_BIN:-"$(pwd)/target/release/sonic-mac"}
+SONIC_BIN=${SONIC_BIN:-"$(pwd)/target/release/sonicterm-mac"}
 WEZTERM_BIN=${WEZTERM_BIN:-"$(command -v wezterm || true)"}
 
 PAYLOAD_FILE=${PAYLOAD_FILE:-}
@@ -134,7 +134,7 @@ if [[ -z "$WEZTERM_BIN" ]]; then
 fi
 if [[ ! -x "$SONIC_BIN" ]]; then
   echo "error: sonic binary not found at $SONIC_BIN" >&2
-  echo "       build with: cargo build --release -p sonic-mac" >&2
+  echo "       build with: cargo build --release -p sonicterm-mac" >&2
   exit 1
 fi
 
@@ -151,9 +151,9 @@ fi
 "$SONIC_BIN" >/dev/null 2>&1 &
 SONIC_PID=$!
 sleep 1.5
-# Sonic's process name in System Events is "sonic-mac"
-position_front_window "sonic-mac" "$SONIC_X" "$SONIC_Y" || true
-paste_payload "sonic-mac" || true
+# Sonic's process name in System Events is "sonicterm-mac"
+position_front_window "sonicterm-mac" "$SONIC_X" "$SONIC_Y" || true
+paste_payload "sonicterm-mac" || true
 
 # Give both a beat to settle
 sleep 0.8

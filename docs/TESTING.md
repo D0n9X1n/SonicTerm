@@ -21,9 +21,9 @@ takes < 2 min on an M1. Run it from the repo root:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run --example pty_dump          -p sonic-core   --release  # must print [e2e] OK
-cargo run --example pty_dump_unicode  -p sonic-core   --release  # CJK + emoji e2e
-cargo build --release -p sonic-mac                               # fat-LTO release
+cargo run --example pty_dump          -p sonicterm-core   --release  # must print [e2e] OK
+cargo run --example pty_dump_unicode  -p sonicterm-core   --release  # CJK + emoji e2e
+cargo build --release -p sonicterm-mac                               # fat-LTO release
 ```
 
 Notes:
@@ -66,24 +66,24 @@ glyph in CI.
 Run both halves:
 
 ```bash
-cargo test -p sonic-core   --test vt_capability_matrix
-cargo test -p sonic-shared --test render_capability_matrix
+cargo test -p sonicterm-core   --test vt_capability_matrix
+cargo test -p sonicterm-shared --test render_capability_matrix
 ```
 
 What each class verifies:
 
 | Test class            | Crate          | Asserts                                                                                                |
 |---|---|---|
-| `vt_capability_matrix`| `sonic-core`   | Parser/grid round-trips for ASCII echo, SGR colors + bold/italic/underline, ED/EL erase modes, alt-screen 1049h re-entry, wide chars + combining marks, OSC 8 hyperlinks. |
-| `render_capability_matrix` | `sonic-shared` | Renderer surface produces non-empty glyph quads for ASCII, CJK (`中文`), emoji (`🎉`), box-drawing, Nerd-Font private-use glyphs, and that the atlas falls back to a secondary font family rather than emitting tofu. |
+| `vt_capability_matrix`| `sonicterm-core`   | Parser/grid round-trips for ASCII echo, SGR colors + bold/italic/underline, ED/EL erase modes, alt-screen 1049h re-entry, wide chars + combining marks, OSC 8 hyperlinks. |
+| `render_capability_matrix` | `sonicterm-shared` | Renderer surface produces non-empty glyph quads for ASCII, CJK (`中文`), emoji (`🎉`), box-drawing, Nerd-Font private-use glyphs, and that the atlas falls back to a secondary font family rather than emitting tofu. |
 
 **Mandatory whenever you touch any of:**
 
-- `sonic-shared/src/render.rs`
-- `sonic-shared/src/swash_rasterizer.rs`
-- `sonic-shared/src/glyph_atlas.rs`
-- `sonic-shared/src/text_pipeline.rs`
-- anything matching `sonic-shared/src/*atlas*` or `*pipeline*`
+- `sonicterm-shared/src/render.rs`
+- `sonicterm-shared/src/swash_rasterizer.rs`
+- `sonicterm-shared/src/glyph_atlas.rs`
+- `sonicterm-shared/src/text_pipeline.rs`
+- anything matching `sonicterm-shared/src/*atlas*` or `*pipeline*`
 
 **Rules about the matrix itself:**
 
@@ -107,24 +107,24 @@ a real macOS window, and real glyph uploads.
 
 **Mandatory whenever you touch any of:**
 
-- `sonic-shared/src/render*.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`,
+- `sonicterm-shared/src/render*.rs`, `swash_rasterizer.rs`, `glyph_atlas.rs`,
   `text_pipeline.rs`, `app.rs`, `quad.rs`, `tabbar_view.rs`
-- `sonic-core/src/vt.rs`, `sonic-core/src/grid.rs`
+- `sonicterm-core/src/vt.rs`, `sonicterm-core/src/grid.rs`
 - any theme or keymap asset under `assets/`
 
 ### Recipe
 
 ```bash
-pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
-./target/release/sonic-mac > /tmp/gui-smoke.log 2>&1 &
+pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
+./target/release/sonicterm-mac > /tmp/gui-smoke.log 2>&1 &
 sleep 2.5
-PID=$(pgrep -f sonic-mac | head -1)
+PID=$(pgrep -f sonicterm-mac | head -1)
 
 # 1. Bring to front and position deterministically so the screencap
 #    actually captures Sonic, not whatever was previously frontmost.
 osascript <<EOF
 tell application "System Events"
-  tell process "sonic-mac"
+  tell process "sonicterm-mac"
     set frontmost to true
     set position of window 1 to {500, 200}
     set size of window 1 to {1000, 700}
@@ -227,10 +227,10 @@ a window or GPU. Emits a single JSON line for diffing.
 
 ```bash
 # Baseline before your changes
-cargo run --release -p sonic-core --example bench -- all > before.json
+cargo run --release -p sonicterm-core --example bench -- all > before.json
 
 # Apply your changes, then:
-cargo run --release -p sonic-core --example bench -- all > after.json
+cargo run --release -p sonicterm-core --example bench -- all > after.json
 
 # Side-by-side comparison with percentage deltas
 scripts/bench_compare.sh before.json after.json
@@ -257,7 +257,7 @@ winit event loop overhead, glyphon shaping, wgpu submission, present
 mode, real-world idle.
 
 ```bash
-cargo build --release -p sonic-mac
+cargo build --release -p sonicterm-mac
 scripts/gui_bench.sh            # default = "all"
 scripts/gui_bench.sh idle       # idle CPU only
 scripts/gui_bench.sh typing     # 60 synthetic 'a' keystrokes
@@ -270,12 +270,12 @@ Accessibility permission granted to your shell.
 ### Layer 3 — `scripts/bench_headless_gui.sh` (no Accessibility prompt)
 
 Degraded-but-runnable alternative for CI machines and fresh clones.
-Launches `target/release/sonic-mac` directly, samples `%CPU` via `ps`
+Launches `target/release/sonicterm-mac` directly, samples `%CPU` via `ps`
 every 200 ms, and greps the trace log for the `skipped unchanged frame`
 counter.
 
 ```bash
-cargo build --release -p sonic-mac
+cargo build --release -p sonicterm-mac
 ./scripts/bench_headless_gui.sh
 # {"idle_cpu_pct":0.01,"scroll_cpu_pct":0.06,"frames_skipped":2,"frames_rendered":0,"typing_delivered":true}
 ```
@@ -369,19 +369,19 @@ work), the deterministic recipe is:
 
 ```bash
 # 0. Build both at known versions.
-cargo build --release -p sonic-mac
+cargo build --release -p sonicterm-mac
 # Assume /Applications/WezTerm.app exists.
 
 # 1. Launch each at known coordinates so screencaps are directly diffable.
-pkill -9 -f sonic-mac 2>/dev/null
+pkill -9 -f sonicterm-mac 2>/dev/null
 open -a /Applications/WezTerm.app
 sleep 1.5
-./target/release/sonic-mac &
+./target/release/sonicterm-mac &
 sleep 2.5
 
 osascript <<EOF
 tell application "System Events"
-  tell process "sonic-mac"
+  tell process "sonicterm-mac"
     set frontmost to true
     set position of window 1 to {100, 200}
     set size of window 1 to {900, 600}
@@ -399,7 +399,7 @@ sleep 0.5
 
 # 2. Send the same payload to whichever is frontmost; repeat after
 #    activating the other.
-for app in "sonic-mac" "WezTerm"; do
+for app in "sonicterm-mac" "WezTerm"; do
   osascript -e "tell application \"System Events\" to tell process \"$app\" to set frontmost to true"
   sleep 0.3
   osascript -e 'tell application "System Events" to keystroke "echo 中文 🎉 && ls --color /"'
@@ -436,13 +436,13 @@ diffs — they are reproducible and quantitative.
 cargo fmt --all -- --check && \
 cargo clippy --workspace --all-targets -- -D warnings && \
 cargo test --workspace && \
-cargo run --example pty_dump         -p sonic-core --release && \
-cargo run --example pty_dump_unicode -p sonic-core --release && \
-cargo build --release -p sonic-mac
+cargo run --example pty_dump         -p sonicterm-core --release && \
+cargo run --example pty_dump_unicode -p sonicterm-core --release && \
+cargo build --release -p sonicterm-mac
 
 # Capability matrix
-cargo test -p sonic-core   --test vt_capability_matrix
-cargo test -p sonic-shared --test render_capability_matrix
+cargo test -p sonicterm-core   --test vt_capability_matrix
+cargo test -p sonicterm-shared --test render_capability_matrix
 
 # Workspace test count (must be ≥ 445)
 cargo test --workspace 2>&1 | grep "test result" \

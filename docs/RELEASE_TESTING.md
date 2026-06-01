@@ -28,7 +28,7 @@ auditor can verify post-hoc.
 
 How to use:
 
-1. Build: `cargo build --release -p sonic-mac` (or `-p sonic-windows`).
+1. Build: `cargo build --release -p sonicterm-mac` (or `-p sonicterm-windows`).
 2. Run each section in order; tick the `[ ]` only after confirming the
    expected outcome with a real observation.
 3. When all boxes are `[x]`, run `bash scripts/check-release-testing.sh`
@@ -95,10 +95,10 @@ How to use:
 
 This is the existing `CLAUDE.md` §13 GUI smoke, kept verbatim as a foundation.
 
-**Setup:** kill any prior `sonic-mac`. Launch fresh:
+**Setup:** kill any prior `sonicterm-mac`. Launch fresh:
 ```bash
-pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
-./target/release/sonic-mac > /tmp/gui-smoke.log 2>&1 &
+pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
+./target/release/sonicterm-mac > /tmp/gui-smoke.log 2>&1 &
 sleep 2.5
 ```
 
@@ -118,7 +118,7 @@ screencapture -x -D 1 /tmp/rel-vX.Y.Z-01-baseline.png
 - [ ] 🎉 renders in color (not monochrome silhouette).
 - [ ] Cursor is visible and blinks (not blank).
 - [ ] Text is sharp on Retina (no upscale blur).
-- [ ] `ps -p $(pgrep sonic-mac) -o %cpu` stays < 5% during the 5 s window.
+- [ ] `ps -p $(pgrep sonicterm-mac) -o %cpu` stays < 5% during the 5 s window.
 
 **FAIL → block release.** Any single missed check.
 
@@ -253,7 +253,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-06-tearout-N.png`.
 - [ ] Original window now has 2 tabs; torn-out tab is no longer in it.
 - [ ] `Cmd+T` in the new window opens a tab IN that new window (NOT back in the original).
 - [ ] Closing the new window does not kill the original.
-- [ ] No orphan PTY: `pgrep -f sonic-mac` count matches visible windows.
+- [ ] No orphan PTY: `pgrep -f sonicterm-mac` count matches visible windows.
 
 **FAIL → block release.**
 
@@ -276,7 +276,7 @@ nvim /tmp/big.txt
 3. `:%s/the/THE/g` then `<Enter>`.
 4. `:wq!` to save and quit (or `:q!` to discard).
 
-Then in the shell: `ps -p $(pgrep sonic-mac) -o %cpu` and wait 5 s, sample again.
+Then in the shell: `ps -p $(pgrep sonicterm-mac) -o %cpu` and wait 5 s, sample again.
 
 Screenshots: `/tmp/rel-vX.Y.Z-07-nvim-N.png`.
 
@@ -356,7 +356,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-09-url-N.png`.
 - [ ] `Cmd+click` on `https://` opens the browser to example.com.
 - [ ] `Cmd+click` on `mailto:` opens the mail client.
 - [ ] `Cmd+click` on `javascript:` does NOT execute anything (CLAUDE.md §4 `url_open::validate` guard).
-- [ ] `file://` is allowed per allow-list (opens Finder) — confirm against current policy in `crates/sonic-cfg/src/url_open.rs`.
+- [ ] `file://` is allowed per allow-list (opens Finder) — confirm against current policy in `crates/sonicterm-cfg/src/url_open.rs`.
 - [ ] No process spawn for denylisted control characters or unknown schemes.
 
 **FAIL → block release.**
@@ -404,7 +404,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-11-multiwin-N.png`.
 
 - [ ] Each `Cmd+N` opens a new OS window with its own PTY + grid (output is independent).
 - [ ] Closing window 2 does not affect W1 or W3.
-- [ ] `pgrep sonic-mac` count matches visible windows (process model — should still be a single app process, but no orphan PTY children).
+- [ ] `pgrep sonicterm-mac` count matches visible windows (process model — should still be a single app process, but no orphan PTY children).
 
 **FAIL → block release.**
 
@@ -417,7 +417,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-11-multiwin-N.png`.
 **Measurement:**
 ```bash
 sleep 30
-ps -p $(pgrep sonic-mac | head -1) -o %cpu
+ps -p $(pgrep sonicterm-mac | head -1) -o %cpu
 ```
 
 **Expected outcome:**
@@ -477,7 +477,7 @@ ps -p $(pgrep sonic-mac | head -1) -o %cpu
 
 - [ ] `Cmd+Q` exits the app cleanly within ~1 s (no spinning beachball).
 - [ ] All 8 shell PIDs spawned by Sonic are gone from the diff (`PtyHandle::Drop` correctness, CLAUDE.md §4).
-- [ ] `pgrep -f sonic-mac` returns nothing.
+- [ ] `pgrep -f sonicterm-mac` returns nothing.
 
 **FAIL → block release.**
 
@@ -726,7 +726,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-24-urlsafety-N.png`.
 - [ ] All denied URLs do nothing (no browser launch, no crash, no shell injection).
 - [ ] No process spawned with shell metacharacters in argv (verify via `ps` snapshot).
 - [ ] Over-length URI is rejected silently.
-- [ ] `crates/sonic-cfg/src/url_open.rs::validate` is the single gatekeeper (CLAUDE.md §4).
+- [ ] `crates/sonicterm-cfg/src/url_open.rs::validate` is the single gatekeeper (CLAUDE.md §4).
 
 **FAIL → block release.**
 
@@ -846,9 +846,9 @@ Session restore is explicitly out of scope until post-v1.0 (CLAUDE.md North Star
 
 **Actions:**
 1. Inject a deliberate panic via a debug-only `SONIC_PANIC=1` env var if such a path exists; otherwise skip the synthetic injection and rely on observed-in-the-wild crashes.
-2. Force-kill the app (`kill -9 $(pgrep sonic-mac)`).
+2. Force-kill the app (`kill -9 $(pgrep sonicterm-mac)`).
 3. Re-launch.
-4. Check macOS Console.app for any crash report tagged `sonic-mac`.
+4. Check macOS Console.app for any crash report tagged `sonicterm-mac`.
 
 **Expected outcome:**
 
@@ -917,7 +917,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-32-locale-N.png`.
 **Expected outcome:**
 
 - [ ] UTF-8 byte input still renders correctly regardless of `$LANG` (Sonic treats stream as UTF-8 with replacement for invalid bytes).
-- [ ] Binary garbage does not crash the VT parser (`cargo test -p sonic-core --test vt_fuzz` mirror).
+- [ ] Binary garbage does not crash the VT parser (`cargo test -p sonicterm-core --test vt_fuzz` mirror).
 - [ ] Invalid UTF-8 bytes show U+FFFD replacement, not silent corruption.
 - [ ] Returning to UTF-8 locale produces identical rendering to baseline.
 
@@ -957,7 +957,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-32-locale-N.png`.
 
 **Measurement (every 10 min via `launchctl`/`cron` or scripted, or just spot-check at the end):**
 ```bash
-ps -p $(pgrep sonic-mac | head -1) -o rss,vsz,%cpu
+ps -p $(pgrep sonicterm-mac | head -1) -o rss,vsz,%cpu
 ```
 
 **Expected outcome:**
@@ -1305,14 +1305,14 @@ those rely on the automated test alone — that's noted in the row.
 
 | # | Land-mine (CLAUDE.md §4) | Manual section | Automated test |
 |---|---|---|---|
-| 1 | `try_lock` on parser in render path (no AB-BA deadlock; missed redraw must reschedule) | Sec 12 (idle no-freeze) + Sec 7 (nvim burst) | `crates/sonic-app/tests/pty_multi_round_hang.rs` |
-| 2 | 16 ms PTY redraw coalescing (burst output does not freeze UI; vsync bypass via `pty_burst_gen`) | Sec 7 (nvim Ctrl+D burst) + Sec 13 (vtebench) | `crates/sonic-app/tests/vsync_pty_burst_bypass.rs` + `crates/sonic-app/tests/vsync_input_bypass.rs` |
-| 3 | CSI `J` (ED) and `K` (EL) honor mode params (J0/J1/J2, K0/K1/K2) | Sec 1 (shell prompt redraw — code-internal beyond that) | `crates/sonic-core/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor` |
-| 4 | Repeated DEC `?1049h` is a no-op when already in alt screen (don't clobber `saved_cursor`) | Sec 7 (vim re-entry) | `crates/sonic-core/tests/vt.rs::dec_1049h_repeated_does_not_clobber_saved_cursor` |
-| 5 | `wgpu::CurrentSurfaceTexture::Suboptimal(frame)` — drop SurfaceTexture BEFORE `surface.configure(...)` (wgpu 29 panic otherwise) | Sec 1 + window-resize-many (code-internal; manual repro is "resize the window 20× rapidly, no panic") | `crates/sonic-shared/tests/suboptimal_drop_ordering.rs` (landed in #206 — source-level guard that fails if `drop(frame)` is reordered after `surface.configure(...)`) |
-| 6 | `set_rich_text` vs `set_text` — per-cell color/weight/style needs `Shaping::Advanced` (cosmic-text 0.18 API) | Sec 8 (per-cell colored bold/italic + per-cell bg) | `crates/sonic-shared/tests/per_cell_bg_renders.rs` + `crates/sonic-shared/tests/unified_font_attrs.rs` + `crates/sonic-shared/tests/user_regressions.rs` (build_tab_title_rich_text_spans) |
-| 7 | `PtyHandle::Drop` kills child explicitly (no orphans) | Sec 15 (Cmd+Q leaves no shell PIDs) | `crates/sonic-io/tests/pty_drop_kills_child.rs::pty_drop_kills_child` (merged in #213) |
-| 8 | `sonic_cfg::url_open::validate()` rejects shell-metachar / non-allowlisted scheme URIs | Sec 9 (OSC 8 hostile URL is silently rejected) | `crates/sonic-cfg/tests/*` (url_open allow/deny matrix) |
+| 1 | `try_lock` on parser in render path (no AB-BA deadlock; missed redraw must reschedule) | Sec 12 (idle no-freeze) + Sec 7 (nvim burst) | `crates/sonicterm-app/tests/pty_multi_round_hang.rs` |
+| 2 | 16 ms PTY redraw coalescing (burst output does not freeze UI; vsync bypass via `pty_burst_gen`) | Sec 7 (nvim Ctrl+D burst) + Sec 13 (vtebench) | `crates/sonicterm-app/tests/vsync_pty_burst_bypass.rs` + `crates/sonicterm-app/tests/vsync_input_bypass.rs` |
+| 3 | CSI `J` (ED) and `K` (EL) honor mode params (J0/J1/J2, K0/K1/K2) | Sec 1 (shell prompt redraw — code-internal beyond that) | `crates/sonicterm-core/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor` |
+| 4 | Repeated DEC `?1049h` is a no-op when already in alt screen (don't clobber `saved_cursor`) | Sec 7 (vim re-entry) | `crates/sonicterm-core/tests/vt.rs::dec_1049h_repeated_does_not_clobber_saved_cursor` |
+| 5 | `wgpu::CurrentSurfaceTexture::Suboptimal(frame)` — drop SurfaceTexture BEFORE `surface.configure(...)` (wgpu 29 panic otherwise) | Sec 1 + window-resize-many (code-internal; manual repro is "resize the window 20× rapidly, no panic") | `crates/sonicterm-shared/tests/suboptimal_drop_ordering.rs` (landed in #206 — source-level guard that fails if `drop(frame)` is reordered after `surface.configure(...)`) |
+| 6 | `set_rich_text` vs `set_text` — per-cell color/weight/style needs `Shaping::Advanced` (cosmic-text 0.18 API) | Sec 8 (per-cell colored bold/italic + per-cell bg) | `crates/sonicterm-shared/tests/per_cell_bg_renders.rs` + `crates/sonicterm-shared/tests/unified_font_attrs.rs` + `crates/sonicterm-shared/tests/user_regressions.rs` (build_tab_title_rich_text_spans) |
+| 7 | `PtyHandle::Drop` kills child explicitly (no orphans) | Sec 15 (Cmd+Q leaves no shell PIDs) | `crates/sonicterm-io/tests/pty_drop_kills_child.rs::pty_drop_kills_child` (merged in #213) |
+| 8 | `sonicterm_cfg::url_open::validate()` rejects shell-metachar / non-allowlisted scheme URIs | Sec 9 (OSC 8 hostile URL is silently rejected) | `crates/sonicterm-cfg/tests/*` (url_open allow/deny matrix) |
 
 **Sign-off rule:** every row above must have BOTH the manual section
 passing AND the named automated test green (`cargo test --workspace`

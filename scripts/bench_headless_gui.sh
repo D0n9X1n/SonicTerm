@@ -8,7 +8,7 @@
 # (the typing/scroll fields are reported as `null`).
 #
 # Usage:
-#   cargo build --release -p sonic-mac
+#   cargo build --release -p sonicterm-mac
 #   scripts/bench_headless_gui.sh
 #
 # Output: single JSON line on stdout, e.g.
@@ -16,25 +16,25 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/release/sonic-mac"
+BIN="$ROOT/target/release/sonicterm-mac"
 LOG="/tmp/sonic-headless-bench.log"
 
 if [ ! -x "$BIN" ]; then
-  echo "missing $BIN — run: cargo build --release -p sonic-mac" >&2
+  echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
   exit 1
 fi
 
-pkill -9 -f "target/release/sonic-mac" 2>/dev/null || true
+pkill -9 -f "target/release/sonicterm-mac" 2>/dev/null || true
 sleep 0.3
 rm -f "$LOG"
 
 # Launch in background with trace logging so we can count skipped frames.
-RUST_LOG=sonic_shared::render=trace "$BIN" >"$LOG" 2>&1 &
+RUST_LOG=sonicterm_shared::render=trace "$BIN" >"$LOG" 2>&1 &
 PID=$!
 sleep 2
 
 if ! kill -0 "$PID" 2>/dev/null; then
-  echo '{"error":"sonic-mac failed to launch","log":"'"$LOG"'"}'
+  echo '{"error":"sonicterm-mac failed to launch","log":"'"$LOG"'"}'
   exit 1
 fi
 

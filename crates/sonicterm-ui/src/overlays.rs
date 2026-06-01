@@ -1,0 +1,404 @@
+//! Pure layout helpers for the three state-only overlays drawn over the
+//! terminal grid:
+//!
+//! 1. Command palette — centered modal (~680×460) with a query input row
+//!    and a filtered action list. State lives in
+//!    [`crate::command_palette::CommandPalette`].
+//! 2. Search bar — bottom-right single-line status with `N/M` match
+//!    counter. State lives in [`crate::search::SearchState`] (one per
+//!    tab).
+//! 3. IME preedit — below the cursor, with an underline. State lives in
+//!    [`crate::ime::ImeState`].
+//!
+//! No GPU types here — these helpers compute coordinates from a viewport
+//! size + the state and return rectangles + label strings. The renderer
+//! turns them into `QuadInstance`s and glyphon `TextArea`s. Pure logic
+//! keeps the path covered by unit tests without a wgpu device.
+//!
+//! Coordinate system: physical pixels, origin top-left (the same system
+//! [`crate::tabbar_view`] uses).
+
+use crate::command_label::label as action_label;
+use crate::command_palette::CommandPalette;
+use crate::ime::ImeState;
+use crate::search::SearchState;
+use crate::tabbar_view::Rect;
+
+// TODO: switch to ui_tokens after #115 merges. Until then the design
+// tokens from issue #112 Round 1 live here as named constants so that
+// `render.rs` and the integration tests can reference them by name and
+// stay self-documenting.
+
+/// Ideal modal width in physical pixels (Raycast-style redesign).
+pub const PALETTE_WIDTH: f32 = 680.0;
+
+/// Ideal modal height in physical pixels.
+pub const PALETTE_HEIGHT: f32 = 460.0;
+
+/// Hard upper bound on the modal width — the layout never grows past this
+/// even on very wide windows. The viewport-relative clamp is
+/// `viewport_w - 48`, whichever is smaller (see [`PaletteLayout::compute`]).
+pub const PALETTE_MAX_WIDTH: f32 = 720.0;
+
+/// Hard upper bound on the modal height. Viewport-relative clamp is
+/// `viewport_h - 96`.
+pub const PALETTE_MAX_HEIGHT: f32 = 520.0;
+
+/// Top margin: the modal's top edge sits at `max(72, viewport_h * 0.18)`.
+pub const PALETTE_TOP_RATIO: f32 = 0.18;
+
+/// Minimum distance from the top of the viewport to the modal top edge.
+pub const PALETTE_TOP_MIN: f32 = 72.0;
+
+/// 1px chrome border around the modal.
+pub const PALETTE_BORDER: f32 = 1.0;
+
+/// Height of the query input field.
+pub const PALETTE_QUERY_HEIGHT: f32 = 52.0;
+
+/// Horizontal padding inside the query field.
+pub const PALETTE_QUERY_PAD_X: f32 = 16.0;
+
+/// Vertical padding inside the query field.
+pub const PALETTE_QUERY_PAD_Y: f32 = 12.0;
+
+/// Search icon size + offset inside the query field.
+pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
+pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
+
+/// Row height inside the action list.
+pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
+
+/// Vertical gap between consecutive rows.
+pub const PALETTE_ROW_GAP: f32 = 4.0;
+
+/// Horizontal padding inside each row.
+pub const PALETTE_ROW_PAD_X: f32 = 12.0;
+
+/// Width of the colored left accent strip on the selected row.
+pub const PALETTE_ROW_ACCENT_W: f32 = 3.0;
+
+/// Footer height (count + nav hint strip at the bottom of the modal).
+pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
+
+/// Inset between the modal edge and the inner content (rows, query, footer).
+pub const PALETTE_INNER_PAD: f32 = 12.0;
+
+/// Corner radius for the modal panel (and its 1px border ring) in physical
+/// pixels. Quad pipeline draws this via an SDF-style rounded-rect path
+/// (see `sonicterm-shared/src/quad.rs`).
+pub const PALETTE_PANEL_RADIUS: f32 = 16.0;
+
+/// Corner radius for the query input field. Slightly tighter than the
+/// panel so it reads as nested chrome.
+pub const PALETTE_QUERY_RADIUS: f32 = 8.0;
+
+/// Corner radius for the selected-row highlight quad.
+pub const PALETTE_ROW_RADIUS: f32 = 6.0;
+
+/// Margin between the search bar and the right/bottom window edge.
+pub const SEARCH_BAR_MARGIN: f32 = 8.0;
+
+/// Width of the small bottom-right search bar.
+pub const SEARCH_BAR_WIDTH: f32 = 260.0;
+
+/// Height of the small bottom-right search bar.
+pub const SEARCH_BAR_HEIGHT: f32 = 26.0;
+
+/// Layout of the command-palette modal.
+#[derive(Debug, Clone)]
+pub struct PaletteLayout {
+    /// Full-window scrim (dim layer under the modal). Covers the entire
+    /// viewport behind `border`.
+    pub scrim: Rect,
+    /// 1px border rectangle (drawn under everything else).
+    pub border: Rect,
+    /// Modal background rectangle, inset by [`PALETTE_BORDER`] from
+    /// `border`.
+    pub bg: Rect,
+    /// Query-input row at the top of the modal.
+    pub query_row: Rect,
+    /// Search-icon rectangle inside the query field.
+    pub query_icon: Rect,
+    /// One rect per visible action row. May be empty when the palette
+    /// hides every action (e.g. a query with no matches).
+    pub rows: Vec<PaletteRow>,
+    /// Index of the highlighted row inside `rows`, if any. The highlight
+    /// is only emitted when the selected index actually falls inside the
+    /// visible window (see scroll clamping in [`PaletteLayout::compute`]).
+    pub selected_row: Option<usize>,
+    /// Left-accent strip rectangle for the selected row (3px wide). Only
+    /// `Some` when `selected_row` is `Some`.
+    pub selected_accent: Option<Rect>,
+    /// Query string the renderer should paint into `query_row`. The
+    /// trailing block cursor is appended so the user can see the caret.
+    /// No `> ` prefix any more — the search icon stands in for it.
+    pub query_label: String,
+    /// Placeholder shown inside the query field when `query_label` is
+    /// effectively empty (just the cursor). Renderer paints this in the
+    /// muted placeholder color and only when the user hasn't typed.
+    pub query_placeholder: Option<String>,
+    /// Display labels for each row in `rows`, parallel order.
+    pub row_labels: Vec<String>,
+    /// When the filter produced zero matches, the layout still emits a
+    /// modal + query row but `rows` is empty; the renderer should paint
+    /// this centered placeholder string instead of the unfiltered list.
+    /// `None` whenever `rows` is non-empty.
+    pub empty_label: Option<String>,
+    /// Secondary hint shown under the empty placeholder.
+    pub empty_hint: Option<String>,
+    /// Footer rectangle at the bottom of the modal (count + nav hints).
+    pub footer: Rect,
+    /// Footer label, e.g. `"42 commands · ↑↓ navigate · ↵ run · esc close"`.
+    pub footer_label: String,
+}
+
+/// One row inside the palette action list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaletteRow {
+    /// Index into [`CommandPalette::visible`] that this row paints.
+    pub item_index: usize,
+    pub rect: Rect,
+}
+
+impl PaletteLayout {
+    /// Build the layout for a window of `window_w × window_h` physical
+    /// pixels. Returns `None` when the palette is closed — callers should
+    /// not draw anything in that case.
+    ///
+    /// Takes the palette by `&mut` so it can publish the current
+    /// `visible_rows` count back into the state — subsequent arrow-key
+    /// navigation uses that to keep the highlighted row inside the
+    /// rendered viewport (the bug this PR fixes was that the selection
+    /// could move past the visible window and the highlight quad would
+    /// then be drawn offscreen below the modal).
+    #[must_use]
+    pub fn compute(
+        palette: &mut CommandPalette,
+        window_w: f32,
+        window_h: f32,
+    ) -> Option<PaletteLayout> {
+        if !palette.is_open() {
+            return None;
+        }
+        // Spec: width is `min(720, viewport_w - 48)`, ideal 680.
+        // Height: `min(520, viewport_h - 96)`, ideal 460.
+        let modal_w = PALETTE_WIDTH.min(PALETTE_MAX_WIDTH).min((window_w - 48.0).max(160.0));
+        let modal_h = PALETTE_HEIGHT.min(PALETTE_MAX_HEIGHT).min((window_h - 96.0).max(120.0));
+        let border_x = ((window_w - modal_w) * 0.5).max(0.0);
+        let border_y =
+            (window_h * PALETTE_TOP_RATIO).max(PALETTE_TOP_MIN).min((window_h - modal_h).max(0.0));
+        let scrim = Rect { x: 0.0, y: 0.0, w: window_w, h: window_h };
+        let border = Rect { x: border_x, y: border_y, w: modal_w, h: modal_h };
+        let bg = Rect {
+            x: border.x + PALETTE_BORDER,
+            y: border.y + PALETTE_BORDER,
+            w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
+            h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
+        };
+        let query_row = Rect {
+            x: bg.x + PALETTE_INNER_PAD,
+            y: bg.y + PALETTE_INNER_PAD,
+            w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+            h: PALETTE_QUERY_HEIGHT,
+        };
+        let query_icon = Rect {
+            x: query_row.x + PALETTE_QUERY_ICON_X,
+            y: query_row.y + (query_row.h - PALETTE_QUERY_ICON_SIZE) * 0.5,
+            w: PALETTE_QUERY_ICON_SIZE,
+            h: PALETTE_QUERY_ICON_SIZE,
+        };
+        let footer = Rect {
+            x: bg.x,
+            y: (bg.y + bg.h - PALETTE_FOOTER_HEIGHT).max(query_row.y + query_row.h),
+            w: bg.w,
+            h: PALETTE_FOOTER_HEIGHT,
+        };
+
+        // Action list region (everything between the query row and the footer).
+        let list_top = query_row.y + query_row.h + PALETTE_INNER_PAD;
+        let list_bottom = footer.y - PALETTE_INNER_PAD;
+        let avail = (list_bottom - list_top).max(0.0);
+        let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
+        let max_rows = if row_stride > 0.0 {
+            ((avail + PALETTE_ROW_GAP) / row_stride).floor() as usize
+        } else {
+            0
+        };
+
+        // Publish viewport size to the state so the next key press can
+        // clamp scroll_offset correctly.
+        palette.set_visible_rows(max_rows);
+
+        let visible = palette.visible();
+        let total = visible.len();
+
+        let window_start = palette.scroll_offset().min(total.saturating_sub(max_rows));
+        let window_end = (window_start + max_rows).min(total);
+        let selected = palette.selected();
+
+        let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
+        let mut row_labels = Vec::with_capacity(rows.capacity());
+        for (i, item_index) in (window_start..window_end).enumerate() {
+            let r = Rect {
+                x: bg.x + PALETTE_INNER_PAD,
+                y: list_top + (i as f32) * row_stride,
+                w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+                h: PALETTE_ROW_HEIGHT,
+            };
+            rows.push(PaletteRow { item_index, rect: r });
+            if let Some(a) = visible.get(item_index) {
+                row_labels.push(action_label(a));
+            } else {
+                row_labels.push(String::new());
+            }
+        }
+        let selected_row = if total > 0 && selected >= window_start && selected < window_end {
+            Some(selected - window_start)
+        } else {
+            None
+        };
+        let selected_accent = selected_row.and_then(|sel| {
+            rows.get(sel).map(|row| Rect {
+                x: row.rect.x,
+                y: row.rect.y + (row.rect.h - 20.0) * 0.5,
+                w: PALETTE_ROW_ACCENT_W,
+                h: 20.0,
+            })
+        });
+
+        // Query label — no `> ` prefix any more; the search icon stands
+        // in for it. Block cursor is still appended so the caret shows.
+        let mut query_label = String::new();
+        query_label.push_str(palette.query());
+        query_label.push('▏');
+        let query_placeholder = if palette.query().is_empty() {
+            Some(String::from("Search commands, settings, themes…"))
+        } else {
+            None
+        };
+
+        let empty_label = if total == 0 && !palette.query().is_empty() {
+            Some(NO_MATCHES.to_string())
+        } else {
+            None
+        };
+        let empty_hint = if empty_label.is_some() {
+            Some(String::from("Try theme, settings, split, font"))
+        } else {
+            None
+        };
+
+        let footer_label = format!(
+            "{} command{} · ↑↓ navigate · ↵ run · esc close",
+            total,
+            if total == 1 { "" } else { "s" }
+        );
+
+        Some(PaletteLayout {
+            scrim,
+            border,
+            bg,
+            query_row,
+            query_icon,
+            rows,
+            selected_row,
+            selected_accent,
+            query_label,
+            query_placeholder,
+            row_labels,
+            empty_label,
+            empty_hint,
+            footer,
+            footer_label,
+        })
+    }
+}
+
+/// Placeholder shown in the action list when the current query filters
+/// every action out. Exposed for tests + so the renderer doesn't have to
+/// duplicate the string.
+pub const NO_MATCHES: &str = "No commands found";
+
+/// Layout of the bottom-right search bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchBarLayout {
+    pub bg: Rect,
+    pub border: Rect,
+}
+
+impl SearchBarLayout {
+    /// Place the bar in the bottom-right corner. The renderer is
+    /// responsible for picking colors and drawing the label produced by
+    /// [`search_bar_label`].
+    #[must_use]
+    pub fn compute(window_w: f32, window_h: f32) -> SearchBarLayout {
+        let w = SEARCH_BAR_WIDTH.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
+        let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
+        let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
+        let y = (window_h - h - SEARCH_BAR_MARGIN).max(0.0);
+        let border = Rect { x, y, w, h };
+        let bg = Rect {
+            x: border.x + 1.0,
+            y: border.y + 1.0,
+            w: (border.w - 2.0).max(0.0),
+            h: (border.h - 2.0).max(0.0),
+        };
+        SearchBarLayout { bg, border }
+    }
+}
+
+/// Produce the text label for the bottom-right search bar.
+///
+/// `N/M` is `current/total` (1-based) when there are matches; otherwise
+/// the bar shows `0/0`. An empty query renders as `/ ` so the user sees
+/// the prompt.
+#[must_use]
+pub fn search_bar_label(search: &SearchState) -> String {
+    let total = search.matches.len();
+    let cur = search.current.map(|i| i + 1).unwrap_or(0);
+    format!("/ {} — {}/{}", search.query, cur, total)
+}
+
+/// Layout of the IME preedit popover, placed just below the text cursor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImePreeditLayout {
+    /// Background rectangle behind the preedit text.
+    pub bg: Rect,
+    /// Underline rectangle drawn at the bottom of `bg`.
+    pub underline: Rect,
+}
+
+impl ImePreeditLayout {
+    /// Place the preedit popover under the cursor cell. `cursor_x` and
+    /// `cursor_y` are the **top-left** of the cursor cell in physical
+    /// pixels; `cell_w` and `cell_h` are the cell size. Returns `None`
+    /// when there is no in-flight preedit text.
+    #[must_use]
+    pub fn compute(
+        ime: &ImeState,
+        cursor_x: f32,
+        cursor_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        window_w: f32,
+        window_h: f32,
+    ) -> Option<ImePreeditLayout> {
+        let text = ime.preedit();
+        if text.is_empty() {
+            return None;
+        }
+        let char_count = text.chars().count().max(1) as f32;
+        let w = (cell_w * char_count + 12.0).min(window_w.max(40.0));
+        let h = cell_h + 6.0;
+        let mut x = cursor_x;
+        let y = (cursor_y + cell_h).min((window_h - h).max(0.0));
+        if x + w > window_w {
+            x = (window_w - w).max(0.0);
+        }
+        let bg = Rect { x, y, w, h };
+        let underline =
+            Rect { x: bg.x + 2.0, y: bg.y + bg.h - 2.0, w: (bg.w - 4.0).max(0.0), h: 2.0 };
+        Some(ImePreeditLayout { bg, underline })
+    }
+}

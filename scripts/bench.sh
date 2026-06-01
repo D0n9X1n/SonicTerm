@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/bench.sh — Sonic perf-bench gate.
 #
-# Runs a subset of perf measurements against the just-built `sonic-mac` (or
-# `sonic-windows`) binary, writes current.json, and diffs against baseline.json.
+# Runs a subset of perf measurements against the just-built `sonicterm-mac` (or
+# `sonicterm-windows`) binary, writes current.json, and diffs against baseline.json.
 #
 # Modes:
 #   bash scripts/bench.sh             # local: prints table, warns on regression,
@@ -105,12 +105,12 @@ PY
 }
 
 measure_idle_cpu() {
-  # Returns 0.0 unless we have a sonic-mac binary we can launch headless.
+  # Returns 0.0 unless we have a sonicterm-mac binary we can launch headless.
   # Real measurement requires a windowed run (see CLAUDE.md §13); the bench
   # gate keeps this lightweight — sampling our own PID's idle CPU is a
   # reasonable proxy for the "no runaway loop" property the gate exists to
   # protect.
-  local bin="$REPO_ROOT/target/release/sonic-mac"
+  local bin="$REPO_ROOT/target/release/sonicterm-mac"
   if [[ ! -x "$bin" ]] || [[ "$(uname)" != "Darwin" ]]; then
     printf '0.0'; return
   fi
@@ -128,7 +128,7 @@ measure_idle_cpu() {
 }
 
 measure_rss_mb() {
-  local bin="$REPO_ROOT/target/release/sonic-mac"
+  local bin="$REPO_ROOT/target/release/sonicterm-mac"
   if [[ ! -x "$bin" ]] || [[ "$(uname)" != "Darwin" ]]; then
     printf '0.0'; return
   fi
@@ -174,10 +174,10 @@ IDLE_CPU=$(measure_idle_cpu)
 echo "[bench] RSS sample…"
 RSS_MB=$(measure_rss_mb)
 echo "[bench] scrollback memory report (#319 PR-F)…"
-SCROLLBACK_RAM_MB=$(cargo run --quiet --example scrollback_memory_report -p sonic-grid --release 2>/dev/null \
+SCROLLBACK_RAM_MB=$(cargo run --quiet --example scrollback_memory_report -p sonicterm-grid --release 2>/dev/null \
   | awk '/^BENCH scrollback_ram_mb/ {print $3; exit}')
 echo "[bench] cold first-frame icons (#415)…"
-COLD_ICONS_MS=$(cargo run --quiet --example cold_first_frame_icons -p sonic-text --release 2>/dev/null \
+COLD_ICONS_MS=$(cargo run --quiet --example cold_first_frame_icons -p sonicterm-text --release 2>/dev/null \
   | awk '/^BENCH cold_first_frame_icons_ms/ {print $3; exit}')
 echo "[bench] vtebench (optional)…"
 VTE_DENSE=$(run_vtebench dense_cells)

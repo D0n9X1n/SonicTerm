@@ -42,7 +42,7 @@ Sonic does all of that on macOS and Windows.
 | Color emoji | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Programming ligatures | ✅ | ✅ | ❌ | ✅ | ✅ |
 | End-to-end CJK IME (Pinyin / 日本語 / 한글) | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Multiplexer built in | ✅ (`sonic-mux`) | ✅ | ❌ | ❌ | ❌ |
+| Multiplexer built in | ✅ (`sonicterm-mux`) | ✅ | ❌ | ❌ | ❌ |
 | SSH client built in | ✅ (optional) | ✅ (`wezterm ssh`) | ❌ | ⚠️ (`kitten ssh`) | ❌ |
 | Tab tear-out → new window | ✅ in-process | ⚠️ via CLI | ❌ | ❌ | ✅ |
 | Cross-window tab merge | ✅ | ⚠️ via CLI | ❌ | ❌ | ✅ |
@@ -100,7 +100,7 @@ Being honest about the gaps so you can pick the right tool:
   signing certs aren't configured yet. You'll see Gatekeeper /
   SmartScreen warnings on first launch.
 - **No auto-update.** Grab new releases manually from the Releases page.
-- **No remote multiplexer / network protocol.** `sonic-mux` is in-process
+- **No remote multiplexer / network protocol.** `sonicterm-mux` is in-process
   only — there's no `wezterm connect`-style remote attach yet.
 - **Younger and less battle-tested** than WezTerm, Alacritty, Kitty, or
   iTerm2. Expect rough edges; please file issues.
@@ -129,10 +129,10 @@ git clone https://github.com/D0n9X1n/sonic
 cd sonic
 
 # macOS
-cargo run --release -p sonic-mac
+cargo run --release -p sonicterm-mac
 
 # Windows
-cargo run --release -p sonic-windows
+cargo run --release -p sonicterm-windows
 ```
 
 Add `--features ssh` to either platform crate to enable the built-in SSH
@@ -166,8 +166,8 @@ local gate before any commit is:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run --example pty_dump -p sonic-core --release   # must print [e2e] OK
-cargo build --release -p sonic-mac
+cargo run --example pty_dump -p sonicterm-core --release   # must print [e2e] OK
+cargo build --release -p sonicterm-mac
 ```
 
 Test count is monotonic — no PR may reduce the workspace test total.
