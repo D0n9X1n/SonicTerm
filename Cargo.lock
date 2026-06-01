@@ -4631,14 +4631,21 @@ dependencies = [
 name = "sonicterm-gpu"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "bytemuck",
  "cosmic-text",
  "glyphon",
  "pollster",
+ "sonicterm-cfg",
+ "sonicterm-core",
+ "sonicterm-grid",
  "sonicterm-render-model",
  "sonicterm-text",
  "sonicterm-types",
+ "sonicterm-ui",
+ "tracing",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

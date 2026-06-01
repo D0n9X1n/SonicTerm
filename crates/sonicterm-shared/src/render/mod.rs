@@ -1,18 +1,19 @@
-//! Renderer module — split for readability (issue #143).
+//! Renderer module — thin re-export shim (M7f).
 //!
-//! `core` holds the `GpuRenderer` struct and all its `impl` blocks
-//! (which must live in the same module as the struct to share private
-//! fields). The sibling modules host the free-function helpers and
-//! plain-data structs extracted from the original 3,600-LOC
-//! `render.rs`. All public symbols are re-exported below so existing
-//! `use sonicterm_shared::render::*` call sites keep working unchanged.
+//! As of M7f, the entire `core` module (the `GpuRenderer` struct + all
+//! its `impl` blocks, plus its free-function helpers) lives in
+//! [`sonicterm_gpu::core`]. This module exists only so legacy import
+//! paths of the form `sonicterm_shared::render::*` keep compiling
+//! against the deprecated `sonicterm-shared` façade; new code should
+//! import from `sonicterm_gpu` (and its sibling crates) directly.
 
-#![deny(missing_docs)]
-
-mod core;
+#![allow(missing_docs)]
+#![allow(deprecated)]
 
 #[deprecated(since = "0.9.0", note = "import from sonicterm_gpu::color directly")]
 pub use sonicterm_gpu::color;
+#[deprecated(since = "0.9.0", note = "import from sonicterm_gpu::core directly")]
+pub use sonicterm_gpu::core;
 #[deprecated(since = "0.9.0", note = "import from sonicterm_gpu::cursor directly")]
 pub use sonicterm_gpu::cursor;
 #[deprecated(since = "0.9.0", note = "import from sonicterm_gpu::row_quad_cache directly")]
@@ -30,12 +31,8 @@ pub use sonicterm_ui::tabbar_view::{tab_bar_top_inset, tab_bar_top_inset_with_ti
 
 pub use color::*;
 pub use core::*;
-#[allow(deprecated)]
 pub use cursor::*;
-#[allow(deprecated)]
 pub use drag_chip::*;
 pub use geometry::*;
-#[allow(deprecated)]
 pub use metrics::*;
-#[allow(deprecated)]
 pub use tab_spans::*;

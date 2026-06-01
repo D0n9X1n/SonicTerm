@@ -179,11 +179,9 @@ fn last_panes_received_matches_slice_length() {
 #[test]
 fn underline_emit_uses_recorded_pane_origin_not_active() {
     use std::fs;
-    let core = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../sonicterm-shared/src/render/core.rs"
-    ))
-    .expect("read sonicterm-shared render/core.rs");
+    let core =
+        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../sonicterm-gpu/src/core.rs"))
+            .expect("read sonicterm-gpu core.rs");
 
     // The underline emit loop is identifiable by `underline_thickness`
     // followed shortly by the for loop over `&underlines`. Extract the

@@ -12,7 +12,7 @@
 
 #[test]
 fn render_core_does_not_paint_caption_buttons() {
-    let source = include_str!("../src/render/core.rs");
+    let source = include_str!("../../sonicterm-gpu/src/core.rs");
     assert!(
         !source.contains("paint_caption_buttons"),
         "render/core.rs must not call paint_caption_buttons (#366): \

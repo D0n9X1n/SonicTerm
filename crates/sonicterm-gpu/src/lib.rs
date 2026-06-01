@@ -20,6 +20,7 @@
 
 #![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(missing_docs)] // core.rs (moved in M7f) carries its own doc coverage; relax until follow-up.
 
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
@@ -46,3 +47,11 @@ pub mod row_quad_cache;
 /// Instanced text pipeline consuming `sonicterm_text::GlyphInstance` and
 /// sampling the GPU glyph atlas.
 pub mod text_pipeline;
+
+/// Composite terminal renderer (`GpuRenderer`). Moved here from
+/// `sonicterm-shared::render::core` in M7f of the workspace refactor —
+/// the renderer is the GPU pipeline that composes `quad`, `text_pipeline`,
+/// `atlas_upload`, and `cursor` into per-frame draws, so it belongs on
+/// the GPU side. `sonicterm-shared::render` is now a thin deprecated
+/// re-export shim around this module.
+pub mod core;

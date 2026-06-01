@@ -58,7 +58,7 @@ fn render_source_has_no_hardcoded_monospace_family() {
     // future regressions where a copy-pasted call site bypasses the
     // helper.
     let src = concat!(
-        include_str!("../src/render/core.rs"),
+        include_str!("../../sonicterm-gpu/src/core.rs"),
         include_str!("../../sonicterm-gpu/src/color.rs"),
         include_str!("../../sonicterm-text/src/metrics.rs"),
         include_str!("../../sonicterm-ui/src/tab_spans.rs"),
@@ -90,7 +90,7 @@ fn render_source_has_no_hardcoded_font_name_literal() {
     // renderer; the only legitimate font-name string should come from
     // config.font.family at runtime.
     let src = concat!(
-        include_str!("../src/render/core.rs"),
+        include_str!("../../sonicterm-gpu/src/core.rs"),
         include_str!("../../sonicterm-gpu/src/color.rs"),
         include_str!("../../sonicterm-text/src/metrics.rs"),
         include_str!("../../sonicterm-ui/src/tab_spans.rs"),
@@ -125,7 +125,7 @@ fn render_source_has_no_hardcoded_font_name_literal() {
 #[test]
 fn no_attrs_new_family_outside_helper() {
     for (path, src) in [
-        ("sonicterm-shared/src/render/core.rs", include_str!("../src/render/core.rs")),
+        ("sonicterm-gpu/src/core.rs", include_str!("../../sonicterm-gpu/src/core.rs")),
         ("sonicterm-ui/src/tab_spans.rs", include_str!("../../sonicterm-ui/src/tab_spans.rs")),
         (
             "sonicterm-shared/src/tabbar_view.rs",

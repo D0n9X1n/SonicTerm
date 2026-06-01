@@ -14,7 +14,7 @@
 
 use std::fs;
 
-const RENDER_RS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/render/core.rs");
+const RENDER_RS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../sonicterm-gpu/src/core.rs");
 
 fn render_src() -> String {
     fs::read_to_string(RENDER_RS).expect("read render.rs")
