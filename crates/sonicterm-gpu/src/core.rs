@@ -4482,10 +4482,22 @@ impl GpuRenderer {
                 let cx = pad + f32::from(*col) * cell_w;
                 let cy = top_inset + f32::from(row) * cell_h;
                 let inv_s = 1.0 / scale_factor;
-                let gx = cx + info.px_offset[0] as f32 * inv_s;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let gw = info.px_size[0] as f32 * inv_s;
-                let gh = info.px_size[1] as f32 * inv_s;
+                let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
+                let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let gw_nat = info.px_size[0] as f32 * inv_s;
+                let gh_nat = info.px_size[1] as f32 * inv_s;
+                // #438: apply symbol-fit policy. ASCII chars classify as
+                // `Natural` (identity), so the hot path is unchanged for
+                // text; this exists to keep the three emit paths
+                // consistent for the rare Powerline/PUA char that slips
+                // through `run_is_ascii_fast` (none today, but the policy
+                // lives in one place).
+                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+                    (gx_nat, gy_nat, gw_nat, gh_nat),
+                    (cx, cy),
+                    (cell_w, cell_h),
+                    sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
+                );
                 // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
                 let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
                     (gx, gy, gw, gh),
@@ -4586,17 +4598,15 @@ impl GpuRenderer {
                 let gw_nat = info.px_size[0] as f32 * inv_s;
                 let gh_nat = info.px_size[1] as f32 * inv_s;
                 // Powerline PUA (U+E0B0..=U+E0BF) glyphs are cell-filling
-                // separators — anchor them to the cell rect so adjacent
-                // rows align. See `swash_rasterizer::anchor_powerline_rect`.
-                let (gx, gy, mut gw, mut gh) =
-                    sonicterm_text::swash_rasterizer::anchor_powerline_rect(
-                        ch,
-                        cx,
-                        cy,
-                        cell_pixel_width,
-                        cell_h,
-                        (gx_nat, gy_nat, gw_nat, gh_nat),
-                    );
+                // separators — anchor them to the cell rect. NerdFont PUA
+                // icons (#438) scale-to-fit to ~0.95 cell_h centered.
+                // See `swash_rasterizer::{classify_symbol, apply_symbol_fit}`.
+                let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+                    (gx_nat, gy_nat, gw_nat, gh_nat),
+                    (cx, cy),
+                    (cell_pixel_width, cell_h),
+                    sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                );
                 // Clamp tile to the cell box the codepoint reserves
                 // (1 cell for narrow, 2 for WIDE). Some fallback faces
                 // (notably Apple Color Emoji at small sizes, certain CJK
@@ -4651,16 +4661,15 @@ impl GpuRenderer {
             let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
             let gw_nat = info.px_size[0] as f32 * inv_s;
             let gh_nat = info.px_size[1] as f32 * inv_s;
-            // Powerline PUA (U+E0B0..=U+E0BF) anchor — see the matching
-            // call in the char-fallback branch above. `g.ch` is the
-            // shaped cluster's lead codepoint.
-            let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::anchor_powerline_rect(
-                g.ch,
-                cx,
-                cy,
-                cell_pixel_width,
-                cell_h,
+            // Powerline PUA (U+E0B0..=U+E0BF) anchor + NerdFont PUA
+            // icon-cell-fit (#438) — see the matching call in the
+            // char-fallback branch above. `g.ch` is the shaped cluster's
+            // lead codepoint.
+            let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                 (gx_nat, gy_nat, gw_nat, gh_nat),
+                (cx, cy),
+                (cell_pixel_width, cell_h),
+                sonicterm_text::swash_rasterizer::classify_symbol(g.ch),
             );
             // See the fallback path above for why we clamp to
             // `cell_pixel_width` — the same overflow class can occur on
