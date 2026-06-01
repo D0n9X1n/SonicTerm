@@ -54,8 +54,9 @@ use crate::glyph_atlas::{GlyphAtlas, RasterTile, Rasterizer};
 ///
 /// - `0x2500..=0x259F` — Box Drawing + Block Elements. Covered by the
 ///   primary Recursive Mono family, so resolution stops at slot 0.
-/// - `0xE0A0..=0xE0D7` — Powerline PUA. The bundled Symbols Nerd Font
-///   Mono carries these; resolution typically lands a few slots in.
+/// - `0xE0A0..=0xE0D7` — Powerline PUA. The bundled `Rec Mono St.Helens`
+///   is Nerd-Font-patched and carries these glyphs, so resolution stops
+///   at slot 0 without needing a system Nerd Font.
 ///
 /// Codepoints the font chain lacks (returns no glyph) are silently
 /// skipped — no atlas entry is created, so a later real use still goes
@@ -209,14 +210,13 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 ///
 /// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
 /// but the chain shouldn't be empty.
-// NOTE: PR #267 inserted `JetBrainsMono Nerd Font` at the FRONT of the
-// chain for PUA-codepoint coverage (#261); the tail position was the
-// follow-up fix so CJK glyph resolution wasn't stolen from
-// PingFang/Microsoft YaHei/Noto. The R1 rename (#419) drops the bundled
-// JetBrainsMono TTFs entirely — Nerd Font PUA coverage now relies on a
-// system-installed Nerd Font (the previous in-tree set is removed); if
-// it isn't present those PUA codepoints render as tofu, which is the
-// agreed trade for shipping only St.Helens.
+// NOTE: The bundled primary `Rec Mono St.Helens` is Nerd-Font-patched,
+// so Powerline (U+E0B0–U+E0BF) and Nerd Font PUA (U+E000–U+F8FF)
+// codepoints resolve in slot 0 without needing any system Nerd Font.
+// The platform fallback chain below is retained for non-Latin scripts
+// (CJK, emoji) that the primary doesn't cover — CJK glyph resolution
+// goes to PingFang/Microsoft YaHei/Noto, color emoji to the platform
+// color font.
 #[cfg(target_os = "macos")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "PingFang SC",

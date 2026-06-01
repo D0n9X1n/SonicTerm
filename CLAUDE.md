@@ -78,6 +78,7 @@ bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
 cargo run --example pty_dump -p sonicterm-core --release
 cargo run --example pty_dump_unicode -p sonicterm-core --release
+cargo run --example pty_dump_unicode -p sonicterm-core --release
 bash scripts/check-visual-snapshots.sh
 cargo build --release -p sonicterm-mac
 bash scripts/bench.sh

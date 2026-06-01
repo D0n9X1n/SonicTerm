@@ -100,6 +100,7 @@ fn make_synth_ws() -> WindowState {
         hidden: false,
         scrollbar_drag: None,
         scrollbar_vis: std::collections::HashMap::new(),
+        test_drag_chip_marker: None,
     }
 }
 

@@ -305,6 +305,7 @@ impl App {
             hidden: false,
             scrollbar_drag: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            test_drag_chip_marker: None,
         };
         self.windows.insert(main_id, shadow);
 
