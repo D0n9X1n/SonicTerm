@@ -87,6 +87,7 @@ fn document_windowstate_none_renderer_resize_scale_paths() {
         hidden: false,
         scrollbar_drag: None,
         scrollbar_vis: std::collections::HashMap::new(),
+        test_drag_chip_marker: None,
     };
 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

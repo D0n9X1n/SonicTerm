@@ -194,6 +194,7 @@ impl App {
             hidden: false,
             scrollbar_drag: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            test_drag_chip_marker: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
@@ -563,6 +564,7 @@ impl App {
             hidden: false,
             scrollbar_drag: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            test_drag_chip_marker: None,
         };
         self.windows.insert(win_id, child);
         // Phase C2 / Haiku #295: register the new window's HWND with
