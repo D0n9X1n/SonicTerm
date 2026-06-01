@@ -92,17 +92,21 @@ routed_test!(
 // the state mutation.
 stub_test!(intent_06_window_moved, AppIntent::WindowMoved { window: wk(), pos: pos() });
 
-// 07..12 Tab lifecycle (non-leaf — 2c)
-stub_test!(intent_07_new_tab, AppIntent::NewTab { window: wk(), cwd: None });
-stub_test!(
+// 07..12 Tab lifecycle (routed in M6a-expand-2c-tab)
+routed_test!(intent_07_new_tab, AppIntent::NewTab { window: wk(), cwd: None });
+routed_test!(
     intent_07_new_tab_with_cwd,
     AppIntent::NewTab { window: wk(), cwd: Some(PathBuf::from("/")) }
 );
-stub_test!(intent_08_close_tab, AppIntent::CloseTab { window: wk(), idx: 0 });
+routed_test!(intent_08_close_tab, AppIntent::CloseTab { window: wk(), idx: 0 });
+// Next/Prev with only one tab (default state) are no-ops by design —
+// transition-only emission, same shape as WindowFocused on fresh state.
+// Focused per-Intent tests in `tab_intents.rs` cover the routed paths.
 stub_test!(intent_09_next_tab, AppIntent::NextTab { window: wk() });
 stub_test!(intent_10_prev_tab, AppIntent::PrevTab { window: wk() });
+// GoToTab against empty tab_count is also a no-op.
 stub_test!(intent_11_goto_tab, AppIntent::GoToTab { window: wk(), idx: 3 });
-stub_test!(intent_12_tear_out_tab, AppIntent::TearOutTab { src_window: wk(), src_tab: 0 });
+routed_test!(intent_12_tear_out_tab, AppIntent::TearOutTab { src_window: wk(), src_tab: 0 });
 
 // 13..19 Pane lifecycle / nav (non-leaf — 2c)
 stub_test!(intent_13_split_pane, AppIntent::SplitPane { window: wk(), dir: SplitDir::Right });

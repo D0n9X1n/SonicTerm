@@ -52,6 +52,16 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
+                // M6a-expand-2c-tab: notify the reducer the user
+                // asked for a new tab. The reducer bumps tab_count,
+                // sets active_tab_idx, and emits Render(TabAdded).
+                // Boundary below remains source-of-truth for the
+                // actual tab spawn (it owns the PtyHandle/Grid/Parser
+                // tree that the renderer paints).
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    cwd: None,
+                });
                 // Epic #289 Phase A — route through the unified
                 // `frontmost_window` discriminator so a Cmd+T typed in a
                 // torn-out child opens a tab in THAT child, not in the
@@ -70,6 +80,13 @@ impl App {
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
+                // M6a-expand-2c-tab: notify reducer first so
+                // tab_count/active_tab_idx stay in sync.
+                let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                self.dispatch_intent(sonicterm_app_core::AppIntent::CloseTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: active_idx,
+                });
                 // Epic #289 Phase A — route to frontmost window.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_tab_in_child(id) {
@@ -82,6 +99,9 @@ impl App {
                 self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NextTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.next_tab_in_child(id) {
                         return true;
@@ -93,6 +113,9 @@ impl App {
                 }
             }
             Action::PrevTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.prev_tab_in_child(id) {
                         return true;
@@ -104,6 +127,10 @@ impl App {
                 }
             }
             Action::ActivateTab(i) => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: *i,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.activate_tab_in_child(id, *i) {
                         return true;

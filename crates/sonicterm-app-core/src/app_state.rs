@@ -36,6 +36,22 @@ pub struct AppState {
     /// `WindowCloseRequested` reducer arm to decide whether to also
     /// emit `Quit` (last window closed).
     pub live_window_count: u32,
+    /// Number of tabs the reducer believes are alive in the focused
+    /// window. Incremented on `NewTab`, decremented on `CloseTab`
+    /// (and on `TearOutTab` — the tab leaves this window's strip).
+    /// The boundary's tab tree in
+    /// `sonicterm-app::app::WindowState.tabs` remains source-of-truth
+    /// for rendering; this counter is the observability surface used
+    /// by the reducer arms and the focused tab tests in
+    /// `tab_intents.rs`. Saturating in both directions
+    /// (M6a-expand-2c-tab).
+    pub tab_count: u32,
+    /// Last tab index the reducer observed becoming active. `None`
+    /// until the first `NewTab`/`NextTab`/`PrevTab`/`GoToTab` lands.
+    /// Used by reducer arms to deduplicate `Render(TabSwitch)`
+    /// Effects (no-op switch emits nothing — same shape as
+    /// `WindowFocused`'s no-op transition guard).
+    pub active_tab_idx: Option<usize>,
 }
 
 impl AppState {
@@ -72,6 +88,8 @@ impl AppStateBuilder {
             focused_window: None,
             last_window_pos: None,
             live_window_count: 0,
+            tab_count: 0,
+            active_tab_idx: None,
         }
     }
 }

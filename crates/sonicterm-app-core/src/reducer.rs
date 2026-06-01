@@ -250,14 +250,107 @@ pub(crate) fn reduce_leaf(
             // session-restore) to read it.
         }
 
-        // ── Non-leaf — stubs (full reducer arms land in 2c-tab/-pane/-misc) ─
-        AppIntent::NewTab { .. }
-        | AppIntent::CloseTab { .. }
-        | AppIntent::NextTab { .. }
-        | AppIntent::PrevTab { .. }
-        | AppIntent::GoToTab { .. }
-        | AppIntent::TearOutTab { .. }
-        | AppIntent::SplitPane { .. }
+        // ── Tab lifecycle (M6a-expand-2c-tab) ───────────────────────
+        //
+        // Per FINAL spec §3:
+        //   NewTab        → Render(TabAdded)   + tab_count++ + active_tab_idx = new_idx
+        //   CloseTab      → Render(TabRemoved) + tab_count-- + active_tab_idx reset if matched
+        //   NextTab       → Render(TabSwitch)  + active_tab_idx = (cur+1) % tab_count
+        //   PrevTab       → Render(TabSwitch)  + active_tab_idx = (cur-1) % tab_count
+        //   GoToTab       → Render(TabSwitch)  iff idx differs from current (and in-range)
+        //   TearOutTab    → Render(TabRemoved) + tab_count-- in source window
+        //                   (the destination NewWindow + NewTab cascade lands separately;
+        //                   the boundary's `os_drag` path drives the new-window creation
+        //                   in its own dispatch_intent call)
+        //
+        // Multi-window tab state lifts in 2c-pane (`AppState` will own
+        // a per-WindowKey tab vector). Until then `tab_count` /
+        // `active_tab_idx` track the focused window only — the
+        // boundary in `sonicterm-app::app::WindowState.tabs` remains
+        // source-of-truth for actual tab content + the visible strip.
+        AppIntent::NewTab { window, cwd: _ } => {
+            _state.tab_count = _state.tab_count.saturating_add(1);
+            // New tab becomes the active one (matches the boundary
+            // behaviour in `App::new_tab` / `spawn_tab_in_child`).
+            let new_idx = _state.tab_count.saturating_sub(1) as usize;
+            _state.active_tab_idx = Some(new_idx);
+            out.push(AppEffect::Render { window, reason: RedrawReason::TabAdded });
+        }
+        AppIntent::CloseTab { window, idx } => {
+            _state.tab_count = _state.tab_count.saturating_sub(1);
+            // If we closed the active tab, the boundary picks a new
+            // active index; we conservatively clamp/clear our tracker
+            // so the next switch/activate is observable as a real
+            // transition (not a no-op).
+            match _state.active_tab_idx {
+                Some(cur) if cur == idx => {
+                    _state.active_tab_idx =
+                        if _state.tab_count == 0 { None } else { Some(cur.saturating_sub(1)) };
+                }
+                Some(cur) if cur > idx => {
+                    // Indices above the removed one shift down by one.
+                    _state.active_tab_idx = Some(cur - 1);
+                }
+                _ => {}
+            }
+            out.push(AppEffect::Render { window, reason: RedrawReason::TabRemoved });
+        }
+        AppIntent::NextTab { window } => {
+            if _state.tab_count > 1 {
+                let cur = _state.active_tab_idx.unwrap_or(0);
+                let next = (cur + 1) % (_state.tab_count as usize);
+                _state.active_tab_idx = Some(next);
+                out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
+            } else if _state.tab_count == 1 && _state.active_tab_idx.is_none() {
+                _state.active_tab_idx = Some(0);
+            }
+        }
+        AppIntent::PrevTab { window } => {
+            if _state.tab_count > 1 {
+                let n = _state.tab_count as usize;
+                let cur = _state.active_tab_idx.unwrap_or(0);
+                let prev = (cur + n - 1) % n;
+                _state.active_tab_idx = Some(prev);
+                out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
+            } else if _state.tab_count == 1 && _state.active_tab_idx.is_none() {
+                _state.active_tab_idx = Some(0);
+            }
+        }
+        AppIntent::GoToTab { window, idx } => {
+            // Out-of-range: drop silently (matches boundary's
+            // saturating `tabs.activate(i)` — clamps to last valid).
+            let n = _state.tab_count as usize;
+            if n == 0 {
+                return;
+            }
+            let clamped = idx.min(n - 1);
+            if _state.active_tab_idx != Some(clamped) {
+                _state.active_tab_idx = Some(clamped);
+                out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
+            }
+        }
+        AppIntent::TearOutTab { src_window, src_tab } => {
+            // Source window loses one tab. The destination NewWindow
+            // + NewTab cascade lands as separate dispatch_intent
+            // calls from the os_drag boundary.
+            _state.tab_count = _state.tab_count.saturating_sub(1);
+            // Adjust active_tab_idx the same way CloseTab does — the
+            // tab effectively leaves the strip.
+            match _state.active_tab_idx {
+                Some(cur) if cur == src_tab => {
+                    _state.active_tab_idx =
+                        if _state.tab_count == 0 { None } else { Some(cur.saturating_sub(1)) };
+                }
+                Some(cur) if cur > src_tab => {
+                    _state.active_tab_idx = Some(cur - 1);
+                }
+                _ => {}
+            }
+            out.push(AppEffect::Render { window: src_window, reason: RedrawReason::TabRemoved });
+        }
+
+        // ── Non-leaf — stubs (full reducer arms land in 2c-pane/-misc) ─
+        AppIntent::SplitPane { .. }
         | AppIntent::ClosePane { .. }
         | AppIntent::ResizePane { .. }
         | AppIntent::FocusPaneLeft { .. }
