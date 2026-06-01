@@ -224,6 +224,24 @@ impl WindowState {
             w.request_redraw();
         }
     }
+
+    /// #447 follow-up to PR #443: clear the drag-chip overlay in one
+    /// place. The renderer's persistent overlay (drawn by the per-frame
+    /// emitter at render/core.rs:3945+) and the headless-test marker
+    /// (`test_drag_chip_marker`, asserted by os_drag_cleanup.rs) used
+    /// to be cleared by two parallel statements in `cancel_drag_session`.
+    /// A future refactor that split them would leave the regression
+    /// test green while breaking production. Unify both clears here so
+    /// every caller flips them in lock-step.
+    #[inline]
+    pub(crate) fn clear_drag_chip(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_drag_chip(None);
+        }
+        if let Some(marker) = self.test_drag_chip_marker.as_mut() {
+            *marker = false;
+        }
+    }
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
@@ -3185,26 +3203,16 @@ impl App {
             ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
-            // Wipe the renderer's persistent drag-chip overlay. The
+            // #447 follow-up to PR #443: clear the renderer's persistent
+            // drag-chip overlay AND the headless-test marker via a single
+            // helper so production and test paths can never diverge. The
             // per-frame emitter at render/core.rs:3945+ keeps drawing
-            // whatever Some(_) value sits here, so leaving it behind
-            // ships a stale chip until something else triggers a
-            // set_drag_chip(None). For headless test windows the
-            // renderer is None — the `test_drag_chip_marker` mirror
-            // below is what os_drag_cleanup.rs asserts against. Both
-            // are flipped in lock-step so the test fails if either
-            // path is ever removed.
-            if let Some(r) = ws.renderer.as_mut() {
-                r.set_drag_chip(None);
-            }
-            // #438 / PR #443 cycle-2 (Haiku review): mirror the renderer
-            // clear into the headless test marker so `renderer: None`
-            // windows can still verify cancel_drag_session iterated this
-            // WindowState. Production windows leave `test_drag_chip_marker`
-            // as `None`, so this is a no-op outside tests.
-            if let Some(marker) = ws.test_drag_chip_marker.as_mut() {
-                *marker = false;
-            }
+            // whatever Some(_) value sits in the renderer, so leaving it
+            // behind ships a stale chip until something else triggers a
+            // set_drag_chip(None). For headless test windows the renderer
+            // is None — the `test_drag_chip_marker` mirror is what
+            // os_drag_cleanup.rs asserts against.
+            ws.clear_drag_chip();
             // Force a repaint so the cleared chip actually leaves the
             // screen instead of waiting for the next external event.
             if let Some(w) = ws.window.as_ref() {
