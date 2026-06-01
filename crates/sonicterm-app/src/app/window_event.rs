@@ -307,7 +307,10 @@ impl App {
                         sonicterm_shared::render::InactivePaneCursor {
                             row: grid.cursor.row,
                             col: grid.cursor.col,
-                            rect: *rect,
+                            rect_x: rect.x,
+                            rect_y: rect.y,
+                            rect_w: rect.w,
+                            rect_h: rect.h,
                         }
                     })
                     .collect();

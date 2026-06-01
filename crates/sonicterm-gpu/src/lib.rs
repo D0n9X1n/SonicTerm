@@ -30,9 +30,19 @@ pub mod atlas_upload;
 /// helpers consume `glyphon::Color` and produce `wgpu::Color`, so they belong
 /// on the GPU side of the layer split.
 pub mod color;
+/// Cursor-related rendering helpers (hollow rects, glyph recolouring,
+/// inactive-pane cursor record). Moved from
+/// `sonicterm-shared::render::cursor` in M7e of the workspace refactor —
+/// all helpers emit `QuadInstance` / `GlyphInstance` and belong on the
+/// GPU side of the layer split.
+pub mod cursor;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;
+/// Per-row quad cache for background / underline / hyperlink tint quads.
+/// Moved from `sonicterm-shared::render::row_quad_cache` in M7e — caches
+/// `QuadInstance`, so it belongs on the GPU side of the layer split.
+pub mod row_quad_cache;
 /// Instanced text pipeline consuming `sonicterm_text::GlyphInstance` and
 /// sampling the GPU glyph atlas.
 pub mod text_pipeline;

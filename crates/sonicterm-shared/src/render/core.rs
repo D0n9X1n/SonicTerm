@@ -3035,8 +3035,8 @@ impl GpuRenderer {
                 // are already padded by the layout (they line up with
                 // pane.rs::Rect) so we anchor cells at the rect's
                 // top-left without re-applying the global padding.
-                let icx = ic.rect.x + f32::from(ic.col) * self.cell_w;
-                let icy = ic.rect.y + f32::from(ic.row) * self.cell_h;
+                let icx = ic.rect_x + f32::from(ic.col) * self.cell_w;
+                let icy = ic.rect_y + f32::from(ic.row) * self.cell_h;
                 // Clip to the pane rect so a stale cursor position from a
                 // pre-resize grid never bleeds onto a sibling. Routed
                 // through the shared clip helper (PR #270 follow-up) — a
@@ -3052,10 +3052,10 @@ impl GpuRenderer {
                     sh,
                     hollow_color,
                     2.0,
-                    ic.rect.x,
-                    ic.rect.y,
-                    ic.rect.w,
-                    ic.rect.h,
+                    ic.rect_x,
+                    ic.rect_y,
+                    ic.rect_w,
+                    ic.rect_h,
                 );
             }
         }

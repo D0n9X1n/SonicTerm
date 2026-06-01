@@ -1,6 +1,10 @@
 //! Cursor-related rendering helpers extracted from `render.rs` (issue #143).
+//!
+//! Moved from `sonicterm-shared::render::cursor` in M7e of the workspace
+//! refactor: all helpers consume `QuadInstance` / `GlyphInstance` and
+//! emit pixel-to-NDC quads, so they belong on the GPU side of the layer
+//! split.
 
-use crate::pane::Rect as PaneRect;
 use crate::quad::{px_to_ndc, QuadInstance};
 use crate::text_pipeline::GlyphInstance;
 
@@ -8,16 +12,25 @@ use crate::text_pipeline::GlyphInstance;
 /// plus the pane's rectangle in window pixels. Carried as a flat
 /// struct (rather than a tuple) so the renderer can extend the
 /// payload (e.g. with the pane's bg color) without ripple changes.
+///
+/// The rectangle is stored as raw `f32` fields (rather than a
+/// `sonicterm_ui::pane::Rect`) so this struct stays free of any
+/// dependency on `sonicterm-ui` — `sonicterm-ui` already depends on
+/// `sonicterm-gpu`, and a back-edge would create a cycle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InactivePaneCursor {
     /// Row (within the pane's grid) where the inactive cursor sits.
     pub row: u16,
     /// Column (within the pane's grid) where the inactive cursor sits.
     pub col: u16,
-    /// The pane's rectangle in window pixels — used to translate the
-    /// `(row, col)` cell address into the parent window's coordinate
-    /// space for drawing.
-    pub rect: PaneRect,
+    /// Pane rect x in window pixels.
+    pub rect_x: f32,
+    /// Pane rect y in window pixels.
+    pub rect_y: f32,
+    /// Pane rect width in window pixels.
+    pub rect_w: f32,
+    /// Pane rect height in window pixels.
+    pub rect_h: f32,
 }
 
 /// Push four thin quad rects forming the outline of `(cell_x, cell_y,
@@ -67,14 +80,39 @@ pub fn push_hollow_rect(
     });
 }
 
+/// Local mirror of `sonicterm_shared::render::core::clip_rect_to_pane`,
+/// kept private so this module has no upward dep on `sonicterm-shared`.
+/// Tiny enough that duplication beats wiring a back-edge crate just for
+/// this helper.
+#[inline]
+fn clip_rect_to_pane_local(
+    rect: (f32, f32, f32, f32),
+    pane_x: f32,
+    pane_y: f32,
+    pane_w: f32,
+    pane_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let (x, y, w, h) = rect;
+    let clipped_x = x.max(pane_x);
+    let clipped_right = (x + w).min(pane_x + pane_w);
+    let clipped_y = y.max(pane_y);
+    let clipped_bottom = (y + h).min(pane_y + pane_h);
+    let clipped_w = clipped_right - clipped_x;
+    let clipped_h = clipped_bottom - clipped_y;
+    if clipped_w > 0.0 && clipped_h > 0.0 {
+        Some((clipped_x, clipped_y, clipped_w, clipped_h))
+    } else {
+        None
+    }
+}
+
 /// Push a hollow rect outline clipped to a pane rect. Each of the four
 /// edges is clipped independently so a cursor whose cell would extend
 /// past the pane edge still draws the visible portion of the outline
 /// without bleeding into a neighbouring split pane.
 ///
 /// `pane_*` arguments are in physical pixels (same coordinate space as
-/// `cell_*`). Mirrors [`crate::render::core::clip_rect_to_pane`] for
-/// the per-edge case.
+/// `cell_*`).
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn push_hollow_rect_clipped(
@@ -108,7 +146,7 @@ pub fn push_hollow_rect_clipped(
     ];
     for (ex, ey, ew, eh) in edges {
         if let Some((cx, cy, cw, ch)) =
-            crate::render::core::clip_rect_to_pane((ex, ey, ew, eh), pane_x, pane_y, pane_w, pane_h)
+            clip_rect_to_pane_local((ex, ey, ew, eh), pane_x, pane_y, pane_w, pane_h)
         {
             quads.push(QuadInstance {
                 rect: px_to_ndc(cx, cy, cw, ch, sw, sh),
