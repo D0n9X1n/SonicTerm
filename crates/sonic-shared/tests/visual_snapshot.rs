@@ -82,7 +82,7 @@ fn font_system() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
@@ -116,7 +116,7 @@ fn render_payload(text: &str) -> Option<(Vec<u8>, bool)> {
     let mut pipeline = TextPipeline::new(&device, format, 256);
     let upload = AtlasUpload::new(&device, &queue, &atlas, &pipeline.bind_group_layout);
 
-    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono Casual", RASTER_PX);
+    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", RASTER_PX);
 
     // Lay out characters left-to-right with a fixed advance roughly the
     // cell width; ligature shaping isn't reproduced here (we render each

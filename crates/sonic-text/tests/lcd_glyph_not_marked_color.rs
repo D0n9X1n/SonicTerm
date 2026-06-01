@@ -25,7 +25,7 @@ fn font_system_with_assets() -> FontSystem {
 #[test]
 fn lcd_outline_glyph_is_not_marked_color() {
     let mut fs = font_system_with_assets();
-    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let tile = rasterizer.rasterize(GlyphKey::new('A', false, false)).expect("rasterize A");
 
     assert!(!tile.is_color, "LCD outline glyph must not be flagged as color");

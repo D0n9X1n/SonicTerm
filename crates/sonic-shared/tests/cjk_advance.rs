@@ -48,7 +48,7 @@ fn font_system() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
@@ -76,7 +76,7 @@ fn wide_cell_glyph_width_does_not_exceed_two_cells_after_inv_scale() {
     let scale_factor = 2.0_f32;
     let inv_s = 1.0_f32 / scale_factor;
 
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", raster_px);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", raster_px);
     let mut atlas = GlyphAtlas::default_size();
 
     for ch in ['中', '文', '测', '试'] {
@@ -129,7 +129,7 @@ fn wide_cell_glyph_width_does_not_exceed_two_cells_after_inv_scale() {
 #[test]
 fn color_emoji_atlas_tile_is_marked_color() {
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let mut atlas = GlyphAtlas::default_size();
 
     let slot =

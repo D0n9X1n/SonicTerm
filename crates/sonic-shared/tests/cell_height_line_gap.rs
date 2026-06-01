@@ -26,7 +26,7 @@ fn font_system_with_rec_mono() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
@@ -40,7 +40,7 @@ fn cell_height_includes_font_line_gap_for_rec_mono_casual() {
     let size = 14.0_f32;
     let line_height_mult = 1.1_f32;
 
-    let natural = sonic_shared::render::natural_line_h_px(&mut fs, "Rec Mono Casual", size);
+    let natural = sonic_shared::render::natural_line_h_px(&mut fs, "Rec Mono St.Helens", size);
     let logical_cell_h = natural * line_height_mult;
     // 2x Retina is the canonical case the user reported the parity bug on.
     let physical_cell_h = logical_cell_h * 2.0;

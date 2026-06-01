@@ -28,7 +28,7 @@ fn font_system() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
@@ -58,14 +58,14 @@ fn lru_caps_at_capacity_and_evicts_oldest() {
     assert_eq!(CAP, 4096, "capacity contract: 4096 entries");
 
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let mut cache = ShapeCache::new();
     assert_eq!(cache.capacity(), CAP);
     let style = RunStyle { bold: false, italic: false };
 
     for i in 0..N {
         let cells = cells_for_index(i);
-        let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+        let _ = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells);
     }
 
     // Invariant 1: size pinned to capacity — not blown away (old
@@ -81,7 +81,7 @@ fn lru_caps_at_capacity_and_evicts_oldest() {
     for i in (N - CAP)..N {
         let cells = cells_for_index(i);
         assert!(
-            cache.contains_run("Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells),
+            cache.contains_run("Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells),
             "recent entry {i} must still be in the cache"
         );
     }
@@ -90,7 +90,7 @@ fn lru_caps_at_capacity_and_evicts_oldest() {
     for i in 0..(N - CAP) {
         let cells = cells_for_index(i);
         assert!(
-            !cache.contains_run("Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells),
+            !cache.contains_run("Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells),
             "old entry {i} must have been evicted"
         );
     }
@@ -104,32 +104,32 @@ fn lru_touch_keeps_recently_used_entries_alive() {
     const CAP: usize = ShapeCache::CAPACITY;
 
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let mut cache = ShapeCache::new();
     let style = RunStyle { bold: false, italic: false };
 
     for i in 0..CAP {
         let cells = cells_for_index(i);
-        let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+        let _ = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells);
     }
     assert_eq!(cache.len(), CAP);
 
     // Touch entry 0 — moves it to most-recently-used.
     let cells0 = cells_for_index(0);
-    let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells0);
+    let _ = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells0);
 
     // One overflow insert — should evict entry 1 (now the LRU), not 0.
     let overflow = cells_for_index(CAP);
-    let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &overflow);
+    let _ = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &overflow);
 
     assert_eq!(cache.len(), CAP);
     assert!(
-        cache.contains_run("Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells0),
+        cache.contains_run("Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells0),
         "entry 0 was touched and must survive overflow"
     );
     let cells1 = cells_for_index(1);
     assert!(
-        !cache.contains_run("Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells1),
+        !cache.contains_run("Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells1),
         "entry 1 was the LRU after touching 0 and must have been evicted"
     );
 }

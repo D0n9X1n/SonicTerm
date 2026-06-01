@@ -13,6 +13,7 @@ hamming-bit threshold.
 | Date       | Commit SHA (parent) | Reason                                                    |
 |------------|---------------------|-----------------------------------------------------------|
 | 2026-05-29 | 4ca26d2             | Re-bake after #284 P0 glyph-blur fix (closes #283).       |
+| 2026-05-31 | cf5b5a5             | R1 (#419): drop bundled Rec Mono Casual + JetBrainsMono; default to Rec Mono St.Helens (filename-routed). |
 
 ## How to refresh
 

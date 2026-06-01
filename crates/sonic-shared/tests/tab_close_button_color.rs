@@ -30,7 +30,7 @@ keymap = "wezterm"
 tab_close_button_color = "#ff5555"
 
 [font]
-family = "JetBrainsMono Nerd Font"
+family = "Rec Mono St.Helens"
 size = 14.0
 line_height = 1.2
 "##,
@@ -55,7 +55,7 @@ theme = "tokyo-night"
 keymap = "wezterm"
 
 [font]
-family = "JetBrainsMono Nerd Font"
+family = "Rec Mono St.Helens"
 size = 14.0
 line_height = 1.2
 "##,
@@ -72,7 +72,7 @@ keymap = "wezterm"
 tab_close_button_color = "#aabbcc"
 
 [font]
-family = "JetBrainsMono Nerd Font"
+family = "Rec Mono St.Helens"
 size = 14.0
 line_height = 1.2
 "##,

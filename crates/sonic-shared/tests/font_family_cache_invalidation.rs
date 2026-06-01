@@ -24,7 +24,7 @@ fn font_family_change_uses_distinct_shape_key_and_clears_row_cache() {
     assert_eq!(shape_cache.misses(), 1);
     let _ = shape_cache.get_or_shape(
         &mut rasterizer,
-        "JetBrainsMono Nerd Font",
+        "Some Other Family",
         DEFAULT_RASTER_PX,
         style,
         &cells,

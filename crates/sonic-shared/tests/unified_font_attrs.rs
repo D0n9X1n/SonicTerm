@@ -11,7 +11,7 @@ use sonic_shared::render::terminal_font_attrs;
 
 #[test]
 fn terminal_font_attrs_uses_family_name_not_generic() {
-    let family = "JetBrainsMono Nerd Font";
+    let family = "Rec Mono St.Helens";
     let a = terminal_font_attrs(family);
     let expected = Attrs::new().family(Family::Name(family));
     // Family should match exactly — no fallback to Family::Monospace.

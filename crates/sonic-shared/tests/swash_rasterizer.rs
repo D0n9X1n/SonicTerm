@@ -25,7 +25,7 @@ fn font_system_with_bundled() -> FontSystem {
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
             let bytes = std::fs::read(&p).unwrap();
-            fs.db_mut().load_font_data(bytes);
+            sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
             loaded += 1;
         }
     }
@@ -36,7 +36,7 @@ fn font_system_with_bundled() -> FontSystem {
 #[test]
 fn rasterizes_capital_a_with_non_empty_coverage() {
     let mut fs = font_system_with_bundled();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let tile = r.rasterize(GlyphKey::new('A', false, false)).expect("A -> Some");
     assert!(tile.width > 0 && tile.height > 0, "A must have visible pixels");
     let any_lit = tile.coverage.iter().any(|&b| b > 0);
@@ -46,7 +46,7 @@ fn rasterizes_capital_a_with_non_empty_coverage() {
 #[test]
 fn space_returns_empty_tile() {
     let mut fs = font_system_with_bundled();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let tile = r.rasterize(GlyphKey::new(' ', false, false)).expect("space -> Some");
     assert!(
         tile.is_empty(),
@@ -59,7 +59,7 @@ fn space_returns_empty_tile() {
 #[test]
 fn bold_and_regular_differ() {
     let mut fs = font_system_with_bundled();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let reg = r.rasterize(GlyphKey::new('e', false, false)).expect("e regular");
     let bold = r.rasterize(GlyphKey::new('e', true, false)).expect("e bold");
     assert_ne!(
@@ -71,7 +71,7 @@ fn bold_and_regular_differ() {
 #[test]
 fn italic_and_upright_differ() {
     let mut fs = font_system_with_bundled();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let up = r.rasterize(GlyphKey::new('e', false, false)).expect("e upright");
     let it = r.rasterize(GlyphKey::new('e', false, true)).expect("e italic");
     assert_ne!(
@@ -83,7 +83,7 @@ fn italic_and_upright_differ() {
 #[test]
 fn determinism_same_key_twice() {
     let mut fs = font_system_with_bundled();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let a1 = r.rasterize(GlyphKey::new('@', false, false)).expect("@1");
     let a2 = r.rasterize(GlyphKey::new('@', false, false)).expect("@2");
     assert_eq!(a1.width, a2.width);
@@ -103,16 +103,16 @@ fn missing_family_returns_none_when_no_fallback_face_covers_the_glyph() {
 #[test]
 fn px_and_family_reflect_constructor_args() {
     // Regression for PR #42 review: render.rs used to hardcode
-    // "Rec Mono Casual" / DEFAULT_RASTER_PX (14.0) when building the
+    // "Rec Mono St.Helens" / DEFAULT_RASTER_PX (14.0) when building the
     // atlas rasterizer, ignoring user `config.font_family` /
     // `config.font_size`. The renderer now threads those values
     // through SwashRasterizer::new; this test pins the contract that
     // the rasterizer actually retains whatever the caller asked for
     // (so config-honoring at the call site is observable).
     let mut fs = font_system_with_bundled();
-    let r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", 20.0);
+    let r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", 20.0);
     assert_eq!(r.px(), 20.0, "raster px must equal the configured font_size");
-    assert_eq!(r.family(), "Rec Mono Casual", "family must equal the configured font_family");
+    assert_eq!(r.family(), "Rec Mono St.Helens", "family must equal the configured font_family");
     assert!(
         (r.px() - DEFAULT_RASTER_PX).abs() > f32::EPSILON,
         "test must use a non-default size to be meaningful"

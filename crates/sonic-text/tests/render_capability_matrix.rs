@@ -50,7 +50,7 @@ fn font_system() -> FontSystem {
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
             let bytes = std::fs::read(&p).unwrap();
-            fs.db_mut().load_font_data(bytes);
+            sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
         }
     }
     fs
@@ -69,7 +69,7 @@ fn font_system() -> FontSystem {
 fn rasterizes(ch: char) -> bool {
     let mut fs = font_system();
     let mut atlas = GlyphAtlas::default_size();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let Some(info) = atlas.get_or_insert(GlyphKey::new(ch, false, false), &mut r) else {
         return false;
     };
@@ -136,7 +136,7 @@ fn rasterizes_latin1_supplement() {
 // The breakage is broader than the CJK report — box-drawing, the
 // Nerd-Font Powerline PUA range, and fullwidth Latin also need
 // fallback because they live in sibling families inside the bundled
-// font pack, not in the primary "Rec Mono Casual" face that the
+// font pack, not in the primary "Rec Mono St.Helens" face that the
 // rasterizer hard-codes today.
 //
 // Remove the `#[ignore]` when fix/atlas-font-fallback lands. THE TEST
