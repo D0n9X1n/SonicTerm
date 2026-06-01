@@ -1847,11 +1847,21 @@ impl App {
                     // tracing's `target:` slot needs a literal at the
                     // call site, so capture both as fields instead.
                     match level {
-                        LogLevel::Trace => tracing::trace!(target: "state_machine.log", reducer_target = target, "{msg}"),
-                        LogLevel::Debug => tracing::debug!(target: "state_machine.log", reducer_target = target, "{msg}"),
-                        LogLevel::Info => tracing::info!(target: "state_machine.log", reducer_target = target, "{msg}"),
-                        LogLevel::Warn => tracing::warn!(target: "state_machine.log", reducer_target = target, "{msg}"),
-                        LogLevel::Error => tracing::error!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                        LogLevel::Trace => {
+                            tracing::trace!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Debug => {
+                            tracing::debug!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Info => {
+                            tracing::info!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Warn => {
+                            tracing::warn!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Error => {
+                            tracing::error!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
                     }
                 }
                 // `AppEffect` is #[non_exhaustive]; future variants
