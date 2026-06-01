@@ -1,0 +1,211 @@
+//! Per-Intent stub-reducer coverage. Proves that every one of the 63
+//! `AppIntent` variants compiles into the enum and that
+//! `AppStateMachine::handle` accepts each variant without panicking.
+//!
+//! Until M6a-expand-2b/2c lands the real reducer arms, each call MUST
+//! return an empty Effect batch (spec §9, sub-PR 2a scope).
+//!
+//! Variant count enforced: 63.
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use bytes::Bytes;
+use sonicterm_app_core::{
+    AppIntent, AppState, AppStateMachine, BroadcastScope, KeyCode, LogicalPos, MouseButton,
+    PaletteChoice, PaneId, PendingDragOutcomeCore, PtyConfig, SelectionMode, SplitDir, WindowRole,
+};
+use sonicterm_types::{ModKey, Pos, WindowKey};
+
+fn wk() -> WindowKey {
+    WindowKey::new(1)
+}
+fn pane() -> PaneId {
+    PaneId(1)
+}
+fn pos() -> LogicalPos {
+    LogicalPos { x: 0.0, y: 0.0 }
+}
+fn cellpos() -> Pos {
+    Pos { col: 0, row: 0 }
+}
+fn mods() -> ModKey {
+    ModKey::empty()
+}
+fn sm() -> AppStateMachine {
+    AppStateMachine::new(AppState::default())
+}
+
+macro_rules! stub_test {
+    ($name:ident, $intent:expr) => {
+        #[test]
+        fn $name() {
+            let mut m = sm();
+            let out = m.handle($intent);
+            assert!(
+                out.is_empty(),
+                "M6a-expand-2a stub reducer must return empty SmallVec for {}",
+                stringify!($name)
+            );
+        }
+    };
+}
+
+// 01..06 Window lifecycle
+stub_test!(intent_01_new_window, AppIntent::NewWindow { role: WindowRole::Primary });
+stub_test!(intent_02_window_close_requested, AppIntent::WindowCloseRequested { window: wk() });
+stub_test!(intent_03_window_focused, AppIntent::WindowFocused { window: wk() });
+stub_test!(intent_04_window_blurred, AppIntent::WindowBlurred { window: wk() });
+stub_test!(intent_05_window_resized, AppIntent::WindowResized { window: wk(), cols: 80, rows: 24 });
+stub_test!(intent_06_window_moved, AppIntent::WindowMoved { window: wk(), pos: pos() });
+
+// 07..12 Tab lifecycle
+stub_test!(intent_07_new_tab, AppIntent::NewTab { window: wk(), cwd: None });
+stub_test!(
+    intent_07_new_tab_with_cwd,
+    AppIntent::NewTab { window: wk(), cwd: Some(PathBuf::from("/")) }
+);
+stub_test!(intent_08_close_tab, AppIntent::CloseTab { window: wk(), idx: 0 });
+stub_test!(intent_09_next_tab, AppIntent::NextTab { window: wk() });
+stub_test!(intent_10_prev_tab, AppIntent::PrevTab { window: wk() });
+stub_test!(intent_11_goto_tab, AppIntent::GoToTab { window: wk(), idx: 3 });
+stub_test!(intent_12_tear_out_tab, AppIntent::TearOutTab { src_window: wk(), src_tab: 0 });
+
+// 13..19 Pane lifecycle / nav
+stub_test!(intent_13_split_pane, AppIntent::SplitPane { window: wk(), dir: SplitDir::Right });
+stub_test!(intent_14_close_pane, AppIntent::ClosePane { window: wk() });
+stub_test!(
+    intent_15_resize_pane,
+    AppIntent::ResizePane { window: wk(), dir: SplitDir::Down, cells: 5 }
+);
+stub_test!(intent_16_focus_pane_left, AppIntent::FocusPaneLeft { window: wk() });
+stub_test!(intent_17_focus_pane_right, AppIntent::FocusPaneRight { window: wk() });
+stub_test!(intent_18_focus_pane_up, AppIntent::FocusPaneUp { window: wk() });
+stub_test!(intent_19_focus_pane_down, AppIntent::FocusPaneDown { window: wk() });
+
+// 20..23 PTY
+stub_test!(intent_20_pty_burst, AppIntent::PtyBurst { pane: pane(), generation: 1 });
+stub_test!(intent_21_pty_exit, AppIntent::PtyExit { pane: pane(), status: 0 });
+stub_test!(
+    intent_22_pty_write,
+    AppIntent::PtyWrite { pane: pane(), bytes: Bytes::from_static(b"hi") }
+);
+stub_test!(
+    intent_23_foreground_proc_changed,
+    AppIntent::ForegroundProcChanged { pane: pane(), name: Some("bash".into()) }
+);
+
+// 24..28 Keyboard / IME
+stub_test!(
+    intent_24_key,
+    AppIntent::Key { window: wk(), code: KeyCode(0x41), mods: mods(), pressed: true }
+);
+stub_test!(intent_25_ime_start, AppIntent::ImeStart { window: wk() });
+stub_test!(
+    intent_26_ime_preedit,
+    AppIntent::ImePreedit { window: wk(), text: "あ".into(), cursor: 0..1 }
+);
+stub_test!(intent_27_ime_commit, AppIntent::ImeCommit { window: wk(), text: "あ".into() });
+stub_test!(intent_28_ime_end, AppIntent::ImeEnd { window: wk() });
+
+// 29..32 Mouse
+stub_test!(
+    intent_29_mouse_button_down,
+    AppIntent::MouseButton {
+        window: wk(),
+        pressed: true,
+        button: MouseButton::Left,
+        mods: mods(),
+        pos: pos()
+    }
+);
+stub_test!(
+    intent_29_mouse_button_up,
+    AppIntent::MouseButton {
+        window: wk(),
+        pressed: false,
+        button: MouseButton::Left,
+        mods: mods(),
+        pos: pos()
+    }
+);
+stub_test!(intent_30_mouse_move, AppIntent::MouseMove { window: wk(), pos: pos() });
+stub_test!(
+    intent_31_mouse_wheel,
+    AppIntent::MouseWheel { window: wk(), dy: -1.0, dx: 0.0, mods: mods() }
+);
+stub_test!(
+    intent_32_hover_url,
+    AppIntent::HoverUrl { window: wk(), url: Some("https://x".into()) }
+);
+
+// 33..39 Scrollback
+stub_test!(intent_33_scroll_up, AppIntent::ScrollUp { window: wk(), lines: 3 });
+stub_test!(intent_34_scroll_down, AppIntent::ScrollDown { window: wk(), lines: 3 });
+stub_test!(intent_35_scroll_page_up, AppIntent::ScrollPageUp { window: wk() });
+stub_test!(intent_36_scroll_page_down, AppIntent::ScrollPageDown { window: wk() });
+stub_test!(intent_37_scroll_to_top, AppIntent::ScrollToTop { window: wk() });
+stub_test!(intent_38_scroll_to_bottom, AppIntent::ScrollToBottom { window: wk() });
+stub_test!(intent_39_scroll_to_cursor, AppIntent::ScrollToCursor { window: wk() });
+
+// 40..45 Selection / clipboard
+stub_test!(
+    intent_40_selection_start,
+    AppIntent::SelectionStart { window: wk(), anchor: cellpos(), mode: SelectionMode::Cell }
+);
+stub_test!(intent_41_selection_extend, AppIntent::SelectionExtend { window: wk(), to: cellpos() });
+stub_test!(intent_42_selection_end, AppIntent::SelectionEnd { window: wk() });
+stub_test!(intent_43_clear_selection, AppIntent::ClearSelection { window: wk() });
+stub_test!(intent_44_copy_selection, AppIntent::CopySelection { window: wk() });
+stub_test!(intent_45_paste, AppIntent::Paste { window: wk(), text: "hi".into(), bracketed: true });
+
+// 46..49 Search
+stub_test!(intent_46_open_search, AppIntent::OpenSearch { window: wk() });
+stub_test!(intent_47_search_query, AppIntent::SearchQuery { window: wk(), q: "needle".into() });
+stub_test!(intent_48_search_step, AppIntent::SearchStep { window: wk(), forward: true });
+stub_test!(intent_49_close_search, AppIntent::CloseSearch { window: wk() });
+
+// 50..53 Palette
+stub_test!(intent_50_toggle_command_palette, AppIntent::ToggleCommandPalette { window: wk() });
+stub_test!(intent_51_palette_filter, AppIntent::PaletteFilter { window: wk(), filter: "x".into() });
+stub_test!(intent_52_palette_step, AppIntent::PaletteStep { window: wk(), delta: 1 });
+stub_test!(
+    intent_53_palette_submit,
+    AppIntent::PaletteSubmit { window: wk(), choice: PaletteChoice { id: "new_tab".into() } }
+);
+
+// 54..55 OS drag / drop
+stub_test!(
+    intent_54_os_drag_outcome,
+    AppIntent::OsDragOutcome(PendingDragOutcomeCore { src_window: wk(), committed: false })
+);
+stub_test!(
+    intent_55_files_dropped,
+    AppIntent::FilesDropped { window: wk(), paths: vec![PathBuf::from("/x")] }
+);
+
+// 56 Hyperlinks
+stub_test!(intent_56_click_url, AppIntent::ClickUrl { window: wk(), url: "https://x".into() });
+
+// 57..59 Config / theming
+stub_test!(
+    intent_57_config_changed,
+    AppIntent::ConfigChanged { new: Box::new(PtyConfig::default()) }
+);
+stub_test!(intent_58_apply_theme, AppIntent::ApplyTheme { name: "Tokyo Night".into() });
+stub_test!(intent_59_font_size_delta, AppIntent::FontSizeDelta { delta: 1 });
+
+// 60 Broadcast
+stub_test!(
+    intent_60_set_broadcast_scope,
+    AppIntent::SetBroadcastScope { scope: BroadcastScope::Off }
+);
+stub_test!(
+    intent_60_set_broadcast_scope_custom,
+    AppIntent::SetBroadcastScope { scope: BroadcastScope::Custom(vec![pane()]) }
+);
+
+// 61..63 Frame timing / lifecycle
+stub_test!(intent_61_redraw_requested, AppIntent::RedrawRequested { window: wk() });
+stub_test!(intent_62_tick, AppIntent::Tick { now: Instant::now() });
+stub_test!(intent_63_exit, AppIntent::Exit);

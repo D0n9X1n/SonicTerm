@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 sonicterm-types = { workspace = true }
+bytes = "1"
+smallvec = "1"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

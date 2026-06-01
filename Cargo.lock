@@ -4586,7 +4586,10 @@ dependencies = [
 name = "sonicterm-app-core"
 version = "0.3.0"
 dependencies = [
+ "bytes",
+ "smallvec",
  "sonicterm-types",
+ "tracing",
 ]
 
 [[package]]
