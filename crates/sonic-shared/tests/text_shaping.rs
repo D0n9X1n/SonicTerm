@@ -39,7 +39,7 @@ fn font_system() -> FontSystem {
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
             let bytes = std::fs::read(&p).unwrap();
-            fs.db_mut().load_font_data(bytes);
+            sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
         }
     }
     fs
@@ -58,11 +58,11 @@ fn cells_for(s: &str) -> Vec<(u16, Cell)> {
 #[test]
 fn plain_ascii_one_glyph_per_cell_no_regression() {
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let cells = cells_for("hello");
     let out = shape_run(
         &mut r,
-        "Rec Mono Casual",
+        "Rec Mono St.Helens",
         DEFAULT_RASTER_PX,
         RunStyle { bold: false, italic: false },
         &cells,
@@ -81,13 +81,13 @@ fn plain_ascii_one_glyph_per_cell_no_regression() {
 #[test]
 fn arrow_ligature_collapses_when_supported() {
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     // `=>` is the canonical "fat arrow" ligature shipped by both Rec
     // Mono Casual and JetBrains Mono.
     let cells = cells_for("=>");
     let out = shape_run(
         &mut r,
-        "Rec Mono Casual",
+        "Rec Mono St.Helens",
         DEFAULT_RASTER_PX,
         RunStyle { bold: false, italic: false },
         &cells,
@@ -115,7 +115,7 @@ fn arrow_ligature_collapses_when_supported() {
 #[test]
 fn zwj_family_composes_or_decomposes_predictably() {
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     // 👨‍👩‍👧 = MAN + ZWJ + WOMAN + ZWJ + GIRL. 5 codepoints; if the
     // active font has the ZWJ sequence it composes to 1 glyph,
     // otherwise the shaper emits the 3 base emoji as separate glyphs
@@ -123,7 +123,7 @@ fn zwj_family_composes_or_decomposes_predictably() {
     let cells = cells_for("👨\u{200d}👩\u{200d}👧");
     let out = shape_run(
         &mut r,
-        "Rec Mono Casual",
+        "Rec Mono St.Helens",
         DEFAULT_RASTER_PX,
         RunStyle { bold: false, italic: false },
         &cells,
@@ -151,11 +151,11 @@ fn ligature_lead_col_stays_at_first_source_cell() {
     // the renderer places it correctly (and cursor / selection math
     // built on per-cell rects still aligns).
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let cells = cells_for("a!=b");
     let out = shape_run(
         &mut r,
-        "Rec Mono Casual",
+        "Rec Mono St.Helens",
         DEFAULT_RASTER_PX,
         RunStyle { bold: false, italic: false },
         &cells,
@@ -202,18 +202,18 @@ fn shape_cache_hits_on_repeat_calls() {
     // Same row content + style on two successive frames must hit the
     // cache on the second call — that's the whole point of the cache.
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let mut cache = sonic_shared::shape::ShapeCache::new();
 
     let cells = cells_for("$ git status");
     let style = RunStyle { bold: false, italic: false };
 
-    let first = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+    let first = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells);
     assert_eq!(cache.hits(), 0);
     assert_eq!(cache.misses(), 1);
     assert!(!first.is_empty());
 
-    let second = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &cells);
+    let second = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &cells);
     assert_eq!(cache.hits(), 1, "second call with identical inputs must hit the cache");
     assert_eq!(cache.misses(), 1, "miss count must not advance on a cache hit");
     assert_eq!(first.len(), second.len(), "cached glyph list must match the shaped list");
@@ -221,7 +221,7 @@ fn shape_cache_hits_on_repeat_calls() {
     // Different style (italic) must miss again — the cache key
     // includes (bold, italic).
     let italic = RunStyle { bold: false, italic: true };
-    let _ = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, italic, &cells);
+    let _ = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, italic, &cells);
     assert_eq!(cache.misses(), 2, "different style must miss the cache");
 }
 
@@ -234,7 +234,7 @@ fn shape_cache_rebases_lead_col_across_positions() {
     // the renderer then drew the run at the wrong x. Regression for
     // Haiku review on PR #57.
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
     let mut cache = sonic_shared::shape::ShapeCache::new();
 
     fn run_at(text: &str, start_col: u16) -> Vec<(u16, Cell)> {
@@ -245,9 +245,9 @@ fn shape_cache_rebases_lead_col_across_positions() {
     let at5 = run_at("hello", 5);
     let at10 = run_at("hello", 10);
 
-    let g5 = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &at5);
+    let g5 = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &at5);
     assert_eq!(cache.misses(), 1);
-    let g10 = cache.get_or_shape(&mut r, "Rec Mono Casual", DEFAULT_RASTER_PX, style, &at10);
+    let g10 = cache.get_or_shape(&mut r, "Rec Mono St.Helens", DEFAULT_RASTER_PX, style, &at10);
     // Same text — must hit the cache (proves relative-column keying).
     assert_eq!(cache.hits(), 1, "same text at different col must hit the cache");
     assert_eq!(cache.misses(), 1);
@@ -322,12 +322,12 @@ fn cjk_shaping_never_returns_primary_slot_glyph_for_cjk_codepoint() {
     // as '臭'. After the fix, shape_run must NOT emit (font_slot=0,
     // glyph_id=N!=0) for a CJK codepoint when the primary font lacks it.
     let mut fs = font_system();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
 
     let cells = cells_for("中文测试");
     let glyphs = shape_run(
         &mut r,
-        "Rec Mono Casual",
+        "Rec Mono St.Helens",
         DEFAULT_RASTER_PX,
         RunStyle { bold: false, italic: false },
         &cells,

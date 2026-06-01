@@ -25,7 +25,7 @@ fn font_system_with_bundled() -> FontSystem {
             let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
                 if let Ok(bytes) = std::fs::read(&p) {
-                    fs.db_mut().load_font_data(bytes);
+                    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
                 }
             }
         }
@@ -40,7 +40,7 @@ fn prebake_populates_atlas_with_box_drawing_glyphs() {
     let baseline = atlas.len();
 
     let inserted = {
-        let mut rast = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+        let mut rast = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
         prebake_box_and_powerline(&mut rast, &mut atlas)
     };
 
@@ -67,7 +67,7 @@ fn prebake_populates_atlas_with_box_drawing_glyphs() {
     // rasterizer resolved (it may not be slot 0 if the primary face
     // lacks the box-drawing block — Recursive Mono does not always).
     let slot = {
-        let mut rast = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+        let mut rast = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
         rast.resolve_slot('\u{2500}', false, false)
     };
     if let Some(slot) = slot {

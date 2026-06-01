@@ -44,8 +44,9 @@ fn nerd_font_not_first_in_macos_fallback_chain() {
         "macOS fallback chain must begin with PingFang SC for correct CJK"
     );
     assert!(
-        platform_fallback_chain_for_test().contains(&"JetBrainsMono Nerd Font"),
-        "JetBrainsMono Nerd Font must still appear in the chain (tail) for PUA codepoints"
+        !platform_fallback_chain_for_test().contains(&"JetBrainsMono Nerd Font"),
+        "the bundled JetBrainsMono TTFs were dropped in #419; the chain must not \
+         reference them anymore (Nerd Font PUA glyphs now rely on a system install)"
     );
 }
 

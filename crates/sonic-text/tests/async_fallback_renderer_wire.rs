@@ -78,7 +78,7 @@ fn missing_glyph_triggers_request_load_for_every_platform_chain_entry() {
     // async-load path.
     let mut fs = empty_font_system();
     let mut rasterizer =
-        SwashRasterizer::new(&mut fs, "Rec Mono Casual", 16.0).with_async_loader(loader.clone());
+        SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", 16.0).with_async_loader(loader.clone());
 
     let result = rasterizer.resolve_slot(TOFU_CHAR, false, false);
     assert!(
@@ -124,7 +124,7 @@ fn no_loader_attached_keeps_legacy_behavior() {
     // With no loader, the historical contract (resolve_slot returns
     // None and caches the negative) must still hold.
     let mut fs = empty_font_system();
-    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono Casual", 16.0);
+    let mut rasterizer = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", 16.0);
 
     assert!(rasterizer.async_loader().is_none());
     let first = rasterizer.resolve_slot(TOFU_CHAR, false, false);

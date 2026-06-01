@@ -13,7 +13,7 @@ use sonic_shared::{
 
 const FONT_SIZE: f32 = 14.0;
 const SCALE_FACTOR: f32 = 2.0;
-const FONT_FAMILY: &str = "Rec Mono Casual";
+const FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();

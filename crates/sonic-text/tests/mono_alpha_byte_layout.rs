@@ -51,7 +51,7 @@ mod mac_linux {
     #[test]
     fn mono_alpha_returns_one_byte_per_pixel() {
         let mut fs = font_system_with_assets();
-        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
         let tile = r.rasterize(GlyphKey::new('A', false, false)).expect("rasterize A");
 
         assert!(!tile.is_color, "LCD outline glyph must not be flagged as color");

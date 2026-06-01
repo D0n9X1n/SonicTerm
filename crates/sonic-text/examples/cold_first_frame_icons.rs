@@ -42,7 +42,7 @@ fn main() {
     // gate (`primary_has_glyph`) actually claims the icon range.
     // This mirrors the real-world setup that issue #415 reproduces
     // on (the user's config names a Nerd Font as `font.family`).
-    let font_family = "JetBrainsMono Nerd Font";
+    let font_family = "Rec Mono St.Helens";
     let font_size = 14.0_f32;
     let scale = 2.0_f32;
 

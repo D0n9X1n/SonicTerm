@@ -185,7 +185,7 @@ fn box_drawing_roundtrips() {
 
 // -----------------------------------------------------------------------
 // Powerline glyphs (Private Use Area). Sonic ships a Nerd-Font-patched
-// "Rec Mono Casual" so these MUST be preserved in the grid. The
+// "Rec Mono St.Helens" so these MUST be preserved in the grid. The
 // renderer-side test asserts a tile actually rasterizes.
 // -----------------------------------------------------------------------
 #[test]

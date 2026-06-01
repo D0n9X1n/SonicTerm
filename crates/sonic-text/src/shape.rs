@@ -149,7 +149,7 @@ impl RunStyle {
 /// entries) through cosmic-text and return one [`ShapedGlyph`] per
 /// shaper-emitted glyph.
 ///
-/// `family` is the primary family name (e.g. "Rec Mono Casual"); the
+/// `family` is the primary family name (e.g. "Rec Mono St.Helens"); the
 /// shaper falls back through the FontSystem's fontdb on a charmap
 /// miss, matching the renderer's own fallback expectations.
 ///

@@ -27,9 +27,14 @@ fn cjk_diag_what_does_cosmic_text_return() {
     ];
 
     let mut fs = FontSystem::new();
-    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", 28.0);
-    let out =
-        shape_run(&mut r, "Rec Mono Casual", 14.0, RunStyle { bold: false, italic: false }, &cells);
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", 28.0);
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        14.0,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
 
     eprintln!("=== shape_run output for 中文测试 ===");
     eprintln!("glyph count: {}", out.len());

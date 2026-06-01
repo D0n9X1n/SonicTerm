@@ -15,7 +15,7 @@
 //! ## Font fallback (B3.1, this PR)
 //!
 //! Before B3.1, the rasterizer queried a single family (default
-//! "Rec Mono Casual") and returned `None` for any codepoint that face
+//! "Rec Mono St.Helens") and returned `None` for any codepoint that face
 //! lacked — every CJK character, emoji, and most accented letters
 //! rendered as a tofu box. Glyphon (the pre-B3 path) had this for free
 //! via cosmic-text's `Buffer` shaping; the atlas path lost it.
@@ -209,14 +209,14 @@ pub const DEFAULT_RASTER_PX: f32 = 14.0;
 ///
 /// Other (Linux/CI): Noto family. Tests don't depend on these resolving,
 /// but the chain shouldn't be empty.
-// NOTE: `JetBrainsMono Nerd Font` lives at the TAIL of every chain.
-// PR #267 inserted it at the FRONT to satisfy Nerd Font PUA-codepoint
-// coverage (#261), but at the front it stole CJK glyph resolution from
-// PingFang/Microsoft YaHei/Noto because cosmic-text walks the chain in
-// order. Nerd Font has no CJK coverage, so CJK cells rendered as tofu /
-// JBM-mangled boxes on macOS — the P0 user-visible regression. The tail
-// position still resolves the PUA codepoints (#261) because no earlier
-// face in the chain covers them.
+// NOTE: PR #267 inserted `JetBrainsMono Nerd Font` at the FRONT of the
+// chain for PUA-codepoint coverage (#261); the tail position was the
+// follow-up fix so CJK glyph resolution wasn't stolen from
+// PingFang/Microsoft YaHei/Noto. The R1 rename (#419) drops the bundled
+// JetBrainsMono TTFs entirely — Nerd Font PUA coverage now relies on a
+// system-installed Nerd Font (the previous in-tree set is removed); if
+// it isn't present those PUA codepoints render as tofu, which is the
+// agreed trade for shipping only St.Helens.
 #[cfg(target_os = "macos")]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "PingFang SC",
@@ -224,17 +224,10 @@ const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "Apple SD Gothic Neo",
     "Symbols Nerd Font Mono",
     "Apple Color Emoji",
-    "JetBrainsMono Nerd Font",
 ];
 #[cfg(target_os = "windows")]
-const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
-    "Microsoft YaHei",
-    "MS Gothic",
-    "Malgun Gothic",
-    "Symbols Nerd Font Mono",
-    "Segoe UI Emoji",
-    "JetBrainsMono Nerd Font",
-];
+const PLATFORM_FALLBACK_CHAIN: &[&str] =
+    &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "Symbols Nerd Font Mono", "Segoe UI Emoji"];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "Noto Sans CJK SC",
@@ -242,7 +235,6 @@ const PLATFORM_FALLBACK_CHAIN: &[&str] = &[
     "Noto Sans CJK KR",
     "Symbols Nerd Font Mono",
     "Noto Color Emoji",
-    "JetBrainsMono Nerd Font",
 ];
 
 /// Maximum number of families in the fallback chain. One byte in the
@@ -462,9 +454,9 @@ impl<'a> SwashRasterizer<'a> {
     }
 
     /// Convenience: build at [`DEFAULT_RASTER_PX`] with the bundled
-    /// "Rec Mono Casual" family. Used by the test harness.
+    /// "Rec Mono St.Helens" family. Used by the test harness.
     pub fn with_default_family(font_system: &'a mut FontSystem) -> Self {
-        Self::new(font_system, "Rec Mono Casual", DEFAULT_RASTER_PX)
+        Self::new(font_system, "Rec Mono St.Helens", DEFAULT_RASTER_PX)
     }
 
     /// Look up the fontdb ID for `family` at the given (bold, italic)

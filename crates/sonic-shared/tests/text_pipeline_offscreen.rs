@@ -41,7 +41,7 @@ fn font_system() -> FontSystem {
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
             let bytes = std::fs::read(&p).unwrap();
-            fs.db_mut().load_font_data(bytes);
+            sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
         }
     }
     fs
@@ -75,7 +75,7 @@ fn atlas_text_pipeline_writes_visible_pixels_offscreen() {
 
     // Rasterize 'A' and pack it.
     let info = {
-        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
         atlas.get_or_insert(GlyphKey::new('A', false, false), &mut r).expect("rasterize A")
     };
     assert!(info.px_size[0] > 0 && info.px_size[1] > 0, "A must have visible pixels");

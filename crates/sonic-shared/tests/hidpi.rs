@@ -15,7 +15,7 @@ use sonic_shared::glyph_atlas::GlyphAtlas;
 use sonic_shared::swash_rasterizer::SwashRasterizer;
 
 const FONT_SIZE: f32 = 14.0;
-const FONT_FAMILY: &str = "Rec Mono Casual";
+const FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();
@@ -28,7 +28,7 @@ fn font_system_with_bundled() -> FontSystem {
         let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
             let bytes = std::fs::read(&p).unwrap();
-            fs.db_mut().load_font_data(bytes);
+            sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
             loaded += 1;
         }
     }

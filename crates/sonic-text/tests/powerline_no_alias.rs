@@ -29,7 +29,7 @@ mod mac_linux {
         load_bundled_fonts(&mut fs);
         // Slot 0 = primary; the bundled Nerd Font is in the chain so
         // we let `resolve_slot` pick the right slot for U+E0B0.
-        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono Casual", DEFAULT_RASTER_PX);
+        let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
         let Some(slot) = r.resolve_slot('\u{E0B0}', false, false) else {
             // No bundled font has the Powerline range in this env (e.g.
             // CI without the assets pulled). Don't fail the suite — the

@@ -49,7 +49,7 @@ fn normal_lookup_rejects_italic_face_when_regular_is_missing() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/fonts/RecMonoSt.Helens-Italic.ttf");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-    fs.db_mut().load_font_data(bytes);
+    sonic_text::load_font_data_with_sonic_overrides(&mut fs, bytes);
 
     assert!(
         lookup_id_in_db(fs.db(), "Rec Mono St.Helens", false, false).is_none(),
@@ -63,8 +63,13 @@ fn plain_ascii_one_glyph_per_cell() {
     let mut r = SwashRasterizer::with_default_family(&mut fs);
     let cells: Vec<(u16, Cell)> =
         "abc".chars().enumerate().map(|(i, ch)| (i as u16, cell(ch))).collect();
-    let out =
-        shape_run(&mut r, "Rec Mono Casual", 14.0, RunStyle { bold: false, italic: false }, &cells);
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        14.0,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
     assert_eq!(out.len(), 3, "ASCII abc must produce one glyph per cell");
     for (i, g) in out.iter().enumerate() {
         assert_eq!(g.lead_col, i as u16);
