@@ -178,6 +178,19 @@ pub struct WindowState {
     /// lazily on first interaction; entries for closed panes are
     /// pruned opportunistically on the next render.
     pub scrollbar_vis: HashMap<u64, scrollbar_visibility::ScrollbarVisState>,
+    /// Test-only mirror of the renderer's `drag_chip` overlay (#438).
+    /// Production code leaves this `None`. Headless tests use
+    /// [`App::__test_set_window_drag_chip_marker`] to flip it `Some(true)`
+    /// before calling [`App::cancel_drag_session`], then assert it is
+    /// `Some(false)` afterward via [`App::__test_window_drag_chip_marker`].
+    /// `cancel_drag_session` flips this in lock-step with the real
+    /// `renderer.set_drag_chip(None)` call (when `Some(_)`), so the test
+    /// observes the SAME loop iteration the production path runs — if
+    /// someone deletes the per-window iteration the marker stays `Some(true)`
+    /// and the test fails. This is the test seam Haiku review of PR #443
+    /// asked for (the `renderer: None` headless windows could not otherwise
+    /// observe `set_drag_chip(None)`).
+    pub test_drag_chip_marker: Option<bool>,
 }
 
 impl WindowState {
@@ -1760,6 +1773,7 @@ impl App {
             hidden: false,
             scrollbar_drag: None,
             scrollbar_vis: HashMap::new(),
+            test_drag_chip_marker: None,
         };
         self.windows.insert(id, child);
         id
@@ -1787,6 +1801,47 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|ws| ws.drag_target.is_some())
+    }
+
+    /// Test-only (#438, PR #443 cycle-2): seed the headless drag-chip
+    /// marker on a window so a subsequent [`Self::cancel_drag_session`]
+    /// can be observed to have cleared it. Returns `false` if the window
+    /// id is unknown. The marker is the cross-platform stand-in for
+    /// `renderer.set_drag_chip(_)` on `renderer: None` test windows —
+    /// production code flips it in the same loop iteration as the real
+    /// renderer call, so the assertion fails if the per-window iteration
+    /// is ever removed.
+    #[doc(hidden)]
+    pub fn __test_set_window_drag_chip_marker(&mut self, id: WindowId, present: bool) -> bool {
+        if let Some(ws) = self.windows.get_mut(&id) {
+            ws.test_drag_chip_marker = Some(present);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Test-only (#438, PR #443 cycle-2): read the drag-chip marker for
+    /// a window. `None` ⇒ window absent OR marker never seeded;
+    /// `Some(true)` ⇒ marker set & not yet cleared by cancel;
+    /// `Some(false)` ⇒ marker was set and cancel ran on this window.
+    #[doc(hidden)]
+    pub fn __test_window_drag_chip_marker(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).and_then(|ws| ws.test_drag_chip_marker)
+    }
+
+    /// Test-only convenience: same as
+    /// [`Self::__test_set_window_drag_chip_marker`] but for the
+    /// synthetic main window (id from [`synthetic_main_window_id`]).
+    #[doc(hidden)]
+    pub fn __test_set_main_drag_chip_marker(&mut self, present: bool) -> bool {
+        self.__test_set_window_drag_chip_marker(synthetic_main_window_id(), present)
+    }
+
+    /// Test-only convenience: read the main window's drag-chip marker.
+    #[doc(hidden)]
+    pub fn __test_main_drag_chip_marker(&self) -> Option<bool> {
+        self.__test_window_drag_chip_marker(synthetic_main_window_id())
     }
 
     /// Test-only (#438): seed drag-gesture residue on a specific child
@@ -2362,6 +2417,7 @@ impl App {
             hidden: false,
             scrollbar_drag: None,
             scrollbar_vis: HashMap::new(),
+            test_drag_chip_marker: None,
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);
@@ -2936,9 +2992,20 @@ impl App {
             // whatever Some(_) value sits here, so leaving it behind
             // ships a stale chip until something else triggers a
             // set_drag_chip(None). For headless test windows the
-            // renderer is None and this is a no-op.
+            // renderer is None — the `test_drag_chip_marker` mirror
+            // below is what os_drag_cleanup.rs asserts against. Both
+            // are flipped in lock-step so the test fails if either
+            // path is ever removed.
             if let Some(r) = ws.renderer.as_mut() {
                 r.set_drag_chip(None);
+            }
+            // #438 / PR #443 cycle-2 (Haiku review): mirror the renderer
+            // clear into the headless test marker so `renderer: None`
+            // windows can still verify cancel_drag_session iterated this
+            // WindowState. Production windows leave `test_drag_chip_marker`
+            // as `None`, so this is a no-op outside tests.
+            if let Some(marker) = ws.test_drag_chip_marker.as_mut() {
+                *marker = false;
             }
             // Force a repaint so the cleared chip actually leaves the
             // screen instead of waiting for the next external event.

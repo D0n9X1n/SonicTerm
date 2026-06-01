@@ -7,16 +7,23 @@
 //! rectangle was left floating in empty pane space after a tab
 //! tear-out gesture ended without a "real" mouse-up event.
 //!
-//! These tests cover the App-observable half of the fix (per-window
-//! `pressed_tab` / `mouse_down` / `drag_session` / `drag_target`
-//! state). The renderer `drag_chip` clearing is also performed by the
-//! production code path inside `cancel_drag_session`, but the headless
-//! test seam constructs windows with `renderer: None`, so the
-//! `if let Some(r) = ws.renderer.as_mut()` branch is a no-op here. The
-//! cross-platform §13 GUI smoke (skipped for this cleanup-only PR per
-//! the issue) would catch a renderer regression visually.
+//! These tests cover both the App-observable per-window scalar state
+//! (`pressed_tab` / `mouse_down` / `drag_session` / `drag_target`)
+//! AND — via the `test_drag_chip_marker` seam (#443 cycle-2) — the
+//! drag-chip clear that production code runs against the renderer.
+//!
+//! Seam rationale (Haiku review on PR #443): unit tests cannot
+//! construct a real `GpuRenderer` (it needs a live wgpu surface), so
+//! production code flips `test_drag_chip_marker` in lock-step with
+//! the real `renderer.set_drag_chip(None)` call. Tests pre-seed each
+//! window's marker to `Some(true)` BEFORE the cancel, and assert it
+//! is `Some(false)` AFTER — proving the per-window iteration ran on
+//! that window. If a future refactor drops the per-window loop, the
+//! marker stays `Some(true)` and the assertion fails. This is more
+//! substantive than the previous `renderer: None` no-op, which left
+//! the test green even if production never touched the renderer.
 
-use sonicterm_app::app::App;
+use sonicterm_app::app::{synthetic_main_window_id, App};
 use sonicterm_core::{
     config::Config,
     keymap::{Keymap, Meta},
@@ -79,31 +86,34 @@ fn make_app() -> App {
 
 #[test]
 fn cancel_drag_session_clears_pressed_tab_and_mouse_down_on_child_windows() {
-    // The pre-#438 implementation only wrote `pressed_tab = None`
-    // / `mouse_down = false` through `main_mut()`, so a child window
-    // that had recorded a tab press would carry the stale values
-    // forward and the very next pointer event in that child would
-    // believe a drag was still in flight.
     let mut app = make_app();
     let child_id = app.__test_seed_child_window(&["c1", "c2"]);
 
-    // Seed BOTH main and child with drag residue.
+    // Seed scalar residue on BOTH main and child.
     app.__test_set_pressed_tab(Some(0));
     app.__test_set_mouse_down(true);
     assert!(app.__test_seed_child_drag_residue(child_id, Some(1), true, false));
 
-    // Sanity: residue is observable before the cancel.
+    // Seed drag-chip markers on BOTH windows — this is the renderer
+    // stand-in (#443 cycle-2). If cancel_drag_session fails to iterate
+    // either window, that window's marker stays `Some(true)`.
+    assert!(app.__test_set_main_drag_chip_marker(true));
+    assert!(app.__test_set_window_drag_chip_marker(child_id, true));
+
+    // Sanity: residue + markers are observable before the cancel.
     assert_eq!(app.__test_pressed_tab(), Some(0));
     assert!(app.__test_mouse_down());
     assert_eq!(app.__test_child_pressed_tab(child_id), Some(Some(1)));
     assert_eq!(app.__test_child_mouse_down(child_id), Some(true));
+    assert_eq!(app.__test_main_drag_chip_marker(), Some(true));
+    assert_eq!(app.__test_window_drag_chip_marker(child_id), Some(true));
 
     let _ = app.cancel_drag_session();
 
-    // Main is cleared (pre-#438 behavior, kept).
+    // Scalar state: main is cleared (pre-#438 behavior).
     assert_eq!(app.__test_pressed_tab(), None);
     assert!(!app.__test_mouse_down());
-    // Child is ALSO cleared (the #438 fix).
+    // Scalar state: child is ALSO cleared (the #438 fix).
     assert_eq!(
         app.__test_child_pressed_tab(child_id),
         Some(None),
@@ -114,17 +124,27 @@ fn cancel_drag_session_clears_pressed_tab_and_mouse_down_on_child_windows() {
         Some(false),
         "#438: cancel_drag_session must clear child mouse_down"
     );
+    // Renderer stand-in: BOTH windows had their drag-chip clear executed
+    // (production code flips this in lock-step with renderer.set_drag_chip(None)).
+    assert_eq!(
+        app.__test_main_drag_chip_marker(),
+        Some(false),
+        "#438 (Haiku PR#443): cancel_drag_session must clear MAIN drag_chip"
+    );
+    assert_eq!(
+        app.__test_window_drag_chip_marker(child_id),
+        Some(false),
+        "#438 (Haiku PR#443): cancel_drag_session must clear CHILD drag_chip"
+    );
 }
 
 #[test]
 fn cancel_drag_session_clears_drag_session_on_child_windows() {
-    // Verifies the existing per-window drag_session / drag_target
-    // sweep already in cancel_drag_session keeps working in the
-    // multi-window seed, AND that the return value signals "had a
-    // session" when a child (not main) was the carrier.
     let mut app = make_app();
     let child_id = app.__test_seed_child_window(&["only"]);
     assert!(app.__test_seed_child_drag_residue(child_id, Some(0), true, true));
+    assert!(app.__test_set_main_drag_chip_marker(true));
+    assert!(app.__test_set_window_drag_chip_marker(child_id, true));
 
     assert_eq!(app.__test_child_has_drag_session(child_id), Some(true));
 
@@ -143,20 +163,47 @@ fn cancel_drag_session_clears_drag_session_on_child_windows() {
     );
     assert_eq!(app.__test_child_pressed_tab(child_id), Some(None));
     assert_eq!(app.__test_child_mouse_down(child_id), Some(false));
+    // Renderer stand-in: cancel ran the per-window loop on both windows
+    // and cleared each drag_chip marker.
+    assert_eq!(app.__test_main_drag_chip_marker(), Some(false));
+    assert_eq!(app.__test_window_drag_chip_marker(child_id), Some(false));
 }
 
 #[test]
 fn cancel_drag_session_is_idempotent_across_all_windows() {
-    // Calling cancel_drag_session twice in a row on a multi-window
-    // App must not panic and must leave every window in the
-    // already-cleared state.
     let mut app = make_app();
     let child_id = app.__test_seed_child_window(&["x"]);
     assert!(app.__test_seed_child_drag_residue(child_id, Some(0), true, true));
+    assert!(app.__test_set_main_drag_chip_marker(true));
+    assert!(app.__test_set_window_drag_chip_marker(child_id, true));
     let _ = app.cancel_drag_session();
+
+    // After first cancel: every marker is Some(false).
+    assert_eq!(app.__test_main_drag_chip_marker(), Some(false));
+    assert_eq!(app.__test_window_drag_chip_marker(child_id), Some(false));
+
+    // Re-arm one marker to prove the second cancel still iterates every
+    // window (and isn't short-circuited by the `had = false` return).
+    assert!(app.__test_set_window_drag_chip_marker(child_id, true));
+
     let had = app.cancel_drag_session();
-    assert!(!had, "second cancel finds nothing to cancel");
+    assert!(!had, "second cancel finds no live drag session");
     assert_eq!(app.__test_child_pressed_tab(child_id), Some(None));
     assert_eq!(app.__test_child_mouse_down(child_id), Some(false));
     assert_eq!(app.__test_child_has_drag_session(child_id), Some(false));
+    // The re-armed marker proves cancel iterated the child window
+    // even when no drag_session was live.
+    assert_eq!(
+        app.__test_window_drag_chip_marker(child_id),
+        Some(false),
+        "#438 (Haiku PR#443): cancel_drag_session must iterate ALL windows on every call"
+    );
+}
+
+// `synthetic_main_window_id` is referenced indirectly via the
+// __test_*_main_drag_chip_marker helpers; pull the symbol in to keep
+// rustdoc cross-refs sane.
+#[allow(dead_code)]
+fn _ref_synth_id() -> winit::window::WindowId {
+    synthetic_main_window_id()
 }
