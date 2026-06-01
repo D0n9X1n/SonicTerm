@@ -50,7 +50,7 @@ See **`docs/ARCHITECTURE.md`** for the full dep graph.
 - `assets/icons/source/sonic.svg` — hand-authored SVG master (user-supplied final design). Variants: `sonic-mono.svg`, `sonic-glyph.svg`.
 - `assets/icons/exports/` — committed PNG / .icns / .ico bakes. Regenerate with `bash assets/icons/bake-icons.sh` (needs `brew install librsvg`).
 - `assets/themes/{tokyo-night,dracula,nord,catppuccin-mocha,gruvbox-dark-hard,wezterm}.toml`
-- `assets/keymaps/wezterm.toml`
+- `assets/keymaps/sonicterm.toml`
 - `assets/fonts/` — `Rec Mono Casual` shipped as guaranteed-present fallback. **Default font is `St Helens`** (#148), system-installed, not bundled — renderer falls through to system mono if missing.
 
 ### Docs
@@ -250,7 +250,7 @@ User config lives at:
 - macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
 - Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
 
-Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5). Default font is `St Helens` (system, not bundled); `Rec Mono Casual` ships under `assets/fonts/` as guaranteed fallback.
+Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/sonicterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5). Default font is `St Helens` (system, not bundled); `Rec Mono Casual` ships under `assets/fonts/` as guaranteed fallback.
 
 ---
 

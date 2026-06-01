@@ -65,7 +65,7 @@
 
                         <Directory Id='AssetsKeymapsDir' Name='keymaps'>
                             <Component Id='asset_keymaps' Guid='C1A21A01-0000-0000-0000-000000000102' Win64='yes'>
-                                <File Id='keymap_wezterm' Name='wezterm.toml' DiskId='1' Source='..\assets\keymaps\wezterm.toml' KeyPath='yes'/>
+                                <File Id='keymap_sonicterm' Name='sonicterm.toml' DiskId='1' Source='..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
                             </Component>
                         </Directory>
 

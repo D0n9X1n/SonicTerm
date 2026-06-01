@@ -286,7 +286,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
             theme: "gruvbox-dark-hard".to_string(),
-            keymap: "wezterm".to_string(),
+            keymap: "sonicterm".to_string(),
             logging: sonicterm_logging::LoggingConfig::default(),
             accessibility: AccessibilityConfig::default(),
             locale: String::new(),

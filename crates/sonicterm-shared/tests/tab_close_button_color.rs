@@ -26,7 +26,7 @@ fn startup_with_custom_tab_close_button_color_parses_into_config() {
         &path,
         r##"
 theme = "tokyo-night"
-keymap = "wezterm"
+keymap = "sonicterm"
 tab_close_button_color = "#ff5555"
 
 [font]
@@ -52,7 +52,7 @@ fn live_reload_change_to_tab_close_button_color_is_observable() {
         &path,
         r##"
 theme = "tokyo-night"
-keymap = "wezterm"
+keymap = "sonicterm"
 
 [font]
 family = "Rec Mono St.Helens"
@@ -68,7 +68,7 @@ line_height = 1.2
         &path,
         r##"
 theme = "tokyo-night"
-keymap = "wezterm"
+keymap = "sonicterm"
 tab_close_button_color = "#aabbcc"
 
 [font]

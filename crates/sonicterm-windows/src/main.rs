@@ -135,7 +135,7 @@ fn load_config() -> Result<Config> {
 }
 
 pub fn windows_default_config() -> Config {
-    Config { keymap: "wezterm-windows".to_string(), ..Config::default() }
+    Config { keymap: "sonicterm-windows".to_string(), ..Config::default() }
 }
 
 fn load_theme(name: &str) -> Result<Theme> {
