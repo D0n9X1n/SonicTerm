@@ -4777,8 +4777,10 @@ name = "sonicterm-types"
 version = "0.3.0"
 dependencies = [
  "bitflags 2.11.1",
+ "glob",
  "serde",
  "serde_json",
+ "toml 0.8.2",
 ]
 
 [[package]]

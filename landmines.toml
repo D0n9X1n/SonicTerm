@@ -1,0 +1,98 @@
+# landmines.toml
+#
+# Machine-checkable mirror of CLAUDE.md §4. Each entry pairs a class of
+# bug with the file globs that can re-introduce it and the test paths
+# that prove it stays dead. `tools/check-landmines.sh` is a diff-scoped
+# pre-commit/CI gate; `crates/sonicterm-types/tests/contract_landmine_coverage.rs`
+# is the TOML self-test that fails if a glob matches no files or a
+# required test path doesn't exist.
+#
+# Editing this file without also updating docs/agents/_common.md (or
+# vice versa) is a contract drift — keep them in lockstep.
+
+[[landmine]]
+id = "LM-001-try-lock-render-path"
+description = "render path must use try_lock not lock to avoid AB-BA deadlock"
+file_globs = [
+  "crates/sonicterm-app/src/app/window_event.rs",
+  "crates/sonicterm-app/src/app/child_window.rs",
+  "crates/sonicterm-app/src/app/misc.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'Render uses try_lock'"
+severity = "block"
+
+[[landmine]]
+id = "LM-002-pty-3ms-coalesce"
+description = "PTY-thread redraw coalescer = 3 ms min + 128 KB byte flush; never per-byte redraw"
+file_globs = [
+  "crates/sonicterm-app/src/app/spawn_pane.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'PTY-thread redraw coalescing'"
+severity = "block"
+
+[[landmine]]
+id = "LM-003-pty-burst-flag-counter"
+description = "PTY burst flag is a generation counter, not a bool (PR #162)"
+file_globs = [
+  "crates/sonicterm-app/src/app/window_event.rs",
+  "crates/sonicterm-app/src/app/spawn_pane.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'PTY burst flag'"
+severity = "block"
+
+[[landmine]]
+id = "LM-004-no-heartbeat-redraw"
+description = "no unconditional heartbeat redraw at end of window_event (feedback loop)"
+file_globs = [
+  "crates/sonicterm-app/src/app/window_event.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'No unconditional heartbeat redraw'"
+severity = "block"
+
+[[landmine]]
+id = "LM-005-csi-ed-el-mode-param"
+description = "CSI J (ED) and K (EL) must honor mode param (0=below, 1=above, 2=all)"
+file_globs = [
+  "crates/sonicterm-vt/src/vt.rs",
+]
+required_test_paths = [
+  "shell_prompt_redraw_preserves_above_cursor",
+]
+clauseref = "CLAUDE.md §4 'CSI J and K MUST honor the mode parameter'"
+severity = "block"
+
+[[landmine]]
+id = "LM-006-1049h-noop-when-alt"
+description = "CSI ?1049h must be a no-op when already in alt screen (vim/fzf re-entry)"
+file_globs = [
+  "crates/sonicterm-vt/src/vt.rs",
+]
+required_test_paths = [
+  "dec_1049h_repeated_does_not_clobber_saved_cursor",
+]
+clauseref = "CLAUDE.md §4 'CSI ?1049h must be a no-op when already in alt screen'"
+severity = "block"
+
+[[landmine]]
+id = "LM-007-pty-drop-kills-child"
+description = "PtyHandle::Drop must kill the child explicitly to avoid orphans"
+file_globs = [
+  "crates/sonicterm-io/src/pty.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'PtyHandle::Drop kills the child'"
+severity = "block"
+
+[[landmine]]
+id = "LM-008-url-open-validate-mandatory"
+description = "url_open::validate() mandatory before spawning anything (OSC 8 from untrusted PTY)"
+file_globs = [
+  "crates/sonicterm-cfg/src/url_open.rs",
+]
+required_test_paths = []
+clauseref = "CLAUDE.md §4 'url_open::validate() is mandatory'"
+severity = "block"
