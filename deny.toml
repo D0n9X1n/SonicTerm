@@ -6,7 +6,7 @@ yanked = "warn"
 ignore = [
     # bincode 1.x is permanently unmaintained per RUSTSEC-2025-0141 but the
     # upstream team explicitly considers 1.3.3 a complete, stable release.
-    # Only pulled in by sonic-mux; migration tracked separately.
+    # Only pulled in by sonicterm-mux; migration tracked separately.
     "RUSTSEC-2025-0141",
     # proc-macro-error is unmaintained but reaches us transitively through
     # gtk3-macros → muda (Windows menu bar). No safe upgrade is published

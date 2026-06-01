@@ -14,18 +14,18 @@
 #   ./scripts/gui_bench.sh all                # all of the above (default)
 #
 # Each scenario kills any prior Sonic, opens a fresh bundle from the
-# repo's `target/release/sonic-mac`, focuses it, runs the scenario,
+# repo's `target/release/sonicterm-mac`, focuses it, runs the scenario,
 # samples, kills it.
 
 set -euo pipefail
 SCENARIO="${1:-all}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/release/sonic-mac"
+BIN="$ROOT/target/release/sonicterm-mac"
 APP="/tmp/sonic-bench/Sonic.app"
 BUNDLE_ID="com.sonic.terminal.bench"
 
 if [ ! -x "$BIN" ]; then
-  echo "missing $BIN — run: cargo build --release -p sonic-mac" >&2
+  echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
   exit 1
 fi
 

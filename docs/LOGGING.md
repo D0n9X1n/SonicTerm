@@ -53,13 +53,13 @@ Two equivalent options (env var wins if both are set):
 
    ```toml
    [logging]
-   level = "sonic=debug,sonic_vt=info"
+   level = "sonic=debug,sonicterm_vt=info"
    ```
 
 The default per-target filter is:
 
 ```
-sonic=info,sonic_vt=warn,sonic_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn
+sonic=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn
 ```
 
 The stderr sink is always pinned to `WARN+` no matter how verbose the
@@ -84,11 +84,11 @@ the main thread. This closes the "silent-exit / no `.ips` / no
 `crashes/` entry" forensic gap where a background-thread panic would
 abort the process with no on-disk trace. In addition to the file
 dump, a one-line `ERROR` breadcrumb is emitted to the rolling
-`sonic.log` under the `sonic_logging::panic` target, so even a
+`sonic.log` under the `sonicterm_logging::panic` target, so even a
 crash-file write failure (read-only home, ENOSPC, etc.) leaves an
 index entry.
 
-Both `sonic-mac` and `sonic-windows` install the hook at the very top
+Both `sonicterm-mac` and `sonicterm-windows` install the hook at the very top
 of `main()` — before config load — so panics during bootstrap (bad
 TOML, missing theme, GPU init failure) are captured the same way as
 steady-state ones.
@@ -142,16 +142,16 @@ every crash also writes a file under `crashes/`. The matrix:
 | `LoopExiting` (Cmd+Q / WM_CLOSE)   | Yes     | "sonic exiting: winit LoopExiting ..." + "clean after LoopExiting" | No |
 | Last window closed                 | Yes     | Same as LoopExiting (winit drives the path)                  | No          |
 | `main` returns normally            | Yes     | "sonic exiting: clean main return"                           | No          |
-| `sonic_logging::exit_with(code)`   | Yes     | "sonic exiting: explicit process::exit" with reason field    | No          |
+| `sonicterm_logging::exit_with(code)`   | Yes     | "sonic exiting: explicit process::exit" with reason field    | No          |
 | Raw `std::process::exit`           | No*     | nothing (drop guards do NOT run)                             | No          |
-| PTY child killed                   | Yes     | logged by `sonic-io` PTY shutdown path                       | No          |
+| PTY child killed                   | Yes     | logged by `sonicterm-io` PTY shutdown path                       | No          |
 | SIGKILL                            | No      | nothing — absence of an "exiting" line near death implies SIGKILL or unrecoverable crash | No |
 | Power off / kernel panic           | No      | same as SIGKILL                                              | No          |
 
 *Raw `std::process::exit` is forbidden in shipped code by the CI grep
 gate `scripts/check-no-raw-process-exit.sh`. Allowlisted exceptions
 (example/demo binaries) live in `scripts/process-exit-allowlist.txt`.
-Production paths funnel through `sonic_logging::exit_with(code, reason)`
+Production paths funnel through `sonicterm_logging::exit_with(code, reason)`
 which logs the reason before exiting.
 
 ### Reading the markers
@@ -168,8 +168,8 @@ even an immediate hardware fault leaves the FATAL line on disk.
 
 ### Source
 
-The implementation lives in `crates/sonic-logging/src/exit_trace.rs`.
-The integration tests in `crates/sonic-logging/tests/exit_trace.rs`
-spawn a child binary (`crates/sonic-logging/examples/exit_test_child.rs`)
+The implementation lives in `crates/sonicterm-logging/src/exit_trace.rs`.
+The integration tests in `crates/sonicterm-logging/tests/exit_trace.rs`
+spawn a child binary (`crates/sonicterm-logging/examples/exit_test_child.rs`)
 under `SONIC_EXIT_TEST_MODE=<mode>` and assert on the resulting log
 files.

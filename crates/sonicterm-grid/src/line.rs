@@ -1,0 +1,1075 @@
+//! Line cluster compression for same-attribute runs (Epic #300, P5).
+//!
+//! A terminal line frequently consists of long runs of consecutive cells that
+//! share the exact same attributes (theme background, default fg, no
+//! bold/italic, no hyperlink) — e.g. trailing blanks after a short prompt, or
+//! an empty alt-screen page. Storing those as `Vec<Cell>` wastes memory and
+//! cache: each `Cell` is dozens of bytes.
+//!
+//! `LineStorage` is a two-form representation:
+//!
+//! * `Cluster(Vec<Cluster>)` — RLE-style runs of identical cells. Built when
+//!   we know a line was written as a stream of same-attr cells (most pty
+//!   output of the form "echo something").
+//! * `Flat(Vec<Cell>)` — the classic dense form. Any in-place edit (write a
+//!   single cell, change a single attr) **degrades** the storage to `Flat`
+//!   immediately. Flat is also the form used while the parser is actively
+//!   mutating a line; clustering is a post-hoc compaction.
+//!
+//! `Line` exposes a transparent `iter`/`get`/`len`/`set` API so callers don't
+//! have to know which form a given line is in. The compaction policy
+//! (`compact_if_beneficial`) only switches Flat → Cluster when the saving is
+//! ≥ 2× — otherwise the bookkeeping costs more than it saves.
+//!
+//! NOTE: this module currently lives as an additive primitive. Wiring it into
+//! `Grid::scrollback` is a follow-up (#300-P5b) because every Row consumer in
+//! the codebase indexes through `Vec<Cell>` directly. Landing the data
+//! structure + invariants + tests first lets the integration PR focus purely
+//! on the call-site refactor.
+
+use sonicterm_types::cell::Cell;
+
+/// A run of `count` consecutive cells that are byte-identical to `cell`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cluster {
+    pub cell: Cell,
+    pub count: usize,
+}
+
+/// Two-form storage for a row of cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineStorage {
+    /// RLE form. Invariant: every `Cluster.count > 0`, no two adjacent
+    /// clusters are equal-cell (otherwise they'd be merged). Sum of counts
+    /// equals the logical line length.
+    Cluster(Vec<Cluster>),
+    /// Dense form. Length equals the logical line length.
+    Flat(Vec<Cell>),
+}
+
+impl LineStorage {
+    /// Build a `Cluster` storage from a flat slice, collapsing runs of equal
+    /// cells. Always succeeds; for an all-distinct slice the result is the
+    /// same length as the input and offers no saving (callers can check that
+    /// via [`Self::approx_byte_size`]).
+    pub fn cluster_from_flat(cells: &[Cell]) -> Self {
+        let mut clusters: Vec<Cluster> = Vec::new();
+        for c in cells {
+            match clusters.last_mut() {
+                Some(last) if &last.cell == c => last.count += 1,
+                _ => clusters.push(Cluster { cell: c.clone(), count: 1 }),
+            }
+        }
+        LineStorage::Cluster(clusters)
+    }
+
+    /// Logical length (number of cells the line presents to its consumer).
+    pub fn len(&self) -> usize {
+        match self {
+            LineStorage::Flat(v) => v.len(),
+            LineStorage::Cluster(cs) => cs.iter().map(|c| c.count).sum(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Approximate byte footprint of the storage payload (excluding the
+    /// enum discriminant). Used by [`Line::compact_if_beneficial`] to decide
+    /// whether collapsing pays for itself.
+    pub fn approx_byte_size(&self) -> usize {
+        match self {
+            LineStorage::Flat(v) => v.len() * std::mem::size_of::<Cell>(),
+            LineStorage::Cluster(cs) => cs.len() * std::mem::size_of::<Cluster>(),
+        }
+    }
+
+    /// Approximate reserved heap payload bytes for the inner storage Vec.
+    /// Unlike [`Self::approx_byte_size`], this uses `Vec::capacity()` so
+    /// reporting code counts bytes actually reserved from the allocator.
+    pub fn approx_capacity_byte_size(&self) -> usize {
+        match self {
+            LineStorage::Flat(v) => v.capacity() * std::mem::size_of::<Cell>(),
+            LineStorage::Cluster(cs) => cs.capacity() * std::mem::size_of::<Cluster>(),
+        }
+    }
+
+    // --- PR-A: API completeness (#319). Pure additive on the primitive.
+    // These methods cover every operation `Line` callers will need in PR-B
+    // (the Line::cells alias swap). Line itself is intentionally unchanged.
+
+    /// `true` if storage is currently in cluster (RLE) form.
+    pub fn is_cluster(&self) -> bool {
+        matches!(self, LineStorage::Cluster(_))
+    }
+
+    /// `true` if storage is currently in flat (dense `Vec<Cell>`) form.
+    pub fn is_flat(&self) -> bool {
+        matches!(self, LineStorage::Flat(_))
+    }
+
+    /// Force the storage to `Flat`. No-op if already flat.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_flat(&mut self) {
+        if let LineStorage::Cluster(cs) = self {
+            let total: usize = cs.iter().map(|c| c.count).sum();
+            let mut flat = Vec::with_capacity(total);
+            for c in cs.iter() {
+                for _ in 0..c.count {
+                    flat.push(c.cell.clone());
+                }
+            }
+            *self = LineStorage::Flat(flat);
+        }
+    }
+
+    /// Get the cell at logical column `idx`, materializing from cluster if
+    /// needed. Returns `None` if out of range.
+    pub fn get(&self, idx: usize) -> Option<Cell> {
+        match self {
+            LineStorage::Flat(v) => v.get(idx).cloned(),
+            LineStorage::Cluster(cs) => {
+                let mut off = 0;
+                for c in cs {
+                    if idx < off + c.count {
+                        return Some(c.cell.clone());
+                    }
+                    off += c.count;
+                }
+                None
+            }
+        }
+    }
+
+    /// Iterate over cells in `[start, end)`, cloning cells for a uniform return
+    /// type across storage forms. `end` is clamped to `len()`; empty or reversed
+    /// ranges yield no cells.
+    pub fn get_range(&self, start: u16, end: u16) -> impl Iterator<Item = Cell> + '_ {
+        let start = usize::from(start);
+        let end = usize::from(end).min(self.len());
+        if start >= end {
+            return StorageRangeIter::Empty;
+        }
+
+        match self {
+            LineStorage::Flat(v) => StorageRangeIter::Flat(v[start..end].iter()),
+            LineStorage::Cluster(cs) => StorageRangeIter::cluster(cs, start, end),
+        }
+    }
+
+    /// Set the cell at `idx`. Degrades to `Flat` on first write. Returns
+    /// `true` if the index was in range.
+    pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                if let Some(slot) = v.get_mut(idx) {
+                    *slot = cell;
+                    true
+                } else {
+                    false
+                }
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Append a cell to the right end. Degrades to Flat first.
+    pub fn push(&mut self, cell: Cell) {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => v.push(cell),
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Truncate to `new_len`. No-op if already shorter or equal. Preserves
+    /// the current storage form.
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.len() {
+            return;
+        }
+        match self {
+            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Cluster(cs) => {
+                let mut remaining = new_len;
+                let mut keep = 0;
+                for c in cs.iter_mut() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if c.count <= remaining {
+                        remaining -= c.count;
+                        keep += 1;
+                    } else {
+                        c.count = remaining;
+                        remaining = 0;
+                        keep += 1;
+                    }
+                }
+                cs.truncate(keep);
+            }
+        }
+    }
+
+    /// Resize to `new_len`, padding the right with `fill` if growing.
+    /// Preserves cluster form when the trailing cluster matches `fill`.
+    pub fn resize(&mut self, new_len: usize, fill: Cell) {
+        let cur = self.len();
+        if new_len == cur {
+            return;
+        }
+        if new_len < cur {
+            self.truncate(new_len);
+            return;
+        }
+        let extra = new_len - cur;
+        match self {
+            LineStorage::Flat(v) => v.resize(cur + extra, fill),
+            LineStorage::Cluster(cs) => match cs.last_mut() {
+                Some(last) if last.cell == fill => last.count += extra,
+                _ => cs.push(Cluster { cell: fill, count: extra }),
+            },
+        }
+    }
+
+    /// Drop all cells, leaving an empty Flat storage.
+    pub fn clear(&mut self) {
+        *self = LineStorage::Flat(Vec::new());
+    }
+
+    /// Iterate over all cells (cloned for uniform return type across forms).
+    pub fn iter(&self) -> StorageIter<'_> {
+        match self {
+            LineStorage::Flat(v) => StorageIter::Flat(v.iter()),
+            LineStorage::Cluster(cs) => {
+                StorageIter::Cluster { clusters: cs.iter(), current: None, remaining: 0 }
+            }
+        }
+    }
+
+    /// Iterate mutably. Forces Flat first so callers always get `&mut Cell`.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => v.iter_mut(),
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Fill cells in `[start, end)` with `cell`. Degrades to Flat. `end` is
+    /// clamped to `len()`; an empty range is a no-op.
+    pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return;
+        }
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                for slot in &mut v[start..end] {
+                    *slot = cell.clone();
+                }
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Clone the range `src` to the position starting at `dst`. Same
+    /// semantics as `slice::copy_within` (overlap-safe) but uses `Clone`
+    /// because `Cell` is not `Copy`. Degrades to Flat.
+    pub fn copy_within(&mut self, src: std::ops::Range<usize>, dst: usize) {
+        self.to_flat();
+        match self {
+            LineStorage::Flat(v) => {
+                let snapshot: Vec<Cell> = v[src.clone()].to_vec();
+                let len = snapshot.len();
+                for (i, cell) in snapshot.into_iter().enumerate() {
+                    v[dst + i] = cell;
+                }
+                let _ = len; // silence unused warning if optimizer drops it
+            }
+            LineStorage::Cluster(_) => unreachable!("just flattened"),
+        }
+    }
+
+    /// Try to re-compress into Cluster form. PR-A exposes only the
+    /// unconditional rebuild for callers that already know they want it
+    /// (e.g. scrollback eject in PR-C). The size-win threshold lives on
+    /// `Line::compact_if_beneficial`. Returns `true` if storage changed.
+    pub fn try_compress(&mut self) -> bool {
+        let flat = match self {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => return false,
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let candidate = Self::cluster_from_flat(flat);
+        if candidate.approx_byte_size() < self.approx_byte_size() {
+            *self = candidate;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Transparent iterator over either `LineStorage` form (clones cells for a
+/// uniform return type).
+pub enum StorageIter<'a> {
+    Flat(std::slice::Iter<'a, Cell>),
+    Cluster { clusters: std::slice::Iter<'a, Cluster>, current: Option<&'a Cell>, remaining: usize },
+}
+
+impl<'a> Iterator for StorageIter<'a> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StorageIter::Flat(it) => it.next().cloned(),
+            StorageIter::Cluster { clusters, current, remaining } => {
+                if *remaining == 0 {
+                    let c = clusters.next()?;
+                    *current = Some(&c.cell);
+                    *remaining = c.count;
+                }
+                *remaining -= 1;
+                current.cloned()
+            }
+        }
+    }
+}
+
+/// Transparent range iterator over either `LineStorage` form (clones cells for
+/// a uniform return type).
+pub enum StorageRangeIter<'a> {
+    Empty,
+    Flat(std::slice::Iter<'a, Cell>),
+    Cluster {
+        clusters: std::slice::Iter<'a, Cluster>,
+        current: Option<&'a Cell>,
+        remaining_in_cluster: usize,
+        remaining_total: usize,
+    },
+}
+
+impl<'a> StorageRangeIter<'a> {
+    fn cluster(clusters: &'a [Cluster], start: usize, end: usize) -> Self {
+        let total = end - start;
+        let mut off = 0;
+        let mut idx = 0;
+        while let Some(cluster) = clusters.get(idx) {
+            let next_off = off + cluster.count;
+            if start < next_off {
+                let skip_in_cluster = start - off;
+                return StorageRangeIter::Cluster {
+                    clusters: clusters[idx + 1..].iter(),
+                    current: Some(&cluster.cell),
+                    remaining_in_cluster: (cluster.count - skip_in_cluster).min(total),
+                    remaining_total: total,
+                };
+            }
+            off = next_off;
+            idx += 1;
+        }
+        StorageRangeIter::Empty
+    }
+}
+
+impl<'a> Iterator for StorageRangeIter<'a> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StorageRangeIter::Empty => None,
+            StorageRangeIter::Flat(it) => it.next().cloned(),
+            StorageRangeIter::Cluster {
+                clusters,
+                current,
+                remaining_in_cluster,
+                remaining_total,
+            } => {
+                if *remaining_total == 0 {
+                    return None;
+                }
+                if *remaining_in_cluster == 0 {
+                    let c = clusters.next()?;
+                    *current = Some(&c.cell);
+                    *remaining_in_cluster = c.count.min(*remaining_total);
+                }
+                *remaining_in_cluster -= 1;
+                *remaining_total -= 1;
+                current.cloned()
+            }
+        }
+    }
+}
+
+/// A line of cells with transparent cluster-or-flat storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    storage: LineStorage,
+}
+
+impl Line {
+    /// Build a flat line of `len` clones of `fill`.
+    pub fn flat_filled(len: usize, fill: Cell) -> Self {
+        Self { storage: LineStorage::Flat(vec![fill; len]) }
+    }
+
+    /// Build directly from a `Vec<Cell>` in flat form.
+    pub fn from_flat(cells: Vec<Cell>) -> Self {
+        Self { storage: LineStorage::Flat(cells) }
+    }
+
+    /// Build directly from clusters. The caller is responsible for the
+    /// "no adjacent equal cells" invariant; in debug builds we assert it.
+    pub fn from_clusters(clusters: Vec<Cluster>) -> Self {
+        debug_assert!(
+            clusters.windows(2).all(|w| w[0].cell != w[1].cell),
+            "adjacent clusters must differ"
+        );
+        debug_assert!(clusters.iter().all(|c| c.count > 0));
+        Self { storage: LineStorage::Cluster(clusters) }
+    }
+
+    /// Logical cell count.
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    /// Approximate payload byte size.
+    pub fn approx_byte_size(&self) -> usize {
+        self.storage.approx_byte_size()
+    }
+
+    /// Approximate reserved heap payload bytes for this line's storage.
+    pub fn approx_capacity_byte_size(&self) -> usize {
+        self.storage.approx_capacity_byte_size()
+    }
+
+    /// Returns `true` if the line is currently in cluster form.
+    pub fn is_clustered(&self) -> bool {
+        matches!(self.storage, LineStorage::Cluster(_))
+    }
+
+    /// Get the cell at logical column `idx`, if in range.
+    pub fn get(&self, idx: usize) -> Option<&Cell> {
+        match &self.storage {
+            LineStorage::Flat(v) => v.get(idx),
+            LineStorage::Cluster(cs) => {
+                let mut off = 0;
+                for c in cs {
+                    if idx < off + c.count {
+                        return Some(&c.cell);
+                    }
+                    off += c.count;
+                }
+                None
+            }
+        }
+    }
+
+    /// Set the cell at logical column `idx`.
+    ///
+    /// PR-D (#319) smart-degrade: when the storage is a single uniform
+    /// Cluster and the new cell is byte-identical to the cluster's
+    /// representative, this is a no-op and storage stays in Cluster form.
+    /// Otherwise the storage is degraded to Flat before the write. This
+    /// preserves the RAM win for the very common pattern of pty-output
+    /// rewriting already-blank cells (cursor repositioning, repeated
+    /// prompts, clearing a region that's already cleared).
+    ///
+    /// Multi-cluster split (the "punch a hole" optimisation) is
+    /// intentionally not attempted here — the full-Flat fallback is
+    /// always correct and is simpler. Returns `true` if `idx` was in
+    /// range.
+    pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
+        if idx >= self.len() {
+            return false;
+        }
+        // Smart-degrade fast path: same-cell write on a uniform Cluster
+        // stays Cluster.
+        if let Some(rep) = self.cluster_representative() {
+            if rep == cell {
+                return true;
+            }
+        }
+        self.degrade_to_flat();
+        match &mut self.storage {
+            LineStorage::Flat(v) => {
+                v[idx] = cell;
+                true
+            }
+            LineStorage::Cluster(_) => unreachable!("just degraded"),
+        }
+    }
+
+    /// If the line is currently a single uniform Cluster (one entry),
+    /// return a clone of its representative cell. `None` for Flat
+    /// storage, empty storage, or multi-Cluster storage.
+    pub fn cluster_representative(&self) -> Option<Cell> {
+        match &self.storage {
+            LineStorage::Cluster(cs) if cs.len() == 1 => Some(cs[0].cell.clone()),
+            _ => None,
+        }
+    }
+
+    /// Fill cells in `[start, end)` with `cell`. `end` is clamped to
+    /// `len()`; empty/reversed ranges are no-ops.
+    ///
+    /// PR-D smart-degrade: matches [`Self::set`]'s policy. If the line
+    /// is a single uniform Cluster whose representative equals `cell`,
+    /// the write is a no-op and storage stays Cluster. Otherwise
+    /// degrade to Flat then bulk-fill the range.
+    pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return;
+        }
+        if let Some(rep) = self.cluster_representative() {
+            if rep == cell {
+                return;
+            }
+        }
+        self.degrade_to_flat();
+        match &mut self.storage {
+            LineStorage::Flat(v) => {
+                for slot in &mut v[start..end] {
+                    *slot = cell.clone();
+                }
+            }
+            LineStorage::Cluster(_) => unreachable!("just degraded"),
+        }
+    }
+
+    /// Force the storage to `Flat`. No-op if already flat.
+    pub fn degrade_to_flat(&mut self) {
+        if let LineStorage::Cluster(cs) = &self.storage {
+            let total: usize = cs.iter().map(|c| c.count).sum();
+            let mut flat = Vec::with_capacity(total);
+            for c in cs {
+                for _ in 0..c.count {
+                    flat.push(c.cell.clone());
+                }
+            }
+            self.storage = LineStorage::Flat(flat);
+        }
+    }
+
+    /// Try to collapse a Flat storage into Cluster form. Only switches when
+    /// the cluster form would use **less than half** the bytes of the flat
+    /// form — otherwise the win is too small to justify the indirection on
+    /// later accesses. No-op if already clustered.
+    ///
+    /// Returns `true` if storage changed.
+    pub fn compact_if_beneficial(&mut self) -> bool {
+        let flat = match &self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => return false,
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let candidate = LineStorage::cluster_from_flat(flat);
+        if candidate.approx_byte_size() * 2 <= self.storage.approx_byte_size() {
+            self.storage = candidate;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Iterator over cells in logical order. Cluster-transparent: yields
+    /// `&Cell` regardless of storage form without materializing the flat
+    /// representation.
+    ///
+    /// **PR-B2 follow-up (Haiku review on #381):** previously routed
+    /// through `as_flat_slice()` which panicked on Cluster lines via
+    /// `as_vec()`. That made PR-C's premise — actually produce Cluster
+    /// lines from scrollback eject — impossible without rewriting every
+    /// downstream call site. The iterator now lazily walks either form
+    /// and implements `DoubleEndedIterator` + `ExactSizeIterator` so the
+    /// existing `iter().rev()` / `iter().len()` call sites (copy_mode,
+    /// search, etc.) keep working unchanged.
+    pub fn iter(&self) -> LineIter<'_> {
+        self.iter_storage()
+    }
+
+    /// Transparent cluster-or-flat iterator. Same as [`Self::iter`] —
+    /// kept as an explicit name for the post-PR-C hot paths that want
+    /// to call it for clarity.
+    pub fn iter_storage(&self) -> LineIter<'_> {
+        match &self.storage {
+            LineStorage::Flat(v) => LineIter::Flat(v.iter()),
+            LineStorage::Cluster(cs) => {
+                let total: usize = cs.iter().map(|c| c.count).sum();
+                LineIter::new_cluster(cs, total)
+            }
+        }
+    }
+
+    /// Iterator over cells in `[start, end)` returning `&Cell` references
+    /// without cloning. `end` is clamped to `len()`. Empty / reversed
+    /// ranges yield no cells. Replaces the removed `Index<Range<usize>>`
+    /// impl: that one couldn't return a real `&[Cell]` slice from a
+    /// Cluster line without materialising, so the trait surface was
+    /// fundamentally incompatible with Cluster storage. Callers that
+    /// truly need a `&[Cell]` slice should `as_flat_slice_after_materialise()`
+    /// instead.
+    pub fn get_range(&self, start: usize, end: usize) -> LineIter<'_> {
+        let n = self.len();
+        let end = end.min(n);
+        if start >= end {
+            return LineIter::empty();
+        }
+        let take = end - start;
+        match &self.storage {
+            LineStorage::Flat(v) => LineIter::Flat(v[start..end].iter()),
+            LineStorage::Cluster(cs) => LineIter::cluster_range(cs, start, take),
+        }
+    }
+
+    /// Materialise into a flat `Vec<Cell>` (cloning). Equivalent to
+    /// `self.iter().cloned().collect()` but a hair faster for the cluster
+    /// case because it pre-sizes.
+    pub fn to_vec(&self) -> Vec<Cell> {
+        let mut out = Vec::with_capacity(self.len());
+        for c in self.iter() {
+            out.push(c.clone());
+        }
+        out
+    }
+
+    /// Read-only access to the underlying storage form. Useful for tests
+    /// and for the eventual `Grid` integration that wants to fast-path
+    /// the cluster case.
+    pub fn storage(&self) -> &LineStorage {
+        &self.storage
+    }
+
+    // ----- PR-B1 (#319): shim accessors used by Grid's internal/public API
+    // while downstream callers still pass &Vec<Cell> / &[Cell] around. These
+    // force the storage to Flat (cheap in B1 because the Grid never produces
+    // Cluster yet) and expose the inner Vec directly so the lifetime chain
+    // `&Grid → &VecDeque<Line> → &Line → &Vec<Cell>` works without copies.
+
+    /// Borrow the underlying flat `Vec<Cell>`. **PANICS** on Cluster storage:
+    /// there is no `Vec<Cell>` to lend without first materialising into
+    /// Flat, which requires `&mut self`. Use [`Self::iter`] / [`Self::get`] /
+    /// [`Self::get_range`] for read-only access that works for either form,
+    /// or call [`Self::as_vec_mut`] / [`Self::degrade_to_flat`] first if a
+    /// borrowed `Vec` reference is truly needed.
+    ///
+    /// **PR-B2 (Haiku review on #381):** all of `iter` / `Hash` /
+    /// range-index used to silently go through this method and panic on
+    /// Cluster lines. They now use cluster-transparent paths; this method
+    /// remains for the few legitimately-flat-only callers (e.g.
+    /// `as_flat_slice_mut` for mutation), but reading it on a Cluster line
+    /// is a programming error.
+    pub fn as_vec(&self) -> &Vec<Cell> {
+        match &self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => {
+                unreachable!(
+                    "Line::as_vec()/as_flat_slice() requires Flat storage; \
+                     call iter()/get()/get_range() for cluster-transparent access"
+                )
+            }
+        }
+    }
+
+    /// Mutably borrow the underlying flat `Vec<Cell>`. Degrades any Cluster
+    /// storage to Flat first.
+    pub fn as_vec_mut(&mut self) -> &mut Vec<Cell> {
+        self.degrade_to_flat();
+        match &mut self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => unreachable!("just degraded"),
+        }
+    }
+
+    /// Borrow the cells as a slice (read-only).
+    pub fn as_flat_slice(&self) -> &[Cell] {
+        self.as_vec().as_slice()
+    }
+
+    /// Borrow the cells as a mutable slice. Degrades to Flat first.
+    pub fn as_flat_slice_mut(&mut self) -> &mut [Cell] {
+        self.as_vec_mut().as_mut_slice()
+    }
+
+    /// Resize to `new_len`, padding with `fill` when growing.
+    ///
+    /// PR-E (#319): Cluster-preserving resize. When the line is in Cluster
+    /// form, this avoids degrading to Flat in the common cases:
+    ///
+    /// * **Shrink** — truncate the cluster's run-len; if the resulting
+    ///   length is 0, clear to empty Flat.
+    /// * **Grow, fill matches trailing cluster** — bump the trailing
+    ///   cluster's count. Stays Cluster.
+    /// * **Grow, fill differs from trailing cluster** — append a new
+    ///   cluster covering the padding. Stays Cluster (multi-cluster).
+    ///
+    /// Flat storage uses the underlying `Vec::resize` path unchanged.
+    pub fn resize(&mut self, new_len: usize, fill: Cell) {
+        let cur = self.len();
+        if new_len == cur {
+            return;
+        }
+        if new_len < cur {
+            // Shrink: delegate to truncate which is cluster-aware.
+            self.truncate(new_len);
+            return;
+        }
+        // Grow.
+        match &mut self.storage {
+            LineStorage::Flat(v) => v.resize(new_len, fill),
+            LineStorage::Cluster(cs) => {
+                let extra = new_len - cur;
+                match cs.last_mut() {
+                    Some(last) if last.cell == fill => last.count += extra,
+                    _ => cs.push(Cluster { cell: fill, count: extra }),
+                }
+            }
+        }
+    }
+
+    /// Truncate the line to `new_len`. No-op if already shorter or
+    /// equal. Cluster-preserving: reduces the trailing cluster's run-len
+    /// and drops any clusters past the new boundary.
+    pub fn truncate(&mut self, new_len: usize) {
+        let cur = self.len();
+        if new_len >= cur {
+            return;
+        }
+        if new_len == 0 {
+            self.storage = LineStorage::Flat(Vec::new());
+            return;
+        }
+        match &mut self.storage {
+            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Cluster(cs) => {
+                let mut remaining = new_len;
+                let mut keep = 0;
+                for c in cs.iter_mut() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if c.count <= remaining {
+                        remaining -= c.count;
+                        keep += 1;
+                    } else {
+                        c.count = remaining;
+                        remaining = 0;
+                        keep += 1;
+                    }
+                }
+                cs.truncate(keep);
+            }
+        }
+    }
+
+    /// Mutable iterator over cells. Degrades to Flat first.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
+        self.as_flat_slice_mut().iter_mut()
+    }
+
+    /// PR-C (#319): try to compress this line into a single Cluster when
+    /// the entire row is uniform (every cell byte-identical). Called by
+    /// `Grid::scroll_up` as a Line is ejected from visible into
+    /// scrollback. Multi-Cluster compression of partially-uniform lines
+    /// is intentionally deferred to PR-D.
+    ///
+    /// Returns `true` if storage changed.
+    ///
+    /// * No-op if already Cluster.
+    /// * No-op on empty Flat (nothing to compress).
+    /// * No-op if any two cells differ — keeps Flat to avoid degrading
+    ///   on the first edit.
+    pub fn try_compress(&mut self) -> bool {
+        let flat = match &self.storage {
+            LineStorage::Flat(v) => v,
+            LineStorage::Cluster(_) => return false,
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let first = &flat[0];
+        if !flat.iter().all(|c| c == first) {
+            return false;
+        }
+        let count = flat.len();
+        let cell = first.clone();
+        self.storage = LineStorage::Cluster(vec![Cluster { cell, count }]);
+        true
+    }
+
+    /// PR-C (#319): force the storage to Flat. Use at any mutation site
+    /// that may operate on a scrollback Line that could now be in
+    /// Cluster form (since PR-C produces Cluster lines on eject). All
+    /// existing `as_vec_mut` / `set` / `iter_mut` paths already degrade,
+    /// but call sites that hold a `&mut Line` and intend to do bulk
+    /// in-place edits can call this once up front for clarity.
+    pub fn ensure_flat(&mut self) {
+        self.degrade_to_flat();
+    }
+}
+
+impl<'a> IntoIterator for &'a Line {
+    type Item = &'a Cell;
+    type IntoIter = LineIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Line {
+    type Item = &'a mut Cell;
+    type IntoIter = std::slice::IterMut<'a, Cell>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_flat_slice_mut().iter_mut()
+    }
+}
+
+impl std::ops::Index<usize> for Line {
+    type Output = Cell;
+    fn index(&self, idx: usize) -> &Cell {
+        self.get(idx).expect("Line index out of bounds")
+    }
+}
+
+impl std::ops::IndexMut<usize> for Line {
+    fn index_mut(&mut self, idx: usize) -> &mut Cell {
+        &mut self.as_vec_mut()[idx]
+    }
+}
+
+// NOTE (Haiku review on #381): `Index<Range<usize>>` and friends were
+// removed because they fundamentally cannot return a real `&[Cell]` slice
+// from a Cluster line without materialising. Callers that want a windowed
+// view must use `Line::get_range(start, end)` which returns a
+// cluster-transparent iterator. Call sites updated: selection.rs,
+// window_event.rs, child_window.rs, render_line_direct_smoke.rs.
+
+impl std::hash::Hash for Line {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the materialised cell sequence so cluster vs flat storage
+        // produces the same hash for the same logical content. We
+        // emulate `<[Cell]>::hash`: length prefix + each element, so a
+        // Flat line and an equivalent Cluster line hash identically.
+        self.len().hash(state);
+        for cell in self.iter() {
+            cell.hash(state);
+        }
+    }
+}
+
+/// Transparent iterator over either storage form. Yields `&Cell` without
+/// materialising the flat form for Cluster storage. Implements
+/// `DoubleEndedIterator` + `ExactSizeIterator` so the existing
+/// `iter().rev()` / `iter().len()` call sites keep working unchanged.
+pub enum LineIter<'a> {
+    Empty,
+    Flat(std::slice::Iter<'a, Cell>),
+    /// Bi-directional walk over a slice of clusters covering exactly
+    /// `total` cells, with `head_*` tracking the next-from-front cluster
+    /// position and `tail_*` tracking the next-from-back cluster
+    /// position. Front and back may chase into the same cluster, at
+    /// which point `total` reaching 0 terminates iteration.
+    Cluster {
+        clusters: &'a [Cluster],
+        /// Index of the next cluster to consume from the front.
+        head_idx: usize,
+        /// Number of cells still to yield from the current head cluster.
+        head_remaining: usize,
+        /// Index of the next cluster to consume from the back
+        /// (inclusive — i.e. `clusters[tail_idx]` still has cells to
+        /// yield from the back side).
+        tail_idx: usize,
+        /// Number of cells still to yield from the current tail cluster
+        /// (consumed in reverse from its tail).
+        tail_remaining: usize,
+        /// Total cells still to yield (front + back combined).
+        total: usize,
+    },
+}
+
+impl<'a> LineIter<'a> {
+    fn empty() -> Self {
+        LineIter::Empty
+    }
+
+    /// Build a Cluster iterator covering the full cluster list.
+    fn new_cluster(clusters: &'a [Cluster], total: usize) -> Self {
+        if clusters.is_empty() || total == 0 {
+            return LineIter::Empty;
+        }
+        LineIter::Cluster {
+            clusters,
+            head_idx: 0,
+            head_remaining: clusters[0].count,
+            tail_idx: clusters.len() - 1,
+            tail_remaining: clusters[clusters.len() - 1].count,
+            total,
+        }
+    }
+
+    /// Build a Cluster iterator over a windowed range `[start, start+take)`.
+    /// Walks `clusters` to find the cluster containing `start`, then
+    /// configures head/tail bookkeeping so exactly `take` cells are
+    /// yielded.
+    fn cluster_range(clusters: &'a [Cluster], start: usize, take: usize) -> Self {
+        if take == 0 {
+            return LineIter::Empty;
+        }
+        // Find head: cluster containing `start`.
+        let mut off = 0;
+        let mut head_idx = 0;
+        let mut head_remaining = 0;
+        while head_idx < clusters.len() {
+            let c = &clusters[head_idx];
+            if start < off + c.count {
+                head_remaining = (off + c.count) - start;
+                break;
+            }
+            off += c.count;
+            head_idx += 1;
+        }
+        if head_idx >= clusters.len() {
+            return LineIter::Empty;
+        }
+        // Find tail: cluster containing `start + take - 1`.
+        let end_inclusive = start + take - 1;
+        let mut off2 = 0;
+        let mut tail_idx = 0;
+        let mut tail_remaining = 0;
+        for (i, c) in clusters.iter().enumerate() {
+            if end_inclusive < off2 + c.count {
+                tail_idx = i;
+                tail_remaining = end_inclusive - off2 + 1;
+                break;
+            }
+            off2 += c.count;
+        }
+        if tail_idx == head_idx {
+            // Same cluster — the window lives entirely inside it. Reconcile.
+            head_remaining = take;
+            tail_remaining = take;
+        }
+        LineIter::Cluster {
+            clusters,
+            head_idx,
+            head_remaining,
+            tail_idx,
+            tail_remaining,
+            total: take,
+        }
+    }
+}
+
+impl<'a> Iterator for LineIter<'a> {
+    type Item = &'a Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            LineIter::Empty => None,
+            LineIter::Flat(it) => it.next(),
+            LineIter::Cluster {
+                clusters,
+                head_idx,
+                head_remaining,
+                tail_idx,
+                tail_remaining,
+                total,
+            } => {
+                if *total == 0 {
+                    return None;
+                }
+                // Advance head if exhausted in current cluster.
+                while *head_remaining == 0 {
+                    *head_idx += 1;
+                    if *head_idx > *tail_idx {
+                        return None;
+                    }
+                    *head_remaining = if *head_idx == *tail_idx {
+                        *tail_remaining
+                    } else {
+                        clusters[*head_idx].count
+                    };
+                }
+                let cell = &clusters[*head_idx].cell;
+                *head_remaining -= 1;
+                *total -= 1;
+                // Keep tail bookkeeping consistent when head and tail
+                // share a cluster.
+                if *head_idx == *tail_idx {
+                    *tail_remaining = (*tail_remaining).saturating_sub(1);
+                }
+                Some(cell)
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len();
+        (n, Some(n))
+    }
+}
+
+impl<'a> DoubleEndedIterator for LineIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            LineIter::Empty => None,
+            LineIter::Flat(it) => it.next_back(),
+            LineIter::Cluster {
+                clusters,
+                head_idx,
+                head_remaining,
+                tail_idx,
+                tail_remaining,
+                total,
+            } => {
+                if *total == 0 {
+                    return None;
+                }
+                while *tail_remaining == 0 {
+                    if *tail_idx == 0 || *tail_idx <= *head_idx {
+                        return None;
+                    }
+                    *tail_idx -= 1;
+                    *tail_remaining = if *tail_idx == *head_idx {
+                        *head_remaining
+                    } else {
+                        clusters[*tail_idx].count
+                    };
+                }
+                let cell = &clusters[*tail_idx].cell;
+                *tail_remaining -= 1;
+                *total -= 1;
+                if *head_idx == *tail_idx {
+                    *head_remaining = (*head_remaining).saturating_sub(1);
+                }
+                Some(cell)
+            }
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for LineIter<'a> {
+    fn len(&self) -> usize {
+        match self {
+            LineIter::Empty => 0,
+            LineIter::Flat(it) => it.len(),
+            LineIter::Cluster { total, .. } => *total,
+        }
+    }
+}

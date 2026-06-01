@@ -4546,7 +4546,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-app"
+name = "sonicterm-app"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -4565,13 +4565,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "sonic-core",
- "sonic-gpu",
- "sonic-logging",
- "sonic-render-model",
- "sonic-shared",
- "sonic-text",
- "sonic-ui",
+ "sonicterm-core",
+ "sonicterm-gpu",
+ "sonicterm-logging",
+ "sonicterm-render-model",
+ "sonicterm-shared",
+ "sonicterm-text",
+ "sonicterm-ui",
  "swash",
  "tempfile",
  "thiserror 2.0.18",
@@ -4582,21 +4582,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-cfg"
+name = "sonicterm-cfg"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
  "serde",
  "serde_plain",
- "sonic-logging",
- "sonic-types",
+ "sonicterm-logging",
+ "sonicterm-types",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
-name = "sonic-core"
+name = "sonicterm-core"
 version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
@@ -4604,39 +4604,39 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
- "sonic-cfg",
- "sonic-grid",
- "sonic-io",
- "sonic-types",
- "sonic-vt",
+ "sonicterm-cfg",
+ "sonicterm-grid",
+ "sonicterm-io",
+ "sonicterm-types",
+ "sonicterm-vt",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
-name = "sonic-gpu"
+name = "sonicterm-gpu"
 version = "0.3.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
  "glyphon",
  "pollster",
- "sonic-render-model",
- "sonic-text",
- "sonic-types",
+ "sonicterm-render-model",
+ "sonicterm-text",
+ "sonicterm-types",
  "wgpu",
 ]
 
 [[package]]
-name = "sonic-grid"
+name = "sonicterm-grid"
 version = "0.3.0"
 dependencies = [
- "sonic-types",
+ "sonicterm-types",
  "unicode-width",
 ]
 
 [[package]]
-name = "sonic-io"
+name = "sonicterm-io"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -4648,7 +4648,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "russh",
- "sonic-types",
+ "sonicterm-types",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4656,7 +4656,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-logging"
+name = "sonicterm-logging"
 version = "0.3.0"
 dependencies = [
  "chrono",
@@ -4671,24 +4671,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-mac"
+name = "sonicterm-mac"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "sonic-app",
- "sonic-core",
- "sonic-logging",
- "sonic-shared",
- "sonic-ui",
+ "sonicterm-app",
+ "sonicterm-core",
+ "sonicterm-logging",
+ "sonicterm-shared",
+ "sonicterm-ui",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
-name = "sonic-mux"
+name = "sonicterm-mux"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -4698,7 +4698,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "serde",
- "sonic-core",
+ "sonicterm-core",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -4706,17 +4706,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-render-model"
+name = "sonicterm-render-model"
 version = "0.3.0"
 dependencies = [
- "sonic-cfg",
- "sonic-grid",
- "sonic-text",
- "sonic-types",
+ "sonicterm-cfg",
+ "sonicterm-grid",
+ "sonicterm-text",
+ "sonicterm-types",
 ]
 
 [[package]]
-name = "sonic-shared"
+name = "sonicterm-shared"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -4741,13 +4741,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "sonic-cfg",
- "sonic-core",
- "sonic-gpu",
- "sonic-grid",
- "sonic-render-model",
- "sonic-text",
- "sonic-ui",
+ "sonicterm-cfg",
+ "sonicterm-core",
+ "sonicterm-gpu",
+ "sonicterm-grid",
+ "sonicterm-render-model",
+ "sonicterm-text",
+ "sonicterm-ui",
  "swash",
  "sys-locale",
  "tempfile",
@@ -4760,20 +4760,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-text"
+name = "sonicterm-text"
 version = "0.3.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
  "fontdb",
  "lru 0.12.5",
- "sonic-types",
+ "sonicterm-types",
  "swash",
  "tracing",
 ]
 
 [[package]]
-name = "sonic-types"
+name = "sonicterm-types"
 version = "0.3.0"
 dependencies = [
  "bitflags 2.11.1",
@@ -4782,7 +4782,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-ui"
+name = "sonicterm-ui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -4792,9 +4792,9 @@ dependencies = [
  "nucleo-matcher",
  "regex",
  "serde",
- "sonic-cfg",
- "sonic-grid",
- "sonic-types",
+ "sonicterm-cfg",
+ "sonicterm-grid",
+ "sonicterm-types",
  "sys-locale",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
@@ -4802,29 +4802,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "sonic-vt"
+name = "sonicterm-vt"
 version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "memchr",
- "sonic-grid",
- "sonic-types",
+ "sonicterm-grid",
+ "sonicterm-types",
  "tracing",
  "vte",
 ]
 
 [[package]]
-name = "sonic-windows"
+name = "sonicterm-windows"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "muda",
  "raw-window-handle",
  "serde_json",
- "sonic-app",
- "sonic-core",
- "sonic-logging",
- "sonic-shared",
+ "sonicterm-app",
+ "sonicterm-core",
+ "sonicterm-logging",
+ "sonicterm-shared",
  "tracing",
  "window-vibrancy",
  "windows 0.62.2",

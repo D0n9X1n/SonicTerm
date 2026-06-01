@@ -10,10 +10,10 @@ can diff before/after.
 
 ```bash
 # Baseline before your changes
-cargo run --release -p sonic-core --example bench -- all > before.json
+cargo run --release -p sonicterm-core --example bench -- all > before.json
 
 # Make your performance changes, then:
-cargo run --release -p sonic-core --example bench -- all > after.json
+cargo run --release -p sonicterm-core --example bench -- all > after.json
 
 # Side-by-side comparison with percentage deltas
 scripts/bench_compare.sh before.json after.json
@@ -49,7 +49,7 @@ overhead, glyphon shaping, wgpu submission, present mode, real-world idle).
 ### Usage
 
 ```bash
-cargo build --release -p sonic-mac          # produce target/release/sonic-mac
+cargo build --release -p sonicterm-mac          # produce target/release/sonicterm-mac
 scripts/gui_bench.sh                        # default = "all"
 scripts/gui_bench.sh idle                   # just idle CPU
 scripts/gui_bench.sh typing                 # 60 synthetic 'a' keystrokes
@@ -72,7 +72,7 @@ Capture stderr to a file, then eyeball or `diff`:
 ```bash
 scripts/gui_bench.sh all 2>before-gui.json
 # … apply perf changes, rebuild …
-cargo build --release -p sonic-mac
+cargo build --release -p sonicterm-mac
 scripts/gui_bench.sh all 2>after-gui.json
 diff before-gui.json after-gui.json
 ```
@@ -164,9 +164,9 @@ has Accessibility permission. CI machines and fresh clones often have
 neither, so `scripts/bench_headless_gui.sh` is a degraded-but-runnable
 alternative:
 
-- Launches `target/release/sonic-mac` directly (no bundle).
+- Launches `target/release/sonicterm-mac` directly (no bundle).
 - Samples `%CPU` from `ps` every 200 ms for 5 s (idle) and 10 s (post-scroll).
-- Greps the `RUST_LOG=sonic_shared::render=trace` log for the
+- Greps the `RUST_LOG=sonicterm_shared::render=trace` log for the
   `renderer: skipped unchanged frame skipped=N` counter to expose the
   fast-path hit count (strips ANSI color codes first).
 - Attempts to deliver a `seq 1 2000\n` burst via `osascript keystroke`;
@@ -174,7 +174,7 @@ alternative:
   (it's the idle-after-launch CPU) but `typing_delivered:false` flags it.
 
 ```bash
-cargo build --release -p sonic-mac
+cargo build --release -p sonicterm-mac
 ./scripts/bench_headless_gui.sh
 # {"idle_cpu_pct":0.01,"scroll_cpu_pct":0.06,"frames_skipped":2,"frames_rendered":0,"typing_delivered":true}
 ```

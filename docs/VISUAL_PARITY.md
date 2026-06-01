@@ -86,7 +86,7 @@ hover. Cosmetic, low priority.
 | | WezTerm | Sonic |
 |---|---|---|
 | Highlight color | `#283457` | `#283457` (`selection_bg`) |
-| Behavior | Click-drag, shift-click extends | Same (sonic-shared/src/selection.rs) |
+| Behavior | Click-drag, shift-click extends | Same (sonicterm-shared/src/selection.rs) |
 | Copy on release | Configurable; on by default with WezTerm-compat keymap | Cmd+C only; auto-copy on release not yet wired |
 
 ### 8. Scrollbar

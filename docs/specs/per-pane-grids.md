@@ -29,7 +29,7 @@ Replace the "one (cols, rows) for all panes" model with per-pane sizing
 driven by `PaneTree::layout(outer)`.
 
 ### Helper to add
-`crates/sonic-app/src/app/mod.rs` (next to `resize_all_panes` at line 250):
+`crates/sonicterm-app/src/app/mod.rs` (next to `resize_all_panes` at line 250):
 
 ```rust
 /// Resize each pane in `panes` to the cells that fit inside its own
@@ -42,7 +42,7 @@ driven by `PaneTree::layout(outer)`.
 #[doc(hidden)]
 pub fn resize_panes_to_rects(
     panes: &HashMap<u64, PaneState>,
-    rects: &[(u64, sonic_ui::pane::Rect)],
+    rects: &[(u64, sonicterm_ui::pane::Rect)],
     cell_w: f32,
     cell_h: f32,
 ) {
@@ -64,8 +64,8 @@ Every existing call passes whole-window `(cols, rows)` from
 `Renderer::cells()` and must be replaced with `resize_panes_to_rects` fed
 by the *active tab's* `PaneTree::layout`. The layout call already exists
 in `window_event.rs:110-132`; factor it into a helper
-`App::compute_active_pane_rects(&self) -> Vec<(u64, sonic_ui::pane::Rect)>`
-on `crates/sonic-app/src/app/mod.rs` so each call site is one line.
+`App::compute_active_pane_rects(&self) -> Vec<(u64, sonicterm_ui::pane::Rect)>`
+on `crates/sonicterm-app/src/app/mod.rs` so each call site is one line.
 
 For child windows (tear-outs) use `child.tab_states[child.tabs.active_index()]`
 the same way; helper variant `compute_pane_rects_for(&ChildWindow)`.
@@ -74,15 +74,15 @@ Call sites to migrate:
 
 | File | Line | Current scope | Replace with |
 |---|---|---|---|
-| `crates/sonic-app/src/app/window_event.rs` | 336–343 (inline `for pane in self.panes.values()`) | main window | `resize_panes_to_rects(&self.panes, &self.compute_active_pane_rects(), cell_w, cell_h)` |
-| `crates/sonic-app/src/app/config_apply.rs` | 103 | main window (font live-reload) | same |
-| `crates/sonic-app/src/app/config_apply.rs` | 116 | child window | child variant |
-| `crates/sonic-app/src/app/config_apply.rs` | 162 | main, theme reload | same |
-| `crates/sonic-app/src/app/config_apply.rs` | 167 | child, theme reload | child variant |
-| `crates/sonic-app/src/app/config_apply.rs` | 287 | main, keymap reload | same |
-| `crates/sonic-app/src/app/config_apply.rs` | 292 | child | child variant |
-| `crates/sonic-app/src/app/config_apply.rs` | 309 | main, padding reload | same |
-| `crates/sonic-app/src/app/config_apply.rs` | 315 | child | child variant |
+| `crates/sonicterm-app/src/app/window_event.rs` | 336–343 (inline `for pane in self.panes.values()`) | main window | `resize_panes_to_rects(&self.panes, &self.compute_active_pane_rects(), cell_w, cell_h)` |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 103 | main window (font live-reload) | same |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 116 | child window | child variant |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 162 | main, theme reload | same |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 167 | child, theme reload | child variant |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 287 | main, keymap reload | same |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 292 | child | child variant |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 309 | main, padding reload | same |
+| `crates/sonicterm-app/src/app/config_apply.rs` | 315 | child | child variant |
 
 The `resize_all_panes` symbol stays for now (one-`(cols,rows)`-for-all is
 still the right semantics for the single-pane fast path used by the
@@ -98,7 +98,7 @@ Expose cell metrics so the app layer can compute per-pane `(cols, rows)`
 without re-deriving them.
 
 ### Change
-`crates/sonic-shared/src/render/core.rs`, after `cells()` at line 831, add:
+`crates/sonicterm-shared/src/render/core.rs`, after `cells()` at line 831, add:
 
 ```rust
 /// Logical cell metrics (width, height) in CSS pixels. Pair with a
@@ -123,13 +123,13 @@ None; pure additive read accessor on existing private fields.
 ## Part C — Test hook
 
 ### Goal
-Let integration tests under `crates/sonic-app/tests/` exercise the
+Let integration tests under `crates/sonicterm-app/tests/` exercise the
 per-rect resize without a wgpu surface or a real shell.
 
 ### Already-public surface (reuse, no new hook needed)
-- `sonic_app::app::PaneState::new(parser, pty)` — line 502, `#[doc(hidden)]`
-- `sonic_app::app::resize_all_panes` — line 250, `#[doc(hidden)]`
-- `sonic_ui::pane::Rect::new(x, y, w, h)` — `crates/sonic-ui/src/pane.rs:34`
+- `sonicterm_app::app::PaneState::new(parser, pty)` — line 502, `#[doc(hidden)]`
+- `sonicterm_app::app::resize_all_panes` — line 250, `#[doc(hidden)]`
+- `sonicterm_ui::pane::Rect::new(x, y, w, h)` — `crates/sonicterm-ui/src/pane.rs:34`
 
 Add `resize_panes_to_rects` (Part A) with the same `#[doc(hidden)] pub`
 treatment so the new regression test can call it directly. No
@@ -140,7 +140,7 @@ treatment so the new regression test can call it directly. No
 ## Part D — Regression test
 
 ### File
-New: `crates/sonic-app/tests/per_pane_resize.rs` (mirrors the shape of
+New: `crates/sonicterm-app/tests/per_pane_resize.rs` (mirrors the shape of
 the existing `padding_live_reload.rs` and `font_live_reload.rs`).
 
 ### What it asserts
@@ -167,9 +167,9 @@ window vertically (a left half 500×700 and a right half 500×700) and
 //! after the fix each pane sizes to its own PaneRect.
 use std::sync::Arc;
 use parking_lot::Mutex;
-use sonic_app::app::{resize_panes_to_rects, PaneState};
-use sonic_vt::vt::Parser;
-use sonic_ui::pane::Rect;
+use sonicterm_app::app::{resize_panes_to_rects, PaneState};
+use sonicterm_vt::vt::Parser;
+use sonicterm_ui::pane::Rect;
 use std::collections::HashMap;
 
 #[test]
@@ -211,7 +211,7 @@ fn subcell_rect_floors_to_one() { /* … */ }
   `WindowEvent::Resized` or `config_apply.rs` (both are app-thread, not
   redraw-path).
 - **CLAUDE.md §13 GUI smoke is MANDATORY.** This PR touches
-  `crates/sonic-app/src/app/window_event.rs` and the resize path is
+  `crates/sonicterm-app/src/app/window_event.rs` and the resize path is
   user-visible — a wrong (cols, rows) shows up as text being truncated
   or as the cursor sitting in the wrong cell after a split. Run the
   full smoke from §13, then ALSO take a second screenshot after a

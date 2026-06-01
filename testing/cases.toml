@@ -452,7 +452,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "Sonic crashes or hangs (#194)"
 
@@ -477,7 +477,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "Sonic hangs or crashes during burst output (#195)"
 
@@ -680,7 +680,7 @@ keystrokes = [
   { kind = "wait", value = 30.0 },
 ]
 expect = [
-  { kind = "process-cpu-max", program = "sonic-mac", max_pct = 1.0 },
+  { kind = "process-cpu-max", program = "sonicterm-mac", max_pct = 1.0 },
 ]
 fail_on = "Idle CPU >= 1% (busy-loop regression)"
 
@@ -735,8 +735,8 @@ keystrokes = [
   { kind = "wait", value = 1.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", max = 0 },
-  { kind = "no-orphan-shells", parent = "sonic-mac" },
+  { kind = "process-count", program = "sonicterm-mac", max = 0 },
+  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
 ]
 fail_on = "Orphan zsh/bash remain"
 
@@ -799,7 +799,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "wgpu panic 'texture still alive' or crash"
 
@@ -981,17 +981,17 @@ fail_on = "Cursor remains block when blinking-beam was requested"
 [[case]]
 id = "kill-9-leaves-no-orphan-shells"
 section = 28
-title = "kill -9 sonic-mac leaves no orphan shells"
+title = "kill -9 sonicterm-mac leaves no orphan shells"
 applies_to = ["mac"]
 covers_bugs = []
 covers_landmines = ["pty-drop-kills-child"]
 setup = ["open-3-tabs"]
 keystrokes = [
-  { kind = "shell-cmd", value = "pkill -9 -f sonic-mac" },
+  { kind = "shell-cmd", value = "pkill -9 -f sonicterm-mac" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
-  { kind = "no-orphan-shells", parent = "sonic-mac" },
+  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
 ]
 fail_on = "Orphan zsh/bash remain after SIGKILL"
 
@@ -1005,11 +1005,11 @@ covers_landmines = []
 setup = []
 keystrokes = [
   { kind = "shell-cmd", value = "echo 'this = is { not valid toml' > /tmp/bad-sonic.toml" },
-  { kind = "shell-cmd", value = "SONIC_CONFIG=/tmp/bad-sonic.toml ./target/release/sonic-mac &" },
+  { kind = "shell-cmd", value = "SONIC_CONFIG=/tmp/bad-sonic.toml ./target/release/sonicterm-mac &" },
   { kind = "wait", value = 2.0 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "Sonic refuses to launch on bad config"
 
@@ -1026,7 +1026,7 @@ keystrokes = [
   { kind = "wait", value = 1.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "Sonic crashes on hot-reload of bad toml"
 
@@ -1143,7 +1143,7 @@ keystrokes = [
   { kind = "wait", value = 1.0 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "Fullscreen toggle crashes"
 
@@ -1167,7 +1167,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
   { kind = "responsive-within", seconds = 1.0 },
 ]
 fail_on = "App becomes unresponsive (beachball) — try_lock regressed"
@@ -1187,7 +1187,7 @@ keystrokes = [
   { kind = "wait", value = 6.0 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
   { kind = "responsive-within", seconds = 1.0 },
 ]
 fail_on = "Beachball or 'app not responding' indicator"
@@ -1255,7 +1255,7 @@ keystrokes = [
   { kind = "wait", value = 1.0 },
 ]
 expect = [
-  { kind = "no-orphan-shells", parent = "sonic-mac" },
+  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
 ]
 fail_on = "Orphan shell remains after tab close"
 
@@ -1272,7 +1272,7 @@ keystrokes = [
   { kind = "wait", value = 1.0 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", min = 1 },
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
 fail_on = "wgpu panic 'texture still alive'"
 
@@ -1316,10 +1316,10 @@ keystrokes = [
   { kind = "wait", value = 1.5 },
 ]
 expect = [
-  { kind = "process-count", program = "sonic-mac", max = 0 },
+  { kind = "process-count", program = "sonicterm-mac", max = 0 },
   { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
-fail_on = "any PID that was a shell descendant of the sonic-mac PID before cmd+q is still alive 1s after cmd+q (became orphan adopted by launchd)"
+fail_on = "any PID that was a shell descendant of the sonicterm-mac PID before cmd+q is still alive 1s after cmd+q (became orphan adopted by launchd)"
 
 # ==========================================================================
 # §4 / land-mines  (covers #348 CSI IL/DL — nvim hold-j stale rows)

@@ -12,7 +12,7 @@ in a follow-up; both drivers consume `testing/cases.toml` — that file is the
 brew install tesseract yq just
 pip3 install Pillow
 
-just build                                # cargo build --release -p sonic-mac
+just build                                # cargo build --release -p sonicterm-mac
 just visual mac                           # run every mac case
 just visual-case tab-open-cmd-t mac       # run one
 ```
@@ -80,7 +80,7 @@ fail_on = "what a visible failure looks like"
 | `pixel-near` | `x`, `y`, `rgba`, `tolerance` | Pillow; coords are in 1000×700 logical pixels, scaled to actual |
 | `text-in-region` / `ocr-text` | `region`, `value` | tesseract OCR |
 | `not-text-in-region` | `region`, `value` | negated OCR |
-| `tab-count` / `pane-count` / `window-count` / `padding-min` / `scrollback-min-lines` | various | **heuristic-pass** today — Sonic doesn't yet expose an introspection IPC. When `sonic-mac --json-state` lands these flip to real checks. |
+| `tab-count` / `pane-count` / `window-count` / `padding-min` / `scrollback-min-lines` | various | **heuristic-pass** today — Sonic doesn't yet expose an introspection IPC. When `sonicterm-mac --json-state` lands these flip to real checks. |
 | `process-count` | `program`, one of `value`/`min`/`max` | `pgrep -f` count |
 | `process-cpu-max` | `program`, `max_pct` | `ps pcpu` sample |
 | `process-spawned` / `process-not-spawned` | `program`, `since` | heuristic |
@@ -133,7 +133,7 @@ testing/results/mac-<sha>/
 │   ├── case.log          # driver log
 │   ├── expect.log        # per-expectation pass/fail
 │   ├── screen.png        # window-only when possible
-│   ├── sonic.log         # stdout/stderr of sonic-mac under test
+│   ├── sonic.log         # stdout/stderr of sonicterm-mac under test
 │   ├── status            # PASS | FAIL
 │   └── steps.sh          # generated keystroke script (for repro)
 └── ...

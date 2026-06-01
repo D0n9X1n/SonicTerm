@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # check_orphans.sh — verify PtyHandle::Drop actually killed every shell
-# sonic-mac had spawned. The old `no-orphan-shells` check only confirmed
-# sonic-mac itself was gone; it never inspected the *children*.
+# sonicterm-mac had spawned. The old `no-orphan-shells` check only confirmed
+# sonicterm-mac itself was gone; it never inspected the *children*.
 #
 # Usage:
 #   check_orphans.sh snapshot <sonic-pid> <out-file>
 #       Walk the descendant tree of <sonic-pid>, keeping any PID whose
 #       comm matches zsh|bash|sh, and write one PID per line to <out-file>.
-#       Intended to run while sonic-mac is still alive with shells spawned.
+#       Intended to run while sonicterm-mac is still alive with shells spawned.
 #
 #   check_orphans.sh check <snapshot-file>
 #       For each PID in <snapshot-file>, test `kill -0 <pid>`. Prints a

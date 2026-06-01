@@ -1,0 +1,16 @@
+[package]
+name = "sonicterm-grid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — grid + hyperlink registry"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-types.workspace = true
+unicode-width.workspace = true

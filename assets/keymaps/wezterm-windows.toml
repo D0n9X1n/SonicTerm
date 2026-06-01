@@ -235,7 +235,7 @@ keys = "ctrl+shift+r"
 action = "reload_config"
 
 # --- SSH client (example; uncomment + edit target to enable) ---
-# Requires building sonic with `--features sonic-core/ssh`.
+# Requires building sonic with `--features sonicterm-core/ssh`.
 # [[binding]]
 # keys = "ctrl+shift+s"
 # action = { open_ssh_pane = "alice@dev.example.com:22" }

@@ -23,25 +23,25 @@ The authoritative running-status doc is **`docs/ROADMAP.md`**. Read it first. Up
 
 ### Crates (under `crates/` directory — restored to nested layout in PR #145)
 
-Pre-#145 the crates lived flat at the repo root. The reorganization in PR #145 moved everything under `crates/`, and PRs #151–#158 then decomposed the original `sonic-core` + `sonic-shared` monoliths into ten leaf crates plus two thin façades. New code should depend on the leaf crate directly; `sonic-core` remains as a deprecated re-export shim for back-compat.
+Pre-#145 the crates lived flat at the repo root. The reorganization in PR #145 moved everything under `crates/`, and PRs #151–#158 then decomposed the original `sonicterm-core` + `sonicterm-shared` monoliths into ten leaf crates plus two thin façades. New code should depend on the leaf crate directly; `sonicterm-core` remains as a deprecated re-export shim for back-compat.
 
 | Crate | Role | Key items |
 |---|---|---|
-| `crates/sonic-types/` | Zero-dep value types | `Cell`, `Pos`, `Action`, `GlyphKey`, `HyperlinkId`, geometry primitives (#151) |
-| `crates/sonic-vt/` | VT/ANSI parser | `vt::Parser`, `vt::Performer` (vte + Performer), SWAR ASCII fast-path (#152, #138) |
-| `crates/sonic-grid/` | Terminal grid + scrollback | `grid::Grid` (cells, scrollback, wide chars, alt screen), `hyperlink::HyperlinkRegistry`, dirty bitset (#152, #130) |
-| `crates/sonic-cfg/` | Config / theme / keymap / URL safety | `config::Config`, `theme::Theme`, `keymap::{Action, Keymap}`, `url_open::validate` (#152) |
-| `crates/sonic-io/` | PTY + process probes + SSH | `pty::PtyHandle`, `proc_info`, `foreground_proc` (Windows), `ssh` (feature-gated) (#152) |
-| `crates/sonic-text/` | Shaping + atlas | `shape` (LRU shape cache), `swash_rasterizer`, `glyph_atlas`, `row_glyph_cache` (#153) |
-| `crates/sonic-render-model/` | Renderer-agnostic frame model | `geometry`, `inputs`, `painter` traits — what to draw, not how (#155) |
-| `crates/sonic-ui/` | UI widgets & overlays | `tabs`, `tabbar_view`, `pane`, `selection`, `search`, `command_palette`, `ime`, `cursor`, `i18n` (#154) |
-| `crates/sonic-gpu/` | wgpu pipelines | `quad::QuadPipeline`, `text_pipeline`, `atlas_upload` (#156) |
-| `crates/sonic-app/` | Winit app loop + platform glue | `app::App` (winit ApplicationHandler) split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; `menu`, `os_drag`, `tab_drag`, `config_watch` (#158, #160) |
-| `crates/sonic-core/` | **Deprecated façade** | re-exports `sonic_vt::vt`, `sonic_grid::{grid,hyperlink}`, `sonic_cfg::{config,theme,keymap,url_open}`, `sonic_io::{pty,proc_info,ssh,foreground_proc}` for back-compat |
-| `crates/sonic-shared/` | **Thin façade** | re-exports `sonic_ui::*` + `render/` module split across `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs` (#157) |
-| `crates/sonic-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonic_shared::run` |
-| `crates/sonic-windows/` | Windows bin | same shape |
-| `crates/sonic-mux/` | Persistent PTY mux daemon | shipped v0.8 (#56), feature-gated remote attach is post-v1.0 |
+| `crates/sonicterm-types/` | Zero-dep value types | `Cell`, `Pos`, `Action`, `GlyphKey`, `HyperlinkId`, geometry primitives (#151) |
+| `crates/sonicterm-vt/` | VT/ANSI parser | `vt::Parser`, `vt::Performer` (vte + Performer), SWAR ASCII fast-path (#152, #138) |
+| `crates/sonicterm-grid/` | Terminal grid + scrollback | `grid::Grid` (cells, scrollback, wide chars, alt screen), `hyperlink::HyperlinkRegistry`, dirty bitset (#152, #130) |
+| `crates/sonicterm-cfg/` | Config / theme / keymap / URL safety | `config::Config`, `theme::Theme`, `keymap::{Action, Keymap}`, `url_open::validate` (#152) |
+| `crates/sonicterm-io/` | PTY + process probes + SSH | `pty::PtyHandle`, `proc_info`, `foreground_proc` (Windows), `ssh` (feature-gated) (#152) |
+| `crates/sonicterm-text/` | Shaping + atlas | `shape` (LRU shape cache), `swash_rasterizer`, `glyph_atlas`, `row_glyph_cache` (#153) |
+| `crates/sonicterm-render-model/` | Renderer-agnostic frame model | `geometry`, `inputs`, `painter` traits — what to draw, not how (#155) |
+| `crates/sonicterm-ui/` | UI widgets & overlays | `tabs`, `tabbar_view`, `pane`, `selection`, `search`, `command_palette`, `ime`, `cursor`, `i18n` (#154) |
+| `crates/sonicterm-gpu/` | wgpu pipelines | `quad::QuadPipeline`, `text_pipeline`, `atlas_upload` (#156) |
+| `crates/sonicterm-app/` | Winit app loop + platform glue | `app::App` (winit ApplicationHandler) split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; `menu`, `os_drag`, `tab_drag`, `config_watch` (#158, #160) |
+| `crates/sonicterm-core/` | **Deprecated façade** | re-exports `sonicterm_vt::vt`, `sonicterm_grid::{grid,hyperlink}`, `sonicterm_cfg::{config,theme,keymap,url_open}`, `sonicterm_io::{pty,proc_info,ssh,foreground_proc}` for back-compat |
+| `crates/sonicterm-shared/` | **Thin façade** | re-exports `sonicterm_ui::*` + `render/` module split across `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs` (#157) |
+| `crates/sonicterm-mac/` | macOS bin | `main.rs` is ~30 lines — loads config + `sonicterm_shared::run` |
+| `crates/sonicterm-windows/` | Windows bin | same shape |
+| `crates/sonicterm-mux/` | Persistent PTY mux daemon | shipped v0.8 (#56), feature-gated remote attach is post-v1.0 |
 
 See **`docs/ARCHITECTURE.md`** for the full dep graph.
 
@@ -70,10 +70,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 bash scripts/check-no-raw-process-exit.sh                      # exit logging gate (no raw process::exit in shipped code)
 bash scripts/check-deny.sh                                     # supply-chain gate (advisories + licenses + bans + sources)
-cargo run --example pty_dump -p sonic-core --release           # must print [e2e] OK
-cargo run --example pty_dump_unicode -p sonic-core --release   # must print [unicode-e2e] OK
+cargo run --example pty_dump -p sonicterm-core --release           # must print [e2e] OK
+cargo run --example pty_dump_unicode -p sonicterm-core --release   # must print [unicode-e2e] OK
 bash scripts/check-visual-snapshots.sh                         # render dHash drift gate (closes #283)
-cargo build --release -p sonic-mac                             # confirms fat-LTO build works
+cargo build --release -p sonicterm-mac                             # confirms fat-LTO build works
 bash scripts/bench.sh                                          # perf-bench subset vs baseline.json; warns locally, exits 1 in CI
 ```
 
@@ -81,14 +81,14 @@ bash scripts/bench.sh                                          # perf-bench subs
 
 **Two-tier CI** (PR #N): the **PR/main quick gate** runs `fmt + clippy + cargo test --workspace --lib --bins` (unit + bin tests only — integration tests under each crate's `tests/` folder are skipped for speed, ~2-3 min target). The **release gate** runs on `v*` tag push only and adds full `cargo test --workspace` (incl. integration), both `pty_dump` e2e examples, `scripts/bench.sh` in CI mode, and the unsigned `.dmg` + `.msi` build/publish. Integration tests must therefore be exercised locally before tagging a release (the pre-commit gate in this section still requires `cargo test --workspace`).
 
-**Test floor: never let workspace test count regress. Current floor = 878** (post-#143 quality polish + per-pane resize regression tests in `crates/sonic-app/tests/per_pane_resize.rs`; was 824 at #160 split, 171 at v0.6). Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
+**Test floor: never let workspace test count regress. Current floor = 878** (post-#143 quality polish + per-pane resize regression tests in `crates/sonicterm-app/tests/per_pane_resize.rs`; was 824 at #160 split, 171 at v0.6). Watch the per-crate breakdown in `cargo test --workspace 2>&1 | grep "test result"` and confirm the sum.
 
 ### E2E binaries (use these to verify, not just unit tests)
 
-- `cargo run --example pty_dump -p sonic-core --release` — spawns the user shell, runs `ls --color=always /` + a bold/italic/underline `printf`. **Exits non-zero if grid lacks colored/styled cells.** Canonical end-to-end gate; any VT/grid/PTY change must keep this green.
-- `cargo run --example pty_dump_unicode -p sonic-core --release` — feeds one shibboleth char from every Unicode class we promise to support (CJK, Hiragana, Katakana, Hangul, emoji, box-drawing, Powerline PUA, fullwidth, Latin-1) and **exits non-zero if any are missing from the resulting grid**. Canonical Unicode-end-to-end gate — added to catch the PR-#42-class regression where every existing test used ASCII only.
-- `cargo run --example altscreen_smoke -p sonic-core --release`
-- `cargo run --example pane_smoke -p sonic-shared --release`
+- `cargo run --example pty_dump -p sonicterm-core --release` — spawns the user shell, runs `ls --color=always /` + a bold/italic/underline `printf`. **Exits non-zero if grid lacks colored/styled cells.** Canonical end-to-end gate; any VT/grid/PTY change must keep this green.
+- `cargo run --example pty_dump_unicode -p sonicterm-core --release` — feeds one shibboleth char from every Unicode class we promise to support (CJK, Hiragana, Katakana, Hangul, emoji, box-drawing, Powerline PUA, fullwidth, Latin-1) and **exits non-zero if any are missing from the resulting grid**. Canonical Unicode-end-to-end gate — added to catch the PR-#42-class regression where every existing test used ASCII only.
+- `cargo run --example altscreen_smoke -p sonicterm-core --release`
+- `cargo run --example pane_smoke -p sonicterm-shared --release`
 
 ---
 
@@ -97,50 +97,50 @@ bash scripts/bench.sh                                          # perf-bench subs
 ```
                           ┌──────────────────────────────┐
    shell stdout ──pty▶    │  Parser (vte + SWAR fast-path)│ ─▶ Grid (cells, scrollback,
-   ▲                       │  sonic-vt::vt                 │     wide chars, alt screen,
+   ▲                       │  sonicterm-vt::vt                 │     wide chars, alt screen,
    │                       └──────────────────────────────┘     dirty bitset)
-   │                                                                       │  sonic-grid
+   │                                                                       │  sonicterm-grid
    PTY thread (BytesMut ring,                                              ▼
    redraw-coalesced — see                                            Grid is the
    spawn_pane.rs)                                                    shared state
    ▲                                                                       │
    │                                                                       ▼
    App (winit ApplicationHandler)  ──▶  shape (LRU) ──▶ atlas ──▶ wgpu (quad + text)
-   ▲   sonic-app::app::App                sonic-text          sonic-gpu
+   ▲   sonicterm-app::app::App                sonicterm-text          sonicterm-gpu
    │   split across app/*.rs (#160)
    │
-   keys/mouse  ──▶ keymap dispatcher (sonic_cfg::keymap::Action)
+   keys/mouse  ──▶ keymap dispatcher (sonicterm_cfg::keymap::Action)
                    super+T new tab, super+D split, palette actions, etc.
 ```
 
 **Per-pane state** (since v0.3d): each pane in a tab owns its own `Grid + Parser + PtyHandle`. Splitting a pane spawns a new shell. `impl Drop for PtyHandle` explicitly kills the child to prevent orphans (caught by Haiku review of PR #21).
 
 **Rendering pipeline** has two layers per frame:
-1. **Text** through `sonic-text` (LRU shape cache → swash rasterizer → glyph atlas → row-glyph cache) into the wgpu text pipeline in `sonic-gpu`. Per-cell foreground + background ANSI colors and bold/italic/underline are emitted as styled attributes per run.
-2. **Custom wgpu quad pipeline** (`sonic-gpu/src/quad.rs`) for everything else — cursor, selection highlight, underlines, hyperlink tints, tab-bar chrome, search-match highlight, focused-pane border.
+1. **Text** through `sonicterm-text` (LRU shape cache → swash rasterizer → glyph atlas → row-glyph cache) into the wgpu text pipeline in `sonicterm-gpu`. Per-cell foreground + background ANSI colors and bold/italic/underline are emitted as styled attributes per run.
+2. **Custom wgpu quad pipeline** (`sonicterm-gpu/src/quad.rs`) for everything else — cursor, selection highlight, underlines, hyperlink tints, tab-bar chrome, search-match highlight, focused-pane border.
 
 ---
 
 ## 4. Land-mines (each was a real bug; do not re-introduce)
 
 ### Threading / event loop
-- **Render uses `try_lock` on the parser, not `lock`.** Earlier `lock()` deadlocked the macOS main thread under shell-startup output bursts. Current locations: `crates/sonic-app/src/app/window_event.rs` (the redraw path) and `crates/sonic-app/src/app/{child_window,misc}.rs`. Comments in window_event.rs at lines ~143 / ~162 explain the AB-BA deadlock.
-- **PTY-thread redraw coalescing.** Live in `crates/sonic-app/src/app/spawn_pane.rs` (~line 76: "Coalesce redraw requests so a burst of pty output…"). **3 ms min interval + 128 KB byte-threshold early flush** (Epic #300 P3, dropped from the original 16 ms to match wezterm). 3 ms is safe because the macOS "not responding" beach ball is driven by *main-thread* blocking, not by how often a *background* PTY thread posts redraw requests — the main thread coalesces RedrawRequested via vsync (PR #132). The coalescer is therefore a CPU-efficiency throttle, not an OS-perception safety knob. **Rule still stands: must coalesce, never per-byte redraw.** PR #132 layered vsync pacing on top via `ControlFlow::WaitUntil` in `event_loop.rs`.
-- **PTY burst flag is a generation counter, not a bool** (PR #162). The original `bool input_dirty` raced when the renderer cleared it between two bursts. The counter version compares "what I last drew" vs "what arrived" — see `crates/sonic-app/src/app/window_event.rs` ~line 34: "with this flag still false and continue to coalesce". Don't revert to `bool`.
+- **Render uses `try_lock` on the parser, not `lock`.** Earlier `lock()` deadlocked the macOS main thread under shell-startup output bursts. Current locations: `crates/sonicterm-app/src/app/window_event.rs` (the redraw path) and `crates/sonicterm-app/src/app/{child_window,misc}.rs`. Comments in window_event.rs at lines ~143 / ~162 explain the AB-BA deadlock.
+- **PTY-thread redraw coalescing.** Live in `crates/sonicterm-app/src/app/spawn_pane.rs` (~line 76: "Coalesce redraw requests so a burst of pty output…"). **3 ms min interval + 128 KB byte-threshold early flush** (Epic #300 P3, dropped from the original 16 ms to match wezterm). 3 ms is safe because the macOS "not responding" beach ball is driven by *main-thread* blocking, not by how often a *background* PTY thread posts redraw requests — the main thread coalesces RedrawRequested via vsync (PR #132). The coalescer is therefore a CPU-efficiency throttle, not an OS-perception safety knob. **Rule still stands: must coalesce, never per-byte redraw.** PR #132 layered vsync pacing on top via `ControlFlow::WaitUntil` in `event_loop.rs`.
+- **PTY burst flag is a generation counter, not a bool** (PR #162). The original `bool input_dirty` raced when the renderer cleared it between two bursts. The counter version compares "what I last drew" vs "what arrived" — see `crates/sonicterm-app/src/app/window_event.rs` ~line 34: "with this flag still false and continue to coalesce". Don't revert to `bool`.
 - **No unconditional "heartbeat redraw" at the end of `window_event`.** It creates a feedback loop. Real triggers (pty bytes / mouse drag / key / resize) cover every case.
 
 ### Parser correctness
-- **CSI `J` (ED) and `K` (EL) MUST honor the mode parameter.** `J0` is "erase below", `J1` is "above", `J2` is "all". The original code erased everything regardless — every shell prompt redraw wiped output. Lives in `crates/sonic-vt/src/vt.rs`. Regression: `crates/sonic-vt/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor`.
-- **CSI `?1049h` must be a no-op when already in alt screen.** Otherwise vim/fzf re-entry clobbers `saved_cursor`. `crates/sonic-vt/src/vt.rs`. Regression: `dec_1049h_repeated_does_not_clobber_saved_cursor`.
-- **`PtyHandle::Drop` kills the child explicitly.** Just dropping the trait object doesn't terminate the shell. Lives in `crates/sonic-io/src/pty.rs`.
+- **CSI `J` (ED) and `K` (EL) MUST honor the mode parameter.** `J0` is "erase below", `J1` is "above", `J2` is "all". The original code erased everything regardless — every shell prompt redraw wiped output. Lives in `crates/sonicterm-vt/src/vt.rs`. Regression: `crates/sonicterm-vt/tests/vt.rs::shell_prompt_redraw_preserves_above_cursor`.
+- **CSI `?1049h` must be a no-op when already in alt screen.** Otherwise vim/fzf re-entry clobbers `saved_cursor`. `crates/sonicterm-vt/src/vt.rs`. Regression: `dec_1049h_repeated_does_not_clobber_saved_cursor`.
+- **`PtyHandle::Drop` kills the child explicitly.** Just dropping the trait object doesn't terminate the shell. Lives in `crates/sonicterm-io/src/pty.rs`.
 
 ### Security / safety
-- **`sonic_cfg::url_open::validate()` is mandatory before spawning anything.** OSC 8 URIs come from untrusted pty output; on Windows `cmd /C start` re-tokenizes through cmd's parser. Allow-list: `http`, `https`, `mailto`, `file`. Denylist: `& | ^ < > " ' \` CR LF NUL` + other control chars. Length capped at 4096. Lives in `crates/sonic-cfg/src/url_open.rs`.
+- **`sonicterm_cfg::url_open::validate()` is mandatory before spawning anything.** OSC 8 URIs come from untrusted pty output; on Windows `cmd /C start` re-tokenizes through cmd's parser. Allow-list: `http`, `https`, `mailto`, `file`. Denylist: `& | ^ < > " ' \` CR LF NUL` + other control chars. Length capped at 4096. Lives in `crates/sonicterm-cfg/src/url_open.rs`.
 
 ### Rendering
-- **Per-cell ANSI background colors must be emitted (P0, #161 → #163).** Pre-#163 the text pipeline silently dropped the `bg` field — only fg + attrs reached glyphon. A whole class of TUIs (`htop` selected-row stripe, `tmux` statusline, fzf preview) rendered with the theme background instead of the cell background. Fix in `crates/sonic-shared/src/render/core.rs` + `crates/sonic-gpu/src/text_pipeline.rs`. Don't regress: the test floor includes a "colored background round-trip" check fed by `pty_dump`.
-- **`wgpu::CurrentSurfaceTexture::Suboptimal(frame)` must drop the SurfaceTexture before calling `surface.configure(...)`.** Otherwise wgpu 29 panics ("texture still alive"). `crates/sonic-shared/src/render/core.rs`.
-- **`set_text` vs `set_rich_text`**: per-cell color/weight/style requires `set_rich_text(spans, default_attrs, Shaping::Advanced, None)` — the cosmic-text 0.18 API. Lives in `crates/sonic-shared/src/render/core.rs`.
+- **Per-cell ANSI background colors must be emitted (P0, #161 → #163).** Pre-#163 the text pipeline silently dropped the `bg` field — only fg + attrs reached glyphon. A whole class of TUIs (`htop` selected-row stripe, `tmux` statusline, fzf preview) rendered with the theme background instead of the cell background. Fix in `crates/sonicterm-shared/src/render/core.rs` + `crates/sonicterm-gpu/src/text_pipeline.rs`. Don't regress: the test floor includes a "colored background round-trip" check fed by `pty_dump`.
+- **`wgpu::CurrentSurfaceTexture::Suboptimal(frame)` must drop the SurfaceTexture before calling `surface.configure(...)`.** Otherwise wgpu 29 panics ("texture still alive"). `crates/sonicterm-shared/src/render/core.rs`.
+- **`set_text` vs `set_rich_text`**: per-cell color/weight/style requires `set_rich_text(spans, default_attrs, Shaping::Advanced, None)` — the cosmic-text 0.18 API. Lives in `crates/sonicterm-shared/src/render/core.rs`.
 
 ### Coupling
 - **`wgpu`, `glyphon`, `cosmic-text` are a coherent triple.** Bumping one forces the others. Current: `wgpu 29` + `glyphon 0.11` + `cosmic-text 0.18`. Don't upgrade just one.
@@ -150,12 +150,12 @@ bash scripts/bench.sh                                          # perf-bench subs
 
 ## 5. Coding conventions
 
-- **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonic-core` + `sonic-shared`'s pre-v0.6 tests out of source files; issue #190 finished the workspace migration. **New tests follow this pattern.** Documented exceptions (kept inline with a `// NOTE (CLAUDE.md §5):` comment naming the blocker):
-  - `sonic-windows/src/os_drag_win.rs` — bin-only crate (no `lib.rs`), no `tests/` route.
-  - `sonic-mac/src/menubar.rs` — small macOS-only surface, private `register`/`lookup`/`scan_themes`.
-  - `sonic-io/src/foreground_proc.rs` — private `snapshot_processes`/`resolve_process_name`/`ProcEntry`.
+- **Per-crate `tests/` folder** (one `.rs` per source module). PR #27 moved all of `sonicterm-core` + `sonicterm-shared`'s pre-v0.6 tests out of source files; issue #190 finished the workspace migration. **New tests follow this pattern.** Documented exceptions (kept inline with a `// NOTE (CLAUDE.md §5):` comment naming the blocker):
+  - `sonicterm-windows/src/os_drag_win.rs` — bin-only crate (no `lib.rs`), no `tests/` route.
+  - `sonicterm-mac/src/menubar.rs` — small macOS-only surface, private `register`/`lookup`/`scan_themes`.
+  - `sonicterm-io/src/foreground_proc.rs` — private `snapshot_processes`/`resolve_process_name`/`ProcEntry`.
 - **Test-only items that must remain accessible to integration tests stay `pub` with `#[doc(hidden)]`.** No `__test_support` shim modules — that pattern was explicitly removed.
-- **Public API for actions**: adding a new bindable user action means adding a variant to `sonic_cfg::keymap::Action` AND a match arm in `sonic_app::app::App` (via `keymap_dispatch.rs`).
+- **Public API for actions**: adding a new bindable user action means adding a variant to `sonicterm_cfg::keymap::Action` AND a match arm in `sonicterm_app::app::App` (via `keymap_dispatch.rs`).
 - **Conventional Commits** with scope: `feat(v1.0): ...`, `fix(vt): ...`, `chore(deps): ...`, `docs: ...`, `refactor(crates): ...`.
 - **Commit trailer**: every Claude-authored commit ends with:
   ```
@@ -208,7 +208,7 @@ gh pr merge <N> -R D0n9X1n/sonic --squash --admin --delete-branch
 ### Parallelism rules
 
 - **Truly independent files only.** Two PRs that both touch `app/window_event.rs` or `render/core.rs` WILL conflict — serialize them.
-- Safe parallel: new files in `sonic-text/`, new modules under `app/`, documentation work.
+- Safe parallel: new files in `sonicterm-text/`, new modules under `app/`, documentation work.
 - Risky parallel: anything touching `app/window_event.rs`, `render/core.rs`, `Cell`, `keymap::Action`.
 - Documentation work is independent of code — always parallelizable.
 
@@ -269,7 +269,7 @@ triggers `.github/workflows/release.yml` → first runs the `release-gate` job (
 
 The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/config-edit/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
-`crates/sonic-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
+`crates/sonicterm-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 
 ---
 
@@ -283,19 +283,19 @@ The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep cover
 
 ## 11. Renderer regressions (the rule that didn't exist before PR #42)
 
-PR #42 cut the terminal grid over to a swash-rasterized atlas (now `crates/sonic-shared/src/render/core.rs` + `crates/sonic-text/src/swash_rasterizer.rs` + `crates/sonic-text/src/glyph_atlas.rs`). It passed the local gate, Haiku review, AND the canonical `pty_dump` e2e — yet shipped a regression that drew every non-ASCII character as a tofu box. Cause: every test, every example, every benchmark used only ASCII, and the rasterizer's "primary family only, no fallback" code path was never exercised on a CJK glyph in CI.
+PR #42 cut the terminal grid over to a swash-rasterized atlas (now `crates/sonicterm-shared/src/render/core.rs` + `crates/sonicterm-text/src/swash_rasterizer.rs` + `crates/sonicterm-text/src/glyph_atlas.rs`). It passed the local gate, Haiku review, AND the canonical `pty_dump` e2e — yet shipped a regression that drew every non-ASCII character as a tofu box. Cause: every test, every example, every benchmark used only ASCII, and the rasterizer's "primary family only, no fallback" code path was never exercised on a CJK glyph in CI.
 
-**Rule:** any change to `crates/sonic-shared/src/render/*.rs`, `crates/sonic-text/src/{swash_rasterizer,glyph_atlas,row_glyph_cache,shape}.rs`, or `crates/sonic-gpu/src/{text_pipeline,atlas_upload,quad}.rs` MUST be gated on the capability matrix passing:
+**Rule:** any change to `crates/sonicterm-shared/src/render/*.rs`, `crates/sonicterm-text/src/{swash_rasterizer,glyph_atlas,row_glyph_cache,shape}.rs`, or `crates/sonicterm-gpu/src/{text_pipeline,atlas_upload,quad}.rs` MUST be gated on the capability matrix passing:
 
 ```bash
-cargo test -p sonic-core --test vt_capability_matrix
-cargo test -p sonic-shared --test render_capability_matrix
-cargo run --example pty_dump_unicode -p sonic-core --release
+cargo test -p sonicterm-core --test vt_capability_matrix
+cargo test -p sonicterm-shared --test render_capability_matrix
+cargo run --example pty_dump_unicode -p sonicterm-core --release
 ```
 
 The matrix exists because **the existing pty_dump e2e cannot catch this class of bug** — its shell payload is pure ASCII. Do NOT delete or weaken the matrix; if a class is intentionally dropped from scope, mark the corresponding test `#[ignore]` with a comment naming the deciding PR, never `#[cfg(skip)]` or deletion.
 
-**Render hot-file rule (closes #283):** any PR that modifies `crates/sonic-shared/src/render/core.rs`, `crates/sonic-gpu/src/text_pipeline.rs`, `crates/sonic-text/src/glyph_atlas.rs`, or `crates/sonic-text/src/swash_rasterizer.rs` MUST either keep `bash scripts/check-visual-snapshots.sh` green or explicitly bump the dHash baselines in the same PR (set `UPDATE_SNAPSHOTS=1`, commit refreshed `crates/sonic-shared/tests/snapshots/*.hash`, and append a row to `crates/sonic-shared/tests/snapshots/README.md`). Silent drift is how PR #282 shipped the glyph-blur P0 fixed in #284. Label such PRs `render` so reviewers see the gate at a glance.
+**Render hot-file rule (closes #283):** any PR that modifies `crates/sonicterm-shared/src/render/core.rs`, `crates/sonicterm-gpu/src/text_pipeline.rs`, `crates/sonicterm-text/src/glyph_atlas.rs`, or `crates/sonicterm-text/src/swash_rasterizer.rs` MUST either keep `bash scripts/check-visual-snapshots.sh` green or explicitly bump the dHash baselines in the same PR (set `UPDATE_SNAPSHOTS=1`, commit refreshed `crates/sonicterm-shared/tests/snapshots/*.hash`, and append a row to `crates/sonicterm-shared/tests/snapshots/README.md`). Silent drift is how PR #282 shipped the glyph-blur P0 fixed in #284. Label such PRs `render` so reviewers see the gate at a glance.
 
 Ignored tests in the matrix document capability gaps awaiting a fix. Removing an `#[ignore]` attribute in that fix's PR is the canonical green light that the gap is closed.
 
@@ -324,20 +324,20 @@ Local `target/` is a separate ~5 GB cost (debug + release + deps + incremental).
 
 The headless local gate (fmt / clippy / test / pty_dump) is necessary but not sufficient. Several real bugs have shipped past it: blank window (PR #36), CJK tofu (PR #42), 100 % idle CPU (PR #31), sRGB gamma washing out theme colors, low-DPI blur on Retina, and **dropped ANSI background colors (#161 → P0 #163)**. None of these show up in `cargo test` because they need a real wgpu surface + real macOS window + real glyph upload.
 
-**Rule:** every PR that touches any file under `crates/sonic-shared/src/render/`, `crates/sonic-text/src/`, `crates/sonic-gpu/src/`, `crates/sonic-app/src/app/`, `crates/sonic-ui/src/{tabbar_view,overlays,cursor,selection,search}.rs`, `crates/sonic-vt/src/vt.rs`, `crates/sonic-grid/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review.
+**Rule:** every PR that touches any file under `crates/sonicterm-shared/src/render/`, `crates/sonicterm-text/src/`, `crates/sonicterm-gpu/src/`, `crates/sonicterm-app/src/app/`, `crates/sonicterm-ui/src/{tabbar_view,overlays,cursor,selection,search}.rs`, `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-grid/src/grid.rs`, or any theme/keymap asset MUST run this GUI smoke before requesting review.
 
 **Prefer the harness:** run `just visual mac` (or `just visual-case <id> mac`) from `testing/workflows/mac.sh` against `testing/cases.toml` — that is the canonical, repeatable form of the ad-hoc snippet below, with per-case screenshots archived under `testing/results/mac-<sha>/`. The snippet below remains valid for one-off checks.
 
 ```bash
-pkill -9 -f sonic-mac 2>/dev/null; sleep 0.3
-./target/release/sonic-mac > /tmp/gui-smoke.log 2>&1 &
+pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
+./target/release/sonicterm-mac > /tmp/gui-smoke.log 2>&1 &
 sleep 2.5
-PID=$(pgrep -f sonic-mac | head -1)
+PID=$(pgrep -f sonicterm-mac | head -1)
 
 # 1. Bring to front + position (so the screenshot actually captures Sonic, not whatever was front)
 osascript <<EOF
 tell application "System Events"
-  tell process "sonic-mac"
+  tell process "sonicterm-mac"
     set frontmost to true
     set position of window 1 to {500, 200}
     set size of window 1 to {1000, 700}
@@ -398,13 +398,13 @@ We claim "fast" in the README and in the North Star. Right now that is aspiratio
 Because perf has shipped regressions silently (e.g. PR #161's dropped per-cell bg), we now run a small bench subset on every render-touching PR and compare against `baseline.json` at the repo root. The gate:
 
 - **Local** (`bash scripts/bench.sh`): prints a table, warns on any metric that regresses by more than `_regression_threshold_pct` (default 20 %), **exits 0** so a dev iterating on perf can re-run cheaply.
-- **CI** (`bash scripts/bench.sh --ci`, or with `CI=1`): same table, but **exits 1** on a >20 % regression. The CI job (`perf-bench` in `.github/workflows/ci.yml`) is paths-filtered to perf-sensitive crates (`sonic-vt`, `sonic-grid`, `sonic-text`, `sonic-gpu`, `sonic-shared/src/render/`, `sonic-app/`, `baseline.json`, `scripts/bench.sh`).
+- **CI** (`bash scripts/bench.sh --ci`, or with `CI=1`): same table, but **exits 1** on a >20 % regression. The CI job (`perf-bench` in `.github/workflows/ci.yml`) is paths-filtered to perf-sensitive crates (`sonicterm-vt`, `sonicterm-grid`, `sonicterm-text`, `sonicterm-gpu`, `sonicterm-shared/src/render/`, `sonicterm-app/`, `baseline.json`, `scripts/bench.sh`).
 - **Intentional perf change** (`bash scripts/bench.sh --record`): re-measures and overwrites `baseline.json`. Commit the diff alongside the change so the regression bar tracks reality.
 - **Testing the gate itself** (`BENCH_SKIP_MEASURE=1 bash scripts/bench.sh [--ci]`): skips the measurement step and reuses the existing `current.json` as-is, so you can inject a synthetic regression into `current.json` (e.g. `jq '.metrics.cat_10mb_ascii_sec = 0.30' current.json > tmp && mv tmp current.json`) and confirm the comparison step fails in CI mode / warns in local mode. Without this flag every invocation re-measures and would overwrite the injected values before comparing.
 
 Subset measured always: `cat_10mb_ascii_sec`, `cat_4mb_ansi_sec`, `idle_cpu_pct`, `rss_mb`. The three `vtebench_*` metrics are run **only if `vtebench` is on PATH**; if absent they're emitted as `null` and skipped from the diff so a missing tool never fails the gate. CI's Linux runner tries `cargo install vtebench --locked`; if install fails (e.g. transient registry issue) the job still passes on the subset rather than blocking unrelated work.
 
-A criterion microbench lives at `crates/sonic-shared/benches/render_throughput.rs` (run with `cargo bench -p sonic-shared --bench render_throughput`). It covers the hot pure-CPU helpers (`hex_to_rgba`, `srgb_u8_to_linear_lut`) the render pipeline calls per-cell so algorithmic regressions in those show up without a GPU surface. Add a new bench function when you add a new hot pure-CPU helper.
+A criterion microbench lives at `crates/sonicterm-shared/benches/render_throughput.rs` (run with `cargo bench -p sonicterm-shared --bench render_throughput`). It covers the hot pure-CPU helpers (`hex_to_rgba`, `srgb_u8_to_linear_lut`) the render pipeline calls per-cell so algorithmic regressions in those show up without a GPU surface. Add a new bench function when you add a new hot pure-CPU helper.
 
 ---
 
@@ -420,10 +420,10 @@ can verify. Cross-platform work goes to whoever claims it first.
 
 | Domain | Owner | Why |
 |---|---|---|
-| `crates/sonic-mac/` + macOS-only paths (NSMenu, libproc) | mac-PM | only Mac can §13 |
-| `crates/sonic-windows/` + Windows-only paths (ConPTY, muda, Mica, OLE drag) | win-PM | only Win can §13 |
+| `crates/sonicterm-mac/` + macOS-only paths (NSMenu, libproc) | mac-PM | only Mac can §13 |
+| `crates/sonicterm-windows/` + Windows-only paths (ConPTY, muda, Mica, OLE drag) | win-PM | only Win can §13 |
 | Cross-platform hot files: `render/core.rs`, `app/*.rs`, `keymap.rs`, `vt.rs`, `grid.rs` | first to claim, blocks the other | high merge-conflict risk |
-| Cross-platform pure-data: `sonic-vt/`, `sonic-grid/`, `sonic-cfg/theme.rs`, `assets/themes/*.toml`, `docs/specs/` | either, coordinate via touches: line | safe parallel |
+| Cross-platform pure-data: `sonicterm-vt/`, `sonicterm-grid/`, `sonicterm-cfg/theme.rs`, `assets/themes/*.toml`, `docs/specs/` | either, coordinate via touches: line | safe parallel |
 | `CLAUDE.md`, `docs/ROADMAP.md`, `docs/RELEASE_TESTING.md`, `CHANGELOG.md` | current release-tag owner | one writer per release window |
 
 ### Mandatory touches: line
@@ -431,7 +431,7 @@ can verify. Cross-platform work goes to whoever claims it first.
 Every PR body MUST start with a single line listing the files/crates
 touched:
 
-    touches: crates/sonic-app/src/app/window_event.rs, crates/sonic-shared/src/render/core.rs
+    touches: crates/sonicterm-app/src/app/window_event.rs, crates/sonicterm-shared/src/render/core.rs
 
 Before opening a PR on a hot file, run:
 

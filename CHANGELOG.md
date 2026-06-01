@@ -8,7 +8,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 29+ PRs landed this session on top of the earlier v1.0.0 staging
 notes. Highlights: the engine was decomposed from a 4-crate
-`sonic-core` + `sonic-shared` monolith into 10 leaf crates under
+`sonicterm-core` + `sonicterm-shared` monolith into 10 leaf crates under
 `crates/`, the bulk `render.rs` and `app.rs` files were split into
 focused modules, a P0 ANSI-background-color regression was caught
 and fixed, the PTY burst flag became a generation counter, and the
@@ -20,28 +20,28 @@ are procured.
 
 - `#145` Move all crates from the flat top-level layout into
   `crates/<name>/` to make room for the leaf split.
-- `#151` Extract `sonic-types` — zero-dep value types (`Cell`, `Pos`,
+- `#151` Extract `sonicterm-types` — zero-dep value types (`Cell`, `Pos`,
   `Action`, `GlyphKey`, `HyperlinkId`, geometry primitives).
-- `#152` Decompose `sonic-core` into four leaf crates: `sonic-vt`
-  (parser), `sonic-grid` (grid + hyperlink registry), `sonic-cfg`
-  (config / theme / keymap / url_open), `sonic-io` (PTY + proc_info
-  + ssh + foreground_proc). `sonic-core` remains as a deprecated
-  re-export façade so `use sonic_core::vt::Parser;` still compiles.
-- `#153` Extract `sonic-text` — shape (LRU cache), swash rasterizer,
+- `#152` Decompose `sonicterm-core` into four leaf crates: `sonicterm-vt`
+  (parser), `sonicterm-grid` (grid + hyperlink registry), `sonicterm-cfg`
+  (config / theme / keymap / url_open), `sonicterm-io` (PTY + proc_info
+  + ssh + foreground_proc). `sonicterm-core` remains as a deprecated
+  re-export façade so `use sonicterm_core::vt::Parser;` still compiles.
+- `#153` Extract `sonicterm-text` — shape (LRU cache), swash rasterizer,
   glyph atlas, row glyph cache.
-- `#154` Extract `sonic-ui` — tabs, tabbar_view, pane, selection,
+- `#154` Extract `sonicterm-ui` — tabs, tabbar_view, pane, selection,
   search, command_palette, cursor, IME, i18n, prefs subsystem.
-- `#155` Extract `sonic-render-model` — renderer-agnostic frame
+- `#155` Extract `sonicterm-render-model` — renderer-agnostic frame
   geometry / inputs / painter traits (what to draw, not how).
-- `#156` Extract `sonic-gpu` — `quad::QuadPipeline`, `text_pipeline`,
+- `#156` Extract `sonicterm-gpu` — `quad::QuadPipeline`, `text_pipeline`,
   `atlas_upload`.
-- `#157` Split `sonic-shared/src/render.rs` into
+- `#157` Split `sonicterm-shared/src/render.rs` into
   `render/{mod,core,color,metrics,tab_spans,cursor,drag_chip}.rs`.
-- `#158` Extract `sonic-app` — winit ApplicationHandler + menu +
+- `#158` Extract `sonicterm-app` — winit ApplicationHandler + menu +
   os_drag + tab_drag + config_watch.
 - `#159` Auto-closed during rebase as scaffolding-only; the accepted
   app-split content shipped via `#160`.
-- `#160` Split `sonic-app/src/app.rs` into 16 focused modules under
+- `#160` Split `sonicterm-app/src/app.rs` into 16 focused modules under
   `app/`: `mod`, `window_event`, `event_loop`, `spawn_pane`,
   `keymap_dispatch`, `key_encoding`, `input`, `redraw`, `overlays`,
   `tab_state`, `tear_out`, `child_window`, `prefs_window`,
@@ -224,7 +224,7 @@ finally pinned to ~0%.
 - `#53` Live reload for font, theme, and keymap files (via `notify`).
 - `#54` Preferences persist to disk and live-apply without a restart.
 - `#55` i18n: English, Simplified Chinese, Japanese UI strings.
-- `#56` `sonic-mux` daemon — persistent PTY sessions surviving Sonic
+- `#56` `sonicterm-mux` daemon — persistent PTY sessions surviving Sonic
   process restarts.
 - `#57` Programming-ligature shaping + ZWJ runs through HarfBuzz.
 - `#58` SSH client pane via `russh` (behind `ssh` cargo feature).
@@ -347,7 +347,7 @@ finally pinned to ~0%.
 ## [0.1.0-alpha.1] — 2026-05-24
 
 ### Added
-- Cargo workspace with 4 crates: `sonic-core`, `sonic-shared`, `sonic-mac`, `sonic-windows`.
+- Cargo workspace with 4 crates: `sonicterm-core`, `sonicterm-shared`, `sonicterm-mac`, `sonicterm-windows`.
 - VT/ANSI parser (CSI cursor motion + ED/EL + SGR incl. 256-color & truecolor; OSC 0/2/8/52).
 - Grid model with scrollback, unicode width, wide-char support.
 - Cross-platform PTY via `portable-pty`.

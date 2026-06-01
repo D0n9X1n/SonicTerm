@@ -23,7 +23,7 @@ make it happen. Keys are written WezTerm-style: `super` is `⌘` on macOS and
 9. [Command palette and keymap](#command-palette-and-keymap)
 10. [Selection, copy, and opacity](#selection-copy-and-opacity)
 11. [SSH client (optional)](#ssh-client-optional)
-12. [Multiplexer (`sonic-mux`)](#multiplexer-sonic-mux)
+12. [Multiplexer (`sonicterm-mux`)](#multiplexer-sonicterm-mux)
 13. [Code signing](#code-signing)
 14. [Regression net](#regression-net)
 15. [Troubleshooting](#troubleshooting)
@@ -285,7 +285,7 @@ key = "super+k"
 action = "ClearScreen"
 ```
 
-The full list of action names lives in `sonic-core::keymap::Action`; the
+The full list of action names lives in `sonicterm-core::keymap::Action`; the
 command palette shows them in their localized form.
 
 ---
@@ -309,7 +309,7 @@ Sonic includes an in-process SSH client built on
 with:
 
 ```bash
-cargo build --release -p sonic-mac --features ssh
+cargo build --release -p sonicterm-mac --features ssh
 ```
 
 Once enabled, open an SSH pane from the command palette
@@ -324,18 +324,18 @@ command.
 
 ---
 
-## Multiplexer (`sonic-mux`)
+## Multiplexer (`sonicterm-mux`)
 
-`sonic-mux` is a separate daemon binary that owns persistent PTY sessions.
+`sonicterm-mux` is a separate daemon binary that owns persistent PTY sessions.
 Sonic's GUI can attach as a thin client — close the window, reopen it,
 and your shells are still running.
 
 ```bash
 # 1. Start the daemon (foreground or via launchd / systemd)
-cargo run --release -p sonic-mux -- --socket /tmp/sonic.sock
+cargo run --release -p sonicterm-mux -- --socket /tmp/sonic.sock
 
 # 2. Attach the GUI as a client
-SONIC_MUX=/tmp/sonic.sock cargo run --release -p sonic-mac
+SONIC_MUX=/tmp/sonic.sock cargo run --release -p sonicterm-mac
 ```
 
 Implementation notes:
@@ -365,10 +365,10 @@ visible has regressed:
 
 ```bash
 # CJK / emoji / Powerline end-to-end through the real grid
-cargo run --example pty_dump_unicode -p sonic-core --release
+cargo run --example pty_dump_unicode -p sonicterm-core --release
 
 # Atlas coverage matrix — non-zero pixels per char class
-cargo test -p sonic-shared --test render_capability_matrix
+cargo test -p sonicterm-shared --test render_capability_matrix
 ```
 
 The first one is sentinel-framed: it writes a known string, scans the
@@ -382,7 +382,7 @@ expected characters in the expected style.
 **My font looks wrong / I can't see emoji.**
 Check `[font] family = "…"` — if you point at a font missing CJK or emoji,
 Sonic falls back to the per-OS chain, but a non-existent family will be
-ignored entirely. Run with `RUST_LOG=sonic_shared=info` to see what got
+ignored entirely. Run with `RUST_LOG=sonicterm_shared=info` to see what got
 loaded.
 
 **Cmd+click doesn't open links.**

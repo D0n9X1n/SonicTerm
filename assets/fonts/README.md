@@ -3,7 +3,7 @@
 Sonic ships exactly one monospaced font family:
 
 **Rec Mono St.Helens** — the brand default referenced by
-`sonic_cfg::config::DEFAULT_FONT_FAMILY`. Four variants are committed
+`sonicterm_cfg::config::DEFAULT_FONT_FAMILY`. Four variants are committed
 directly to this directory:
 
 - `RecMonoSt.Helens-Regular.ttf`
@@ -25,7 +25,7 @@ The upstream St.Helens TTFs ship with broken OS/2 metadata:
 A naive `(family, style, weight)` query against fontdb therefore returns
 either the wrong face or `None`. WezTerm dodges this by routing by
 filename / PostScript name; we do the same in
-`sonic_text::load_font_data_with_sonic_overrides`, which patches the
+`sonicterm_text::load_font_data_with_sonic_overrides`, which patches the
 `FaceInfo` style+weight at load time using the (correct) PostScript name
 as the source of truth. The override path also drops any system-installed
 St.Helens copies whose metadata we cannot fix, so a user with the font
@@ -40,7 +40,7 @@ Rec Mono St.Helens is committed in-tree (no fetch step needed).
 
 If you need Nerd Font / Powerline PUA coverage, install a Nerd Font
 system-wide (e.g. JetBrainsMono Nerd Font, Symbols Nerd Font Mono); the
-platform fallback chain in `sonic_text::swash_rasterizer` resolves
+platform fallback chain in `sonicterm_text::swash_rasterizer` resolves
 through it automatically. The previously-bundled JetBrainsMono Nerd Font
 TTFs and Rec Mono Casual were dropped in R1 of the rename epic (#419).
 

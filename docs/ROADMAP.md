@@ -35,26 +35,26 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | PaneTree model (recursive splits, collapse-on-close) | ✅ | bootstrap |
 | TOML config + 4 themes + WezTerm keymap | ✅ | bootstrap |
 | Original SVG icon (terminal window + cyan speed trails + `>_`) | ✅ v0.3 | `assets/icons/source/sonic.svg` |
-| **wgpu+glyphon character rendering** | ✅ v0.2 | `sonic-shared/src/render.rs` |
-| **Keyboard input → PTY** | ✅ v0.2 | `sonic-shared/src/app.rs::encode_logical` |
-| Cursor rendering + selection + keymap dispatcher + clipboard | ✅ v0.3a | `sonic-shared/src/app.rs` |
-| Per-cell color + bold / italic / underline | ✅ v0.3b | `sonic-shared/src/render.rs` |
-| Browser-style tab bar UI | ✅ v0.3c | `sonic-shared/src/tabbar_view.rs` + `render.rs` |
-| Bound keymap actions | ✅ v0.3d | `sonic-shared/src/app.rs::run_action` (Split/Close/Focus wired) |
-| Pane rendering + per-pane PTY | ✅ v0.3d | `sonic-shared/src/pane.rs` + `render.rs` border pass |
-| OSC 8 hyperlinks (registry + URL opener) | ✅ v0.4 | `sonic-core::vt` + `sonic-shared` |
-| OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonic-shared/src/render.rs` + `app.rs` |
-| In-page search (`Cmd+F`) | ✅ v0.4 | `sonic-shared/src/search.rs` |
-| Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonic-core::vt` |
+| **wgpu+glyphon character rendering** | ✅ v0.2 | `sonicterm-shared/src/render.rs` |
+| **Keyboard input → PTY** | ✅ v0.2 | `sonicterm-shared/src/app.rs::encode_logical` |
+| Cursor rendering + selection + keymap dispatcher + clipboard | ✅ v0.3a | `sonicterm-shared/src/app.rs` |
+| Per-cell color + bold / italic / underline | ✅ v0.3b | `sonicterm-shared/src/render.rs` |
+| Browser-style tab bar UI | ✅ v0.3c | `sonicterm-shared/src/tabbar_view.rs` + `render.rs` |
+| Bound keymap actions | ✅ v0.3d | `sonicterm-shared/src/app.rs::run_action` (Split/Close/Focus wired) |
+| Pane rendering + per-pane PTY | ✅ v0.3d | `sonicterm-shared/src/pane.rs` + `render.rs` border pass |
+| OSC 8 hyperlinks (registry + URL opener) | ✅ v0.4 | `sonicterm-core::vt` + `sonicterm-shared` |
+| OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonicterm-shared/src/render.rs` + `app.rs` |
+| In-page search (`Cmd+F`) | ✅ v0.4 | `sonicterm-shared/src/search.rs` |
+| Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonicterm-core::vt` |
 | **Palette config-file editing** | ✅ v1.0-RC | `Edit sonic.toml` / `Edit keymap.toml` palette actions replace the removed prefs UI (#326) |
-| Tab tear-out + cross-window merge | ✅ v0.8 | `sonic-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
+| Tab tear-out + cross-window merge | ✅ v0.8 | `sonicterm-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
 | Command palette (`super+shift+P`) | ✅ v0.8 | (#41, #45) |
 | IME composition + preedit anchoring | ✅ v0.8 | (#40, #50) |
 | In-page + scrollback search | ✅ v0.8 | (#51) |
 | Bracketed paste + OSC 133 shell-integration | ✅ v0.8 | (#52) |
 | Font / theme / keymap live-reload + config-file editing | ✅ v0.8 / v1.0-RC | (#53, #54, #326) |
 | i18n (en / zh-CN / ja) | ✅ v0.8 | (#55) |
-| `sonic-mux` daemon (persistent PTY sessions) | ✅ v0.8 | `sonic-mux/` (#56) |
+| `sonicterm-mux` daemon (persistent PTY sessions) | ✅ v0.8 | `sonicterm-mux/` (#56) |
 | Programming ligatures + ZWJ shaping | ✅ v0.8 | (#57) |
 | SSH client pane (russh, feature-gated) | ✅ v0.8 | (#58) |
 | Native macOS menubar | ✅ v0.8 | (#66) |
@@ -62,7 +62,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | WezTerm visual parity (≤ 3 ΔE on standard recipe) | ✅ v0.8 | (#70, #75) |
 | Windows MVP (MSI, titlebar+Mica, menu, OLE drag, fg-proc probe) | ✅ v1.0 | (#133, #134, #135, #137, #139) |
 | Renderer + VT + PTY perf pass (8 wins) | ⏳ partial | landed: #129, #130, #131, #132, #136, #138, #140, #141, #142; still 6–302× behind WezTerm on vtebench — Phase E continues |
-| Crate decomposition (sonic-core → sonic-{vt,grid,cfg,io} + sonic-{types,text,ui,render-model,gpu,app}) | ✅ v1.0-RC | (#145, #151, #152, #153, #154, #155, #156, #157, #158, #160) |
+| Crate decomposition (sonicterm-core → sonic-{vt,grid,cfg,io} + sonic-{types,text,ui,render-model,gpu,app}) | ✅ v1.0-RC | (#145, #151, #152, #153, #154, #155, #156, #157, #158, #160) |
 | Per-cell ANSI background colors render correctly (P0 regression fix) | ✅ v1.0-RC | (#161 spec → #163 fix) |
 | PTY burst flag converted to generation counter (race fix) | ✅ v1.0-RC | (#162) |
 | Default font switched to St Helens (system-installed, not bundled) | ✅ v1.0-RC | (#148) |
@@ -141,7 +141,7 @@ Highlights:
    #75) — HiDPI physical-px rasterization (#63, #72, #76), sRGB→linear
    gamma (#65), CJK / emoji / Hangul / Powerline / ZWJ (#49, #57, #68).
 6. **Live reload** of font/theme/keymap via config files (#53, #54, #326).
-7. **`sonic-mux` daemon** for persistent PTY sessions (#56).
+7. **`sonicterm-mux` daemon** for persistent PTY sessions (#56).
 8. **SSH client pane** behind `ssh` feature flag (#58).
 9. **Native macOS menubar** (#66) + WezTerm-style tab titles (#77).
 10. **i18n** en / zh-CN / ja (#55).
@@ -161,13 +161,13 @@ procurement AND an honest perf-parity sign-off (see below).
 PRs landed this session:
 
 - **Crate decomposition (refactor)**: #145 (move to `crates/` nesting),
-  #151 (extract `sonic-types`), #152 (split `sonic-core` into
-  `sonic-vt` / `sonic-grid` / `sonic-cfg` / `sonic-io` + façade), #153
-  (extract `sonic-text`: shape + atlas + raster), #154 (extract
-  `sonic-ui`: tabs / panes / search / palette / IME / i18n),
-  #155 (extract `sonic-render-model`), #156 (extract `sonic-gpu`),
+  #151 (extract `sonicterm-types`), #152 (split `sonicterm-core` into
+  `sonicterm-vt` / `sonicterm-grid` / `sonicterm-cfg` / `sonicterm-io` + façade), #153
+  (extract `sonicterm-text`: shape + atlas + raster), #154 (extract
+  `sonicterm-ui`: tabs / panes / search / palette / IME / i18n),
+  #155 (extract `sonicterm-render-model`), #156 (extract `sonicterm-gpu`),
   #157 (split `render.rs` → `render/{color,metrics,tab_spans,cursor,drag_chip,core}.rs`),
-  #158 (extract `sonic-app`), #160 (split `app.rs` into 16 modules
+  #158 (extract `sonicterm-app`), #160 (split `app.rs` into 16 modules
   under `app/`).
 - **P0 correctness fix**: #161 (spec) → #163 (fix) — per-cell ANSI
   background colors were silently dropped before reaching the text
@@ -206,7 +206,7 @@ bodies.
 Six-PR chain (A: API, B1/B2: cluster-transparent reads, C: scroll_up
 eject, D: smart-degrade, E: resize-aware, F: bench + validation)
 landed the cluster-RLE scrollback representation. Validated end-to-end
-by `crates/sonic-grid/examples/scrollback_memory_report.rs` and
+by `crates/sonicterm-grid/examples/scrollback_memory_report.rs` and
 `tests/scrollback_compression_ratio.rs`:
 
 - 10K uniform-blank lines @ 120 cols: **1.034 MiB measured vs 28.195
@@ -230,7 +230,7 @@ Still deferred past v1.0:
 
 4. **Auto-update**: Sparkle on macOS, Squirrel or WinSparkle on Windows.
 5. **Session restore**: persist tab/pane layouts to disk on shutdown,
-   restore on next launch (complements `sonic-mux` from v0.8).
+   restore on next launch (complements `sonicterm-mux` from v0.8).
 6. **Linux support**: re-enable `sonic-linux`, add to CI matrix and
    release pipeline, AppImage + `.deb`.
 7. **Half-transparent / blur backgrounds** (rolled forward from v0.8).
@@ -263,7 +263,7 @@ Still deferred past v1.0:
 - **No Linux work** until v1.0.
 - **No signing** until v1.0.
 - **No nightly Rust** — stable only (`rust-toolchain.toml`).
-- **No `unsafe`** outside platform shim layers in `sonic-mac` / `sonic-windows`,
+- **No `unsafe`** outside platform shim layers in `sonicterm-mac` / `sonicterm-windows`,
   and even there only when wrapping a platform API. Workspace lint
   `unsafe_op_in_unsafe_fn = "warn"` is on.
 - **Clippy is `all`, not `pedantic`/`nursery`.** Don't re-enable the loud

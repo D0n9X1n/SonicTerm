@@ -10,10 +10,10 @@
 - [ ] chore / ci
 
 ## Scope
-- [ ] sonic-core
-- [ ] sonic-shared
-- [ ] sonic-mac
-- [ ] sonic-windows
+- [ ] sonicterm-core
+- [ ] sonicterm-shared
+- [ ] sonicterm-mac
+- [ ] sonicterm-windows
 - [ ] CI / release
 - [ ] docs / assets
 

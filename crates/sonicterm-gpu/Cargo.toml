@@ -1,0 +1,23 @@
+[package]
+name = "sonicterm-gpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — GPU pipeline primitives (quad, text, atlas upload)"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-types.workspace = true
+sonicterm-text.workspace = true
+sonicterm-render-model.workspace = true
+wgpu.workspace = true
+glyphon.workspace = true
+cosmic-text.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+pollster = "0.4"

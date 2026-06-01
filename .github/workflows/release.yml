@@ -49,12 +49,12 @@ jobs:
         run: cargo test --workspace
       - name: pty_dump e2e
         run: |
-          OUT=$(cargo run --example pty_dump -p sonic-core --release)
+          OUT=$(cargo run --example pty_dump -p sonicterm-core --release)
           echo "$OUT"
           echo "$OUT" | grep -q '\[e2e\] OK'
       - name: pty_dump_unicode e2e
         run: |
-          OUT=$(cargo run --example pty_dump_unicode -p sonic-core --release)
+          OUT=$(cargo run --example pty_dump_unicode -p sonicterm-core --release)
           echo "$OUT"
           echo "$OUT" | grep -q '\[unicode-e2e\] OK'
       - name: Install vtebench (best-effort)
@@ -95,17 +95,17 @@ jobs:
           shared-key: release-mac
 
       - name: Build x86_64
-        run: cargo build --release --target x86_64-apple-darwin -p sonic-mac
+        run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 
       - name: Build aarch64
-        run: cargo build --release --target aarch64-apple-darwin -p sonic-mac
+        run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 
       - name: Make universal binary
         run: |
           mkdir -p dist
           lipo -create \
-            target/x86_64-apple-darwin/release/sonic-mac \
-            target/aarch64-apple-darwin/release/sonic-mac \
+            target/x86_64-apple-darwin/release/sonicterm-mac \
+            target/aarch64-apple-darwin/release/sonicterm-mac \
             -output dist/sonic
           file dist/sonic
 
@@ -123,7 +123,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: sonic-mac
+          name: sonicterm-mac
           path: dist/*.dmg
 
   # --- Windows build + .msi (UNSIGNED — signing deferred pending certs) -----
@@ -147,12 +147,12 @@ jobs:
         run: cargo install cargo-wix --locked
 
       - name: Build release
-        run: cargo build --release --target x86_64-pc-windows-msvc -p sonic-windows
+        run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
       - name: Build .msi (unsigned)
         shell: bash
         run: |
-          cd crates/sonic-windows
+          cd crates/sonicterm-windows
           cargo wix --no-build --nocapture --output ../../dist/
 
       - name: Note unsigned build
@@ -161,7 +161,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: sonic-windows
+          name: sonicterm-windows
           path: dist/*.msi
 
   publish:

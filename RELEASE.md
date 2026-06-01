@@ -13,8 +13,8 @@ From a clean checkout of `main`:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run --example pty_dump -p sonic-core --release      # must print [e2e] OK
-cargo build --release -p sonic-mac                        # confirms fat-LTO build
+cargo run --example pty_dump -p sonicterm-core --release      # must print [e2e] OK
+cargo build --release -p sonicterm-mac                        # confirms fat-LTO build
 ```
 
 Confirm:
@@ -46,14 +46,14 @@ the `v*` tag and:
    - Installs `librsvg` + `imagemagick`.
    - Runs `bash assets/icons/bake-icons.sh` so the bundle carries fresh
      `.icns` / PNG bakes.
-   - Builds `sonic-mac` with the release profile (fat LTO, 1 codegen
+   - Builds `sonicterm-mac` with the release profile (fat LTO, 1 codegen
      unit, strip, panic=abort).
    - Packages a **universal `Sonic-vX.Y.Z.dmg`**.
    - As of v0.8 (#39): code-signing + notarization runs **only when the
      `APPLE_*` secrets are present**. Until v1.0 these are intentionally
      absent and the DMG ships unsigned.
 2. **`windows-latest` job**
-   - Builds `sonic-windows` release.
+   - Builds `sonicterm-windows` release.
    - Packages an **x64 `Sonic-vX.Y.Z.msi`** via WiX.
    - Signtool runs only when `WINDOWS_CERT_*` secrets are present (also
      v1.0 work).

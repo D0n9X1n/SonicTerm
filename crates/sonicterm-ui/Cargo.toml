@@ -1,0 +1,34 @@
+[package]
+name = "sonicterm-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sonic Terminal — pure-data UI state and layout (tabs, panes, selection, search, palette, overlays, ui_tokens). No winit, no wgpu, no glyphon."
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-types.workspace = true
+sonicterm-cfg.workspace = true
+# sonicterm-grid is a pure-data crate (Grid/Cell/CellFlags) — selection.rs and
+# search.rs need it. This is a deliberate deviation from the PR-5 plan,
+# which listed only {sonicterm-types, sonicterm-cfg}; sonicterm-grid is data-only
+# (no wgpu/winit/glyphon) so the "pure UI state, no GPU" invariant holds.
+sonicterm-grid.workspace = true
+regex.workspace = true
+nucleo-matcher = "0.3"
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+fluent-bundle = "0.15"
+fluent-langneg = "0.13"
+unic-langid = { version = "0.9", features = ["macros"] }
+intl-memoizer = "0.5"
+sys-locale = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
