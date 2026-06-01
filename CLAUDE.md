@@ -247,8 +247,8 @@ cargo test --workspace 2>&1 | grep "test result" | awk -F'[ .,]' '{s+=$5} END {p
 ## 8. Configuration runtime
 
 User config lives at:
-- macOS: `~/Library/Application Support/Sonic/sonic.toml`
-- Windows: `%APPDATA%\Sonic\sonic.toml`
+- macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
+- Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
 
 Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5). Default font is `St Helens` (system, not bundled); `Rec Mono Casual` ships under `assets/fonts/` as guaranteed fallback.
 
@@ -269,7 +269,7 @@ triggers `.github/workflows/release.yml` → first runs the `release-gate` job (
 
 The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/config-edit/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
-`crates/sonicterm-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
+`crates/sonicterm-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/SonicTerm/sonicterm.log.*` / `%LOCALAPPDATA%\SonicTerm\Logs\sonicterm.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 
 ---
 
@@ -536,7 +536,7 @@ but does NOT commit on the owner's open branches without invitation.
 
 When filing a bug, attach the last 200 lines of the most recent log file:
 
-- macOS: `tail -200 ~/Library/Logs/Sonic/sonic.log.*`
-- Windows: `Get-Content "$env:LOCALAPPDATA\Sonic\Logs\sonic.log.*" -Tail 200`
+- macOS: `tail -200 ~/Library/Logs/SonicTerm/sonicterm.log.*`
+- Windows: `Get-Content "$env:LOCALAPPDATA\SonicTerm\Logs\sonicterm.log.*" -Tail 200`
 
 If the bug crashed the app, include the matching `crashes/crash-*.log` from the same directory. If logs are gone (auto-cleaned by the 14-day / 5-rotated-file retention policy), say roughly when the bug happened so we can correlate. Full retention + level docs live in `docs/LOGGING.md`.

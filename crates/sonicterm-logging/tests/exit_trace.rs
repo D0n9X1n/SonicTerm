@@ -58,7 +58,7 @@ fn read_all_logs(dir: &Path) -> String {
             let p = e.path();
             if p.is_file()
                 && p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with("sonic.log"))
+                    .map(|n| n.to_string_lossy().starts_with("sonicterm.log"))
                     .unwrap_or(false)
             {
                 if let Ok(s) = std::fs::read_to_string(&p) {

@@ -171,7 +171,7 @@ fn palette_lists_every_action_variant() {
 fn fuzzy_match_ranks_substring_before_subsequence() {
     // Typing "neta" should match "New Tab" (a subsequence: N-e-T-a)
     // and rank it ahead of any candidate where the chars only barely
-    // appear. "Edit sonic.toml" has no 'n' followed by 'e' followed
+    // appear. "Edit sonicterm.toml" has no 'n' followed by 'e' followed
     // by 't' followed by 'a', so it must NOT match at all.
     let mut p = CommandPalette::new();
     p.open();
@@ -184,8 +184,8 @@ fn fuzzy_match_ranks_substring_before_subsequence() {
         "'neta' should match 'New Tab' as a subsequence: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l == "Edit sonic.toml"),
-        "'neta' should NOT match 'Edit sonic.toml': {labels:?}"
+        !labels.iter().any(|l| l == "Edit sonicterm.toml"),
+        "'neta' should NOT match 'Edit sonicterm.toml': {labels:?}"
     );
 
     // And against a query that exists as a contiguous substring in
@@ -322,8 +322,8 @@ fn palette_query_sett_matches_edit_config() {
     let labels: Vec<String> =
         p.visible().iter().map(|a| sonicterm_shared::command_label::label(a)).collect();
     assert!(
-        labels.iter().any(|l| l == "Edit sonic.toml"),
-        "'sett' should match 'Edit sonic.toml' via keyword alias: {labels:?}"
+        labels.iter().any(|l| l == "Edit sonicterm.toml"),
+        "'sett' should match 'Edit sonicterm.toml' via keyword alias: {labels:?}"
     );
 }
 

@@ -54,7 +54,7 @@ When `MACOS_CERT_P12_BASE64` is set:
   keychain on the runner.
 - `packaging/mac/make-dmg.sh` sees `MACOS_SIGNING_IDENTITY` in its env and runs
   `codesign --deep --force --options runtime --timestamp --sign "$IDENTITY"`
-  on `Sonic.app` before wrapping it in the DMG.
+  on `SonicTerm.app` before wrapping it in the DMG.
 
 When `MACOS_NOTARY_USER` is also set:
 - After the DMG is built, the workflow runs
@@ -65,8 +65,8 @@ When `MACOS_NOTARY_USER` is also set:
 
 ```bash
 # Should print "Developer ID Application: …" and "satisfies its Designated Requirement"
-codesign -dv --verbose=4 /Applications/Sonic.app
-spctl --assess --type execute --verbose /Applications/Sonic.app    # accepted
+codesign -dv --verbose=4 /Applications/SonicTerm.app
+spctl --assess --type execute --verbose /Applications/SonicTerm.app    # accepted
 xcrun stapler validate Sonic-<version>-mac-universal.dmg            # validated
 ```
 

@@ -23,17 +23,17 @@ pub const fn platform_default_keymap_name() -> &'static str {
 
 /// Platform-specific default user keymap path.
 ///
-/// Windows uses `%APPDATA%\Sonic\keymap.toml`; macOS uses
-/// `~/Library/Application Support/Sonic/keymap.toml`. Other platforms follow
-/// Sonic's config-dir fallback so tests and non-shipping builds stay usable.
+/// Windows uses `%APPDATA%\SonicTerm\keymap.toml`; macOS uses
+/// `~/Library/Application Support/SonicTerm/keymap.toml`. Other platforms follow
+/// SonicTerm's config-dir fallback so tests and non-shipping builds stay usable.
 pub fn default_user_keymap_path() -> Option<std::path::PathBuf> {
     let base = if cfg!(target_os = "macos") {
         std::path::PathBuf::from(std::env::var_os("HOME")?)
-            .join("Library/Application Support/Sonic")
+            .join("Library/Application Support/SonicTerm")
     } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(std::path::PathBuf::from)?.join("Sonic")
+        std::env::var_os("APPDATA").map(std::path::PathBuf::from)?.join("SonicTerm")
     } else {
-        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config/sonic")
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config/sonicterm")
     };
     Some(base.join("keymap.toml"))
 }

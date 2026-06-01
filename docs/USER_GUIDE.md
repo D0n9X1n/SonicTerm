@@ -5,8 +5,8 @@ make it happen. Keys are written WezTerm-style: `super` is `⌘` on macOS and
 `Ctrl` on Windows unless otherwise noted.
 
 > If a default binding clashes with something you already use, edit
-> `~/Library/Application Support/Sonic/sonic.toml` (macOS) or
-> `%APPDATA%\Sonic\sonic.toml` (Windows) — see [Configuration](#configuration).
+> `~/Library/Application Support/SonicTerm/sonicterm.toml` (macOS) or
+> `%APPDATA%\SonicTerm\sonicterm.toml` (Windows) — see [Configuration](#configuration).
 
 ---
 
@@ -72,7 +72,7 @@ What works out of the box:
 - **Programming ligatures** — `=>`, `!=`, `>=`, `->`, `===` and friends
   ligate automatically when the font supplies them.
 
-To use a different primary font, set it in `sonic.toml`:
+To use a different primary font, set it in `sonicterm.toml`:
 
 ```toml
 [font]
@@ -165,7 +165,7 @@ echoes new output the indicator updates immediately — no stale results.
   the last tab, the source drains rather than exits, so the application
   remains alive.
 - **macOS:** tabs can be dragged **across processes** via NSPasteboard —
-  drop a Sonic tab onto a second Sonic.app instance. (Windows support is
+  drop a Sonic tab onto a second SonicTerm.app instance. (Windows support is
   stubbed but not wired yet.)
 
 ### Panes
@@ -187,10 +187,10 @@ its child shell (no orphans).
 
 User config lives at:
 
-- macOS: `~/Library/Application Support/Sonic/sonic.toml`
-- Windows: `%APPDATA%\Sonic\sonic.toml`
+- macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
+- Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
 
-A minimal `sonic.toml`:
+A minimal `sonicterm.toml`:
 
 ```toml
 [font]
@@ -211,7 +211,7 @@ locale = "auto"
 
 ### Live reload
 
-Sonic watches `sonic.toml` and the bundled theme / keymap files. Save the
+Sonic watches `sonicterm.toml` and the bundled theme / keymap files. Save the
 file in your editor and the change applies in the running window:
 
 - Font family / size: re-rasterizes the atlas on next frame.
@@ -223,16 +223,16 @@ config opened by an older Sonic doesn't lose data.
 
 ### Editing configuration
 
-Open the command palette and run `Edit sonic.toml` or `Edit keymap.toml`
+Open the command palette and run `Edit sonicterm.toml` or `Edit keymap.toml`
 to open the editable user files in the OS default `.toml` handler. If
-`sonic.toml` does not exist yet, Sonic creates it with a short commented
+`sonicterm.toml` does not exist yet, Sonic creates it with a short commented
 header first. Saved changes are picked up by the live-reload watcher.
 
 ---
 
 ## Themes
 
-Bundled themes (selectable from `sonic.toml`, for example `[appearance] theme = "…"`).
+Bundled themes (selectable from `sonicterm.toml`, for example `[appearance] theme = "…"`).
 The default is `wezterm` for out-of-box visual parity with WezTerm:
 
 - `wezterm` (default)
@@ -243,7 +243,7 @@ The default is `wezterm` for out-of-box visual parity with WezTerm:
 - `gruvbox-dark-hard`
 
 Custom themes can be dropped as `.toml` into the same directory as
-`sonic.toml` and referenced by filename (without extension).
+`sonicterm.toml` and referenced by filename (without extension).
 
 ---
 
@@ -259,13 +259,13 @@ today:
 
 Locale selection order:
 
-1. `[i18n] locale = "…"` in `sonic.toml`
+1. `[i18n] locale = "…"` in `sonicterm.toml`
 2. `SONIC_LOCALE` environment variable
 3. OS locale (`AppleLanguages` on macOS, `GetUserDefaultUILanguage` on
    Windows)
 4. Fallback to `en`
 
-Changing `locale` in `sonic.toml` switches locale live without a restart.
+Changing `locale` in `sonicterm.toml` switches locale live without a restart.
 
 ---
 
@@ -297,7 +297,7 @@ command palette shows them in their localized form.
 - **Copy:** `super+c` (also auto-copies on selection if
   `[appearance] copy_on_select = true`).
 - **Paste:** `super+v`.
-- **Window opacity:** set `[appearance] opacity = 0.96` in `sonic.toml`.
+- **Window opacity:** set `[appearance] opacity = 0.96` in `sonicterm.toml`.
   Values from `0.5` to `1.0`.
 
 ---
@@ -399,7 +399,7 @@ the `\[ \]` brackets matter for bash; zsh uses `%{ %}`.
 That's a Claude Code reminder, not a Sonic message. Ignore.
 
 **How do I edit settings?**
-Open the command palette (`super+shift+p`) and type `Edit sonic.toml`.
+Open the command palette (`super+shift+p`) and type `Edit sonicterm.toml`.
 Sonic opens the platform config file in your default `.toml` editor.
 
 ---

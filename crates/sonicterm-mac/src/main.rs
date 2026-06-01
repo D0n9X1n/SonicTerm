@@ -92,6 +92,7 @@ fn main() -> Result<()> {
 }
 
 fn load_config() -> Result<Config> {
+    sonicterm_core::config::migrate_legacy_config_if_needed();
     match Config::default_path() {
         Some(path) => Config::load_or_default(&path),
         None => Ok(Config::default()),
@@ -112,7 +113,7 @@ fn load_keymap(name: &str) -> Result<Keymap> {
 /// In dev (`cargo run`), fall back to the workspace-root `assets/` dir.
 fn asset_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
-        // `.../Sonic.app/Contents/MacOS/sonic` → `.../Contents/Resources/assets`
+        // `.../SonicTerm.app/Contents/MacOS/sonicterm-mac` → `.../Contents/Resources/assets`
         if let Some(macos) = exe.parent() {
             if let Some(contents) = macos.parent() {
                 let bundled = contents.join("Resources").join("assets");

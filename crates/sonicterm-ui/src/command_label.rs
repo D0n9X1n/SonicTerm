@@ -159,7 +159,7 @@ pub fn label(a: &Action) -> String {
         Action::OpenSearch => "Open Search".into(),
         Action::OpenCommandPalette => "Open Command Palette".into(),
         Action::ShowKeymapCheatsheet => "Show Keyboard Shortcuts".into(),
-        Action::EditConfigFile => "Edit sonic.toml".into(),
+        Action::EditConfigFile => "Edit sonicterm.toml".into(),
         Action::OpenKeymapFile => "Edit keymap.toml".into(),
         Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),

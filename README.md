@@ -64,7 +64,7 @@ platforms than three mediocre ones.
   **St Helens** (not bundled — install system-wide; if missing, the
   renderer falls through to system mono and `Rec Mono Casual` ships
   under `assets/fonts/` as a guaranteed-present fallback). Override via
-  `[font] family = "..."` in `sonic.toml`. The
+  `[font] family = "..."` in `sonicterm.toml`. The
   default theme is the WezTerm-style `wezterm` palette
   (out-of-box visual parity with WezTerm);
 - hate when their idle terminal eats 5% of a CPU core just to blink a
@@ -84,7 +84,7 @@ platforms than three mediocre ones.
   bindable action, in your language.
 - **5 bundled themes**: Tokyo Night, Dracula, Nord, Catppuccin Mocha,
   Gruvbox Dark Hard.
-- **Editable config files** from the command palette: `Edit sonic.toml`
+- **Editable config files** from the command palette: `Edit sonicterm.toml`
   and `Edit keymap.toml`; changes persist and live-apply.
 
 Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
@@ -116,7 +116,7 @@ Each tagged release publishes a universal macOS `.dmg` and an x64 Windows
 [**Releases**](https://github.com/D0n9X1n/sonic/releases).
 
 > Builds are **not code-signed yet** (see roadmap). On macOS you may need
-> `xattr -dr com.apple.quarantine /Applications/Sonic.app` the first
+> `xattr -dr com.apple.quarantine /Applications/SonicTerm.app` the first
 > time; on Windows, Defender SmartScreen may want a "More info → Run
 > anyway."
 

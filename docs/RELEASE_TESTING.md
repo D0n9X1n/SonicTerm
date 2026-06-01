@@ -219,16 +219,16 @@ Screenshots: `/tmp/rel-vX.Y.Z-04-palette-N.png`.
 1. Open command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
 2. Type `edit sonic` and press Enter.
 3. If prompted, let the OS open the `.toml` file in the default handler.
-4. Change a harmless live-reload setting in `sonic.toml` (for example theme or font size), save, and return to Sonic.
+4. Change a harmless live-reload setting in `sonicterm.toml` (for example theme or font size), save, and return to Sonic.
 5. Re-open command palette, type `edit keymap`, and press Enter.
 
 Screenshots: `/tmp/rel-vX.Y.Z-05-edit-config-N.png`.
 
 **Expected outcome:**
 
-- [ ] Palette contains `Edit sonic.toml` and opens the platform user config file.
-- [ ] If `sonic.toml` did not exist, Sonic creates it with a commented header first.
-- [ ] Saving `sonic.toml` live-reloads without restart.
+- [ ] Palette contains `Edit sonicterm.toml` and opens the platform user config file.
+- [ ] If `sonicterm.toml` did not exist, Sonic creates it with a commented header first.
+- [ ] Saving `sonicterm.toml` live-reloads without restart.
 - [ ] Palette contains `Edit keymap.toml` and opens the editable user keymap file.
 
 **FAIL → block release.**
@@ -593,7 +593,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-19-hidpi-N.png`.
 
 ## 20. Theme + font live-reload
 
-**Setup:** fresh launch; have the config file path ready (`~/Library/Application Support/Sonic/sonic.toml` on macOS).
+**Setup:** fresh launch; have the config file path ready (`~/Library/Application Support/SonicTerm/sonicterm.toml` on macOS).
 
 **Actions:**
 1. Edit config to change theme (e.g. `tokyo-night` → `gruvbox-dark-hard`); save.
@@ -854,7 +854,7 @@ Session restore is explicitly out of scope until post-v1.0 (CLAUDE.md North Star
 
 - [ ] Re-launch after kill works without complaint (no half-written state file blocking startup).
 - [ ] If a panic occurred, the backtrace is captured (RUST_BACKTRACE-enabled binary in dev; in release at least a one-line panic message in `/tmp/gui-smoke.log` or stderr).
-- [ ] No corrupted user config after force-kill (validate by re-reading `sonic.toml` and confirming app starts).
+- [ ] No corrupted user config after force-kill (validate by re-reading `sonicterm.toml` and confirming app starts).
 - [ ] No "Sonic quit unexpectedly" dialog from macOS for a normal `Cmd+Q` quit.
 
 **FAIL → block release.**
@@ -888,7 +888,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-30-a11y-N.png`.
 
 ## 31. First-run experience
 
-**Setup:** `rm -rf ~/Library/Application\ Support/Sonic/` (BACK UP first if you care about your config). Then launch fresh.
+**Setup:** `rm -rf ~/Library/Application\ Support/SonicTerm/` (BACK UP first if you care about your config). Then launch fresh.
 
 **Expected outcome:**
 
@@ -896,7 +896,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-30-a11y-N.png`.
 - [ ] Default theme + keymap (wezterm) apply (CLAUDE.md §1).
 - [ ] No error dialog about missing config.
 - [ ] Default font resolves (`St Helens` system, falls back to `Rec Mono Casual` bundled) — no tofu in welcome shell prompt.
-- [ ] `sonic.toml` exists after first quit (or is generated lazily on first edit — verify against current design and note which).
+- [ ] `sonicterm.toml` exists after first quit (or is generated lazily on first edit — verify against current design and note which).
 
 **FAIL → block release.**
 
@@ -998,7 +998,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-35-drop-N.png`.
 
 ## 36. Config validation
 
-**Setup:** back up `sonic.toml` then mutate it.
+**Setup:** back up `sonicterm.toml` then mutate it.
 
 **Cases (one per launch):**
 1. Missing top-level table — file with just `# comment`.
@@ -1006,7 +1006,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-35-drop-N.png`.
 3. Wrong type — `font_size = "big"` instead of number.
 4. Bad theme name — `theme = "doesnotexist"`.
 5. Bad keymap binding — `bind = "CmdShiftCtrlAlt+QWERTY"`.
-6. Circular include (if includes exist) — `include = ["./sonic.toml"]`.
+6. Circular include (if includes exist) — `include = ["./sonicterm.toml"]`.
 7. Empty file.
 8. UTF-8 BOM at start.
 
@@ -1251,7 +1251,7 @@ Screenshots: `/tmp/rel-vX.Y.Z-36-config-N.png` per case.
 
 | macOS | Windows |
 |---|---|
-| Copy the TOML into `~/Library/Application Support/Sonic/themes/`; select it from config. | Copy the TOML into `%APPDATA%\Sonic\themes\`; select it from config. |
+| Copy the TOML into `~/Library/Application Support/SonicTerm/themes/`; select it from config. | Copy the TOML into `%APPDATA%\SonicTerm\themes\`; select it from config. |
 | Export the current theme to `/tmp/rel-theme-export.toml`. | Export the current theme to `%TEMP%\rel-theme-export.toml`. |
 | Re-import the exported TOML under a new name and switch to it. | Re-import the exported TOML under a new name and switch to it. |
 

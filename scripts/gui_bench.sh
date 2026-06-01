@@ -21,8 +21,8 @@ set -euo pipefail
 SCENARIO="${1:-all}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sonicterm-mac"
-APP="/tmp/sonic-bench/Sonic.app"
-BUNDLE_ID="com.sonic.terminal.bench"
+APP="/tmp/sonic-bench/SonicTerm.app"
+BUNDLE_ID="com.d0n9x1n.sonicterm.bench"
 
 if [ ! -x "$BIN" ]; then
   echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
@@ -32,7 +32,7 @@ fi
 # Build a tiny bundle so it gets a Dock icon + can be focused by osascript.
 rm -rf /tmp/sonic-bench
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN" "$APP/Contents/MacOS/sonic"
+cp "$BIN" "$APP/Contents/MacOS/sonicterm-mac"
 cp -r "$ROOT/assets" "$APP/Contents/Resources/" 2>/dev/null || true
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,7 +42,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 <key>CFBundleVersion</key><string>0.0.0</string>
 <key>CFBundleShortVersionString</key><string>0.0.0</string>
-<key>CFBundleExecutable</key><string>sonic</string>
+<key>CFBundleExecutable</key><string>sonicterm-mac</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -55,7 +55,7 @@ sleep 0.3
 
 open "$APP"
 sleep 1.5
-PID=$(pgrep -f "sonic-bench/Sonic.app/Contents/MacOS/sonic" | head -1)
+PID=$(pgrep -f "sonic-bench/SonicTerm.app/Contents/MacOS/sonicterm-mac" | head -1)
 if [ -z "$PID" ]; then
   echo '{"error":"sonic failed to launch"}'
   exit 1

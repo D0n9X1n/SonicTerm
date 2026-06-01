@@ -128,7 +128,9 @@ static PANIC_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub fn install_panic_hook(log_dir: PathBuf) {
     let _ = PANIC_DIR.set(log_dir);
     let prev = std::panic::take_hook();
-    let abort = std::env::var_os("SONIC_PANIC_ABORT").is_some_and(|v| v == "1");
+    let abort = std::env::var_os("SONICTERM_PANIC_ABORT")
+        .or_else(|| std::env::var_os("SONIC_PANIC_ABORT"))
+        .is_some_and(|v| v == "1");
     std::panic::set_hook(Box::new(move |info| {
         let summary = summarize(info);
         // Rolling-log breadcrumb first; file dump is the heavyweight

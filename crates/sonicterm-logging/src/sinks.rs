@@ -10,4 +10,4 @@
 /// Suffix appended to the active `sonic.log` by `tracing-appender`'s
 /// daily rotation. Exposed so [`crate::cleanup`] can recognise rotated
 /// files unambiguously.
-pub const ROTATED_PREFIX: &str = "sonic.log.";
+pub const ROTATED_PREFIX: &str = "sonicterm.log.";

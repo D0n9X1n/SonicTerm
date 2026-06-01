@@ -32,7 +32,7 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 
 [[bin]]
-name = "sonic-mac"
+name = "sonicterm-mac"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

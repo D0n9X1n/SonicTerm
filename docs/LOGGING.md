@@ -8,8 +8,8 @@ errors (config parse, theme load, panic during init) end up on disk.
 
 | Platform | Log directory                              |
 |----------|---------------------------------------------|
-| macOS    | `~/Library/Logs/Sonic/`                    |
-| Windows  | `%LOCALAPPDATA%\Sonic\Logs\`               |
+| macOS    | `~/Library/Logs/SonicTerm/`                    |
+| Windows  | `%LOCALAPPDATA%\SonicTerm\Logs\`               |
 | Linux/dev| `$XDG_STATE_HOME/sonic/logs/` (fallback `~/.local/state/sonic/logs/`) |
 
 Inside that directory you will find:
@@ -24,7 +24,7 @@ before launching Sonic — useful in CI and ops.
 
 ## Retention
 
-All five knobs are exposed in `sonic.toml` under `[logging]`. Defaults:
+All five knobs are exposed in `sonicterm.toml` under `[logging]`. Defaults:
 
 ```toml
 [logging]
@@ -49,7 +49,7 @@ Two equivalent options (env var wins if both are set):
 
 1. `RUST_LOG=sonic=debug ./sonic` — standard `tracing_subscriber`
    syntax. Multiple targets: `RUST_LOG=sonic=debug,wgpu=info`.
-2. In `sonic.toml`:
+2. In `sonicterm.toml`:
 
    ```toml
    [logging]
@@ -106,11 +106,11 @@ Please attach:
 
 1. The last 200 lines of the most recent log file. On macOS:
    ```sh
-   tail -200 ~/Library/Logs/Sonic/sonic.log.* | pbcopy
+   tail -200 ~/Library/Logs/SonicTerm/sonicterm.log.* | pbcopy
    ```
    On Windows:
    ```powershell
-   Get-Content "$env:LOCALAPPDATA\Sonic\Logs\sonic.log.*" -Tail 200 | Set-Clipboard
+   Get-Content "$env:LOCALAPPDATA\SonicTerm\Logs\sonicterm.log.*" -Tail 200 | Set-Clipboard
    ```
 2. Any matching `crashes/crash-*.log` for the same timeframe.
 3. If you cleared logs already, mention the rough time the bug
@@ -124,7 +124,7 @@ Please attach:
   removes every rotated log file (preserving only the active one) and
   every crash dump. A native notification reports the count and bytes
   freed.
-- Manual nuke: `rm -rf ~/Library/Logs/Sonic/*` (or the platform
+- Manual nuke: `rm -rf ~/Library/Logs/SonicTerm/*` (or the platform
   equivalent) — Sonic recreates the directory on next launch.
 
 ## Exit and crash coverage
