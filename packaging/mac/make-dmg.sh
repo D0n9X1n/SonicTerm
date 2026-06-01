@@ -19,6 +19,17 @@ chmod +x "$APP/Contents/MacOS/sonicterm-mac"
 cp "$ROOT/assets/icons/exports/sonic.icns" "$APP/Contents/Resources/" 2>/dev/null || \
     echo "warning: icon not baked, continuing"
 
+# Bundle runtime assets/ tree — required by crates/sonicterm-mac/src/main.rs
+# which loads Contents/Resources/assets/{fonts,themes,keymaps,icons,i18n}/ at
+# startup. Without these, fresh-installed DMGs panic with 'Error: load theme'.
+# Fixes #451.
+mkdir -p "$APP/Contents/Resources/assets"
+cp -R "$ROOT/assets/fonts"   "$APP/Contents/Resources/assets/"
+cp -R "$ROOT/assets/themes"  "$APP/Contents/Resources/assets/"
+cp -R "$ROOT/assets/keymaps" "$APP/Contents/Resources/assets/"
+cp -R "$ROOT/assets/icons"   "$APP/Contents/Resources/assets/"
+cp -R "$ROOT/assets/i18n"    "$APP/Contents/Resources/assets/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
