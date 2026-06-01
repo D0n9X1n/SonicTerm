@@ -207,11 +207,13 @@ mod tests {
     #[should_panic(expected = "PTY redraw coalescer fired Interval-flush too fast")]
     fn coalescer_interval_flush_under_3ms_panics() {
         // Two Interval-reason flushes < min_interval apart MUST trip the
-        // debug_assert — that is the whole point of the probe.
+        // debug_assert — that is the whole point of the probe. Use a wide
+        // 10-second min_interval + zero sleep so the test is independent of
+        // CI runner timer slop (macos-14 was tripping a false-pass with a
+        // 3 ms min_interval + 1 ms sleep when the runner's sleep overran).
         let mut probe = RedrawCoalescerProbe::new();
-        probe.note_redraw(Duration::from_millis(3), FlushReason::Interval);
-        std::thread::sleep(Duration::from_millis(1));
-        probe.note_redraw(Duration::from_millis(3), FlushReason::Interval);
+        probe.note_redraw(Duration::from_secs(10), FlushReason::Interval);
+        probe.note_redraw(Duration::from_secs(10), FlushReason::Interval);
     }
 
     #[test]
