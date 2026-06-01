@@ -157,6 +157,14 @@ impl App {
                 // Epic #289 Phase A — route to frontmost window so Cmd+D
                 // typed in a torn-out child splits THAT window's active
                 // pane, not the main window's.
+                // M6a-expand-2c-pane: notify the reducer first so
+                // `pane_count` / `focused_pane_idx` track the topology;
+                // the boundary's `split_active*` remains source-of-truth
+                // for actual geometry.
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.split_active_pane_in_child(id, Direction::Right) {
                         return true;
@@ -166,6 +174,10 @@ impl App {
                 self.split_active(Direction::Right);
             }
             Action::SplitDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.split_active_pane_in_child(id, Direction::Down) {
                         return true;
@@ -175,6 +187,9 @@ impl App {
                 self.split_active(Direction::Down);
             }
             Action::ClosePane => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ClosePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_pane_in_child(id) {
                         return true;
@@ -234,6 +249,30 @@ impl App {
             }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
             Action::FocusPane(d) => {
+                // M6a-expand-2c-pane: notify reducer (emits
+                // Render(Focus) when pane_count >= 2; no-op otherwise).
+                let dir = match d {
+                    Direction::Left => sonicterm_app_core::SplitDir::Left,
+                    Direction::Right => sonicterm_app_core::SplitDir::Right,
+                    Direction::Up => sonicterm_app_core::SplitDir::Up,
+                    Direction::Down => sonicterm_app_core::SplitDir::Down,
+                };
+                let wkey = sonicterm_types::WindowKey::new(0);
+                let intent = match dir {
+                    sonicterm_app_core::SplitDir::Left => {
+                        sonicterm_app_core::AppIntent::FocusPaneLeft { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Right => {
+                        sonicterm_app_core::AppIntent::FocusPaneRight { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Up => {
+                        sonicterm_app_core::AppIntent::FocusPaneUp { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Down => {
+                        sonicterm_app_core::AppIntent::FocusPaneDown { window: wkey }
+                    }
+                };
+                self.dispatch_intent(intent);
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.focus_pane_dir_in_child(id, *d) {
                         return true;
@@ -243,6 +282,11 @@ impl App {
                 self.focus_pane_dir(*d);
             }
             Action::ResizePaneLeft => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Left,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Left) {
                         return true;
@@ -252,6 +296,11 @@ impl App {
                 self.resize_active_split(Direction::Left);
             }
             Action::ResizePaneRight => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Right) {
                         return true;
@@ -261,6 +310,11 @@ impl App {
                 self.resize_active_split(Direction::Right);
             }
             Action::ResizePaneUp => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Up,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Up) {
                         return true;
@@ -270,6 +324,11 @@ impl App {
                 self.resize_active_split(Direction::Up);
             }
             Action::ResizePaneDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Down) {
                         return true;

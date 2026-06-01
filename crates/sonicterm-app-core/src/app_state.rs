@@ -52,6 +52,29 @@ pub struct AppState {
     /// Effects (no-op switch emits nothing — same shape as
     /// `WindowFocused`'s no-op transition guard).
     pub active_tab_idx: Option<usize>,
+    /// Number of panes the reducer believes are alive in the focused
+    /// tab of the focused window. Incremented on `SplitPane`,
+    /// decremented on `ClosePane`. Saturating in both directions.
+    /// Starts at 0 — the first `SplitPane` brings it to 1 (the new
+    /// pane that the split spawned); a subsequent `NewTab` does NOT
+    /// bump this counter (panes are per-tab; a fresh tab starts with
+    /// its own pane via the boundary's `spawn_pane`, not via a
+    /// `SplitPane` Intent). The boundary's `WindowState.tab_states`
+    /// remains source-of-truth for actual pane content; this counter
+    /// is the observability surface used by the reducer arms and the
+    /// pane tests in `pane_intents.rs`. (M6a-expand-2c-pane)
+    pub pane_count: u32,
+    /// Last pane index the reducer observed becoming focused within
+    /// the active tab. `None` until the first `SplitPane` /
+    /// `FocusPane*` lands. Used by reducer arms to deduplicate
+    /// `Render(Focus)` Effects (no-op focus emits nothing).
+    pub focused_pane_idx: Option<usize>,
+    /// Whether the active pane is currently zoomed (single-pane
+    /// fullscreen-within-tab). The boundary's `toggle_active_pane_zoom`
+    /// path remains source-of-truth for the rendered layout; this
+    /// boolean tracks the reducer's observable view of the toggle so
+    /// `ZoomPane` Intents can be added in 2c-misc.
+    pub pane_zoomed: bool,
 }
 
 impl AppState {
@@ -90,6 +113,9 @@ impl AppStateBuilder {
             live_window_count: 0,
             tab_count: 0,
             active_tab_idx: None,
+            pane_count: 0,
+            focused_pane_idx: None,
+            pane_zoomed: false,
         }
     }
 }

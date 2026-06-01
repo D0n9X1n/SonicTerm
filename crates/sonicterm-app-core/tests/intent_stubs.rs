@@ -108,9 +108,15 @@ stub_test!(intent_10_prev_tab, AppIntent::PrevTab { window: wk() });
 stub_test!(intent_11_goto_tab, AppIntent::GoToTab { window: wk(), idx: 3 });
 routed_test!(intent_12_tear_out_tab, AppIntent::TearOutTab { src_window: wk(), src_tab: 0 });
 
-// 13..19 Pane lifecycle / nav (non-leaf — 2c)
-stub_test!(intent_13_split_pane, AppIntent::SplitPane { window: wk(), dir: SplitDir::Right });
-stub_test!(intent_14_close_pane, AppIntent::ClosePane { window: wk() });
+// 13..19 Pane lifecycle / nav (routed in M6a-expand-2c-pane)
+routed_test!(intent_13_split_pane, AppIntent::SplitPane { window: wk(), dir: SplitDir::Right });
+// ClosePane against empty pane_count (default state) is a no-op
+// emission-wise (saturates at 0); pane_intents.rs covers the routed
+// path with a populated state.
+routed_test!(intent_14_close_pane, AppIntent::ClosePane { window: wk() });
+// ResizePane / FocusPane* require pane_count >= 2 to emit — fresh
+// state returns empty by design (no second pane to focus/resize).
+// Focused per-Intent tests in `pane_intents.rs` cover the routed paths.
 stub_test!(
     intent_15_resize_pane,
     AppIntent::ResizePane { window: wk(), dir: SplitDir::Down, cells: 5 }

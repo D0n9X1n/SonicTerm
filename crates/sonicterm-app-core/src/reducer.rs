@@ -349,15 +349,73 @@ pub(crate) fn reduce_leaf(
             out.push(AppEffect::Render { window: src_window, reason: RedrawReason::TabRemoved });
         }
 
-        // ── Non-leaf — stubs (full reducer arms land in 2c-pane/-misc) ─
-        AppIntent::SplitPane { .. }
-        | AppIntent::ClosePane { .. }
-        | AppIntent::ResizePane { .. }
-        | AppIntent::FocusPaneLeft { .. }
-        | AppIntent::FocusPaneRight { .. }
-        | AppIntent::FocusPaneUp { .. }
-        | AppIntent::FocusPaneDown { .. }
-        | AppIntent::ForegroundProcChanged { .. }
+        // ── Pane lifecycle / navigation (M6a-expand-2c-pane) ────────
+        //
+        // Per FINAL spec §3:
+        //   SplitPane         → Render(Layout)  + pane_count++ + focus = new
+        //   ClosePane         → Render(Layout)  + pane_count-- + focus clamp
+        //   ResizePane        → Render(Layout)  (no count mutation)
+        //   FocusPaneLeft     → Render(Focus)   (only on transition; we
+        //                       conservatively emit since the boundary
+        //                       owns the geometry — see note below)
+        //   FocusPaneRight    → Render(Focus)
+        //   FocusPaneUp       → Render(Focus)
+        //   FocusPaneDown     → Render(Focus)
+        //
+        // The reducer tracks a flat `pane_count` + `focused_pane_idx`
+        // pair — *not* a pane tree. The boundary's
+        // `WindowState.tab_states[..].tree` remains source-of-truth for
+        // the actual geometry and the focused-leaf id. Directional
+        // focus Intents therefore can't resolve the *target* leaf in
+        // pure reducer land; we emit `Render(Focus)` unconditionally
+        // when `pane_count >= 2` so the boundary can re-paint, and
+        // leave `focused_pane_idx` untouched (the boundary's
+        // `focus_pane_dir` mutates the canonical tree and the reducer
+        // catches up via the next SplitPane/ClosePane Intent). With a
+        // single pane, directional focus is a no-op.
+        AppIntent::SplitPane { window, dir: _ } => {
+            _state.pane_count = _state.pane_count.saturating_add(1);
+            // The split makes the *new* leaf the focused pane. Index
+            // is the new last leaf (count - 1 after increment), but
+            // pre-split count was 0 means this is also the first pane
+            // — boundary's `spawn_pane`/`split_active` both end up
+            // focusing the new leaf.
+            let new_idx = _state.pane_count.saturating_sub(1) as usize;
+            _state.focused_pane_idx = Some(new_idx);
+            out.push(AppEffect::Render { window, reason: RedrawReason::Layout });
+        }
+        AppIntent::ClosePane { window } => {
+            _state.pane_count = _state.pane_count.saturating_sub(1);
+            // If the active was the last leaf, drop to previous; if
+            // none remain, clear the focus tracker.
+            _state.focused_pane_idx = if _state.pane_count == 0 {
+                None
+            } else {
+                let cur = _state.focused_pane_idx.unwrap_or(0);
+                let max = (_state.pane_count as usize).saturating_sub(1);
+                Some(cur.min(max))
+            };
+            out.push(AppEffect::Render { window, reason: RedrawReason::Layout });
+        }
+        AppIntent::ResizePane { window, dir: _, cells: _ } => {
+            // Resize doesn't change topology — pane_count and
+            // focused_pane_idx are stable. Emit Render(Layout) so the
+            // boundary re-paints with the new split fraction.
+            if _state.pane_count >= 2 {
+                out.push(AppEffect::Render { window, reason: RedrawReason::Layout });
+            }
+        }
+        AppIntent::FocusPaneLeft { window }
+        | AppIntent::FocusPaneRight { window }
+        | AppIntent::FocusPaneUp { window }
+        | AppIntent::FocusPaneDown { window } => {
+            if _state.pane_count >= 2 {
+                out.push(AppEffect::Render { window, reason: RedrawReason::Focus });
+            }
+        }
+
+        // ── Non-leaf — stubs (full reducer arms land in 2c-misc) ────
+        AppIntent::ForegroundProcChanged { .. }
         | AppIntent::MouseButton { .. }
         | AppIntent::MouseMove { .. }
         | AppIntent::SelectionStart { .. }
