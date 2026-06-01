@@ -50,7 +50,7 @@ pub struct MacOsDragSink;
 
 impl MacOsDragSink {
     /// Build the sink as an `Arc<dyn OsDragSink>` ready to pass to
-    /// `sonicterm_shared::run_with_os_drag`.
+    /// `MacShell::with_os_drag_sink`.
     pub fn arc() -> Arc<dyn OsDragSink> {
         Arc::new(MacOsDragSink)
     }

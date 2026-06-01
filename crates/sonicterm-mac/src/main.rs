@@ -85,12 +85,13 @@ fn main() -> Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // FUTURE: Win32 menu bar — native Windows menus are usually
-        // in-window, so wiring them belongs alongside the Win32
-        // chrome work in `sonicterm-windows`. The cross-platform
-        // `Action` plumbing + `menubar_bridge` queue are already
-        // ready when that lands.
-        sonicterm_app::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+        // Non-macOS targets cannot exercise the macOS shell path
+        // (NSMenu, libproc, NSPasteboard). The crate is gated to
+        // macOS via Cargo.toml's `[target]` table; this branch only
+        // exists so `cargo check --workspace` on non-Mac hosts still
+        // type-checks the bin. Unused bindings:
+        let _ = (theme, config, keymap, theme_loader, keymap_loader);
+        unreachable!("sonicterm-mac binary built for non-macOS target")
     }
 }
 

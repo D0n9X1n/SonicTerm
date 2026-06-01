@@ -63,7 +63,7 @@ use sonicterm_app::os_drag::PASTEBOARD_TYPE;
 /// Production `OsTabDragBackend` impl for macOS. Holds the most
 /// recently stashed [`AppHandle`] so AppKit callback hooks (future
 /// NSDraggingSource subclass) can post back to the winit main loop.
-#[allow(dead_code)] // wired in production via `sonicterm-mac::main` (run_with_os_drag_pending_and_hook backend slot)
+#[allow(dead_code)] // wired in production via `sonicterm-mac::main` (MacShell::with_os_drag_backend slot)
 pub struct MacOsTabDragBackend {
     handle_slot: std::sync::Mutex<Option<AppHandle>>,
 }

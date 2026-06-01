@@ -121,7 +121,12 @@ fn main() -> Result<()> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        sonicterm_app::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+        // Non-Windows targets cannot exercise the Windows shell path
+        // (ConPTY, muda, OLE drag, Mica). Keep this branch only so
+        // `cargo check --workspace` on non-Win hosts type-checks the
+        // bin. Unused bindings:
+        let _ = (theme, config, keymap, theme_loader, keymap_loader);
+        unreachable!("sonicterm-windows binary built for non-Windows target")
     }
 }
 

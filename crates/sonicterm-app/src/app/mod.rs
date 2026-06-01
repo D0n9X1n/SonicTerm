@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_core::{
@@ -25,7 +25,7 @@ use sonicterm_core::{
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowAttributes, WindowId},
 };
@@ -470,36 +470,10 @@ pub fn refresh_active_tab_title(
     Some(pretty)
 }
 
-/// Entry point used by the platform bin crates.
-pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
-    run_with(theme, config, keymap, None, None)
-}
-
-/// Loader callback type used by `run_with` to reload a theme by name.
+/// Loader callback type used by the platform shell to reload a theme by name.
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
-/// Loader callback type used by `run_with` to reload a keymap by name.
+/// Loader callback type used by the platform shell to reload a keymap by name.
 pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
-
-/// Entry point that additionally accepts asset loaders so theme +
-/// keymap changes can apply live (no restart).
-pub fn run_with(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-) -> Result<()> {
-    init_tracing();
-    let event_loop =
-        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
-    app.theme_loader = theme_loader;
-    app.keymap_loader = keymap_loader;
-    event_loop.run_app(&mut app).context("run event loop")?;
-    Ok(())
-}
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
@@ -578,137 +552,6 @@ pub fn build_async_fallback_loader_for_proxy(
         let _ = proxy.send_event(UserEvent::ClearShapeCache);
     });
     AsyncFallbackLoader::new(load_fn, notify)
-}
-
-/// Same as [`run`] but installs a platform-specific OS-drag sink.
-/// `sonicterm-mac` calls this with a `NSPasteboard`-backed impl; future
-/// `sonicterm-windows` work will pass an `IDataObject`/`DoDragDrop` impl.
-/// When the cursor leaves every SonicTerm window during a tab tear-out,
-/// the sink is invoked with a serialized [`crate::os_drag::TabPayload`]
-/// instead of spawning a child window.
-pub fn run_with_os_drag(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-) -> Result<()> {
-    run_with_os_drag_and_pending(theme, config, keymap, sink, theme_loader, keymap_loader, None)
-}
-
-/// Like [`run_with_os_drag`] but also seeds an already-received
-/// [`crate::os_drag::TabPayload`] (e.g. one the platform shim found on
-/// the pasteboard at startup). The payload becomes a real tab via
-/// [`App::new_tab_from_payload`] before the event loop starts — this
-/// is the receiver half of the (review) data-loss fix for PR #59:
-/// without it the payload was only logged and the user's torn tab
-/// vanished.
-pub fn run_with_os_drag_and_pending(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-) -> Result<()> {
-    run_with_os_drag_pending_and_hook(
-        theme,
-        config,
-        keymap,
-        sink,
-        theme_loader,
-        keymap_loader,
-        pending,
-        None,
-    )
-}
-
-/// Like [`run_with_os_drag_and_pending`] but also accepts a one-shot
-/// `on_resumed` hook invoked at the top of the first
-/// `ApplicationHandler::resumed` tick. The macOS bin uses this slot to
-/// install the native NSMenu — by then winit has built the AppKit event
-/// loop and `setMainMenu` sticks. Installing it before `event_loop.
-/// run_app` left AppKit with only the default `Apple, sonicterm-mac`
-/// menubar (bug caught by the PR #114 release-binary smoke).
-#[allow(clippy::too_many_arguments)]
-pub fn run_with_os_drag_pending_and_hook(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-    on_resumed: Option<Box<dyn FnOnce() + Send>>,
-) -> Result<()> {
-    run_with_os_drag_pending_and_window_hook(
-        theme,
-        config,
-        keymap,
-        sink,
-        theme_loader,
-        keymap_loader,
-        pending,
-        on_resumed,
-        None,
-        None,
-    )
-}
-
-/// Like [`run_with_os_drag_pending_and_hook`] but also accepts a
-/// one-shot `on_window_ready` hook invoked immediately after
-/// `create_window` succeeds, with the raw window handle. The Windows
-/// bin uses this slot to install the muda menubar (needs the HWND).
-///
-/// Phase C2: `os_drag_backend` is the platform OS-level drag-session
-/// backend (NSDraggingSession on Mac, OLE DoDragDrop on Windows).
-/// Installed onto the constructed App via
-/// [`App::set_os_drag_backend`]. Pass `None` on platforms / tests
-/// without a backend — the App falls back to the legacy `OsDragSink`
-/// path.
-#[allow(clippy::too_many_arguments)]
-pub fn run_with_os_drag_pending_and_window_hook(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-    on_resumed: Option<Box<dyn FnOnce() + Send>>,
-    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
-) -> Result<()> {
-    init_tracing();
-    let event_loop =
-        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    // Install the same proxy for the macOS native menubar bridge so
-    // NSMenu selectors can wake the event loop and dispatch through
-    // `run_action`. Safe + cheap on platforms without a menubar.
-    crate::menubar_bridge::install_proxy(proxy.clone());
-    crate::os_drag_bridge::install_proxy(proxy.clone());
-    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
-    app.theme_loader = theme_loader;
-    app.keymap_loader = keymap_loader;
-    app.os_drag_sink = Some(sink);
-    if let Some(b) = os_drag_backend {
-        app.set_os_drag_backend(b);
-    }
-    if let Some(hook) = on_resumed {
-        app.on_resumed = Some(hook);
-    }
-    if let Some(hook) = on_window_ready {
-        app.on_window_ready = Some(hook);
-    }
-    if let Some(p) = pending {
-        let _ = app.new_tab_from_payload(&p);
-    }
-    event_loop.run_app(&mut app).context("run event loop")?;
-    Ok(())
 }
 
 mod child_window;
@@ -1012,7 +855,9 @@ pub struct App {
     /// set, [`Self::tear_out_tab`] checks whether the cursor sits
     /// outside every SonicTerm-owned window; if so, it invokes the sink
     /// and KILLS the local tab instead of spawning a child window.
-    /// Installed by the platform bin via [`run_with_os_drag`].
+    /// Installed by the platform shell via
+    /// [`crate::shell::MacShell::with_os_drag_sink`] /
+    /// [`crate::shell::WindowsShell::with_os_drag_sink`].
     pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
     /// Phase C2 OS-level drag *session* backend. Distinct from
     /// `os_drag_sink` (cross-process wire format): this drives the

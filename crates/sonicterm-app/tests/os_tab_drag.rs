@@ -178,7 +178,7 @@ fn receiver_spawn_path_creates_tab_from_payload() {
     // App::new_tab_from_payload so a real tab appears. Here we drive
     // that method directly with a synthesized payload — the same call
     // sonicterm-mac/src/main.rs makes on startup via
-    // run_with_os_drag_and_pending.
+    // MacShell::with_pending_payload.
     let mut app = synth_app();
     let _ = app.__test_seed_tab("existing");
     let before = app.__test_tab_count();

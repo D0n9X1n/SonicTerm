@@ -22,5 +22,4 @@ pub mod tab_drag;
 pub mod tab_thumbnail;
 pub mod window_key_boundary;
 
-pub use app::run;
-pub use app::{run_with, KeymapLoader, ThemeLoader};
+pub use app::{KeymapLoader, ThemeLoader};
