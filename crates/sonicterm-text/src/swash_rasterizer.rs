@@ -106,6 +106,10 @@ pub fn is_powerline_char(ch: char) -> bool {
 /// crate that owns Powerline classification) ensures the policy stays
 /// consistent across the ASCII fast path, the shaped path, and the
 /// char-fallback path.
+///
+/// Retained as a thin wrapper over [`apply_symbol_fit`] so older call
+/// sites keep working. Prefer [`classify_symbol`] +
+/// [`apply_symbol_fit`] for new code (covers NerdFont icon-cell-fit too).
 #[inline]
 pub fn anchor_powerline_rect(
     ch: char,
@@ -115,10 +119,114 @@ pub fn anchor_powerline_rect(
     cell_h: f32,
     natural: (f32, f32, f32, f32),
 ) -> (f32, f32, f32, f32) {
-    if is_powerline_char(ch) {
-        (cx, cy, cell_w, cell_h)
-    } else {
-        natural
+    let fit = if is_powerline_char(ch) { SymbolFit::PowerlineCellFill } else { SymbolFit::Natural };
+    apply_symbol_fit(natural, (cx, cy), (cell_w, cell_h), fit)
+}
+
+/// Cell-fit policy for a single codepoint, used by the renderer's
+/// `flush_shape_run` to decide how to place a rasterized glyph relative
+/// to its cell rect.
+///
+/// Background (#438): NerdFont PUA icons (devicons, file-type glyphs,
+/// `seti-ui`, `material design`) are designed to occupy ~full cell
+/// height, but swash returns them at their natural typographic size —
+/// in SonicTerm that came out to ~60% cell height vs Windows Terminal's
+/// cell-fill. Powerline (already cell-filled by #357) needed exact
+/// edge-to-edge fill; icons need a slight padding (so adjacent icons
+/// don't kiss) but still want to fill the cell visually.
+///
+/// Text/CJK/emoji are explicitly NOT touched — they round-trip through
+/// `Natural` and continue to use swash's placement metrics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SymbolFit {
+    /// Exact cell rect (Powerline separators must butt up edge-to-edge).
+    PowerlineCellFill,
+    /// Scale-to-fit within cell, preserving aspect, centered both axes.
+    /// Target: 0.95 of cell_h (slight padding so adjacent icons don't
+    /// visually kiss).
+    IconCellFit,
+    /// Natural swash placement (text, CJK, emoji).
+    Natural,
+}
+
+/// Target fraction of cell height for `SymbolFit::IconCellFit`.
+const ICON_FIT_TARGET: f32 = 0.95;
+
+/// Classifies a character for the [`SymbolFit`] policy. Inline-cheap;
+/// called on the per-glyph emit hot path.
+///
+/// Ranges (#438):
+/// * `U+E0B0..=U+E0BF` — Powerline Symbols → `PowerlineCellFill`.
+///   (Subset of `U+E000..=U+F8FF` BMP PUA; matched first.)
+/// * `U+E000..=U+E0AF`, `U+E0C0..=U+F8FF` — NerdFont BMP PUA →
+///   `IconCellFit`.
+/// * `U+F0000..=U+FFFFD` — Plane-1 PUA-A (NerdFont MDI, etc.) →
+///   `IconCellFit`.
+/// * `U+25B6, U+25B7, U+25C0, U+25C1` — filled / outlined geometric
+///   triangle arrows commonly used in TUI prompts → `IconCellFit`.
+/// * Everything else → `Natural`.
+#[inline]
+pub fn classify_symbol(ch: char) -> SymbolFit {
+    match ch as u32 {
+        // Powerline subset — must come first (it's inside the PUA range).
+        0xE0B0..=0xE0BF => SymbolFit::PowerlineCellFill,
+        // NerdFont BMP PUA (excluding Powerline subset above).
+        0xE000..=0xE0AF | 0xE0C0..=0xF8FF => SymbolFit::IconCellFit,
+        // Plane-1 PUA-A — NerdFont Material Design Icons etc.
+        0xF0000..=0xFFFFD => SymbolFit::IconCellFit,
+        // Filled / outlined triangle arrows common in TUI prompts.
+        0x25B6 | 0x25B7 | 0x25C0 | 0x25C1 => SymbolFit::IconCellFit,
+        _ => SymbolFit::Natural,
+    }
+}
+
+/// Rescales / recenters a glyph dest rect according to its [`SymbolFit`]
+/// policy.
+///
+/// * `Natural` — returns `rect` unchanged.
+/// * `PowerlineCellFill` — returns the exact cell rect
+///   `(cell_origin.0, cell_origin.1, cell_size.0, cell_size.1)`.
+/// * `IconCellFit` — scales the input rect (preserving aspect ratio) so
+///   its height equals `ICON_FIT_TARGET * cell_h`, then centers it both
+///   horizontally and vertically within the cell.
+///
+/// Inputs are in *logical* pixels (after the `inv_s` divide in the
+/// renderer); the device-pixel snap happens downstream of this call.
+#[inline]
+pub fn apply_symbol_fit(
+    rect: (f32, f32, f32, f32),
+    cell_origin: (f32, f32),
+    cell_size: (f32, f32),
+    fit: SymbolFit,
+) -> (f32, f32, f32, f32) {
+    let (cx, cy) = cell_origin;
+    let (cell_w, cell_h) = cell_size;
+    match fit {
+        SymbolFit::Natural => rect,
+        SymbolFit::PowerlineCellFill => (cx, cy, cell_w, cell_h),
+        SymbolFit::IconCellFit => {
+            let (_, _, gw, gh) = rect;
+            // Degenerate glyph (zero-size) — fall back to centered cell.
+            if gw <= 0.0 || gh <= 0.0 {
+                return (cx, cy, cell_w, cell_h);
+            }
+            let target_h = (ICON_FIT_TARGET * cell_h).max(0.0);
+            let scale = target_h / gh;
+            let out_w = gw * scale;
+            let out_h = gh * scale;
+            // If the resulting width is wider than the cell, clamp on
+            // width instead (preserving aspect) so the glyph never
+            // bleeds into the neighbour.
+            let (out_w, out_h) = if out_w > cell_w {
+                let clamp = cell_w / out_w;
+                (out_w * clamp, out_h * clamp)
+            } else {
+                (out_w, out_h)
+            };
+            let out_x = cx + (cell_w - out_w) * 0.5;
+            let out_y = cy + (cell_h - out_h) * 0.5;
+            (out_x, out_y, out_w, out_h)
+        }
     }
 }
 
