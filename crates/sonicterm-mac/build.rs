@@ -63,14 +63,25 @@ fn copy_dir_incremental(src: &Path, dst: &Path, total: &mut usize) -> std::io::R
         if file_type.is_dir() {
             copy_dir_incremental(&path, &dst_path, total)?;
         } else if file_type.is_file() {
-            if let (Ok(src_meta), Ok(dst_meta)) = (path.metadata(), dst_path.metadata()) {
-                if src_meta.len() == dst_meta.len() {
-                    continue;
-                }
+            if !should_copy(&path, &dst_path) {
+                continue;
             }
             std::fs::copy(&path, &dst_path)?;
             *total += 1;
         }
     }
     Ok(())
+}
+
+/// Returns true if `src` should be copied to `dst`. Copies when `dst`
+/// is missing or when `src`'s mtime is newer than `dst`'s. Any metadata
+/// error conservatively returns true so we never silently skip a real
+/// change. (Size-equality was tried first but missed same-size content
+/// edits — see Haiku review on PR #444.)
+fn should_copy(src: &Path, dst: &Path) -> bool {
+    let Ok(src_meta) = std::fs::metadata(src) else { return true };
+    let Ok(dst_meta) = std::fs::metadata(dst) else { return true };
+    let Ok(src_mtime) = src_meta.modified() else { return true };
+    let Ok(dst_mtime) = dst_meta.modified() else { return true };
+    src_mtime > dst_mtime
 }

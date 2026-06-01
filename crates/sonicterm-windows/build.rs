@@ -25,8 +25,10 @@
 //! the assets?" gate.
 //!
 //! **What gets copied:** every file under `assets/`, recursively.
-//! Size-equality is used as an incremental short-circuit so unchanged
-//! files don't re-copy on every `cargo build`.
+//! Mtime comparison is used as an incremental short-circuit so unchanged
+//! files don't re-copy on every `cargo build`. (Size equality was tried
+//! first but missed same-size content edits, e.g. a TOML tweak that
+//! preserves length — see Haiku review on PR #444.)
 //!
 //! **Out of scope:** the runtime `asset_dir()` lookup is already
 //! correct — it checks `<exe-dir>/assets` first. This script just makes
@@ -78,10 +80,10 @@ fn main() {
 }
 
 /// Recursively mirror `src` into `dst`. Skips files whose destination
-/// already exists with the same byte length (cheap incremental gate —
-/// `rerun-if-changed` on the parent dir handles the rare same-size /
-/// changed-contents case). Returns count of files actually copied via
-/// `*total`.
+/// already exists and has an mtime >= the source mtime (cheap
+/// incremental gate that catches same-size content edits which a
+/// length-only check would miss). Returns count of files actually
+/// copied via `*total`.
 fn copy_dir_incremental(src: &Path, dst: &Path, total: &mut usize) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -93,10 +95,8 @@ fn copy_dir_incremental(src: &Path, dst: &Path, total: &mut usize) -> std::io::R
         if file_type.is_dir() {
             copy_dir_incremental(&path, &dst_path, total)?;
         } else if file_type.is_file() {
-            if let (Ok(src_meta), Ok(dst_meta)) = (path.metadata(), dst_path.metadata()) {
-                if src_meta.len() == dst_meta.len() {
-                    continue;
-                }
+            if !should_copy(&path, &dst_path) {
+                continue;
             }
             std::fs::copy(&path, &dst_path)?;
             *total += 1;
@@ -104,4 +104,16 @@ fn copy_dir_incremental(src: &Path, dst: &Path, total: &mut usize) -> std::io::R
         // Symlinks: skip silently. We don't ship any in assets/.
     }
     Ok(())
+}
+
+/// Returns true if `src` should be copied to `dst`. Copies when `dst`
+/// is missing or when `src`'s mtime is newer than `dst`'s. Any metadata
+/// error conservatively returns true so we never silently skip a real
+/// change.
+fn should_copy(src: &Path, dst: &Path) -> bool {
+    let Ok(src_meta) = std::fs::metadata(src) else { return true };
+    let Ok(dst_meta) = std::fs::metadata(dst) else { return true };
+    let Ok(src_mtime) = src_meta.modified() else { return true };
+    let Ok(dst_mtime) = dst_meta.modified() else { return true };
+    src_mtime > dst_mtime
 }
