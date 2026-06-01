@@ -71,10 +71,10 @@
 
                         <Directory Id='AssetsFontsDir' Name='fonts'>
                             <Component Id='asset_fonts' Guid='C1A21A01-0000-0000-0000-000000000103' Win64='yes'>
-                                <File Id='font_regular'    Name='RecMonoCasual-Regular-1.085.ttf'    DiskId='1' Source='..\assets\fonts\RecMonoCasual-Regular-1.085.ttf' KeyPath='yes'/>
-                                <File Id='font_bold'       Name='RecMonoCasual-Bold-1.085.ttf'       DiskId='1' Source='..\assets\fonts\RecMonoCasual-Bold-1.085.ttf'/>
-                                <File Id='font_italic'     Name='RecMonoCasual-Italic-1.085.ttf'     DiskId='1' Source='..\assets\fonts\RecMonoCasual-Italic-1.085.ttf'/>
-                                <File Id='font_bolditalic' Name='RecMonoCasual-BoldItalic-1.085.ttf' DiskId='1' Source='..\assets\fonts\RecMonoCasual-BoldItalic-1.085.ttf'/>
+                                <File Id='font_regular'    Name='RecMonoSt.Helens-Regular.ttf'    DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Regular.ttf' KeyPath='yes'/>
+                                <File Id='font_bold'       Name='RecMonoSt.Helens-Bold.ttf'       DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Bold.ttf'/>
+                                <File Id='font_italic'     Name='RecMonoSt.Helens-Italic.ttf'     DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Italic.ttf'/>
+                                <File Id='font_bolditalic' Name='RecMonoSt.Helens-BoldItalic.ttf' DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-BoldItalic.ttf'/>
                             </Component>
                         </Directory>
 
