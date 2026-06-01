@@ -1,4 +1,4 @@
-//! Platform-agnostic value types shared across Sonic crates.
+//! Platform-agnostic value types shared across SonicTerm crates.
 //!
 //! This crate carries only **data types** (cells, colors, positions, actions,
 //! glyph keys, hyperlink ids). It deliberately has **no** runtime dependencies

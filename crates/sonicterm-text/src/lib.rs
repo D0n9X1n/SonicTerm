@@ -33,7 +33,7 @@ pub fn terminal_font_attrs(family: &str) -> Attrs<'_> {
 }
 
 /// Load a TTF/OTF payload into `font_system`, correcting metadata for bundled
-/// Sonic fonts whose OS/2 fields lie about both italic flag AND weight.
+/// SonicTerm fonts whose OS/2 fields lie about both italic flag AND weight.
 ///
 /// The St.Helens TTF set ships with every face's OS/2 `fsSelection` flagged
 /// Italic and weights of (400, 400, 600, 600) regardless of actual variant —

@@ -43,7 +43,7 @@ fn menu_lists_all_documented_items() {
 
     // 5 top-level submenus, in order.
     let titles: Vec<&str> = bp.iter().map(|s| s.title).collect();
-    assert_eq!(titles, vec!["Sonic", "Shell", "Edit", "View", "Help"], "submenu order/titles");
+    assert_eq!(titles, vec!["SonicTerm", "Shell", "Edit", "View", "Help"], "submenu order/titles");
 
     let find = |menu: &str, title: &str| -> Item {
         bp.iter()
@@ -105,7 +105,7 @@ fn menu_lists_all_documented_items() {
     assert!(matches!(find("View", "Reset Zoom").binding, Binding::Action(Action::ResetFontSize)));
 
     // ---- Help ----
-    let help_url = find("Help", "Sonic Help");
+    let help_url = find("Help", "SonicTerm Help");
     match &help_url.binding {
         Binding::Url(u) => assert_eq!(*u, "https://github.com/D0n9X1n/sonic"),
         other => panic!("expected URL binding, got {other:?}"),
@@ -116,26 +116,26 @@ fn menu_lists_all_documented_items() {
         other => panic!("expected URL binding, got {other:?}"),
     }
 
-    // ---- Sonic (existing menu preserved) ----
+    // ---- SonicTerm (existing menu preserved) ----
     assert!(bp
         .iter()
-        .find(|s| s.title == "Sonic")
+        .find(|s| s.title == "SonicTerm")
         .unwrap()
         .items
         .iter()
-        .any(|i| i.title == "About Sonic"));
+        .any(|i| i.title == "About SonicTerm"));
     assert!(bp
         .iter()
-        .find(|s| s.title == "Sonic")
+        .find(|s| s.title == "SonicTerm")
         .unwrap()
         .items
         .iter()
-        .any(|i| i.title == "Edit sonic.toml…"));
+        .any(|i| i.title == "Edit sonicterm.toml…"));
     assert!(bp
         .iter()
-        .find(|s| s.title == "Sonic")
+        .find(|s| s.title == "SonicTerm")
         .unwrap()
         .items
         .iter()
-        .any(|i| i.title == "Quit Sonic"));
+        .any(|i| i.title == "Quit SonicTerm"));
 }

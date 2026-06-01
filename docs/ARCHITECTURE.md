@@ -1,4 +1,4 @@
-# Sonic — Architecture (post-v1.0-RC)
+# SonicTerm — Architecture (post-v1.0-RC)
 
 This document captures the 10-leaf-crate layout that landed in PRs
 #145, #151–#158, and #160. Use this when you need to know which

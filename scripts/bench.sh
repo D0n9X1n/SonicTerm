@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/bench.sh — Sonic perf-bench gate.
+# scripts/bench.sh — SonicTerm perf-bench gate.
 #
 # Runs a subset of perf measurements against the just-built `sonicterm-mac` (or
 # `sonicterm-windows`) binary, writes current.json, and diffs against baseline.json.

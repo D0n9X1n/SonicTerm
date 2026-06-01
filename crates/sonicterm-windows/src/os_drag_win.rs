@@ -1,4 +1,4 @@
-//! Windows OLE drag-and-drop for Sonic.
+//! Windows OLE drag-and-drop for SonicTerm.
 //!
 //! Implements both ends of the cross-process tab-drag wire defined in
 //! [`sonicterm_app::os_drag`]:
@@ -96,9 +96,9 @@ fn file_drop_sink() -> &'static Mutex<Option<FileDropSink>> {
 }
 
 /// Install a callback invoked when an Explorer file drop lands on the
-/// Sonic window. The string passed in is already shell-quoted (POSIX
+/// SonicTerm window. The string passed in is already shell-quoted (POSIX
 /// rules — Windows `cmd.exe` users typically run under a POSIX-ish
-/// shell inside Sonic, mirroring the macOS behavior).
+/// shell inside SonicTerm, mirroring the macOS behavior).
 #[allow(dead_code)]
 pub fn install_file_drop_sink<F: Fn(String) + Send + Sync + 'static>(f: F) {
     *file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(f));
@@ -116,7 +116,7 @@ pub fn take_pending_payload() -> Option<TabPayload> {
 /// installs for the duration of a single `DoDragDrop` call. The
 /// `IDropTarget::Drop` callback reads from here to post a real
 /// `DragOutcome::Drop` (target_window + target_slot) back to the
-/// dispatcher when a peer Sonic HWND accepts the drop within the same
+/// dispatcher when a peer SonicTerm HWND accepts the drop within the same
 /// process.
 static DROP_OUTCOME_HANDLE: OnceLock<Mutex<Option<sonicterm_app::app::os_drag::AppHandle>>> =
     OnceLock::new();
@@ -137,7 +137,7 @@ pub fn install_drop_outcome_handle(handle: sonicterm_app::app::os_drag::AppHandl
 
 /// Clear the AppHandle. Called by `WinOsTabDragBackend::begin_session`
 /// after `DoDragDrop` returns so a subsequent unrelated drop (e.g.
-/// from another Sonic process) doesn't reuse a stale handle.
+/// from another SonicTerm process) doesn't reuse a stale handle.
 pub fn clear_drop_outcome_handle() {
     if let Ok(mut slot) = drop_outcome_handle_slot().lock() {
         *slot = None;
@@ -176,12 +176,12 @@ pub fn shutdown_ole() {
 /// `CF_HGLOBAL`. We do not advertise `CF_HDROP` from the source side —
 /// we only consume it as a target.
 #[implement(IDataObject)]
-struct SonicDataObject {
+struct SonicTermDataObject {
     /// UTF-8 JSON body (from [`TabPayload::to_json`]).
     json: Vec<u8>,
 }
 
-impl SonicDataObject {
+impl SonicTermDataObject {
     fn matches(&self, fmt: &FORMATETC) -> bool {
         fmt.cfFormat == cf_sonic_tab()
             && fmt.dwAspect == DVASPECT_CONTENT.0
@@ -190,7 +190,7 @@ impl SonicDataObject {
 }
 
 #[allow(non_snake_case)]
-impl IDataObject_Impl for SonicDataObject_Impl {
+impl IDataObject_Impl for SonicTermDataObject_Impl {
     fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
         // SAFETY: caller guarantees pformatetcin is a valid FORMATETC.
         let fmt = unsafe { &*pformatetcin };
@@ -279,10 +279,10 @@ impl IDataObject_Impl for SonicDataObject_Impl {
 // ---- IDropSource implementation ---------------------------------------------
 
 #[implement(IDropSource)]
-struct SonicDropSource;
+struct SonicTermDropSource;
 
 #[allow(non_snake_case)]
-impl IDropSource_Impl for SonicDropSource_Impl {
+impl IDropSource_Impl for SonicTermDropSource_Impl {
     fn QueryContinueDrag(
         &self,
         fescapepressed: BOOL,
@@ -330,8 +330,8 @@ struct DragDropOutcome {
 /// MUST be called on a thread that has called `OleInitialize` —
 /// typically the main UI thread.
 fn begin_tab_drag_outcome(payload_json: &str) -> DragDropOutcome {
-    let data: IDataObject = SonicDataObject { json: payload_json.as_bytes().to_vec() }.into();
-    let source: IDropSource = SonicDropSource.into();
+    let data: IDataObject = SonicTermDataObject { json: payload_json.as_bytes().to_vec() }.into();
+    let source: IDropSource = SonicTermDropSource.into();
     let mut effect = DROPEFFECT_NONE;
     // SAFETY: DoDragDrop is the documented entry point. Both COM
     // objects outlive the call (kept on the stack here).
@@ -352,8 +352,8 @@ pub fn begin_tab_drag(payload_json: &str) -> u32 {
 // ---- OsDragSink wiring ------------------------------------------------------
 
 /// `OsDragSink` impl that, on `begin_drag`, kicks off the OLE drag
-/// loop synchronously. A normal Sonic drop target returns
-/// `DROPEFFECT_MOVE`; a drop on bare desktop / non-Sonic targets returns
+/// loop synchronously. A normal SonicTerm drop target returns
+/// `DROPEFFECT_MOVE`; a drop on bare desktop / non-SonicTerm targets returns
 /// `DROPEFFECT_NONE`, which we treat as a Windows tear-out by spawning a
 /// child `sonicterm-windows.exe` with the serialized payload.
 pub struct WinOsDragSink;
@@ -422,7 +422,7 @@ struct DropTarget;
 
 impl DropTarget {
     /// Inspect an incoming data object: prefer `CF_SONIC_TAB` over
-    /// `CF_HDROP` (a sibling Sonic window's tab is more specific than
+    /// `CF_HDROP` (a sibling SonicTerm window's tab is more specific than
     /// a generic file drop).
     fn preferred_effect(data: &IDataObject) -> DROPEFFECT {
         if has_format(data, cf_sonic_tab(), TYMED_HGLOBAL.0 as u32) {
@@ -498,9 +498,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
                     // destination via the shared TabBarRegistry the App
                     // publishes into every frame. Falls back to
                     // DroppedOnEmpty (tear out at drop point) when the
-                    // cursor isn't over any registered Sonic tab bar
-                    // but IS over a Sonic window's client area. If the
-                    // cursor isn't over any Sonic window at all we
+                    // cursor isn't over any registered SonicTerm tab bar
+                    // but IS over a SonicTerm window's client area. If the
+                    // cursor isn't over any SonicTerm window at all we
                     // still report DroppedOnEmpty so the source side
                     // spawns a tear-out at the drop point.
                     if let Some(handle) = snapshot_drop_outcome_handle() {

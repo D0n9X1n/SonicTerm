@@ -1,4 +1,4 @@
-# Sonic Terminal Roadmap
+# SonicTerm Terminal Roadmap
 
 Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
@@ -46,7 +46,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonicterm-shared/src/render.rs` + `app.rs` |
 | In-page search (`Cmd+F`) | ✅ v0.4 | `sonicterm-shared/src/search.rs` |
 | Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonicterm-core::vt` |
-| **Palette config-file editing** | ✅ v1.0-RC | `Edit sonic.toml` / `Edit keymap.toml` palette actions replace the removed prefs UI (#326) |
+| **Palette config-file editing** | ✅ v1.0-RC | `Edit sonicterm.toml` / `Edit keymap.toml` palette actions replace the removed prefs UI (#326) |
 | Tab tear-out + cross-window merge | ✅ v0.8 | `sonicterm-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
 | Command palette (`super+shift+P`) | ✅ v0.8 | (#41, #45) |
 | IME composition + preedit anchoring | ✅ v0.8 | (#40, #50) |
@@ -119,7 +119,7 @@ production blockers are clear.
 
 The graphical preferences subsystem shipped experimentally in v0.6 and was
 removed before v1.0-RC (#326). The supported settings workflow is now the
-command palette: run `Edit sonic.toml` or `Edit keymap.toml`; the existing
+command palette: run `Edit sonicterm.toml` or `Edit keymap.toml`; the existing
 `notify` watcher live-reloads saved changes.
 
 ### ✅ v0.8.0 — Production polish (2026-05-26)
@@ -194,7 +194,7 @@ PRs landed this session:
 
 The 8 perf wins closed ~30–60% of the gap on cat-large-file and
 tail-f hot paths. They did **not** achieve WezTerm parity. Current
-`vtebench` numbers vs WezTerm on the same hardware show Sonic
+`vtebench` numbers vs WezTerm on the same hardware show SonicTerm
 **6×–302× slower** depending on the benchmark — worst on heavy SGR
 attribute streams and dense scrollback writes (see
 `/tmp/sonic-vs-wezterm.md` notes). Phase E (perf parity) is ongoing,

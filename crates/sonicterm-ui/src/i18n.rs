@@ -6,7 +6,7 @@
 //!
 //! 1. Explicit `SONIC_LOCALE` env var (highest priority — used by tests and
 //!    by users who want a one-shot override without editing config).
-//! 2. Explicit `locale` value from `sonic.toml` (for example,
+//! 2. Explicit `locale` value from `sonicterm.toml` (for example,
 //!    `locale = "zh-CN"`).
 //! 3. OS locale via [`sys_locale::get_locale`].
 //! 4. `"en"` as the ultimate fallback.
@@ -15,7 +15,7 @@
 //! bundle returns the key itself so visible UI never shows an empty string.
 //!
 //! The module is intentionally tiny — Fluent's full API surface is large,
-//! but Sonic's UI strings are simple labels and a couple of `{ $name }`
+//! but SonicTerm's UI strings are simple labels and a couple of `{ $name }`
 //! placeholder formats. We expose just the two helpers (`t` and `t_args`)
 //! that cover those cases.
 use std::borrow::Cow;

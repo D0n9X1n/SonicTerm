@@ -247,8 +247,8 @@ cargo test --workspace 2>&1 | grep "test result" | awk -F'[ .,]' '{s+=$5} END {p
 ## 8. Configuration runtime
 
 User config lives at:
-- macOS: `~/Library/Application Support/Sonic/sonic.toml`
-- Windows: `%APPDATA%\Sonic\sonic.toml`
+- macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
+- Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
 
 Bundled defaults: `assets/themes/*.toml` + `assets/keymaps/wezterm.toml`. The keymap action enum is the public surface — adding a bindable action requires a variant + dispatcher arm (see §5). Default font is `St Helens` (system, not bundled); `Rec Mono Casual` ships under `assets/fonts/` as guaranteed fallback.
 
@@ -269,7 +269,7 @@ triggers `.github/workflows/release.yml` → first runs the `release-gate` job (
 
 The checklist itself (`docs/RELEASE_TESTING.md`) is a **49-section** sweep covering tab/pane/palette/config-edit/tear-out/nvim-stress/ANSI/URL/IME/multi-window/idle/perf/drag-drop/quit plus scrollback+copy, search overlay, resize semantics, HiDPI/multi-monitor, theme+font live-reload, shell exit/kill, Ctrl-letter encoding, alt-screen round-trip, OSC8+URL safety extended, mouse modes, wide-chars/grapheme clusters, cursor styles, crash hygiene, accessibility, first-run, locale/non-UTF8, TCC permissions, 1-hour stability, drag-drop edge cases, config validation, per-OS tab chrome/new-tab/title/padding/keymap parity, cheatsheet, copy mode + quick select, broadcast input, pane zoom + resize, accessibility modes, theme import/export, OSC 133 command badges, notifications, and CLAUDE.md §4 land-mine coverage — i.e. exactly the user-facing surfaces that the §13 single-pane GUI smoke does NOT exercise. **v0.8.1 is the first release using this gate.**
 
-`crates/sonicterm-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/Sonic/sonic.log.*` / `%LOCALAPPDATA%\Sonic\Logs\sonic.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
+`crates/sonicterm-logging/` is initialized at the top of every binary's `main()` (before config load) so even bootstrap errors land in `~/Library/Logs/SonicTerm/sonicterm.log.*` / `%LOCALAPPDATA%\SonicTerm\Logs\sonicterm.log.*`. Retention is ~60 MB rolling + 10 crash dumps; see `docs/LOGGING.md`.
 
 ---
 
@@ -334,7 +334,7 @@ pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
 sleep 2.5
 PID=$(pgrep -f sonicterm-mac | head -1)
 
-# 1. Bring to front + position (so the screenshot actually captures Sonic, not whatever was front)
+# 1. Bring to front + position (so the screenshot actually captures SonicTerm, not whatever was front)
 osascript <<EOF
 tell application "System Events"
   tell process "sonicterm-mac"
@@ -389,7 +389,7 @@ comments present.
 
 ## 14. Honest perf status (v1.0-RC)
 
-We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows Sonic **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
+We claim "fast" in the README and in the North Star. Right now that is aspirational, not measured. Latest `vtebench` run (see `/tmp/sonic-vs-wezterm.md` notes or re-run locally) shows SonicTerm **6×–302× slower than WezTerm** depending on the benchmark — the worst offenders are heavy SGR-attribute streams and dense scrollback writes. The 8 perf PRs that landed this session (#129 #130 #131 #132 #136 #138 #140 #141 #142, plus #162 burst-flag fix) closed ~30–60 % of the gap on the cat-large-file and tail-f hot paths but did NOT achieve parity.
 
 **Rule:** do not describe perf work as "done" in commit messages or PR bodies. Phase E (perf parity) is ongoing. Concrete remaining items live in the v1.x section of `docs/ROADMAP.md`.
 
@@ -532,11 +532,11 @@ but does NOT commit on the owner's open branches without invitation.
 
 ---
 
-## 15. Filing bugs against Sonic
+## 15. Filing bugs against SonicTerm
 
 When filing a bug, attach the last 200 lines of the most recent log file:
 
-- macOS: `tail -200 ~/Library/Logs/Sonic/sonic.log.*`
-- Windows: `Get-Content "$env:LOCALAPPDATA\Sonic\Logs\sonic.log.*" -Tail 200`
+- macOS: `tail -200 ~/Library/Logs/SonicTerm/sonicterm.log.*`
+- Windows: `Get-Content "$env:LOCALAPPDATA\SonicTerm\Logs\sonicterm.log.*" -Tail 200`
 
 If the bug crashed the app, include the matching `crashes/crash-*.log` from the same directory. If logs are gone (auto-cleaned by the 14-day / 5-rotated-file retention policy), say roughly when the bug happened so we can correlate. Full retention + level docs live in `docs/LOGGING.md`.

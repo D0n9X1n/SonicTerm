@@ -1,7 +1,7 @@
 //! Exit and crash tracing.
 //!
 //! Ensures that **every** process termination path leaves a marker in
-//! `sonic.log` and, for crashes, a file under `crashes/`.
+//! `sonicterm.log` and, for crashes, a file under `crashes/`.
 //!
 //! Coverage matrix (see also `docs/LOGGING.md`):
 //!
@@ -46,7 +46,7 @@ pub enum ExitReason {
 static REASON: AtomicU8 = AtomicU8::new(ExitReason::Clean as u8);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static CRASH_DIR: OnceLock<PathBuf> = OnceLock::new();
-/// Pre-opened raw fd for sonic.log (best-effort) so async-signal-safe
+/// Pre-opened raw fd for sonicterm.log (best-effort) so async-signal-safe
 /// handlers can `write(2)` without going through tracing/alloc.
 ///
 /// Only read/written by the Unix signal-handler path; on Windows it
@@ -159,7 +159,7 @@ fn install_alloc_error_logging() {
     // behaviour is to call `__rust_alloc_error_handler`, which prints
     // to stderr and aborts via SIGABRT — and our SIGABRT handler
     // (installed below on Unix) catches the abort and writes a
-    // "FATAL: SIGABRT" marker to sonic.log. So alloc failures DO
+    // "FATAL: SIGABRT" marker to sonicterm.log. So alloc failures DO
     // produce a log line on Unix, just routed via the signal path.
     // Documented in docs/LOGGING.md.
 }

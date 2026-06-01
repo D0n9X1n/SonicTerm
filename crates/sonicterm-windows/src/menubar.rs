@@ -150,14 +150,14 @@ fn build_submenu(sm: &Submenu) -> Result<MudaSubmenu> {
                 match *sel {
                     "orderFrontStandardAboutPanel:" => {
                         let about = PredefinedMenuItem::about(
-                            Some("About Sonic"),
+                            Some("About SonicTerm"),
                             Some(AboutMetadata::default()),
                         );
                         muda_sm.append(&about).context("muda about")?;
                     }
                     "terminate:" => {
                         muda_sm
-                            .append(&PredefinedMenuItem::quit(Some("Quit Sonic")))
+                            .append(&PredefinedMenuItem::quit(Some("Quit SonicTerm")))
                             .context("muda quit")?;
                     }
                     other => {

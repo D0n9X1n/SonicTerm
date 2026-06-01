@@ -5,7 +5,7 @@
 //!   R1: cursor is at the wrong row when ED0 fires (so erase_below misses the
 //!       trailing row), or
 //!   R2: ED is correct and the renderer cache is the culprit, or
-//!   R3: Claude sends a different sequence to Sonic vs WezTerm based on
+//!   R3: Claude sends a different sequence to SonicTerm vs WezTerm based on
 //!       terminfo (most likely DECSTBM-then-print without ED at all).
 //!
 //! These tests document the SPEC behavior of ED0 + DECSTBM that the fix loop

@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — PTY + process probes (+ optional SSH backend)"
+description = "SonicTerm Terminal — PTY + process probes (+ optional SSH backend)"
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — grid + hyperlink registry"
+description = "SonicTerm Terminal — grid + hyperlink registry"
 
 [lints]
 workspace = true

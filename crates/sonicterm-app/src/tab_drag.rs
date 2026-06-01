@@ -42,7 +42,7 @@ pub enum DragAction<W> {
     /// in the original tab vector); `TabBar::reorder` handles the
     /// remove-then-insert shift.
     ReorderTab { from: usize, to: usize },
-    /// Cursor is over another Sonic window's tab bar — release merges
+    /// Cursor is over another SonicTerm window's tab bar — release merges
     /// the dragged tab into that window at the indicated slot.
     MergeIntoWindow(DropTarget<W>),
     /// Cursor is anywhere else (well below the source bar, or off any

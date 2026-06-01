@@ -1,5 +1,5 @@
 {
-  "_comment": "Perf baseline for Sonic Terminal. Numbers are sonic's measurements on main as of 2026-05-28, captured by `bash scripts/bench.sh --record`. The CI perf-bench job (see .github/workflows/ci.yml) hard-fails when any metric regresses by more than the threshold below; `bash scripts/bench.sh` locally only prints a warning. Update by re-running with --record after an intentional perf change; commit the diff alongside the change so the regression bar tracks reality.",
+  "_comment": "Perf baseline for SonicTerm Terminal. Numbers are sonic's measurements on main as of 2026-05-28, captured by `bash scripts/bench.sh --record`. The CI perf-bench job (see .github/workflows/ci.yml) hard-fails when any metric regresses by more than the threshold below; `bash scripts/bench.sh` locally only prints a warning. Update by re-running with --record after an intentional perf change; commit the diff alongside the change so the regression bar tracks reality.",
   "_recorded_at": "2026-05-28",
   "_recorded_on": "main",
   "_regression_threshold_pct": 20,

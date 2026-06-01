@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — config / theme / keymap / url_open loaders"
+description = "SonicTerm Terminal — config / theme / keymap / url_open loaders"
 
 [lints]
 workspace = true

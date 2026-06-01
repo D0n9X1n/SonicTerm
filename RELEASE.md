@@ -1,4 +1,4 @@
-# Cutting a Sonic release
+# Cutting a SonicTerm release
 
 The one-page script for shipping a tagged release. Written against
 **v0.8.0** but the steps are version-agnostic — substitute the tag.
@@ -48,13 +48,13 @@ the `v*` tag and:
      `.icns` / PNG bakes.
    - Builds `sonicterm-mac` with the release profile (fat LTO, 1 codegen
      unit, strip, panic=abort).
-   - Packages a **universal `Sonic-vX.Y.Z.dmg`**.
+   - Packages a **universal `SonicTerm-vX.Y.Z.dmg`**.
    - As of v0.8 (#39): code-signing + notarization runs **only when the
      `APPLE_*` secrets are present**. Until v1.0 these are intentionally
      absent and the DMG ships unsigned.
 2. **`windows-latest` job**
    - Builds `sonicterm-windows` release.
-   - Packages an **x64 `Sonic-vX.Y.Z.msi`** via WiX.
+   - Packages an **x64 `SonicTerm-vX.Y.Z.msi`** via WiX.
    - Signtool runs only when `WINDOWS_CERT_*` secrets are present (also
      v1.0 work).
 3. **`release` job** publishes a GitHub Release attached to the tag,
@@ -86,8 +86,8 @@ Once the Release page is live:
 - [ ] Idle the app for 60 seconds with no input; CPU should sit at
       ~0% (regression guard for #37).
 - [ ] Verify the GitHub Release body contains the CHANGELOG section
-      and that the artifact filenames match `Sonic-v0.8.0.dmg` /
-      `Sonic-v0.8.0.msi`.
+      and that the artifact filenames match `SonicTerm-v0.8.0.dmg` /
+      `SonicTerm-v0.8.0.msi`.
 - [ ] Bump `[Unreleased]` in `CHANGELOG.md` with whatever lands next.
 - [ ] Update `docs/ROADMAP.md` "Last updated" line.
 

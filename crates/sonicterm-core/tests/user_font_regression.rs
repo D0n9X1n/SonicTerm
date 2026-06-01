@@ -1,5 +1,5 @@
 //! Regression test (Bug 5): the global font family is user-configurable
-//! via `sonic.toml`:
+//! via `sonicterm.toml`:
 //!
 //! ```toml
 //! [font]

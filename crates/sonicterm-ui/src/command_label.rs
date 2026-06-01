@@ -159,7 +159,7 @@ pub fn label(a: &Action) -> String {
         Action::OpenSearch => "Open Search".into(),
         Action::OpenCommandPalette => "Open Command Palette".into(),
         Action::ShowKeymapCheatsheet => "Show Keyboard Shortcuts".into(),
-        Action::EditConfigFile => "Edit sonic.toml".into(),
+        Action::EditConfigFile => "Edit sonicterm.toml".into(),
         Action::OpenKeymapFile => "Edit keymap.toml".into(),
         Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
@@ -176,7 +176,7 @@ pub fn label(a: &Action) -> String {
 ///
 /// Example: typing `sett` in the palette must surface
 /// [`Action::EditConfigFile`] even though its label is
-/// "Edit sonic.toml" (no `sett` subsequence). We expose
+/// "Edit sonicterm.toml" (no `sett` subsequence). We expose
 /// `["settings", "config", "options", "prefs"]` so any of those land it.
 #[must_use]
 pub fn keywords(a: &Action) -> &'static [&'static str] {

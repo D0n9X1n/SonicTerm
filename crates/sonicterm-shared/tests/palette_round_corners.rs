@@ -80,14 +80,14 @@ fn palette_row_buffer_line_height_matches_stride() {
 fn palette_footer_positioned_in_footer_rect() {
     let src = render_src();
     // #384: footer text is now emitted via `emit_overlay_text_glyphs`
-    // (Sonic atlas device-scale path), no longer via a glyphon
+    // (SonicTerm atlas device-scale path), no longer via a glyphon
     // TextArea. The contract this test enforces is unchanged: the
     // footer label MUST anchor on `layout.footer.{x,y}` (so the hint
     // sits inside the footer strip, not pushed up into the rows list)
     // and MUST NOT be concatenated onto the rows buffer.
     assert!(
         src.contains("emit_overlay_text_glyphs"),
-        "render.rs must emit palette text through the Sonic atlas device-scale path (#384)"
+        "render.rs must emit palette text through the SonicTerm atlas device-scale path (#384)"
     );
     // Locate the footer emitter call. It's preceded by a `// Footer`
     // marker comment so the search is stable to formatter reflow.

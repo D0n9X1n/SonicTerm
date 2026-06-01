@@ -10,7 +10,7 @@ pub type SessionId = u64;
 /// Server-assigned, monotonically allocated identifier for a pane within a session.
 pub type PaneId = u64;
 
-/// Messages sent from a client (e.g. the Sonic GUI) to the mux server.
+/// Messages sent from a client (e.g. the SonicTerm GUI) to the mux server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMsg {
     /// Ask the server to enumerate all live sessions; replied with `Sessions`.

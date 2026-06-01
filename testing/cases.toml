@@ -1,6 +1,6 @@
 [meta]
 schema_version = 1
-description = "Sonic visual test cases. Single source of truth for mac.sh + windows.ps1."
+description = "SonicTerm visual test cases. Single source of truth for mac.sh + windows.ps1."
 
 # Schema:
 #   [[case]]
@@ -454,7 +454,7 @@ keystrokes = [
 expect = [
   { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
-fail_on = "Sonic crashes or hangs (#194)"
+fail_on = "SonicTerm crashes or hangs (#194)"
 
 [[case]]
 id = "nvim-massive-substitute"
@@ -479,7 +479,7 @@ keystrokes = [
 expect = [
   { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
-fail_on = "Sonic hangs or crashes during burst output (#195)"
+fail_on = "SonicTerm hangs or crashes during burst output (#195)"
 
 # ==========================================================================
 # §8 ANSI / colors (covers #161 #163)
@@ -825,13 +825,13 @@ fail_on = "OCR fails to read text (blur)"
 [[case]]
 id = "live-config-reload-on-save"
 section = 20
-title = "Saving sonic.toml triggers live reload"
+title = "Saving sonicterm.toml triggers live reload"
 applies_to = ["mac"]
 covers_bugs = []
 covers_landmines = []
 setup = ["wait:0.3"]
 keystrokes = [
-  { kind = "shell-cmd", value = "sed -i '' 's/^theme.*/theme = \"dracula\"/' ~/Library/Application\\ Support/Sonic/sonic.toml || true" },
+  { kind = "shell-cmd", value = "sed -i '' 's/^theme.*/theme = \"dracula\"/' ~/Library/Application\\ Support/SonicTerm/sonicterm.toml || true" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
@@ -998,37 +998,37 @@ fail_on = "Orphan zsh/bash remain after SIGKILL"
 [[case]]
 id = "config-validation-bad-toml-falls-back"
 section = 29
-title = "Malformed sonic.toml falls back to defaults, no crash"
+title = "Malformed sonicterm.toml falls back to defaults, no crash"
 applies_to = ["mac", "windows"]
 covers_bugs = []
 covers_landmines = []
 setup = []
 keystrokes = [
-  { kind = "shell-cmd", value = "echo 'this = is { not valid toml' > /tmp/bad-sonic.toml" },
-  { kind = "shell-cmd", value = "SONIC_CONFIG=/tmp/bad-sonic.toml ./target/release/sonicterm-mac &" },
+  { kind = "shell-cmd", value = "echo 'this = is { not valid toml' > /tmp/bad-sonicterm.toml" },
+  { kind = "shell-cmd", value = "SONICTERM_CONFIG=/tmp/bad-sonicterm.toml ./target/release/sonicterm-mac &" },
   { kind = "wait", value = 2.0 },
 ]
 expect = [
   { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
-fail_on = "Sonic refuses to launch on bad config"
+fail_on = "SonicTerm refuses to launch on bad config"
 
 [[case]]
 id = "config-watch-invalid-edit-keeps-current"
 section = 30
-title = "Saving an invalid edit to sonic.toml keeps the current config (no crash)"
+title = "Saving an invalid edit to sonicterm.toml keeps the current config (no crash)"
 applies_to = ["mac"]
 covers_bugs = []
 covers_landmines = []
 setup = ["wait:0.3"]
 keystrokes = [
-  { kind = "shell-cmd", value = "echo 'broken =' >> ~/Library/Application\\ Support/Sonic/sonic.toml" },
+  { kind = "shell-cmd", value = "echo 'broken =' >> ~/Library/Application\\ Support/SonicTerm/sonicterm.toml" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
   { kind = "process-count", program = "sonicterm-mac", min = 1 },
 ]
-fail_on = "Sonic crashes on hot-reload of bad toml"
+fail_on = "SonicTerm crashes on hot-reload of bad toml"
 
 [[case]]
 id = "selection-mouse-drag-highlights"

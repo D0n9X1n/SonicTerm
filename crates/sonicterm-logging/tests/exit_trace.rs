@@ -2,7 +2,7 @@
 //!
 //! Every test spawns the `exit_test_child` example binary with
 //! `SONIC_EXIT_TEST_MODE` set, points it at a fresh tempdir via
-//! `SONIC_LOG_DIR`, then asserts on the contents of `sonic.log` and
+//! `SONIC_LOG_DIR`, then asserts on the contents of `sonicterm.log` and
 //! `crashes/` after the child terminates.
 //!
 //! These tests are non-trivial because they exercise process-wide
@@ -58,7 +58,7 @@ fn read_all_logs(dir: &Path) -> String {
             let p = e.path();
             if p.is_file()
                 && p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with("sonic.log"))
+                    .map(|n| n.to_string_lossy().starts_with("sonicterm.log"))
                     .unwrap_or(false)
             {
                 if let Ok(s) = std::fs::read_to_string(&p) {

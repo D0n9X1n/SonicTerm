@@ -1,6 +1,6 @@
 # Bundled Fonts
 
-Sonic ships exactly one monospaced font family:
+SonicTerm ships exactly one monospaced font family:
 
 **Rec Mono St.Helens** — the brand default referenced by
 `sonicterm_cfg::config::DEFAULT_FONT_FAMILY`. Four variants are committed

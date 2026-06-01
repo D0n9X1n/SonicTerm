@@ -51,7 +51,7 @@ impl App {
         ) {
             self.input_dirty = true;
         }
-        // Drain any pending sonic.toml live-reload deliveries before
+        // Drain any pending sonicterm.toml live-reload deliveries before
         // dispatching the event — guarantees font/theme/keymap swaps
         // land on the same redraw tick they were detected on.
         self.poll_config_reload();
@@ -556,7 +556,7 @@ impl App {
                     // Intentionally do NOT toggle `set_ime_allowed` on
                     // focus transitions. macOS' IMK posts a runloop
                     // wake message on every toggle; doing it on every
-                    // focus in/out (which Sonic also receives when the
+                    // focus in/out (which SonicTerm also receives when the
                     // OS shows a notification, switches Spaces, etc.)
                     // floods stderr with
                     // `IMKCFRunLoopWakeUpReliable` errors and is a

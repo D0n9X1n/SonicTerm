@@ -1,8 +1,8 @@
 //! OS-level cross-process tab drag — shared payload definitions.
 //!
-//! When the user drags a tab off a Sonic window and the cursor leaves
-//! every Sonic-owned window (i.e. they're dropping it on a *different*
-//! Sonic process, not just into another window of the same process —
+//! When the user drags a tab off a SonicTerm window and the cursor leaves
+//! every SonicTerm-owned window (i.e. they're dropping it on a *different*
+//! SonicTerm process, not just into another window of the same process —
 //! that's handled by `tab_drag`), we fall through to the platform's
 //! native drag-and-drop facility. This module defines the wire format
 //! the source and destination processes agree on.
@@ -13,7 +13,7 @@
 //! (`NSPasteboard` + `NSDraggingSession`) on macOS and OLE
 //! (`IDataObject` + `DoDragDrop`) on Windows. Both expect a typed blob
 //! identified by a stable, reverse-DNS-style format name. That name
-//! and the payload schema must match between *whichever* two Sonic
+//! and the payload schema must match between *whichever* two SonicTerm
 //! processes happen to be involved — pinning v1 in the type name lets
 //! us evolve the schema later without ambiguity.
 //!
@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 /// sequence or the drag silently no-ops.
 pub const PASTEBOARD_TYPE: &str = "com.sonic-terminal.tab.v1";
 
-/// JSON payload exchanged between Sonic processes during an
+/// JSON payload exchanged between SonicTerm processes during an
 /// OS-level tab drag.
 ///
 /// Field names are kebab-friendly snake_case to match the JSON wire
@@ -214,7 +214,7 @@ impl TabPayload {
 /// but have not heard back from a receiver" — leaves the source tab
 /// alive, because v1 has no cross-process consumption-ack channel
 /// yet and the alternative (kill-on-write-success) destroys user
-/// sessions when no second Sonic.app is running.
+/// sessions when no second SonicTerm.app is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragAck {
     /// A destination has positively acknowledged the handoff and is
@@ -236,7 +236,7 @@ pub enum DragAck {
 /// Trait implemented by platform-specific OS-drag senders.
 ///
 /// `sonicterm-shared` knows when a tab has been dragged outside every
-/// Sonic-owned window — that's the trigger for an OS-level handoff.
+/// SonicTerm-owned window — that's the trigger for an OS-level handoff.
 /// What it does NOT know is how to actually start an NSDragging
 /// session or a `DoDragDrop` call; those live in `sonicterm-mac` and
 /// `sonicterm-windows` respectively. The platform binary installs an
@@ -303,7 +303,7 @@ impl PendingPayloadSlot {
 /// Trait implemented by platform-specific OS-drag senders.
 ///
 /// `sonicterm-shared` knows when a tab has been dragged outside every
-/// Sonic-owned window — that's the trigger for an OS-level handoff.
+/// SonicTerm-owned window — that's the trigger for an OS-level handoff.
 /// What it does NOT know is how to actually start an NSDragging
 /// session or a `DoDragDrop` call; those live in `sonicterm-mac` and
 /// `sonicterm-windows` respectively. The platform binary installs an

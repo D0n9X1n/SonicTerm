@@ -1,5 +1,5 @@
 //! VT/parser-level capability matrix — regression net for the entire set
-//! of character classes Sonic promises to handle.
+//! of character classes SonicTerm promises to handle.
 //!
 //! Why this exists: PR #42 (B3 cutover) broke non-ASCII rendering and
 //! every existing test only used ASCII, so the local gate, Haiku review,
@@ -184,7 +184,7 @@ fn box_drawing_roundtrips() {
 }
 
 // -----------------------------------------------------------------------
-// Powerline glyphs (Private Use Area). Sonic ships a Nerd-Font-patched
+// Powerline glyphs (Private Use Area). SonicTerm ships a Nerd-Font-patched
 // "Rec Mono St.Helens" so these MUST be preserved in the grid. The
 // renderer-side test asserts a tile actually rasterizes.
 // -----------------------------------------------------------------------

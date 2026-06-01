@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="Sonic Terminal" width="160" height="160"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm Terminal" width="160" height="160"/>
 
-# Sonic Terminal
+# SonicTerm Terminal
 
-**Sonic is what you'd build if you started a terminal in 2026: GPU-native,
+**SonicTerm is what you'd build if you started a terminal in 2026: GPU-native,
 fast at idle, correct on every script, and you can drag tabs between
 windows.**
 
@@ -17,7 +17,7 @@ windows.**
 
 ---
 
-## Why Sonic?
+## Why SonicTerm?
 
 There are good terminals. There are even good *GPU* terminals. What there
 isn't, yet, is a GPU terminal that:
@@ -31,11 +31,11 @@ isn't, yet, is a GPU terminal that:
 - ships a **localized UI** (English / 简体中文 / 日本語) the first time you
   launch it.
 
-Sonic does all of that on macOS and Windows.
+SonicTerm does all of that on macOS and Windows.
 
 ### How it compares
 
-| Capability | Sonic | WezTerm | Alacritty | Kitty | iTerm2 |
+| Capability | SonicTerm | WezTerm | Alacritty | Kitty | iTerm2 |
 |---|:---:|:---:|:---:|:---:|:---:|
 | GPU rendering (wgpu/OpenGL) | ✅ | ✅ | ✅ | ✅ | ⚠️ Metal only |
 | Idle CPU when nothing happens | **0%** | ~1% | ~1% | ~1% | varies |
@@ -64,7 +64,7 @@ platforms than three mediocre ones.
   **St Helens** (not bundled — install system-wide; if missing, the
   renderer falls through to system mono and `Rec Mono Casual` ships
   under `assets/fonts/` as a guaranteed-present fallback). Override via
-  `[font] family = "..."` in `sonic.toml`. The
+  `[font] family = "..."` in `sonicterm.toml`. The
   default theme is the WezTerm-style `wezterm` palette
   (out-of-box visual parity with WezTerm);
 - hate when their idle terminal eats 5% of a CPU core just to blink a
@@ -84,18 +84,18 @@ platforms than three mediocre ones.
   bindable action, in your language.
 - **5 bundled themes**: Tokyo Night, Dracula, Nord, Catppuccin Mocha,
   Gruvbox Dark Hard.
-- **Editable config files** from the command palette: `Edit sonic.toml`
+- **Editable config files** from the command palette: `Edit sonicterm.toml`
   and `Edit keymap.toml`; changes persist and live-apply.
 
 Full feature reference and every keybinding: **[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**.
 
-### What Sonic doesn't have (yet)
+### What SonicTerm doesn't have (yet)
 
 Being honest about the gaps so you can pick the right tool:
 
 - **No Linux build.** Deferred to v1.0 — see
   [`docs/ROADMAP.md`](docs/ROADMAP.md). WezTerm, Alacritty, and Kitty
-  all run on Linux today; Sonic does not.
+  all run on Linux today; SonicTerm does not.
 - **No code signing.** macOS `.dmg` and Windows `.msi` are unsigned —
   signing certs aren't configured yet. You'll see Gatekeeper /
   SmartScreen warnings on first launch.
@@ -116,7 +116,7 @@ Each tagged release publishes a universal macOS `.dmg` and an x64 Windows
 [**Releases**](https://github.com/D0n9X1n/sonic/releases).
 
 > Builds are **not code-signed yet** (see roadmap). On macOS you may need
-> `xattr -dr com.apple.quarantine /Applications/Sonic.app` the first
+> `xattr -dr com.apple.quarantine /Applications/SonicTerm.app` the first
 > time; on Windows, Defender SmartScreen may want a "More info → Run
 > anyway."
 
@@ -159,7 +159,7 @@ client.
 
 ## Contributing
 
-Sonic is built with an agent-driven PR pipeline (see `CLAUDE.md`). The
+SonicTerm is built with an agent-driven PR pipeline (see `CLAUDE.md`). The
 local gate before any commit is:
 
 ```bash

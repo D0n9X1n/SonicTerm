@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sonic GUI performance harness — drives a real built .app via osascript
+# SonicTerm GUI performance harness — drives a real built .app via osascript
 # keystrokes and samples its CPU / RSS over time. Outputs JSON-ish summary.
 #
 # Requires (one-time): grant Terminal.app or whoever is running this
@@ -13,7 +13,7 @@
 #   ./scripts/gui_bench.sh scroll             # huge `seq 5000` burst
 #   ./scripts/gui_bench.sh all                # all of the above (default)
 #
-# Each scenario kills any prior Sonic, opens a fresh bundle from the
+# Each scenario kills any prior SonicTerm, opens a fresh bundle from the
 # repo's `target/release/sonicterm-mac`, focuses it, runs the scenario,
 # samples, kills it.
 
@@ -21,8 +21,8 @@ set -euo pipefail
 SCENARIO="${1:-all}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sonicterm-mac"
-APP="/tmp/sonic-bench/Sonic.app"
-BUNDLE_ID="com.sonic.terminal.bench"
+APP="/tmp/sonic-bench/SonicTerm.app"
+BUNDLE_ID="com.d0n9x1n.sonicterm.bench"
 
 if [ ! -x "$BIN" ]; then
   echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
@@ -32,17 +32,17 @@ fi
 # Build a tiny bundle so it gets a Dock icon + can be focused by osascript.
 rm -rf /tmp/sonic-bench
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN" "$APP/Contents/MacOS/sonic"
+cp "$BIN" "$APP/Contents/MacOS/sonicterm-mac"
 cp -r "$ROOT/assets" "$APP/Contents/Resources/" 2>/dev/null || true
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>SonicBench</string>
+<key>CFBundleName</key><string>SonicTermBench</string>
 <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 <key>CFBundleVersion</key><string>0.0.0</string>
 <key>CFBundleShortVersionString</key><string>0.0.0</string>
-<key>CFBundleExecutable</key><string>sonic</string>
+<key>CFBundleExecutable</key><string>sonicterm-mac</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -50,12 +50,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-pkill -9 -f "Sonic" 2>/dev/null || true
+pkill -9 -f "SonicTerm" 2>/dev/null || true
 sleep 0.3
 
 open "$APP"
 sleep 1.5
-PID=$(pgrep -f "sonic-bench/Sonic.app/Contents/MacOS/sonic" | head -1)
+PID=$(pgrep -f "sonic-bench/SonicTerm.app/Contents/MacOS/sonicterm-mac" | head -1)
 if [ -z "$PID" ]; then
   echo '{"error":"sonic failed to launch"}'
   exit 1
@@ -151,4 +151,4 @@ echo "  \"final_rss_kb\": $RSS" >&2
 echo "}" >&2
 
 # Cleanup
-pkill -9 -f "Sonic" 2>/dev/null || true
+pkill -9 -f "SonicTerm" 2>/dev/null || true

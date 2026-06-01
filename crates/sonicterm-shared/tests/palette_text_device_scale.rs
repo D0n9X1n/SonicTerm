@@ -1,5 +1,5 @@
 //! Regression coverage for #384: command-palette text must render
-//! through the Sonic glyph atlas at device pixel scale (mirroring
+//! through the SonicTerm glyph atlas at device pixel scale (mirroring
 //! `emit_tab_title_glyphs`) so it stays crisp on Windows HiDPI.
 //!
 //! Pre-fix the palette routed through `glyphon::TextRenderer::set_text`
@@ -69,7 +69,7 @@ fn palette_text_glyphs_use_device_scaled_sonic_atlas() {
         Some(&mut debug),
     );
 
-    assert!(!glyphs.is_empty(), "palette label must emit Sonic-atlas glyph instances (#384)");
+    assert!(!glyphs.is_empty(), "palette label must emit SonicTerm-atlas glyph instances (#384)");
     assert!(!debug.is_empty(), "debug records must mirror emitted glyphs");
 
     let first = debug.first().expect("debug record for first palette glyph");
@@ -92,7 +92,7 @@ fn palette_text_glyphs_use_device_scaled_sonic_atlas() {
         FONT_SIZE
     );
     // The emitted *logical* rect height must be the physical tile
-    // divided by scale_factor — i.e. the Sonic atlas device-scale
+    // divided by scale_factor — i.e. the SonicTerm atlas device-scale
     // contract: rasterize big, draw small. (Pre-fix glyphon path
     // drew at logical size with logical rasterization → blur.)
     let logical_h = first.rect[3];

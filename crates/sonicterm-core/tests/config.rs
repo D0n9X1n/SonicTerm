@@ -32,7 +32,7 @@ fn unknown_keys_survive_load_save_roundtrip() {
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     let original = "theme = \"x\"\n\
                     font_size = 14\n\
                     my_custom_plugin_key = \"preserved\"\n\
@@ -75,7 +75,7 @@ fn defaults_match_wezterm_visual_parity() {
     }
 }
 
-/// Legacy `padding = N` in `sonic.toml` (single value) must splat onto
+/// Legacy `padding = N` in `sonicterm.toml` (single value) must splat onto
 /// all four per-side fields after load — users who configured the old
 /// shorthand should not have to migrate their config to keep the same
 /// visual.
@@ -84,7 +84,7 @@ fn legacy_padding_scalar_splats_to_all_sides() {
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     std::fs::write(&path, "[window]\npadding = 12.0\n").unwrap();
     let cfg = Config::load_or_default(&path).unwrap();
     assert!((cfg.window.padding_left - 12.0).abs() < f32::EPSILON);
@@ -96,7 +96,7 @@ fn legacy_padding_scalar_splats_to_all_sides() {
     assert!(cfg.window.padding.is_none());
 }
 
-/// Per-side padding values from `sonic.toml` reach `WindowConfig`
+/// Per-side padding values from `sonicterm.toml` reach `WindowConfig`
 /// untouched (no shadowing by the legacy field, no clobbering by
 /// `normalize_padding`).
 #[test]
@@ -104,7 +104,7 @@ fn per_side_padding_values_round_trip() {
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("sonic.toml");
+    let path = dir.path().join("sonicterm.toml");
     std::fs::write(
         &path,
         "[window]\npadding_left = 1.0\npadding_right = 2.0\n\

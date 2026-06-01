@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sonic Terminal — shared: window, tabs, panes, app loop"
+description = "SonicTerm Terminal — shared: window, tabs, panes, app loop"
 
 [lints]
 workspace = true

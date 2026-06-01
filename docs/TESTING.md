@@ -1,6 +1,6 @@
-# TESTING.md — Sonic testing methodology
+# TESTING.md — SonicTerm testing methodology
 
-This document is the single source of truth for **how Sonic is tested before
+This document is the single source of truth for **how SonicTerm is tested before
 code lands on `main`**. It consolidates the rules scattered across
 `CLAUDE.md` §2, §11, §12, §13 and `scripts/README.md` into one operational
 checklist. If you are an agent or a human contributor opening a PR, the
@@ -121,7 +121,7 @@ sleep 2.5
 PID=$(pgrep -f sonicterm-mac | head -1)
 
 # 1. Bring to front and position deterministically so the screencap
-#    actually captures Sonic, not whatever was previously frontmost.
+#    actually captures SonicTerm, not whatever was previously frontmost.
 osascript <<EOF
 tell application "System Events"
   tell process "sonicterm-mac"
@@ -222,7 +222,7 @@ in order; each adds signal the previous layer misses.
 
 ### Layer 1 — headless `bench` (CI-runnable, reproducible)
 
-Runs the full Sonic stack (PTY + Parser + Grid + spans builder) without
+Runs the full SonicTerm stack (PTY + Parser + Grid + spans builder) without
 a window or GPU. Emits a single JSON line for diffing.
 
 ```bash

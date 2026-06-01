@@ -12,9 +12,9 @@ use tempfile::tempdir;
 fn size_rotation_renames_oversized_active_log() {
     let dir = tempdir().unwrap();
     // tracing-appender's daily rotation produces names like
-    // sonic.log.YYYY-MM-DD, so the "active" file is the newest
+    // sonicterm.log.YYYY-MM-DD, so the "active" file is the newest
     // file matching the rotated prefix.
-    let active = dir.path().join("sonic.log.2026-05-27");
+    let active = dir.path().join("sonicterm.log.2026-05-27");
     // Write 1.5 MiB to exceed a 1 MiB cap.
     let payload = vec![b'x'; 1_572_864];
     fs::write(&active, &payload).unwrap();
@@ -37,7 +37,7 @@ fn size_rotation_renames_oversized_active_log() {
         .filter(|e| {
             let n = e.file_name();
             let s = n.to_string_lossy().to_string();
-            s.starts_with("sonic.log.")
+            s.starts_with("sonicterm.log.")
         })
         .collect();
     assert_eq!(
@@ -55,7 +55,7 @@ fn size_rotation_renames_oversized_active_log() {
 #[test]
 fn size_rotation_skipped_when_under_limit() {
     let dir = tempdir().unwrap();
-    let active = dir.path().join("sonic.log.2026-05-27");
+    let active = dir.path().join("sonicterm.log.2026-05-27");
     fs::write(&active, b"small").unwrap();
     let cfg = LoggingConfig {
         max_file_size_mb: 1,
@@ -71,7 +71,7 @@ fn size_rotation_skipped_when_under_limit() {
 #[test]
 fn size_rotation_disabled_when_zero() {
     let dir = tempdir().unwrap();
-    let active = dir.path().join("sonic.log.2026-05-27");
+    let active = dir.path().join("sonicterm.log.2026-05-27");
     let big = vec![b'x'; 5 * 1024 * 1024];
     fs::write(&active, &big).unwrap();
     let cfg = LoggingConfig {

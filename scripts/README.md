@@ -1,10 +1,10 @@
 # Performance benchmarking harness
 
-Two layers for measuring Sonic's perf, plus a diff tool to compare runs.
+Two layers for measuring SonicTerm's perf, plus a diff tool to compare runs.
 
 ## Layer 1 — Headless `bench`
 
-Runs the full Sonic stack (PTY + Parser + Grid + spans-builder) without a
+Runs the full SonicTerm stack (PTY + Parser + Grid + spans-builder) without a
 window or GPU. Reproducible, CI-runnable, emits a single JSON line so you
 can diff before/after.
 

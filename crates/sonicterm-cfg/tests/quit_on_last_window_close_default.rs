@@ -3,7 +3,7 @@
 //! Default is `true` (traditional terminal behavior: closing the last
 //! window quits the app). Users who want Chrome/Firefox/Safari-style
 //! dock-alive behavior set `quit_on_last_window_close = false` in
-//! `sonic.toml`. Flip rationale: user testing showed Cmd+W on the last
+//! `sonicterm.toml`. Flip rationale: user testing showed Cmd+W on the last
 //! tab "did nothing" — the discoverability cost of a dock-alive default
 //! outweighed the cold-start cost it was meant to avoid.
 

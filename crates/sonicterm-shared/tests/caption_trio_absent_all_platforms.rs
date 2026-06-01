@@ -1,6 +1,6 @@
 //! Regression for #366: the custom min/max/close trio must be absent on
 //! every platform. The OS-native window controls (macOS traffic lights,
-//! Windows native caption buttons) handle min/max/close — Sonic never
+//! Windows native caption buttons) handle min/max/close — SonicTerm never
 //! renders its own trio in the client area.
 //!
 //! This is asserted by source-grep on the renderer call site

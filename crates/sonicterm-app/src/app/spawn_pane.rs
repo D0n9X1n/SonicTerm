@@ -44,7 +44,7 @@ impl App {
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
-        // neo-tree icon cells visibly differ from Sonic's clear surface
+        // neo-tree icon cells visibly differ from SonicTerm's clear surface
         // (#369).
         {
             let mut p = parser.lock();
@@ -237,7 +237,7 @@ impl App {
                                     }
                                     if let Some(t) = new_title {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.set_title(&format!("Sonic — {t}"));
+                                            w.set_title(&format!("SonicTerm — {t}"));
                                         }
                                     }
                                     if last_request.elapsed() >= min_interval

@@ -1,6 +1,6 @@
-# Logging in Sonic
+# Logging in SonicTerm
 
-Sonic uses [`tracing`] for all in-process logging. The logging subsystem
+SonicTerm uses [`tracing`] for all in-process logging. The logging subsystem
 is initialised at the very top of `main()` so even early bootstrap
 errors (config parse, theme load, panic during init) end up on disk.
 
@@ -8,23 +8,23 @@ errors (config parse, theme load, panic during init) end up on disk.
 
 | Platform | Log directory                              |
 |----------|---------------------------------------------|
-| macOS    | `~/Library/Logs/Sonic/`                    |
-| Windows  | `%LOCALAPPDATA%\Sonic\Logs\`               |
+| macOS    | `~/Library/Logs/SonicTerm/`                    |
+| Windows  | `%LOCALAPPDATA%\SonicTerm\Logs\`               |
 | Linux/dev| `$XDG_STATE_HOME/sonic/logs/` (fallback `~/.local/state/sonic/logs/`) |
 
 Inside that directory you will find:
 
-- `sonic.log.YYYY-MM-DD` — current day's events. `tracing-appender`
+- `sonicterm.log.YYYY-MM-DD` — current day's events. `tracing-appender`
   rotates daily; the freshest file is the one being actively written.
-- `sonic.log.YYYY-MM-DD` (older) — previous days, capped by retention.
+- `sonicterm.log.YYYY-MM-DD` (older) — previous days, capped by retention.
 - `crashes/crash-<utc-iso8601>.log` — per-panic dump (see Crash dumps).
 
 The path can be overridden by setting the `SONIC_LOG_DIR` env var
-before launching Sonic — useful in CI and ops.
+before launching SonicTerm — useful in CI and ops.
 
 ## Retention
 
-All five knobs are exposed in `sonic.toml` under `[logging]`. Defaults:
+All five knobs are exposed in `sonicterm.toml` under `[logging]`. Defaults:
 
 ```toml
 [logging]
@@ -49,7 +49,7 @@ Two equivalent options (env var wins if both are set):
 
 1. `RUST_LOG=sonic=debug ./sonic` — standard `tracing_subscriber`
    syntax. Multiple targets: `RUST_LOG=sonic=debug,wgpu=info`.
-2. In `sonic.toml`:
+2. In `sonicterm.toml`:
 
    ```toml
    [logging]
@@ -64,12 +64,12 @@ sonic=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text
 
 The stderr sink is always pinned to `WARN+` no matter how verbose the
 file filter is, so `RUST_LOG=debug` won't drown the terminal you
-launched Sonic from.
+launched SonicTerm from.
 
 ## Crash dumps
 
 A `tracing_subscriber::Layer` keeps a fixed-size ring of the most
-recent 50 events. On panic, Sonic's panic hook writes
+recent 50 events. On panic, SonicTerm's panic hook writes
 `crashes/crash-<utc-iso8601>.log` containing:
 
 - header (timestamp, version, **thread name + id**, panic location,
@@ -84,7 +84,7 @@ the main thread. This closes the "silent-exit / no `.ips` / no
 `crashes/` entry" forensic gap where a background-thread panic would
 abort the process with no on-disk trace. In addition to the file
 dump, a one-line `ERROR` breadcrumb is emitted to the rolling
-`sonic.log` under the `sonicterm_logging::panic` target, so even a
+`sonicterm.log` under the `sonicterm_logging::panic` target, so even a
 crash-file write failure (read-only home, ENOSPC, etc.) leaves an
 index entry.
 
@@ -106,11 +106,11 @@ Please attach:
 
 1. The last 200 lines of the most recent log file. On macOS:
    ```sh
-   tail -200 ~/Library/Logs/Sonic/sonic.log.* | pbcopy
+   tail -200 ~/Library/Logs/SonicTerm/sonicterm.log.* | pbcopy
    ```
    On Windows:
    ```powershell
-   Get-Content "$env:LOCALAPPDATA\Sonic\Logs\sonic.log.*" -Tail 200 | Set-Clipboard
+   Get-Content "$env:LOCALAPPDATA\SonicTerm\Logs\sonicterm.log.*" -Tail 200 | Set-Clipboard
    ```
 2. Any matching `crashes/crash-*.log` for the same timeframe.
 3. If you cleared logs already, mention the rough time the bug
@@ -124,15 +124,15 @@ Please attach:
   removes every rotated log file (preserving only the active one) and
   every crash dump. A native notification reports the count and bytes
   freed.
-- Manual nuke: `rm -rf ~/Library/Logs/Sonic/*` (or the platform
-  equivalent) — Sonic recreates the directory on next launch.
+- Manual nuke: `rm -rf ~/Library/Logs/SonicTerm/*` (or the platform
+  equivalent) — SonicTerm recreates the directory on next launch.
 
 ## Exit and crash coverage
 
-Every process-termination path leaves a marker in `sonic.log`, and
+Every process-termination path leaves a marker in `sonicterm.log`, and
 every crash also writes a file under `crashes/`. The matrix:
 
-| Path                               | Caught? | Marker in sonic.log                                          | Crash file? |
+| Path                               | Caught? | Marker in sonicterm.log                                          | Crash file? |
 |------------------------------------|---------|--------------------------------------------------------------|-------------|
 | Rust panic, main thread            | Yes     | "sonic exiting: after panic"                                 | Yes         |
 | Rust panic, spawned thread         | Yes     | "sonic exiting: after panic"                                 | Yes         |

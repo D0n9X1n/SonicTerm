@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
-/// Top-level user configuration loaded from `sonic.toml`.
+/// Top-level user configuration loaded from `sonicterm.toml`.
 pub struct Config {
     /// Font selection and metrics.
     pub font: FontConfig,
@@ -85,7 +85,7 @@ pub struct WindowConfig {
     pub rows: u16,
     /// Legacy single-value padding (logical px). When non-`None` on load,
     /// it is splatted onto all four per-side fields below as a backward-
-    /// compatibility shim so existing `sonic.toml` files keep working.
+    /// compatibility shim so existing `sonicterm.toml` files keep working.
     /// Always serialized as `None` on save; the per-side fields are the
     /// canonical surface.
     #[serde(default, skip_serializing)]
@@ -128,7 +128,7 @@ impl WindowConfig {
 #[serde(rename_all = "lowercase")]
 /// OS compositor backdrop behind the terminal surface.
 pub enum BackdropKind {
-    /// Draw an opaque Sonic background with no system material.
+    /// Draw an opaque SonicTerm background with no system material.
     #[default]
     Opaque,
     /// Windows 11 Mica material.
@@ -223,7 +223,7 @@ fn default_threshold_secs() -> u64 {
 
 /// Default for [`Config::quit_on_last_window_close`]: `true`.
 /// Traditional terminal behavior: closing the last window quits the
-/// app. Set `quit_on_last_window_close = false` in `sonic.toml` for
+/// app. Set `quit_on_last_window_close = false` in `sonicterm.toml` for
 /// Chrome/Firefox/Safari-style dock-alive behavior where the process
 /// stays running after the last window closes (macOS only — other
 /// platforms always exit since they have no dock concept).
@@ -308,7 +308,7 @@ impl Default for Config {
 /// (with the dot) — that's the exact name to use here. When the family is
 /// missing the renderer falls through to the system mono chain;
 /// `JetBrainsMono Nerd Font` is also bundled and serves as the implicit
-/// fallback. Users can override via `[font] family = "..."` in `sonic.toml`.
+/// fallback. Users can override via `[font] family = "..."` in `sonicterm.toml`.
 pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
@@ -348,14 +348,20 @@ impl Default for TerminalConfig {
 
 impl Config {
     /// Where the user's config lives, by platform convention.
+    ///
+    /// Post–R3 rename: the new on-disk layout uses `SonicTerm/sonicterm.toml`.
+    /// The legacy `Sonic/sonic.toml` layout is migrated on first launch by
+    /// [`migrate_legacy_config_if_needed`].
     pub fn default_path() -> Option<PathBuf> {
-        let base = if cfg!(target_os = "macos") {
-            dirs_home()?.join("Library/Application Support/Sonic")
-        } else if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(PathBuf::from)?.join("Sonic")
-        } else {
-            dirs_home()?.join(".config/sonic")
-        };
+        let base = default_config_dir()?;
+        Some(base.join("sonicterm.toml"))
+    }
+
+    /// Legacy (pre-R3) config path. Used only by the one-shot migration
+    /// in [`migrate_legacy_config_if_needed`]; never returned to callers
+    /// at runtime.
+    pub fn legacy_default_path() -> Option<PathBuf> {
+        let base = legacy_config_dir()?;
         Some(base.join("sonic.toml"))
     }
 
@@ -371,7 +377,7 @@ impl Config {
             }
         }
         const HEADER: &str =
-            "# Sonic config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
+            "# SonicTerm config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
         std::fs::write(path, HEADER).with_context(|| format!("write {path:?}"))
     }
 
@@ -413,7 +419,7 @@ impl Config {
         let file_name = path
             .file_name()
             .map(|s| s.to_os_string())
-            .unwrap_or_else(|| std::ffi::OsString::from("sonic.toml"));
+            .unwrap_or_else(|| std::ffi::OsString::from("sonicterm.toml"));
         let mut tmp_name = file_name;
         tmp_name.push(".tmp");
         tmp.set_file_name(tmp_name);
@@ -425,6 +431,76 @@ impl Config {
 
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Post–R3 config directory (the new on-disk layout).
+pub fn default_config_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(dirs_home()?.join("Library/Application Support/SonicTerm"))
+    } else if cfg!(target_os = "windows") {
+        Some(std::env::var_os("APPDATA").map(PathBuf::from)?.join("SonicTerm"))
+    } else {
+        Some(dirs_home()?.join(".config/sonicterm"))
+    }
+}
+
+/// Pre–R3 (legacy) config directory. Used only by the migration shim.
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(dirs_home()?.join("Library/Application Support/Sonic"))
+    } else if cfg!(target_os = "windows") {
+        Some(std::env::var_os("APPDATA").map(PathBuf::from)?.join("Sonic"))
+    } else {
+        Some(dirs_home()?.join(".config/sonic"))
+    }
+}
+
+/// One-shot migration from the pre-R3 layout (`Sonic/sonic.toml`) to the
+/// post-R3 layout (`SonicTerm/sonicterm.toml`).
+///
+/// Behaviour:
+///   - If the new config file already exists → no-op.
+///   - Else if the legacy file exists → COPY it (not move) to the new
+///     location, creating the new directory as needed. The legacy file
+///     is left intact for safety so the user can roll back.
+///   - Else → no-op (first launch will create defaults on save).
+///
+/// Returns `Ok(true)` when a migration copy was performed, `Ok(false)`
+/// otherwise. Errors during the copy are returned to the caller so the
+/// app can log them; they are not fatal.
+///
+/// The two arguments make this testable without touching real HOME paths.
+pub fn migrate_legacy_config(legacy: Option<&Path>, new: Option<&Path>) -> Result<bool> {
+    let Some(new_path) = new else { return Ok(false) };
+    if new_path.exists() {
+        return Ok(false);
+    }
+    let Some(legacy_path) = legacy else { return Ok(false) };
+    if !legacy_path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+    }
+    std::fs::copy(legacy_path, new_path)
+        .with_context(|| format!("copy {legacy_path:?} -> {new_path:?}"))?;
+    Ok(true)
+}
+
+/// Run [`migrate_legacy_config`] against the platform default paths and
+/// log the outcome. Safe to call once at process start before the first
+/// `Config::load_or_default`.
+pub fn migrate_legacy_config_if_needed() {
+    let legacy = Config::legacy_default_path();
+    let new = Config::default_path();
+    match migrate_legacy_config(legacy.as_deref(), new.as_deref()) {
+        Ok(true) => eprintln!(
+            "[sonicterm-cfg] migrated config from {:?} -> {:?}; old left intact for safety",
+            legacy, new
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[sonicterm-cfg] legacy config migration failed: {e:?}"),
+    }
 }
 
 // Unit tests live in `tests/config.rs`.

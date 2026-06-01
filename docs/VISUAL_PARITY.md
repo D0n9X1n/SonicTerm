@@ -3,7 +3,7 @@
 This document is the **side-by-side checklist** we walk down after running
 `scripts/visual_diff.sh`. The goal is not pixel-identical output — that's
 impossible across two renderers — but **no surprising visual gap** when a
-user with muscle memory from WezTerm tries Sonic.
+user with muscle memory from WezTerm tries SonicTerm.
 
 Capture method: `bash scripts/visual_diff.sh` (see that script's header
 comment for prerequisites). Both terminals are positioned at the same
@@ -14,7 +14,7 @@ is OS-controlled and will always match the system, not the peer terminal.
 Strip the titlebar (`*-crop.png` outputs) before eyeballing.
 
 **Reference theme for both:** Tokyo Night, JetBrainsMono Nerd Font 14pt,
-1.0 line-height. Sonic ships this as default; configure WezTerm to match.
+1.0 line-height. SonicTerm ships this as default; configure WezTerm to match.
 
 ---
 
@@ -22,7 +22,7 @@ Strip the titlebar (`*-crop.png` outputs) before eyeballing.
 
 ### 1. Background color
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Hex | `#1a1b26` (Tokyo Night default ported) | `#1a1b26` (`assets/themes/tokyo-night.toml`) |
 | Notes | Solid fill, no gradient | Solid fill via wgpu clear color |
@@ -32,35 +32,35 @@ crops. Tolerance: identical hex.
 
 ### 2. Foreground color (default text)
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Hex | `#c0caf5` | `#c0caf5` |
 | Notes | sRGB; no gamma correction in 20240203+ | Currently passes color straight to glyphon (sRGB) — gamma PR pending |
 
 **Known gap:** until the gamma PR lands, thin strokes may look slightly
-heavier in Sonic at low DPI. TBD after merge.
+heavier in SonicTerm at low DPI. TBD after merge.
 
 ### 3. Cell padding (px from cell edge to glyph)
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Inter-cell horizontal | 0 px (cells abut) | 0 px |
 | Window edge → first column | ~4 px (`window_padding.left = 4`) | 8 px (hardcoded in `GpuRenderer::layout`) |
 | Window edge → top row | ~4 px (`top = 4`) | tab-bar height + 4 px |
 
-**Known gap:** Sonic's left/right margin is 2× WezTerm's. Track as
+**Known gap:** SonicTerm's left/right margin is 2× WezTerm's. Track as
 follow-up; surface it in `Config` so users can match.
 
 ### 4. Line-height
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Multiplier | 1.0 (configurable via `line_height`) | 1.0 (fixed; metrics from cosmic-text font) |
 | Effect | Tight, traditional terminal feel | Same |
 
 ### 5. Tab-bar style
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Bar background | `#16161e` (theme `tab_bar.background`) | `#16161e` (`theme.tab.bar_bg`) |
 | Active tab bg | `#1a1b26` (matches content for "no border" look) | `#1a1b26` |
@@ -69,12 +69,12 @@ follow-up; surface it in `Config` so users can match.
 | Close button | `×` glyph on hover | `×` glyph always shown (`tabbar_view.rs`) |
 | Height | 28 px (font-size dependent) | 28 px |
 
-**Known gap:** Sonic shows the `×` unconditionally; WezTerm reveals on
+**Known gap:** SonicTerm shows the `×` unconditionally; WezTerm reveals on
 hover. Cosmetic, low priority.
 
 ### 6. Cursor
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Default shape | `SteadyBlock` (filled block, no blink) | Filled block (quad pipeline) |
 | Color | `#c0caf5` with cursor_text `#1a1b26` (inverted glyph) | Same — `theme.colors.cursor` + `cursor_text` |
@@ -83,7 +83,7 @@ hover. Cosmetic, low priority.
 
 ### 7. Selection
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Highlight color | `#283457` | `#283457` (`selection_bg`) |
 | Behavior | Click-drag, shift-click extends | Same (sonicterm-shared/src/selection.rs) |
@@ -91,18 +91,18 @@ hover. Cosmetic, low priority.
 
 ### 8. Scrollbar
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Visibility | Optional (`enable_scroll_bar = false` default) | Not rendered |
 | Style when shown | Thin strip on right edge, theme `scrollbar_thumb` | TBD |
 
-**Known gap:** Sonic has no scrollbar UI; scrollback works via keyboard
+**Known gap:** SonicTerm has no scrollbar UI; scrollback works via keyboard
 (`super+shift+up/down`). Not a bug — matches WezTerm's default — but
 worth a config knob in v1.0.
 
 ### 9. Underlines & decorations
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Underline | 1 px solid at descent | 1 px quad at descent (`quad.rs`) |
 | Curly/dotted/dashed | Supported (SGR 4:3 etc.) | Solid only; SGR 4:N treated as 4:1 |
@@ -110,7 +110,7 @@ worth a config knob in v1.0.
 
 ### 10. HiDPI / CJK width
 
-| | WezTerm | Sonic |
+| | WezTerm | SonicTerm |
 |---|---|---|
 | Wide chars | 2 cells, glyph centered | 2 cells (`grid.rs` width tracking) — visual centering PR pending |
 | Retina sharpness | Native @2x | Native @2x (wgpu surface configured with `scale_factor`) |

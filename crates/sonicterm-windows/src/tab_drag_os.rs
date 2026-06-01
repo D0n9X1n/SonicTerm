@@ -4,7 +4,7 @@
 //! loop in [`crate::os_drag_win`]. Same-process drag uses the in-memory
 //! `(src_window, src_tab_idx)` bookkeeping the App already keeps in
 //! `os_drag_source`; the OLE payload only needs to carry an opaque
-//! identifier the IDropTarget on a peer Sonic HWND can use to recognise
+//! identifier the IDropTarget on a peer SonicTerm HWND can use to recognise
 //! "this is one of ours, accept it". We reuse the existing
 //! `CF_SONIC_TAB` clipboard format for that — the JSON body is the
 //! source-side identifier tuple.
@@ -18,8 +18,8 @@
 //! the rest of the UI is frozen by design until the gesture ends.
 //!
 //! When `DoDragDrop` returns we have the terminal outcome (drop on a
-//! Sonic IDropTarget → `DROPEFFECT_MOVE`; drop on bare desktop /
-//! non-Sonic → `DROPEFFECT_NONE`; ESC → `DRAGDROP_S_CANCEL`). We
+//! SonicTerm IDropTarget → `DROPEFFECT_MOVE`; drop on bare desktop /
+//! non-SonicTerm → `DROPEFFECT_NONE`; ESC → `DRAGDROP_S_CANCEL`). We
 //! translate that into a [`DragOutcome`] and post it through
 //! [`AppHandle::post_drag_ended`] so the App's
 //! `UserEvent::DragEnded` dispatcher can call
@@ -73,7 +73,7 @@ impl Default for WinOsTabDragBackend {
 
 /// Serialize the same-process drag identifier carried in the
 /// `CF_SONIC_TAB` clipboard payload. Peer IDropTarget instances on
-/// other Sonic HWNDs in this process read this back to confirm the
+/// other SonicTerm HWNDs in this process read this back to confirm the
 /// payload is one of ours and to recover the source coordinates
 /// (although in-process drags reuse the App's `os_drag_source`
 /// bookkeeping directly, so the JSON is purely a tagging mechanism).
@@ -123,7 +123,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         );
 
         // Carry the FULL TabPayload schema on CF_SONIC_TAB — peer
-        // IDropTarget on a Sonic HWND parses via
+        // IDropTarget on a SonicTerm HWND parses via
         // `sonicterm_app::os_drag::TabPayload::from_json`. If the caller
         // failed to serialize (passed empty), fall back to the
         // lightweight identifier tuple so OLE still has a non-empty
@@ -145,7 +145,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
 
         // Clear the installed handle now that the gesture has
         // terminated — a subsequent unrelated CF_SONIC_TAB drop
-        // (e.g. from another Sonic process) must not reuse a stale
+        // (e.g. from another SonicTerm process) must not reuse a stale
         // handle.
         crate::os_drag_win::clear_drop_outcome_handle();
 
@@ -157,7 +157,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         }
         let outcome = match effect {
             e if e == windows::Win32::System::Ole::DROPEFFECT_MOVE.0 => {
-                // Drop accepted by a Sonic IDropTarget but the
+                // Drop accepted by a SonicTerm IDropTarget but the
                 // destination side did not post a richer outcome —
                 // dispatcher will route via transfer_tab with default
                 // main-window/self target. The destination IDropTarget

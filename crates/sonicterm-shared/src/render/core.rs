@@ -587,7 +587,7 @@ pub struct GpuRenderer {
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
     /// Reserved height (logical px) above the tab bar for the OS native
-    /// titlebar. Kept at zero while Sonic uses the normal OS titlebar with a
+    /// titlebar. Kept at zero while SonicTerm uses the normal OS titlebar with a
     /// bottom-pinned tab bar.
     titlebar_inset: f32,
     /// Characters from the most recent `render()` call that the
@@ -818,7 +818,7 @@ pub struct OverlayTextGlyphDebug {
     pub px_size: [u32; 2],
 }
 
-/// Emit overlay text (palette query / rows / footer, etc.) as Sonic-atlas
+/// Emit overlay text (palette query / rows / footer, etc.) as SonicTerm-atlas
 /// glyph instances at device pixel scale. Mirrors [`emit_tab_title_glyphs`]
 /// but takes an explicit pixel `origin_x` and `baseline_y` plus a clipping
 /// rect, so the caller can position multi-line overlays (one call per
@@ -1643,7 +1643,7 @@ impl GpuRenderer {
     }
 
     /// Update all four padding values at once (used by the live config
-    /// reload path so editing `sonic.toml` takes effect without restart).
+    /// reload path so editing `sonicterm.toml` takes effect without restart).
     /// Invalidates the cached frame so the next render relays out.
     pub fn set_padding(&mut self, padding: [f32; 4]) {
         let [l, r, t, b] = padding;
@@ -3611,7 +3611,7 @@ impl GpuRenderer {
             // Shape the query row text. The renderer paints either the
             // placeholder (empty query) or the typed text + cursor.
             //
-            // #384: emit through the Sonic glyph atlas at device pixel
+            // #384: emit through the SonicTerm glyph atlas at device pixel
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
             // is crisp on HiDPI. The previous glyphon TextRenderer path
             // bypassed `scale_factor` and rendered blurry on Windows.
@@ -4069,7 +4069,7 @@ impl GpuRenderer {
         };
 
         // #384: palette query / rows / footer are now emitted as
-        // device-scaled Sonic-atlas glyph instances above (see the palette
+        // device-scaled SonicTerm-atlas glyph instances above (see the palette
         // overlay block earlier in this function) and drawn via
         // `text_pipeline_overlay` after `quad_overlay`. No TextArea is
         // needed for them — leaving these as None.
@@ -4141,7 +4141,7 @@ impl GpuRenderer {
         });
 
         // Pre-overlay text areas: legacy bottom status bar. Tab titles are
-        // emitted into `glyph_instances` above so they use Sonic's
+        // emitted into `glyph_instances` above so they use SonicTerm's
         // nearest-sampled atlas path at device scale, matching the grid.
         let mut areas: Vec<TextArea> = Vec::new();
         if let Some(a) = search_area {
@@ -4321,7 +4321,7 @@ impl GpuRenderer {
             self.quad_overlay.draw(&self.device, &self.queue, &mut pass, &quads_overlay);
             self.text_renderer_overlay.render(&self.atlas, &self.viewport, &mut pass)?;
             // #384: palette / overlay glyph instances rendered through
-            // the Sonic atlas device-scale path. Drawn AFTER
+            // the SonicTerm atlas device-scale path. Drawn AFTER
             // `quad_overlay` and `text_renderer_overlay` so they sit on
             // top of the modal background and any legacy glyphon-routed
             // overlays (cheatsheet, IME, search) below them.

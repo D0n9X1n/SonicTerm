@@ -1,4 +1,4 @@
-//! sonicterm-logging — Sonic Terminal's logging subsystem.
+//! sonicterm-logging — SonicTerm logging subsystem.
 //!
 //! This crate is infrastructure only: it wires up [`tracing`] with two
 //! sinks (stderr at WARN+ and a rolling file at INFO+ by default),
@@ -21,10 +21,10 @@
 //!
 //! ## Log location
 //!
-//! - macOS: `~/Library/Logs/Sonic/sonic.log`
-//! - Windows: `%LOCALAPPDATA%\Sonic\Logs\sonic.log`
-//! - other (dev/Linux): `$XDG_STATE_HOME/sonic/logs/sonic.log` or
-//!   `~/.local/state/sonic/logs/sonic.log`
+//! - macOS: `~/Library/Logs/SonicTerm/sonicterm.log`
+//! - Windows: `%LOCALAPPDATA%\SonicTerm\Logs\sonicterm.log`
+//! - other (dev/Linux): `$XDG_STATE_HOME/sonicterm/logs/sonicterm.log` or
+//!   `~/.local/state/sonicterm/logs/sonicterm.log`
 //!
 //! ## Retention
 //!
@@ -91,7 +91,7 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
     // Size-based rotation isn't a native tracing-appender feature, so
     // we use daily rotation as the appender's own knob and rely on
     // `cleanup_old_files` to enforce size + count + age caps. Rotated
-    // file names follow `sonic.log.YYYY-MM-DD`.
+    // file names follow `sonicterm.log.YYYY-MM-DD`.
     let file_appender = tracing_appender::rolling::daily(&dir, path::log_file_name());
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 

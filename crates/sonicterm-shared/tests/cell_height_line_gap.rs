@@ -1,12 +1,12 @@
 //! Regression test: the cell height MUST include the font's intrinsic
 //! `line_gap` (a.k.a. skrifa `leading`).
 //!
-//! Pre-fix, Sonic computed `cell_h = font_size * line_height_mult`,
+//! Pre-fix, SonicTerm computed `cell_h = font_size * line_height_mult`,
 //! which ignored the font's hhea/OS-2 line-gap entry. At
 //! `font_size = 14, line_height = 1.1` with Rec Mono Casual on a 2x
 //! Retina display, that produced a 30-physical-px cell — 88% of the
 //! 34-physical-px cell WezTerm produces at IDENTICAL config. Visually:
-//! Sonic squeezes ~3 extra rows into the same window vs WezTerm.
+//! SonicTerm squeezes ~3 extra rows into the same window vs WezTerm.
 //!
 //! Post-fix, `cell_h = natural_line_h_px(family, size) * line_height_mult`
 //! where `natural_line_h_px = (ascent + |descent| + leading) / upem * size`.
