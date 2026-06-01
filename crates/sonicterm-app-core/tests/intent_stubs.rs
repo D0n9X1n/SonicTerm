@@ -73,12 +73,23 @@ macro_rules! routed_test {
     };
 }
 
-// 01..06 Window lifecycle (non-leaf — 2c)
-stub_test!(intent_01_new_window, AppIntent::NewWindow { role: WindowRole::Primary });
-stub_test!(intent_02_window_close_requested, AppIntent::WindowCloseRequested { window: wk() });
-stub_test!(intent_03_window_focused, AppIntent::WindowFocused { window: wk() });
+// 01..06 Window lifecycle (routed in M6a-expand-2c-window)
+routed_test!(intent_01_new_window, AppIntent::NewWindow { role: WindowRole::Primary });
+routed_test!(intent_02_window_close_requested, AppIntent::WindowCloseRequested { window: wk() });
+routed_test!(intent_03_window_focused, AppIntent::WindowFocused { window: wk() });
+// Blurred only emits when previously focused — exercise the
+// transition path (see window_lifecycle_intents::blur_after_focus).
+// A standalone Blurred against fresh state legitimately returns
+// empty, so it stays in the stub bucket here; a dedicated focused
+// test covers the routed transition.
 stub_test!(intent_04_window_blurred, AppIntent::WindowBlurred { window: wk() });
-stub_test!(intent_05_window_resized, AppIntent::WindowResized { window: wk(), cols: 80, rows: 24 });
+routed_test!(
+    intent_05_window_resized,
+    AppIntent::WindowResized { window: wk(), cols: 80, rows: 24 }
+);
+// Moved is intentionally side-effect-free (record-only); it stays
+// in the stub bucket here while window_lifecycle_intents asserts
+// the state mutation.
 stub_test!(intent_06_window_moved, AppIntent::WindowMoved { window: wk(), pos: pos() });
 
 // 07..12 Tab lifecycle (non-leaf — 2c)

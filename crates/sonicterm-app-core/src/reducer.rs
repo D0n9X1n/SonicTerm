@@ -1,6 +1,13 @@
 //! Per-Intent reducer arms.
 //!
-//! **M6a-expand-2b** (THIS PR): leaf-only routing per FINAL spec §9.
+//! **M6a-expand-2b** (prior): leaf-only routing per FINAL spec §9.
+//!
+//! **M6a-expand-2c-window** (THIS PR): adds the six window-lifecycle
+//! arms (NewWindow / WindowCloseRequested / WindowFocused /
+//! WindowBlurred / WindowResized / WindowMoved). These mutate
+//! `AppState::{focused_window, last_window_pos, cols, rows,
+//! live_window_count}` and emit the corresponding window-class
+//! Effects per spec §3.
 //!
 //! Leaf intents are those whose translation into Effects is a 1-to-2
 //! direct mapping that touches no fan-out state cascade (no pane-tree
@@ -53,6 +60,7 @@ use smallvec::SmallVec;
 use crate::app_state::AppState;
 use crate::effect::AppEffect;
 use crate::intent::{AppIntent, RedrawReason};
+use crate::supporting::LogicalSize;
 
 /// Route a single Intent through the leaf reducer, appending zero or
 /// more Effects to `out`. Does not sort — `AppStateMachine::handle`
@@ -177,14 +185,73 @@ pub(crate) fn reduce_leaf(
             out.push(AppEffect::Quit);
         }
 
-        // ── Non-leaf — stubs (full reducer arms land in 2c) ─────────
-        AppIntent::NewWindow { .. }
-        | AppIntent::WindowCloseRequested { .. }
-        | AppIntent::WindowFocused { .. }
-        | AppIntent::WindowBlurred { .. }
-        | AppIntent::WindowResized { .. }
-        | AppIntent::WindowMoved { .. }
-        | AppIntent::NewTab { .. }
+        // ── Window lifecycle (M6a-expand-2c-window) ─────────────────
+        //
+        // Per FINAL spec §3:
+        //   NewWindow           → WindowOpen + (deferred MenubarUpdate)
+        //   WindowCloseRequested→ WindowClose [+ Quit if last]
+        //   WindowFocused       → Render(Focus) (only on transition)
+        //   WindowBlurred       → Render(Focus) (only on transition)
+        //   WindowResized       → Render(Resize) + grid-size mutation
+        //   WindowMoved         → record only (no Effects; OS already
+        //                         repositioned the surface)
+        AppIntent::NewWindow { role } => {
+            _state.live_window_count = _state.live_window_count.saturating_add(1);
+            out.push(AppEffect::WindowOpen { role, initial_size: None });
+        }
+        AppIntent::WindowCloseRequested { window } => {
+            // Decrement (saturating: the boundary may double-fire on
+            // some platforms; never wrap below zero).
+            _state.live_window_count = _state.live_window_count.saturating_sub(1);
+            if _state.focused_window == Some(window) {
+                _state.focused_window = None;
+            }
+            out.push(AppEffect::WindowClose { window });
+            if _state.live_window_count == 0 {
+                // Last window — cascade a Quit. The boundary's
+                // `quit_on_last_window_close = false` policy is
+                // honoured at dispatch time (it suppresses the
+                // platform exit and re-opens a fresh main window
+                // instead); the reducer always emits the intent so
+                // the contract is observable.
+                out.push(AppEffect::Quit);
+            }
+        }
+        AppIntent::WindowFocused { window } => {
+            if _state.focused_window != Some(window) {
+                _state.focused_window = Some(window);
+                out.push(AppEffect::Render { window, reason: RedrawReason::Focus });
+            }
+        }
+        AppIntent::WindowBlurred { window } => {
+            if _state.focused_window == Some(window) {
+                _state.focused_window = None;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Focus });
+            }
+        }
+        AppIntent::WindowResized { window, cols, rows } => {
+            _state.cols = u32::from(cols);
+            _state.rows = u32::from(rows);
+            out.push(AppEffect::Render { window, reason: RedrawReason::Resize });
+            // Echo a programmatic resize Effect so the boundary can
+            // re-publish the canonical size to its renderer / tab
+            // strip. The boundary already resized the wgpu surface in
+            // response to the underlying winit `Resized` event; the
+            // Effect here is the observable contract surface.
+            out.push(AppEffect::WindowResize {
+                window,
+                size: LogicalSize { width: f64::from(cols), height: f64::from(rows) },
+            });
+        }
+        AppIntent::WindowMoved { window: _, pos } => {
+            _state.last_window_pos = Some(pos);
+            // No Effects: the OS already moved the window. Recording
+            // the position is enough for future reducer arms (e.g.
+            // session-restore) to read it.
+        }
+
+        // ── Non-leaf — stubs (full reducer arms land in 2c-tab/-pane/-misc) ─
+        AppIntent::NewTab { .. }
         | AppIntent::CloseTab { .. }
         | AppIntent::NextTab { .. }
         | AppIntent::PrevTab { .. }

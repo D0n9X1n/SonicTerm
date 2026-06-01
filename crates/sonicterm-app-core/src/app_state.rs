@@ -3,15 +3,39 @@
 //! M6b..d. This crate currently owns the *shape* of the boundary, not
 //! the implementation.
 
+use sonicterm_types::WindowKey;
+
+use crate::supporting::LogicalPos;
+
 /// Pure-data application state. Intentionally minimal at M6a — fields
 /// migrate over from `sonicterm-app::app::App` in subsequent
 /// modularization PRs.
+///
+/// M6a-expand-2c-window adds tracking for window-lifecycle reducer
+/// arms: which window most recently held focus, the last reported
+/// resize cell dimensions, and the last reported logical position.
+/// These power deterministic reducer outputs (`WindowFocused` emits
+/// a `Render(Focus)` only when focus actually changed) without yet
+/// owning the full pane/tab topology (that lands in 2c-tab/-pane).
 #[derive(Debug, Default)]
 pub struct AppState {
-    /// Logical grid width in cells. Updated on resize.
+    /// Logical grid width in cells. Updated on `WindowResized`.
     pub cols: u32,
-    /// Logical grid height in cells.
+    /// Logical grid height in cells. Updated on `WindowResized`.
     pub rows: u32,
+    /// Window the reducer believes is currently focused, if any.
+    /// Updated on `WindowFocused` / `WindowBlurred`; cleared on
+    /// `WindowCloseRequested` of the same window.
+    pub focused_window: Option<WindowKey>,
+    /// Last logical-pixel position reported via `WindowMoved`.
+    /// `None` until the platform ships its first `Moved` event.
+    pub last_window_pos: Option<LogicalPos>,
+    /// Number of top-level platform windows the reducer believes are
+    /// alive. Incremented on `NewWindow` (cascades a `WindowOpen`
+    /// Effect), decremented on `WindowCloseRequested`. Used by the
+    /// `WindowCloseRequested` reducer arm to decide whether to also
+    /// emit `Quit` (last window closed).
+    pub live_window_count: u32,
 }
 
 impl AppState {
@@ -42,6 +66,12 @@ impl AppStateBuilder {
     /// Finalize.
     #[must_use]
     pub fn build(self) -> AppState {
-        AppState { cols: self.cols, rows: self.rows }
+        AppState {
+            cols: self.cols,
+            rows: self.rows,
+            focused_window: None,
+            last_window_pos: None,
+            live_window_count: 0,
+        }
     }
 }

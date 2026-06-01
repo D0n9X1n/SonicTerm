@@ -274,6 +274,16 @@ impl App {
                 // quit_on_last_window_close=false) is the motivating
                 // bug Haiku flagged on PR #297.
                 self.pending_new_window = true;
+                // M6a-expand-2c-window: notify the reducer the user
+                // asked for a new window. The reducer bumps
+                // `live_window_count` and emits a `WindowOpen` Effect
+                // (currently trace-stubbed in `dispatch_effects`; the
+                // production `drain_pending_window_creates` boundary
+                // above remains the source of truth for actually
+                // building the platform surface).
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NewWindow {
+                    role: sonicterm_app_core::WindowRole::Primary,
+                });
             }
             Action::Scroll(kind) => {
                 // #412: replace the "not yet wired up" stub. Translate
