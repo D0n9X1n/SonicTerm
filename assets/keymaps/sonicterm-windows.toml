@@ -3,7 +3,7 @@
 # matches both. Keys not listed fall through to the terminal.
 
 [meta]
-name = "wezterm-windows-default"
+name = "sonicterm-windows-default"
 version = "1.0"
 
 # --- Tabs ---

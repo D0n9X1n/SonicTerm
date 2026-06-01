@@ -88,7 +88,7 @@ fn watcher_wakes_loop_on_delivery() {
         &path,
         r#"
 theme = "dracula"
-keymap = "wezterm"
+keymap = "sonicterm"
 
 [font]
 family = "JetBrains Mono"
@@ -115,7 +115,7 @@ line_height = 1.2
         &path,
         r#"
 theme = "nord"
-keymap = "wezterm"
+keymap = "sonicterm"
 
 [font]
 family = "JetBrains Mono"

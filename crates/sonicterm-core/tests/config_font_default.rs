@@ -32,7 +32,7 @@ fn font_family_is_user_overridable() {
     // sure a user-supplied override is honored.
     let toml = r#"
         theme = "tokyo-night"
-        keymap = "wezterm"
+        keymap = "sonicterm"
         [font]
         family = "Menlo"
         size = 16.0

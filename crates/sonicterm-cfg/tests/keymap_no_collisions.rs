@@ -6,7 +6,7 @@ use sonicterm_cfg::keymap::Keymap;
 fn bundled_keymaps_do_not_bind_multiple_actions_to_the_same_chord() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
 
-    for keymap_name in ["wezterm", "wezterm-windows"] {
+    for keymap_name in ["sonicterm", "sonicterm-windows"] {
         let keymap_path = root.join(format!("assets/keymaps/{keymap_name}.toml"));
         let keymap =
             Keymap::load(&keymap_path).unwrap_or_else(|err| panic!("load {keymap_name}: {err:#}"));

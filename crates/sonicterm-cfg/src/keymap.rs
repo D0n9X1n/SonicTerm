@@ -15,9 +15,9 @@ pub use sonicterm_types::{Action, BroadcastScope, Direction, ScrollAction};
 /// user keymap file.
 pub const fn platform_default_keymap_name() -> &'static str {
     if cfg!(target_os = "windows") {
-        "wezterm-windows"
+        "sonicterm-windows"
     } else {
-        "wezterm"
+        "sonicterm"
     }
 }
 
@@ -48,9 +48,9 @@ pub fn ensure_user_keymap_file(path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
     }
     let default_text = if cfg!(target_os = "windows") {
-        include_str!("../../../assets/keymaps/wezterm-windows.toml")
+        include_str!("../../../assets/keymaps/sonicterm-windows.toml")
     } else {
-        include_str!("../../../assets/keymaps/wezterm.toml")
+        include_str!("../../../assets/keymaps/sonicterm.toml")
     };
     std::fs::write(path, default_text).with_context(|| format!("write {path:?}"))
 }

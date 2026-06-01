@@ -14,7 +14,7 @@ fn save_load_roundtrip_preserves_all_fields() {
     let path = dir.path().join("nested/dir/sonicterm.toml");
     let cfg = Config {
         theme: "tokyo-night".to_string(),
-        keymap: "wezterm".to_string(),
+        keymap: "sonicterm".to_string(),
         font: FontConfig { family: "Fira Code".to_string(), size: 16.0, line_height: 1.2 },
         window: WindowConfig { opacity: 0.85, ..Default::default() },
         terminal: TerminalConfig {

@@ -2,7 +2,7 @@ use sonicterm_cfg::keymap::{Action, Keymap};
 
 fn windows_keymap() -> Keymap {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/keymaps/wezterm-windows.toml");
+        .join("../../assets/keymaps/sonicterm-windows.toml");
     Keymap::load(&path).expect("load bundled Windows keymap")
 }
 

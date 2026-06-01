@@ -276,7 +276,7 @@ every bindable action. Type a few letters, press `Enter`, and the action
 runs. This is the easiest way to discover features you haven't memorized
 a keybinding for.
 
-The default keymap is **WezTerm-compatible** (`assets/keymaps/wezterm.toml`).
+The default keymap is **WezTerm-compatible** (`assets/keymaps/sonicterm.toml`).
 To override one binding without forking the whole map:
 
 ```toml

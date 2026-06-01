@@ -4,16 +4,16 @@ use sonicterm_core::{
 };
 
 fn windows_default_config_for_test() -> Config {
-    Config { keymap: "wezterm-windows".to_string(), ..Config::default() }
+    Config { keymap: "sonicterm-windows".to_string(), ..Config::default() }
 }
 
 #[test]
 fn keymap_default_windows_uses_ctrl_shift() {
     let cfg = windows_default_config_for_test();
-    assert_eq!(cfg.keymap, "wezterm-windows");
+    assert_eq!(cfg.keymap, "sonicterm-windows");
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/keymaps/wezterm-windows.toml");
+        .join("../../assets/keymaps/sonicterm-windows.toml");
     let keymap = Keymap::load(&path).expect("load Windows default keymap");
 
     assert!(
