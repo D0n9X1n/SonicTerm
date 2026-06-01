@@ -83,13 +83,10 @@ A handful of keystrokes that show off the surface area:
 | Keystroke           | What it does                                  |
 |---------------------|-----------------------------------------------|
 | `Cmd+T` / `Ctrl+T`  | New tab                                       |
-| `Cmd+D` / `Ctrl+D`  | Split pane (vertical)                         |
-| `Cmd+Shift+D`       | Split pane (horizontal)                       |
+| `Cmd+D` / `Ctrl+D`  | Split pane                                    |
 | `Cmd+K` / `Ctrl+K`  | Command palette (everything is searchable)    |
 | `Cmd+F` / `Ctrl+F`  | Incremental search through scrollback         |
 | `Cmd+[` / `Ctrl+[`  | Enter copy mode (vi-like navigation)          |
-| `Cmd+W` / `Ctrl+W`  | Close pane (or tab if it's the last pane)     |
-| `Cmd+,` / `Ctrl+,`  | Open `sonicterm.toml` in your editor          |
 
 Drag a tab out of the tab bar to tear it into its own window. Drop it
 back to re-attach.
@@ -147,7 +144,7 @@ see the change on the next keystroke.
 ## Project status
 
 **v1.0 in progress.** macOS + Windows are the supported targets and
-both produce nightly builds via the release workflow. Linux, code
+both produce release-tagged builds (no automated nightly channel today). Linux, code
 signing, auto-update, and session restore are explicitly deferred
 past v1.0 — see [docs/ROADMAP.md](docs/ROADMAP.md) for the full
 post-v1.0 plan.
