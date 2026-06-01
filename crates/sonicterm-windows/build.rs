@@ -1,43 +1,45 @@
-//! Copy `assets/fonts/` from the workspace root into the binary's output
-//! directory so `load_bundled_fonts` finds it at
-//! `<exe-dir>/assets/fonts/` — the first (and most reliable) candidate
-//! it probes at runtime.
+//! Copy the entire `assets/` directory from the workspace root into the
+//! binary's output directory so the runtime's `<exe-dir>/assets/...`
+//! lookups (themes, keymaps, fonts, icons) all hit on a `cargo build`
+//! / `cargo run` without manual asset copying.
 //!
-//! **Why this exists** (issue #439): the runtime `load_bundled_fonts`
-//! probes three locations in order:
-//!   1. `<exe-dir>/assets/fonts`
-//!   2. `<exe-dir>/../Resources/assets/fonts` (.app bundle layout)
-//!   3. `CARGO_MANIFEST_DIR/../../assets/fonts` (compile-time absolute
-//!      path baked in)
+//! **Why this exists** (issue #439 + smoke regression):
 //!
-//! Path 3 happens to resolve correctly on the **build host** because
-//! the absolute path to the workspace at build time is reachable on
-//! disk. But ANY machine that doesn't share that absolute path — every
-//! end-user, every release MSI, every CI runner that ran the build
-//! elsewhere — sees path 3 point at a nonexistent directory and the
-//! function silently falls through to system fontconfig. With the
-//! bundled `Rec Mono St.Helens` never loading, Powerline/Nerd-Font PUA
-//! codepoints render as tofu (#439).
+//! - `crates/sonicterm-windows/src/main.rs::asset_dir()` returns
+//!   `<exe-dir>/assets` if present, else falls back to the compile-time
+//!   absolute `CARGO_MANIFEST_DIR/../../assets`. The fallback only
+//!   resolves on the build host — every other machine sees a path that
+//!   doesn't exist, the binary panics in `Theme::load(...)` before it
+//!   even reaches `load_bundled_fonts`, and the user sees an
+//!   `Error: load theme / Caused by: read "...\target\release\assets\themes\gruvbox-dark-hard.toml"`
+//!   at startup.
+//! - `crates/sonicterm-text/src/swash_rasterizer.rs::load_bundled_fonts`
+//!   probes `<exe-dir>/assets/fonts` first, with the same compile-time
+//!   absolute fallback. Same off-host failure mode (#439): Powerline /
+//!   Nerd-Font icons render as tofu.
 //!
-//! The fix is to make path 1 always hit: copy `assets/fonts/` next to
-//! the freshly-built exe in `target/{debug,release}/`. We do it from
-//! `build.rs` (not from a manual pre-deploy step) so every developer
-//! running `cargo run -p sonicterm-windows` and every CI release build
-//! both get the colocation automatically — no separate "did you copy
-//! the fonts?" gate.
+//! The fix is to colocate the WHOLE `assets/` tree next to the freshly
+//! built exe. Doing it from `build.rs` (not a manual pre-deploy step)
+//! means every developer running `cargo run -p sonicterm-windows` and
+//! every CI release build both Just Work — no separate "did you copy
+//! the assets?" gate.
+//!
+//! **What gets copied:** every file under `assets/`, recursively.
+//! Size-equality is used as an incremental short-circuit so unchanged
+//! files don't re-copy on every `cargo build`.
+//!
+//! **Out of scope:** the runtime `asset_dir()` lookup is already
+//! correct — it checks `<exe-dir>/assets` first. This script just makes
+//! sure that path exists.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    // The workspace root is two parents up from this crate's manifest.
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo"),
     );
-    let src_fonts = manifest_dir.join("../../assets/fonts");
+    let src_assets = manifest_dir.join("../../assets");
 
-    // OUT_DIR is somewhere inside `target/.../build/sonicterm-windows-<hash>/out`.
-    // Walk up to `target/{profile}/` — the directory containing the exe.
-    // Cargo doesn't expose this directly, so we use OUT_DIR's ancestor.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR must be set by cargo"));
     // OUT_DIR layout: target/<profile>/build/<pkg>-<hash>/out
     // We want      : target/<profile>/
@@ -45,75 +47,61 @@ fn main() {
         .ancestors()
         .nth(3)
         .expect("OUT_DIR should have a target/<profile> ancestor 3 levels up");
-    let dst_fonts = profile_dir.join("assets/fonts");
+    let dst_assets = profile_dir.join("assets");
 
-    println!("cargo:rerun-if-changed={}", src_fonts.display());
+    println!("cargo:rerun-if-changed={}", src_assets.display());
 
-    if !src_fonts.is_dir() {
-        // Workspace layout missing assets/fonts is a misconfiguration;
-        // surface it as a build warning but don't fail — useful for
-        // downstream consumers who might vendor this crate without
-        // the fonts directory.
+    if !src_assets.is_dir() {
         println!(
-            "cargo:warning=sonicterm-windows build.rs: source fonts dir {} does not exist; \
-             bundled Powerline/Nerd-Font icons will render as tofu at runtime (#439).",
-            src_fonts.display()
+            "cargo:warning=sonicterm-windows build.rs: source assets dir {} does not exist; \
+             runtime will panic loading themes/keymaps/fonts (#439).",
+            src_assets.display()
         );
         return;
     }
 
-    if let Err(e) = std::fs::create_dir_all(&dst_fonts) {
+    let mut total: usize = 0;
+    if let Err(e) = copy_dir_incremental(&src_assets, &dst_assets, &mut total) {
         println!(
-            "cargo:warning=sonicterm-windows build.rs: failed to create {}: {e}",
-            dst_fonts.display()
+            "cargo:warning=sonicterm-windows build.rs: copy {} -> {} failed: {e}",
+            src_assets.display(),
+            dst_assets.display()
         );
         return;
     }
+    if total > 0 {
+        println!(
+            "cargo:warning=sonicterm-windows build.rs: copied {total} bundled asset file(s) to {}",
+            dst_assets.display()
+        );
+    }
+}
 
-    let entries = match std::fs::read_dir(&src_fonts) {
-        Ok(e) => e,
-        Err(e) => {
-            println!(
-                "cargo:warning=sonicterm-windows build.rs: failed to read_dir {}: {e}",
-                src_fonts.display()
-            );
-            return;
-        }
-    };
-
-    let mut copied = 0usize;
-    for entry in entries.flatten() {
+/// Recursively mirror `src` into `dst`. Skips files whose destination
+/// already exists with the same byte length (cheap incremental gate —
+/// `rerun-if-changed` on the parent dir handles the rare same-size /
+/// changed-contents case). Returns count of files actually copied via
+/// `*total`.
+fn copy_dir_incremental(src: &Path, dst: &Path, total: &mut usize) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
         let path = entry.path();
-        let ext = path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
-        if !matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
-            continue;
-        }
         let Some(file_name) = path.file_name() else { continue };
-        let dst = dst_fonts.join(file_name);
-        // Skip the copy if dst already exists AND is up to date — keeps
-        // incremental builds fast (no I/O on every rebuild). We rely on
-        // file-size equality as the cheap freshness check; the
-        // rerun-if-changed on the source dir handles the rare case
-        // where size matches but contents changed.
-        if let (Ok(src_meta), Ok(dst_meta)) = (path.metadata(), dst.metadata()) {
-            if src_meta.len() == dst_meta.len() {
-                continue;
+        let dst_path = dst.join(file_name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_incremental(&path, &dst_path, total)?;
+        } else if file_type.is_file() {
+            if let (Ok(src_meta), Ok(dst_meta)) = (path.metadata(), dst_path.metadata()) {
+                if src_meta.len() == dst_meta.len() {
+                    continue;
+                }
             }
+            std::fs::copy(&path, &dst_path)?;
+            *total += 1;
         }
-        match std::fs::copy(&path, &dst) {
-            Ok(_) => copied += 1,
-            Err(e) => println!(
-                "cargo:warning=sonicterm-windows build.rs: failed to copy {} -> {}: {e}",
-                path.display(),
-                dst.display()
-            ),
-        }
+        // Symlinks: skip silently. We don't ship any in assets/.
     }
-
-    if copied > 0 {
-        println!(
-            "cargo:warning=sonicterm-windows build.rs: copied {copied} bundled font(s) to {}",
-            dst_fonts.display()
-        );
-    }
+    Ok(())
 }
