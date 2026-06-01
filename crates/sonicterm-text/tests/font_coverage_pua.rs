@@ -300,3 +300,93 @@ fn metadata_patched_face_still_has_live_charmap() {
     // Sanity: ASCII works too.
     assert_ne!(charmap.map('A'), 0);
 }
+
+// -----------------------------------------------------------------------
+// Asset-discovery path test — exercises the ACTUAL `load_bundled_fonts`
+// function (not the load_font_data_with_sonic_overrides helper the
+// other tests use). This is what production calls at renderer
+// construction. The root cause of #439 was that this function silently
+// fell through every candidate dir and left fontdb without the bundled
+// face — without this test we'd have to GUI-smoke every PR to know.
+//
+// The function probes three locations:
+//   1. <exe-dir>/assets/fonts
+//   2. <exe-dir>/../Resources/assets/fonts
+//   3. CARGO_MANIFEST_DIR/../../assets/fonts (compile-time absolute)
+//
+// In `cargo test` the test binary lives at
+// `target/<profile>/deps/font_coverage_pua-<hash>.exe` and the
+// sonicterm-windows/sonicterm-mac build.rs scripts only run for their
+// respective binary crates, not for sonicterm-text tests — so
+// candidate 1 will MISS for the test exe. Candidate 3 (the
+// workspace-absolute path) is what makes this test pass. That's fine
+// — the test asserts "load_bundled_fonts can find and load the
+// bundled fonts somehow given the workspace", which is the contract
+// we're guarding. A regression that broke the function (or all three
+// candidate paths) would fail this test.
+// -----------------------------------------------------------------------
+
+#[test]
+fn load_bundled_fonts_actually_loads_st_helens() {
+    use cosmic_text::fontdb;
+    let mut fs = FontSystem::new();
+    sonicterm_text::swash_rasterizer::load_bundled_fonts(&mut fs);
+
+    // After discovery, fontdb must contain at least one Binary-source
+    // face for Rec Mono St.Helens. Binary source is the marker that
+    // load_font_data_with_sonic_overrides ran — a system-installed copy
+    // would be a File source, which the override layer explicitly
+    // removes (see lib.rs:77-88).
+    let bundled_helens: Vec<_> = fs
+        .db()
+        .faces()
+        .filter(|f| {
+            f.families.iter().any(|(name, _)| name == "Rec Mono St.Helens")
+                && matches!(f.source, fontdb::Source::Binary(_))
+        })
+        .collect();
+
+    assert!(
+        !bundled_helens.is_empty(),
+        "load_bundled_fonts must register at least one Binary-source Rec Mono St.Helens face; \
+         this is the root cause of #439 when it silently fails. Checked candidates: \
+         <exe-dir>/assets/fonts (would need build.rs colocation), \
+         <exe-dir>/../Resources/assets/fonts (macOS .app), \
+         CARGO_MANIFEST_DIR/../../assets/fonts (compile-time absolute workspace path)."
+    );
+
+    // All four shipped St.Helens TTF variants (Regular, Bold, Italic,
+    // BoldItalic) must be present so bold/italic terminal text uses
+    // the right face instead of fontdb's synthetic style fallback.
+    assert_eq!(
+        bundled_helens.len(),
+        4,
+        "expected all 4 shipped St.Helens variants to load; got {} face(s). Check that \
+         assets/fonts/ contains Regular + Bold + Italic + BoldItalic .ttf files.",
+        bundled_helens.len()
+    );
+}
+
+#[test]
+fn load_bundled_fonts_resolves_pua_glyphs_end_to_end() {
+    // End-to-end: the function must populate fontdb enough that
+    // SwashRasterizer's charmap walk hits gid != 0 for the three
+    // diagnostic codepoints from #439. This is the integration test
+    // that ties "discovery worked" to "user sees a glyph".
+    let mut fs = FontSystem::new();
+    sonicterm_text::swash_rasterizer::load_bundled_fonts(&mut fs);
+    let mut rast = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+    for (ch, name) in [
+        ('\u{e0b0}', "U+E0B0 Powerline chevron"),
+        ('\u{25b6}', "U+25B6 BLACK RIGHT-POINTING TRIANGLE"),
+        ('\u{f0001}', "U+F0001 Nerd Font PUA"),
+    ] {
+        let slot = rast.resolve_slot(ch, false, false);
+        assert_eq!(
+            slot,
+            Some(0),
+            "after load_bundled_fonts, slot 0 (Rec Mono St.Helens, the bundled face) must cover \
+             {name}; None means discovery failed (no bundled face in fontdb)"
+        );
+    }
+}

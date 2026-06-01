@@ -300,6 +300,22 @@ pub fn lookup_id_in_db(
 /// Load bundled TTF/OTF files from the same locations used by the windowed
 /// renderers. Shared by the terminal renderer and the preferences renderer so
 /// Nerd Font PUA codepoints resolve consistently in both paths.
+///
+/// **Discovery order** (issue #439 — silent miss diagnosis):
+/// 1. `<exe-dir>/assets/fonts` (release layout: assets colocated with exe).
+/// 2. `<exe-dir>/../Resources/assets/fonts` (macOS .app bundle layout).
+/// 3. `CARGO_MANIFEST_DIR/../../assets/fonts` (cargo dev / workspace layout).
+///
+/// Every candidate is probed in order; the **first directory that yields
+/// at least one loaded font wins** and the rest are skipped. Each
+/// candidate's outcome is logged so a deployment that ships an exe
+/// without `assets/fonts/` next to it (the actual root cause of #439 —
+/// bundled `Rec Mono St.Helens` never loaded, fontdb silently fell
+/// through to system fontconfig, PUA codepoints rendered as tofu)
+/// shows up as a single grep against `sonicterm.log`. If every candidate
+/// fails the function emits a WARN — `Powerline/NF icons will likely
+/// render as tofu` is the user-visible consequence and we want it in
+/// the support log without a bug report.
 pub fn load_bundled_fonts(fs: &mut FontSystem) {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -313,23 +329,63 @@ pub fn load_bundled_fonts(fs: &mut FontSystem) {
     candidates
         .push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
 
-    for dir in candidates {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        let mut n = 0;
-        for e in entries.flatten() {
-            let p = e.path();
-            let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
-            if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
-                if let Ok(bytes) = std::fs::read(&p) {
-                    crate::load_font_data_with_sonic_overrides(fs, bytes);
-                    n += 1;
+    let mut total_loaded: usize = 0;
+    let mut dirs_with_fonts: usize = 0;
+    for dir in &candidates {
+        match std::fs::read_dir(dir) {
+            Err(e) => {
+                tracing::debug!(
+                    "load_bundled_fonts: skip candidate {dir:?} — read_dir failed: {e}"
+                );
+                continue;
+            }
+            Ok(entries) => {
+                let mut n = 0usize;
+                for e in entries.flatten() {
+                    let p = e.path();
+                    let ext =
+                        p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+                    if matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
+                        match std::fs::read(&p) {
+                            Ok(bytes) => {
+                                crate::load_font_data_with_sonic_overrides(fs, bytes);
+                                n += 1;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "load_bundled_fonts: read {p:?} failed: {err} \
+                                     (file present but unreadable — check permissions)"
+                                );
+                            }
+                        }
+                    }
+                }
+                tracing::debug!("load_bundled_fonts: candidate {dir:?} -> {n} font(s)");
+                if n > 0 {
+                    total_loaded += n;
+                    dirs_with_fonts += 1;
+                    // Stop at first directory that yielded fonts — matches the
+                    // previous behavior (only one path wins, no double-loading
+                    // of the same Rec Mono St.Helens across exe-dir +
+                    // workspace-dir candidates).
+                    break;
                 }
             }
         }
-        if n > 0 {
-            tracing::info!("loaded {n} bundled font(s) from {dir:?}");
-            return;
-        }
+    }
+
+    if total_loaded == 0 {
+        tracing::warn!(
+            "load_bundled_fonts: no bundled fonts found across {} candidate dir(s) — \
+             falling back to system fontconfig, Powerline/NF icons may not render. \
+             Candidates probed: {:?}",
+            candidates.len(),
+            candidates
+        );
+    } else {
+        tracing::info!(
+            "load_bundled_fonts: loaded {total_loaded} font(s) across {dirs_with_fonts} dir(s)"
+        );
     }
 }
 
