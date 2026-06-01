@@ -21,11 +21,11 @@ use wgpu::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use super::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu_with_alpha};
-use super::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
-use super::drag_chip::{DragChipOverlay, DragChipVisual};
-use super::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
-use super::tab_spans::{
+use crate::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu_with_alpha};
+use crate::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
+use sonicterm_text::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
+use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
+use sonicterm_ui::tab_spans::{
     build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
 };
 
@@ -193,11 +193,20 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 
 use crate::{
     atlas_upload::AtlasUpload,
+    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
+    text_pipeline::{GlyphInstance, TextPipeline},
+};
+use sonicterm_cfg::config::CursorShape;
+use sonicterm_text::{
+    glyph_atlas::GlyphAtlas,
+    shape::{run_is_ascii_fast, shape_run, RunStyle, ShapeCache},
+    swash_rasterizer::{self, SwashRasterizer},
+};
+use sonicterm_ui::{
     cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
-    cursor::{self, CursorShape},
-    glyph_atlas::GlyphAtlas,
+    cursor as ui_cursor,
     ime::ImeState,
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
@@ -205,14 +214,10 @@ use crate::{
         PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
-    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
     search::SearchState,
     selection::Selection,
-    shape::{run_is_ascii_fast, shape_run, RunStyle, ShapeCache},
-    swash_rasterizer::{self, SwashRasterizer},
     tabbar_view::{tab_bar_height, TabBarLayout, TAB_GAP},
     tabs::TabBar,
-    text_pipeline::{GlyphInstance, TextPipeline},
 };
 
 /// Style and sizing inputs for tab-bar quad emission.
@@ -319,15 +324,15 @@ pub fn emit_tab_bar_quads(
 }
 
 struct CheatsheetLayout {
-    scrim: crate::tabbar_view::Rect,
-    border: crate::tabbar_view::Rect,
-    bg: crate::tabbar_view::Rect,
-    query_row: crate::tabbar_view::Rect,
-    rows: Vec<crate::tabbar_view::Rect>,
+    scrim: sonicterm_ui::tabbar_view::Rect,
+    border: sonicterm_ui::tabbar_view::Rect,
+    bg: sonicterm_ui::tabbar_view::Rect,
+    query_row: sonicterm_ui::tabbar_view::Rect,
+    rows: Vec<sonicterm_ui::tabbar_view::Rect>,
     selected_row: Option<usize>,
     query_label: String,
     rows_text: String,
-    footer: crate::tabbar_view::Rect,
+    footer: sonicterm_ui::tabbar_view::Rect,
     footer_label: String,
 }
 
@@ -339,25 +344,25 @@ fn compute_cheatsheet_layout(
 ) -> CheatsheetLayout {
     let modal_w = 760.0_f32.min((window_w - 48.0).max(180.0));
     let modal_h = 520.0_f32.min((window_h - 96.0).max(140.0));
-    let border = crate::tabbar_view::Rect {
+    let border = sonicterm_ui::tabbar_view::Rect {
         x: ((window_w - modal_w) * 0.5).max(0.0),
         y: (window_h * 0.14).max(48.0).min((window_h - modal_h).max(0.0)),
         w: modal_w,
         h: modal_h,
     };
-    let bg = crate::tabbar_view::Rect {
+    let bg = sonicterm_ui::tabbar_view::Rect {
         x: border.x + PALETTE_BORDER,
         y: border.y + PALETTE_BORDER,
         w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
         h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
     };
-    let query_row = crate::tabbar_view::Rect {
+    let query_row = sonicterm_ui::tabbar_view::Rect {
         x: bg.x + PALETTE_INNER_PAD,
         y: bg.y + PALETTE_INNER_PAD,
         w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
         h: 44.0,
     };
-    let footer = crate::tabbar_view::Rect {
+    let footer = sonicterm_ui::tabbar_view::Rect {
         x: bg.x,
         y: (bg.y + bg.h - 32.0).max(query_row.y + query_row.h),
         w: bg.w,
@@ -380,7 +385,7 @@ fn compute_cheatsheet_layout(
     let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
     let mut rows_text = String::new();
     for (row_i, idx_pos) in (window_start..window_end).enumerate() {
-        rows.push(crate::tabbar_view::Rect {
+        rows.push(sonicterm_ui::tabbar_view::Rect {
             x: bg.x + PALETTE_INNER_PAD,
             y: list_top + (row_i as f32) * row_stride,
             w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
@@ -411,7 +416,7 @@ fn compute_cheatsheet_layout(
     );
 
     CheatsheetLayout {
-        scrim: crate::tabbar_view::Rect { x: 0.0, y: 0.0, w: window_w, h: window_h },
+        scrim: sonicterm_ui::tabbar_view::Rect { x: 0.0, y: 0.0, w: window_w, h: window_h },
         border,
         bg,
         query_row,
@@ -606,13 +611,13 @@ pub struct GpuRenderer {
     /// hash. A row whose contents / style / selection-overlap haven't
     /// changed splices its cached output straight into the frame and
     /// skips the entire `flush_shape_run` walk.
-    row_glyph_cache: crate::row_glyph_cache::RowGlyphCache,
+    row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
     /// Per-row cache for background/underline/hyperlink-tint quads
     /// (Epic #300 Phase P2). Mirrors `row_glyph_cache` but for the
     /// `QuadInstance`s emitted by `emit_cell_bg_quads_clipped` — on a
     /// hit we splice the cached `Vec<QuadInstance>` straight into the
     /// frame's quad vector and skip the per-cell run-length-encode.
-    line_quad_cache: crate::render::row_quad_cache::LineQuadCache,
+    line_quad_cache: crate::row_quad_cache::LineQuadCache,
     /// Per-pane origins recorded on the most recent `render()` call.
     /// `(pane_id, [origin_x_px, origin_y_px])` for every pane in the
     /// frame's pane slice. Test-only diagnostic surfaced through
@@ -1125,7 +1130,7 @@ impl GpuRenderer {
         // the "selection highlights an empty slot" bug from live testing.
         let palette_rows_metrics = Metrics::new(
             font_size,
-            crate::overlays::PALETTE_ROW_HEIGHT + crate::overlays::PALETTE_ROW_GAP,
+            sonicterm_ui::overlays::PALETTE_ROW_HEIGHT + sonicterm_ui::overlays::PALETTE_ROW_GAP,
         );
         let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
         palette_rows_buffer.set_size(
@@ -1137,12 +1142,12 @@ impl GpuRenderer {
         // instead of being appended to the rows list (which made it
         // appear near the top of the visible window).
         let palette_footer_metrics =
-            Metrics::new(font_size * 0.85, crate::overlays::PALETTE_FOOTER_HEIGHT);
+            Metrics::new(font_size * 0.85, sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT);
         let mut palette_footer_buffer = Buffer::new(&mut font_system, palette_footer_metrics);
         palette_footer_buffer.set_size(
             &mut font_system,
             Some(size.width as f32),
-            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
+            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
         );
         let mut cheatsheet_query_buffer = Buffer::new(&mut font_system, palette_metrics);
         cheatsheet_query_buffer.set_size(
@@ -1160,7 +1165,7 @@ impl GpuRenderer {
         cheatsheet_footer_buffer.set_size(
             &mut font_system,
             Some(size.width as f32),
-            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
+            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
         );
         let ime_metrics = Metrics::new(font_size, font_size * 1.25);
         let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
@@ -1247,8 +1252,8 @@ impl GpuRenderer {
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             shape_cache: ShapeCache::new(),
-            row_glyph_cache: crate::row_glyph_cache::RowGlyphCache::new(),
-            line_quad_cache: crate::render::row_quad_cache::LineQuadCache::new(),
+            row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
+            line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
             style_rev: 0,
             drag_chip: None,
@@ -1290,7 +1295,7 @@ impl GpuRenderer {
         self.palette_footer_buffer.set_size(
             &mut self.font_system,
             Some(logical_w),
-            Some(crate::overlays::PALETTE_FOOTER_HEIGHT),
+            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
         );
         self.ime_buffer.set_size(
             &mut self.font_system,
@@ -1430,7 +1435,7 @@ impl GpuRenderer {
     /// is visible AND [`Self::cursor_blink`] is true; otherwise nothing
     /// new would render and the request would be wasted.
     pub fn blink_redraw_interval(&self) -> std::time::Duration {
-        cursor::redraw_interval()
+        ui_cursor::redraw_interval()
     }
 
     /// Wall-clock instant at which the next blink phase bucket begins,
@@ -2311,12 +2316,12 @@ impl GpuRenderer {
             h.finish()
         };
         let blink_elapsed = self.blink_epoch.elapsed();
-        let blink_alpha = cursor::blink_alpha(blink_elapsed, self.cursor_blink);
+        let blink_alpha = ui_cursor::blink_alpha(blink_elapsed, self.cursor_blink);
         // `phase_bucket` is intentionally NOT folded into the FrameKey
         // (see the `cursor_phase: 0` comment below). The alpha is
         // still computed every render so a real redraw event picks up
         // the current blink pulse.
-        let _ = cursor::phase_bucket(blink_elapsed, self.cursor_blink);
+        let _ = ui_cursor::phase_bucket(blink_elapsed, self.cursor_blink);
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
         // moves between tabs / on and off the × glyph.
@@ -2487,7 +2492,7 @@ impl GpuRenderer {
             // collide on absolute-row keys (PR #208 prereq).
             for pv in &pane_views {
                 let grid: &Grid = pv.grid;
-                let pane_id: crate::row_glyph_cache::PaneId = pv.pane_id;
+                let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
                 let pad = pv.origin_x;
                 let top_inset = pv.origin_y;
                 // Resolve which absolute row sits at the top of the rendered
@@ -2524,7 +2529,7 @@ impl GpuRenderer {
                         continue;
                     };
                     // ------ Cache lookup ------
-                    let key = crate::row_glyph_cache::row_hash(
+                    let key = sonicterm_text::row_glyph_cache::row_hash(
                         view_top_abs,
                         r as usize,
                         row.as_flat_slice(),
@@ -2669,7 +2674,7 @@ impl GpuRenderer {
                         pane_id,
                         row_abs,
                         key,
-                        crate::row_glyph_cache::CachedRow {
+                        sonicterm_text::row_glyph_cache::CachedRow {
                             glyphs: row_glyphs,
                             underlines: row_underlines,
                             tofu: row_tofu,
@@ -2711,7 +2716,7 @@ impl GpuRenderer {
         self.line_quad_cache.resize(total_visible_rows.max(1));
         for pv in &pane_views {
             let pv_grid: &Grid = pv.grid;
-            let pane_id: crate::render::row_quad_cache::PaneId = pv.pane_id;
+            let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = pane_rects
                 .iter()
                 .find(|(id, _)| *id == pv.pane_id)
@@ -2737,7 +2742,7 @@ impl GpuRenderer {
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
                     continue;
                 };
-                let key = crate::render::row_quad_cache::row_quad_hash(
+                let key = crate::row_quad_cache::row_quad_hash(
                     view_top_abs_bg,
                     r as usize,
                     row_cells.as_flat_slice(),
@@ -2774,7 +2779,7 @@ impl GpuRenderer {
                     pane_id,
                     row_abs,
                     key,
-                    crate::render::row_quad_cache::CachedRowQuads { quads: row_quads },
+                    crate::row_quad_cache::CachedRowQuads { quads: row_quads },
                 );
             }
         }
@@ -3035,8 +3040,8 @@ impl GpuRenderer {
                 // are already padded by the layout (they line up with
                 // pane.rs::Rect) so we anchor cells at the rect's
                 // top-left without re-applying the global padding.
-                let icx = ic.rect.x + f32::from(ic.col) * self.cell_w;
-                let icy = ic.rect.y + f32::from(ic.row) * self.cell_h;
+                let icx = ic.rect_x + f32::from(ic.col) * self.cell_w;
+                let icy = ic.rect_y + f32::from(ic.row) * self.cell_h;
                 // Clip to the pane rect so a stale cursor position from a
                 // pre-resize grid never bleeds onto a sibling. Routed
                 // through the shared clip helper (PR #270 follow-up) — a
@@ -3052,10 +3057,10 @@ impl GpuRenderer {
                     sh,
                     hollow_color,
                     2.0,
-                    ic.rect.x,
-                    ic.rect.y,
-                    ic.rect.w,
-                    ic.rect.h,
+                    ic.rect_x,
+                    ic.rect_y,
+                    ic.rect_w,
+                    ic.rect_h,
                 );
             }
         }
@@ -3266,8 +3271,8 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            use crate::ui_tokens::color as tok;
-            let ui_palette = crate::ui_tokens::UiPalette::from_theme(theme);
+            use sonicterm_ui::ui_tokens::color as tok;
+            let ui_palette = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
             // Issue #383: `tok::BG_BASE()` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -3520,7 +3525,7 @@ impl GpuRenderer {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
             // Tokyo Night literals (see UiPalette::from_theme).
-            let palette_chrome = crate::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -3628,7 +3633,7 @@ impl GpuRenderer {
                 palette_rasterizer.set_async_loader(loader);
             }
             // Query: vertically centre inside the query_row chrome.
-            let query_origin_x = layout.query_row.x + crate::overlays::PALETTE_ROW_PAD_X;
+            let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
             let query_baseline_y =
                 layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
             emit_overlay_text_glyphs(
@@ -3652,11 +3657,11 @@ impl GpuRenderer {
             // baseline aligns with the row's highlight quad. Stride
             // matches PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP (the buffer's
             // line_height pre-fix).
-            let row_h = crate::overlays::PALETTE_ROW_HEIGHT;
+            let row_h = sonicterm_ui::overlays::PALETTE_ROW_HEIGHT;
             let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
             for (i, label) in layout.row_labels.iter().enumerate() {
                 let Some(row) = layout.rows.get(i) else { continue };
-                let origin_x = row.rect.x + crate::overlays::PALETTE_ROW_PAD_X;
+                let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
                 let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
@@ -3679,10 +3684,11 @@ impl GpuRenderer {
             // row when there are no matches.
             if let Some(ph) = &layout.empty_label {
                 let empty_x = layout.bg.x
-                    + crate::overlays::PALETTE_INNER_PAD
-                    + crate::overlays::PALETTE_ROW_PAD_X;
-                let empty_y_top =
-                    layout.query_row.y + layout.query_row.h + crate::overlays::PALETTE_INNER_PAD;
+                    + sonicterm_ui::overlays::PALETTE_INNER_PAD
+                    + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                let empty_y_top = layout.query_row.y
+                    + layout.query_row.h
+                    + sonicterm_ui::overlays::PALETTE_INNER_PAD;
                 let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
@@ -3702,8 +3708,8 @@ impl GpuRenderer {
                 );
                 if let Some(hint) = &layout.empty_hint {
                     let hint_baseline_y = empty_baseline_y
-                        + crate::overlays::PALETTE_ROW_HEIGHT
-                        + crate::overlays::PALETTE_ROW_GAP;
+                        + sonicterm_ui::overlays::PALETTE_ROW_HEIGHT
+                        + sonicterm_ui::overlays::PALETTE_ROW_GAP;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         &self.font_family,
@@ -3758,7 +3764,7 @@ impl GpuRenderer {
             .as_ref()
             .map(|(state, bindings)| compute_cheatsheet_layout(state, bindings, sw, sh));
         if let Some(layout) = &cheatsheet_layout {
-            let palette_chrome = crate::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
@@ -3958,7 +3964,7 @@ impl GpuRenderer {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
-                let mut line_color = crate::ui_tokens::UiPalette::from_theme(theme).accent;
+                let mut line_color = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
                 line_color[3] = 0.95;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
@@ -4481,8 +4487,10 @@ impl GpuRenderer {
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
                 // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-                let (gx, gy, gw, gh) =
-                    crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
+                let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
+                    (gx, gy, gw, gh),
+                    scale_factor,
+                );
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba = glyphon_color_to_linear_rgba(color);
                 glyph_instances.push(GlyphInstance {
@@ -4610,8 +4618,10 @@ impl GpuRenderer {
                     glyphon_color_to_linear_rgba(color)
                 };
                 // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-                let (gx, gy, gw, gh) =
-                    crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
+                let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
+                    (gx, gy, gw, gh),
+                    scale_factor,
+                );
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4668,8 +4678,10 @@ impl GpuRenderer {
                 glyphon_color_to_linear_rgba(color)
             };
             // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-            let (gx, gy, gw, gh) =
-                crate::render::geometry::snap_to_device_pixels((gx, gy, gw, gh), scale_factor);
+            let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
+                (gx, gy, gw, gh),
+                scale_factor,
+            );
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,

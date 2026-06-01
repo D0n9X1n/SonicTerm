@@ -67,6 +67,32 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
+                // M6a-expand-2c-window: notify the reducer of the
+                // close request. The reducer mutates
+                // `AppState::{live_window_count, focused_window}` and
+                // emits `WindowClose` [+ `Quit` if last]. The
+                // boundary's existing macOS-style "hide instead of
+                // exit" policy below is the source of truth for what
+                // the platform actually does; the reducer's Effects
+                // are observability-only in this slice (the
+                // `dispatch_effects` arms for `WindowClose` /
+                // `WindowOpen` / `WindowResize` are trace-stubs per
+                // §9). The `Quit` cascade does flip `pending_exit` —
+                // suppress that here so we don't override the
+                // "hide-on-last-close" policy. Real Quit cascading
+                // moves to the reducer in 2c-misc.
+                let intent = sonicterm_app_core::AppIntent::WindowCloseRequested {
+                    window: sonicterm_types::WindowKey::new(0),
+                };
+                for effect in self.machine.handle(intent) {
+                    if !matches!(
+                        effect,
+                        sonicterm_app_core::AppEffect::Quit
+                            | sonicterm_app_core::AppEffect::WindowClose { .. }
+                    ) {
+                        self.dispatch_effects(smallvec::smallvec![effect]);
+                    }
+                }
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
@@ -281,7 +307,10 @@ impl App {
                         sonicterm_shared::render::InactivePaneCursor {
                             row: grid.cursor.row,
                             col: grid.cursor.col,
-                            rect: *rect,
+                            rect_x: rect.x,
+                            rect_y: rect.y,
+                            rect_w: rect.w,
+                            rect_h: rect.h,
                         }
                     })
                     .collect();
@@ -501,6 +530,22 @@ impl App {
             }
 
             WindowEvent::Focused(focused) => {
+                // M6a-expand-2c-window: route focus transitions
+                // through the reducer. The reducer mutates
+                // `AppState::focused_window` and emits a
+                // `Render(Focus)` only on actual transition (no spam
+                // on duplicate Focused(true)). The boundary's
+                // existing per-pane dirty-mark + `request_redraw`
+                // below stays as the production paint path; the
+                // reducer's Render is observability-only here (and
+                // dedups via `dispatch_effects`' redraw counter).
+                let wk = sonicterm_types::WindowKey::new(0);
+                let intent = if focused {
+                    sonicterm_app_core::AppIntent::WindowFocused { window: wk }
+                } else {
+                    sonicterm_app_core::AppIntent::WindowBlurred { window: wk }
+                };
+                self.dispatch_intent(intent);
                 if focused {
                     // Epic #289 Phase A — record the main window as
                     // OS-frontmost so keymap_dispatch / menubar drain
@@ -579,6 +624,29 @@ impl App {
                 if let Some(r) = self.main_renderer_mut() {
                     r.resize(size.width, size.height);
                 }
+                // M6a-expand-2c-window: notify the reducer of the
+                // new logical grid dimensions. Derive cols/rows from
+                // the renderer's cell size; fall back to zero when
+                // unavailable (smoke-test environments). The
+                // reducer's `WindowResize` Effect is observability-
+                // only — the boundary above already drove the wgpu
+                // resize, and the existing `request_redraw` below is
+                // the production paint path.
+                let (cols_u16, rows_u16) = {
+                    let cell = self.main_renderer().map(GpuRenderer::cell_size);
+                    match cell {
+                        Some((cw, ch)) if cw > 0.0 && ch > 0.0 => (
+                            ((size.width as f32 / cw).floor() as u32).min(u16::MAX as u32) as u16,
+                            ((size.height as f32 / ch).floor() as u32).min(u16::MAX as u32) as u16,
+                        ),
+                        _ => (0u16, 0u16),
+                    }
+                };
+                self.dispatch_intent(sonicterm_app_core::AppIntent::WindowResized {
+                    window: sonicterm_types::WindowKey::new(0),
+                    cols: cols_u16,
+                    rows: rows_u16,
+                });
                 // Per-pane sizing: each pane's grid + PTY is resized to
                 // its own PaneRect within the (new) window content area,
                 // not the whole window's (cols, rows). Pre-fix, inactive
@@ -650,6 +718,14 @@ impl App {
                 }
                 let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                // M6a-expand-2c-mouse: notify the reducer so
+                // `last_mouse_pos` tracks the cursor; the reducer's
+                // identity check implicitly coalesces sub-pixel jitter
+                // bursts into a single Render(Hover) per frame.
+                self.dispatch_intent(sonicterm_app_core::AppIntent::MouseMove {
+                    window: sonicterm_types::WindowKey::new(0),
+                    pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                });
                 let mut hover_redraw = false;
                 if let Some(r) = self.main_renderer_mut() {
                     hover_redraw = r.set_hover_cursor(Some((lx, ly)));
@@ -849,6 +925,20 @@ impl App {
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
+                    // M6a-expand-2c-mouse: notify reducer of the
+                    // press/release transition (Render(Selection)).
+                    {
+                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            window: sonicterm_types::WindowKey::new(0),
+                            pressed: true,
+                            button: sonicterm_app_core::MouseButton::Left,
+                            mods: sonicterm_types::ModKey::empty(),
+                            pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        });
+                    }
                     if let Some(ws) = self.main_mut() {
                         ws.mouse_down = true;
                     }
@@ -1059,6 +1149,20 @@ impl App {
                     }
                 }
                 ElementState::Released => {
+                    // M6a-expand-2c-mouse: notify reducer of the
+                    // release transition (Render(Selection)).
+                    {
+                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            window: sonicterm_types::WindowKey::new(0),
+                            pressed: false,
+                            button: sonicterm_app_core::MouseButton::Left,
+                            mods: sonicterm_types::ModKey::empty(),
+                            pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        });
+                    }
                     // #386 PR-C: end any active scrollbar drag — do this
                     // unconditionally on release so a drag that ended
                     // outside the bar still clears state.

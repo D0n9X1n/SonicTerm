@@ -8,6 +8,10 @@
 //! tail -f, htop) re-emit the same per-row geometry every frame even
 //! though the row content hasn't changed since the last redraw.
 //!
+//! Moved from `sonicterm-shared::render::row_quad_cache` in M7e of the
+//! workspace refactor — caches `QuadInstance`, so it belongs on the
+//! GPU side of the layer split.
+//!
 //! On a cache hit the renderer can `extend_from_slice` the cached
 //! `Vec<QuadInstance>` directly into the frame's quad vector and skip
 //! the per-cell run-length-encode + `cell_bg_rgba` lookup loop in
@@ -32,8 +36,8 @@
 //! * Search-match / quick-select overlays — same story; emitted into
 //!   a separate `quads_overlay` buffer and not part of this cache.
 
-use sonicterm_core::grid::Cell;
-use sonicterm_gpu::quad::QuadInstance;
+use crate::quad::QuadInstance;
+use sonicterm_types::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};

@@ -52,6 +52,16 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard(),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
+                // M6a-expand-2c-tab: notify the reducer the user
+                // asked for a new tab. The reducer bumps tab_count,
+                // sets active_tab_idx, and emits Render(TabAdded).
+                // Boundary below remains source-of-truth for the
+                // actual tab spawn (it owns the PtyHandle/Grid/Parser
+                // tree that the renderer paints).
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    cwd: None,
+                });
                 // Epic #289 Phase A — route through the unified
                 // `frontmost_window` discriminator so a Cmd+T typed in a
                 // torn-out child opens a tab in THAT child, not in the
@@ -70,6 +80,13 @@ impl App {
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
+                // M6a-expand-2c-tab: notify reducer first so
+                // tab_count/active_tab_idx stay in sync.
+                let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                self.dispatch_intent(sonicterm_app_core::AppIntent::CloseTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: active_idx,
+                });
                 // Epic #289 Phase A — route to frontmost window.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_tab_in_child(id) {
@@ -82,6 +99,9 @@ impl App {
                 self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NextTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.next_tab_in_child(id) {
                         return true;
@@ -93,6 +113,9 @@ impl App {
                 }
             }
             Action::PrevTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.prev_tab_in_child(id) {
                         return true;
@@ -104,6 +127,10 @@ impl App {
                 }
             }
             Action::ActivateTab(i) => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: *i,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.activate_tab_in_child(id, *i) {
                         return true;
@@ -130,6 +157,14 @@ impl App {
                 // Epic #289 Phase A — route to frontmost window so Cmd+D
                 // typed in a torn-out child splits THAT window's active
                 // pane, not the main window's.
+                // M6a-expand-2c-pane: notify the reducer first so
+                // `pane_count` / `focused_pane_idx` track the topology;
+                // the boundary's `split_active*` remains source-of-truth
+                // for actual geometry.
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.split_active_pane_in_child(id, Direction::Right) {
                         return true;
@@ -139,6 +174,10 @@ impl App {
                 self.split_active(Direction::Right);
             }
             Action::SplitDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.split_active_pane_in_child(id, Direction::Down) {
                         return true;
@@ -148,6 +187,9 @@ impl App {
                 self.split_active(Direction::Down);
             }
             Action::ClosePane => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ClosePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_pane_in_child(id) {
                         return true;
@@ -207,6 +249,30 @@ impl App {
             }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
             Action::FocusPane(d) => {
+                // M6a-expand-2c-pane: notify reducer (emits
+                // Render(Focus) when pane_count >= 2; no-op otherwise).
+                let dir = match d {
+                    Direction::Left => sonicterm_app_core::SplitDir::Left,
+                    Direction::Right => sonicterm_app_core::SplitDir::Right,
+                    Direction::Up => sonicterm_app_core::SplitDir::Up,
+                    Direction::Down => sonicterm_app_core::SplitDir::Down,
+                };
+                let wkey = sonicterm_types::WindowKey::new(0);
+                let intent = match dir {
+                    sonicterm_app_core::SplitDir::Left => {
+                        sonicterm_app_core::AppIntent::FocusPaneLeft { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Right => {
+                        sonicterm_app_core::AppIntent::FocusPaneRight { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Up => {
+                        sonicterm_app_core::AppIntent::FocusPaneUp { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Down => {
+                        sonicterm_app_core::AppIntent::FocusPaneDown { window: wkey }
+                    }
+                };
+                self.dispatch_intent(intent);
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.focus_pane_dir_in_child(id, *d) {
                         return true;
@@ -216,6 +282,11 @@ impl App {
                 self.focus_pane_dir(*d);
             }
             Action::ResizePaneLeft => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Left,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Left) {
                         return true;
@@ -225,6 +296,11 @@ impl App {
                 self.resize_active_split(Direction::Left);
             }
             Action::ResizePaneRight => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Right) {
                         return true;
@@ -234,6 +310,11 @@ impl App {
                 self.resize_active_split(Direction::Right);
             }
             Action::ResizePaneUp => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Up,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Up) {
                         return true;
@@ -243,6 +324,11 @@ impl App {
                 self.resize_active_split(Direction::Up);
             }
             Action::ResizePaneDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                    cells: 1,
+                });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.resize_active_split_in_child(id, Direction::Down) {
                         return true;
@@ -274,6 +360,16 @@ impl App {
                 // quit_on_last_window_close=false) is the motivating
                 // bug Haiku flagged on PR #297.
                 self.pending_new_window = true;
+                // M6a-expand-2c-window: notify the reducer the user
+                // asked for a new window. The reducer bumps
+                // `live_window_count` and emits a `WindowOpen` Effect
+                // (currently trace-stubbed in `dispatch_effects`; the
+                // production `drain_pending_window_creates` boundary
+                // above remains the source of truth for actually
+                // building the platform surface).
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NewWindow {
+                    role: sonicterm_app_core::WindowRole::Primary,
+                });
             }
             Action::Scroll(kind) => {
                 // #412: replace the "not yet wired up" stub. Translate

@@ -19,6 +19,13 @@ sonicterm-cfg.workspace = true
 # which listed only {sonicterm-types, sonicterm-cfg}; sonicterm-grid is data-only
 # (no wgpu/winit/glyphon) so the "pure UI state, no GPU" invariant holds.
 sonicterm-grid.workspace = true
+# sonicterm-text + glyphon are needed by `tab_spans` (relocated from
+# sonicterm-shared in M7d): the tab-title span builder produces
+# glyphon `Attrs` keyed by `sonicterm_text::terminal_font_attrs`.
+# This is a relaxation of the original "no glyphon" invariant — the
+# rest of the crate remains pure-data.
+sonicterm-text.workspace = true
+glyphon.workspace = true
 regex.workspace = true
 nucleo-matcher = "0.3"
 anyhow.workspace = true

@@ -14,10 +14,18 @@ workspace = true
 sonicterm-types.workspace = true
 sonicterm-text.workspace = true
 sonicterm-render-model.workspace = true
+sonicterm-core.workspace = true
+sonicterm-grid.workspace = true
+sonicterm-cfg.workspace = true
+sonicterm-ui.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true
 cosmic-text.workspace = true
 bytemuck.workspace = true
+winit.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+pollster.workspace = true
 
 [dev-dependencies]
 pollster = "0.4"

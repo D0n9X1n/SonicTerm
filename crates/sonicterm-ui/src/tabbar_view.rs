@@ -503,4 +503,24 @@ impl TabBarLayout {
     }
 }
 
+/// Pure helper computing the top inset reserved above the grid for both
+/// the OS titlebar band (when an integrated titlebar pushes the content
+/// view under the native chrome) and the tab bar. Returns the titlebar
+/// inset alone when the tab bar is hidden, so the grid recovers the row
+/// the bar used to take. Exposed so tests can validate visibility wiring
+/// without needing a live GPU context.
+pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
+    tab_bar_top_inset_with_titlebar(visible, padding, 0.0)
+}
+
+/// Same as [`tab_bar_top_inset`] but adds a reserved titlebar band on top.
+/// `titlebar_inset` is the height in logical pixels the OS reserves at the
+/// top of the content view (e.g. macOS traffic-lights strip when
+/// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
+/// our content below its chrome.
+pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
+    let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
+    titlebar_inset + bar
+}
+
 // Unit tests live in `tests/src_tabbar_view.rs`.

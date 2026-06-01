@@ -39,7 +39,7 @@ use sonicterm_app::app::os_drag::{
 /// recently stashed [`AppHandle`] so the OLE `IDropSource` /
 /// `IDropTarget` callbacks can post back to the winit main loop via
 /// the wrapped `EventLoopProxy`.
-#[allow(dead_code)] // wired in production via `sonicterm-windows::main` (run_with_os_drag_pending_and_window_hook backend slot)
+#[allow(dead_code)] // wired in production via `sonicterm-windows::main` (WindowsShell::with_os_drag_backend slot)
 pub struct WinOsTabDragBackend {
     handle_slot: std::sync::Mutex<Option<AppHandle>>,
     /// Set of HWND ids (as u64) that have already had `RegisterDragDrop`

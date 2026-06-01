@@ -7,7 +7,7 @@
 //! `wgpu::SurfaceTexture` (it's opaque and only obtainable from a live
 //! adapter+surface) and a headless wgpu test cannot reliably force the
 //! `Suboptimal` branch on every CI host. Instead we parse the source of
-//! `crates/sonicterm-shared/src/render/core.rs`, locate the Suboptimal handler,
+//! `crates/sonicterm-shared/../sonicterm-gpu/src/core.rs`, locate the Suboptimal handler,
 //! and assert that within that arm `drop(frame)` appears textually BEFORE
 //! `self.surface.configure(`.
 //!
@@ -25,7 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn render_core_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/render/core.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-gpu/src/core.rs");
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 

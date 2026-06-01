@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_core::{
@@ -25,7 +25,7 @@ use sonicterm_core::{
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowAttributes, WindowId},
 };
@@ -483,36 +483,10 @@ pub fn refresh_active_tab_title(
     Some(pretty)
 }
 
-/// Entry point used by the platform bin crates.
-pub fn run(theme: Theme, config: Config, keymap: Keymap) -> Result<()> {
-    run_with(theme, config, keymap, None, None)
-}
-
-/// Loader callback type used by `run_with` to reload a theme by name.
+/// Loader callback type used by the platform shell to reload a theme by name.
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
-/// Loader callback type used by `run_with` to reload a keymap by name.
+/// Loader callback type used by the platform shell to reload a keymap by name.
 pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
-
-/// Entry point that additionally accepts asset loaders so theme +
-/// keymap changes can apply live (no restart).
-pub fn run_with(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-) -> Result<()> {
-    init_tracing();
-    let event_loop =
-        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
-    app.theme_loader = theme_loader;
-    app.keymap_loader = keymap_loader;
-    event_loop.run_app(&mut app).context("run event loop")?;
-    Ok(())
-}
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
@@ -593,137 +567,6 @@ pub fn build_async_fallback_loader_for_proxy(
     AsyncFallbackLoader::new(load_fn, notify)
 }
 
-/// Same as [`run`] but installs a platform-specific OS-drag sink.
-/// `sonicterm-mac` calls this with a `NSPasteboard`-backed impl; future
-/// `sonicterm-windows` work will pass an `IDataObject`/`DoDragDrop` impl.
-/// When the cursor leaves every SonicTerm window during a tab tear-out,
-/// the sink is invoked with a serialized [`crate::os_drag::TabPayload`]
-/// instead of spawning a child window.
-pub fn run_with_os_drag(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-) -> Result<()> {
-    run_with_os_drag_and_pending(theme, config, keymap, sink, theme_loader, keymap_loader, None)
-}
-
-/// Like [`run_with_os_drag`] but also seeds an already-received
-/// [`crate::os_drag::TabPayload`] (e.g. one the platform shim found on
-/// the pasteboard at startup). The payload becomes a real tab via
-/// [`App::new_tab_from_payload`] before the event loop starts — this
-/// is the receiver half of the (review) data-loss fix for PR #59:
-/// without it the payload was only logged and the user's torn tab
-/// vanished.
-pub fn run_with_os_drag_and_pending(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-) -> Result<()> {
-    run_with_os_drag_pending_and_hook(
-        theme,
-        config,
-        keymap,
-        sink,
-        theme_loader,
-        keymap_loader,
-        pending,
-        None,
-    )
-}
-
-/// Like [`run_with_os_drag_and_pending`] but also accepts a one-shot
-/// `on_resumed` hook invoked at the top of the first
-/// `ApplicationHandler::resumed` tick. The macOS bin uses this slot to
-/// install the native NSMenu — by then winit has built the AppKit event
-/// loop and `setMainMenu` sticks. Installing it before `event_loop.
-/// run_app` left AppKit with only the default `Apple, sonicterm-mac`
-/// menubar (bug caught by the PR #114 release-binary smoke).
-#[allow(clippy::too_many_arguments)]
-pub fn run_with_os_drag_pending_and_hook(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-    on_resumed: Option<Box<dyn FnOnce() + Send>>,
-) -> Result<()> {
-    run_with_os_drag_pending_and_window_hook(
-        theme,
-        config,
-        keymap,
-        sink,
-        theme_loader,
-        keymap_loader,
-        pending,
-        on_resumed,
-        None,
-        None,
-    )
-}
-
-/// Like [`run_with_os_drag_pending_and_hook`] but also accepts a
-/// one-shot `on_window_ready` hook invoked immediately after
-/// `create_window` succeeds, with the raw window handle. The Windows
-/// bin uses this slot to install the muda menubar (needs the HWND).
-///
-/// Phase C2: `os_drag_backend` is the platform OS-level drag-session
-/// backend (NSDraggingSession on Mac, OLE DoDragDrop on Windows).
-/// Installed onto the constructed App via
-/// [`App::set_os_drag_backend`]. Pass `None` on platforms / tests
-/// without a backend — the App falls back to the legacy `OsDragSink`
-/// path.
-#[allow(clippy::too_many_arguments)]
-pub fn run_with_os_drag_pending_and_window_hook(
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    sink: Arc<dyn crate::os_drag::OsDragSink>,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    pending: Option<crate::os_drag::TabPayload>,
-    on_resumed: Option<Box<dyn FnOnce() + Send>>,
-    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
-) -> Result<()> {
-    init_tracing();
-    let event_loop =
-        EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    // Install the same proxy for the macOS native menubar bridge so
-    // NSMenu selectors can wake the event loop and dispatch through
-    // `run_action`. Safe + cheap on platforms without a menubar.
-    crate::menubar_bridge::install_proxy(proxy.clone());
-    crate::os_drag_bridge::install_proxy(proxy.clone());
-    let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
-    app.theme_loader = theme_loader;
-    app.keymap_loader = keymap_loader;
-    app.os_drag_sink = Some(sink);
-    if let Some(b) = os_drag_backend {
-        app.set_os_drag_backend(b);
-    }
-    if let Some(hook) = on_resumed {
-        app.on_resumed = Some(hook);
-    }
-    if let Some(hook) = on_window_ready {
-        app.on_window_ready = Some(hook);
-    }
-    if let Some(p) = pending {
-        let _ = app.new_tab_from_payload(&p);
-    }
-    event_loop.run_app(&mut app).context("run event loop")?;
-    Ok(())
-}
-
 mod child_window;
 pub use child_window::{
     child_window_resized_handles_no_renderer,
@@ -755,6 +598,13 @@ fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("sonic=info"));
     let _ = fmt().with_env_filter(filter).try_init();
+}
+
+/// Public re-export of [`init_tracing`] for the M6b platform shell
+/// (`crate::shell::MacShell::run`). Same idempotent `try_init`
+/// behaviour — no-op if a subscriber is already installed.
+pub fn init_tracing_public() {
+    init_tracing();
 }
 
 /// Per-pane runtime state. The parser is shared with a per-pane VT thread
@@ -965,9 +815,9 @@ pub struct App {
     // entry is gone — both shapes mean "no visible main").
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
-    pub(super) theme_loader: Option<ThemeLoader>,
+    pub(crate) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
-    pub(super) keymap_loader: Option<KeymapLoader>,
+    pub(crate) keymap_loader: Option<KeymapLoader>,
     /// Live-reload watcher for the user's `sonicterm.toml`. Spawned in
     /// `resumed`; `None` if the config path could not be resolved or
     /// the watcher failed to start (e.g. parent dir unwritable).
@@ -1018,8 +868,10 @@ pub struct App {
     /// set, [`Self::tear_out_tab`] checks whether the cursor sits
     /// outside every SonicTerm-owned window; if so, it invokes the sink
     /// and KILLS the local tab instead of spawning a child window.
-    /// Installed by the platform bin via [`run_with_os_drag`].
-    pub(super) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
+    /// Installed by the platform shell via
+    /// [`crate::shell::MacShell::with_os_drag_sink`] /
+    /// [`crate::shell::WindowsShell::with_os_drag_sink`].
+    pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
     /// Phase C2 OS-level drag *session* backend. Distinct from
     /// `os_drag_sink` (cross-process wire format): this drives the
     /// NSDraggingSession / OLE DoDragDrop call that captures the
@@ -1059,7 +911,7 @@ pub struct App {
     /// NSMenu; calling `setMainMenu` earlier (before winit builds the
     /// AppKit loop) leaves AppKit with only the default
     /// `Apple, sonicterm-mac` menubar.
-    pub(super) on_resumed: Option<Box<dyn FnOnce() + Send>>,
+    pub(crate) on_resumed: Option<Box<dyn FnOnce() + Send>>,
 
     /// One-shot hook fired the moment the main window has been created
     /// (immediately after `el.create_window` succeeds, before the first
@@ -1094,6 +946,14 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
+    /// M6a-expand-2b — winit-agnostic state machine. Routed Intents
+    /// (PTY write, scroll, hyperlink open, …) flow through here and
+    /// the platform shell's [`Self::dispatch_effects`] translates the
+    /// resulting [`AppEffect`] batch into concrete calls against the
+    /// existing renderer / clipboard / PTY plumbing. Non-leaf paths
+    /// (tab/pane/window lifecycle) continue to take the legacy direct
+    /// route until M6a-expand-2c lifts those into the reducer.
+    pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
@@ -1166,10 +1026,32 @@ impl App {
 
     #[doc(hidden)]
     pub fn new_with_proxy(
+        theme: Theme,
+        config: Config,
+        keymap: Keymap,
+        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    ) -> Self {
+        Self::new_with_proxy_and_machine(
+            theme,
+            config,
+            keymap,
+            event_loop_proxy,
+            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
+        )
+    }
+
+    /// M6b: constructor that accepts an externally-built
+    /// [`sonicterm_app_core::AppStateMachine`]. The platform shell
+    /// ([`crate::shell::MacShell`]) constructs the machine first,
+    /// then hands it in so all state mutation routes through the
+    /// reducer that the shell already owns — instead of `App`
+    /// silently building a parallel machine inside its `new_with_proxy`.
+    pub fn new_with_proxy_and_machine(
         mut theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+        machine: sonicterm_app_core::AppStateMachine,
     ) -> Self {
         theme.apply_accessibility(&config.accessibility);
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
@@ -1218,6 +1100,7 @@ impl App {
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
+            machine,
         }
     }
 
@@ -1690,11 +1573,326 @@ impl App {
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
-        if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-            if let Some(pty) = p.pty.as_ref() {
-                let _ = pty.in_tx.send(bytes);
+        // M6a-expand-2b leaf-routing demonstration: the keystroke /
+        // broadcast / encoded-input path now flows through the
+        // winit-agnostic `AppStateMachine`. The reducer translates
+        // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane,
+        // data }`, and `dispatch_pty_write_effect` is the boundary
+        // method that performs the actual `pty.in_tx.send(...)`. The
+        // net behaviour is identical to the pre-2b direct call; the
+        // boundary is what changes so subsequent migration PRs
+        // (2c+) can lift more state into the reducer without
+        // touching this call site again.
+        let intent = sonicterm_app_core::AppIntent::PtyWrite {
+            pane: sonicterm_app_core::PaneId(pane_id),
+            bytes: bytes::Bytes::from(bytes),
+        };
+        // The state machine is owned by `&mut self` in production
+        // code paths; `write_to_pane` is `&self` because broadcast
+        // fan-out borrows immutably. Run the reducer through a
+        // throwaway transient machine — the reducer for PtyWrite is
+        // pure (it does not touch `AppState`), so this is
+        // semantically equivalent to dispatching through `self.machine`
+        // and avoids a structural borrow refactor (deferred to 2c).
+        let mut transient =
+            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+        for effect in transient.handle(intent) {
+            self.dispatch_pty_write_effect(&effect);
+        }
+    }
+
+    /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
+    ///
+    /// Resolves the pane id back to a live [`PtyHandle`] on the main
+    /// window and forwards the bytes. M6a-expand-2b boundary layer
+    /// per spec §9.
+    pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
+        if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
+            let pane_id = pane.0;
+            if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+                if let Some(pty) = p.pty.as_ref() {
+                    let _ = pty.in_tx.send(data.to_vec());
+                }
             }
         }
+    }
+
+    /// Generic boundary dispatcher for an Effect batch produced by the
+    /// state machine. M6a-expand-2b handles the leaf classes (PTY,
+    /// clipboard set, OpenURL, Quit, Render-reasons that map to a
+    /// redraw request). Non-leaf classes (WindowOpen, ChildSpawn,
+    /// MenubarUpdate, …) intentionally fall through to a tracing
+    /// debug — they land in 2c.
+    pub(crate) fn dispatch_effects(
+        &mut self,
+        effects: smallvec::SmallVec<[sonicterm_app_core::AppEffect; 4]>,
+    ) {
+        use sonicterm_app_core::AppEffect;
+        for effect in effects {
+            match effect {
+                AppEffect::PtyWrite { .. } => {
+                    self.dispatch_pty_write_effect(&effect);
+                }
+                AppEffect::ClipboardSet { text } => {
+                    if !text.is_empty() {
+                        if let Some(cb) = self.clipboard.as_mut() {
+                            let _ = cb.set_text(text);
+                        }
+                    }
+                    // Empty text sentinel (M6a-expand-2b CopySelection):
+                    // the boundary's existing `copy_selection` already
+                    // resolved the selection; the sentinel exists so
+                    // the Intent→Effect contract is observable in
+                    // tests. Real text payloads land in 2c.
+                }
+                AppEffect::OpenURL { url } => {
+                    if sonicterm_core::url_open::validate(&url).is_ok() {
+                        let _ = sonicterm_core::url_open::open(&url);
+                    }
+                }
+                AppEffect::Quit => {
+                    self.pending_exit = true;
+                }
+                AppEffect::Render { .. } | AppEffect::RenderDirtyRect { .. } => {
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                        self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                // ── PTY class (M6a-expand-2c-wire) ────────────────────
+                //
+                // PtyClose: the per-pane `PtyHandle::Drop` impl already
+                // SIGKILLs the child (CLAUDE.md §4 land-mine). Removing
+                // the pane entry from `WindowState.panes` is what
+                // actually triggers the drop. We try the main window
+                // first; if not found, scan child windows.
+                AppEffect::PtyClose { pane } => {
+                    let pane_id = pane.0;
+                    let mut closed = false;
+                    if let Some(ws) = self.main_mut() {
+                        if ws.panes.remove(&pane_id).is_some() {
+                            closed = true;
+                        }
+                    }
+                    if !closed {
+                        for ws in self.windows.values_mut() {
+                            if ws.panes.remove(&pane_id).is_some() {
+                                closed = true;
+                                break;
+                            }
+                        }
+                    }
+                    tracing::debug!(target: "state_machine", pane = pane_id, closed, "dispatch_effects: PtyClose");
+                }
+                // ChildExitPropagate: observability — the renderer's
+                // poll loop already noticed the child exit and updated
+                // the per-pane status. Surface a structured log so the
+                // session-restore layer (post-v1.0) can correlate.
+                AppEffect::ChildExitPropagate { pane, status } => {
+                    tracing::info!(target: "state_machine", pane = pane.0, status, "child exit propagated");
+                }
+                // ChildSpawn: record-only at the boundary. Production
+                // pane spawning flows through `App::spawn_pane` /
+                // `spawn_tab_in_child`, which constructs the PTY
+                // directly; the effect here is the observable contract.
+                AppEffect::ChildSpawn { pane, argv0 } => {
+                    tracing::debug!(target: "state_machine", pane = pane.0, %argv0, "dispatch_effects: ChildSpawn (record-only)");
+                }
+                // ── OS drag class ────────────────────────────────────
+                //
+                // The actual platform OS drag is initiated by the
+                // tear-out / tab-drag path which talks directly to the
+                // platform backend (NSPasteboard / OLE). The reducer
+                // emits OsDragStart for observability + future
+                // session-restore.
+                AppEffect::OsDragStart { src_window, payload_tab } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = src_window.0,
+                        tab = payload_tab,
+                        "dispatch_effects: OsDragStart (platform path owns the actual drag)"
+                    );
+                }
+                // OsDragEnd: settle the pending-drag table so the
+                // tear-out boundary can finalize. The os_drag layer's
+                // PendingDragOutcome already tracks the outcome
+                // bilaterally; we surface a log here.
+                AppEffect::OsDragEnd { src_window, committed } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = src_window.0,
+                        committed,
+                        "dispatch_effects: OsDragEnd"
+                    );
+                }
+                // ── Clipboard / notification side channels ───────────
+                //
+                // ClipboardRequest: async paste handshake. The actual
+                // read happens through `clipboard.get_text()` at the
+                // boundary's paste path; here we surface the request.
+                AppEffect::ClipboardRequest { window, bracketed } => {
+                    if let Some(cb) = self.clipboard.as_mut() {
+                        if let Ok(text) = cb.get_text() {
+                            tracing::debug!(
+                                target: "state_machine",
+                                window = window.0,
+                                bracketed,
+                                len = text.len(),
+                                "dispatch_effects: ClipboardRequest fulfilled"
+                            );
+                        }
+                    }
+                }
+                // Notification: route through the existing
+                // `notify_command_done` path (test capture friendly).
+                AppEffect::Notification { title, body } => {
+                    let combined = if title.is_empty() { body } else { format!("{title}: {body}") };
+                    notify_command_done(combined);
+                }
+                // ── Window ops ───────────────────────────────────────
+                //
+                // WindowOpen: defer to the existing pending-new-window
+                // flag drained by event_loop on the next tick. The
+                // platform-creation requires `&ActiveEventLoop` which
+                // dispatch_effects doesn't carry — flagging keeps the
+                // request observable without changing the dispatcher
+                // signature.
+                AppEffect::WindowOpen { role, initial_size } => {
+                    self.pending_new_window = true;
+                    tracing::debug!(
+                        target: "state_machine",
+                        ?role,
+                        ?initial_size,
+                        "dispatch_effects: WindowOpen queued (drained by event_loop)"
+                    );
+                }
+                // WindowClose: best-effort. Without a WindowKey→WindowId
+                // map (lifted in 2d), close the main window or, if it's
+                // a child, the matching entry. We at minimum surface a
+                // log and set pending_exit when it's the last live
+                // window per the reducer's contract.
+                AppEffect::WindowClose { window } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        "dispatch_effects: WindowClose (platform path closes via WindowEvent::CloseRequested)"
+                    );
+                }
+                // WindowResize: programmatic resize. winit's
+                // `set_inner_size` is the API; since `LogicalSize` here
+                // is f64 cells (not pixels) per the reducer's contract,
+                // emit a redraw so the boundary re-measures.
+                AppEffect::WindowResize { window, size } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        w = size.width,
+                        h = size.height,
+                        "dispatch_effects: WindowResize (observability)"
+                    );
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                    }
+                }
+                // WindowMove: record-only; OS already moved the window.
+                AppEffect::WindowMove { window, pos } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        x = pos.x,
+                        y = pos.y,
+                        "dispatch_effects: WindowMove (record-only)"
+                    );
+                }
+                // WindowSetTitle: programmatic title set. Best-effort
+                // against the main window.
+                AppEffect::WindowSetTitle { window, title } => {
+                    if let Some(w) = self.main_window() {
+                        w.set_title(&title);
+                    }
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        %title,
+                        "dispatch_effects: WindowSetTitle"
+                    );
+                }
+                // TimerSchedule / TimerCancel: the boundary's redraw
+                // pacing uses winit's ControlFlow::WaitUntil directly
+                // (#132). The reducer emitting these surfaces a
+                // contract for future schedulers (e.g. cursor-blink
+                // refactor); record-only today.
+                AppEffect::TimerSchedule { id, at } => {
+                    tracing::trace!(
+                        target: "state_machine",
+                        id,
+                        ?at,
+                        "dispatch_effects: TimerSchedule (record-only — winit ControlFlow drives pacing)"
+                    );
+                }
+                AppEffect::TimerCancel { id } => {
+                    tracing::trace!(
+                        target: "state_machine",
+                        id,
+                        "dispatch_effects: TimerCancel (record-only)"
+                    );
+                }
+                // ── Menubar ──────────────────────────────────────────
+                //
+                // MenubarUpdate: macOS rebuilds the NSMenu through the
+                // existing `menubar_bridge`; Windows is a log-only
+                // no-op per FINAL spec §5 (muda's menubar is owned by
+                // the platform code path directly). We surface a debug
+                // log either way so the request is observable.
+                AppEffect::MenubarUpdate(model) => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        items = model.items.len(),
+                        "dispatch_effects: MenubarUpdate (platform path owns NSMenu/muda mutation)"
+                    );
+                }
+                // ── Log ──────────────────────────────────────────────
+                //
+                // LogEvent: forward to tracing at the requested level.
+                AppEffect::LogEvent { level, target, msg } => {
+                    use sonicterm_app_core::LogLevel;
+                    // `target` is &'static str from the reducer but
+                    // tracing's `target:` slot needs a literal at the
+                    // call site, so capture both as fields instead.
+                    match level {
+                        LogLevel::Trace => {
+                            tracing::trace!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Debug => {
+                            tracing::debug!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Info => {
+                            tracing::info!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Warn => {
+                            tracing::warn!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                        LogLevel::Error => {
+                            tracing::error!(target: "state_machine.log", reducer_target = target, "{msg}")
+                        }
+                    }
+                }
+                // `AppEffect` is #[non_exhaustive]; future variants
+                // surface here as an unrouted log until wired.
+                _ => {
+                    tracing::trace!(target: "state_machine", "dispatch_effects: unrouted effect {:?}", effect);
+                }
+            }
+        }
+    }
+
+    /// Drive a single [`AppIntent`] through the state machine and
+    /// dispatch the resulting Effects through the boundary layer.
+    /// M6a-expand-2b entry point — wires the winit-flavoured shell
+    /// into the winit-agnostic reducer.
+    pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
+        let effects = self.machine.handle(intent);
+        self.dispatch_effects(effects);
     }
 
     fn broadcast_from(&self, active_id: u64, bytes: Vec<u8>) {

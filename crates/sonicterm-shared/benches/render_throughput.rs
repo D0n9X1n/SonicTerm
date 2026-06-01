@@ -10,7 +10,7 @@
 #![allow(missing_docs)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use sonicterm_shared::render::color::{hex_to_rgba, hex_to_wgpu, srgb_u8_to_linear_lut};
+use sonicterm_gpu::color::{hex_to_rgba, hex_to_wgpu, srgb_u8_to_linear_lut};
 
 fn bench_hex_to_rgba(c: &mut Criterion) {
     // Theme files contain ~30 hex colors; renderer parses them on every

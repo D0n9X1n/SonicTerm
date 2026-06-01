@@ -1,46 +1,30 @@
-//! Layout / metric helpers extracted from `render.rs` (issue #143).
+//! Font + atlas metric helpers (extracted from `sonicterm-shared::render::metrics`
+//! in M7c). These depend on glyphon shaping and the atlas tile size, so
+//! they live alongside the rest of the text layer rather than in the
+//! renderer.
 
-use glyphon::{Buffer, FontSystem, Metrics, Shaping};
-use sonicterm_text::terminal_font_attrs;
+use cosmic_text::{Buffer, FontSystem, Metrics, Shaping};
 
-use crate::tabbar_view::TAB_BAR_HEIGHT;
-
-/// Pure helper computing the top inset reserved above the grid for both
-/// the OS titlebar band (when an integrated titlebar pushes the content
-/// view under the native chrome) and the tab bar. Returns the titlebar
-/// inset alone when the tab bar is hidden, so the grid recovers the row
-/// the bar used to take. Exposed so tests can validate visibility wiring
-/// without needing a live GPU context.
-pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
-    tab_bar_top_inset_with_titlebar(visible, padding, 0.0)
-}
-
-/// Same as [`tab_bar_top_inset`] but adds a reserved titlebar band on top.
-/// `titlebar_inset` is the height in logical pixels the OS reserves at the
-/// top of the content view (e.g. macOS traffic-lights strip when
-/// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
-/// our content below its chrome.
-pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
-    let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
-    titlebar_inset + bar
-}
+use crate::glyph_atlas::ATLAS_DIM;
+use crate::terminal_font_attrs;
 
 /// Atlas dimension to allocate for a given DPI scale. On 2× screens we
 /// roughly double-stack tiles, so a base 2048² atlas isn't enough room
 /// for the same working set. We use `max(2048, base * ceil(scale))` to
 /// keep the 1× footprint unchanged while reserving headroom on Retina.
 pub fn atlas_dim_for_scale(scale_factor: f32) -> u32 {
-    let base = crate::glyph_atlas::ATLAS_DIM;
+    let base = ATLAS_DIM;
     let s = scale_factor.max(1.0).ceil() as u32;
     base.saturating_mul(s).max(base)
 }
 
-pub(super) fn measure_cell(
-    fs: &mut FontSystem,
-    family: &str,
-    size: f32,
-    line_h: f32,
-) -> (f32, f32) {
+/// Measure one cell's pixel size (`(cell_w, cell_h)`) for `family` at
+/// the given `size` (logical px) using the supplied `line_h`.
+///
+/// Width is taken from the shaped advance of `"M"`; height is the
+/// caller-supplied `line_h` so the renderer can apply the user's
+/// `line_height` multiplier on top of [`natural_line_h_px`].
+pub fn measure_cell(fs: &mut FontSystem, family: &str, size: f32, line_h: f32) -> (f32, f32) {
     let mut buf = Buffer::new(fs, Metrics::new(size, line_h));
     buf.set_size(fs, Some(1000.0), Some(1000.0));
     buf.set_text(fs, "M", &terminal_font_attrs(family), Shaping::Advanced, None);

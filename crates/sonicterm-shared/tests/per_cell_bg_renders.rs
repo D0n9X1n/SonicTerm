@@ -16,9 +16,9 @@
 
 use sonicterm_core::grid::{Cell, CellFlags, Color, Grid};
 use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_gpu::color::srgb_u8_to_linear_lut;
 use sonicterm_gpu::quad::QuadInstance;
 use sonicterm_shared::pane::Rect as PaneRect;
-use sonicterm_shared::render::color::srgb_u8_to_linear_lut;
 use sonicterm_shared::render::{emit_cell_bg_quads, emit_cell_bg_quads_clipped};
 
 fn theme_with_red_index1() -> Theme {

@@ -158,6 +158,12 @@ impl App {
     }
     pub(super) fn toggle_command_palette(&mut self) {
         let now_open = self.command_palette.toggle();
+        // M6a-expand-2c-misc: notify reducer of the toggle. The
+        // reducer flips `palette_open` and emits Render(Overlay) on
+        // every transition.
+        self.dispatch_intent(sonicterm_app_core::AppIntent::ToggleCommandPalette {
+            window: sonicterm_types::WindowKey::new(0),
+        });
         if now_open {
             // Epic #289 follow-up: tag with the frontmost window so the
             // palette appears on whatever window the user is looking at.
@@ -197,6 +203,12 @@ impl App {
         );
     }
     pub(super) fn open_search(&mut self) {
+        // M6a-expand-2c-misc: notify reducer of the open transition
+        // (Render(Overlay) — transition-guarded so a re-open against
+        // an already-open overlay is a no-op).
+        self.dispatch_intent(sonicterm_app_core::AppIntent::OpenSearch {
+            window: sonicterm_types::WindowKey::new(0),
+        });
         // Epic #289 follow-up: route to the OS-frontmost window so
         // Cmd+F typed in a torn-out child opens a search bar on
         // THAT child's active tab, not the main window's.

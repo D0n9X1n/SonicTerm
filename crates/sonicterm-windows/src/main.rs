@@ -99,24 +99,34 @@ fn main() -> Result<()> {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }
             });
-        let result = sonicterm_app::app::run_with_os_drag_pending_and_window_hook(
-            theme,
-            config,
-            keymap,
-            os_drag_win::WinOsDragSink::arc(),
-            Some(theme_loader),
-            Some(keymap_loader),
-            tearout_payload.or_else(os_drag_win::take_pending_payload),
-            None,
-            Some(on_window_ready),
-            Some(tab_drag_os::WinOsTabDragBackend::boxed()),
-        );
+        let result = {
+            // M6c: construct the AppStateMachine in the bin and hand
+            // it to the platform shell. State mutation routes through
+            // the reducer the shell owns — the bin no longer reaches
+            // into the monolithic `App` directly via `run_with_*`.
+            let machine =
+                sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+            let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+                .with_asset_loaders(theme_loader, keymap_loader)
+                .with_os_drag_sink(os_drag_win::WinOsDragSink::arc())
+                .with_os_drag_backend(tab_drag_os::WinOsTabDragBackend::boxed())
+                .with_on_window_ready(on_window_ready);
+            if let Some(p) = tearout_payload.or_else(os_drag_win::take_pending_payload) {
+                shell = shell.with_pending_payload(p);
+            }
+            shell.run()
+        };
         os_drag_win::shutdown_ole();
         result
     }
     #[cfg(not(target_os = "windows"))]
     {
-        sonicterm_app::run_with(theme, config, keymap, Some(theme_loader), Some(keymap_loader))
+        // Non-Windows targets cannot exercise the Windows shell path
+        // (ConPTY, muda, OLE drag, Mica). Keep this branch only so
+        // `cargo check --workspace` on non-Win hosts type-checks the
+        // bin. Unused bindings:
+        let _ = (theme, config, keymap, theme_loader, keymap_loader);
+        unreachable!("sonicterm-windows binary built for non-Windows target")
     }
 }
 

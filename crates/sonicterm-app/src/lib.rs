@@ -17,8 +17,9 @@ pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;
 pub mod os_drag_bridge;
+pub mod shell;
 pub mod tab_drag;
 pub mod tab_thumbnail;
+pub mod window_key_boundary;
 
-pub use app::run;
-pub use app::{run_with, KeymapLoader, ThemeLoader};
+pub use app::{KeymapLoader, ThemeLoader};

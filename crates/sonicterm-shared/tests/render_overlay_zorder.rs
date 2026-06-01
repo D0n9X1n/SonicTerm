@@ -17,7 +17,7 @@
 
 use std::fs;
 
-const RENDER_RS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/render/core.rs");
+const RENDER_RS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../sonicterm-gpu/src/core.rs");
 
 fn must_find(src: &str, needle: &str) -> usize {
     src.find(needle).unwrap_or_else(|| panic!("expected `{needle}` somewhere in render.rs"))

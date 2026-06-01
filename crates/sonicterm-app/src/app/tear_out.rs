@@ -41,6 +41,14 @@ use crate::app::window_geom;
 
 impl App {
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
+        // M6a-expand-2c-misc: notify reducer of the tear-out
+        // cascade. The reducer emits Render(TabRemoved) on the
+        // source window AND a WindowOpen for the destination, all
+        // in one handle() call (see misc_intents::tear_out_tab_emits_*).
+        self.dispatch_intent(sonicterm_app_core::AppIntent::TearOutTab {
+            src_window: sonicterm_types::WindowKey::new(0),
+            src_tab: index,
+        });
         // Cross-window merge takes priority over the single-tab guard:
         // see [`Self::try_cross_window_merge`] for the gate.
         if self.try_cross_window_merge(index) {
