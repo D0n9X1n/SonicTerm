@@ -57,7 +57,10 @@
                                 <File Id='theme_catppuccin' Name='catppuccin-mocha.toml' DiskId='1' Source='..\assets\themes\catppuccin-mocha.toml' KeyPath='yes'/>
                                 <File Id='theme_dracula'    Name='dracula.toml'          DiskId='1' Source='..\assets\themes\dracula.toml'/>
                                 <File Id='theme_gruvbox'    Name='gruvbox-dark-hard.toml' DiskId='1' Source='..\assets\themes\gruvbox-dark-hard.toml'/>
+                                <File Id='theme_monokai'    Name='monokai-pro.toml'      DiskId='1' Source='..\assets\themes\monokai-pro.toml'/>
                                 <File Id='theme_nord'       Name='nord.toml'             DiskId='1' Source='..\assets\themes\nord.toml'/>
+                                <File Id='theme_onedark'    Name='one-dark.toml'         DiskId='1' Source='..\assets\themes\one-dark.toml'/>
+                                <File Id='theme_solarized'  Name='solarized-dark.toml'   DiskId='1' Source='..\assets\themes\solarized-dark.toml'/>
                                 <File Id='theme_tokyo'      Name='tokyo-night.toml'      DiskId='1' Source='..\assets\themes\tokyo-night.toml'/>
                                 <File Id='theme_wezterm'    Name='wezterm.toml'          DiskId='1' Source='..\assets\themes\wezterm.toml'/>
                             </Component>
@@ -65,7 +68,8 @@
 
                         <Directory Id='AssetsKeymapsDir' Name='keymaps'>
                             <Component Id='asset_keymaps' Guid='C1A21A01-0000-0000-0000-000000000102' Win64='yes'>
-                                <File Id='keymap_sonicterm' Name='sonicterm.toml' DiskId='1' Source='..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
+                                <File Id='keymap_sonicterm'         Name='sonicterm.toml'         DiskId='1' Source='..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
+                                <File Id='keymap_sonicterm_windows' Name='sonicterm-windows.toml' DiskId='1' Source='..\assets\keymaps\sonicterm-windows.toml'/>
                             </Component>
                         </Directory>
 
