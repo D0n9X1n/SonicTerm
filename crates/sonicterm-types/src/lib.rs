@@ -15,9 +15,11 @@ pub mod cell;
 pub mod geom;
 pub mod glyph_key;
 pub mod hyperlink_id;
+pub mod traits;
 
 pub use action::{Action, BroadcastScope, Direction, ScrollAction};
 pub use cell::{Cell, CellFlags, Color, FatAttributes};
 pub use geom::Pos;
 pub use glyph_key::GlyphKey;
 pub use hyperlink_id::HyperlinkId;
+pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};

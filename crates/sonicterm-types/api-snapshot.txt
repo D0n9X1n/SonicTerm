@@ -1,0 +1,928 @@
+pub mod sonicterm_types
+pub mod sonicterm_types::action
+pub enum sonicterm_types::action::Action
+pub sonicterm_types::action::Action::ActivateLastTab
+pub sonicterm_types::action::Action::ActivateTab(usize)
+pub sonicterm_types::action::Action::ApplyTheme(alloc::string::String)
+pub sonicterm_types::action::Action::CloseActivePaneOrTab
+pub sonicterm_types::action::Action::ClosePane
+pub sonicterm_types::action::Action::CloseTab
+pub sonicterm_types::action::Action::CopyToClipboard
+pub sonicterm_types::action::Action::DecreaseFontSize
+pub sonicterm_types::action::Action::EditConfigFile
+pub sonicterm_types::action::Action::EnterCopyMode
+pub sonicterm_types::action::Action::EnterQuickSelect
+pub sonicterm_types::action::Action::FocusPane(sonicterm_types::action::Direction)
+pub sonicterm_types::action::Action::IncreaseFontSize
+pub sonicterm_types::action::Action::NewTab
+pub sonicterm_types::action::Action::NewWindow
+pub sonicterm_types::action::Action::NextTab
+pub sonicterm_types::action::Action::OpenCommandPalette
+pub sonicterm_types::action::Action::OpenKeymapFile
+pub sonicterm_types::action::Action::OpenSearch
+pub sonicterm_types::action::Action::OpenSshPane(alloc::string::String)
+pub sonicterm_types::action::Action::PasteFromClipboard
+pub sonicterm_types::action::Action::PrevTab
+pub sonicterm_types::action::Action::ReloadConfig
+pub sonicterm_types::action::Action::ResetFontSize
+pub sonicterm_types::action::Action::ResizePane
+pub sonicterm_types::action::Action::ResizePane::amount: u16
+pub sonicterm_types::action::Action::ResizePane::dir: sonicterm_types::action::Direction
+pub sonicterm_types::action::Action::ResizePaneDown
+pub sonicterm_types::action::Action::ResizePaneLeft
+pub sonicterm_types::action::Action::ResizePaneRight
+pub sonicterm_types::action::Action::ResizePaneUp
+pub sonicterm_types::action::Action::Scroll(sonicterm_types::action::ScrollAction)
+pub sonicterm_types::action::Action::ScrollToNextPrompt
+pub sonicterm_types::action::Action::ScrollToPrevPrompt
+pub sonicterm_types::action::Action::ShowKeymapCheatsheet
+pub sonicterm_types::action::Action::SplitDown
+pub sonicterm_types::action::Action::SplitRight
+pub sonicterm_types::action::Action::ToggleBroadcast
+pub sonicterm_types::action::Action::ToggleBroadcast::scope: sonicterm_types::action::BroadcastScope
+pub sonicterm_types::action::Action::ToggleFullscreen
+pub sonicterm_types::action::Action::TogglePaneZoom
+pub sonicterm_types::action::Action::ToggleTabBar
+impl core::clone::Clone for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::clone(&self) -> sonicterm_types::action::Action
+impl core::cmp::Eq for sonicterm_types::action::Action
+impl core::cmp::PartialEq for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::eq(&self, &sonicterm_types::action::Action) -> bool
+impl core::fmt::Debug for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::action::Action
+impl serde_core::ser::Serialize for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::Action
+impl core::marker::Send for sonicterm_types::action::Action
+impl core::marker::Sync for sonicterm_types::action::Action
+impl core::marker::Unpin for sonicterm_types::action::Action
+impl core::marker::UnsafeUnpin for sonicterm_types::action::Action
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Action
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Action
+pub enum sonicterm_types::action::BroadcastScope
+pub sonicterm_types::action::BroadcastScope::AllTabs
+pub sonicterm_types::action::BroadcastScope::Tab
+impl core::clone::Clone for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::clone(&self) -> sonicterm_types::action::BroadcastScope
+impl core::cmp::Eq for sonicterm_types::action::BroadcastScope
+impl core::cmp::PartialEq for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::eq(&self, &sonicterm_types::action::BroadcastScope) -> bool
+impl core::fmt::Debug for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::BroadcastScope
+impl core::marker::StructuralPartialEq for sonicterm_types::action::BroadcastScope
+impl serde_core::ser::Serialize for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::BroadcastScope
+impl core::marker::Send for sonicterm_types::action::BroadcastScope
+impl core::marker::Sync for sonicterm_types::action::BroadcastScope
+impl core::marker::Unpin for sonicterm_types::action::BroadcastScope
+impl core::marker::UnsafeUnpin for sonicterm_types::action::BroadcastScope
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::BroadcastScope
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::BroadcastScope
+pub enum sonicterm_types::action::Direction
+pub sonicterm_types::action::Direction::Down
+pub sonicterm_types::action::Direction::Left
+pub sonicterm_types::action::Direction::Right
+pub sonicterm_types::action::Direction::Up
+impl core::clone::Clone for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::clone(&self) -> sonicterm_types::action::Direction
+impl core::cmp::Eq for sonicterm_types::action::Direction
+impl core::cmp::PartialEq for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::eq(&self, &sonicterm_types::action::Direction) -> bool
+impl core::fmt::Debug for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::Direction
+impl core::marker::StructuralPartialEq for sonicterm_types::action::Direction
+impl serde_core::ser::Serialize for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::Direction
+impl core::marker::Send for sonicterm_types::action::Direction
+impl core::marker::Sync for sonicterm_types::action::Direction
+impl core::marker::Unpin for sonicterm_types::action::Direction
+impl core::marker::UnsafeUnpin for sonicterm_types::action::Direction
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Direction
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Direction
+pub enum sonicterm_types::action::ScrollAction
+pub sonicterm_types::action::ScrollAction::LineDown
+pub sonicterm_types::action::ScrollAction::LineUp
+pub sonicterm_types::action::ScrollAction::PageDown
+pub sonicterm_types::action::ScrollAction::PageUp
+pub sonicterm_types::action::ScrollAction::ToBottom
+pub sonicterm_types::action::ScrollAction::ToTop
+impl core::clone::Clone for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::clone(&self) -> sonicterm_types::action::ScrollAction
+impl core::cmp::Eq for sonicterm_types::action::ScrollAction
+impl core::cmp::PartialEq for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::eq(&self, &sonicterm_types::action::ScrollAction) -> bool
+impl core::fmt::Debug for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::ScrollAction
+impl core::marker::StructuralPartialEq for sonicterm_types::action::ScrollAction
+impl serde_core::ser::Serialize for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::ScrollAction
+impl core::marker::Send for sonicterm_types::action::ScrollAction
+impl core::marker::Sync for sonicterm_types::action::ScrollAction
+impl core::marker::Unpin for sonicterm_types::action::ScrollAction
+impl core::marker::UnsafeUnpin for sonicterm_types::action::ScrollAction
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::ScrollAction
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::ScrollAction
+pub mod sonicterm_types::cell
+pub enum sonicterm_types::cell::Color
+pub sonicterm_types::cell::Color::Default
+pub sonicterm_types::cell::Color::Indexed(u8)
+pub sonicterm_types::cell::Color::Rgb(u8, u8, u8)
+impl core::clone::Clone for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::clone(&self) -> sonicterm_types::cell::Color
+impl core::cmp::Eq for sonicterm_types::cell::Color
+impl core::cmp::PartialEq for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::eq(&self, &sonicterm_types::cell::Color) -> bool
+impl core::default::Default for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::default() -> sonicterm_types::cell::Color
+impl core::fmt::Debug for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::cell::Color
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::Color
+impl serde_core::ser::Serialize for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::cell::Color
+impl core::marker::Send for sonicterm_types::cell::Color
+impl core::marker::Sync for sonicterm_types::cell::Color
+impl core::marker::Unpin for sonicterm_types::cell::Color
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::Color
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::Color
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::Color
+pub struct sonicterm_types::cell::Cell
+pub sonicterm_types::cell::Cell::bg: sonicterm_types::cell::Color
+pub sonicterm_types::cell::Cell::ch: char
+pub sonicterm_types::cell::Cell::fg: sonicterm_types::cell::Color
+pub sonicterm_types::cell::Cell::flags: sonicterm_types::cell::CellFlags
+impl sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::extras(&self) -> core::option::Option<&str>
+pub fn sonicterm_types::cell::Cell::hyperlink(&self) -> core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+pub fn sonicterm_types::cell::Cell::plain(char, sonicterm_types::cell::Color, sonicterm_types::cell::Color, sonicterm_types::cell::CellFlags) -> Self
+pub fn sonicterm_types::cell::Cell::set_extras(&mut self, core::option::Option<alloc::boxed::Box<str>>)
+pub fn sonicterm_types::cell::Cell::set_hyperlink(&mut self, core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>)
+pub fn sonicterm_types::cell::Cell::take_extras(&mut self) -> core::option::Option<alloc::boxed::Box<str>>
+impl core::clone::Clone for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::clone(&self) -> sonicterm_types::cell::Cell
+impl core::cmp::Eq for sonicterm_types::cell::Cell
+impl core::cmp::PartialEq for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::eq(&self, &sonicterm_types::cell::Cell) -> bool
+impl core::default::Default for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::default() -> Self
+impl core::fmt::Debug for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::Cell
+impl serde_core::ser::Serialize for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::serialize<S: serde_core::ser::Serializer>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for sonicterm_types::cell::Cell
+impl core::marker::Send for sonicterm_types::cell::Cell
+impl core::marker::Sync for sonicterm_types::cell::Cell
+impl core::marker::Unpin for sonicterm_types::cell::Cell
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::Cell
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::Cell
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::Cell
+pub struct sonicterm_types::cell::CellFlags(_)
+impl sonicterm_types::cell::CellFlags
+pub const sonicterm_types::cell::CellFlags::BLINK: Self
+pub const sonicterm_types::cell::CellFlags::BOLD: Self
+pub const sonicterm_types::cell::CellFlags::DIM: Self
+pub const sonicterm_types::cell::CellFlags::HIDDEN: Self
+pub const sonicterm_types::cell::CellFlags::INVERSE: Self
+pub const sonicterm_types::cell::CellFlags::ITALIC: Self
+pub const sonicterm_types::cell::CellFlags::STRIKETHROUGH: Self
+pub const sonicterm_types::cell::CellFlags::UNDERLINE: Self
+pub const sonicterm_types::cell::CellFlags::WIDE: Self
+pub const sonicterm_types::cell::CellFlags::WIDE_CONT: Self
+impl sonicterm_types::cell::CellFlags
+pub const fn sonicterm_types::cell::CellFlags::all() -> Self
+pub const fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
+pub const fn sonicterm_types::cell::CellFlags::complement(self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::contains(&self, Self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::difference(self, Self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::empty() -> Self
+pub const fn sonicterm_types::cell::CellFlags::from_bits(u16) -> core::option::Option<Self>
+pub const fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> Self
+pub const fn sonicterm_types::cell::CellFlags::from_bits_truncate(u16) -> Self
+pub fn sonicterm_types::cell::CellFlags::from_name(&str) -> core::option::Option<Self>
+pub fn sonicterm_types::cell::CellFlags::insert(&mut self, Self)
+pub const fn sonicterm_types::cell::CellFlags::intersection(self, Self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::intersects(&self, Self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::is_all(&self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::is_empty(&self) -> bool
+pub fn sonicterm_types::cell::CellFlags::remove(&mut self, Self)
+pub fn sonicterm_types::cell::CellFlags::set(&mut self, Self, bool)
+pub const fn sonicterm_types::cell::CellFlags::symmetric_difference(self, Self) -> Self
+pub fn sonicterm_types::cell::CellFlags::toggle(&mut self, Self)
+pub const fn sonicterm_types::cell::CellFlags::union(self, Self) -> Self
+impl sonicterm_types::cell::CellFlags
+pub const fn sonicterm_types::cell::CellFlags::iter(&self) -> bitflags::iter::Iter<sonicterm_types::cell::CellFlags>
+pub const fn sonicterm_types::cell::CellFlags::iter_names(&self) -> bitflags::iter::IterNames<sonicterm_types::cell::CellFlags>
+impl bitflags::traits::Flags for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Bits = u16
+pub const sonicterm_types::cell::CellFlags::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::cell::CellFlags>]
+pub fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
+pub fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> sonicterm_types::cell::CellFlags
+impl bitflags::traits::PublicFlags for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Internal = InternalBitFlags
+pub type sonicterm_types::cell::CellFlags::Primitive = u16
+impl core::clone::Clone for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::clone(&self) -> sonicterm_types::cell::CellFlags
+impl core::cmp::Eq for sonicterm_types::cell::CellFlags
+impl core::cmp::PartialEq for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::eq(&self, &sonicterm_types::cell::CellFlags) -> bool
+impl core::default::Default for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::default() -> sonicterm_types::cell::CellFlags
+impl core::fmt::Binary for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Debug for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::LowerHex for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Octal for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::UpperHex for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::iter::traits::collect::Extend<sonicterm_types::cell::CellFlags> for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::extend<T: core::iter::traits::collect::IntoIterator<Item = Self>>(&mut self, T)
+impl core::iter::traits::collect::FromIterator<sonicterm_types::cell::CellFlags> for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::from_iter<T: core::iter::traits::collect::IntoIterator<Item = Self>>(T) -> Self
+impl core::iter::traits::collect::IntoIterator for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::IntoIter = bitflags::iter::Iter<sonicterm_types::cell::CellFlags>
+pub type sonicterm_types::cell::CellFlags::Item = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::into_iter(self) -> Self::IntoIter
+impl core::marker::Copy for sonicterm_types::cell::CellFlags
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::CellFlags
+impl core::ops::arith::Sub for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::sub(self, Self) -> Self
+impl core::ops::arith::SubAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::sub_assign(&mut self, Self)
+impl core::ops::bit::BitAnd for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitand(self, Self) -> Self
+impl core::ops::bit::BitAndAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitand_assign(&mut self, Self)
+impl core::ops::bit::BitOr for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitor(self, sonicterm_types::cell::CellFlags) -> Self
+impl core::ops::bit::BitOrAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitor_assign(&mut self, Self)
+impl core::ops::bit::BitXor for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitxor(self, Self) -> Self
+impl core::ops::bit::BitXorAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitxor_assign(&mut self, Self)
+impl core::ops::bit::Not for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::not(self) -> Self
+impl core::marker::Freeze for sonicterm_types::cell::CellFlags
+impl core::marker::Send for sonicterm_types::cell::CellFlags
+impl core::marker::Sync for sonicterm_types::cell::CellFlags
+impl core::marker::Unpin for sonicterm_types::cell::CellFlags
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::CellFlags
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::CellFlags
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::CellFlags
+pub struct sonicterm_types::cell::FatAttributes
+pub sonicterm_types::cell::FatAttributes::extras: core::option::Option<alloc::boxed::Box<str>>
+pub sonicterm_types::cell::FatAttributes::hyperlink: core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+impl sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::is_empty(&self) -> bool
+impl core::clone::Clone for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::clone(&self) -> sonicterm_types::cell::FatAttributes
+impl core::cmp::Eq for sonicterm_types::cell::FatAttributes
+impl core::cmp::PartialEq for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::eq(&self, &sonicterm_types::cell::FatAttributes) -> bool
+impl core::default::Default for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::default() -> sonicterm_types::cell::FatAttributes
+impl core::fmt::Debug for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::FatAttributes
+impl core::marker::Freeze for sonicterm_types::cell::FatAttributes
+impl core::marker::Send for sonicterm_types::cell::FatAttributes
+impl core::marker::Sync for sonicterm_types::cell::FatAttributes
+impl core::marker::Unpin for sonicterm_types::cell::FatAttributes
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::FatAttributes
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::FatAttributes
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::FatAttributes
+pub mod sonicterm_types::geom
+pub struct sonicterm_types::geom::Pos
+pub sonicterm_types::geom::Pos::col: u16
+pub sonicterm_types::geom::Pos::row: u16
+impl core::clone::Clone for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::clone(&self) -> sonicterm_types::geom::Pos
+impl core::cmp::Eq for sonicterm_types::geom::Pos
+impl core::cmp::PartialEq for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::eq(&self, &sonicterm_types::geom::Pos) -> bool
+impl core::default::Default for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::default() -> sonicterm_types::geom::Pos
+impl core::fmt::Debug for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::geom::Pos
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::Pos
+impl core::marker::Freeze for sonicterm_types::geom::Pos
+impl core::marker::Send for sonicterm_types::geom::Pos
+impl core::marker::Sync for sonicterm_types::geom::Pos
+impl core::marker::Unpin for sonicterm_types::geom::Pos
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub mod sonicterm_types::glyph_key
+pub struct sonicterm_types::glyph_key::GlyphKey
+pub sonicterm_types::glyph_key::GlyphKey::ch: char
+pub sonicterm_types::glyph_key::GlyphKey::font_slot: u8
+pub sonicterm_types::glyph_key::GlyphKey::glyph_id: u16
+pub sonicterm_types::glyph_key::GlyphKey::italic: bool
+pub sonicterm_types::glyph_key::GlyphKey::weight_bold: bool
+impl sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
+pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u16, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
+impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::clone(&self) -> sonicterm_types::glyph_key::GlyphKey
+impl core::cmp::Eq for sonicterm_types::glyph_key::GlyphKey
+impl core::cmp::PartialEq for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::eq(&self, &sonicterm_types::glyph_key::GlyphKey) -> bool
+impl core::fmt::Debug for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::StructuralPartialEq for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Freeze for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Send for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Sync for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Unpin for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::UnsafeUnpin for sonicterm_types::glyph_key::GlyphKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::glyph_key::GlyphKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::glyph_key::GlyphKey
+pub mod sonicterm_types::hyperlink_id
+pub struct sonicterm_types::hyperlink_id::HyperlinkId(pub u64)
+impl sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::next() -> Self
+impl core::clone::Clone for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::clone(&self) -> sonicterm_types::hyperlink_id::HyperlinkId
+impl core::cmp::Eq for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::cmp::PartialEq for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::eq(&self, &sonicterm_types::hyperlink_id::HyperlinkId) -> bool
+impl core::fmt::Debug for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::StructuralPartialEq for sonicterm_types::hyperlink_id::HyperlinkId
+impl serde_core::ser::Serialize for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Send for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Sync for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub mod sonicterm_types::traits
+pub mod sonicterm_types::traits::clipboard
+pub enum sonicterm_types::traits::clipboard::ClipboardError
+pub sonicterm_types::traits::clipboard::ClipboardError::Backend(alloc::string::String)
+impl core::fmt::Debug for sonicterm_types::traits::clipboard::ClipboardError
+pub fn sonicterm_types::traits::clipboard::ClipboardError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::traits::clipboard::ClipboardError
+impl core::marker::Send for sonicterm_types::traits::clipboard::ClipboardError
+impl core::marker::Sync for sonicterm_types::traits::clipboard::ClipboardError
+impl core::marker::Unpin for sonicterm_types::traits::clipboard::ClipboardError
+impl core::marker::UnsafeUnpin for sonicterm_types::traits::clipboard::ClipboardError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::clipboard::ClipboardError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::clipboard::ClipboardError
+pub trait sonicterm_types::traits::clipboard::ClipboardBackend: core::marker::Send
+pub fn sonicterm_types::traits::clipboard::ClipboardBackend::get_text(&mut self) -> core::option::Option<alloc::string::String>
+pub fn sonicterm_types::traits::clipboard::ClipboardBackend::set_text(&mut self, &str) -> core::result::Result<(), sonicterm_types::traits::clipboard::ClipboardError>
+pub mod sonicterm_types::traits::painter
+pub enum sonicterm_types::traits::painter::PaintError
+pub sonicterm_types::traits::painter::PaintError::Other(alloc::string::String)
+pub sonicterm_types::traits::painter::PaintError::OutOfMemory
+pub sonicterm_types::traits::painter::PaintError::SurfaceLost
+impl core::fmt::Debug for sonicterm_types::traits::painter::PaintError
+pub fn sonicterm_types::traits::painter::PaintError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::traits::painter::PaintError
+impl core::marker::Send for sonicterm_types::traits::painter::PaintError
+impl core::marker::Sync for sonicterm_types::traits::painter::PaintError
+impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
+impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
+pub trait sonicterm_types::traits::painter::FrameLike
+pub fn sonicterm_types::traits::painter::FrameLike::cols(&self) -> u32
+pub fn sonicterm_types::traits::painter::FrameLike::rows(&self) -> u32
+pub trait sonicterm_types::traits::painter::Painter: core::marker::Send
+pub fn sonicterm_types::traits::painter::Painter::paint_frame(&mut self, &dyn sonicterm_types::traits::painter::FrameLike) -> core::result::Result<(), sonicterm_types::traits::painter::PaintError>
+pub fn sonicterm_types::traits::painter::Painter::resize_surface(&mut self, u32, u32)
+pub mod sonicterm_types::traits::pty
+pub trait sonicterm_types::traits::pty::PtyTransport: core::marker::Send
+pub fn sonicterm_types::traits::pty::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::traits::pty::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
+pub fn sonicterm_types::traits::pty::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::traits::pty::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub mod sonicterm_types::traits::window
+pub trait sonicterm_types::traits::window::WindowBackend: core::marker::Send
+pub fn sonicterm_types::traits::window::WindowBackend::inner_size_px(&self) -> (u32, u32)
+pub fn sonicterm_types::traits::window::WindowBackend::request_redraw(&self)
+pub fn sonicterm_types::traits::window::WindowBackend::scale_factor(&self) -> f64
+pub fn sonicterm_types::traits::window::WindowBackend::set_title(&self, &str)
+pub enum sonicterm_types::traits::PaintError
+pub sonicterm_types::traits::PaintError::Other(alloc::string::String)
+pub sonicterm_types::traits::PaintError::OutOfMemory
+pub sonicterm_types::traits::PaintError::SurfaceLost
+impl core::fmt::Debug for sonicterm_types::traits::painter::PaintError
+pub fn sonicterm_types::traits::painter::PaintError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::traits::painter::PaintError
+impl core::marker::Send for sonicterm_types::traits::painter::PaintError
+impl core::marker::Sync for sonicterm_types::traits::painter::PaintError
+impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
+impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
+pub trait sonicterm_types::traits::ClipboardBackend: core::marker::Send
+pub fn sonicterm_types::traits::ClipboardBackend::get_text(&mut self) -> core::option::Option<alloc::string::String>
+pub fn sonicterm_types::traits::ClipboardBackend::set_text(&mut self, &str) -> core::result::Result<(), sonicterm_types::traits::clipboard::ClipboardError>
+pub trait sonicterm_types::traits::FrameLike
+pub fn sonicterm_types::traits::FrameLike::cols(&self) -> u32
+pub fn sonicterm_types::traits::FrameLike::rows(&self) -> u32
+pub trait sonicterm_types::traits::Painter: core::marker::Send
+pub fn sonicterm_types::traits::Painter::paint_frame(&mut self, &dyn sonicterm_types::traits::painter::FrameLike) -> core::result::Result<(), sonicterm_types::traits::painter::PaintError>
+pub fn sonicterm_types::traits::Painter::resize_surface(&mut self, u32, u32)
+pub trait sonicterm_types::traits::PtyTransport: core::marker::Send
+pub fn sonicterm_types::traits::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::traits::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
+pub fn sonicterm_types::traits::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::traits::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub trait sonicterm_types::traits::WindowBackend: core::marker::Send
+pub fn sonicterm_types::traits::WindowBackend::inner_size_px(&self) -> (u32, u32)
+pub fn sonicterm_types::traits::WindowBackend::request_redraw(&self)
+pub fn sonicterm_types::traits::WindowBackend::scale_factor(&self) -> f64
+pub fn sonicterm_types::traits::WindowBackend::set_title(&self, &str)
+pub enum sonicterm_types::Action
+pub sonicterm_types::Action::ActivateLastTab
+pub sonicterm_types::Action::ActivateTab(usize)
+pub sonicterm_types::Action::ApplyTheme(alloc::string::String)
+pub sonicterm_types::Action::CloseActivePaneOrTab
+pub sonicterm_types::Action::ClosePane
+pub sonicterm_types::Action::CloseTab
+pub sonicterm_types::Action::CopyToClipboard
+pub sonicterm_types::Action::DecreaseFontSize
+pub sonicterm_types::Action::EditConfigFile
+pub sonicterm_types::Action::EnterCopyMode
+pub sonicterm_types::Action::EnterQuickSelect
+pub sonicterm_types::Action::FocusPane(sonicterm_types::action::Direction)
+pub sonicterm_types::Action::IncreaseFontSize
+pub sonicterm_types::Action::NewTab
+pub sonicterm_types::Action::NewWindow
+pub sonicterm_types::Action::NextTab
+pub sonicterm_types::Action::OpenCommandPalette
+pub sonicterm_types::Action::OpenKeymapFile
+pub sonicterm_types::Action::OpenSearch
+pub sonicterm_types::Action::OpenSshPane(alloc::string::String)
+pub sonicterm_types::Action::PasteFromClipboard
+pub sonicterm_types::Action::PrevTab
+pub sonicterm_types::Action::ReloadConfig
+pub sonicterm_types::Action::ResetFontSize
+pub sonicterm_types::Action::ResizePane
+pub sonicterm_types::Action::ResizePane::amount: u16
+pub sonicterm_types::Action::ResizePane::dir: sonicterm_types::action::Direction
+pub sonicterm_types::Action::ResizePaneDown
+pub sonicterm_types::Action::ResizePaneLeft
+pub sonicterm_types::Action::ResizePaneRight
+pub sonicterm_types::Action::ResizePaneUp
+pub sonicterm_types::Action::Scroll(sonicterm_types::action::ScrollAction)
+pub sonicterm_types::Action::ScrollToNextPrompt
+pub sonicterm_types::Action::ScrollToPrevPrompt
+pub sonicterm_types::Action::ShowKeymapCheatsheet
+pub sonicterm_types::Action::SplitDown
+pub sonicterm_types::Action::SplitRight
+pub sonicterm_types::Action::ToggleBroadcast
+pub sonicterm_types::Action::ToggleBroadcast::scope: sonicterm_types::action::BroadcastScope
+pub sonicterm_types::Action::ToggleFullscreen
+pub sonicterm_types::Action::TogglePaneZoom
+pub sonicterm_types::Action::ToggleTabBar
+impl core::clone::Clone for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::clone(&self) -> sonicterm_types::action::Action
+impl core::cmp::Eq for sonicterm_types::action::Action
+impl core::cmp::PartialEq for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::eq(&self, &sonicterm_types::action::Action) -> bool
+impl core::fmt::Debug for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::action::Action
+impl serde_core::ser::Serialize for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::Action
+pub fn sonicterm_types::action::Action::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::Action
+impl core::marker::Send for sonicterm_types::action::Action
+impl core::marker::Sync for sonicterm_types::action::Action
+impl core::marker::Unpin for sonicterm_types::action::Action
+impl core::marker::UnsafeUnpin for sonicterm_types::action::Action
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Action
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Action
+pub enum sonicterm_types::BroadcastScope
+pub sonicterm_types::BroadcastScope::AllTabs
+pub sonicterm_types::BroadcastScope::Tab
+impl core::clone::Clone for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::clone(&self) -> sonicterm_types::action::BroadcastScope
+impl core::cmp::Eq for sonicterm_types::action::BroadcastScope
+impl core::cmp::PartialEq for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::eq(&self, &sonicterm_types::action::BroadcastScope) -> bool
+impl core::fmt::Debug for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::BroadcastScope
+impl core::marker::StructuralPartialEq for sonicterm_types::action::BroadcastScope
+impl serde_core::ser::Serialize for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::BroadcastScope
+pub fn sonicterm_types::action::BroadcastScope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::BroadcastScope
+impl core::marker::Send for sonicterm_types::action::BroadcastScope
+impl core::marker::Sync for sonicterm_types::action::BroadcastScope
+impl core::marker::Unpin for sonicterm_types::action::BroadcastScope
+impl core::marker::UnsafeUnpin for sonicterm_types::action::BroadcastScope
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::BroadcastScope
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::BroadcastScope
+pub enum sonicterm_types::Color
+pub sonicterm_types::Color::Default
+pub sonicterm_types::Color::Indexed(u8)
+pub sonicterm_types::Color::Rgb(u8, u8, u8)
+impl core::clone::Clone for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::clone(&self) -> sonicterm_types::cell::Color
+impl core::cmp::Eq for sonicterm_types::cell::Color
+impl core::cmp::PartialEq for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::eq(&self, &sonicterm_types::cell::Color) -> bool
+impl core::default::Default for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::default() -> sonicterm_types::cell::Color
+impl core::fmt::Debug for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::cell::Color
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::Color
+impl serde_core::ser::Serialize for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::Color
+pub fn sonicterm_types::cell::Color::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::cell::Color
+impl core::marker::Send for sonicterm_types::cell::Color
+impl core::marker::Sync for sonicterm_types::cell::Color
+impl core::marker::Unpin for sonicterm_types::cell::Color
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::Color
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::Color
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::Color
+pub enum sonicterm_types::Direction
+pub sonicterm_types::Direction::Down
+pub sonicterm_types::Direction::Left
+pub sonicterm_types::Direction::Right
+pub sonicterm_types::Direction::Up
+impl core::clone::Clone for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::clone(&self) -> sonicterm_types::action::Direction
+impl core::cmp::Eq for sonicterm_types::action::Direction
+impl core::cmp::PartialEq for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::eq(&self, &sonicterm_types::action::Direction) -> bool
+impl core::fmt::Debug for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::Direction
+impl core::marker::StructuralPartialEq for sonicterm_types::action::Direction
+impl serde_core::ser::Serialize for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::Direction
+pub fn sonicterm_types::action::Direction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::Direction
+impl core::marker::Send for sonicterm_types::action::Direction
+impl core::marker::Sync for sonicterm_types::action::Direction
+impl core::marker::Unpin for sonicterm_types::action::Direction
+impl core::marker::UnsafeUnpin for sonicterm_types::action::Direction
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Direction
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Direction
+pub enum sonicterm_types::PaintError
+pub sonicterm_types::PaintError::Other(alloc::string::String)
+pub sonicterm_types::PaintError::OutOfMemory
+pub sonicterm_types::PaintError::SurfaceLost
+impl core::fmt::Debug for sonicterm_types::traits::painter::PaintError
+pub fn sonicterm_types::traits::painter::PaintError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::traits::painter::PaintError
+impl core::marker::Send for sonicterm_types::traits::painter::PaintError
+impl core::marker::Sync for sonicterm_types::traits::painter::PaintError
+impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
+impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
+pub enum sonicterm_types::ScrollAction
+pub sonicterm_types::ScrollAction::LineDown
+pub sonicterm_types::ScrollAction::LineUp
+pub sonicterm_types::ScrollAction::PageDown
+pub sonicterm_types::ScrollAction::PageUp
+pub sonicterm_types::ScrollAction::ToBottom
+pub sonicterm_types::ScrollAction::ToTop
+impl core::clone::Clone for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::clone(&self) -> sonicterm_types::action::ScrollAction
+impl core::cmp::Eq for sonicterm_types::action::ScrollAction
+impl core::cmp::PartialEq for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::eq(&self, &sonicterm_types::action::ScrollAction) -> bool
+impl core::fmt::Debug for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::action::ScrollAction
+impl core::marker::StructuralPartialEq for sonicterm_types::action::ScrollAction
+impl serde_core::ser::Serialize for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::action::ScrollAction
+pub fn sonicterm_types::action::ScrollAction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::action::ScrollAction
+impl core::marker::Send for sonicterm_types::action::ScrollAction
+impl core::marker::Sync for sonicterm_types::action::ScrollAction
+impl core::marker::Unpin for sonicterm_types::action::ScrollAction
+impl core::marker::UnsafeUnpin for sonicterm_types::action::ScrollAction
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::ScrollAction
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::ScrollAction
+pub struct sonicterm_types::Cell
+pub sonicterm_types::Cell::bg: sonicterm_types::cell::Color
+pub sonicterm_types::Cell::ch: char
+pub sonicterm_types::Cell::fg: sonicterm_types::cell::Color
+pub sonicterm_types::Cell::flags: sonicterm_types::cell::CellFlags
+impl sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::extras(&self) -> core::option::Option<&str>
+pub fn sonicterm_types::cell::Cell::hyperlink(&self) -> core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+pub fn sonicterm_types::cell::Cell::plain(char, sonicterm_types::cell::Color, sonicterm_types::cell::Color, sonicterm_types::cell::CellFlags) -> Self
+pub fn sonicterm_types::cell::Cell::set_extras(&mut self, core::option::Option<alloc::boxed::Box<str>>)
+pub fn sonicterm_types::cell::Cell::set_hyperlink(&mut self, core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>)
+pub fn sonicterm_types::cell::Cell::take_extras(&mut self) -> core::option::Option<alloc::boxed::Box<str>>
+impl core::clone::Clone for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::clone(&self) -> sonicterm_types::cell::Cell
+impl core::cmp::Eq for sonicterm_types::cell::Cell
+impl core::cmp::PartialEq for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::eq(&self, &sonicterm_types::cell::Cell) -> bool
+impl core::default::Default for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::default() -> Self
+impl core::fmt::Debug for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::Cell
+impl serde_core::ser::Serialize for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::serialize<S: serde_core::ser::Serializer>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::Cell
+pub fn sonicterm_types::cell::Cell::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for sonicterm_types::cell::Cell
+impl core::marker::Send for sonicterm_types::cell::Cell
+impl core::marker::Sync for sonicterm_types::cell::Cell
+impl core::marker::Unpin for sonicterm_types::cell::Cell
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::Cell
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::Cell
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::Cell
+pub struct sonicterm_types::CellFlags(_)
+impl sonicterm_types::cell::CellFlags
+pub const sonicterm_types::cell::CellFlags::BLINK: Self
+pub const sonicterm_types::cell::CellFlags::BOLD: Self
+pub const sonicterm_types::cell::CellFlags::DIM: Self
+pub const sonicterm_types::cell::CellFlags::HIDDEN: Self
+pub const sonicterm_types::cell::CellFlags::INVERSE: Self
+pub const sonicterm_types::cell::CellFlags::ITALIC: Self
+pub const sonicterm_types::cell::CellFlags::STRIKETHROUGH: Self
+pub const sonicterm_types::cell::CellFlags::UNDERLINE: Self
+pub const sonicterm_types::cell::CellFlags::WIDE: Self
+pub const sonicterm_types::cell::CellFlags::WIDE_CONT: Self
+impl sonicterm_types::cell::CellFlags
+pub const fn sonicterm_types::cell::CellFlags::all() -> Self
+pub const fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
+pub const fn sonicterm_types::cell::CellFlags::complement(self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::contains(&self, Self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::difference(self, Self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::empty() -> Self
+pub const fn sonicterm_types::cell::CellFlags::from_bits(u16) -> core::option::Option<Self>
+pub const fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> Self
+pub const fn sonicterm_types::cell::CellFlags::from_bits_truncate(u16) -> Self
+pub fn sonicterm_types::cell::CellFlags::from_name(&str) -> core::option::Option<Self>
+pub fn sonicterm_types::cell::CellFlags::insert(&mut self, Self)
+pub const fn sonicterm_types::cell::CellFlags::intersection(self, Self) -> Self
+pub const fn sonicterm_types::cell::CellFlags::intersects(&self, Self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::is_all(&self) -> bool
+pub const fn sonicterm_types::cell::CellFlags::is_empty(&self) -> bool
+pub fn sonicterm_types::cell::CellFlags::remove(&mut self, Self)
+pub fn sonicterm_types::cell::CellFlags::set(&mut self, Self, bool)
+pub const fn sonicterm_types::cell::CellFlags::symmetric_difference(self, Self) -> Self
+pub fn sonicterm_types::cell::CellFlags::toggle(&mut self, Self)
+pub const fn sonicterm_types::cell::CellFlags::union(self, Self) -> Self
+impl sonicterm_types::cell::CellFlags
+pub const fn sonicterm_types::cell::CellFlags::iter(&self) -> bitflags::iter::Iter<sonicterm_types::cell::CellFlags>
+pub const fn sonicterm_types::cell::CellFlags::iter_names(&self) -> bitflags::iter::IterNames<sonicterm_types::cell::CellFlags>
+impl bitflags::traits::Flags for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Bits = u16
+pub const sonicterm_types::cell::CellFlags::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::cell::CellFlags>]
+pub fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
+pub fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> sonicterm_types::cell::CellFlags
+impl bitflags::traits::PublicFlags for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Internal = InternalBitFlags
+pub type sonicterm_types::cell::CellFlags::Primitive = u16
+impl core::clone::Clone for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::clone(&self) -> sonicterm_types::cell::CellFlags
+impl core::cmp::Eq for sonicterm_types::cell::CellFlags
+impl core::cmp::PartialEq for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::eq(&self, &sonicterm_types::cell::CellFlags) -> bool
+impl core::default::Default for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::default() -> sonicterm_types::cell::CellFlags
+impl core::fmt::Binary for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Debug for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::LowerHex for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Octal for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::UpperHex for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::iter::traits::collect::Extend<sonicterm_types::cell::CellFlags> for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::extend<T: core::iter::traits::collect::IntoIterator<Item = Self>>(&mut self, T)
+impl core::iter::traits::collect::FromIterator<sonicterm_types::cell::CellFlags> for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::from_iter<T: core::iter::traits::collect::IntoIterator<Item = Self>>(T) -> Self
+impl core::iter::traits::collect::IntoIterator for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::IntoIter = bitflags::iter::Iter<sonicterm_types::cell::CellFlags>
+pub type sonicterm_types::cell::CellFlags::Item = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::into_iter(self) -> Self::IntoIter
+impl core::marker::Copy for sonicterm_types::cell::CellFlags
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::CellFlags
+impl core::ops::arith::Sub for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::sub(self, Self) -> Self
+impl core::ops::arith::SubAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::sub_assign(&mut self, Self)
+impl core::ops::bit::BitAnd for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitand(self, Self) -> Self
+impl core::ops::bit::BitAndAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitand_assign(&mut self, Self)
+impl core::ops::bit::BitOr for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitor(self, sonicterm_types::cell::CellFlags) -> Self
+impl core::ops::bit::BitOrAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitor_assign(&mut self, Self)
+impl core::ops::bit::BitXor for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitxor(self, Self) -> Self
+impl core::ops::bit::BitXorAssign for sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::bitxor_assign(&mut self, Self)
+impl core::ops::bit::Not for sonicterm_types::cell::CellFlags
+pub type sonicterm_types::cell::CellFlags::Output = sonicterm_types::cell::CellFlags
+pub fn sonicterm_types::cell::CellFlags::not(self) -> Self
+impl core::marker::Freeze for sonicterm_types::cell::CellFlags
+impl core::marker::Send for sonicterm_types::cell::CellFlags
+impl core::marker::Sync for sonicterm_types::cell::CellFlags
+impl core::marker::Unpin for sonicterm_types::cell::CellFlags
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::CellFlags
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::CellFlags
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::CellFlags
+pub struct sonicterm_types::FatAttributes
+pub sonicterm_types::FatAttributes::extras: core::option::Option<alloc::boxed::Box<str>>
+pub sonicterm_types::FatAttributes::hyperlink: core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+impl sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::is_empty(&self) -> bool
+impl core::clone::Clone for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::clone(&self) -> sonicterm_types::cell::FatAttributes
+impl core::cmp::Eq for sonicterm_types::cell::FatAttributes
+impl core::cmp::PartialEq for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::eq(&self, &sonicterm_types::cell::FatAttributes) -> bool
+impl core::default::Default for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::default() -> sonicterm_types::cell::FatAttributes
+impl core::fmt::Debug for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::FatAttributes
+pub fn sonicterm_types::cell::FatAttributes::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::FatAttributes
+impl core::marker::Freeze for sonicterm_types::cell::FatAttributes
+impl core::marker::Send for sonicterm_types::cell::FatAttributes
+impl core::marker::Sync for sonicterm_types::cell::FatAttributes
+impl core::marker::Unpin for sonicterm_types::cell::FatAttributes
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::FatAttributes
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::FatAttributes
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::FatAttributes
+pub struct sonicterm_types::GlyphKey
+pub sonicterm_types::GlyphKey::ch: char
+pub sonicterm_types::GlyphKey::font_slot: u8
+pub sonicterm_types::GlyphKey::glyph_id: u16
+pub sonicterm_types::GlyphKey::italic: bool
+pub sonicterm_types::GlyphKey::weight_bold: bool
+impl sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
+pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u16, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
+impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::clone(&self) -> sonicterm_types::glyph_key::GlyphKey
+impl core::cmp::Eq for sonicterm_types::glyph_key::GlyphKey
+impl core::cmp::PartialEq for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::eq(&self, &sonicterm_types::glyph_key::GlyphKey) -> bool
+impl core::fmt::Debug for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::glyph_key::GlyphKey
+pub fn sonicterm_types::glyph_key::GlyphKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::StructuralPartialEq for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Freeze for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Send for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Sync for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::Unpin for sonicterm_types::glyph_key::GlyphKey
+impl core::marker::UnsafeUnpin for sonicterm_types::glyph_key::GlyphKey
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::glyph_key::GlyphKey
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::glyph_key::GlyphKey
+pub struct sonicterm_types::HyperlinkId(pub u64)
+impl sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::next() -> Self
+impl core::clone::Clone for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::clone(&self) -> sonicterm_types::hyperlink_id::HyperlinkId
+impl core::cmp::Eq for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::cmp::PartialEq for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::eq(&self, &sonicterm_types::hyperlink_id::HyperlinkId) -> bool
+impl core::fmt::Debug for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::StructuralPartialEq for sonicterm_types::hyperlink_id::HyperlinkId
+impl serde_core::ser::Serialize for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::hyperlink_id::HyperlinkId
+pub fn sonicterm_types::hyperlink_id::HyperlinkId::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Send for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Sync for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub struct sonicterm_types::Pos
+pub sonicterm_types::Pos::col: u16
+pub sonicterm_types::Pos::row: u16
+impl core::clone::Clone for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::clone(&self) -> sonicterm_types::geom::Pos
+impl core::cmp::Eq for sonicterm_types::geom::Pos
+impl core::cmp::PartialEq for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::eq(&self, &sonicterm_types::geom::Pos) -> bool
+impl core::default::Default for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::default() -> sonicterm_types::geom::Pos
+impl core::fmt::Debug for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::geom::Pos
+pub fn sonicterm_types::geom::Pos::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::geom::Pos
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::Pos
+impl core::marker::Freeze for sonicterm_types::geom::Pos
+impl core::marker::Send for sonicterm_types::geom::Pos
+impl core::marker::Sync for sonicterm_types::geom::Pos
+impl core::marker::Unpin for sonicterm_types::geom::Pos
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub trait sonicterm_types::ClipboardBackend: core::marker::Send
+pub fn sonicterm_types::ClipboardBackend::get_text(&mut self) -> core::option::Option<alloc::string::String>
+pub fn sonicterm_types::ClipboardBackend::set_text(&mut self, &str) -> core::result::Result<(), sonicterm_types::traits::clipboard::ClipboardError>
+pub trait sonicterm_types::FrameLike
+pub fn sonicterm_types::FrameLike::cols(&self) -> u32
+pub fn sonicterm_types::FrameLike::rows(&self) -> u32
+pub trait sonicterm_types::Painter: core::marker::Send
+pub fn sonicterm_types::Painter::paint_frame(&mut self, &dyn sonicterm_types::traits::painter::FrameLike) -> core::result::Result<(), sonicterm_types::traits::painter::PaintError>
+pub fn sonicterm_types::Painter::resize_surface(&mut self, u32, u32)
+pub trait sonicterm_types::PtyTransport: core::marker::Send
+pub fn sonicterm_types::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
+pub fn sonicterm_types::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub trait sonicterm_types::WindowBackend: core::marker::Send
+pub fn sonicterm_types::WindowBackend::inner_size_px(&self) -> (u32, u32)
+pub fn sonicterm_types::WindowBackend::request_redraw(&self)
+pub fn sonicterm_types::WindowBackend::scale_factor(&self) -> f64
+pub fn sonicterm_types::WindowBackend::set_title(&self, &str)
