@@ -52,10 +52,8 @@ fn collect_pub_traits(dir: &Path, traits: &mut Vec<String>) {
             }
             // matches: `pub trait Foo`, `pub(crate) trait` is excluded
             if let Some(rest) = trimmed.strip_prefix("pub trait ") {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
+                let name: String =
+                    rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 if !name.is_empty() {
                     traits.push(name);
                 }

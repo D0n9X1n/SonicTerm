@@ -1,6 +1,6 @@
 //! Contract: `ClipboardBackend` must be object-safe and Send.
 
-use sonicterm_types::{ClipboardBackend, traits::clipboard::ClipboardError};
+use sonicterm_types::{traits::clipboard::ClipboardError, ClipboardBackend};
 
 #[test]
 fn clipboard_backend_is_object_safe_and_send() {

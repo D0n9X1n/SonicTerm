@@ -4582,6 +4582,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonicterm-app-core"
+version = "0.3.0"
+dependencies = [
+ "sonicterm-types",
+]
+
+[[package]]
 name = "sonicterm-cfg"
 version = "0.3.0"
 dependencies = [
