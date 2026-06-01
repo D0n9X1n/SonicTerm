@@ -90,9 +90,10 @@ pub struct KeyCode(pub u32);
 // ── Broadcast / palette / drag ──────────────────────────────────────
 
 /// Scope of broadcast-input multiplexing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum BroadcastScope {
     /// Broadcast disabled.
+    #[default]
     Off,
     /// Broadcast to every pane in the current tab.
     CurrentTab,

@@ -330,12 +330,18 @@ pub(crate) fn reduce_leaf(
             }
         }
         AppIntent::TearOutTab { src_window, src_tab } => {
-            // Source window loses one tab. The destination NewWindow
-            // + NewTab cascade lands as separate dispatch_intent
-            // calls from the os_drag boundary.
+            // Source window loses one tab; a fresh top-level window
+            // is opened to host it. The boundary's `tear_out_tab`
+            // path then re-issues a `NewTab` Intent on the new
+            // window once winit has returned its WindowId.
+            //
+            // 2c-misc: emit the WindowOpen cascade in the same batch
+            // so consumers observe both halves of the tear-out in a
+            // single `handle()` call. (The reducer currently lacks
+            // access to the state-machine's `pending` queue; using
+            // the `out` batch keeps the contract observable without
+            // changing the reducer signature.)
             _state.tab_count = _state.tab_count.saturating_sub(1);
-            // Adjust active_tab_idx the same way CloseTab does — the
-            // tab effectively leaves the strip.
             match _state.active_tab_idx {
                 Some(cur) if cur == src_tab => {
                     _state.active_tab_idx =
@@ -346,7 +352,12 @@ pub(crate) fn reduce_leaf(
                 }
                 _ => {}
             }
+            _state.live_window_count = _state.live_window_count.saturating_add(1);
             out.push(AppEffect::Render { window: src_window, reason: RedrawReason::TabRemoved });
+            out.push(AppEffect::WindowOpen {
+                role: crate::supporting::WindowRole::Child,
+                initial_size: None,
+            });
         }
 
         // ── Pane lifecycle / navigation (M6a-expand-2c-pane) ────────
@@ -470,24 +481,127 @@ pub(crate) fn reduce_leaf(
         }
 
         // ── Non-leaf — stubs (full reducer arms land in 2c-misc) ────
-        AppIntent::ForegroundProcChanged { .. }
-        | AppIntent::SelectionStart { .. }
-        | AppIntent::SelectionExtend { .. }
-        | AppIntent::SelectionEnd { .. }
-        | AppIntent::ClearSelection { .. }
-        | AppIntent::OpenSearch { .. }
-        | AppIntent::SearchQuery { .. }
-        | AppIntent::SearchStep { .. }
-        | AppIntent::CloseSearch { .. }
-        | AppIntent::ToggleCommandPalette { .. }
-        | AppIntent::PaletteFilter { .. }
-        | AppIntent::PaletteStep { .. }
-        | AppIntent::PaletteSubmit { .. }
-        | AppIntent::OsDragOutcome(_)
-        | AppIntent::FilesDropped { .. }
-        | AppIntent::SetBroadcastScope { .. }
-        | AppIntent::Tick { .. } => {
-            // Intentionally empty. M6a-expand-2c.
+        AppIntent::FilesDropped { .. } | AppIntent::Tick { .. } => {
+            // Intentionally empty per spec §3 (record-only / clock-only).
+        }
+
+        // ── ForegroundProcChanged (M6a-expand-2c-misc) ──────────────
+        //
+        // Per FINAL spec §3: emits Render(TitleOrTab) when the
+        // process name actually changed (transition-guarded like
+        // WindowFocused). The boundary's per-pane proc snapshot
+        // remains source-of-truth.
+        AppIntent::ForegroundProcChanged { pane: _, name } => {
+            if _state.fg_proc_name != name {
+                _state.fg_proc_name = name;
+                out.push(AppEffect::Render {
+                    window: sonicterm_types::WindowKey::new(0),
+                    reason: RedrawReason::TitleOrTab,
+                });
+            }
+        }
+
+        // ── Selection (M6a-expand-2c-misc) ──────────────────────────
+        //
+        // Per FINAL spec §3: every selection mutation emits
+        // Render(Selection). Start/End/Clear additionally flip
+        // `selection_active`. Extend always emits while a selection
+        // is active (drag-extend repaint gate).
+        AppIntent::SelectionStart { window, anchor: _, mode: _ } => {
+            _state.selection_active = true;
+            out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
+        }
+        AppIntent::SelectionExtend { window, to: _ } => {
+            if _state.selection_active {
+                out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
+            }
+        }
+        AppIntent::SelectionEnd { window } => {
+            if _state.selection_active {
+                _state.selection_active = false;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
+            }
+        }
+        AppIntent::ClearSelection { window } => {
+            if _state.selection_active {
+                _state.selection_active = false;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
+            }
+        }
+
+        // ── Search overlay (M6a-expand-2c-misc) ─────────────────────
+        //
+        // Per FINAL spec §3: Open/Close are transition-guarded
+        // (Render(Overlay) only on the actual open/close). Query
+        // and Step always emit while the overlay is open
+        // (search-result repaint gate).
+        AppIntent::OpenSearch { window } => {
+            if !_state.search_open {
+                _state.search_open = true;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+            }
+        }
+        AppIntent::CloseSearch { window } => {
+            if _state.search_open {
+                _state.search_open = false;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+            }
+        }
+        AppIntent::SearchQuery { window, q: _ } | AppIntent::SearchStep { window, forward: _ } => {
+            if _state.search_open {
+                out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+            }
+        }
+
+        // ── Command palette (M6a-expand-2c-misc) ────────────────────
+        //
+        // Per FINAL spec §3: Toggle flips `palette_open` and emits
+        // Render(Overlay) on every transition. Filter/Step emit
+        // while open. Submit closes the palette (emits Overlay) and
+        // the cascaded Intent the choice translates to lands as a
+        // separate dispatch_intent from the boundary's palette
+        // handler (see overlays.rs).
+        AppIntent::ToggleCommandPalette { window } => {
+            _state.palette_open = !_state.palette_open;
+            out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+        }
+        AppIntent::PaletteFilter { window, filter: _ }
+        | AppIntent::PaletteStep { window, delta: _ } => {
+            if _state.palette_open {
+                out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+            }
+        }
+        AppIntent::PaletteSubmit { window, choice: _ } => {
+            if _state.palette_open {
+                _state.palette_open = false;
+                out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
+            }
+        }
+
+        // ── OS drag outcome (M6a-expand-2c-misc) ────────────────────
+        //
+        // The drag completes (committed or not). Emit `OsDragEnd`
+        // so the boundary's pending-drag table can settle.
+        AppIntent::OsDragOutcome(outcome) => {
+            out.push(AppEffect::OsDragEnd {
+                src_window: outcome.src_window,
+                committed: outcome.committed,
+            });
+        }
+
+        // ── Broadcast scope (M6a-expand-2c-misc) ────────────────────
+        //
+        // Per FINAL spec §3: changing scope re-paints the title /
+        // tab strip (broadcast indicator glyph). Transition-guarded
+        // — no-op set emits nothing.
+        AppIntent::SetBroadcastScope { scope } => {
+            if _state.broadcast_scope != scope {
+                _state.broadcast_scope = scope;
+                out.push(AppEffect::Render {
+                    window: sonicterm_types::WindowKey::new(0),
+                    reason: RedrawReason::TitleOrTab,
+                });
+            }
         }
     }
 }

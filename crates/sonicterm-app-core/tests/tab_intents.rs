@@ -147,8 +147,11 @@ fn tear_out_tab_decrements_source_count_and_emits_removed() {
     assert_eq!(m.state().active_tab_idx, Some(1));
 
     let out = m.handle(AppIntent::TearOutTab { src_window: wk(1), src_tab: 1 });
-    assert_eq!(out.len(), 1);
+    // 2c-misc: cascade now emits Render(TabRemoved) + WindowOpen
+    // (the destination window for the torn-out tab).
+    assert_eq!(out.len(), 2);
     assert_render(&out[0], wk(1), RedrawReason::TabRemoved);
+    assert!(matches!(out[1], sonicterm_app_core::AppEffect::WindowOpen { .. }));
     assert_eq!(m.state().tab_count, 1);
     // Active was 1 (the torn-out one); reducer clamps down to 0.
     assert_eq!(m.state().active_tab_idx, Some(0));

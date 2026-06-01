@@ -2,11 +2,14 @@
 //! `AppIntent` variants compiles into the enum and that
 //! `AppStateMachine::handle` accepts each variant without panicking.
 //!
-//! **M6a-expand-2b** (THIS PR): the leaf reducer now emits Effects for
-//! the routed Intent classes (PTY / Key / IME / clipboard / scroll /
-//! mouse-wheel / hyperlink / config / redraw / exit). Non-leaf
-//! variants (window / tab / pane lifecycle, selection, search,
-//! palette, broadcast, OS drag) still return empty pending 2c.
+//! **M6a-expand-2c-misc** (THIS PR): every remaining stub is now
+//! routed. The remaining `stub_test!` entries assert the
+//! transition-guard behaviour (e.g. SelectionExtend without an
+//! active selection is a no-op — same shape as WindowBlurred without
+//! a prior Focused). FilesDropped + Tick stay as stubs by spec §3
+//! (record-only / clock-only). Routed variants are exercised both
+//! here AND in their per-class focused test files
+//! (`misc_intents.rs`, `tab_intents.rs`, etc.).
 //!
 //! Variant count enforced: 63.
 
@@ -134,6 +137,10 @@ routed_test!(
     AppIntent::PtyWrite { pane: pane(), bytes: Bytes::from_static(b"hi") }
 );
 stub_test!(
+    intent_23_foreground_proc_changed_noop,
+    AppIntent::ForegroundProcChanged { pane: pane(), name: None }
+);
+routed_test!(
     intent_23_foreground_proc_changed,
     AppIntent::ForegroundProcChanged { pane: pane(), name: Some("bash".into()) }
 );
@@ -195,8 +202,10 @@ routed_test!(intent_37_scroll_to_top, AppIntent::ScrollToTop { window: wk() });
 routed_test!(intent_38_scroll_to_bottom, AppIntent::ScrollToBottom { window: wk() });
 routed_test!(intent_39_scroll_to_cursor, AppIntent::ScrollToCursor { window: wk() });
 
-// 40..45 Selection / clipboard (44, 45 routed; rest stubs)
-stub_test!(
+// 40..45 Selection / clipboard (all routed; Extend/End/Clear are
+// transition-guarded — fresh state with no active selection is a
+// no-op for those, same shape as WindowBlurred without a Focused.)
+routed_test!(
     intent_40_selection_start,
     AppIntent::SelectionStart { window: wk(), anchor: cellpos(), mode: SelectionMode::Cell }
 );
@@ -209,14 +218,15 @@ routed_test!(
     AppIntent::Paste { window: wk(), text: "hi".into(), bracketed: true }
 );
 
-// 46..49 Search (stub)
-stub_test!(intent_46_open_search, AppIntent::OpenSearch { window: wk() });
+// 46..49 Search (routed; Query/Step transition-guarded — fresh
+// state with overlay closed is a no-op for those)
+routed_test!(intent_46_open_search, AppIntent::OpenSearch { window: wk() });
 stub_test!(intent_47_search_query, AppIntent::SearchQuery { window: wk(), q: "needle".into() });
 stub_test!(intent_48_search_step, AppIntent::SearchStep { window: wk(), forward: true });
 stub_test!(intent_49_close_search, AppIntent::CloseSearch { window: wk() });
 
-// 50..53 Palette (stub)
-stub_test!(intent_50_toggle_command_palette, AppIntent::ToggleCommandPalette { window: wk() });
+// 50..53 Palette (routed; Filter/Step/Submit guarded against closed)
+routed_test!(intent_50_toggle_command_palette, AppIntent::ToggleCommandPalette { window: wk() });
 stub_test!(intent_51_palette_filter, AppIntent::PaletteFilter { window: wk(), filter: "x".into() });
 stub_test!(intent_52_palette_step, AppIntent::PaletteStep { window: wk(), delta: 1 });
 stub_test!(
@@ -224,8 +234,8 @@ stub_test!(
     AppIntent::PaletteSubmit { window: wk(), choice: PaletteChoice { id: "new_tab".into() } }
 );
 
-// 54..55 OS drag / drop (stub)
-stub_test!(
+// 54..55 OS drag / drop (54 routed; 55 record-only per spec §3)
+routed_test!(
     intent_54_os_drag_outcome,
     AppIntent::OsDragOutcome(PendingDragOutcomeCore { src_window: wk(), committed: false })
 );
@@ -245,12 +255,12 @@ routed_test!(
 routed_test!(intent_58_apply_theme, AppIntent::ApplyTheme { name: "Tokyo Night".into() });
 routed_test!(intent_59_font_size_delta, AppIntent::FontSizeDelta { delta: 1 });
 
-// 60 Broadcast (stub)
+// 60 Broadcast (routed; Off→Off no-op is a stub)
 stub_test!(
     intent_60_set_broadcast_scope,
     AppIntent::SetBroadcastScope { scope: BroadcastScope::Off }
 );
-stub_test!(
+routed_test!(
     intent_60_set_broadcast_scope_custom,
     AppIntent::SetBroadcastScope { scope: BroadcastScope::Custom(vec![pane()]) }
 );

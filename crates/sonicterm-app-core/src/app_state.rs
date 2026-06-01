@@ -5,7 +5,7 @@
 
 use sonicterm_types::WindowKey;
 
-use crate::supporting::LogicalPos;
+use crate::supporting::{BroadcastScope, LogicalPos};
 
 /// Pure-data application state. Intentionally minimal at M6a — fields
 /// migrate over from `sonicterm-app::app::App` in subsequent
@@ -90,6 +90,31 @@ pub struct AppState {
     /// this flag is the observability surface used by reducer arms.
     /// (M6a-expand-2c-mouse)
     pub mouse_left_down: bool,
+    /// Whether the search overlay is open. Toggled by `OpenSearch` /
+    /// `CloseSearch`. Reducer emits `Render(Overlay)` only on the
+    /// open/close transition (same shape as `WindowFocused`'s
+    /// transition guard). (M6a-expand-2c-misc)
+    pub search_open: bool,
+    /// Whether the command palette is open. Toggled by
+    /// `ToggleCommandPalette`; closed on `PaletteSubmit`.
+    /// (M6a-expand-2c-misc)
+    pub palette_open: bool,
+    /// Whether the reducer currently has an active selection drag.
+    /// Set true on `SelectionStart`; cleared on `SelectionEnd` /
+    /// `ClearSelection`. The boundary's per-window `selection`
+    /// remains source-of-truth for the rendered rectangle; this is
+    /// the observability surface. (M6a-expand-2c-misc)
+    pub selection_active: bool,
+    /// Last foreground-process name observed for the focused pane.
+    /// `None` until the first `ForegroundProcChanged`. Reducer emits
+    /// `Render(TitleOrTab)` only on actual name change. (2c-misc)
+    pub fg_proc_name: Option<String>,
+    /// Current broadcast-input multiplexing scope as observed by the
+    /// reducer. Updated by `SetBroadcastScope`. The boundary's
+    /// `App.broadcast` remains source-of-truth for actual fan-out;
+    /// the reducer flag is the title/tab-strip re-paint gate.
+    /// (M6a-expand-2c-misc)
+    pub broadcast_scope: BroadcastScope,
 }
 
 impl AppState {
@@ -133,6 +158,11 @@ impl AppStateBuilder {
             pane_zoomed: false,
             last_mouse_pos: None,
             mouse_left_down: false,
+            search_open: false,
+            palette_open: false,
+            selection_active: false,
+            fg_proc_name: None,
+            broadcast_scope: BroadcastScope::Off,
         }
     }
 }
