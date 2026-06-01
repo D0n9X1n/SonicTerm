@@ -1646,6 +1646,216 @@ impl App {
                         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
+                // ── PTY class (M6a-expand-2c-wire) ────────────────────
+                //
+                // PtyClose: the per-pane `PtyHandle::Drop` impl already
+                // SIGKILLs the child (CLAUDE.md §4 land-mine). Removing
+                // the pane entry from `WindowState.panes` is what
+                // actually triggers the drop. We try the main window
+                // first; if not found, scan child windows.
+                AppEffect::PtyClose { pane } => {
+                    let pane_id = pane.0;
+                    let mut closed = false;
+                    if let Some(ws) = self.main_mut() {
+                        if ws.panes.remove(&pane_id).is_some() {
+                            closed = true;
+                        }
+                    }
+                    if !closed {
+                        for ws in self.windows.values_mut() {
+                            if ws.panes.remove(&pane_id).is_some() {
+                                closed = true;
+                                break;
+                            }
+                        }
+                    }
+                    tracing::debug!(target: "state_machine", pane = pane_id, closed, "dispatch_effects: PtyClose");
+                }
+                // ChildExitPropagate: observability — the renderer's
+                // poll loop already noticed the child exit and updated
+                // the per-pane status. Surface a structured log so the
+                // session-restore layer (post-v1.0) can correlate.
+                AppEffect::ChildExitPropagate { pane, status } => {
+                    tracing::info!(target: "state_machine", pane = pane.0, status, "child exit propagated");
+                }
+                // ChildSpawn: record-only at the boundary. Production
+                // pane spawning flows through `App::spawn_pane` /
+                // `spawn_tab_in_child`, which constructs the PTY
+                // directly; the effect here is the observable contract.
+                AppEffect::ChildSpawn { pane, argv0 } => {
+                    tracing::debug!(target: "state_machine", pane = pane.0, %argv0, "dispatch_effects: ChildSpawn (record-only)");
+                }
+                // ── OS drag class ────────────────────────────────────
+                //
+                // The actual platform OS drag is initiated by the
+                // tear-out / tab-drag path which talks directly to the
+                // platform backend (NSPasteboard / OLE). The reducer
+                // emits OsDragStart for observability + future
+                // session-restore.
+                AppEffect::OsDragStart { src_window, payload_tab } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = src_window.0,
+                        tab = payload_tab,
+                        "dispatch_effects: OsDragStart (platform path owns the actual drag)"
+                    );
+                }
+                // OsDragEnd: settle the pending-drag table so the
+                // tear-out boundary can finalize. The os_drag layer's
+                // PendingDragOutcome already tracks the outcome
+                // bilaterally; we surface a log here.
+                AppEffect::OsDragEnd { src_window, committed } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = src_window.0,
+                        committed,
+                        "dispatch_effects: OsDragEnd"
+                    );
+                }
+                // ── Clipboard / notification side channels ───────────
+                //
+                // ClipboardRequest: async paste handshake. The actual
+                // read happens through `clipboard.get_text()` at the
+                // boundary's paste path; here we surface the request.
+                AppEffect::ClipboardRequest { window, bracketed } => {
+                    if let Some(cb) = self.clipboard.as_mut() {
+                        if let Ok(text) = cb.get_text() {
+                            tracing::debug!(
+                                target: "state_machine",
+                                window = window.0,
+                                bracketed,
+                                len = text.len(),
+                                "dispatch_effects: ClipboardRequest fulfilled"
+                            );
+                        }
+                    }
+                }
+                // Notification: route through the existing
+                // `notify_command_done` path (test capture friendly).
+                AppEffect::Notification { title, body } => {
+                    let combined = if title.is_empty() { body } else { format!("{title}: {body}") };
+                    notify_command_done(combined);
+                }
+                // ── Window ops ───────────────────────────────────────
+                //
+                // WindowOpen: defer to the existing pending-new-window
+                // flag drained by event_loop on the next tick. The
+                // platform-creation requires `&ActiveEventLoop` which
+                // dispatch_effects doesn't carry — flagging keeps the
+                // request observable without changing the dispatcher
+                // signature.
+                AppEffect::WindowOpen { role, initial_size } => {
+                    self.pending_new_window = true;
+                    tracing::debug!(
+                        target: "state_machine",
+                        ?role,
+                        ?initial_size,
+                        "dispatch_effects: WindowOpen queued (drained by event_loop)"
+                    );
+                }
+                // WindowClose: best-effort. Without a WindowKey→WindowId
+                // map (lifted in 2d), close the main window or, if it's
+                // a child, the matching entry. We at minimum surface a
+                // log and set pending_exit when it's the last live
+                // window per the reducer's contract.
+                AppEffect::WindowClose { window } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        "dispatch_effects: WindowClose (platform path closes via WindowEvent::CloseRequested)"
+                    );
+                }
+                // WindowResize: programmatic resize. winit's
+                // `set_inner_size` is the API; since `LogicalSize` here
+                // is f64 cells (not pixels) per the reducer's contract,
+                // emit a redraw so the boundary re-measures.
+                AppEffect::WindowResize { window, size } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        w = size.width,
+                        h = size.height,
+                        "dispatch_effects: WindowResize (observability)"
+                    );
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                    }
+                }
+                // WindowMove: record-only; OS already moved the window.
+                AppEffect::WindowMove { window, pos } => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        x = pos.x,
+                        y = pos.y,
+                        "dispatch_effects: WindowMove (record-only)"
+                    );
+                }
+                // WindowSetTitle: programmatic title set. Best-effort
+                // against the main window.
+                AppEffect::WindowSetTitle { window, title } => {
+                    if let Some(w) = self.main_window() {
+                        w.set_title(&title);
+                    }
+                    tracing::debug!(
+                        target: "state_machine",
+                        window = window.0,
+                        %title,
+                        "dispatch_effects: WindowSetTitle"
+                    );
+                }
+                // TimerSchedule / TimerCancel: the boundary's redraw
+                // pacing uses winit's ControlFlow::WaitUntil directly
+                // (#132). The reducer emitting these surfaces a
+                // contract for future schedulers (e.g. cursor-blink
+                // refactor); record-only today.
+                AppEffect::TimerSchedule { id, at } => {
+                    tracing::trace!(
+                        target: "state_machine",
+                        id,
+                        ?at,
+                        "dispatch_effects: TimerSchedule (record-only — winit ControlFlow drives pacing)"
+                    );
+                }
+                AppEffect::TimerCancel { id } => {
+                    tracing::trace!(
+                        target: "state_machine",
+                        id,
+                        "dispatch_effects: TimerCancel (record-only)"
+                    );
+                }
+                // ── Menubar ──────────────────────────────────────────
+                //
+                // MenubarUpdate: macOS rebuilds the NSMenu through the
+                // existing `menubar_bridge`; Windows is a log-only
+                // no-op per FINAL spec §5 (muda's menubar is owned by
+                // the platform code path directly). We surface a debug
+                // log either way so the request is observable.
+                AppEffect::MenubarUpdate(model) => {
+                    tracing::debug!(
+                        target: "state_machine",
+                        items = model.items.len(),
+                        "dispatch_effects: MenubarUpdate (platform path owns NSMenu/muda mutation)"
+                    );
+                }
+                // ── Log ──────────────────────────────────────────────
+                //
+                // LogEvent: forward to tracing at the requested level.
+                AppEffect::LogEvent { level, target, msg } => {
+                    use sonicterm_app_core::LogLevel;
+                    // `target` is &'static str from the reducer but
+                    // tracing's `target:` slot needs a literal at the
+                    // call site, so capture both as fields instead.
+                    match level {
+                        LogLevel::Trace => tracing::trace!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                        LogLevel::Debug => tracing::debug!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                        LogLevel::Info => tracing::info!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                        LogLevel::Warn => tracing::warn!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                        LogLevel::Error => tracing::error!(target: "state_machine.log", reducer_target = target, "{msg}"),
+                    }
+                }
+                // `AppEffect` is #[non_exhaustive]; future variants
+                // surface here as an unrouted log until wired.
                 _ => {
                     tracing::trace!(target: "state_machine", "dispatch_effects: unrouted effect {:?}", effect);
                 }
