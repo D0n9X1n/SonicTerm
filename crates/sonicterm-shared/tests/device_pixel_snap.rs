@@ -1,4 +1,4 @@
-use sonicterm_shared::render::geometry::snap_to_device_pixels;
+use sonicterm_render_model::geometry::snap_to_device_pixels;
 
 #[test]
 fn integer_scale_is_noop() {

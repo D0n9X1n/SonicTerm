@@ -14,7 +14,8 @@ mod core;
 pub mod color;
 pub mod cursor;
 pub mod drag_chip;
-pub mod geometry;
+#[deprecated(since = "0.9.0", note = "import from sonicterm_render_model::geometry directly")]
+pub use sonicterm_render_model::geometry;
 pub mod metrics;
 pub mod row_quad_cache;
 pub mod tab_spans;
@@ -24,5 +25,6 @@ pub use core::*;
 pub use cursor::*;
 pub use drag_chip::*;
 pub use geometry::*;
+#[allow(deprecated)]
 pub use metrics::*;
 pub use tab_spans::*;
