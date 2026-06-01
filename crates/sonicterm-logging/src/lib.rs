@@ -61,13 +61,18 @@ pub struct LoggingGuard {
 }
 
 /// The default per-target filter applied when neither `RUST_LOG` nor
-/// `LoggingConfig::level` is set. Top-level `sonic` floor is WARN so the
-/// shipped build doesn't accumulate steady-state INFO chatter into the
-/// rolling file (was INFO pre-v0.8.1; bumped to WARN as part of the
-/// release-blocker triage that brought RSS regression back under
-/// control). The `sonic_exit` target is kept explicitly WARN-on so exit
-/// markers survive the default filter.
-pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonic=warn,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
+/// `LoggingConfig::level` is set. Top-level `sonicterm` floor is INFO so
+/// diagnostic logs from the renamed `sonicterm_*` crates (font discovery,
+/// app loop bootstrap, platform glue) reach the rolling file. The noisy
+/// `sonicterm_vt` and `sonicterm_grid` crates are pinned to WARN to keep
+/// steady-state chatter out of the file (this is the original v0.8.1
+/// RSS-driven decision, preserved here per-crate rather than via a
+/// blanket umbrella). The `sonic_exit` target (emitted from this crate's
+/// own exit-trace module) is kept explicitly WARN-on so exit markers
+/// survive the default filter. Post-#430 rename: the prior `sonic=warn`
+/// rule matched no crate after `sonic-*` → `sonicterm-*` and silently
+/// dropped every INFO log from the renamed crates — see issue #448.
+pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).
