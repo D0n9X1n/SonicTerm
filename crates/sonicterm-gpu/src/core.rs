@@ -984,6 +984,21 @@ impl GpuRenderer {
             })
             .await
             .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
+        let info = adapter.get_info();
+        tracing::info!(
+            backend = ?info.backend,
+            name = %info.name,
+            driver = %info.driver,
+            "wgpu adapter selected"
+        );
+        if matches!(info.backend, wgpu::Backend::Gl) {
+            tracing::warn!(
+                adapter = %info.name,
+                "GPU backend is GLES — rendering may differ from native D3D12/Metal. \
+                 Glyph sharpness, Powerline anchoring, and HiDPI snap may behave \
+                 unexpectedly. Common cause: running over RDP without GPU passthrough."
+            );
+        }
         let (device, queue) =
             adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
 
