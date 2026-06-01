@@ -151,8 +151,8 @@ routed_test!(
 routed_test!(intent_27_ime_commit, AppIntent::ImeCommit { window: wk(), text: "あ".into() });
 routed_test!(intent_28_ime_end, AppIntent::ImeEnd { window: wk() });
 
-// 29..32 Mouse (29, 30 still stubs; 31 routed; 32 routed)
-stub_test!(
+// 29..32 Mouse (29 down routed, 29 up stub against fresh state, 30 routed, 31 routed, 32 routed)
+routed_test!(
     intent_29_mouse_button_down,
     AppIntent::MouseButton {
         window: wk(),
@@ -162,6 +162,10 @@ stub_test!(
         pos: pos()
     }
 );
+// Button-up against fresh state (mouse_left_down already false) is a
+// no-op transition by design — same shape as WindowFocused on a fresh
+// state. The focused test in `mouse_intents.rs` covers the down→up
+// round-trip.
 stub_test!(
     intent_29_mouse_button_up,
     AppIntent::MouseButton {
@@ -172,7 +176,7 @@ stub_test!(
         pos: pos()
     }
 );
-stub_test!(intent_30_mouse_move, AppIntent::MouseMove { window: wk(), pos: pos() });
+routed_test!(intent_30_mouse_move, AppIntent::MouseMove { window: wk(), pos: pos() });
 routed_test!(
     intent_31_mouse_wheel,
     AppIntent::MouseWheel { window: wk(), dy: -1.0, dx: 0.0, mods: mods() }

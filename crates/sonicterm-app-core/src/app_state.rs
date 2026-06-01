@@ -75,6 +75,21 @@ pub struct AppState {
     /// boolean tracks the reducer's observable view of the toggle so
     /// `ZoomPane` Intents can be added in 2c-misc.
     pub pane_zoomed: bool,
+    /// Last logical-pixel cursor position reported via `MouseMove`.
+    /// `None` until the platform ships its first `CursorMoved` event.
+    /// Used by the `MouseMove` reducer arm to implicitly coalesce
+    /// — only emit a `Render(Hover)` when the position actually
+    /// changed since the previous report (spec §3 mouse routing).
+    /// (M6a-expand-2c-mouse)
+    pub last_mouse_pos: Option<LogicalPos>,
+    /// Whether the reducer believes the primary mouse button is
+    /// currently pressed. Set true on `MouseButton { pressed: true,
+    /// button: Left, .. }` and false on the matching release. The
+    /// boundary's `WindowState.mouse_down` remains source-of-truth
+    /// for the actual hit-test gates (tab drag, selection extend);
+    /// this flag is the observability surface used by reducer arms.
+    /// (M6a-expand-2c-mouse)
+    pub mouse_left_down: bool,
 }
 
 impl AppState {
@@ -116,6 +131,8 @@ impl AppStateBuilder {
             pane_count: 0,
             focused_pane_idx: None,
             pane_zoomed: false,
+            last_mouse_pos: None,
+            mouse_left_down: false,
         }
     }
 }

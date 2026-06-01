@@ -414,10 +414,63 @@ pub(crate) fn reduce_leaf(
             }
         }
 
+        // ── Mouse (M6a-expand-2c-mouse) ─────────────────────────────
+        //
+        // Per FINAL spec §3:
+        //   MouseButton(pressed,Left)  → Render(Selection) (transition;
+        //                                 boundary owns selection geom)
+        //                              + tracks `mouse_left_down`
+        //   MouseButton(released,Left) → Render(Selection) (transition)
+        //                              + clears `mouse_left_down`
+        //   MouseButton(non-Left)      → Render(UserInput) (right/middle
+        //                                 click — boundary translates to
+        //                                 paste / context menu)
+        //   MouseMove                  → Render(Hover) IFF the position
+        //                                 differs from the last reported
+        //                                 one (implicit coalescer — same
+        //                                 shape as WindowFocused's
+        //                                 transition-guard pattern).
+        //                                 Tracks `last_mouse_pos`.
+        //
+        // The boundary's `WindowState.{mouse_down, cursor_pos, selection,
+        // drag_session}` remain source-of-truth for the actual hit-tests
+        // (tab drag, selection extend, scrollbar drag, OSC8 hover); the
+        // reducer's job here is the observability + dedupe surface.
+        // MouseWheel + HoverUrl were routed in 2b and stay there.
+        AppIntent::MouseButton { window, pressed, button, mods: _, pos } => {
+            _state.last_mouse_pos = Some(pos);
+            let is_left = matches!(button, crate::supporting::MouseButton::Left);
+            if is_left {
+                // Only emit on transition — same shape as WindowFocused.
+                if _state.mouse_left_down != pressed {
+                    _state.mouse_left_down = pressed;
+                    out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
+                }
+            } else {
+                // Right / middle / extra: emit UserInput so the boundary
+                // can repaint a freshly-pasted region or a context menu
+                // affordance immediately.
+                out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
+            }
+        }
+        AppIntent::MouseMove { window, pos } => {
+            // Implicit coalescer: only emit when the cursor actually
+            // moved. winit fires CursorMoved on every device tick even
+            // if the integer pixel position is unchanged (sub-pixel
+            // jitter on Retina), so the LogicalPos equality check
+            // collapses the burst into a single Render per frame in
+            // the common case. Drag-extend repaints still flow through
+            // the boundary's selection-extend path; the reducer's
+            // Render(Hover) is the URL/scrollbar/tab-close affordance
+            // gate.
+            if _state.last_mouse_pos != Some(pos) {
+                _state.last_mouse_pos = Some(pos);
+                out.push(AppEffect::Render { window, reason: RedrawReason::Hover });
+            }
+        }
+
         // ── Non-leaf — stubs (full reducer arms land in 2c-misc) ────
         AppIntent::ForegroundProcChanged { .. }
-        | AppIntent::MouseButton { .. }
-        | AppIntent::MouseMove { .. }
         | AppIntent::SelectionStart { .. }
         | AppIntent::SelectionExtend { .. }
         | AppIntent::SelectionEnd { .. }

@@ -715,6 +715,14 @@ impl App {
                 }
                 let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                 let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                // M6a-expand-2c-mouse: notify the reducer so
+                // `last_mouse_pos` tracks the cursor; the reducer's
+                // identity check implicitly coalesces sub-pixel jitter
+                // bursts into a single Render(Hover) per frame.
+                self.dispatch_intent(sonicterm_app_core::AppIntent::MouseMove {
+                    window: sonicterm_types::WindowKey::new(0),
+                    pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                });
                 let mut hover_redraw = false;
                 if let Some(r) = self.main_renderer_mut() {
                     hover_redraw = r.set_hover_cursor(Some((lx, ly)));
@@ -914,6 +922,20 @@ impl App {
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
+                    // M6a-expand-2c-mouse: notify reducer of the
+                    // press/release transition (Render(Selection)).
+                    {
+                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            window: sonicterm_types::WindowKey::new(0),
+                            pressed: true,
+                            button: sonicterm_app_core::MouseButton::Left,
+                            mods: sonicterm_types::ModKey::empty(),
+                            pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        });
+                    }
                     if let Some(ws) = self.main_mut() {
                         ws.mouse_down = true;
                     }
@@ -1124,6 +1146,20 @@ impl App {
                     }
                 }
                 ElementState::Released => {
+                    // M6a-expand-2c-mouse: notify reducer of the
+                    // release transition (Render(Selection)).
+                    {
+                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
+                        let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            window: sonicterm_types::WindowKey::new(0),
+                            pressed: false,
+                            button: sonicterm_app_core::MouseButton::Left,
+                            mods: sonicterm_types::ModKey::empty(),
+                            pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        });
+                    }
                     // #386 PR-C: end any active scrollbar drag — do this
                     // unconditionally on release so a drag that ended
                     // outside the bar still clears state.
