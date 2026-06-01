@@ -4839,6 +4839,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "sonicterm-app",
+ "sonicterm-app-core",
  "sonicterm-core",
  "sonicterm-logging",
  "sonicterm-shared",
