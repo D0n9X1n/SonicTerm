@@ -1213,8 +1213,24 @@ impl App {
                                 // bar before releasing cancels the drag.
                             }
                             crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                if let Some(t) = self.main_tabs_mut() {
-                                    t.reorder(from, to);
+                                // #535 + #540 — must move Tab +
+                                // TabState in lock-step, otherwise the
+                                // title moves but `tab_states[i]`
+                                // (active pane + PaneTree leaf-ids)
+                                // stays bound to the old slot →
+                                // title-N points at the OTHER tab's
+                                // PTY. Also clamps `to` for the
+                                // drag-past-last case (`TabBar::reorder`
+                                // silently no-ops when `to == len`,
+                                // which looked like the tab vanished).
+                                // Logic lives on `WindowState::reorder_tab`
+                                // so the regression tests in
+                                // `tests/reorder_main_window_pane_follows_title.rs`
+                                // exercise the same path production runs.
+                                if let Some(id) = self.main_window_id {
+                                    if let Some(ws) = self.windows.get_mut(&id) {
+                                        ws.reorder_tab(from, to);
+                                    }
                                 }
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
