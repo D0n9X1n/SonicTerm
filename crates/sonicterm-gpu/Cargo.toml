@@ -10,6 +10,13 @@ description = "SonicTerm Terminal — GPU pipeline primitives (quad, text, atlas
 [lints]
 workspace = true
 
+[features]
+# #538: gate `emit_one_glyph_for_trace` (and the `GlyphEmitTrace` type)
+# behind a feature so production builds don't carry test-only symbols.
+# Integration tests under `tests/` enable it implicitly via `cfg(test)`,
+# but cross-crate test harnesses that consume the seam can opt-in.
+test-emit-trace = []
+
 [dependencies]
 sonicterm-types.workspace = true
 sonicterm-text.workspace = true
@@ -31,3 +38,7 @@ pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 image_hasher = "3"
 tempfile = "3"
+# #538: enable the trace seam in our own integration tests by depending
+# on ourselves with the feature on. cargo handles the cycle correctly
+# for dev-dependencies.
+sonicterm-gpu = { path = ".", features = ["test-emit-trace"] }

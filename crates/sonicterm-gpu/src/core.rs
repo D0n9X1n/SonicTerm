@@ -4975,19 +4975,29 @@ impl GpuRenderer {
                 snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
             // Powerline PUA (U+E0B0..=U+E0BF) anchor + NerdFont PUA
             // icon-cell-fit (#438) — see the matching call in the
-            // char-fallback branch above. `g.ch` is the shaped cluster's
-            // lead codepoint.
+            // char-fallback branch above.
+            //
+            // #538: classify against `lead_cell.ch` — the visible cell's
+            // codepoint — NOT `g.ch`. `g.ch` is the shape *cluster lead*
+            // (from `shape.rs:L258` `text[g.start..end].chars().next()`),
+            // which for a chevron-as-continuation cluster is often a
+            // space ' ' (Natural), causing `apply_symbol_fit` to skip
+            // cell-fill and emit the chevron as a 2-px baseline slice.
+            // Same fix applies to `block_element_rect` + the trace
+            // logger below: ALL `SymbolFit` buckets (PowerlineCellFill,
+            // BlockCellFill, BoxDrawingCellFill) share this dispatch.
+            let classify_ch = lead_cell.ch;
             let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                 (gx_nat, gy_nat, gw_nat, gh_nat),
                 (cx, cy),
                 (cell_pixel_width_snapped, cell_h),
-                sonicterm_text::swash_rasterizer::classify_symbol(g.ch),
+                sonicterm_text::swash_rasterizer::classify_symbol(classify_ch),
             );
             // #537: Block Elements override font glyph with per-codepoint
             // sub-cell rects (see ASCII-fast path above for rationale).
             let (gx, gy, mut gw, mut gh) = if let Some(geom) =
                 sonicterm_text::block_element_geometry::block_element_rect(
-                    g.ch,
+                    classify_ch,
                     (cx, cy),
                     (cell_pixel_width_snapped, cell_h),
                 ) {
@@ -4998,7 +5008,7 @@ impl GpuRenderer {
             };
             // #537: NF icon-cell-fit decision trace (shaped path).
             sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
-                g.ch,
+                classify_ch,
                 Some(g.font_slot as usize),
                 gw_nat,
                 cell_pixel_width_snapped,
@@ -5531,5 +5541,60 @@ pub fn clip_rect_to_pane(
         Some((clipped_x, clipped_y, clipped_w, clipped_h))
     } else {
         None
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// #538 test seam — mirror of the apply-site dispatch in `flush_shape_run`
+// so an integration test can exercise the cluster-lead-vs-visible-cell
+// codepoint mismatch without standing up the full atlas/wgpu pipeline.
+//
+// `visible_cell_ch` is the codepoint of the cell currently being emitted
+// (`lead_cell.ch` in the renderer). `cluster_lead_ch` is what the shape
+// run reports as `g.ch` — for a Powerline continuation cluster it's
+// typically a space.
+//
+// The seam returns the `SymbolFit` actually selected and the final cell
+// rect produced by `apply_symbol_fit`. A correct implementation MUST
+// classify on `visible_cell_ch` (otherwise U+E0B0..U+E0BF clusters
+// driven by a space lead degrade to `Natural` and emit a 2-px slice).
+// ──────────────────────────────────────────────────────────────────────
+#[cfg(any(test, feature = "test-emit-trace"))]
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphEmitTrace {
+    pub fit_used: sonicterm_text::swash_rasterizer::SymbolFit,
+    pub final_rect: (f32, f32, f32, f32),
+    pub cell_rect: (f32, f32, f32, f32),
+}
+
+/// Test-only seam reproducing the apply-site dispatch from
+/// `flush_shape_run` (shaped path, ~L4980). Used by
+/// `crates/sonicterm-gpu/tests/powerline_emit_trace.rs` (#538).
+///
+/// `natural_rect` is what swash would emit (a tiny ~2-px top slice for a
+/// chevron when the visible cell's char is a space-lead cluster). The
+/// renderer's job is to override that with `apply_symbol_fit` keyed on
+/// the *visible cell's* char.
+#[cfg(any(test, feature = "test-emit-trace"))]
+pub fn emit_one_glyph_for_trace(
+    visible_cell_ch: char,
+    cluster_lead_ch: char,
+    natural_rect: (f32, f32, f32, f32),
+    cell_origin: (f32, f32),
+    cell_size: (f32, f32),
+    classify_on_cluster_lead: bool,
+) -> GlyphEmitTrace {
+    let ch_for_classify = if classify_on_cluster_lead { cluster_lead_ch } else { visible_cell_ch };
+    let fit = sonicterm_text::swash_rasterizer::classify_symbol(ch_for_classify);
+    let final_rect = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+        natural_rect,
+        cell_origin,
+        cell_size,
+        fit,
+    );
+    GlyphEmitTrace {
+        fit_used: fit,
+        final_rect,
+        cell_rect: (cell_origin.0, cell_origin.1, cell_size.0, cell_size.1),
     }
 }

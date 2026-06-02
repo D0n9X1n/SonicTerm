@@ -4630,6 +4630,7 @@ dependencies = [
  "image_hasher",
  "pollster",
  "sonicterm-cfg",
+ "sonicterm-gpu",
  "sonicterm-grid",
  "sonicterm-render-model",
  "sonicterm-text",
