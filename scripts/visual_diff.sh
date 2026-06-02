@@ -114,7 +114,7 @@ paste_payload() {
   local app_name="$1"
   # Pre-keystroke focus gate — abort the paste if $app_name isn't frontmost
   # after up to 5 retries, instead of leaking keystrokes into whatever else
-  # has focus. See issue #473. (#474 owns the pbcopy + screencap fixes here.)
+  # has focus. See issue #473. (See PR #523 for the clipboard + screencap fixes.)
   local front try
   for try in 1 2 3 4 5; do
     /usr/bin/osascript >/dev/null 2>&1 <<EOF || true
