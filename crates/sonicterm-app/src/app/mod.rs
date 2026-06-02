@@ -714,6 +714,19 @@ impl TabState {
     }
 }
 
+/// Issue #553 Phase A: typed in-process tear-out request. Created by
+/// `handle_os_drag_ended` on the `DroppedOnEmpty` branch (Win32
+/// `GetCursorPos` provides the screen-position field); drained by
+/// `drain_pending_window_creates` which calls the in-process child-window
+/// builder factored out of `tear_out.rs` — so no `Command::new` is ever
+/// invoked for the tear-out path on Phase A.
+#[derive(Debug, Clone)]
+pub struct PendingTearOut {
+    pub source_window: WindowId,
+    pub source_tab_idx: usize,
+    pub drop_screen_pos: (i32, i32),
+}
+
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
@@ -756,6 +769,14 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
+    /// Issue #553 Phase A: typed in-process tear-out request. Set by
+    /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch with the
+    /// recorded source tab handle + Win32 cursor screen position.
+    /// Drained by `drain_pending_window_creates` AFTER `pending_new_window`
+    /// in the SAME pass (NewShell then TearOut). Replaces the legacy
+    /// child-process spawn (`spawn_tearout_child`) — that code path
+    /// becomes dead in Phase A and is removed in Phase B.
+    pub(super) pending_tear_out: Option<PendingTearOut>,
     /// Issue #462 (speculative defensive fix): deferred
     /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
     /// on the `DroppedOnEmpty` branch instead of cancelling inline,
@@ -786,8 +807,7 @@ pub struct App {
     /// living in `tests/os_drag_cleanup.rs` is an INTEGRATION test
     /// that compiles the crate without `cfg(test)`.
     #[doc(hidden)]
-    pub(super) test_post_snapshot_hook:
-        Option<Box<dyn FnOnce(&mut App) + Send>>,
+    pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request. Set from `run_action` when the user's
     /// Cmd+W chain has just closed the last tab of the last window AND
     /// `Config::quit_on_last_window_close` is true (or non-macOS).
@@ -1134,6 +1154,7 @@ impl App {
             keymap,
             clipboard: Clipboard::new().ok(),
             pending_new_window: false,
+            pending_tear_out: None,
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
             pending_exit: false,
@@ -2604,6 +2625,18 @@ impl App {
         self.pending_new_window
     }
 
+    /// Issue #553 Phase A test seam: read whether a typed in-process
+    /// tear-out request has been queued (drained by
+    /// `drain_pending_window_creates`). The request carries the
+    /// source tab handle + Win32 cursor screen position from the
+    /// `DroppedOnEmpty` branch of `handle_os_drag_ended`.
+    #[doc(hidden)]
+    pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, (i32, i32))> {
+        self.pending_tear_out
+            .as_ref()
+            .map(|t| (t.source_window, t.source_tab_idx, t.drop_screen_pos))
+    }
+
     /// Issue #462 test seam: read the `pending_os_teardown` flag set
     /// by `handle_os_drag_ended` on the `DroppedOnEmpty` branch.
     #[doc(hidden)]
@@ -3200,24 +3233,41 @@ impl App {
             os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos } => {
                 tracing::debug!(
                     ?drop_screen_pos,
-                    "os_drag_session: DroppedOnEmpty — existing path handles new-window spawn"
+                    "os_drag_session: DroppedOnEmpty — in-process tear-out (Phase A)"
                 );
-                // The existing tear_out path is driven by within-process
-                // state machines; Phase C2 leaves window-spawn semantics
-                // unchanged. Clear residue so the next gesture starts
-                // fresh.
-                //
+                // Issue #553 Phase A: replace the legacy
+                // out-of-process tear-out (child-window via
+                // `spawn_tearout_child` → `Command::new`) with an
+                // in-process create. Enqueue a typed `PendingTearOut`
+                // request carrying the recorded source tab handle and
+                // the Win32 cursor screen position; the next
+                // event-loop tick drains it via the existing
+                // `drain_pending_window_creates` slot, which now
+                // builds the child window directly from the reusable
+                // helper extracted from `tear_out.rs`.
+                if let Some((src_win, src_idx)) = source {
+                    self.pending_tear_out = Some(PendingTearOut {
+                        source_window: src_win,
+                        source_tab_idx: src_idx,
+                        drop_screen_pos,
+                    });
+                } else {
+                    tracing::warn!(
+                        "os_drag_session: DroppedOnEmpty without recorded source — no tear-out"
+                    );
+                }
                 // Issue #462 (speculative defensive fix per PM
                 // override): do NOT call `cancel_drag_session` inline
                 // here. The `DroppedOnEmpty` path triggers a
                 // tear-out-spawn that creates a brand new top-level
-                // window via the `pending_new_window` drain. If we
-                // cancel inline, cross-window drag-residue cleanup
-                // runs BEFORE the new window exists, racing the spawn
-                // and potentially freezing Explorer's drag thread on
-                // Windows when the OLE drop-target tear-down sequence
-                // overlaps with new HWND creation. Defer cancellation
-                // to `drain_pending_os_teardown`, which runs AFTER
+                // window via the `pending_new_window` /
+                // `pending_tear_out` drain. If we cancel inline,
+                // cross-window drag-residue cleanup runs BEFORE the
+                // new window exists, racing the spawn and potentially
+                // freezing Explorer's drag thread on Windows when the
+                // OLE drop-target tear-down sequence overlaps with new
+                // HWND creation. Defer cancellation to
+                // `drain_pending_os_teardown`, which runs AFTER
                 // `drain_pending_window_creates` at the event-loop
                 // boundary. Order matters; this flag controls only
                 // WHEN cancel runs, not WHETHER — the all-windows

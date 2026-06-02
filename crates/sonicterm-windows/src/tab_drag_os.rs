@@ -166,7 +166,29 @@ impl OsTabDragBackend for WinOsTabDragBackend {
                 // user-visible result is "tab appears at destination".
                 DragOutcome::DroppedOnBar { target_window: None, target_slot: source_tab_idx }
             }
-            _ => DragOutcome::Cancelled,
+            _ => {
+                // Issue #553 Phase A: DROPEFFECT_NONE means the user
+                // released over bare desktop / a non-SonicTerm window.
+                // Capture the cursor position via Win32 GetCursorPos
+                // (screen coordinates) so the App can spawn a torn-out
+                // window IN-PROCESS at that location — replacing the
+                // legacy child-process spawn (`spawn_tearout_child`)
+                // which incurred a cold-start cost. `DragOutcome::
+                // DroppedOnEmpty { drop_screen_pos }` is routed by
+                // `App::handle_os_drag_ended` into a typed
+                // `PendingTearOut` drain.
+                let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+                // SAFETY: POINT outlives the call; GetCursorPos writes
+                // through the pointer. Failure (rare; closed session)
+                // leaves pt zero-initialised — acceptable fallback.
+                let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) };
+                tracing::info!(
+                    x = pt.x,
+                    y = pt.y,
+                    "WinOsTabDragBackend: DROPEFFECT_NONE → DroppedOnEmpty (in-process tear-out)"
+                );
+                DragOutcome::DroppedOnEmpty { drop_screen_pos: (pt.x, pt.y) }
+            }
         };
 
         handle.post_drag_ended(outcome);

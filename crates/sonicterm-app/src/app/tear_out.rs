@@ -75,7 +75,43 @@ impl App {
         // survives the gesture intact.
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
-        let attrs = super::with_backdrop_transparency(
+        if self.install_torn_out_window(el, tab, state, panes, None).is_none() {
+            return true;
+        }
+        // Phase B source-side cleanup: hide main if drained, else
+        // activate the LEFT neighbor of the removed slot (spec §B4).
+        self.tear_out_apply_source_side(index);
+        tracing::info!("tab torn out as new window; windows={}", self.windows.len());
+        // #508: tear-out shifted main's active tab to a neighbor (or
+        // hid main entirely). Republish so the harness sink reflects
+        // whichever main pane (if any) is now active. `hide_main_window`
+        // already publishes None, but the post-hide republish here is
+        // idempotent — the slot just gets set to None twice.
+        self.refresh_harness_sink();
+        true
+    }
+
+    /// Issue #553 Phase A: factored-out child-window construction so
+    /// both [`Self::tear_out_tab`] (cursor-leaves-windows path) and the
+    /// in-process tear-out drain (`drain_pending_window_creates` →
+    /// `pending_tear_out` enqueued from `DroppedOnEmpty`) build the
+    /// same window the same way. Preserves the live `PtyHandle` move
+    /// (panes' `redraw_target` swapped, PTY resized to child grid).
+    ///
+    /// Returns `Some(window_id)` on success, `None` on failure (panes
+    /// dropped → shells killed via `PtyHandle::Drop`). When
+    /// `screen_pos` is `Some`, positions the new window so its
+    /// top-left lands roughly under the cursor.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn install_torn_out_window(
+        &mut self,
+        el: &ActiveEventLoop,
+        tab: Tab,
+        state: TabState,
+        panes: HashMap<u64, super::PaneState>,
+        screen_pos: Option<(i32, i32)>,
+    ) -> Option<WindowId> {
+        let mut attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(format!("SonicTerm — {}", tab.title))
@@ -84,15 +120,16 @@ impl App {
             ),
             self.config.appearance.backdrop,
         );
+        if let Some((sx, sy)) = screen_pos {
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
+        }
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
                 // panes drop here, which kills the child shells via
                 // PtyHandle::Drop — acceptable for an OS-level failure.
-                // The gesture IS consumed — we already drained the
-                // source tab — so the caller must clear drag state.
-                return true;
+                return None;
             }
         };
         window.set_ime_allowed(true);
@@ -124,7 +161,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
-                return true;
+                return None;
             }
         };
         // Epic #300 P4 follow-up wire (tear-out path).
@@ -138,18 +175,6 @@ impl App {
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        // On macOS the freshly created window often reports
-        // scale_factor=1.0 inside `GpuRenderer::new` because it hasn't
-        // been placed on a display yet. Once the OS positions it on a
-        // Retina display the real scale is 2.0 but no
-        // `ScaleFactorChanged` necessarily fires synchronously, so the
-        // child window would render with stale 1× glyph tiles + a
-        // surface that's actually 2× — producing the "huge letter
-        // spacing, no colors, missing nerd-font glyphs" repro. Force
-        // an atlas rebuild against the window's CURRENT scale factor,
-        // then re-configure the surface to the window's CURRENT
-        // physical inner size so cells/rows are derived from real
-        // numbers instead of the 800×500 logical seed.
         let real_sf = window.scale_factor() as f32;
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
@@ -209,22 +234,9 @@ impl App {
         self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
         // Epic #289 Phase B: the new window is now OS-frontmost (we
-        // just created and focused it). Update `frontmost_window` so
-        // subsequent keymap actions (Cmd+T, Cmd+W, …) route to it.
-        // A real Focused event will confirm this shortly, but setting
-        // it eagerly avoids a frame of mis-routing.
+        // just created and focused it).
         self.frontmost_window = Some(win_id);
-        // Phase B source-side cleanup: hide main if drained, else
-        // activate the LEFT neighbor of the removed slot (spec §B4).
-        self.tear_out_apply_source_side(index);
-        tracing::info!("tab torn out as new window; windows={}", self.windows.len());
-        // #508: tear-out shifted main's active tab to a neighbor (or
-        // hid main entirely). Republish so the harness sink reflects
-        // whichever main pane (if any) is now active. `hide_main_window`
-        // already publishes None, but the post-hide republish here is
-        // idempotent — the slot just gets set to None twice.
-        self.refresh_harness_sink();
-        true
+        Some(win_id)
     }
 
     /// Epic #289 Phase B — source-side post-tear-out cleanup, factored
