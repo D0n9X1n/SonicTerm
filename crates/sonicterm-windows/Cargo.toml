@@ -10,6 +10,13 @@ description = "SonicTerm Terminal — Windows app"
 [lints]
 workspace = true
 
+[features]
+# Test/automation-only feature that enables the named-pipe input
+# harness (`--harness-input-pipe`). Off by default — release builds
+# MUST NOT carry the symbol (`scripts/check-no-harness-in-release.ps1`
+# enforces). See issue #506.
+harness = []
+
 [dependencies]
 sonicterm-app.workspace = true
 sonicterm-app-core.workspace = true
@@ -17,6 +24,7 @@ sonicterm-cfg.workspace = true
 sonicterm-logging.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+crossbeam-channel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -34,6 +42,12 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_HiDpi",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_IO",
+    "Win32_System_Threading",
 ] }
 windows-implement = "0.60"
 windows-core = "0.62"

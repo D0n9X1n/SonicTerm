@@ -31,6 +31,8 @@ fn set_process_dpi_awareness() {}
 #[cfg(target_os = "windows")]
 mod backdrop;
 mod cli;
+#[cfg(all(target_os = "windows", feature = "harness"))]
+mod harness_pipe;
 #[cfg(target_os = "windows")]
 mod menubar;
 #[cfg(target_os = "windows")]
@@ -67,7 +69,11 @@ fn main() -> Result<()> {
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     #[cfg(target_os = "windows")]
-    let tearout_payload = cli::parse_tearout_payload_from_env()?;
+    let parsed_cli = cli::parse_cli_from_env()?;
+    #[cfg(target_os = "windows")]
+    let tearout_payload = parsed_cli.tearout;
+    #[cfg(all(target_os = "windows", feature = "harness"))]
+    let harness_request = parsed_cli.harness_input_pipe;
     let theme = load_theme(&config.theme).context("load theme")?;
     let keymap = load_keymap(&config.keymap).context("load keymap")?;
     let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
@@ -101,6 +107,21 @@ fn main() -> Result<()> {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }
             });
+        #[cfg(feature = "harness")]
+        let _harness_sink = if let Some(req) = harness_request.as_deref() {
+            // Hold the Arc so the slot outlives the App; the read
+            // thread also holds a clone. Sender publication (focus
+            // change → active pane sender) is a follow-up — see
+            // `harness_pipe.rs` module doc for the seam.
+            let sink = harness_pipe::new_sink();
+            match harness_pipe::spawn(req, sink.clone()) {
+                Ok(name) => tracing::info!(pipe = %name, "harness pipe thread spawned"),
+                Err(e) => tracing::error!(error = ?e, "failed to spawn harness pipe"),
+            }
+            Some(sink)
+        } else {
+            None
+        };
         let result = {
             // M6c: construct the AppStateMachine in the bin and hand
             // it to the platform shell. State mutation routes through
