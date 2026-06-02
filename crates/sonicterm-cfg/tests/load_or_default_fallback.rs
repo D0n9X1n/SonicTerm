@@ -95,3 +95,37 @@ fn keymap_load_strict_errors_on_bad_toml() {
 
     assert!(Keymap::load_strict(&path).is_err(), "strict load must surface parse error");
 }
+
+// ---------- Config (collecting variant; PR #534 Haiku follow-up) ----------
+
+/// `load_or_default_collecting` exists so `main.rs` can call the
+/// fallback loader BEFORE `sonicterm_logging::init`. The warn is
+/// surfaced as a returned `String` instead of a `tracing::warn!`
+/// (which would be dropped on the floor because no subscriber is
+/// installed yet). main.rs drains the vec post-init.
+#[test]
+fn config_load_or_default_collecting_captures_warning() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("sonicterm.toml");
+    fs::write(&path, BAD_TOML).unwrap();
+
+    let mut warnings: Vec<String> = Vec::new();
+    let cfg = Config::load_or_default_collecting(&path, &mut warnings);
+
+    assert_eq!(cfg, Config::default(), "must return Config::default() on parse error");
+    assert_eq!(warnings.len(), 1, "expected exactly one collected warning, got {warnings:?}");
+    let w = &warnings[0];
+    assert!(w.contains("config TOML parse failed"), "warning missing prefix: {w}");
+    assert!(w.contains("falling back to defaults"), "warning missing suffix: {w}");
+}
+
+#[test]
+fn config_load_or_default_collecting_quiet_on_success() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("sonicterm.toml");
+    fs::write(&path, "").unwrap(); // empty TOML parses to Config::default-ish
+
+    let mut warnings: Vec<String> = Vec::new();
+    let _cfg = Config::load_or_default_collecting(&path, &mut warnings);
+    assert!(warnings.is_empty(), "no warnings expected on a clean parse, got {warnings:?}");
+}

@@ -59,10 +59,17 @@ fn main() -> Result<()> {
     // See `crates/sonicterm-logging/src/exit_trace.rs`.
     let _exit_guard = sonicterm_logging::install_exit_logging(&sonicterm_logging::log_dir());
 
-    let config = load_config();
+    let mut cfg_warnings: Vec<String> = Vec::new();
+    let config = load_config(&mut cfg_warnings);
     let log_cfg = config.logging.clone();
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
+    // Drain any warnings collected during pre-logging Config load so the
+    // #522 parse-failure WARN actually reaches sonicterm.log + stderr
+    // (Haiku review of PR #534).
+    for w in cfg_warnings.drain(..) {
+        tracing::warn!(target: "sonicterm-cfg", "{w}");
+    }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     #[cfg(target_os = "windows")]
     let parsed_cli = cli::parse_cli_from_env()?;
@@ -161,11 +168,11 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_config() -> Config {
+fn load_config(warnings: &mut Vec<String>) -> Config {
     match Config::default_path() {
         Some(path) => {
             if path.exists() {
-                Config::load_or_default(&path)
+                Config::load_or_default_collecting(&path, warnings)
             } else {
                 windows_default_config()
             }

@@ -403,14 +403,35 @@ impl Config {
     /// to [`Self::default`] so the app can still launch with a broken
     /// user config — see issue #522.
     pub fn load_or_default(path: &Path) -> Self {
+        let mut warnings = Vec::new();
+        let cfg = Self::load_or_default_collecting(path, &mut warnings);
+        for w in warnings {
+            tracing::warn!(target: "sonicterm-cfg", "{w}");
+        }
+        cfg
+    }
+
+    /// Same as [`Self::load_or_default`] but, instead of emitting
+    /// `tracing::warn!` directly, appends any fallback message to
+    /// `warnings`. Use this from `main` BEFORE `sonicterm_logging::init`
+    /// has run — otherwise the parse-failure warn is dropped because no
+    /// subscriber is installed yet (Haiku review of PR #534).
+    ///
+    /// Callers MUST drain `warnings` after logging is initialised, e.g.
+    /// ```ignore
+    /// let mut cfg_warnings = Vec::new();
+    /// let config = Config::load_or_default_collecting(&path, &mut cfg_warnings);
+    /// let _g = sonicterm_logging::init(&config.logging.clone()).ok();
+    /// for w in cfg_warnings { tracing::warn!(target: "sonicterm-cfg", "{w}"); }
+    /// ```
+    pub fn load_or_default_collecting(path: &Path, warnings: &mut Vec<String>) -> Self {
         match Self::load_strict(path) {
             Ok(cfg) => cfg,
             Err(e) => {
-                tracing::warn!(
-                    target: "sonicterm-cfg",
+                warnings.push(format!(
                     "config TOML parse failed at {}: {e}; falling back to defaults",
                     path.display()
-                );
+                ));
                 Self::default()
             }
         }
