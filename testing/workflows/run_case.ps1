@@ -47,6 +47,11 @@ public class SonicWin32 {
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
   [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr child, string cls, string title);
+  // #491 Guard-4 fix: AttachThreadInput lets SetForegroundWindow succeed past
+  // the first call in an RDP/locked-desktop session by piggy-backing on the
+  // target window's input queue. Always pair with a detach in `finally`.
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@ -ReferencedAssemblies System.Drawing,System.Windows.Forms 2>&1 | Out-Null
@@ -198,10 +203,39 @@ function Verify-Front {
   $fgPid = 0; [void][SonicWin32]::GetWindowThreadProcessId($fg, [ref]$fgPid)
   return ($fgPid -eq $SONIC_PID)
 }
+# ------------------------------------------------------------------
+# #491 fix — SetForegroundWindow becomes a no-op past the first
+# successful call inside an RDP / locked-desktop session because the
+# foreground-lock timeout filters out subsequent requests. Attaching
+# our input queue to the target window's thread bypasses the lock
+# (option-c per Opus Step-2 APPROVED-DIAG). The detach in `finally`
+# is mandatory — leaking the attach jams keyboard input for both
+# threads until process exit.
+# ------------------------------------------------------------------
+function Invoke-SetForegroundWithAttach {
+  param([Parameter(Mandatory=$true)][IntPtr]$Hwnd)
+  if ($Hwnd -eq [IntPtr]::Zero) { return $false }
+  $targetPid = 0
+  $targetTid = [SonicWin32]::GetWindowThreadProcessId($Hwnd, [ref]$targetPid)
+  $currentTid = [SonicWin32]::GetCurrentThreadId()
+  if ($targetTid -eq 0) { return $false }
+  if ($targetTid -eq $currentTid) {
+    return [SonicWin32]::SetForegroundWindow($Hwnd)
+  }
+  $attached = $false
+  try {
+    $attached = [SonicWin32]::AttachThreadInput($currentTid, $targetTid, $true)
+    return [SonicWin32]::SetForegroundWindow($Hwnd)
+  } finally {
+    if ($attached) {
+      [void][SonicWin32]::AttachThreadInput($currentTid, $targetTid, $false)
+    }
+  }
+}
 function Focus-Sonic {
   for ($t = 1; $t -le 5; $t++) {
     [SonicWin32]::ShowWindow($WindowHandle, 9) | Out-Null
-    [SonicWin32]::SetForegroundWindow($WindowHandle) | Out-Null
+    [void](Invoke-SetForegroundWithAttach -Hwnd $WindowHandle)
     Start-Sleep -Milliseconds 250
     if (Verify-Front) { return $true }
     Log "focus retry $t"
