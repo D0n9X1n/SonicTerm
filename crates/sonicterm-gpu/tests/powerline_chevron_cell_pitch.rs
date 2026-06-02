@@ -5,11 +5,43 @@
 // Verifies the snapped-cell-position cache contract directly: compute
 // `snapped_cell_x` exactly like `core.rs` does immediately before the
 // per-row loop, then check that every adjacent pair of column edges
-// produces the SAME device-pixel width. The fix in `flush_shape_run`
+// produces matching device-pixel widths. The fix in `flush_shape_run`
 // derives both `cx` and `cell_pixel_width` from these snapped edges,
 // so this property is the algorithmic guarantee the fix relies on.
+//
+// ---------------------------------------------------------------
+// Acceptance amendment (see PR #480 thread + comment on #470):
+//
+// The original #470 acceptance read "Adjacent Powerline cells render
+// with identical device-pixel width at all DPI scales (1.0, 1.25,
+// 1.5, 1.75, 2.0)". Option (a) — the snapped-edge cache — CANNOT
+// deliver strict per-cell width equality at every fractional scale
+// for an arbitrary logical cell_w. Worked example, scale = 1.25,
+// cell_w = 8.571 logical, pad = 8.0:
+//
+//   col   logical x   device x (x1.25)   snapped logical x
+//   ---   ---------   ----------------   ------------------
+//    0       8.000          10.000              8.000
+//    1      16.571          20.714  -> 21      16.800
+//    2      25.143          31.429  -> 31      24.800
+//    3      33.714          42.143  -> 42      33.600
+//    4      42.286          52.857  -> 53      42.400
+//
+// Adjacent device-pixel widths: 11, 10, 11, 11 — strictly NOT equal.
+// This is unavoidable without quantising cell_w to an integer device
+// pitch (option (b) in the issue). Since #480 ships option (a), the
+// guarantee we actually deliver — and the one that fixes the visible
+// gap — is "adjacent cells share an edge (right edge of cell N ==
+// left edge of cell N+1)" plus "cell pitch never varies by more than
+// 1 device px". A 1-device-pixel alternation is invisible at
+// fractional DPI; a *gap* between abutting Powerline glyphs is not.
+// The acceptance criterion on #470 has been amended to reflect that.
+// ---------------------------------------------------------------
 
 use sonicterm_render_model::geometry::snap_to_device_pixels;
+
+/// All five DPI scales listed in #470 acceptance.
+const ACCEPTANCE_SCALES: &[f32] = &[1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Mirror of the per-pane snapped-edge cache built inside
 /// `render_frame` immediately before `flush_shape_run` runs.
@@ -19,17 +51,13 @@ fn build_snapped_cell_x(pad: f32, cell_w: f32, cols: u16, scale: f32) -> Vec<f32
         .collect()
 }
 
-/// Acceptance criterion from issue #470: at scale 1.75, four Powerline
-/// chevrons in adjacent cells must render with IDENTICAL device-pixel
-/// width per cell. Captured-data in the issue showed the broken state
-/// alternated 14 / 15 / 14 / 15 device px; the snapped-edge cache fixes
-/// this by sharing edges between adjacent cells.
+/// Original #470 captured-data test: at scale 1.75 specifically, the
+/// 8.571-logical cell pitch DOES snap to a uniform 15 device px once
+/// the shared-edge cache is in use. (At 1.75x, 8.571 * 1.75 = 14.999,
+/// which rounds cleanly without inter-cell alternation.)
 #[test]
 fn powerline_chevrons_have_identical_device_pixel_width_at_1_75() {
     let scale = 1.75_f32;
-    // Reproduce the captured geometry from #461 PR-B1:
-    //   cell_w = 8.571 logical (= 15 device px at 1.75x)
-    //   pad ≈ 8.0 logical (matches the (79.428, 87.428, ...) trace)
     let cell_w = 8.571428_f32; // 15 / 1.75
     let pad = 8.0_f32;
     let cols = 4_u16;
@@ -37,12 +65,10 @@ fn powerline_chevrons_have_identical_device_pixel_width_at_1_75() {
     let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
     assert_eq!(snapped.len(), (cols + 1) as usize);
 
-    // Device-pixel width of each adjacent cell.
     let widths_dev: Vec<i32> = (0..cols as usize)
         .map(|c| ((snapped[c + 1] - snapped[c]) * scale).round() as i32)
         .collect();
 
-    // Every cell must be the same device-pixel width.
     let first = widths_dev[0];
     assert!(
         widths_dev.iter().all(|w| *w == first),
@@ -52,9 +78,6 @@ fn powerline_chevrons_have_identical_device_pixel_width_at_1_75() {
         widths_dev,
         snapped,
     );
-    // And it must be the cell's rounded device width — 15 px at 1.75x —
-    // so we're not pinning the regression to a value that's still wrong
-    // (e.g. uniformly 14 across all cells).
     assert_eq!(
         first,
         (cell_w * scale).round() as i32,
@@ -65,28 +88,26 @@ fn powerline_chevrons_have_identical_device_pixel_width_at_1_75() {
     );
 }
 
-/// Generalize across the fractional DPI scales the issue lists. The
-/// snapped-cache fix guarantees adjacent cells share an edge (right edge
-/// of cell N == left edge of cell N+1 by construction, since both come
-/// from the same `snapped_cell_x[c+1]` entry). With shared edges no gap
-/// can appear between Powerline chevrons. Individual cell widths may
-/// still alternate by 1 device px at scales like 1.25 (logical pitch
-/// 10.71 device px snaps to 11/10 alternation) — that's unavoidable
-/// without changing the cell pitch, but the *gap* — the visible #470
-/// regression — is gone.
+/// #470 acceptance, amended form: at EACH of the five DPI scales
+/// (1.0, 1.25, 1.5, 1.75, 2.0), adjacent Powerline cells must
+/// (i) share an exact edge (no gap), and (ii) have device-pixel
+/// pitch that varies by at most 1 px (the snapping floor). This is
+/// what option (a) actually delivers and what eliminates the visible
+/// gap in oh-my-posh prompts.
 #[test]
-fn adjacent_cells_share_edges_at_all_fractional_scales() {
+fn adjacent_cells_share_edges_at_all_acceptance_scales() {
     let cell_w = 8.571428_f32;
     let pad = 8.0_f32;
     let cols = 8_u16;
 
-    for &scale in &[1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+    for &scale in ACCEPTANCE_SCALES {
         let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
-        // Cell N+1's left edge MUST equal cell N's right edge — they're
-        // the same slot in the cache. This is the gap-elimination
-        // guarantee. (Tautological given how the cache is built; the
-        // test exists so any future regression that recomputes edges
-        // with two different formulas fails loudly here.)
+
+        // (i) Shared-edge guarantee. The right edge of cell N is
+        // literally the same `snapped_cell_x[c+1]` entry as the
+        // left edge of cell N+1 — bit-for-bit. A future regression
+        // that recomputes edges with two different formulas will
+        // fail loudly here.
         for c in 0..cols as usize {
             let right_of_n = snapped[c + 1];
             let left_of_n_plus_1 = snapped[c + 1];
@@ -99,9 +120,10 @@ fn adjacent_cells_share_edges_at_all_fractional_scales() {
                 c + 1,
             );
         }
-        // And: cell pitch in device pixels must never vary by more than
-        // 1 — a wider drift would be a worse regression than #470's
-        // 14/15 alternation.
+
+        // (ii) Pitch-jitter bound: <= 1 device px. Anything looser
+        // would be a worse regression than the 14/15 alternation
+        // that motivated #470.
         let widths_dev: Vec<i32> = (0..cols as usize)
             .map(|c| ((snapped[c + 1] - snapped[c]) * scale).round() as i32)
             .collect();
@@ -116,9 +138,70 @@ fn adjacent_cells_share_edges_at_all_fractional_scales() {
     }
 }
 
+/// Integer-scale strict equality: at scale 1.0 and 2.0,
+/// `snap_to_device_pixels` is the identity, so EVERY cell must have
+/// exactly the same device-pixel width. This is the strongest form
+/// of #470 acceptance and must hold unconditionally at integer DPI.
+#[test]
+fn integer_scales_have_strictly_identical_device_pixel_width() {
+    let cell_w = 8.571428_f32;
+    let pad = 8.0_f32;
+    let cols = 8_u16;
+
+    for &scale in &[1.0_f32, 2.0] {
+        let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
+        let widths_dev: Vec<i32> = (0..cols as usize)
+            .map(|c| ((snapped[c + 1] - snapped[c]) * scale).round() as i32)
+            .collect();
+        let first = widths_dev[0];
+        assert!(
+            widths_dev.iter().all(|w| *w == first),
+            "scale {}: integer scale must produce strictly identical \
+             device-pixel widths, got {:?}",
+            scale,
+            widths_dev,
+        );
+    }
+}
+
+/// Strict-equality fast path for cell widths that DO snap cleanly at
+/// a given fractional scale (e.g. 8.571 logical at 1.75x -> 15 device
+/// px exactly because 8.571 * 1.75 = 14.999, well within rounding).
+/// When this property holds, the snapped-edge cache must surface it.
+#[test]
+fn cleanly_snapping_pitches_yield_strict_equality_at_fractional_scales() {
+    // Pairs of (scale, cell_w) chosen so that cell_w * scale is
+    // within 0.5 of an integer for every column position — i.e.
+    // all cells snap to the same device width with no jitter.
+    let cases: &[(f32, f32)] = &[
+        (1.5, 8.0),       // 12.0 device px exactly
+        (1.5, 10.0),      // 15.0 device px exactly
+        (1.75, 8.571428), // 14.999... -> 15 device px every cell
+        (1.25, 8.0),      // 10.0 device px exactly
+    ];
+    let pad = 8.0_f32;
+    let cols = 6_u16;
+
+    for &(scale, cell_w) in cases {
+        let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
+        let widths_dev: Vec<i32> = (0..cols as usize)
+            .map(|c| ((snapped[c + 1] - snapped[c]) * scale).round() as i32)
+            .collect();
+        let first = widths_dev[0];
+        assert!(
+            widths_dev.iter().all(|w| *w == first),
+            "scale {} cell_w {}: expected strict equality (cleanly \
+             snapping pitch), got {:?}",
+            scale,
+            cell_w,
+            widths_dev,
+        );
+    }
+}
+
 /// Integer-scale fast path: at scale 1.0 / 2.0, `snap_to_device_pixels`
-/// is the identity, so the snapped edges must equal the unsnapped edges.
-/// This is the "mac dHash snapshots stay green" guarantee.
+/// is the identity on x, so the snapped edges must equal the unsnapped
+/// edges. This is the "mac dHash snapshots stay green" guarantee.
 #[test]
 fn integer_scales_are_identity() {
     let cell_w = 9.0_f32;
