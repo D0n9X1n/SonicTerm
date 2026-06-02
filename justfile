@@ -12,3 +12,15 @@ visual-case id platform="mac":
 # Release build of the mac binary (used by the visual harness)
 build:
     cargo build --release -p sonicterm-mac
+
+# Run the full Windows visual harness (all cases)
+test-windows:
+    pwsh -File testing/workflows/windows.ps1 -All
+
+# Run a single Windows harness case by id
+test-windows-case CASE:
+    pwsh -File testing/workflows/windows.ps1 -Case {{CASE}}
+
+# Build the Windows binary then run the full Windows harness
+test-windows-build:
+    pwsh -File testing/workflows/windows.ps1 -Build -All
