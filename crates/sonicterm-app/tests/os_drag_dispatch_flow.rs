@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use sonicterm_app::app::os_drag::{AppHandle, DragOutcome, OsTabDragBackend};
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

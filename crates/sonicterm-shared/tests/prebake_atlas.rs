@@ -10,11 +10,11 @@
 //! invisible to the rest of the test suite.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::glyph_atlas::GlyphAtlas;
-use sonicterm_shared::swash_rasterizer::{
+use sonicterm_text::glyph_atlas::GlyphAtlas;
+use sonicterm_text::swash_rasterizer::{
     prebake_box_and_powerline, SwashRasterizer, DEFAULT_RASTER_PX, PREBAKE_RANGES,
 };
+use sonicterm_types::glyph_key::GlyphKey;
 
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();

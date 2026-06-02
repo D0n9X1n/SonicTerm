@@ -7,7 +7,7 @@
 //! sites converge on) and the keymap dispatch arm.
 
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
@@ -97,7 +97,7 @@ fn scroll_pane_at_or_past_live_tail_snaps_to_none() {
 
 #[test]
 fn keymap_scroll_lineup_dispatches_through_scroll_pane() {
-    use sonicterm_core::keymap::{Action, ScrollAction};
+    use sonicterm_cfg::keymap::{Action, ScrollAction};
     let (mut app, pane_id, sb) = build_app_with_pane(150);
     assert!(app.run_action(&Action::Scroll(ScrollAction::LineUp)));
     assert_eq!(vt_abs(&app, pane_id), Some(sb - 1));
@@ -105,7 +105,7 @@ fn keymap_scroll_lineup_dispatches_through_scroll_pane() {
 
 #[test]
 fn keymap_scroll_pageup_uses_viewport_rows() {
-    use sonicterm_core::keymap::{Action, ScrollAction};
+    use sonicterm_cfg::keymap::{Action, ScrollAction};
     let (mut app, pane_id, sb) = build_app_with_pane(150);
     let rows = app.__test_pane_viewport_rows(pane_id).unwrap() as u64;
     assert!(app.run_action(&Action::Scroll(ScrollAction::PageUp)));
@@ -114,7 +114,7 @@ fn keymap_scroll_pageup_uses_viewport_rows() {
 
 #[test]
 fn keymap_scroll_pagedown_moves_toward_tail() {
-    use sonicterm_core::keymap::{Action, ScrollAction};
+    use sonicterm_cfg::keymap::{Action, ScrollAction};
     let (mut app, pane_id, _sb) = build_app_with_pane(150);
     app.scroll_pane(pane_id, -100);
     let before = vt_abs(&app, pane_id).unwrap();
@@ -127,7 +127,7 @@ fn keymap_scroll_pagedown_moves_toward_tail() {
 
 #[test]
 fn keymap_scroll_totop_jumps_to_zero() {
-    use sonicterm_core::keymap::{Action, ScrollAction};
+    use sonicterm_cfg::keymap::{Action, ScrollAction};
     let (mut app, pane_id, _sb) = build_app_with_pane(150);
     assert!(app.run_action(&Action::Scroll(ScrollAction::ToTop)));
     assert_eq!(vt_abs(&app, pane_id), Some(0));
@@ -135,7 +135,7 @@ fn keymap_scroll_totop_jumps_to_zero() {
 
 #[test]
 fn keymap_scroll_tobottom_jumps_to_tail() {
-    use sonicterm_core::keymap::{Action, ScrollAction};
+    use sonicterm_cfg::keymap::{Action, ScrollAction};
     let (mut app, pane_id, _sb) = build_app_with_pane(150);
     app.scroll_pane(pane_id, -50);
     assert!(app.run_action(&Action::Scroll(ScrollAction::ToBottom)));

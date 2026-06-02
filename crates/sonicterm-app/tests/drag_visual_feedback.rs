@@ -21,8 +21,8 @@
 //!     "lifts off" instead of staying solid in the source bar).
 
 use sonicterm_app::tab_drag::{build_drag_chip_overlay, DragSession};
-use sonicterm_shared::tabbar_view::TabBarLayout;
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::TabBarLayout;
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 const INSERTION_GAP_PX: f32 = TabBarLayout::INSERTION_GAP_PX;
 
@@ -161,7 +161,7 @@ fn d3_source_tab_is_grayed_at_alpha_point_three() {
 #[test]
 fn ghost_tab_text_run_has_half_alpha() {
     use glyphon::Color as GColor;
-    use sonicterm_shared::render::scale_glyphon_alpha;
+    use sonicterm_gpu::core::scale_glyphon_alpha;
 
     // Reproduce the live drag → chip pipeline the renderer consumes.
     let bar = bar_with(3);
@@ -197,7 +197,8 @@ fn ghost_tab_text_run_has_half_alpha() {
 #[test]
 fn source_tab_text_during_drag_has_30pct_alpha() {
     use glyphon::Color as GColor;
-    use sonicterm_shared::render::{build_tab_title_spans, scale_glyphon_alpha, TabSpanInput};
+    use sonicterm_gpu::core::scale_glyphon_alpha;
+    use sonicterm_ui::tab_spans::{build_tab_title_spans, TabSpanInput};
 
     // Build a 3-tab bar; the drag's source is tab index 1.
     let bar = bar_with(3);

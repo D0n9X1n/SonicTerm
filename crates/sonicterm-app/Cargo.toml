@@ -56,4 +56,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 notify-rust = "4"
 
 [dev-dependencies]
+sonicterm-cfg.workspace = true
+sonicterm-grid.workspace = true
+sonicterm-io.workspace = true
+sonicterm-vt.workspace = true
 tempfile = "3"

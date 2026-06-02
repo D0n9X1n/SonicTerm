@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 sonicterm-core.workspace = true
+sonicterm-cfg.workspace = true
 sonicterm-shared.workspace = true
 sonicterm-app.workspace = true
 sonicterm-app-core.workspace = true

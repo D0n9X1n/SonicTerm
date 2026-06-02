@@ -19,8 +19,8 @@
 //! pre-decode in test code — that would short-circuit the very code
 //! path we're trying to exercise.
 
-use sonicterm_core::grid::{CellFlags, Grid};
-use sonicterm_core::vt::Parser;
+use sonicterm_grid::grid::{CellFlags, Grid};
+use sonicterm_vt::vt::Parser;
 
 /// Drive the parser with raw UTF-8 bytes and return a flat string of
 /// the cells on row 0 up to the cursor, with WIDE_CONT cells stripped.

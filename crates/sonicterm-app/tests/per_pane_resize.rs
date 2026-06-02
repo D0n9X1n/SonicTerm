@@ -18,10 +18,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use sonicterm_app::app::{resize_panes_to_rects, PaneState};
-use sonicterm_core::grid::Grid;
-use sonicterm_core::keymap::Direction;
-use sonicterm_core::vt::Parser;
+use sonicterm_cfg::keymap::Direction;
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::pane::{PaneTree, Rect};
+use sonicterm_vt::vt::Parser;
 
 fn make_pane(cols: u16, rows: u16) -> (PaneState, Arc<Mutex<Parser>>) {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));
@@ -125,10 +125,10 @@ fn close_sibling_pane_resizes_survivor_to_full_width() {
     // close_active_pane by calling PaneTree::close + resize_panes_to_rects
     // directly; this cycle drives the real entry point).
     use sonicterm_app::app::{App, TabState};
-    use sonicterm_core::config::Config;
-    use sonicterm_core::keymap::{Keymap, Meta};
-    use sonicterm_core::pty::PtyHandle;
-    use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    use sonicterm_cfg::config::Config;
+    use sonicterm_cfg::keymap::{Keymap, Meta};
+    use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+    use sonicterm_io::pty::PtyHandle;
     use sonicterm_ui::tabs::Tab;
     use std::sync::atomic::{AtomicU32, Ordering};
 

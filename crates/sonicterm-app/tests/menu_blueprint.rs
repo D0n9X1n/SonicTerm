@@ -5,7 +5,7 @@
 //! on the same canonical structure being present at compile/link time.
 
 use sonicterm_app::menu::{blueprint, Binding, KeyMods, Sender};
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 
 #[test]
 fn blueprint_has_five_top_level_submenus_in_order() {

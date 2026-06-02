@@ -22,9 +22,9 @@
 //!   strict assertion flaky, so we soften to "chain non-trivial".
 
 use cosmic_text::FontSystem;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::glyph_atlas::{GlyphAtlas, Rasterizer};
-use sonicterm_shared::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
+use sonicterm_text::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_types::glyph_key::GlyphKey;
 
 /// Build a font system populated with the four Rec Mono Casual cuts
 /// shipped under `assets/fonts/`. On macOS, also let cosmic-text's

@@ -3,7 +3,7 @@
 //! per-glyph `glyphon_color_to_linear_rgba` call; any mismatch would
 //! produce a visible color shift on body text.
 
-use sonicterm_shared::render::{srgb_channel_to_linear, srgb_u8_to_linear_lut};
+use sonicterm_gpu::color::{srgb_channel_to_linear, srgb_u8_to_linear_lut};
 
 #[test]
 fn lut_matches_float_pow_path_for_every_u8() {

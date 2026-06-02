@@ -1,6 +1,6 @@
-use sonicterm_shared::{
-    quad::QuadInstance,
-    render::{emit_tab_bar_quads, TabBarQuadParams},
+use sonicterm_gpu::core::{emit_tab_bar_quads, TabBarQuadParams};
+use sonicterm_gpu::quad::QuadInstance;
+use sonicterm_ui::{
     tabbar_view::TabBarLayout,
     tabs::{Tab, TabBar},
 };

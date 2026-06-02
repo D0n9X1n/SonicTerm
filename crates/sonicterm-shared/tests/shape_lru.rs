@@ -1,4 +1,4 @@
-//! Tests for the LRU eviction policy in [`sonicterm_shared::shape::ShapeCache`].
+//! Tests for the LRU eviction policy in [`sonicterm_text::shape::ShapeCache`].
 //!
 //! The previous cache cleared the entire `HashMap` on overflow at 512
 //! entries, causing a cold-cache stall every time a user opened a long
@@ -13,8 +13,8 @@
 //! 3. The oldest entries (those evicted earliest) are gone.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::grid::Cell;
-use sonicterm_shared::{
+use sonicterm_grid::grid::Cell;
+use sonicterm_text::{
     shape::{RunStyle, ShapeCache},
     swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
 };

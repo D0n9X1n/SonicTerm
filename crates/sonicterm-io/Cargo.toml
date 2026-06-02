@@ -17,6 +17,10 @@ default = []
 # off by default to keep the cold build slim. Enable with
 # `cargo build -p sonicterm-io --features ssh` (or via the bin crate).
 ssh = ["dep:russh", "dep:tokio", "dep:async-trait"]
+# Exposes test-only helpers (`ShellDialect` for the e2e gate examples + integration
+# tests). Not for shipping use — gated behind cfg(feature = "test_support") so
+# production builds don't pull it in.
+test_support = []
 
 [dependencies]
 sonicterm-types.workspace = true
@@ -39,3 +43,14 @@ windows = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+sonicterm-grid.workspace = true
+sonicterm-vt.workspace = true
+# Examples need the ShellDialect helpers. Enable test_support via dev-deps
+# so `cargo build --examples` / `cargo run --example` pull it in automatically.
+sonicterm-io = { path = ".", features = ["test_support"] }
+
+[[example]]
+name = "pty_dump_unicode"
+path = "examples/pty_dump_unicode.rs"

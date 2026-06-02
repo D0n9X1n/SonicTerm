@@ -1,4 +1,4 @@
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Action, Keymap},
 };

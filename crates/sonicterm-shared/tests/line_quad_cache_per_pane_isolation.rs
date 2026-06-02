@@ -6,7 +6,7 @@
 //! don't clobber each other's quads.
 
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::render::row_quad_cache::{CachedRowQuads, LineQuadCache};
+use sonicterm_gpu::row_quad_cache::{CachedRowQuads, LineQuadCache};
 
 fn marker_row(marker: f32) -> CachedRowQuads {
     CachedRowQuads {

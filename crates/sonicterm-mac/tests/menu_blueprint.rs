@@ -4,7 +4,7 @@
 
 #![cfg(target_os = "macos")]
 
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 use sonicterm_mac::menubar::{blueprint, dispatch_tag, Binding, Item, KeyMods, MenuEntry};
 
 /// The serialization needs to match: clicking the "New Tab" menu item

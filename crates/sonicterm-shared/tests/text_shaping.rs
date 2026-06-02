@@ -1,5 +1,5 @@
 //! Tests for the cosmic-text-driven shaping path in
-//! [`sonicterm_shared::shape`]. Exercises three cases the renderer must
+//! [`sonicterm_text::shape`]. Exercises three cases the renderer must
 //! preserve and one (ligatures) it must enable:
 //!
 //! 1. **Plain ASCII** keeps producing one shaped glyph per cell — no
@@ -22,8 +22,8 @@
 //!    produces is rasterizable.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::grid::Cell;
-use sonicterm_shared::{
+use sonicterm_grid::grid::Cell;
+use sonicterm_text::{
     shape::{shape_run, RunStyle},
     swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
 };
@@ -174,7 +174,7 @@ fn ascii_fast_path_detects_pure_ascii_runs() {
     // recognize it so the renderer bypasses cosmic-text shaping.
     let cells = cells_for("hello world");
     assert!(
-        sonicterm_shared::shape::run_is_ascii_fast(&cells),
+        sonicterm_text::shape::run_is_ascii_fast(&cells),
         "pure printable-ASCII run must take the fast path (no shaping)"
     );
 
@@ -182,7 +182,7 @@ fn ascii_fast_path_detects_pure_ascii_runs() {
     // path — the shaper has to see it to resolve fallback fonts.
     let cells = cells_for("héllo");
     assert!(
-        !sonicterm_shared::shape::run_is_ascii_fast(&cells),
+        !sonicterm_text::shape::run_is_ascii_fast(&cells),
         "non-ASCII codepoint must force the shaping path"
     );
 
@@ -192,7 +192,7 @@ fn ascii_fast_path_detects_pure_ascii_runs() {
     let mut cells = cells_for("a");
     cells[0].1.set_extras(Some("\u{200D}".to_string().into_boxed_str()));
     assert!(
-        !sonicterm_shared::shape::run_is_ascii_fast(&cells),
+        !sonicterm_text::shape::run_is_ascii_fast(&cells),
         "cluster extras must force the shaping path"
     );
 }
@@ -203,7 +203,7 @@ fn shape_cache_hits_on_repeat_calls() {
     // cache on the second call — that's the whole point of the cache.
     let mut fs = font_system();
     let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
-    let mut cache = sonicterm_shared::shape::ShapeCache::new();
+    let mut cache = sonicterm_text::shape::ShapeCache::new();
 
     let cells = cells_for("$ git status");
     let style = RunStyle { bold: false, italic: false };
@@ -235,7 +235,7 @@ fn shape_cache_rebases_lead_col_across_positions() {
     // Haiku review on PR #57.
     let mut fs = font_system();
     let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
-    let mut cache = sonicterm_shared::shape::ShapeCache::new();
+    let mut cache = sonicterm_text::shape::ShapeCache::new();
 
     fn run_at(text: &str, start_col: u16) -> Vec<(u16, Cell)> {
         text.chars().enumerate().map(|(i, ch)| (start_col + i as u16, cell(ch))).collect()
@@ -280,14 +280,14 @@ fn ascii_fast_path_skips_ligature_triggers() {
     // could produce them.
     let cells = cells_for("let foo = bar();");
     assert!(
-        !sonicterm_shared::shape::run_is_ascii_fast(&cells),
+        !sonicterm_text::shape::run_is_ascii_fast(&cells),
         "ASCII with `=` must NOT take the fast path (would miss `=>` / `==` ligatures)",
     );
     for trigger in ['=', '!', '<', '>', '-', '_', ':', '|', '&', '*'] {
         let s = format!("a{trigger}b");
         let cells = cells_for(&s);
         assert!(
-            !sonicterm_shared::shape::run_is_ascii_fast(&cells),
+            !sonicterm_text::shape::run_is_ascii_fast(&cells),
             "ASCII containing {trigger:?} must route through the shaper",
         );
     }
@@ -301,7 +301,7 @@ fn ascii_fast_path_keeps_plain_text_fast() {
     for s in ["hello world", "the quick brown fox", "$ ls", "echo 1234567890"] {
         let cells = cells_for(s);
         assert!(
-            sonicterm_shared::shape::run_is_ascii_fast(&cells),
+            sonicterm_text::shape::run_is_ascii_fast(&cells),
             "plain ASCII {s:?} must take the fast path",
         );
     }

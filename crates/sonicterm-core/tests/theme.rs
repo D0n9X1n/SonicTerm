@@ -1,6 +1,6 @@
 //! Integration tests for the sonicterm-core theme re-exports.
 
-use sonicterm_core::theme::*;
+use sonicterm_cfg::theme::*;
 
 fn bundled(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes").join(name)

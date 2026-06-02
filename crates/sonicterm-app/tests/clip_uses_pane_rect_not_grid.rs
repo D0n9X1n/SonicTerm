@@ -24,7 +24,7 @@
 //! x=750 was dropped. Under the fix the clip bound is 800 and the quad
 //! passes through unchanged.
 
-use sonicterm_shared::render::clip_rect_to_pane;
+use sonicterm_gpu::core::clip_rect_to_pane;
 
 const CELL_W: f32 = 9.0;
 const CELL_H: f32 = 18.0;

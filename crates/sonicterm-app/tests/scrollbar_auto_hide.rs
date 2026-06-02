@@ -10,7 +10,7 @@ use sonicterm_app::app::scrollbar_visibility::{
     is_animating, is_mouse_near_right_edge, tick, update_and_collect, ScrollbarVisState,
     ALPHA_EMIT_FLOOR, EDGE_PROXIMITY_PX, FADE_IN_MS, FADE_OUT_MS, IDLE_HIDE_MS,
 };
-use sonicterm_core::config::ScrollbarMode;
+use sonicterm_cfg::config::ScrollbarMode;
 use std::time::{Duration, Instant};
 
 /// Advance simulated time by repeatedly ticking with synthetic now()

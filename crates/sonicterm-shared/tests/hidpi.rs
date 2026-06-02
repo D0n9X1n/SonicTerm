@@ -10,9 +10,9 @@
 //! code path the renderer uses to build the atlas.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::glyph_atlas::GlyphAtlas;
-use sonicterm_shared::swash_rasterizer::SwashRasterizer;
+use sonicterm_text::glyph_atlas::GlyphAtlas;
+use sonicterm_text::swash_rasterizer::SwashRasterizer;
+use sonicterm_types::glyph_key::GlyphKey;
 
 const FONT_SIZE: f32 = 14.0;
 const FONT_FAMILY: &str = "Rec Mono St.Helens";
@@ -128,10 +128,10 @@ fn atlas_dim_grows_with_scale_factor() {
     // The renderer's atlas-size helper must scale up on Retina so a 2×
     // tile working set fits. At 1× we keep the original ATLAS_DIM
     // footprint; at 2× we expect roughly double the dimension.
-    use sonicterm_shared::glyph_atlas::ATLAS_DIM;
-    let a = sonicterm_shared::render::atlas_dim_for_scale(1.0);
-    let b = sonicterm_shared::render::atlas_dim_for_scale(2.0);
-    let c = sonicterm_shared::render::atlas_dim_for_scale(3.0);
+    use sonicterm_text::glyph_atlas::ATLAS_DIM;
+    let a = sonicterm_text::metrics::atlas_dim_for_scale(1.0);
+    let b = sonicterm_text::metrics::atlas_dim_for_scale(2.0);
+    let c = sonicterm_text::metrics::atlas_dim_for_scale(3.0);
     assert_eq!(a, ATLAS_DIM, "1x atlas dim must equal ATLAS_DIM");
     assert!(b >= ATLAS_DIM * 2, "2x atlas dim ({b}) must be >= 2×ATLAS_DIM");
     assert!(c >= ATLAS_DIM * 3, "3x atlas dim ({c}) must be >= 3×ATLAS_DIM");
@@ -142,8 +142,8 @@ fn atlas_dim_floors_at_base_for_subunit_scale() {
     // Edge case: some platforms can report scale_factor < 1.0 (e.g.
     // fractional zoom out). We must never shrink the atlas below the
     // base size, otherwise even a 1× working set wouldn't fit.
-    use sonicterm_shared::glyph_atlas::ATLAS_DIM;
-    let a = sonicterm_shared::render::atlas_dim_for_scale(0.5);
+    use sonicterm_text::glyph_atlas::ATLAS_DIM;
+    let a = sonicterm_text::metrics::atlas_dim_for_scale(0.5);
     assert!(a >= ATLAS_DIM, "sub-unit scale must not shrink atlas below ATLAS_DIM");
 }
 
@@ -179,8 +179,8 @@ fn no_op_when_scale_unchanged_via_helper() {
     // with the same scale must produce the same dimension, so a
     // no-change scale_factor update won't trigger a needless atlas
     // realloc in set_scale_factor.
-    let a = sonicterm_shared::render::atlas_dim_for_scale(2.0);
-    let b = sonicterm_shared::render::atlas_dim_for_scale(2.0);
+    let a = sonicterm_text::metrics::atlas_dim_for_scale(2.0);
+    let b = sonicterm_text::metrics::atlas_dim_for_scale(2.0);
     assert_eq!(a, b);
 }
 
@@ -241,8 +241,8 @@ fn tile_at_125x_intermediate_scale() {
 
 #[test]
 fn atlas_dim_for_125x_holds_at_base() {
-    use sonicterm_shared::glyph_atlas::ATLAS_DIM;
-    let d = sonicterm_shared::render::atlas_dim_for_scale(1.25);
+    use sonicterm_text::glyph_atlas::ATLAS_DIM;
+    let d = sonicterm_text::metrics::atlas_dim_for_scale(1.25);
     assert!(d >= ATLAS_DIM, "1.25x atlas dim {d} must be >= ATLAS_DIM");
 }
 
@@ -283,8 +283,9 @@ fn atlas_upload_recreated_matches_new_atlas_dim_after_scale_change() {
     // device (same offscreen pattern as text_pipeline_offscreen.rs) so
     // the assertion is grounded in actual GPU resources, not a mock.
     use pollster::FutureExt as _;
-    use sonicterm_shared::text_pipeline::TextPipeline;
-    use sonicterm_shared::{atlas_upload::AtlasUpload, glyph_atlas::GlyphAtlas};
+    use sonicterm_gpu::atlas_upload::AtlasUpload;
+    use sonicterm_gpu::text_pipeline::TextPipeline;
+    use sonicterm_text::glyph_atlas::GlyphAtlas;
     use wgpu::{
         DeviceDescriptor, InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat,
     };
@@ -303,7 +304,7 @@ fn atlas_upload_recreated_matches_new_atlas_dim_after_scale_change() {
     let pipeline = TextPipeline::new(&device, TextureFormat::Rgba8UnormSrgb, 16);
 
     // Step 1: build "1x" atlas + upload.
-    let dim_1x = sonicterm_shared::render::atlas_dim_for_scale(1.0);
+    let dim_1x = sonicterm_text::metrics::atlas_dim_for_scale(1.0);
     let atlas_1x = GlyphAtlas::new(dim_1x, dim_1x);
     let upload_1x = AtlasUpload::new(&device, &queue, &atlas_1x, &pipeline.bind_group_layout);
     assert_eq!(upload_1x.width(), dim_1x);
@@ -312,7 +313,7 @@ fn atlas_upload_recreated_matches_new_atlas_dim_after_scale_change() {
     // Step 2: model set_scale_factor(2.0) — replace the CPU atlas with
     // a larger one, then recreate AtlasUpload so the GPU texture +
     // bind group match the new dimensions.
-    let dim_2x = sonicterm_shared::render::atlas_dim_for_scale(2.0);
+    let dim_2x = sonicterm_text::metrics::atlas_dim_for_scale(2.0);
     assert!(dim_2x > dim_1x, "2x atlas dim must exceed 1x for the regression to be meaningful");
     let atlas_2x = GlyphAtlas::new(dim_2x, dim_2x);
     let upload_2x = AtlasUpload::new(&device, &queue, &atlas_2x, &pipeline.bind_group_layout);

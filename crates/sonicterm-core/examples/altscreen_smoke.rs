@@ -1,9 +1,7 @@
 //! Smoke test for DEC ?1049 alt-screen handling.
 
-use sonicterm_core::{
-    grid::{CellFlags, Grid},
-    vt::Parser,
-};
+use sonicterm_grid::grid::{CellFlags, Grid};
+use sonicterm_vt::vt::Parser;
 
 fn row_str(parser: &Parser, r: u16) -> String {
     parser

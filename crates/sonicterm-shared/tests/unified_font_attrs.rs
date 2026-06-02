@@ -7,7 +7,7 @@
 //! some systems → visible mismatch between grid text and tab title.
 
 use glyphon::{Attrs, Family};
-use sonicterm_shared::render::terminal_font_attrs;
+use sonicterm_gpu::core::terminal_font_attrs;
 
 #[test]
 fn terminal_font_attrs_uses_family_name_not_generic() {

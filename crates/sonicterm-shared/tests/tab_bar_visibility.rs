@@ -21,8 +21,8 @@
 //! FAILS if a future change reverts to `tok::BG_BASE()` or otherwise
 //! reintroduces the camouflage.
 
-use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
-use sonicterm_shared::ui_tokens::{color as tok, UiPalette};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_ui::ui_tokens::{color as tok, UiPalette};
 
 /// Minimum L1 distance (sum of |Δr|+|Δg|+|Δb| in linear sRGB) between
 /// the tab-bar background and the cell-grid background. The bug case

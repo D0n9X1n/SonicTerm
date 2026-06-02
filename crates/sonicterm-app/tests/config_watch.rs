@@ -13,8 +13,8 @@ use std::io::Write;
 use std::time::Duration;
 
 use sonicterm_app::config_watch::ConfigWatcher;
-use sonicterm_core::config::Config;
-use sonicterm_shared::glyph_atlas::GlyphAtlas;
+use sonicterm_cfg::config::Config;
+use sonicterm_text::glyph_atlas::GlyphAtlas;
 
 /// Write `body` to `path` and fsync so the watcher observes a real
 /// `Modify` event on every platform (notify on macOS occasionally

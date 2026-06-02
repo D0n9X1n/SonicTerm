@@ -4,15 +4,13 @@ use std::time::{Duration, Instant};
 use sonicterm_app::app::{
     poll_command_events_for_tab_state, PaneCommandEvent, PaneState, TabState,
 };
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    vt::{CommandEvent, Parser},
-};
+use sonicterm_cfg::config::Config;
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::{
     pane::PaneTree,
     tabs::{CommandStatus, Tab, TabBar},
 };
+use sonicterm_vt::vt::{CommandEvent, Parser};
 
 #[test]
 fn command_events_are_polled_for_child_window_tabs() {

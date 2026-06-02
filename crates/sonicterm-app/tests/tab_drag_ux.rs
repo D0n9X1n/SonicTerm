@@ -8,8 +8,8 @@
 use sonicterm_app::tab_drag::{
     compute_action, find_drop_target, DragAction, DragSession, DropTarget, WindowGeom,
 };
-use sonicterm_shared::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn synth_bar(n: usize) -> TabBar {
     let mut b = TabBar::new();

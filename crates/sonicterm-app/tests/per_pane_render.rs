@@ -17,10 +17,10 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use sonicterm_core::grid::Grid;
-use sonicterm_core::vt::Parser;
+use sonicterm_grid::grid::Grid;
 use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_render_model::{CursorStyle, PaneRender};
+use sonicterm_vt::vt::Parser;
 
 #[test]
 fn split_right_yields_two_pane_origins_with_distinct_x() {

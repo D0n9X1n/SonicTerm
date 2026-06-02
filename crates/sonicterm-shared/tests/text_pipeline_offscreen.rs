@@ -18,14 +18,16 @@
 
 use cosmic_text::FontSystem;
 use pollster::FutureExt as _;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::{
+use sonicterm_gpu::{
     atlas_upload::AtlasUpload,
-    glyph_atlas::GlyphAtlas,
     quad::px_to_ndc,
-    swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
     text_pipeline::{GlyphInstance, TextPipeline},
 };
+use sonicterm_text::{
+    glyph_atlas::GlyphAtlas,
+    swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX},
+};
+use sonicterm_types::glyph_key::GlyphKey;
 use wgpu::{
     Color, CommandEncoderDescriptor, DeviceDescriptor, Extent3d, InstanceDescriptor, LoadOp,
     Operations, PowerPreference, RenderPassColorAttachment, RenderPassDescriptor,

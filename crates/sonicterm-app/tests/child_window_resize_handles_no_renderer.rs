@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use sonicterm_app::app::{
     resize_renderer_and_panes_if_present, set_scale_factor_if_renderer_present, PaneState,
 };
-use sonicterm_core::{grid::Grid, vt::Parser};
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 
 fn pane(cols: u16, rows: u16) -> (PaneState, std::sync::Arc<parking_lot::Mutex<Parser>>) {
     let parser = std::sync::Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(cols, rows))));

@@ -11,12 +11,9 @@
 
 use cosmic_text::FontSystem;
 use glyphon::Color as GColor;
-use sonicterm_shared::{
-    glyph_atlas::GlyphAtlas,
-    render::{emit_overlay_text_glyphs, OverlayTextGlyphDebug},
-    swash_rasterizer::SwashRasterizer,
-    text_pipeline::GlyphInstance,
-};
+use sonicterm_gpu::core::{emit_overlay_text_glyphs, OverlayTextGlyphDebug};
+use sonicterm_gpu::text_pipeline::GlyphInstance;
+use sonicterm_text::{glyph_atlas::GlyphAtlas, swash_rasterizer::SwashRasterizer};
 
 const FONT_SIZE: f32 = 14.0;
 const SCALE_FACTOR: f32 = 2.0;
@@ -24,7 +21,7 @@ const FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();
-    sonicterm_shared::swash_rasterizer::load_bundled_fonts(&mut fs);
+    sonicterm_text::swash_rasterizer::load_bundled_fonts(&mut fs);
     fs
 }
 

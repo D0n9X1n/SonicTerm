@@ -7,7 +7,7 @@
 //! 29,32,33) rendered as `~#6e6e6e` (~110,110,110) — a mid-gray — until
 //! `hex_to_wgpu` / `hex_to_rgba` were updated to convert sRGB→linear.
 
-use sonicterm_shared::render::{hex_to_rgba, hex_to_wgpu, srgb_channel_to_linear};
+use sonicterm_gpu::color::{hex_to_rgba, hex_to_wgpu, srgb_channel_to_linear};
 
 fn approx(a: f64, b: f64, eps: f64) -> bool {
     (a - b).abs() < eps

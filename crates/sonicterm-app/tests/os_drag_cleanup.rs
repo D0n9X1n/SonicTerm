@@ -24,7 +24,7 @@
 //! the test green even if production never touched the renderer.
 
 use sonicterm_app::app::{synthetic_main_window_id, App};
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

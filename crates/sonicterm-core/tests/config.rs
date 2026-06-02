@@ -1,6 +1,6 @@
 //! Integration tests for the sonicterm-core config re-exports.
 
-use sonicterm_core::config::*;
+use sonicterm_cfg::config::*;
 
 #[test]
 fn default_theme_is_gruvbox_dark_hard() {

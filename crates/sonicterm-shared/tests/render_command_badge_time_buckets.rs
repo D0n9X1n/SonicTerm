@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use sonicterm_shared::render::command_status_hash;
+use sonicterm_gpu::core::command_status_hash;
 use sonicterm_ui::tabs::CommandStatus;
 
 #[test]

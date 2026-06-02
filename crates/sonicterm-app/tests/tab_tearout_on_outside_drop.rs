@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use sonicterm_app::app::App;
 use sonicterm_app::os_drag::{DragAck, OsDragSink, TabPayload};
-use sonicterm_core::pty::PtyHandle;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
+use sonicterm_io::pty::PtyHandle;
 
 fn synth_theme() -> Theme {
     let hex = || Hex("#000000".to_string());

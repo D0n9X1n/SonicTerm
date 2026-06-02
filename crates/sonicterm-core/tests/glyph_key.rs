@@ -1,10 +1,10 @@
-//! Tests for `sonicterm_core::glyph_key::GlyphKey` — the atlas key type.
+//! Tests for `sonicterm_types::glyph_key::GlyphKey` — the atlas key type.
 
 use std::collections::{HashMap, HashSet};
 
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_core::grid::{Cell, CellFlags, Color};
-use sonicterm_core::hyperlink::HyperlinkId;
+use sonicterm_grid::grid::{Cell, CellFlags, Color};
+use sonicterm_grid::hyperlink::HyperlinkId;
+use sonicterm_types::glyph_key::GlyphKey;
 
 fn cell(ch: char, flags: CellFlags) -> Cell {
     Cell::plain(ch, Color::Default, Color::Default, flags)

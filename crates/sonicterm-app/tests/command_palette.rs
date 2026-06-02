@@ -1,7 +1,7 @@
 //! Integration tests for the command palette state.
 
-use sonicterm_core::keymap::{Action, Direction, ScrollAction};
-use sonicterm_shared::command_palette::{action_display_name, all_actions, CommandPalette};
+use sonicterm_cfg::keymap::{Action, Direction, ScrollAction};
+use sonicterm_ui::command_palette::{action_display_name, all_actions, CommandPalette};
 
 #[test]
 fn starts_closed_and_empty_query() {
@@ -149,11 +149,11 @@ fn all_actions_covers_every_variant_kind() {
 
 #[test]
 fn palette_lists_every_action_variant() {
-    // Every variant kind in sonicterm_core::keymap::Action must be
+    // Every variant kind in sonicterm_cfg::keymap::Action must be
     // represented at least once in the palette universe — otherwise
     // a brand-new bindable action would silently never appear.
-    use sonicterm_shared::command_label::{variant_kind, ALL_VARIANT_KINDS};
-    use sonicterm_shared::command_palette::covers_every_variant_kind;
+    use sonicterm_ui::command_label::{variant_kind, ALL_VARIANT_KINDS};
+    use sonicterm_ui::command_palette::covers_every_variant_kind;
     assert!(covers_every_variant_kind(), "all_actions() is missing a variant kind");
     let universe = all_actions();
     for kind in ALL_VARIANT_KINDS {
@@ -178,7 +178,7 @@ fn fuzzy_match_ranks_substring_before_subsequence() {
     p.set_query("neta");
     let visible_actions = p.visible();
     let labels: Vec<String> =
-        visible_actions.iter().map(|a| sonicterm_shared::command_label::label(a)).collect();
+        visible_actions.iter().map(|a| sonicterm_ui::command_label::label(a)).collect();
     assert!(
         labels.iter().any(|l| l == "New Tab"),
         "'neta' should match 'New Tab' as a subsequence: {labels:?}"
@@ -195,7 +195,7 @@ fn fuzzy_match_ranks_substring_before_subsequence() {
     p.set_query("new t");
     let top = p.current().cloned().expect("at least one match");
     assert_eq!(
-        sonicterm_shared::command_label::label(&top),
+        sonicterm_ui::command_label::label(&top),
         "New Tab",
         "contiguous substring should rank first"
     );
@@ -241,8 +241,8 @@ fn esc_closes_palette() {
 
 #[test]
 fn keybinding_hint_uses_pretty_glyphs_when_bound() {
-    use sonicterm_core::keymap::{ActionWrapper, Binding, Keymap, Meta};
-    use sonicterm_shared::command_label::keybinding_hint;
+    use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
+    use sonicterm_ui::command_label::keybinding_hint;
     let km = Keymap {
         meta: Meta { name: "test".into(), version: "1".into() },
         bindings: vec![
@@ -320,7 +320,7 @@ fn palette_query_sett_matches_edit_config() {
     p.open();
     p.set_query("sett");
     let labels: Vec<String> =
-        p.visible().iter().map(|a| sonicterm_shared::command_label::label(a)).collect();
+        p.visible().iter().map(|a| sonicterm_ui::command_label::label(a)).collect();
     assert!(
         labels.iter().any(|l| l == "Edit sonicterm.toml"),
         "'sett' should match 'Edit sonicterm.toml' via keyword alias: {labels:?}"
@@ -329,7 +329,7 @@ fn palette_query_sett_matches_edit_config() {
 
 #[test]
 fn palette_zero_matches_shows_no_commands_placeholder() {
-    use sonicterm_shared::overlays::{PaletteLayout, NO_MATCHES};
+    use sonicterm_ui::overlays::{PaletteLayout, NO_MATCHES};
     let mut p = CommandPalette::new();
     p.open();
     p.set_query("zzz_definitely_no_match_zzz");

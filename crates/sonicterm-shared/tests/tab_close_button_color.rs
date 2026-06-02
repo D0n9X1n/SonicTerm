@@ -8,13 +8,13 @@
 //!    observable through plain `Config` equality so the
 //!    `apply_new_config` diff in `App` fires the renderer push.
 //!
-//! These tests deliberately drive `sonicterm_core::config::Config` rather
+//! These tests deliberately drive `sonicterm_cfg::config::Config` rather
 //! than `GpuRenderer` — the renderer requires a live winit window +
 //! wgpu adapter, which is unavailable in CI. The App's startup +
 //! live-reload paths only consume `Config::tab_close_button_color`,
 //! so verifying the parser + diff is the meaningful coverage.
 
-use sonicterm_core::config::Config;
+use sonicterm_cfg::config::Config;
 use std::fs;
 use tempfile::TempDir;
 

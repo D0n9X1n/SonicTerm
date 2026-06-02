@@ -1,4 +1,4 @@
-//! Windows-only integration test for `sonicterm_core::foreground_proc`.
+//! Windows-only integration test for `sonicterm_io::foreground_proc`.
 //!
 //! Spawns `cmd /c timeout 30`, then asks the probe to identify the
 //! foreground descendant of `cmd`. The expected resolution is `timeout`
@@ -24,7 +24,7 @@ fn probe_finds_cmd_or_timeout_child() {
     // Give cmd a moment to spawn the timeout child.
     thread::sleep(Duration::from_millis(500));
 
-    let result = sonicterm_core::foreground_proc::current_foreground_pid(child.id());
+    let result = sonicterm_io::foreground_proc::current_foreground_pid(child.id());
 
     // Always kill the child before asserting so a failure doesn't leak a
     // 30 s sleeping process onto the runner.

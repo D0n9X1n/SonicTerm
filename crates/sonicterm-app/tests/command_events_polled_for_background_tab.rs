@@ -1,13 +1,13 @@
 use std::time::{Duration, Instant};
 
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-    vt::CommandEvent,
 };
 use sonicterm_ui::tabs::CommandStatus;
+use sonicterm_vt::vt::CommandEvent;
 
 fn hex() -> Hex {
     Hex("#000000".to_string())
@@ -62,7 +62,7 @@ fn command_events_are_polled_for_background_tab() {
     let mut app = App::new(synth_theme(), Config::default(), empty_keymap());
     app.__test_seed_tab("active");
     let background_pane = app.__test_seed_tab("background");
-    app.run_action(&sonicterm_core::keymap::Action::PrevTab);
+    app.run_action(&sonicterm_cfg::keymap::Action::PrevTab);
 
     let started = Instant::now() - Duration::from_secs(6);
     app.__test_push_pane_command_event(background_pane, CommandEvent::CmdStart, started, None);

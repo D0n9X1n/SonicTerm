@@ -18,13 +18,13 @@
 
 use parking_lot::Mutex;
 use sonicterm_app::app::{App, PaneState};
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
-    grid::Grid,
     keymap::{Action, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-    vt::Parser,
 };
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

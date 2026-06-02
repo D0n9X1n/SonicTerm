@@ -12,7 +12,7 @@
 //! `TabId` and asserts that `bar.tabs()[bar.active_index()].id`
 //! still refers to the SAME tab after reorder.
 
-use sonicterm_shared::tabs::{Tab, TabBar, TabId};
+use sonicterm_ui::tabs::{Tab, TabBar, TabId};
 
 fn bar_with_n(n: usize) -> TabBar {
     let mut b = TabBar::new();

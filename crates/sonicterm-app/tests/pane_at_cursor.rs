@@ -5,17 +5,17 @@
 
 use parking_lot::Mutex;
 use sonicterm_app::app::{App, PaneState, TabState};
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
-    grid::Grid,
     keymap::{Direction, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-    vt::Parser,
 };
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::{
     pane::{PaneTree, Rect},
     tabs::Tab,
 };
+use sonicterm_vt::vt::Parser;
 use std::sync::Arc;
 
 fn hex() -> Hex {

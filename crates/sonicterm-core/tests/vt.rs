@@ -1,13 +1,13 @@
-//! Integration tests for `sonicterm_core::vt`.
+//! Integration tests for `sonicterm_vt::vt`.
 //!
 //! Migrated from inline `#[cfg(test)] mod tests` in src/vt.rs as part of
 //! the per-crate tests/ folder restructure. Adds alt-screen / DEC-mode
 //! tests introduced in v0.5.
 
-use sonicterm_core::grid;
-use sonicterm_core::grid::{CellFlags, Color, Grid};
-use sonicterm_core::vt::VtEvent;
-use sonicterm_core::vt::*;
+use sonicterm_grid::grid;
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_vt::vt::VtEvent;
+use sonicterm_vt::vt::*;
 
 fn parse(input: &[u8]) -> Parser {
     let mut p = Parser::new(Grid::new(20, 5));

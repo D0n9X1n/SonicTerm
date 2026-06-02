@@ -1,6 +1,6 @@
 //! Integration tests for the sonicterm-core grid re-exports.
 
-use sonicterm_core::grid::*;
+use sonicterm_grid::grid::*;
 
 #[test]
 fn put_char_advances_cursor() {
@@ -658,7 +658,7 @@ fn scroll_up_preserves_row_content_after_rotation() {
     // memmove implementation: row k after `scroll_up(n)` must equal
     // row k+n before, for k+n < rows. The freshly-introduced bottom
     // row(s) must be blank.
-    use sonicterm_core::grid::{CellFlags, Color, Grid};
+    use sonicterm_grid::grid::{CellFlags, Color, Grid};
     let mut g = Grid::new(8, 5);
     // Fill each row with a distinct letter so we can tell them apart.
     for r in 0..5u16 {
@@ -686,7 +686,7 @@ fn scroll_up_preserves_row_content_after_rotation() {
 fn scroll_up_recycles_oldest_scrollback_row_at_limit() {
     // Once scrollback is at the limit, a further scroll should evict
     // the oldest row AND reuse its buffer (no allocation, no row leak).
-    use sonicterm_core::grid::{CellFlags, Color, Grid};
+    use sonicterm_grid::grid::{CellFlags, Color, Grid};
     let mut g = Grid::new(4, 3);
     g.set_scrollback_limit(2);
     for tag in [b'A', b'B', b'C', b'D', b'E'] {

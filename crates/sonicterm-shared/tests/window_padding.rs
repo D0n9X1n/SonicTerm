@@ -19,9 +19,9 @@
 //!   col = floor((px - padding_left) / cell_w)
 //!   row = floor((py - top_inset)    / cell_h)
 
-use sonicterm_core::config::WindowConfig;
-use sonicterm_shared::render::tab_bar_top_inset_with_titlebar;
-use sonicterm_shared::tabbar_view::TAB_BAR_HEIGHT;
+use sonicterm_cfg::config::WindowConfig;
+use sonicterm_ui::tabbar_view::tab_bar_top_inset_with_titlebar;
+use sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT;
 
 /// Pure model of the renderer's `cells()` formula. Kept in this test
 /// file so the asymmetric padding ratios stay obvious — if anyone

@@ -1,6 +1,6 @@
 //! Integration tests for sonicterm-shared quad.
 
-use sonicterm_shared::quad::*;
+use sonicterm_gpu::quad::*;
 
 #[test]
 fn px_to_ndc_full_screen_covers_whole_quad() {

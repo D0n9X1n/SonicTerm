@@ -10,10 +10,10 @@
 //!
 //! The fix clips selection quads to the active pane's rect after they're
 //! computed. This test verifies the contract via the two pure helpers
-//! exposed from `sonicterm_shared::render::core` (`selection_quad_rects` +
+//! exposed from `sonicterm_gpu::core` (`selection_quad_rects` +
 //! `clip_rect_to_pane`).
 
-use sonicterm_shared::render::{clip_rect_to_pane, selection_quad_rects};
+use sonicterm_gpu::core::{clip_rect_to_pane, selection_quad_rects};
 use sonicterm_ui::selection::Selection;
 
 const CELL_W: f32 = 10.0;

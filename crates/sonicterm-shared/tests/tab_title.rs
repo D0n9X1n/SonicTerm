@@ -1,12 +1,12 @@
 //! Integration tests for the wezterm-style tab title formatter and the
 //! OSC 7 → cwd pipeline that feeds it. These hit the public surface
-//! (`sonicterm_shared::tab_title::format_tab_title` and
-//! `sonicterm_core::vt::Parser::cwd`) so a regression in either layer is
+//! (`sonicterm_ui::tab_title::format_tab_title` and
+//! `sonicterm_vt::vt::Parser::cwd`) so a regression in either layer is
 //! caught here.
 
-use sonicterm_core::grid::Grid;
-use sonicterm_core::vt::{parse_osc7_cwd, Parser};
-use sonicterm_shared::tab_title::format_tab_title;
+use sonicterm_grid::grid::Grid;
+use sonicterm_ui::tab_title::format_tab_title;
+use sonicterm_vt::vt::{parse_osc7_cwd, Parser};
 
 #[test]
 fn format_tab_title_nvim_two_components() {
@@ -77,7 +77,7 @@ fn format_tab_title_shell_index_zero_to_one() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_proc_probe_returns_known_name_for_self() {
-    use sonicterm_core::proc_info::foreground_process;
+    use sonicterm_io::proc_info::foreground_process;
     // The test binary itself: probing our own pid + walking descendants
     // should at minimum return *some* process name (the deepest
     // descendant is often a temporary helper; we just assert non-empty
@@ -98,7 +98,7 @@ fn macos_proc_probe_returns_known_name_for_self() {
 // detach must renumber INACTIVE tabs too, not just the active one.
 // ---------------------------------------------------------------------------
 
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn titles(bar: &TabBar) -> Vec<String> {
     bar.tabs().iter().map(|t| t.title.clone()).collect()

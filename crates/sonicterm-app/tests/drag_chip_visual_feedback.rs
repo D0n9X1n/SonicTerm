@@ -19,8 +19,8 @@
 use sonicterm_app::tab_drag::{
     build_drag_chip_overlay, drag_moved_enough, DragSession, DRAG_START_THRESHOLD_PX,
 };
-use sonicterm_shared::tabbar_view::TabBarLayout;
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::TabBarLayout;
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn bar_with(n: usize) -> TabBar {
     let mut b = TabBar::new();

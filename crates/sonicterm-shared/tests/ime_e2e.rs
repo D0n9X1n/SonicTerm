@@ -8,8 +8,8 @@
 //! production produce the expected bytes-to-PTY and the expected
 //! on-screen rectangle for any cursor (row, col).
 
-use sonicterm_shared::ime::ImeState;
-use sonicterm_shared::overlays::ImePreeditLayout;
+use sonicterm_ui::ime::ImeState;
+use sonicterm_ui::overlays::ImePreeditLayout;
 
 /// Match the renderer's geometry math so the test pins the actual
 /// production formula (cf. `render.rs` near the IME overlay block):

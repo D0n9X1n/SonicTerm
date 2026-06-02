@@ -3,15 +3,15 @@
 //! actually emits for "中文测试".
 
 use cosmic_text::FontSystem;
-use sonicterm_core::grid::{Cell, CellFlags};
-use sonicterm_shared::shape::{shape_run, RunStyle};
-use sonicterm_shared::swash_rasterizer::SwashRasterizer;
+use sonicterm_grid::grid::{Cell, CellFlags};
+use sonicterm_text::shape::{shape_run, RunStyle};
+use sonicterm_text::swash_rasterizer::SwashRasterizer;
 
 fn wide_cell(ch: char) -> Cell {
     Cell::plain(
         ch,
-        sonicterm_core::grid::Color::Default,
-        sonicterm_core::grid::Color::Default,
+        sonicterm_grid::grid::Color::Default,
+        sonicterm_grid::grid::Color::Default,
         CellFlags::WIDE,
     )
 }

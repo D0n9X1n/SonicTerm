@@ -6,17 +6,15 @@
 
 use std::time::{Duration, Instant};
 
-use sonicterm_core::{
-    grid::{CellFlags, Color, Grid},
-    pty::PtyHandle,
-    vt::Parser,
-};
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_vt::vt::Parser;
 
 fn main() {
     let pty = PtyHandle::spawn_default_shell(
         80,
         24,
-        sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true },
+        sonicterm_io::pty::ShellSpawnOpts { clean_e2e: true },
     )
     .expect("spawn shell");
     let mut parser = Parser::new(Grid::new(80, 24));

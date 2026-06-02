@@ -8,7 +8,7 @@
 //! to-end here so any future regression in the render path's read
 //! lands a failure in this crate, not at runtime.
 
-use sonicterm_core::grid::{Cell, CellFlags, Color, Grid};
+use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
 
 fn build(cols: u16, rows: u16, n_scrolls: u16) -> Grid {
     let mut g = Grid::new(cols, rows);

@@ -5,7 +5,7 @@
 //! built from MOSconfig/recursive-code-config v1.2.2 under SIL OFL 1.1),
 //! with `JetBrainsMono Nerd Font` as the implicit fallback.
 
-use sonicterm_core::config::{Config, FontConfig, DEFAULT_FONT_FAMILY};
+use sonicterm_cfg::config::{Config, FontConfig, DEFAULT_FONT_FAMILY};
 
 #[test]
 fn font_config_default_is_st_helens() {

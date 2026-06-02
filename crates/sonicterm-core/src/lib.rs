@@ -48,12 +48,6 @@ pub use sonicterm_io::foreground_proc;
 // `sonicterm_core::glyph_key::GlyphKey` resolves.
 pub mod glyph_key;
 
-/// Test-only helpers (ShellDialect for the e2e gate examples + integration
-/// tests). Gated behind `cfg(feature = "test_support")` so production builds
-/// don't pull this in. Examples enable the feature in their build config.
-#[cfg(feature = "test_support")]
-pub mod test_support;
-
 /// Re-exports of the most commonly used items.
 #[deprecated(since = "0.9.0", note = "use leaf crates directly; see docs/migrations/0.9.0.md")]
 pub mod prelude {

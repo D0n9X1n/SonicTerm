@@ -14,12 +14,12 @@
 //!      simple `\033[41m` 80-col fill),
 //!   4. default-bg cells emit nothing (the surface clear handles those).
 
-use sonicterm_core::grid::{Cell, CellFlags, Color, Grid};
-use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonicterm_gpu::color::srgb_u8_to_linear_lut;
+use sonicterm_gpu::core::{emit_cell_bg_quads, emit_cell_bg_quads_clipped};
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::pane::Rect as PaneRect;
-use sonicterm_shared::render::{emit_cell_bg_quads, emit_cell_bg_quads_clipped};
+use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
+use sonicterm_ui::pane::Rect as PaneRect;
 
 fn theme_with_red_index1() -> Theme {
     let h = || Hex("#000000".to_string());

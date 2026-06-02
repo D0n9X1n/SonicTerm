@@ -1,4 +1,4 @@
-//! Tests for the ASCII SWAR fast-path in `sonicterm_core::vt::Parser::advance`.
+//! Tests for the ASCII SWAR fast-path in `sonicterm_vt::vt::Parser::advance`.
 //!
 //! The fast-path bulk-prints printable-ASCII runs straight to the grid while
 //! the vte state machine is in the Ground state, falling back to vte for
@@ -7,8 +7,8 @@
 //! grid (cells, attrs, cursor, scrollback) as if every byte had gone through
 //! vte one at a time.
 
-use sonicterm_core::grid::{Color, Grid};
-use sonicterm_core::vt::Parser;
+use sonicterm_grid::grid::{Color, Grid};
+use sonicterm_vt::vt::Parser;
 
 fn row_text(p: &Parser, r: u16) -> String {
     let row = p.grid().row(r);

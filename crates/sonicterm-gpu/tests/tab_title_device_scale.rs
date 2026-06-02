@@ -1,15 +1,12 @@
 use cosmic_text::FontSystem;
 use glyphon::Color as GColor;
-use sonicterm_shared::{
-    glyph_atlas::GlyphAtlas,
-    render::{
-        build_tab_title_rich_text_spans, build_tab_title_spans, emit_tab_title_glyphs,
-        tab_title_font_size, TabSpanInput, TabTitleGlyphDebug,
-    },
-    swash_rasterizer::SwashRasterizer,
-    tabs::{Tab, TabBar},
-    text_pipeline::GlyphInstance,
+use sonicterm_gpu::core::{emit_tab_title_glyphs, TabTitleGlyphDebug};
+use sonicterm_gpu::text_pipeline::GlyphInstance;
+use sonicterm_text::{glyph_atlas::GlyphAtlas, swash_rasterizer::SwashRasterizer};
+use sonicterm_ui::tab_spans::{
+    build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
 };
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 const FONT_SIZE: f32 = 14.0;
 const SCALE_FACTOR: f32 = 2.0;
@@ -17,7 +14,7 @@ const FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 fn font_system_with_bundled() -> FontSystem {
     let mut fs = FontSystem::new();
-    sonicterm_shared::swash_rasterizer::load_bundled_fonts(&mut fs);
+    sonicterm_text::swash_rasterizer::load_bundled_fonts(&mut fs);
     fs
 }
 
