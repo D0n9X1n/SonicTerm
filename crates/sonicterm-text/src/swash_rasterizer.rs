@@ -405,6 +405,38 @@ pub fn platform_fallback_chain_for_test() -> &'static [&'static str] {
     PLATFORM_FALLBACK_CHAIN
 }
 
+/// Canonical-substitute mapping for codepoints whose visually-equivalent
+/// twin IS in the bundled font, when the codepoint itself is NOT.
+///
+/// **#461 / PR-B2c — visual parity with Windows Terminal.** Some apps
+/// (notably Claude Code's bypass-mode arrows) use codepoints like
+/// `U+23F5 BLACK MEDIUM RIGHT-POINTING TRIANGLE` that bundled Rec Mono
+/// St.Helens doesn't cover. WT renders these via fallback to Segoe UI
+/// Symbol. Rather than bundling another font, we substitute the codepoint
+/// at lookup time with a visually-equivalent codepoint that IS in
+/// St.Helens. The result is byte-identical visual output to WT for these
+/// glyphs.
+///
+/// The substitution is applied:
+///  - in `SwashRasterizer::resolve_slot` (so the slot picker doesn't
+///    bounce off the missing original codepoint)
+///  - in `SwashRasterizer::rasterize` (so the actual drawn glyph matches
+///    the slot we picked)
+///
+/// Returns the original `ch` for codepoints with no canonical substitute.
+#[inline]
+pub fn canonical_substitute(ch: char) -> char {
+    match ch as u32 {
+        // U+23F4..=U+23F7 BLACK MEDIUM (LEFT|RIGHT|UP|DOWN)-POINTING TRIANGLE.
+        // Substitute to U+25C0/U+25B6/U+25B2/U+25BC which ARE in St.Helens.
+        0x23F4 => '\u{25C0}', // ⏴ → ◀
+        0x23F5 => '\u{25B6}', // ⏵ → ▶
+        0x23F6 => '\u{25B2}', // ⏶ → ▲
+        0x23F7 => '\u{25BC}', // ⏷ → ▼
+        _ => ch,
+    }
+}
+
 /// Test-visible helper for the exact fontdb lookup semantics used by
 /// [`SwashRasterizer`].
 #[doc(hidden)]
@@ -658,13 +690,22 @@ impl<'a> SwashRasterizer<'a> {
         if let Some(slot) = self.slot_cache.get(&(ch, weight_bold, italic)) {
             return *slot;
         }
+        // #461 PR-B2c: a small handful of codepoints have visually-
+        // equivalent canonical substitutes that ARE in the bundled Nerd-
+        // patched Rec Mono St.Helens cmap. Map them transparently so
+        // Claude Code's `⏵` bypass arrows (U+23F5) render as `▶`
+        // (U+25B6) instead of tofu, matching WT's output. WT does this
+        // via fallback to Segoe UI Symbol — bundling that is overkill
+        // when the substitute is visually identical and already covered.
+        let resolved_ch = canonical_substitute(ch);
+        let lookup_ch = resolved_ch;
         let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
         let mut found: Option<u8> = None;
         for (idx, family) in self.families.iter().enumerate() {
             let Some(id) = self.lookup_id(family, weight_bold, italic) else { continue };
             let Some(font) = self.font_system.get_font(id, weight) else { continue };
             let swash_font = font.as_swash();
-            if swash_font.charmap().map(ch) != 0 {
+            if swash_font.charmap().map(lookup_ch) != 0 {
                 found = Some(idx as u8);
                 break;
             }
@@ -744,7 +785,10 @@ impl<'a> Rasterizer for SwashRasterizer<'a> {
         let glyph_id = if key.glyph_id != 0 {
             key.glyph_id
         } else {
-            let g = swash_font.charmap().map(key.ch);
+            // #461 PR-B2c: same canonical-substitute mapping as resolve_slot
+            // so the glyph we actually rasterize matches the slot we picked.
+            let lookup_ch = canonical_substitute(key.ch);
+            let g = swash_font.charmap().map(lookup_ch);
             if g == 0 {
                 // The slot the caller pinned doesn't have this glyph. If
                 // the caller is the renderer, they will have already
