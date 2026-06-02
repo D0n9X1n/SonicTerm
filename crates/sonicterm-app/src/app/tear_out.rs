@@ -39,6 +39,28 @@ use crate::app::window_geom;
 
 impl App {
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
+        // #536 profile: explicit Instant + RAII drop guard so the
+        // wall-clock is emitted on every exit path. Using a guard
+        // (instead of `info_span!.entered()`) because the default
+        // `sonicterm-logging` subscriber doesn't have
+        // `with_span_events(FmtSpan::CLOSE)` configured — span timing
+        // would never reach the log. `[perf]` prefix matches the inner
+        // markers (`tear_out_spawn_exe`, `gpu_renderer_new`,
+        // `font_atlas_warmup`, `tear_out_child_init`).
+        struct PerfGuard {
+            t: std::time::Instant,
+            tab_index: usize,
+        }
+        impl Drop for PerfGuard {
+            fn drop(&mut self) {
+                tracing::info!(
+                    tab_index = self.tab_index,
+                    elapsed = ?self.t.elapsed(),
+                    "[perf] tear_out_handler"
+                );
+            }
+        }
+        let _perf_guard = PerfGuard { t: std::time::Instant::now(), tab_index: index };
         // M6a-expand-2c-misc: notify reducer of the tear-out
         // cascade. The reducer emits Render(TabRemoved) on the
         // source window AND a WindowOpen for the destination, all

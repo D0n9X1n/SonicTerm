@@ -965,6 +965,14 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
+        // #536 profile: explicit Instant timing for gpu_renderer_new.
+        // One of the two suspect cost centers motivating the
+        // tear-out-spawn investigation. Using `Instant::now()` instead
+        // of `info_span!.entered()` because the default
+        // `sonicterm-logging` subscriber doesn't have
+        // `with_span_events(FmtSpan::CLOSE)` configured, so span
+        // timing would never be emitted.
+        let __t_gpu_init = std::time::Instant::now();
         let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
             settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -1058,6 +1066,13 @@ impl GpuRenderer {
         // launch don't pay the font-fallback charmap-walk cost per cell
         // in the first paint. See `swash_rasterizer::prebake_box_and_powerline`.
         {
+            // #536 profile: explicit Instant timing for font_atlas_warmup.
+            // Per-glyph cost is ~3 ms on a cold font_system; this is the
+            // second suspect cost center. Using `Instant::now()` instead
+            // of `info_span!.entered()` because the default
+            // `sonicterm-logging` subscriber doesn't have
+            // `with_span_events(FmtSpan::CLOSE)` configured.
+            let __t_warmup = std::time::Instant::now();
             let mut prebake_raster =
                 SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
             let _inserted =
@@ -1069,6 +1084,7 @@ impl GpuRenderer {
                 &mut prebake_raster,
                 &mut glyph_atlas,
             );
+            tracing::info!(elapsed = ?__t_warmup.elapsed(), "[perf] font_atlas_warmup");
         }
         let glyph_upload =
             AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
@@ -1190,6 +1206,7 @@ impl GpuRenderer {
         let mut drag_chip_buffer = Buffer::new(&mut font_system, drag_chip_metrics);
         drag_chip_buffer.set_size(&mut font_system, Some(220.0), Some(font_size * 1.5));
 
+        tracing::info!(elapsed = ?__t_gpu_init.elapsed(), "[perf] gpu_renderer_new");
         Ok(Self {
             instance,
             device,

@@ -396,20 +396,30 @@ fn drag_ack_for_outcome(
 }
 
 fn spawn_tearout_child(payload_json: &str) -> DragAck {
+    // #536 profile: explicit Instant timing for tear_out_spawn_exe.
+    // Opus diagnosis expects this to dominate tear-out wall-clock
+    // cost. Using `Instant::now()` instead of `info_span!.entered()`
+    // because the default `sonicterm-logging` subscriber doesn't have
+    // `with_span_events(FmtSpan::CLOSE)` configured, so span timing
+    // would never be emitted.
+    let __t_spawn = std::time::Instant::now();
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(e) => {
             tracing::error!(?e, "Windows tab tear-out: current_exe failed");
+            tracing::info!(elapsed = ?__t_spawn.elapsed(), "[perf] tear_out_spawn_exe (failed)");
             return DragAck::NotAcknowledged;
         }
     };
     match std::process::Command::new(exe).arg("--tear-out-payload").arg(payload_json).spawn() {
         Ok(child) => {
             tracing::info!(pid = child.id(), "Windows tab tear-out: spawned child window");
+            tracing::info!(elapsed = ?__t_spawn.elapsed(), "[perf] tear_out_spawn_exe");
             DragAck::Accepted
         }
         Err(e) => {
             tracing::error!(?e, "Windows tab tear-out: failed to spawn child window");
+            tracing::info!(elapsed = ?__t_spawn.elapsed(), "[perf] tear_out_spawn_exe (failed)");
             DragAck::NotAcknowledged
         }
     }

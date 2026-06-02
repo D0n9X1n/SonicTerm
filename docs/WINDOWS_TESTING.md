@@ -207,3 +207,28 @@ Three harness-hardening guards layered on top of Guards 1–6:
 
 ---
 *Maintained alongside `testing/workflows/*.ps1` and `crates/sonicterm-windows/src/harness_pipe.rs`. PRs touching either should update this doc.*
+
+---
+
+## Profiling tear-out latency (#536)
+
+When investigating tab tear-out wall-clock cost (drag-out → new window
+visible), launch sonic with these env vars to capture the relevant
+spans:
+
+```powershell
+$env:RUST_LOG = "info,sonicterm_app::tear_out=trace,sonicterm_gpu::core=trace,sonicterm_windows=trace"
+.\target\release\sonicterm-windows.exe
+```
+
+Spans emitted (look for `enter`/`close` timing pairs in the log):
+
+| Span | Site | Measures |
+|---|---|---|
+| `tear_out_handler` | `sonicterm-app/src/app/tear_out.rs` | total handler wall-clock (parent process) |
+| `tear_out_spawn_exe` | `sonicterm-windows/src/os_drag_win.rs` | `Command::spawn` cost (parent) |
+| `tear_out_child_init` | `sonicterm-windows/src/main.rs` | child-process `main()` cost; `tear_out_child=true` iff launched via `--tear-out-payload` |
+| `gpu_renderer_new` | `sonicterm-gpu/src/core.rs` | wgpu instance/adapter/device init + surface configure |
+| `font_atlas_warmup` | `sonicterm-gpu/src/core.rs` | box-drawing + Powerline + ASCII + Nerd Font prebake |
+
+These are profile-only; behavior is unchanged.
