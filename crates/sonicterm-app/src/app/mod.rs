@@ -231,6 +231,20 @@ impl WindowState {
     /// A future refactor that split them would leave the regression
     /// test green while breaking production. Unify both clears here so
     /// every caller flips them in lock-step.
+    ///
+    /// **Contract (#462 speculative fix codification):** this helper is
+    /// **tolerant** — it is safe to call on a `WindowState` whose
+    /// `renderer` is `None` (e.g. a transitional window that hasn't
+    /// finished initialization yet, or a headless test window) AND on
+    /// a window whose `test_drag_chip_marker` is `None`. Both branches
+    /// short-circuit cleanly. This matters because the deferred
+    /// `pending_os_teardown` drain (see [`App::cancel_drag_session`]
+    /// and `App::drain_pending_os_teardown`) iterates a snapshot of
+    /// `self.windows.keys()`, and a tear-out spawn that just landed
+    /// (#462 race) may have produced a `WindowState` whose renderer
+    /// is still being constructed. Both fields are flipped together —
+    /// callers MUST NOT split them, or the headless-test lock-step
+    /// guarantee in `tests/os_drag_cleanup.rs` regresses.
     #[inline]
     pub(crate) fn clear_drag_chip(&mut self) {
         if let Some(r) = self.renderer.as_mut() {
@@ -742,6 +756,20 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
+    /// Issue #462 (speculative defensive fix): deferred
+    /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
+    /// on the `DroppedOnEmpty` branch instead of cancelling inline,
+    /// so any tear-out-spawn produced by the existing
+    /// `pending_new_window` drain runs to completion BEFORE
+    /// cross-window drag-residue cleanup mutates `self.windows`.
+    /// Drained by `App::drain_pending_os_teardown` AFTER
+    /// `App::drain_pending_window_creates` at the natural event-loop
+    /// boundary in `event_loop.rs::do_user_event`. The
+    /// `cancel_drag_session` all-windows loop runs **unconditionally**
+    /// when drained — this flag controls only WHEN it runs, not
+    /// WHETHER (preserves the `os_drag_cleanup.rs:172-201`
+    /// idempotence guarantee).
+    pub(super) pending_os_teardown: bool,
     /// Deferred app-exit request. Set from `run_action` when the user's
     /// Cmd+W chain has just closed the last tab of the last window AND
     /// `Config::quit_on_last_window_close` is true (or non-macOS).
@@ -1088,6 +1116,7 @@ impl App {
             keymap,
             clipboard: Clipboard::new().ok(),
             pending_new_window: false,
+            pending_os_teardown: false,
             pending_exit: false,
             command_palette: CommandPalette::new(),
             palette_attached_window: None,
@@ -2556,6 +2585,30 @@ impl App {
         self.pending_new_window
     }
 
+    /// Issue #462 test seam: read the `pending_os_teardown` flag set
+    /// by `handle_os_drag_ended` on the `DroppedOnEmpty` branch.
+    #[doc(hidden)]
+    pub fn __test_pending_os_teardown(&self) -> bool {
+        self.pending_os_teardown
+    }
+
+    /// Issue #462 test seam: directly set `pending_os_teardown` so
+    /// the race test can simulate the `DroppedOnEmpty` branch without
+    /// forging a full OS-drag pending state.
+    #[doc(hidden)]
+    pub fn __test_set_pending_os_teardown(&mut self, v: bool) {
+        self.pending_os_teardown = v;
+    }
+
+    /// Issue #462 test seam: drive `drain_pending_os_teardown` from
+    /// integration tests (no `ActiveEventLoop` needed — the teardown
+    /// drain doesn't create windows; only the window-create drain
+    /// does).
+    #[doc(hidden)]
+    pub fn __test_drain_pending_os_teardown(&mut self) {
+        self.drain_pending_os_teardown();
+    }
+
     /// Test-only: count of entries in `self.windows`. Used by the
     /// `new_window_*` regression tests to assert that a real drain
     /// would change the windows-map cardinality (the post-drain
@@ -3108,7 +3161,25 @@ impl App {
                 // state machines; Phase C2 leaves window-spawn semantics
                 // unchanged. Clear residue so the next gesture starts
                 // fresh.
-                self.cancel_drag_session();
+                //
+                // Issue #462 (speculative defensive fix per PM
+                // override): do NOT call `cancel_drag_session` inline
+                // here. The `DroppedOnEmpty` path triggers a
+                // tear-out-spawn that creates a brand new top-level
+                // window via the `pending_new_window` drain. If we
+                // cancel inline, cross-window drag-residue cleanup
+                // runs BEFORE the new window exists, racing the spawn
+                // and potentially freezing Explorer's drag thread on
+                // Windows when the OLE drop-target tear-down sequence
+                // overlaps with new HWND creation. Defer cancellation
+                // to `drain_pending_os_teardown`, which runs AFTER
+                // `drain_pending_window_creates` at the event-loop
+                // boundary. Order matters; this flag controls only
+                // WHEN cancel runs, not WHETHER — the all-windows
+                // loop still runs unconditionally on drain (preserves
+                // the `os_drag_cleanup.rs:172-201` idempotence
+                // guarantee).
+                self.pending_os_teardown = true;
             }
             os_drag::DragOutcome::Cancelled => {
                 self.cancel_drag_session();
@@ -3252,6 +3323,18 @@ impl App {
     #[doc(hidden)]
     pub fn cancel_drag_session(&mut self) -> bool {
         let mut had = false;
+        // Issue #462 (defensive): snapshot window-id keys BEFORE the
+        // mutation loop. The loop body calls `clear_drag_chip` /
+        // `request_redraw`, neither of which mutate `self.windows`
+        // today, but a future per-window handler (or a winit reentrant
+        // callback on Windows under HOT-FILE PR pressure) could
+        // insert/remove a window mid-iteration. Iterating a snapshot of
+        // `Vec<WindowId>` is panic-free and matches intent: cancel
+        // residue on the set of windows that exist RIGHT NOW. The
+        // all-windows loop runs UNCONDITIONALLY — never short-circuit;
+        // `os_drag_cleanup.rs:172-201` asserts this on a re-armed
+        // second invocation.
+        let ids: Vec<_> = self.windows.keys().copied().collect();
         // Issue #438: clear ALL per-window drag residue, not just
         // drag_session / drag_target. Previously `pressed_tab` and
         // `mouse_down` were only cleared on the main window, and the
@@ -3262,7 +3345,12 @@ impl App {
         // floating in empty pane space until the next render forced a
         // refresh. Iterate every WindowState (main + children) and wipe
         // the lot.
-        for ws in self.windows.values_mut() {
+        for id in ids {
+            let Some(ws) = self.windows.get_mut(&id) else {
+                // Window vanished between snapshot and iteration —
+                // nothing to clean. Tolerant by design (#462).
+                continue;
+            };
             if ws.drag_session.take().is_some() {
                 had = true;
             }

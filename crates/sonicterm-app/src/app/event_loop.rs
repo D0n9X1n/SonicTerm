@@ -125,6 +125,12 @@ impl App {
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
         self.drain_pending_window_creates(el);
+        // Issue #462 (speculative defensive fix): drain deferred
+        // OS-drag teardown AFTER `drain_pending_window_creates` so any
+        // tear-out-spawn from the `DroppedOnEmpty` branch has produced
+        // its new window before cross-window drag-residue cleanup
+        // runs. Ordering is the entire point — do not move above.
+        self.drain_pending_os_teardown();
     }
 
     /// Drain a `UserEvent::ClearShapeCache` (Epic #300 P4 follow-up):
