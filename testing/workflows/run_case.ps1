@@ -171,6 +171,86 @@ if (-not $Script:OCR_AVAILABLE -and $AllExpects.Count -gt 0) {
     Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
   }
 }
+# #493 — per-case `shell:` field. Marks which shell dialect the
+# keystroke/text payloads target. Allowed: bash | cmd | pwsh | cross.
+# Default `cross` means the author asserts portability (no validation).
+#
+# When shell="bash" and the case applies to windows, we must spawn
+# sonicterm-windows with bash.exe as the child shell — the default
+# pwsh.exe cannot interpret bash printf/$()/&& payloads, producing
+# screenshot diffs that look like a renderer regression but are
+# actually a shell-dialect mismatch.
+#
+# Strategy: sonicterm-windows has no `--shell` flag and no env-var
+# override; it reads $APPDATA\SonicTerm\sonicterm.toml. We back up
+# that file (if any), write a minimal override pointing
+# `terminal.shell` at the resolved bash path, then restore on exit.
+# Restore is guarded so a panic mid-case can't strand the override.
+# ------------------------------------------------------------------
+$AllowedShells = @('bash','cmd','pwsh','cross')
+$CaseShell = if ($Case.PSObject.Properties.Name -contains 'shell' -and $Case.shell) {
+  [string]$Case.shell
+} else { 'cross' }
+if ($AllowedShells -notcontains $CaseShell) {
+  Log "FATAL: invalid shell '$CaseShell' for case '$Id' (allowed: $($AllowedShells -join ', '))"
+  Set-Content (Join-Path $CaseOut 'status') 'FAIL'; exit 1
+}
+Log "shell-dialect: $CaseShell"
+
+function Resolve-BashExe {
+  $candidates = @(
+    'C:\Program Files\Gitinash.exe',
+    'C:\Program Files (x86)\Gitinash.exe'
+  )
+  foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+  $cmd = Get-Command bash.exe -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+  if ($wsl) { return $wsl.Source }   # wsl.exe with default distro invokes its bash
+  return $null
+}
+
+$ConfigPath = Join-Path $env:APPDATA 'SonicTerm\sonicterm.toml'
+$script:ConfigBackup = $null
+$script:ConfigOverrode = $false
+function Restore-Config {
+  if (-not $script:ConfigOverrode) { return }
+  try {
+    if ($null -ne $script:ConfigBackup) {
+      Set-Content -Path $ConfigPath -Value $script:ConfigBackup -Encoding UTF8 -NoNewline
+      Log "#493 restored original sonicterm.toml"
+    } elseif (Test-Path $ConfigPath) {
+      Remove-Item -Force $ConfigPath -ErrorAction SilentlyContinue
+      Log "#493 removed harness-written sonicterm.toml (no original)"
+    }
+  } catch { Log "WARN: config restore failed: $_" }
+}
+
+if ($CaseShell -eq 'bash' -and $AppliesTo -match '(^|,)windows(,|$)') {
+  $bashPath = Resolve-BashExe
+  if (-not $bashPath) {
+    Log 'SKIP — bash_unavailable (no git-bash or wsl.exe on PATH)'
+    Set-Content (Join-Path $CaseOut 'status') 'SKIP'
+    Set-Content (Join-Path $CaseOut 'skip_reason') 'bash_unavailable'
+    exit 77
+  }
+  Log "#493 forcing child shell -> $bashPath"
+  $parent = Split-Path $ConfigPath -Parent
+  if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  if (Test-Path $ConfigPath) {
+    $script:ConfigBackup = Get-Content -Raw -Path $ConfigPath
+  }
+  $tomlPath = $bashPath -replace '\\','\\\\'
+  $override = "# Written by testing/workflows/run_case.ps1 for case '$Id' (#493).`n# Restored after the case completes.`n[terminal]`nshell = `"$tomlPath`"`n"
+  Set-Content -Path $ConfigPath -Value $override -Encoding UTF8 -NoNewline
+  $script:ConfigOverrode = $true
+  $env:SONIC_493_BASH_PATH = $bashPath
+}
+
+# Restore the user's sonicterm.toml on ANY pwsh exit (clean, exit-code,
+# unhandled exception). The handler runs in this same process so it
+# sees $script: state set above.
+[void](Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action { Restore-Config })
 
 # ------------------------------------------------------------------
 # Start sonicterm-windows fresh
