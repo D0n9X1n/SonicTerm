@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
@@ -32,21 +32,21 @@ fn main() -> Result<()> {
     // `crates/sonicterm-logging/src/exit_trace.rs` for the full matrix.
     let _exit_guard = sonicterm_logging::install_exit_logging(&sonicterm_logging::log_dir());
 
-    let config = match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("sonic: config load failed: {e:?}");
-            return Err(e);
-        }
-    };
+    let config = load_config();
     let log_cfg = config.logging.clone();
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
-    let theme = load_theme(&config.theme).context("load theme")?;
-    let keymap = load_keymap(&config.keymap).context("load keymap")?;
-    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
-    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| load_keymap(name));
+    let theme = load_theme(&config.theme);
+    let keymap = load_keymap(&config.keymap);
+    // Initial load is infallible (#522 fallback); hot-reload loaders use
+    // strict variants so user-visible errors are surfaced after startup.
+    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| {
+        Theme::load_strict(&asset_dir().join("themes").join(format!("{name}.toml")))
+    });
+    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| {
+        Keymap::load_strict(&asset_dir().join("keymaps").join(format!("{name}.toml")))
+    });
     #[cfg(target_os = "macos")]
     {
         // The native NSMenu MUST be installed AFTER winit has built
@@ -97,21 +97,21 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_config() -> Result<Config> {
+fn load_config() -> Config {
     match Config::default_path() {
         Some(path) => Config::load_or_default(&path),
-        None => Ok(Config::default()),
+        None => Config::default(),
     }
 }
 
-fn load_theme(name: &str) -> Result<Theme> {
+fn load_theme(name: &str) -> Theme {
     let path = asset_dir().join("themes").join(format!("{name}.toml"));
-    Theme::load(&path)
+    Theme::load_or_default(&path)
 }
 
-fn load_keymap(name: &str) -> Result<Keymap> {
+fn load_keymap(name: &str) -> Keymap {
     let path = asset_dir().join("keymaps").join(format!("{name}.toml"));
-    Keymap::load(&path)
+    Keymap::load_or_default(&path)
 }
 
 /// Bundled assets live next to the binary inside the `.app` bundle.

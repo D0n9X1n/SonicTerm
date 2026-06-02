@@ -148,11 +148,38 @@ pub struct Meta {
 }
 
 impl Keymap {
-    /// Load a keymap from a TOML file at `path`.
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Strict load of a keymap from a TOML file at `path`.
+    pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         let km: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         Ok(km)
+    }
+
+    /// Infallible loader. On any error, logs a warning at
+    /// `target = "sonicterm-cfg"` and returns [`Self::default`] — see #522.
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::load_strict(path) {
+            Ok(km) => km,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "keymap TOML parse failed at {}: {e}; falling back to defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Bundled default keymap, embedded at compile time and used by
+    /// [`Self::load_or_default`] as the infallible fallback. On Windows we
+    /// embed the windows-specific defaults; everywhere else the unix map.
+    pub fn bundled_default() -> Self {
+        #[cfg(target_os = "windows")]
+        const BUNDLED: &str = include_str!("../../../assets/keymaps/sonicterm-windows.toml");
+        #[cfg(not(target_os = "windows"))]
+        const BUNDLED: &str = include_str!("../../../assets/keymaps/sonicterm.toml");
+        toml::from_str(BUNDLED).expect("bundled keymap must parse")
     }
 
     /// Look up the first action bound to `keys` (case-insensitive). Returns
@@ -160,5 +187,11 @@ impl Keymap {
     pub fn lookup(&self, keys: &str) -> Option<&Action> {
         let needle = keys.to_ascii_lowercase();
         self.bindings.iter().find(|b| b.keys.to_ascii_lowercase() == needle).map(|b| &b.action.0)
+    }
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Self::bundled_default()
     }
 }

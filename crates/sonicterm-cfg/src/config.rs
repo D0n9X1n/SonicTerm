@@ -384,8 +384,11 @@ impl Config {
         Ok(path)
     }
 
-    /// Load from `path`, or return defaults if the file does not exist.
-    pub fn load_or_default(path: &Path) -> Result<Self> {
+    /// Strict load from `path`. Returns defaults if the file is absent, but
+    /// surfaces an `Err` when the file exists and fails to read or parse.
+    /// Hot-reload paths and tests use this so a malformed user edit is
+    /// visible rather than silently masked.
+    pub fn load_strict(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -393,6 +396,24 @@ impl Config {
         let mut cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         cfg.window.normalize_padding();
         Ok(cfg)
+    }
+
+    /// Infallible startup loader. Calls [`Self::load_strict`] and, on any
+    /// error, logs a warning at `target = "sonicterm-cfg"` and falls back
+    /// to [`Self::default`] so the app can still launch with a broken
+    /// user config — see issue #522.
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::load_strict(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "config TOML parse failed at {}: {e}; falling back to defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 
     /// Serialize to a TOML string.

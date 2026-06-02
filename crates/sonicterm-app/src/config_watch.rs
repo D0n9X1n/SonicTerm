@@ -174,7 +174,7 @@ fn spawn_inner(
                 }
             }
             if touches_config {
-                match Config::load_or_default(&target) {
+                match Config::load_strict(&target) {
                     Ok(cfg) => {
                         let toml = match cfg.to_toml() {
                             Ok(s) => s,
@@ -201,7 +201,7 @@ fn spawn_inner(
             }
             if touches_keymap {
                 if let Some(path) = keymap_path.as_ref() {
-                    match Keymap::load(path) {
+                    match Keymap::load_strict(path) {
                         Ok(km) => {
                             if tx.send(ConfigWatchUpdate::Keymap(km)).is_err() {
                                 return;

@@ -5,7 +5,7 @@ fn new_bundled_themes_parse_and_have_non_empty_colors() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
 
     for theme_name in ["solarized-dark", "monokai-pro", "one-dark"] {
-        let theme = Theme::load(&root.join(format!("assets/themes/{theme_name}.toml")))
+        let theme = Theme::load_strict(&root.join(format!("assets/themes/{theme_name}.toml")))
             .unwrap_or_else(|err| panic!("load {theme_name}: {err:#}"));
 
         assert!(!theme.name.is_empty(), "{theme_name} name should not be empty");

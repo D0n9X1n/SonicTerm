@@ -41,7 +41,7 @@ fn unknown_keys_survive_load_save_roundtrip() {
                     foo = 1\n";
     std::fs::write(&path, original).unwrap();
 
-    let cfg = Config::load_or_default(&path).unwrap();
+    let cfg = Config::load_strict(&path).unwrap();
     cfg.save(&path).unwrap();
 
     let reread = std::fs::read_to_string(&path).unwrap();
@@ -86,7 +86,7 @@ fn legacy_padding_scalar_splats_to_all_sides() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("sonicterm.toml");
     std::fs::write(&path, "[window]\npadding = 12.0\n").unwrap();
-    let cfg = Config::load_or_default(&path).unwrap();
+    let cfg = Config::load_strict(&path).unwrap();
     assert!((cfg.window.padding_left - 12.0).abs() < f32::EPSILON);
     assert!((cfg.window.padding_right - 12.0).abs() < f32::EPSILON);
     assert!((cfg.window.padding_top - 12.0).abs() < f32::EPSILON);
@@ -111,7 +111,7 @@ fn per_side_padding_values_round_trip() {
          padding_top = 3.0\npadding_bottom = 4.0\n",
     )
     .unwrap();
-    let cfg = Config::load_or_default(&path).unwrap();
+    let cfg = Config::load_strict(&path).unwrap();
     assert!((cfg.window.padding_left - 1.0).abs() < f32::EPSILON);
     assert!((cfg.window.padding_right - 2.0).abs() < f32::EPSILON);
     assert!((cfg.window.padding_top - 3.0).abs() < f32::EPSILON);

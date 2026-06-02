@@ -6,7 +6,7 @@ use sonicterm_cfg::keymap::*;
 fn parses_bundled_wezterm_map() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/keymaps/sonicterm.toml");
-    let km = Keymap::load(&path).expect("load");
+    let km = Keymap::load_strict(&path).expect("load");
     assert_eq!(km.meta.name, "sonicterm-default");
     assert!(matches!(km.lookup("super+t"), Some(Action::NewTab)));
     assert!(matches!(km.lookup("super+1"), Some(Action::ActivateTab(0))));

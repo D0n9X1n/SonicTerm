@@ -33,7 +33,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         logging: sonicterm_cfg::LoggingConfig::default(),
     };
     cfg.save(&path).unwrap();
-    let reloaded = Config::load_or_default(&path).unwrap();
+    let reloaded = Config::load_strict(&path).unwrap();
     assert_eq!(cfg, reloaded);
 }
 

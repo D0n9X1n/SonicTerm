@@ -1054,8 +1054,47 @@ keystrokes = [
 ]
 expect = [
   { kind = "process-count", program = "sonicterm-mac", min = 1 },
+  { kind = "window-visible", program = "sonicterm-mac" },
 ]
 fail_on = "SonicTerm refuses to launch on bad config"
+
+[[case]]
+id = "theme-validation-bad-toml-falls-back"
+section = 29
+title = "Malformed theme TOML falls back to bundled default, no crash (#522)"
+applies_to = ["mac", "windows"]
+covers_bugs = [522]
+covers_landmines = []
+setup = []
+keystrokes = [
+  { kind = "shell-cmd", value = "mkdir -p /tmp/bad-theme && printf 'broken =\\n' > /tmp/bad-theme/broken.toml" },
+  { kind = "shell-cmd", value = "SONICTERM_THEME_DIR=/tmp/bad-theme SONICTERM_THEME=broken ./target/release/sonicterm-mac &" },
+  { kind = "wait", value = 2.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
+  { kind = "window-visible", program = "sonicterm-mac" },
+]
+fail_on = "SonicTerm refuses to launch on bad theme"
+
+[[case]]
+id = "keymap-validation-bad-toml-falls-back"
+section = 29
+title = "Malformed keymap TOML falls back to bundled default, no crash (#522)"
+applies_to = ["mac", "windows"]
+covers_bugs = [522]
+covers_landmines = []
+setup = []
+keystrokes = [
+  { kind = "shell-cmd", value = "mkdir -p /tmp/bad-keymap && printf 'broken =\\n' > /tmp/bad-keymap/broken.toml" },
+  { kind = "shell-cmd", value = "SONICTERM_KEYMAP_DIR=/tmp/bad-keymap SONICTERM_KEYMAP=broken ./target/release/sonicterm-mac &" },
+  { kind = "wait", value = 2.0 },
+]
+expect = [
+  { kind = "process-count", program = "sonicterm-mac", min = 1 },
+  { kind = "window-visible", program = "sonicterm-mac" },
+]
+fail_on = "SonicTerm refuses to launch on bad keymap"
 
 [[case]]
 id = "config-watch-invalid-edit-keeps-current"

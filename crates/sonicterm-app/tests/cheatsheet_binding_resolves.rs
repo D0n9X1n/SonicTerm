@@ -5,7 +5,7 @@ use winit::keyboard::{Key, ModifiersState};
 fn shifted_question_mark_super_binding_opens_cheatsheet() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/keymaps/sonicterm.toml");
-    let keymap = Keymap::load(&path).expect("load default wezterm keymap");
+    let keymap = Keymap::load_strict(&path).expect("load default wezterm keymap");
 
     let mut mods = ModifiersState::empty();
     mods.set(ModifiersState::SUPER, true);

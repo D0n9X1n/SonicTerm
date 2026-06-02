@@ -198,11 +198,36 @@ impl Theme {
         ]
     }
 
-    /// Load a theme from a TOML file at `path`.
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Strict load of a theme from a TOML file at `path`.
+    pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         let t: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         Ok(t)
+    }
+
+    /// Infallible loader. On any error, logs a warning at
+    /// `target = "sonicterm-cfg"` and returns the bundled `wezterm` theme
+    /// as a built-in default — see #522. The bundled theme is embedded at
+    /// compile time so the fallback cannot fail.
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::load_strict(path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "theme TOML parse failed at {}: {e}; falling back to defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Bundled default theme (`wezterm`), embedded at compile time and used
+    /// by [`Self::load_or_default`] as the infallible fallback.
+    pub fn bundled_default() -> Self {
+        const BUNDLED: &str = include_str!("../../../assets/themes/wezterm.toml");
+        toml::from_str(BUNDLED).expect("bundled wezterm.toml must parse")
     }
 
     /// Import a theme TOML file into `user_theme_dir`, returning its canonical name.
@@ -227,6 +252,12 @@ impl Theme {
         let text = toml::to_string_pretty(self).context("serialize theme")?;
         std::fs::write(dst, text).with_context(|| format!("write {dst:?}"))?;
         Ok(())
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::bundled_default()
     }
 }
 
