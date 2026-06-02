@@ -2536,6 +2536,25 @@ impl GpuRenderer {
                     let (a, b) = s.normalized();
                     (a.0, a.1, b.0, b.1)
                 });
+                // #470: per-cell device-pixel snapping rounds each cell's left
+                // edge independently. At fractional DPI (1.25/1.5/1.75) that
+                // produces a 14/15/14/15 device-pixel alternation in cell
+                // pitch, which shows as 1-px gaps between adjacent Powerline
+                // chevrons. Precompute snapped column edges once per pane so
+                // every glyph-emit path in `flush_shape_run` derives `cx` and
+                // the per-cell width from the SAME snapped edges — adjacent
+                // cells then share an edge by construction. Integer-scale
+                // fast path in `snap_to_device_pixels` makes this a no-op at
+                // scale 1.0/2.0 (mac dHash snapshots stay green).
+                let snapped_cell_x: Vec<f32> = (0..=grid.cols)
+                    .map(|col| {
+                        sonicterm_render_model::geometry::snap_to_device_pixels(
+                            (pad + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+                            self.scale_factor,
+                        )
+                        .0
+                    })
+                    .collect();
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -2643,6 +2662,7 @@ impl GpuRenderer {
                                     sw,
                                     sh,
                                     baseline_y_in_cell,
+                                    &snapped_cell_x,
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -2675,6 +2695,7 @@ impl GpuRenderer {
                             sw,
                             sh,
                             baseline_y_in_cell,
+                            &snapped_cell_x,
                         );
                     }
                     // Capture this row's contributions and insert into
@@ -4461,10 +4482,19 @@ impl GpuRenderer {
         cell_w: f32,
         cell_h: f32,
         top_inset: f32,
-        pad: f32,
+        // #470: `pad` is no longer used directly inside `flush_shape_run` —
+        // every cell-position now comes from `snapped_cell_x`, which was
+        // computed at the call-site using `pad + col * cell_w` before being
+        // snapped. Kept in the signature for callsite symmetry / future use.
+        _pad: f32,
         sw: f32,
         sh: f32,
         baseline_y_in_cell: f32,
+        // #470: snapped device-pixel left-edges keyed by column. Length
+        // `cols + 1` so the right edge of the final column is also
+        // expressible. Adjacent cells share an edge by construction, so
+        // Powerline chevrons at fractional DPI no longer leave gaps.
+        snapped_cell_x: &[f32],
     ) {
         if cells.is_empty() {
             return;
@@ -4492,7 +4522,7 @@ impl GpuRenderer {
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                let cx = pad + f32::from(*col) * cell_w;
+                let cx = snapped_cell_x[*col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
                 let inv_s = 1.0 / scale_factor;
                 let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
@@ -4557,6 +4587,11 @@ impl GpuRenderer {
         for g in shaped {
             let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
+            // Logical cell pixel width — retained for the tofu fallback box.
+            // The glyph-emit branches below derive per-cell width from
+            // `snapped_cell_x` (#470) so adjacent Powerline cells share an
+            // edge at fractional DPI; tofu boxes have an explicit inset and
+            // don't need the abutting-edge guarantee.
             let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
 
             // glyph_id == 0 from the shaper means one of two things:
@@ -4584,7 +4619,7 @@ impl GpuRenderer {
                 let Some(slot) = resolved else {
                     // Every face in the chain lacks this codepoint —
                     // genuine tofu.
-                    let cx = pad + f32::from(g.lead_col) * cell_w;
+                    let cx = snapped_cell_x[g.lead_col as usize];
                     let cy = top_inset + f32::from(row) * cell_h;
                     let inset = (cell_h * 0.12).max(1.0);
                     // #461 PR-B1: log every tofu emit so we can pin which
@@ -4637,7 +4672,7 @@ impl GpuRenderer {
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                let cx = pad + f32::from(g.lead_col) * cell_w;
+                let cx = snapped_cell_x[g.lead_col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
                 // Atlas tiles are rasterized at `font_size * scale_factor`
                 // physical pixels, but GPU output is in *logical* units —
@@ -4652,6 +4687,14 @@ impl GpuRenderer {
                 let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw_nat = info.px_size[0] as f32 * inv_s;
                 let gh_nat = info.px_size[1] as f32 * inv_s;
+                // #470: derive the cell-box width that `apply_symbol_fit`
+                // anchors against from snapped column edges, so Powerline
+                // chevrons in adjacent cells produce identical device-pixel
+                // widths at fractional DPI. Span is 1 for narrow, 2 for WIDE.
+                let span = if is_wide { 2usize } else { 1usize };
+                let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
+                let cell_pixel_width_snapped =
+                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
                 // Powerline PUA (U+E0B0..=U+E0BF) glyphs are cell-filling
                 // separators — anchor them to the cell rect. NerdFont PUA
                 // icons (#438) scale-to-fit to ~0.95 cell_h centered.
@@ -4659,7 +4702,7 @@ impl GpuRenderer {
                 let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                     (gx_nat, gy_nat, gw_nat, gh_nat),
                     (cx, cy),
-                    (cell_pixel_width, cell_h),
+                    (cell_pixel_width_snapped, cell_h),
                     sonicterm_text::swash_rasterizer::classify_symbol(ch),
                 );
                 // Clamp tile to the cell box the codepoint reserves
@@ -4667,9 +4710,9 @@ impl GpuRenderer {
                 // (notably Apple Color Emoji at small sizes, certain CJK
                 // fonts) emit bitmaps slightly wider than the cell box;
                 // unclamped they bleed into the following column.
-                if gw > cell_pixel_width {
-                    let ratio = cell_pixel_width / gw;
-                    gw = cell_pixel_width;
+                if gw > cell_pixel_width_snapped {
+                    let ratio = cell_pixel_width_snapped / gw;
+                    gw = cell_pixel_width_snapped;
                     gh *= ratio;
                 }
                 let color = cell_fg(&lead_cell, theme, fg_default);
@@ -4723,13 +4766,20 @@ impl GpuRenderer {
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
                 continue;
             }
-            let cx = pad + f32::from(g.lead_col) * cell_w;
+            let cx = snapped_cell_x[g.lead_col as usize];
             let cy = top_inset + f32::from(row) * cell_h;
             let inv_s = 1.0 / scale_factor;
             let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
             let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
             let gw_nat = info.px_size[0] as f32 * inv_s;
             let gh_nat = info.px_size[1] as f32 * inv_s;
+            // #470: derive cell-box width from snapped column edges (span=1
+            // for narrow, 2 for WIDE). Adjacent Powerline chevrons then
+            // produce identical device-pixel widths at fractional DPI.
+            let span = if is_wide { 2usize } else { 1usize };
+            let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
+            let cell_pixel_width_snapped =
+                snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
             // Powerline PUA (U+E0B0..=U+E0BF) anchor + NerdFont PUA
             // icon-cell-fit (#438) — see the matching call in the
             // char-fallback branch above. `g.ch` is the shaped cluster's
@@ -4737,16 +4787,16 @@ impl GpuRenderer {
             let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                 (gx_nat, gy_nat, gw_nat, gh_nat),
                 (cx, cy),
-                (cell_pixel_width, cell_h),
+                (cell_pixel_width_snapped, cell_h),
                 sonicterm_text::swash_rasterizer::classify_symbol(g.ch),
             );
             // See the fallback path above for why we clamp to
-            // `cell_pixel_width` — the same overflow class can occur on
-            // shaped color emoji where the strike bitmap is slightly
+            // `cell_pixel_width_snapped` — the same overflow class can occur
+            // on shaped color emoji where the strike bitmap is slightly
             // wider than the reserved 2-cell box.
-            if gw > cell_pixel_width {
-                let ratio = cell_pixel_width / gw;
-                gw = cell_pixel_width;
+            if gw > cell_pixel_width_snapped {
+                let ratio = cell_pixel_width_snapped / gw;
+                gw = cell_pixel_width_snapped;
                 gh *= ratio;
             }
             let color = cell_fg(&lead_cell, theme, fg_default);
