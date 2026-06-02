@@ -100,9 +100,16 @@ fn cmd_n_child_dispatch_clears_pending_new_window_in_same_turn() {
 #[test]
 fn child_window_run_action_path_invokes_pending_create_drain() {
     let source = child_window_src();
+    // Issue #539: the dispatch call site was migrated from
+    // `self.run_action(&action)` to the source-aware
+    // `self.run_action_for_window(&action, win_id)` so a chord typed
+    // in window A always routes to A regardless of the cached
+    // frontmost. The drain invariant is unchanged: whichever helper
+    // we end up calling, the post-dispatch `drain_pending_window_creates`
+    // must still fire so a NewWindow chord lands its surface this turn.
     let idx = source
-        .find("if self.run_action(&action) {")
-        .expect("child full-dispatch run_action path must exist");
+        .find("if self.run_action_for_window(&action, win_id) {")
+        .expect("child full-dispatch run_action_for_window path must exist (#539)");
     let block = &source[idx..idx + 320];
 
     assert!(

@@ -549,7 +549,7 @@ impl App {
                     if let Some(key_str) = key_event_to_string(&event, child_mods) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::ShowKeymapCheatsheet) {
-                                self.run_action(&action);
+                                self.run_action_for_window(&action, win_id);
                                 self.drain_pending_window_creates(el);
                                 if let Some(c) = self.windows.get(&win_id) {
                                     c.request_redraw();
@@ -570,7 +570,7 @@ impl App {
                     if let Some(key_str) = key_event_to_string(&event, child_mods) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             if matches!(action, Action::OpenCommandPalette) {
-                                self.run_action(&action);
+                                self.run_action_for_window(&action, win_id);
                                 self.drain_pending_window_creates(el);
                                 if let Some(c) = self.windows.get(&win_id) {
                                     c.request_redraw();
@@ -627,7 +627,7 @@ impl App {
                                 return;
                             }
                             _ => {
-                                if self.run_action(&action) {
+                                if self.run_action_for_window(&action, win_id) {
                                     self.drain_pending_window_creates(el);
                                     if let Some(c) = self.windows.get(&win_id) {
                                         c.request_redraw();
