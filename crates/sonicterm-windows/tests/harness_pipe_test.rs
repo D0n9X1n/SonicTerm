@@ -53,30 +53,20 @@ fn sonicterm_windows_harness_pipe_resolve(req: &str) -> String {
     }
 }
 
-/// Spec test (5.a) — full e2e against the running exe.
+/// Asserts:
+/// - Pipe creation succeeds (no ERROR_INVALID_OWNER 1307 — #510)
+/// - "harness pipe ready" stdout line appears AFTER pipe is actually open (no race — #511)
+/// - CreateFileW from another process succeeds (SDDL grants owner access)
 ///
-/// Was previously `#[ignore]`d as a stub: blocked by
-///   * #510 — `ConvertStringSecurityDescriptorToSecurityDescriptorW`
-///     rejected the SDDL alias `OW` with `ERROR_INVALID_OWNER (1307)`,
-///     so the pipe was never created.
-///   * #511 — `harness_pipe::spawn` printed `"harness pipe ready"`
-///     BEFORE calling `CreateNamedPipeW`, so test clients that read
-///     stdout for the ready signal raced ahead of the actual pipe
-///     existing on the filesystem and got `ERROR_FILE_NOT_FOUND`.
+/// Does NOT assert:
+/// - Sentinel bytes reach the active pane's PTY (blocked on #513 —
+///   drain_until_eof drops every chunk; sink never read).
+/// - Window title updates from OSC sentinel.
 ///
-/// Both fixed in this PR:
-///   * `crate::win_sid::cached_current_user_sid()` substitutes the
-///     concrete user SID into the SDDL template.
-///   * `harness_pipe::spawn` now prints + flushes only after
-///     `CreateNamedPipeW` returns successfully.
-///
-/// Test pre-builds the binary so the spawn doesn't race with cargo,
-/// reads the ready line off the child's stdout, then opens the pipe
-/// with `CreateFileW` and writes the OSC sentinel. A successful open
-/// with neither `ERROR_INVALID_OWNER (1307)` nor `ERROR_FILE_NOT_
-/// FOUND (2)` proves both bugs fixed.
+/// Once #513 lands, a follow-up `e2e_window_title_sentinel` test should
+/// be added that writes the OSC sentinel and polls GetWindowText.
 #[test]
-fn e2e_window_title_sentinel() {
+fn e2e_sddl_and_ready_line_ordering() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::time::Instant;
@@ -95,7 +85,7 @@ fn e2e_window_title_sentinel() {
 
     let Some(exe) = locate_exe() else {
         eprintln!(
-            "e2e_window_title_sentinel: sonicterm.exe not found next to test binary; \
+            "e2e_sddl_and_ready_line_ordering: sonicterm.exe not found next to test binary; \
              run `cargo build -p sonicterm-windows --features harness` first."
         );
         return;
@@ -153,6 +143,13 @@ fn e2e_window_title_sentinel() {
         }
     };
 
+    // Smoke-write the OSC sentinel. This is intentionally a
+    // "doesn't crash / WriteFile returns success" check only — it
+    // does NOT assert the sentinel reaches the active pane's PTY or
+    // updates the window title. The end-to-end title path is wired
+    // by #513 (drain_until_eof drops every chunk today; the sink is
+    // never read), and a real `e2e_window_title_sentinel` test that
+    // polls `GetWindowText` should be added once that lands.
     let sentinel = b"\x1b]0;SONIC510-WT-OK\x07";
     let mut bytes_written: u32 = 0;
     unsafe {
