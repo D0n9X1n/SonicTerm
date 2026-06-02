@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use sonicterm_core::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::Keymap;
+use sonicterm_cfg::theme::Theme;
 
 #[cfg(target_os = "windows")]
 fn set_process_dpi_awareness() {
@@ -153,8 +155,8 @@ fn load_theme(name: &str) -> Result<Theme> {
 
 fn load_keymap(name: &str) -> Result<Keymap> {
     if name == "user" {
-        if let Some(path) = sonicterm_core::keymap::default_user_keymap_path() {
-            sonicterm_core::keymap::ensure_user_keymap_file(&path)?;
+        if let Some(path) = sonicterm_cfg::keymap::default_user_keymap_path() {
+            sonicterm_cfg::keymap::ensure_user_keymap_file(&path)?;
             return Keymap::load(&path);
         }
     }

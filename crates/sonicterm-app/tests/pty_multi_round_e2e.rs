@@ -26,7 +26,6 @@ use std::time::{Duration, Instant};
 use sonicterm_grid::grid::{CellFlags, Grid};
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_vt::vt::Parser;
-
 /// Drain whatever bytes the PTY has produced so far into the parser,
 /// up to `total` deadline, returning early as soon as `needle` appears
 /// anywhere in the grid (so a slow child doesn't blow the wall-clock

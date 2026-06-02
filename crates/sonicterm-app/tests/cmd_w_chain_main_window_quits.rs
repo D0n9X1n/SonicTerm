@@ -13,12 +13,9 @@
 //! GUI smoke instead of in a unit test.
 
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Action, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
-
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 fn hex() -> Hex {
     Hex("#000000".to_string())
 }

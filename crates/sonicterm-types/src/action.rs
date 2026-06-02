@@ -162,6 +162,6 @@ pub enum Action {
 
     /// Open a new pane connected to a remote shell over SSH. Argument is
     /// a `user@host[:port]` target string; parsing/validation happens in
-    /// `sonicterm_core::ssh::parse_target` before any connection attempt.
+    /// `sonicterm_io::ssh::parse_target` before any connection attempt.
     OpenSshPane(String),
 }

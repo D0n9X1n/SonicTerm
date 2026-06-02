@@ -9,7 +9,7 @@
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
 };
-use sonicterm_core::config::BackdropKind;
+use sonicterm_cfg::config::BackdropKind;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE},

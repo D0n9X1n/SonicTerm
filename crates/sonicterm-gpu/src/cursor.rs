@@ -80,7 +80,7 @@ pub fn push_hollow_rect(
     });
 }
 
-/// Local mirror of `sonicterm_shared::render::core::clip_rect_to_pane`,
+/// Local mirror of `sonicterm_gpu::core::clip_rect_to_pane`,
 /// kept private so this module has no upward dep on `sonicterm-shared`.
 /// Tiny enough that duplication beats wiring a back-edge crate just for
 /// this helper.

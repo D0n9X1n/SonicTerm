@@ -1,8 +1,5 @@
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Action, Keymap},
-};
-
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Keymap};
 fn windows_default_config_for_test() -> Config {
     Config { keymap: "sonicterm-windows".to_string(), ..Config::default() }
 }

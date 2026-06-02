@@ -2,10 +2,11 @@
 //! config watcher, and top-level event-loop wiring for SonicTerm Terminal.
 //!
 //! Extracted from `sonicterm-shared` in refactor PR 8a. The previous
-//! `sonicterm_shared::app`, `sonicterm_shared::menu`, `sonicterm_shared::menubar_bridge`,
-//! `sonicterm_shared::os_drag(_bridge)`, `sonicterm_shared::tab_drag`, and
-//! `sonicterm_shared::config_watch` import paths are preserved as re-exports
-//! from `sonicterm-shared` for backwards compatibility.
+//! `sonicterm_app::app`, `sonicterm_app::menu`, `sonicterm_app::menubar_bridge`,
+//! `sonicterm_app::os_drag(_bridge)`, `sonicterm_app::tab_drag`, and
+//! `sonicterm_app::config_watch` import paths are the canonical homes;
+//! the deprecated `sonicterm-shared` façade still re-exports them for
+//! backwards compatibility.
 
 // TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
 #![allow(missing_docs)]

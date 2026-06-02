@@ -1,7 +1,7 @@
 //! Native macOS `NSMenu` for SonicTerm Terminal.
 //!
 //! Top-level submenus (in order): **SonicTerm / Shell / Edit / View / Help**.
-//! Items dispatch to `sonicterm_core::keymap::Action`s via the
+//! Items dispatch to `sonicterm_cfg::keymap::Action`s via the
 //! [`sonicterm_app::menubar_bridge`] queue; the winit loop drains and
 //! routes through `App::run_action` — the same path used by keybindings.
 //!
@@ -24,7 +24,7 @@ use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSW
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSURL};
 
 use sonicterm_app::menu::{self, PlatformMenu, Sender};
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 
 // Re-export shared blueprint types so external integration tests and
 // call sites that referenced `menubar::Item` / `Binding` / `KeyMods`

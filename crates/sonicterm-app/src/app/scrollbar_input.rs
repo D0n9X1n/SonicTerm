@@ -8,7 +8,7 @@
 //!
 //! All coordinates here are **logical pixels** to match the pane-rect
 //! layout the renderer also uses. The width constant mirrors the one
-//! held inside `sonicterm_gpu::core::core::emit_pane_scrollbar` — if
+//! held inside `sonicterm_gpu::core::emit_pane_scrollbar` — if
 //! you change one, change the other (PR-D will lift this into config).
 //!
 //! NOT exported above the `app` module: tests reach in via
@@ -18,7 +18,7 @@ use sonicterm_cfg::config::ScrollbarMode;
 use sonicterm_ui::scrollbar::{self, HitTarget, Point, Rect, ScrollbarGeometry};
 
 /// Bar width in logical pixels. Must stay in sync with
-/// `sonicterm_gpu::core::core::SCROLLBAR_WIDTH_PX` (PR-B).
+/// `sonicterm_gpu::core::SCROLLBAR_WIDTH_PX` (PR-B).
 pub const SCROLLBAR_WIDTH_PX: f32 = 8.0;
 
 /// Active drag gesture on a pane's scrollbar thumb.

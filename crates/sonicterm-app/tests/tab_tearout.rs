@@ -10,11 +10,9 @@
 //!    are not started here — the seeded tabs have None pty handles).
 
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonicterm_ui::tabbar_view::{detect_tear_out, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
 
 fn synth_theme() -> Theme {

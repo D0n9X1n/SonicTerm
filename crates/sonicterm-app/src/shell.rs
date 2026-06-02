@@ -38,7 +38,6 @@ use sonicterm_app_core::AppStateMachine;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
-
 /// macOS platform shell. Owns the externally-built
 /// [`AppStateMachine`] and the winit event loop; translates winit
 /// events into Intents (via the embedded `App` dispatcher) and

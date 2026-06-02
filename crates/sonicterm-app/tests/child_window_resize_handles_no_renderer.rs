@@ -5,7 +5,6 @@ use sonicterm_app::app::{
 };
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
-
 fn pane(cols: u16, rows: u16) -> (PaneState, std::sync::Arc<parking_lot::Mutex<Parser>>) {
     let parser = std::sync::Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(cols, rows))));
     (PaneState::new(parser.clone(), None), parser)

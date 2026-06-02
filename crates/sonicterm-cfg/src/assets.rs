@@ -1,6 +1,6 @@
 //! Bundled-asset directory probe.
 //!
-//! Moved from `sonicterm_shared::asset_dir()` in PR-C of issue #469 so the
+//! Moved from the deprecated `sonicterm-shared` façade `asset_dir()` in PR-C of issue #469 so the
 //! app crate no longer needs to depend on the deprecated `sonicterm-shared`
 //! façade just to locate `assets/`.
 
