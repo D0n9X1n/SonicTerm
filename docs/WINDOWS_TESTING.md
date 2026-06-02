@@ -12,6 +12,19 @@ cd Q:\FunCode\sonic
 cargo build --release -p sonicterm-windows
 ```
 
+### Prereqs
+
+#### OCR (optional but recommended)
+
+Mirrors `brew install tesseract` from `testing/workflows/mac.sh`.
+
+```powershell
+winget install UB-Mannheim.TesseractOCR
+tesseract --version  # verify install
+```
+
+Without tesseract, OCR-only cases (~7 of 23) gracefully SKIP per #492. With tesseract, they run.
+
 ### Launch with full glyph-render instrumentation
 ```powershell
 Get-Process sonicterm-windows -ErrorAction SilentlyContinue | Stop-Process -Force
