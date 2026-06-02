@@ -19,6 +19,22 @@ param(
 $ErrorActionPreference = 'Continue'
 
 # ------------------------------------------------------------------
+# Hard preflight (issue #496).
+# run_case.ps1 may be invoked standalone (not via windows.ps1), so
+# the python3 + Pillow checks in windows.ps1 do not cover it. Both
+# are mandatory dependencies (used by OCR re-detect below and case
+# extraction further down), so fail fast with exit 2 here rather
+# than dying with a confusing error mid-case.
+# ------------------------------------------------------------------
+if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+  Write-Error "FATAL: python3 required (mandatory dep)"; exit 2
+}
+& python3 -c "from PIL import Image" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "FATAL: Pillow required (pip3 install Pillow)"; exit 2
+}
+
+# ------------------------------------------------------------------
 # OCR availability re-detect (issue #492).
 # windows.ps1 sets its own preflight state, but this script is
 # launched as `pwsh -NoProfile -File ...` so script-scope state in
