@@ -284,6 +284,23 @@ impl App {
         }
     }
 
+    /// Issue #462 (speculative defensive fix): drain a deferred
+    /// `cancel_drag_session` request raised by `handle_os_drag_ended`
+    /// on the `DroppedOnEmpty` branch. Callers MUST invoke this
+    /// AFTER [`Self::drain_pending_window_creates`] so any
+    /// tear-out-spawn has produced its new window before cross-window
+    /// drag-residue cleanup mutates `self.windows`. The all-windows
+    /// loop inside `cancel_drag_session` still runs UNCONDITIONALLY
+    /// when this drain fires (preserves the
+    /// `os_drag_cleanup.rs:172-201` idempotence guarantee — the flag
+    /// controls WHEN, not WHETHER).
+    pub(super) fn drain_pending_os_teardown(&mut self) {
+        if self.pending_os_teardown {
+            self.pending_os_teardown = false;
+            self.cancel_drag_session();
+        }
+    }
+
     /// Epic #289 Phase E (Haiku follow-up on PR #297): create a fresh
     /// top-level terminal window, install its renderer, spawn one
     /// tab + PTY-backed pane, register it with the OS-drag backend,
