@@ -223,9 +223,37 @@ mod tests {
         // must NOT route through this helper. Returning None tells the
         // caller to keep using the glyph atlas path.
         assert!(emit_geometry_for_char('A', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
-        // Heavy box drawing (U+2501 ━) is out of Phase A scope, fall
-        // back to glyph stretch.
-        assert!(emit_geometry_for_char('━', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
+        // Double box drawing (U+2550 ═) is still out of Phase A/B1 scope
+        // (deferred to B2), so it must fall back to glyph stretch.
+        assert!(emit_geometry_for_char('═', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
+    }
+
+    #[test]
+    fn box_drawing_heavy_horizontal_emits_thicker_line_than_light() {
+        // Phase B1: ━ must route through the line-SDF path with a
+        // stroke thickness strictly greater than ─'s. The exact value
+        // depends on scale_factor (we ask for 2 logical px @ 1.0×).
+        let light = emit_geometry_for_char('─', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        let heavy = emit_geometry_for_char('━', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        assert_eq!(light.len(), 1);
+        assert_eq!(heavy.len(), 1);
+        assert!(
+            heavy[0].line_thickness_px > light[0].line_thickness_px,
+            "heavy ━ stroke ({}) must exceed light ─ stroke ({})",
+            heavy[0].line_thickness_px,
+            light[0].line_thickness_px
+        );
+    }
+
+    #[test]
+    fn box_drawing_heavy_cross_emits_two_thick_line_quads() {
+        // ╋ — Phase B1 heavy cross — same shape as ┼ but with the
+        // heavy stroke width.
+        let quads = emit_geometry_for_char('╋', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        assert_eq!(quads.len(), 2);
+        for q in &quads {
+            assert!(q.line_thickness_px >= 2.0, "heavy stroke must be ≥ 2 device px @ 1×");
+        }
     }
 
     #[test]

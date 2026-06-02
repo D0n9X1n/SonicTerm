@@ -22,10 +22,28 @@
 //! - `┴` U+2534 bottom-T
 //! - `┼` U+253C cross
 //!
-//! All other codepoints in the Box Drawing block (heavy/double/dashed/
-//! arc/diagonal) return `None`; callers fall back to the existing
+//! Phase B1 adds the 11 heavy single-line counterparts (same geometric
+//! shape, thicker stroke):
+//!
+//! - `━` U+2501 heavy horizontal line
+//! - `┃` U+2503 heavy vertical line
+//! - `┏` U+250F heavy top-left corner
+//! - `┓` U+2513 heavy top-right corner
+//! - `┗` U+2517 heavy bottom-left corner
+//! - `┛` U+251B heavy bottom-right corner
+//! - `┣` U+2523 heavy left-T
+//! - `┫` U+252B heavy right-T
+//! - `┳` U+2533 heavy top-T
+//! - `┻` U+253B heavy bottom-T
+//! - `╋` U+254B heavy cross
+//!
+//! All other codepoints in the Box Drawing block (double/dashed/arc/
+//! diagonal) return `None`; callers fall back to the existing
 //! `BoxDrawingCellFill` glyph stretch path in
-//! `swash_rasterizer::apply_symbol_fit`.
+//! `swash_rasterizer::apply_symbol_fit`. Double-line codepoints
+//! (U+2550..) are reserved for Phase B2; the [`StrokeStyle::Double`]
+//! variant exists on [`LineSegment`] in anticipation of that phase but
+//! is not emitted by Phase B1.
 //!
 //! Coordinates returned here are in the same logical pixel space as the
 //! `cell_origin` / `cell_size` inputs — the GPU translator
@@ -35,6 +53,40 @@
 //!
 //! See #542 (Box Drawing geometry epic) and the diagnosis at
 //! <https://github.com/D0n9X1n/SonicTerm/issues/542>.
+
+/// Stroke weight classification for a Box Drawing line segment.
+///
+/// The numeric stroke width lives in [`LineSegment::thickness`] —
+/// this enum is the *semantic* tag the renderer can use for theme-
+/// aware adjustments (e.g. boosting heavy strokes another half-pixel
+/// at low DPI). Heavy strokes are nominally 2 logical px; light
+/// strokes are nominally 1 logical px.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrokeWeight {
+    /// 1-logical-pixel single stroke — Phase A codepoints (U+2500,
+    /// U+2502, U+250C, …).
+    Light,
+    /// 2-logical-pixel single stroke — Phase B1 codepoints (U+2501,
+    /// U+2503, U+250F, …).
+    Heavy,
+}
+
+/// Stroke style — single line vs double parallel lines.
+///
+/// `Single` covers all Phase A + B1 codepoints. `Double` is reserved
+/// for Phase B2 (U+2550..) and is NOT currently emitted by
+/// [`box_drawing_geometry`]; it exists on [`LineSegment`] so the
+/// renderer and consumers can be coded against the final data shape
+/// without a second breaking change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrokeStyle {
+    /// One single line along the segment.
+    Single,
+    /// Two parallel lines offset perpendicular to the segment axis.
+    /// Reserved for Phase B2 — `box_drawing_geometry` does not emit
+    /// this variant in Phase B1.
+    Double,
+}
 
 /// One axis-aligned line segment in cell-local pixel coordinates.
 ///
@@ -49,17 +101,22 @@ pub struct LineSegment {
     pub from: (f32, f32),
     /// Second endpoint of the segment, in absolute pixel coordinates.
     pub to: (f32, f32),
-    /// Stroke thickness in logical pixels (e.g. `1.0` for light, the
-    /// renderer can clamp `>= 1px device` after scale).
+    /// Stroke thickness in logical pixels (e.g. `1.0` for light, `2.0`
+    /// for heavy). The renderer can clamp `>= 1px device` after scale.
     pub thickness: f32,
+    /// Semantic stroke weight tag — derived from the source codepoint.
+    pub weight: StrokeWeight,
+    /// Stroke style (single vs double). Currently always `Single`;
+    /// `Double` is reserved for Phase B2.
+    pub style: StrokeStyle,
 }
 
 /// Geometry to emit for a single Box Drawing cell.
 ///
 /// Phase A only produces line-segment geometry; future phases may add
-/// `DashedLines`, `DoubleLines`, or `Arc` variants without breaking
-/// existing callers (they should `match` exhaustively and fall back on
-/// the glyph-stretch path for unknown variants).
+/// `DashedLines` or `Arc` variants without breaking existing callers
+/// (they should `match` exhaustively and fall back on the glyph-stretch
+/// path for unknown variants).
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoxGeometry {
     /// One or more straight line segments that together form the
@@ -68,10 +125,15 @@ pub enum BoxGeometry {
     Lines(Vec<LineSegment>),
 }
 
-/// Returns the procedural geometry for the Phase-A Box Drawing subset,
-/// or `None` for any codepoint outside that subset. `None` indicates
-/// "fall back to the existing glyph stretch path" and is the correct
-/// response for every Box Drawing codepoint not yet ported.
+/// Nominal stroke thickness for a light single line, in logical pixels.
+pub const LIGHT_THICKNESS_PX: f32 = 1.0;
+/// Nominal stroke thickness for a heavy single line, in logical pixels.
+pub const HEAVY_THICKNESS_PX: f32 = 2.0;
+
+/// Returns the procedural geometry for the Phase A + B1 Box Drawing
+/// subset, or `None` for any codepoint outside that subset. `None`
+/// indicates "fall back to the existing glyph stretch path" and is the
+/// correct response for every Box Drawing codepoint not yet ported.
 ///
 /// `cell_origin` is the cell top-left in logical pixels; `cell_size`
 /// is `(width, height)` in the same units. The returned segments use
@@ -83,6 +145,8 @@ pub enum BoxGeometry {
 /// vertical lines terminate at the top/bottom edges. This is the
 /// continuity contract that makes adjacent cells abut without gaps —
 /// adjacent `┌─┐` cells share the same `(x, y_center)` join point.
+/// Heavy codepoints share the same join points as light, so mixed
+/// `┌━┓` rows still meet at the cell-edge midline.
 #[must_use]
 pub fn box_drawing_geometry(
     ch: char,
@@ -97,45 +161,122 @@ pub fn box_drawing_geometry(
     let right = x + w;
     let top = y;
     let bottom = y + h;
-    // Light stroke is 1 logical pixel; the renderer will clamp to
-    // `>= 1 device pixel` after scale.
-    let t = 1.0_f32;
 
-    let mk = |segs: Vec<((f32, f32), (f32, f32))>| -> BoxGeometry {
+    let mk = |segs: Vec<((f32, f32), (f32, f32))>, weight: StrokeWeight| -> BoxGeometry {
+        let thickness = match weight {
+            StrokeWeight::Light => LIGHT_THICKNESS_PX,
+            StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
+        };
         BoxGeometry::Lines(
-            segs.into_iter().map(|(from, to)| LineSegment { from, to, thickness: t }).collect(),
+            segs.into_iter()
+                .map(|(from, to)| LineSegment {
+                    from,
+                    to,
+                    thickness,
+                    weight,
+                    style: StrokeStyle::Single,
+                })
+                .collect(),
         )
     };
 
     match ch as u32 {
+        // ── Phase A: light single-line ──────────────────────────────
         // ─ horizontal line
-        0x2500 => Some(mk(vec![((left, cy), (right, cy))])),
+        0x2500 => Some(mk(vec![((left, cy), (right, cy))], StrokeWeight::Light)),
         // │ vertical line
-        0x2502 => Some(mk(vec![((cx, top), (cx, bottom))])),
+        0x2502 => Some(mk(vec![((cx, top), (cx, bottom))], StrokeWeight::Light)),
         // ┌ top-left corner: from center down to bottom edge of cell
         //   center (i.e. cy → bottom) AND center → right edge
-        0x250C => Some(mk(vec![((cx, cy), (right, cy)), ((cx, cy), (cx, bottom))])),
+        0x250C => {
+            Some(mk(vec![((cx, cy), (right, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Light))
+        }
         // ┐ top-right corner
-        0x2510 => Some(mk(vec![((left, cy), (cx, cy)), ((cx, cy), (cx, bottom))])),
+        0x2510 => {
+            Some(mk(vec![((left, cy), (cx, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Light))
+        }
         // └ bottom-left corner
-        0x2514 => Some(mk(vec![((cx, top), (cx, cy)), ((cx, cy), (right, cy))])),
+        0x2514 => {
+            Some(mk(vec![((cx, top), (cx, cy)), ((cx, cy), (right, cy))], StrokeWeight::Light))
+        }
         // ┘ bottom-right corner
-        0x2518 => Some(mk(vec![((cx, top), (cx, cy)), ((left, cy), (cx, cy))])),
+        0x2518 => {
+            Some(mk(vec![((cx, top), (cx, cy)), ((left, cy), (cx, cy))], StrokeWeight::Light))
+        }
         // ├ left-T: full vertical + half horizontal to right
-        0x251C => Some(mk(vec![((cx, top), (cx, bottom)), ((cx, cy), (right, cy))])),
+        0x251C => {
+            Some(mk(vec![((cx, top), (cx, bottom)), ((cx, cy), (right, cy))], StrokeWeight::Light))
+        }
         // ┤ right-T: full vertical + half horizontal to left
-        0x2524 => Some(mk(vec![((cx, top), (cx, bottom)), ((left, cy), (cx, cy))])),
+        0x2524 => {
+            Some(mk(vec![((cx, top), (cx, bottom)), ((left, cy), (cx, cy))], StrokeWeight::Light))
+        }
         // ┬ top-T: full horizontal + half vertical down
-        0x252C => Some(mk(vec![((left, cy), (right, cy)), ((cx, cy), (cx, bottom))])),
+        0x252C => {
+            Some(mk(vec![((left, cy), (right, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Light))
+        }
         // ┴ bottom-T: full horizontal + half vertical up
-        0x2534 => Some(mk(vec![((left, cy), (right, cy)), ((cx, top), (cx, cy))])),
+        0x2534 => {
+            Some(mk(vec![((left, cy), (right, cy)), ((cx, top), (cx, cy))], StrokeWeight::Light))
+        }
         // ┼ cross: full horizontal + full vertical
-        0x253C => Some(mk(vec![((left, cy), (right, cy)), ((cx, top), (cx, bottom))])),
+        0x253C => Some(mk(
+            vec![((left, cy), (right, cy)), ((cx, top), (cx, bottom))],
+            StrokeWeight::Light,
+        )),
+
+        // ── Phase B1: heavy single-line ─────────────────────────────
+        // Geometric shape is identical to the light counterparts; only
+        // stroke weight differs. Continuity points (cell-edge midlines)
+        // are unchanged so mixed light/heavy rows still abut cleanly.
+        // ━ heavy horizontal line
+        0x2501 => Some(mk(vec![((left, cy), (right, cy))], StrokeWeight::Heavy)),
+        // ┃ heavy vertical line
+        0x2503 => Some(mk(vec![((cx, top), (cx, bottom))], StrokeWeight::Heavy)),
+        // ┏ heavy top-left corner
+        0x250F => {
+            Some(mk(vec![((cx, cy), (right, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Heavy))
+        }
+        // ┓ heavy top-right corner
+        0x2513 => {
+            Some(mk(vec![((left, cy), (cx, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Heavy))
+        }
+        // ┗ heavy bottom-left corner
+        0x2517 => {
+            Some(mk(vec![((cx, top), (cx, cy)), ((cx, cy), (right, cy))], StrokeWeight::Heavy))
+        }
+        // ┛ heavy bottom-right corner
+        0x251B => {
+            Some(mk(vec![((cx, top), (cx, cy)), ((left, cy), (cx, cy))], StrokeWeight::Heavy))
+        }
+        // ┣ heavy left-T
+        0x2523 => {
+            Some(mk(vec![((cx, top), (cx, bottom)), ((cx, cy), (right, cy))], StrokeWeight::Heavy))
+        }
+        // ┫ heavy right-T
+        0x252B => {
+            Some(mk(vec![((cx, top), (cx, bottom)), ((left, cy), (cx, cy))], StrokeWeight::Heavy))
+        }
+        // ┳ heavy top-T
+        0x2533 => {
+            Some(mk(vec![((left, cy), (right, cy)), ((cx, cy), (cx, bottom))], StrokeWeight::Heavy))
+        }
+        // ┻ heavy bottom-T
+        0x253B => {
+            Some(mk(vec![((left, cy), (right, cy)), ((cx, top), (cx, cy))], StrokeWeight::Heavy))
+        }
+        // ╋ heavy cross
+        0x254B => Some(mk(
+            vec![((left, cy), (right, cy)), ((cx, top), (cx, bottom))],
+            StrokeWeight::Heavy,
+        )),
+
         _ => None,
     }
 }
 
-/// Returns `true` if `ch` is a codepoint Phase A covers procedurally.
+/// Returns `true` if `ch` is a codepoint Phase A or Phase B1 covers
+/// procedurally.
 ///
 /// Useful for renderer fast-paths that want to skip the font glyph
 /// emit entirely when we know we'll draw the cell as line-SDF quads
@@ -144,6 +285,7 @@ pub fn box_drawing_geometry(
 pub fn is_covered_box_drawing(ch: char) -> bool {
     matches!(
         ch as u32,
+        // Phase A — light
         0x2500
             | 0x2502
             | 0x250C
@@ -155,6 +297,18 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x252C
             | 0x2534
             | 0x253C
+            // Phase B1 — heavy
+            | 0x2501
+            | 0x2503
+            | 0x250F
+            | 0x2513
+            | 0x2517
+            | 0x251B
+            | 0x2523
+            | 0x252B
+            | 0x2533
+            | 0x253B
+            | 0x254B
     )
 }
 
@@ -185,14 +339,75 @@ mod tests {
     }
 
     #[test]
-    fn out_of_phase_a_codepoints_return_none() {
-        // Heavy / double / dashed / arc variants are explicitly deferred
-        // to phases B/C/D. They must keep returning `None` so the
-        // renderer falls back to `BoxDrawingCellFill` glyph stretch.
-        for ch in ['━', '┃', '╌', '╍', '═', '║', '╔', '╭', '╮', '╱'] {
+    fn all_eleven_phase_b1_heavy_codepoints_return_some() {
+        // Phase B1: every heavy single-line counterpart must produce
+        // geometry, must be tagged Heavy, and must be in the covered
+        // predicate so cache invalidation (#559 wire-up) catches them.
+        for ch in ['━', '┃', '┏', '┓', '┗', '┛', '┣', '┫', '┳', '┻', '╋'] {
+            let geom = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H));
+            assert!(
+                geom.is_some(),
+                "Phase B1 codepoint U+{:04X} ('{ch}') must return geometry",
+                ch as u32
+            );
+            assert!(
+                is_covered_box_drawing(ch),
+                "Phase B1 codepoint U+{:04X} ('{ch}') must be in is_covered_box_drawing",
+                ch as u32
+            );
+            let BoxGeometry::Lines(segs) = geom.unwrap();
+            assert!(!segs.is_empty(), "U+{:04X} produced empty Lines", ch as u32);
+            for s in &segs {
+                assert_eq!(
+                    s.weight,
+                    StrokeWeight::Heavy,
+                    "U+{:04X} segment must be StrokeWeight::Heavy",
+                    ch as u32
+                );
+                assert_eq!(
+                    s.style,
+                    StrokeStyle::Single,
+                    "Phase B1 codepoints are single-stroke (Double is B2)"
+                );
+                assert!(
+                    (s.thickness - HEAVY_THICKNESS_PX).abs() < f32::EPSILON,
+                    "U+{:04X} thickness must be HEAVY_THICKNESS_PX, got {}",
+                    ch as u32,
+                    s.thickness
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn phase_a_codepoints_remain_tagged_light() {
+        // Adding the StrokeWeight tag must not flip Phase A under us.
+        for ch in ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'] {
+            let BoxGeometry::Lines(segs) =
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).unwrap();
+            for s in &segs {
+                assert_eq!(
+                    s.weight,
+                    StrokeWeight::Light,
+                    "U+{:04X} ('{ch}') must remain StrokeWeight::Light",
+                    ch as u32
+                );
+                assert!((s.thickness - LIGHT_THICKNESS_PX).abs() < f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_phase_a_b1_codepoints_return_none() {
+        // Double / dashed / arc / diagonal variants are explicitly
+        // deferred to phases B2/C/D. They must keep returning `None`
+        // so the renderer falls back to `BoxDrawingCellFill` glyph
+        // stretch. NOTE: ━ ┃ moved into Phase B1; they are no longer
+        // in this list.
+        for ch in ['╌', '╍', '═', '║', '╔', '╭', '╮', '╱'] {
             assert!(
                 box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
-                "Codepoint U+{:04X} ('{ch}') is out of Phase A scope and must return None",
+                "Codepoint U+{:04X} ('{ch}') is out of Phase A/B1 scope and must return None",
                 ch as u32
             );
             assert!(!is_covered_box_drawing(ch));
@@ -209,6 +424,41 @@ mod tests {
         let expected_y = ORIGIN.1 + CELL_H * 0.5;
         assert_eq!(s.from, (ORIGIN.0, expected_y));
         assert_eq!(s.to, (ORIGIN.0 + CELL_W, expected_y));
+    }
+
+    #[test]
+    fn heavy_horizontal_line_matches_light_endpoints() {
+        // ━ shares the same endpoints as ─ (so mixed light/heavy rows
+        // line up at the cell midline); only thickness/weight differ.
+        let light = lines('─');
+        let heavy = lines('━');
+        assert_eq!(light.len(), 1);
+        assert_eq!(heavy.len(), 1);
+        assert_eq!(light[0].from, heavy[0].from, "heavy ━ must share light ─'s left endpoint");
+        assert_eq!(light[0].to, heavy[0].to, "heavy ━ must share light ─'s right endpoint");
+        assert!(heavy[0].thickness > light[0].thickness, "heavy must be thicker than light");
+    }
+
+    #[test]
+    fn heavy_cross_emits_full_horizontal_and_full_vertical() {
+        // ╋ must extend BOTH lines edge-to-edge — same continuity
+        // contract as ┼ in Phase A.
+        let segs = lines('╋');
+        assert_eq!(segs.len(), 2);
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        assert!(
+            segs.iter().any(|s| s.from == (ORIGIN.0, cy)
+                && s.to == (ORIGIN.0 + CELL_W, cy)
+                && s.weight == StrokeWeight::Heavy),
+            "heavy cross missing full heavy horizontal line"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx, ORIGIN.1)
+                && s.to == (cx, ORIGIN.1 + CELL_H)
+                && s.weight == StrokeWeight::Heavy),
+            "heavy cross missing full heavy vertical line"
+        );
     }
 
     #[test]
@@ -232,17 +482,13 @@ mod tests {
         let cx = ORIGIN.0 + CELL_W * 0.5;
         let cy = ORIGIN.1 + CELL_H * 0.5;
         // One segment goes center → right edge along cy.
-        assert!(segs.contains(&LineSegment {
-            from: (cx, cy),
-            to: (ORIGIN.0 + CELL_W, cy),
-            thickness: 1.0,
-        }));
+        assert!(segs.iter().any(|s| s.from == (cx, cy)
+            && s.to == (ORIGIN.0 + CELL_W, cy)
+            && s.weight == StrokeWeight::Light));
         // Other segment goes center → bottom edge along cx.
-        assert!(segs.contains(&LineSegment {
-            from: (cx, cy),
-            to: (cx, ORIGIN.1 + CELL_H),
-            thickness: 1.0,
-        }));
+        assert!(segs.iter().any(|s| s.from == (cx, cy)
+            && s.to == (cx, ORIGIN.1 + CELL_H)
+            && s.weight == StrokeWeight::Light));
     }
 
     #[test]
@@ -254,19 +500,15 @@ mod tests {
         let cx = ORIGIN.0 + CELL_W * 0.5;
         let cy = ORIGIN.1 + CELL_H * 0.5;
         assert!(
-            segs.contains(&LineSegment {
-                from: (ORIGIN.0, cy),
-                to: (ORIGIN.0 + CELL_W, cy),
-                thickness: 1.0,
-            }),
+            segs.iter().any(|s| s.from == (ORIGIN.0, cy)
+                && s.to == (ORIGIN.0 + CELL_W, cy)
+                && s.thickness == 1.0),
             "cross missing full horizontal line"
         );
         assert!(
-            segs.contains(&LineSegment {
-                from: (cx, ORIGIN.1),
-                to: (cx, ORIGIN.1 + CELL_H),
-                thickness: 1.0,
-            }),
+            segs.iter().any(|s| s.from == (cx, ORIGIN.1)
+                && s.to == (cx, ORIGIN.1 + CELL_H)
+                && s.thickness == 1.0),
             "cross missing full vertical line"
         );
     }
@@ -348,6 +590,71 @@ mod tests {
         let h2 = c2.iter().find(|s| s.from.1 == cy && s.to.1 == cy).unwrap();
         assert_eq!(h0.to, h1.from, "┼┼ join must be pixel-identical at 150% DPI");
         assert_eq!(h1.to, h2.from, "┼┼ second join must be pixel-identical at 150% DPI");
+    }
+
+    #[test]
+    fn heavy_three_by_three_continuity_at_100_percent_dpi() {
+        // Phase B1 spec'd 3×3:
+        //   ┏━┓
+        //   ┃ ┃
+        //   ┗━┛
+        // — same continuity contract as the light variant, asserted at
+        // 100% DPI. Heavy segments must abut their neighbours at the
+        // cell midline pixel-identically.
+        check_heavy_3x3_continuity(1.0);
+    }
+
+    #[test]
+    fn heavy_three_by_three_continuity_at_125_percent_dpi() {
+        check_heavy_3x3_continuity(1.25);
+    }
+
+    #[test]
+    fn heavy_three_by_three_continuity_at_150_percent_dpi() {
+        check_heavy_3x3_continuity(1.5);
+    }
+
+    fn check_heavy_3x3_continuity(scale: f32) {
+        let cw = 8.0_f32 * scale;
+        let ch = 16.0_f32 * scale;
+        let cell = |col: usize, row: usize| (col as f32 * cw, row as f32 * ch);
+
+        // Row 0: ┏━┓
+        let tl = lines_at('┏', cell(0, 0), (cw, ch));
+        let h0 = lines_at('━', cell(1, 0), (cw, ch));
+        let tr = lines_at('┓', cell(2, 0), (cw, ch));
+        let cy = ch * 0.5;
+        let tl_right = tl.iter().find(|s| s.from.1 == cy && s.to.0 == cw).unwrap();
+        let h0_seg = h0[0];
+        assert_eq!(
+            tl_right.to, h0_seg.from,
+            "scale {scale}× ┏→━ horizontal join must be pixel-identical"
+        );
+        let tr_left = tr.iter().find(|s| s.from.0 == 2.0 * cw && s.from.1 == cy).unwrap();
+        assert_eq!(
+            h0_seg.to, tr_left.from,
+            "scale {scale}× ━→┓ horizontal join must be pixel-identical"
+        );
+
+        // Row 2: ┗━┛
+        let bl = lines_at('┗', cell(0, 2), (cw, ch));
+        let h2 = lines_at('━', cell(1, 2), (cw, ch));
+        let br = lines_at('┛', cell(2, 2), (cw, ch));
+        let bot_cy = 2.0 * ch + ch * 0.5;
+        let bl_right = bl.iter().find(|s| s.to.0 == cw && s.to.1 == bot_cy).unwrap();
+        let h2_seg = h2[0];
+        assert_eq!(bl_right.to, h2_seg.from, "scale {scale}× ┗→━ join");
+        let br_left = br.iter().find(|s| s.from.0 == 2.0 * cw && s.from.1 == bot_cy).unwrap();
+        assert_eq!(h2_seg.to, br_left.from, "scale {scale}× ━→┛ join");
+
+        // Vertical continuity left column: ┏ bottom == ┃ top == ┗ top.
+        let v1 = lines_at('┃', cell(0, 1), (cw, ch));
+        let cx = cw * 0.5;
+        let tl_down = tl.iter().find(|s| s.to.0 == cx && s.to.1 == ch).unwrap();
+        let v1_top = v1[0];
+        assert_eq!(tl_down.to, v1_top.from, "scale {scale}× ┏→┃ vertical join");
+        let bl_up = bl.iter().find(|s| s.from.0 == cx && s.from.1 == 2.0 * ch).unwrap();
+        assert_eq!(v1_top.to, bl_up.from, "scale {scale}× ┃→┗ vertical join");
     }
 
     fn lines_at(ch: char, origin: (f32, f32), size: (f32, f32)) -> Vec<LineSegment> {
