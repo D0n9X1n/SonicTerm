@@ -129,6 +129,16 @@ pub enum BoxGeometry {
 pub const LIGHT_THICKNESS_PX: f32 = 1.0;
 /// Nominal stroke thickness for a heavy single line, in logical pixels.
 pub const HEAVY_THICKNESS_PX: f32 = 2.0;
+/// Perpendicular distance from a `Double`-style centerline to each
+/// emitted lane, in logical pixels. Lanes are spaced
+/// `2 * DOUBLE_LANE_OFFSET_PX = 3.0` logical pixels center-to-center,
+/// which leaves a ≥ 1 device-pixel inter-lane gap at 100/125/150% DPI
+/// when the per-lane stroke is `LIGHT_THICKNESS_PX`. The same constant
+/// is used to place the pre-clipped lane segments of Phase B2
+/// double-line corners / T-junctions / cross so the renderer's `Double`
+/// splay for ═ ║ meets the corner lanes at pixel-identical inner
+/// corners.
+pub const DOUBLE_LANE_OFFSET_PX: f32 = 1.5;
 
 /// Returns the procedural geometry for the Phase A + B1 Box Drawing
 /// subset, or `None` for any codepoint outside that subset. `None`
@@ -179,6 +189,40 @@ pub fn box_drawing_geometry(
                 .collect(),
         )
     };
+
+    // Phase B2 helper: pre-clipped per-lane `Single` segments for
+    // double-line corners / T-junctions / cross.
+    let mk_lanes = |segs: Vec<((f32, f32), (f32, f32))>| -> BoxGeometry {
+        BoxGeometry::Lines(
+            segs.into_iter()
+                .map(|(from, to)| LineSegment {
+                    from,
+                    to,
+                    thickness: LIGHT_THICKNESS_PX,
+                    weight: StrokeWeight::Light,
+                    style: StrokeStyle::Single,
+                })
+                .collect(),
+        )
+    };
+
+    // Phase B2 helper: single centerline `Double`-style segment for
+    // ═ ║. Renderer splays at ±DOUBLE_LANE_OFFSET_PX.
+    let mk_double_center = |segs: Vec<((f32, f32), (f32, f32))>| -> BoxGeometry {
+        BoxGeometry::Lines(
+            segs.into_iter()
+                .map(|(from, to)| LineSegment {
+                    from,
+                    to,
+                    thickness: LIGHT_THICKNESS_PX,
+                    weight: StrokeWeight::Light,
+                    style: StrokeStyle::Double,
+                })
+                .collect(),
+        )
+    };
+
+    let off = DOUBLE_LANE_OFFSET_PX;
 
     match ch as u32 {
         // ── Phase A: light single-line ──────────────────────────────
@@ -271,6 +315,85 @@ pub fn box_drawing_geometry(
             StrokeWeight::Heavy,
         )),
 
+        // ── Phase B2: double-line ───────────────────────────────────
+        // ═ U+2550 double horizontal — single centerline tagged Double.
+        0x2550 => Some(mk_double_center(vec![((left, cy), (right, cy))])),
+        // ║ U+2551 double vertical
+        0x2551 => Some(mk_double_center(vec![((cx, top), (cx, bottom))])),
+        // ╔ U+2554 double top-left corner — 4 pre-clipped lane segments.
+        0x2554 => Some(mk_lanes(vec![
+            ((cx - off, cy - off), (right, cy - off)),
+            ((cx + off, cy + off), (right, cy + off)),
+            ((cx - off, cy - off), (cx - off, bottom)),
+            ((cx + off, cy + off), (cx + off, bottom)),
+        ])),
+        // ╗ U+2557 double top-right corner
+        0x2557 => Some(mk_lanes(vec![
+            ((left, cy - off), (cx + off, cy - off)),
+            ((left, cy + off), (cx - off, cy + off)),
+            ((cx + off, cy - off), (cx + off, bottom)),
+            ((cx - off, cy + off), (cx - off, bottom)),
+        ])),
+        // ╚ U+255A double bottom-left corner
+        0x255A => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, cy + off)),
+            ((cx + off, top), (cx + off, cy - off)),
+            ((cx - off, cy + off), (right, cy + off)),
+            ((cx + off, cy - off), (right, cy - off)),
+        ])),
+        // ╝ U+255D double bottom-right corner
+        0x255D => Some(mk_lanes(vec![
+            ((cx + off, top), (cx + off, cy + off)),
+            ((cx - off, top), (cx - off, cy - off)),
+            ((left, cy + off), (cx + off, cy + off)),
+            ((left, cy - off), (cx - off, cy - off)),
+        ])),
+        // ╠ U+2560 double left-T — outer (left) vertical lane is
+        // continuous; inner (right) is broken by the horizontal arms.
+        0x2560 => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, bottom)),
+            ((cx + off, top), (cx + off, cy - off)),
+            ((cx + off, cy + off), (cx + off, bottom)),
+            ((cx + off, cy - off), (right, cy - off)),
+            ((cx + off, cy + off), (right, cy + off)),
+        ])),
+        // ╣ U+2563 double right-T
+        0x2563 => Some(mk_lanes(vec![
+            ((cx + off, top), (cx + off, bottom)),
+            ((cx - off, top), (cx - off, cy - off)),
+            ((cx - off, cy + off), (cx - off, bottom)),
+            ((left, cy - off), (cx - off, cy - off)),
+            ((left, cy + off), (cx - off, cy + off)),
+        ])),
+        // ╦ U+2566 double top-T — outer (top) horizontal continuous.
+        0x2566 => Some(mk_lanes(vec![
+            ((left, cy - off), (right, cy - off)),
+            ((left, cy + off), (cx - off, cy + off)),
+            ((cx + off, cy + off), (right, cy + off)),
+            ((cx - off, cy + off), (cx - off, bottom)),
+            ((cx + off, cy + off), (cx + off, bottom)),
+        ])),
+        // ╩ U+2569 double bottom-T
+        0x2569 => Some(mk_lanes(vec![
+            ((left, cy + off), (right, cy + off)),
+            ((left, cy - off), (cx - off, cy - off)),
+            ((cx + off, cy - off), (right, cy - off)),
+            ((cx - off, top), (cx - off, cy - off)),
+            ((cx + off, top), (cx + off, cy - off)),
+        ])),
+        // ╬ U+256C double cross — 8 lane segments (4 arms × 2 lanes).
+        // Central junction window is intentionally empty.
+        0x256C => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, cy - off)),
+            ((cx + off, top), (cx + off, cy - off)),
+            ((cx - off, cy + off), (cx - off, bottom)),
+            ((cx + off, cy + off), (cx + off, bottom)),
+            ((left, cy - off), (cx - off, cy - off)),
+            ((left, cy + off), (cx - off, cy + off)),
+            ((cx + off, cy - off), (right, cy - off)),
+            ((cx + off, cy + off), (right, cy + off)),
+        ])),
+
         _ => None,
     }
 }
@@ -309,6 +432,18 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x2533
             | 0x253B
             | 0x254B
+            // Phase B2 — double
+            | 0x2550
+            | 0x2551
+            | 0x2554
+            | 0x2557
+            | 0x255A
+            | 0x255D
+            | 0x2560
+            | 0x2563
+            | 0x2566
+            | 0x2569
+            | 0x256C
     )
 }
 
@@ -398,16 +533,14 @@ mod tests {
     }
 
     #[test]
-    fn out_of_phase_a_b1_codepoints_return_none() {
-        // Double / dashed / arc / diagonal variants are explicitly
-        // deferred to phases B2/C/D. They must keep returning `None`
-        // so the renderer falls back to `BoxDrawingCellFill` glyph
-        // stretch. NOTE: ━ ┃ moved into Phase B1; they are no longer
-        // in this list.
-        for ch in ['╌', '╍', '═', '║', '╔', '╭', '╮', '╱'] {
+    fn out_of_scope_codepoints_return_none() {
+        // Dashed / arc / diagonal variants are explicitly deferred to
+        // phases C/D. NOTE: Phase B2 moved ═ ║ ╔ ╗ ╚ ╝ ╠ ╣ ╦ ╩ ╬ into
+        // the covered set; they are no longer here.
+        for ch in ['╌', '╍', '╭', '╮', '╱', '╲'] {
             assert!(
                 box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
-                "Codepoint U+{:04X} ('{ch}') is out of Phase A/B1 scope and must return None",
+                "Codepoint U+{:04X} ('{ch}') is out of phase scope and must return None",
                 ch as u32
             );
             assert!(!is_covered_box_drawing(ch));
@@ -664,9 +797,6 @@ mod tests {
     }
 
     fn check_continuity_at_scale(scale: f32) {
-        // Pre-multiply cell size by scale to simulate fractional DPI
-        // happening BEFORE snap-to-device-pixels (which is what
-        // sonicterm-render-model::geometry does in the live pipeline).
         let cw = 8.0_f32 * scale;
         let ch = 16.0_f32 * scale;
         let cell = |col: usize, row: usize| (col as f32 * cw, row as f32 * ch);
@@ -680,5 +810,212 @@ mod tests {
         assert_eq!(tl_right.to, h0_seg.from, "scale {scale}× ┌→─ must be gap-free");
         let tr_left = tr.iter().find(|s| s.from.0 == 2.0 * cw && s.from.1 == cy).unwrap();
         assert_eq!(h0_seg.to, tr_left.from, "scale {scale}× ─→┐ must be gap-free");
+    }
+
+    // ─── Phase B2 (double-line) tests ──────────────────────────────
+
+    #[test]
+    fn all_eleven_phase_b2_double_codepoints_return_some() {
+        for ch in ['═', '║', '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬'] {
+            let geom = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H));
+            assert!(
+                geom.is_some(),
+                "Phase B2 codepoint U+{:04X} ('{ch}') must return geometry",
+                ch as u32
+            );
+            assert!(is_covered_box_drawing(ch));
+            let BoxGeometry::Lines(segs) = geom.unwrap();
+            assert!(!segs.is_empty(), "U+{:04X} produced empty Lines", ch as u32);
+        }
+    }
+
+    #[test]
+    fn double_straights_use_double_style_centerline() {
+        for ch in ['═', '║'] {
+            let segs = lines(ch);
+            assert_eq!(segs.len(), 1, "U+{:04X} = one centerline segment", ch as u32);
+            assert_eq!(
+                segs[0].style,
+                StrokeStyle::Double,
+                "U+{:04X} centerline must be StrokeStyle::Double",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn double_junctions_use_single_pre_clipped_lanes() {
+        for ch in ['╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬'] {
+            let segs = lines(ch);
+            assert!(segs.len() >= 4, "U+{:04X} needs ≥ 4 lanes", ch as u32);
+            for s in &segs {
+                assert_eq!(
+                    s.style,
+                    StrokeStyle::Single,
+                    "U+{:04X} lane must be Single (pre-clipped)",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn double_cross_inner_corner_coordinates_no_overshoot() {
+        // ╬ — every endpoint must be outside the strict junction
+        // window (cx ± off, cy ± off). Per Opus Step-2.
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let segs = lines('╬');
+        assert_eq!(segs.len(), 8, "╬ = 8 lane segments");
+        for s in &segs {
+            for &p in &[s.from, s.to] {
+                let inside_x = p.0 > cx - off && p.0 < cx + off;
+                let inside_y = p.1 > cy - off && p.1 < cy + off;
+                assert!(!(inside_x && inside_y), "╬ endpoint {:?} overshoots junction window", p);
+            }
+        }
+        let inner = [
+            (cx - off, cy - off),
+            (cx + off, cy - off),
+            (cx - off, cy + off),
+            (cx + off, cy + off),
+        ];
+        for corner in &inner {
+            assert!(
+                segs.iter().any(|s| s.from == *corner || s.to == *corner),
+                "╬ missing endpoint at inner corner {:?}",
+                corner
+            );
+        }
+    }
+
+    #[test]
+    fn double_top_left_corner_inner_corner_assertion() {
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let segs = lines('╔');
+        assert_eq!(segs.len(), 4, "╔ = 4 lanes");
+        let outer = (cx - off, cy - off);
+        let inner = (cx + off, cy + off);
+        assert!(
+            segs.iter().any(|s| s.from == outer && s.to == (ORIGIN.0 + CELL_W, cy - off)),
+            "╔ outer horizontal lane must start at outer inner-corner"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == outer && s.to == (cx - off, ORIGIN.1 + CELL_H)),
+            "╔ outer vertical lane must start at outer inner-corner"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == inner && s.to == (ORIGIN.0 + CELL_W, cy + off)),
+            "╔ inner horizontal lane must start at inner inner-corner"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == inner && s.to == (cx + off, ORIGIN.1 + CELL_H)),
+            "╔ inner vertical lane must start at inner inner-corner"
+        );
+    }
+
+    #[test]
+    fn double_t_junctions_have_one_continuous_through_lane() {
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let l = lines('╠');
+        assert!(
+            l.iter()
+                .any(|s| s.from == (cx - off, ORIGIN.1) && s.to == (cx - off, ORIGIN.1 + CELL_H)),
+            "╠ outer vertical lane must be continuous"
+        );
+        let r = lines('╣');
+        assert!(
+            r.iter()
+                .any(|s| s.from == (cx + off, ORIGIN.1) && s.to == (cx + off, ORIGIN.1 + CELL_H)),
+            "╣ outer vertical lane must be continuous"
+        );
+        let t = lines('╦');
+        assert!(
+            t.iter()
+                .any(|s| s.from == (ORIGIN.0, cy - off) && s.to == (ORIGIN.0 + CELL_W, cy - off)),
+            "╦ outer horizontal lane must be continuous"
+        );
+        let b = lines('╩');
+        assert!(
+            b.iter()
+                .any(|s| s.from == (ORIGIN.0, cy + off) && s.to == (ORIGIN.0 + CELL_W, cy + off)),
+            "╩ outer horizontal lane must be continuous"
+        );
+    }
+
+    fn check_double_3x3_continuity(scale: f32) {
+        // ╔══╗ / ║  ║ / ╚══╝
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cw = 8.0_f32 * scale;
+        let ch = 16.0_f32 * scale;
+        let cell = |col: usize, row: usize| (col as f32 * cw, row as f32 * ch);
+
+        let tl = lines_at('╔', cell(0, 0), (cw, ch));
+        let h0a = lines_at('═', cell(1, 0), (cw, ch));
+        let _h0b = lines_at('═', cell(2, 0), (cw, ch));
+        let _tr = lines_at('╗', cell(3, 0), (cw, ch));
+
+        let cy_top = ch * 0.5;
+        assert_eq!(h0a[0].style, StrokeStyle::Double, "scale {scale}× ═ must be Double");
+        assert!(
+            (h0a[0].from.0 - cw).abs() < 1e-3 && (h0a[0].from.1 - cy_top).abs() < 1e-3,
+            "scale {scale}× ═ centerline starts at left cell edge"
+        );
+        // ╔ outer vertical lane (x = cx_left - off) must end at row
+        // boundary y = ch.
+        let cx_left = cw * 0.5;
+        assert!(
+            tl.iter().any(|s| (s.from.0 - (cx_left - off)).abs() < 1e-3
+                && (s.to.0 - (cx_left - off)).abs() < 1e-3
+                && (s.to.1 - ch).abs() < 1e-3),
+            "scale {scale}× ╔ outer vertical lane must end at y=ch"
+        );
+        // ║ centerline in row 1 must span row 1 from y=ch to y=2ch.
+        let v_mid = lines_at('║', cell(0, 1), (cw, ch));
+        assert_eq!(v_mid[0].style, StrokeStyle::Double);
+        assert!((v_mid[0].from.0 - cx_left).abs() < 1e-3);
+        assert!((v_mid[0].from.1 - ch).abs() < 1e-3);
+        assert!((v_mid[0].to.1 - 2.0 * ch).abs() < 1e-3);
+    }
+
+    #[test]
+    fn double_three_by_three_continuity_at_100_percent_dpi() {
+        check_double_3x3_continuity(1.0);
+    }
+
+    #[test]
+    fn double_three_by_three_continuity_at_125_percent_dpi() {
+        check_double_3x3_continuity(1.25);
+    }
+
+    #[test]
+    fn double_three_by_three_continuity_at_150_percent_dpi() {
+        check_double_3x3_continuity(1.5);
+    }
+
+    #[test]
+    fn double_lane_offset_constant_gives_safe_gap_at_all_dpis() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let gap_logical = 2.0 * DOUBLE_LANE_OFFSET_PX - LIGHT_THICKNESS_PX;
+            let gap_device = gap_logical * scale;
+            assert!(
+                gap_device >= 1.0,
+                "scale {scale}×: inter-lane gap {gap_device} device-px must be ≥ 1"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_matches_geometry_table_for_phase_b2() {
+        for ch in ['═', '║', '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬'] {
+            let geom_some = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some();
+            let covered = is_covered_box_drawing(ch);
+            assert_eq!(geom_some, covered, "predicate/geometry mismatch for U+{:04X}", ch as u32);
+        }
     }
 }
