@@ -37,6 +37,10 @@ pub mod color;
 /// all helpers emit `QuadInstance` / `GlyphInstance` and belong on the
 /// GPU side of the layer split.
 pub mod cursor;
+/// Per-codepoint geometry → `QuadInstance` bridge for #542. Single
+/// funnel used by all three GPU emit branches in `core.rs` so the
+/// "fix only one branch" anti-pattern stays fixed.
+pub mod geometry_emit;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;
