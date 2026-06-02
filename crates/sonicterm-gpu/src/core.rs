@@ -4529,8 +4529,9 @@ impl GpuRenderer {
                     code_u32 = cell.ch as u32,
                     scale_factor = scale_factor,
                     classify = ?sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
-                    natural_rect = ?(gx, gy, gw, gh),
+                    final_rect = ?(gx, gy, gw, gh),
                     final_rgba = ?rgba,
+                    is_color = info.is_color,
                     path = "ascii_fast",
                     "glyph render emit"
                 );
@@ -4591,6 +4592,14 @@ impl GpuRenderer {
                     // #461 PR-B1: log every tofu emit so we can pin which
                     // codepoint dropped + why. Critical for diagnosing the
                     // U+25B6 / Powerline / NF tofu reported visually.
+                    let tofu_rect = (
+                        cx + inset,
+                        cy + inset,
+                        cell_pixel_width - inset * 2.0,
+                        cell_h - inset * 2.0,
+                    );
+                    let tofu_color = cell_fg(&lead_cell, theme, fg_default);
+                    let tofu_rgba = glyphon_color_to_linear_rgba(tofu_color);
                     tracing::debug!(
                         target: "sonic::render::glyph",
                         ch = ?ch,
@@ -4601,6 +4610,9 @@ impl GpuRenderer {
                         scale_factor = scale_factor,
                         classify = ?sonicterm_text::swash_rasterizer::classify_symbol(ch),
                         resolve_slot = ?resolved,
+                        final_rect = ?tofu_rect,
+                        final_rgba = ?tofu_rgba,
+                        is_color = false,
                         path = "char_fallback_tofu",
                         "tofu emitted — every face in chain lacks codepoint"
                     );
