@@ -43,10 +43,12 @@ fn box_drawing_codepoint_emits_geometry_quads() {
     )
     .expect("U+2500 ─ must route through the geometry helper");
     assert!(!quads.is_empty(), "geometry helper must emit at least one QuadInstance");
-    // Line-SDF stroke (see `geometry_emit::line_segment_to_quad`).
+    // Post-#565: axis-aligned Box-Drawing segments route through the
+    // sharp-rect path (line_thickness_px == 0) so adjacent cell rects
+    // abut flush without the capsule-SDF endpoint AA gap.
     assert!(
-        quads.iter().all(|q| q.line_thickness_px >= 1.0),
-        "Box-Drawing quads must use the line-SDF path (thickness >= 1 device px)"
+        quads.iter().all(|q| q.line_thickness_px == 0.0),
+        "Box-Drawing axis-aligned quads must use the sharp-rect path (#565)"
     );
 }
 
