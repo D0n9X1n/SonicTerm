@@ -240,3 +240,176 @@ fn inverted_glyph_recolor_is_premultiplied_during_blink() {
     let buggy = [0.8, 0.4, 0.2, 0.5];
     assert_ne!(got, buggy, "must not be straight-alpha");
 }
+
+// ---------------------------------------------------------------------
+// Issue #568: cluster-spanning glyphs (ligatures, CJK wide) must be
+// recolored whenever the cursor sits on ANY cell of the cluster, not
+// just the cell containing the glyph's geometric center.
+// ---------------------------------------------------------------------
+
+/// Helper: synthesise a [`GlyphInstance`] whose pixel rect spans
+/// `(px, py, pw, ph)` on a `(sw, sh)` surface.
+fn glyph_at(px: f32, py: f32, pw: f32, ph: f32, sw: f32, sh: f32) -> GlyphInstance {
+    GlyphInstance {
+        rect: px_to_ndc(px, py, pw, ph, sw, sh),
+        uv: [0.0; 4],
+        color: [1.0, 1.0, 1.0, 1.0],
+        flags: [0.0; 4],
+    }
+}
+
+/// A 2-cell `=>` ligature is shaped as a single glyph whose rect
+/// covers both cells. With the cursor on the **lead** cell the glyph
+/// must be recolored — the centre-of-glyph test used to pass here only
+/// because the lead cell happened to contain the center.
+#[test]
+fn recolor_ligature_cursor_on_lead_cell() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let lead_x = 20.0;
+    let cell_y = 30.0;
+    // Ligature spans 2 cells starting at lead_x.
+    let mut glyphs = vec![glyph_at(lead_x, cell_y, cell_w * 2.0, cell_h, sw, sh)];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    recolor_cursor_glyphs(&mut glyphs, lead_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "ligature on lead cell must be recolored");
+}
+
+/// Same `=>` ligature, cursor on the **trail** cell (lead+1). The
+/// glyph's geometric centre falls in the trail cell too, but the AABB
+/// approach is what makes the regression below also pass for the
+/// 3-cell case. Belt-and-suspenders coverage.
+#[test]
+fn recolor_ligature_cursor_on_trail_cell() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let lead_x = 20.0;
+    let trail_x = lead_x + cell_w;
+    let cell_y = 30.0;
+    let mut glyphs = vec![glyph_at(lead_x, cell_y, cell_w * 2.0, cell_h, sw, sh)];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    recolor_cursor_glyphs(&mut glyphs, trail_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "ligature on trail cell must be recolored");
+}
+
+/// A 3-cell `===` ligature with cursor on the **middle** cell. The
+/// centre-point test would have passed here (centre is in middle
+/// cell), but the lead and trail cells used to fail; this case
+/// guards the middle as well so regressions are caught wherever the
+/// cursor lands.
+#[test]
+fn recolor_three_cell_ligature_cursor_on_middle() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let lead_x = 20.0;
+    let cell_y = 30.0;
+    // 3-cell ligature.
+    let mut glyphs = vec![glyph_at(lead_x, cell_y, cell_w * 3.0, cell_h, sw, sh)];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    let middle_x = lead_x + cell_w;
+    recolor_cursor_glyphs(&mut glyphs, middle_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "3-cell ligature on middle must be recolored");
+}
+
+/// A 3-cell `===` ligature with cursor on the **lead** cell. With the
+/// old centre-of-glyph test this was the canonical regression: the
+/// centre lies in the middle cell, so the lead-cell cursor never
+/// recoloured the glyph.
+#[test]
+fn recolor_three_cell_ligature_cursor_on_lead() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let lead_x = 20.0;
+    let cell_y = 30.0;
+    let mut glyphs = vec![glyph_at(lead_x, cell_y, cell_w * 3.0, cell_h, sw, sh)];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    recolor_cursor_glyphs(&mut glyphs, lead_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "3-cell ligature on lead cell must be recolored");
+}
+
+/// CJK wide character (`中`) emits a single glyph spanning 2 cells.
+/// Cursor on the lead cell must recolor the glyph.
+#[test]
+fn recolor_cjk_wide_cursor_on_lead_cell() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let lead_x = 40.0;
+    let cell_y = 30.0;
+    // Wide glyph spans 2 cells.
+    let mut glyphs = vec![glyph_at(lead_x, cell_y, cell_w * 2.0, cell_h, sw, sh)];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    recolor_cursor_glyphs(&mut glyphs, lead_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "CJK wide on lead cell must be recolored");
+}
+
+/// Regression guard: a 1-cell glyph (`a`) sitting in the cursor cell
+/// must still be recolored — the AABB approach must not regress the
+/// common single-cell case.
+#[test]
+fn recolor_single_cell_glyph_in_cursor_cell() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let cell_x = 50.0;
+    let cell_y = 30.0;
+    // Glyph entirely inside the cursor cell.
+    let mut glyphs = vec![glyph_at(
+        cell_x + 1.0,
+        cell_y + 2.0,
+        cell_w - 2.0,
+        cell_h - 4.0,
+        sw,
+        sh,
+    )];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    recolor_cursor_glyphs(&mut glyphs, cell_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(glyphs[0].color, bg, "single-cell glyph in cursor cell must be recolored");
+}
+
+/// Regression guard: a 1-cell glyph (`a`) sitting in the cell adjacent
+/// to the cursor must NOT be recolored — the AABB approach must not
+/// over-recolor neighbouring glyphs.
+#[test]
+fn no_recolor_single_cell_glyph_in_adjacent_cell() {
+    let sw = 100.0;
+    let sh = 100.0;
+    let cell_w = 10.0;
+    let cell_h = 20.0;
+    let cell_x = 50.0;
+    let cell_y = 30.0;
+    let neighbour_x = cell_x + cell_w;
+    // Glyph entirely inside the NEIGHBOUR cell, fully outside the cursor cell.
+    let mut glyphs = vec![glyph_at(
+        neighbour_x + 1.0,
+        cell_y + 2.0,
+        cell_w - 2.0,
+        cell_h - 4.0,
+        sw,
+        sh,
+    )];
+
+    let bg = [0.0, 0.1, 0.2, 0.9];
+    let original = glyphs[0].color;
+    recolor_cursor_glyphs(&mut glyphs, cell_x, cell_y, cell_w, cell_h, sw, sh, bg);
+    assert_eq!(
+        glyphs[0].color, original,
+        "single-cell glyph in adjacent cell must NOT be recolored"
+    );
+}
