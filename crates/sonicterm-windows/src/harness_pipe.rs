@@ -58,10 +58,20 @@ use windows::Win32::System::Pipes::{
     PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
-/// Owner-only SDDL: owner SID = current owner, group = current owner,
-/// DACL protected (no inheritance), single ACE granting `GA`
-/// (`GENERIC_ALL`) to the owner. Nothing else can connect.
-const PIPE_SDDL: &str = "O:OWG:OWD:P(A;;GA;;;OW)";
+/// Owner-only SDDL template: owner SID = current user, group =
+/// current user, DACL protected (no inheritance), single ACE
+/// granting `GA` (`GENERIC_ALL`) to the current user. Nothing else
+/// can connect.
+///
+/// Issue #510: we previously used the SDDL alias `OW` ("owner of
+/// object"), but `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+/// rejects `OW` in the owner field with `ERROR_INVALID_OWNER (1307)`.
+/// The fix is to substitute the concrete user SID resolved from the
+/// process token at construction time — see `win_sid.rs`.
+fn pipe_sddl() -> String {
+    let sid = crate::win_sid::cached_current_user_sid();
+    format!("O:{sid}G:{sid}D:P(A;;GA;;;{sid})")
+}
 
 const PIPE_PREFIX: &str = "\\\\.\\pipe\\sonicterm-harness-";
 const READ_CHUNK: usize = 4096;
@@ -133,7 +143,8 @@ impl Drop for PipeSd {
 }
 
 fn build_security_descriptor() -> Result<PipeSd> {
-    let wide = to_wide(PIPE_SDDL);
+    let sddl = pipe_sddl();
+    let wide = to_wide(&sddl);
     let mut sd = PSECURITY_DESCRIPTOR::default();
     // SAFETY: wide is null-terminated, sd is a valid out pointer.
     unsafe {
@@ -153,9 +164,11 @@ fn build_security_descriptor() -> Result<PipeSd> {
 /// stdout once). The thread runs for the lifetime of the process.
 pub fn spawn(request: &str, sink: HarnessSink) -> Result<String> {
     let pipe_name = resolve_pipe_name(request);
-    // Per spec — single stdout line, fixed format.
-    println!("harness pipe ready: {pipe_name}");
-    tracing::info!(pipe = %pipe_name, "harness pipe ready");
+    // #511: announce readiness ONLY after CreateNamedPipeW returns
+    // successfully. Previously we printed "harness pipe ready" before
+    // even constructing the pipe, which made the test harness race
+    // ahead and CreateFileW on a non-existent pipe (ERROR_FILE_NOT_
+    // FOUND). Moved below the CreateNamedPipeW success check.
 
     let name_wide = to_wide(&pipe_name);
     let name_for_thread = pipe_name.clone();
@@ -186,6 +199,15 @@ pub fn spawn(request: &str, sink: HarnessSink) -> Result<String> {
         let err = unsafe { GetLastError() };
         bail!("CreateNamedPipeW failed: {:?}", err);
     }
+
+    // #511: Per spec — single stdout line, fixed format. Emitted ONLY
+    // after CreateNamedPipeW succeeded so a client reading our stdout
+    // sees "ready" iff the pipe truly exists. flush() forces the line
+    // out before we hand off to the accept thread (Windows is
+    // line-buffered to a TTY but block-buffered when stdout is a pipe).
+    println!("harness pipe ready: {pipe_name}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    tracing::info!(pipe = %pipe_name, "harness pipe ready");
 
     // SECURITY_ATTRIBUTES is `Copy` (POD); it's been read into the
     // Win32 call above and we don't need to keep the binding around.

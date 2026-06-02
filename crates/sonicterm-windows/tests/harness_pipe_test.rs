@@ -53,38 +53,29 @@ fn sonicterm_windows_harness_pipe_resolve(req: &str) -> String {
     }
 }
 
-/// Spec test (5.a) — full e2e against the running exe. The active-
-/// pane sender publication side landed in #508 (this PR) and is
-/// verified by:
-///   * `harness_sink_publish.rs` (sonicterm-app unit test) — App
-///     publishes the active pane's sender into the sink on every
-///     pane-change.
-///   * `harness_race_test.rs` (this crate) — per-chunk atomicity
-///     across focus-change-mid-write.
+/// Spec test (5.a) — full e2e against the running exe.
 ///
-/// However, running this e2e test against the real exe revealed a
-/// **pre-existing #507 bug** that #508 cannot fix in-scope:
-/// `CreateNamedPipeW` returns `WIN32_ERROR(1307)` (`ERROR_INVALID_OWNER`)
-/// when given the SDDL `O:OWG:OWD:P(A;;GA;;;OW)`. The pipe is never
-/// created, the read thread never spawns, and any client `CreateFileW`
-/// returns `ERROR_FILE_NOT_FOUND (0x80070002)`.
+/// Was previously `#[ignore]`d as a stub: blocked by
+///   * #510 — `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+///     rejected the SDDL alias `OW` with `ERROR_INVALID_OWNER (1307)`,
+///     so the pipe was never created.
+///   * #511 — `harness_pipe::spawn` printed `"harness pipe ready"`
+///     BEFORE calling `CreateNamedPipeW`, so test clients that read
+///     stdout for the ready signal raced ahead of the actual pipe
+///     existing on the filesystem and got `ERROR_FILE_NOT_FOUND`.
 ///
-/// Repro (interactive desktop session on Windows host):
-/// ```pwsh
-/// .\target\debug\sonicterm-windows.exe --harness-input-pipe auto
-/// # logs: "failed to spawn harness pipe error=CreateNamedPipeW failed: WIN32_ERROR(1307)"
-/// ```
+/// Both fixed in this PR:
+///   * `crate::win_sid::cached_current_user_sid()` substitutes the
+///     concrete user SID into the SDDL template.
+///   * `harness_pipe::spawn` now prints + flushes only after
+///     `CreateNamedPipeW` returns successfully.
 ///
-/// Filed as follow-up: harness-pipe SDDL needs the owner SID
-/// resolved at runtime via `GetTokenInformation(TokenOwner)` rather
-/// than the literal `OW` shorthand, OR the pipe needs to be created
-/// with `NULL` security attributes (Windows-default DACL — full
-/// access to the creator) and the SDDL approach abandoned.
-///
-/// Kept `#[ignore]` so the test is buildable + runnable manually but
-/// doesn't block CI until the #507 SDDL bug is fixed.
+/// Test pre-builds the binary so the spawn doesn't race with cargo,
+/// reads the ready line off the child's stdout, then opens the pipe
+/// with `CreateFileW` and writes the OSC sentinel. A successful open
+/// with neither `ERROR_INVALID_OWNER (1307)` nor `ERROR_FILE_NOT_
+/// FOUND (2)` proves both bugs fixed.
 #[test]
-#[ignore = "blocked by #507 pre-existing bug: CreateNamedPipeW fails ERROR_INVALID_OWNER on the SDDL. See test docstring."]
 fn e2e_window_title_sentinel() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
@@ -134,38 +125,35 @@ fn e2e_window_title_sentinel() {
         }
     };
 
-    std::thread::sleep(Duration::from_millis(500));
-
+    // No retry loop here: #511 fix guarantees that once we see the
+    // ready line on stdout, the pipe is already published. A failure
+    // to open the pipe at this point is a real bug, not a race.
     let pipe_wide = to_wide(&pipe_name);
-    let connect_deadline = Instant::now() + Duration::from_secs(5);
-    let h = loop {
-        let attempt = unsafe {
-            CreateFileW(
-                PCWSTR(pipe_wide.as_ptr()),
-                GENERIC_WRITE.0,
-                FILE_SHARE_NONE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-        };
-        match attempt {
-            Ok(h) => break h,
-            Err(_) if Instant::now() < connect_deadline => {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                panic!(
-                    "connect to harness pipe {pipe_name:?} after 5s: {e:?}\n\
-                     (NB: #507 SDDL bug — see this test's ignore reason)"
-                );
-            }
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(pipe_wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_NONE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    let h = match h {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = child.kill();
+            let code = unsafe { GetLastError() }.0;
+            panic!(
+                "CreateFileW to harness pipe {pipe_name:?} failed: {e:?} (LastError={code}); \
+                 expected success — #510 (1307 ERROR_INVALID_OWNER) and \
+                 #511 (2 ERROR_FILE_NOT_FOUND race) should both be fixed."
+            );
         }
     };
 
-    let sentinel = b"\x1b]0;SONIC508-WT-OK\x07";
+    let sentinel = b"\x1b]0;SONIC510-WT-OK\x07";
     let mut bytes_written: u32 = 0;
     unsafe {
         windows::Win32::Storage::FileSystem::WriteFile(
