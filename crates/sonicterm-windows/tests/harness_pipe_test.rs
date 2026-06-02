@@ -62,7 +62,7 @@ fn sonicterm_windows_harness_pipe_resolve(req: &str) -> String {
 ///     harness_pipe_test -- --ignored e2e_window_title_sentinel
 /// ```
 #[test]
-#[ignore = "depends on follow-up active-pane sender wiring (see harness_pipe.rs module doc)"]
+#[ignore = "depends on follow-up active-pane sender wiring — see #508 (also harness_pipe.rs module doc)"]
 fn e2e_window_title_sentinel() {
     // Intentionally a stub: see ignore reason.
 }
