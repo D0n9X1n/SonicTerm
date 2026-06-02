@@ -11,8 +11,8 @@
 
 use cosmic_text::FontSystem;
 use glyphon::Color as GColor;
+use sonicterm_gpu::core::{emit_overlay_text_glyphs, OverlayTextGlyphDebug};
 use sonicterm_gpu::text_pipeline::GlyphInstance;
-use sonicterm_shared::render::{emit_overlay_text_glyphs, OverlayTextGlyphDebug};
 use sonicterm_text::{glyph_atlas::GlyphAtlas, swash_rasterizer::SwashRasterizer};
 
 const FONT_SIZE: f32 = 14.0;

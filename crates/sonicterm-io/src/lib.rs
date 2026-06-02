@@ -10,3 +10,9 @@ pub mod foreground_proc;
 pub mod proc_info;
 pub mod pty;
 pub mod ssh;
+
+/// Test-only helpers (`ShellDialect` for the e2e gate examples + integration
+/// tests). Gated behind `cfg(feature = "test_support")` so production builds
+/// don't pull it in.
+#[cfg(feature = "test_support")]
+pub mod test_support;

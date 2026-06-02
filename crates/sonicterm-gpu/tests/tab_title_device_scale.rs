@@ -1,11 +1,11 @@
 use cosmic_text::FontSystem;
 use glyphon::Color as GColor;
+use sonicterm_gpu::core::{emit_tab_title_glyphs, TabTitleGlyphDebug};
 use sonicterm_gpu::text_pipeline::GlyphInstance;
-use sonicterm_shared::render::{
-    build_tab_title_rich_text_spans, build_tab_title_spans, emit_tab_title_glyphs,
-    tab_title_font_size, TabSpanInput, TabTitleGlyphDebug,
-};
 use sonicterm_text::{glyph_atlas::GlyphAtlas, swash_rasterizer::SwashRasterizer};
+use sonicterm_ui::tab_spans::{
+    build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
+};
 use sonicterm_ui::tabs::{Tab, TabBar};
 
 const FONT_SIZE: f32 = 14.0;

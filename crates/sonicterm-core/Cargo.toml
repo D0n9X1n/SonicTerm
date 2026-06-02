@@ -15,10 +15,6 @@ workspace = true
 default = []
 # Forwards to `sonicterm-io/ssh` — keeps the old `sonicterm-core/ssh` feature working.
 ssh = ["sonicterm-io/ssh"]
-# Exposes test-only helpers (ShellDialect for the e2e gate examples + integration tests).
-# Not for shipping use — gated behind cfg(feature = "test_support") so production builds
-# don't pull it in.
-test_support = []
 
 [dependencies]
 sonicterm-types.workspace = true
@@ -36,9 +32,6 @@ parking_lot.workspace = true
 toml.workspace = true
 serde.workspace = true
 crossbeam-channel.workspace = true
-# Examples need the ShellDialect helpers. Enable test_support via dev-deps
-# so `cargo build --examples` / `cargo run --example` pull it in automatically.
-sonicterm-core = { path = ".", features = ["test_support"] }
 
 [[example]]
 name = "pty_dump"

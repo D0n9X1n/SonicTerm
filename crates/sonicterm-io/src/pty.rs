@@ -70,7 +70,7 @@ pub struct ShellSpawnOpts {
 }
 
 /// Sentinel value `PtyHandle::shell_program_path` returns for the test-only
-/// constructor `for_test`. `dialect_for_shell` (in `sonicterm-core::test_support::shell_dialect`,
+/// constructor `for_test`. `dialect_for_shell` (in `sonicterm_io::test_support::shell_dialect`,
 /// follow-up PR) explicitly rejects it so test fixtures fail loud if
 /// misused as a real shell.
 pub const TEST_SENTINEL_SHELL_PATH: &str = "<sonicterm-pty-test-sentinel>";

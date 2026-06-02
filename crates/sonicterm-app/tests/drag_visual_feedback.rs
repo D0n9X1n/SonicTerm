@@ -197,7 +197,8 @@ fn ghost_tab_text_run_has_half_alpha() {
 #[test]
 fn source_tab_text_during_drag_has_30pct_alpha() {
     use glyphon::Color as GColor;
-    use sonicterm_shared::render::{build_tab_title_spans, scale_glyphon_alpha, TabSpanInput};
+    use sonicterm_gpu::core::scale_glyphon_alpha;
+    use sonicterm_ui::tab_spans::{build_tab_title_spans, TabSpanInput};
 
     // Build a 3-tab bar; the drag's source is tab index 1.
     let bar = bar_with(3);

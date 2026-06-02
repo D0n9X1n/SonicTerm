@@ -24,13 +24,13 @@
 //!
 //! Wired into the local gate in `CLAUDE.md` §2.
 //!
-//! Run with: `cargo run --example pty_dump_unicode -p sonicterm-core --release`
+//! Run with: `cargo run --example pty_dump_unicode -p sonicterm-io --release --features test_support`
 
 use std::time::{Duration, Instant};
 
-use sonicterm_core::test_support::shell_dialect::dialect_for_shell;
 use sonicterm_grid::grid::{CellFlags, Grid};
 use sonicterm_io::pty::PtyHandle;
+use sonicterm_io::test_support::shell_dialect::dialect_for_shell;
 use sonicterm_vt::vt::Parser;
 
 /// One character from every class the capability matrix covers. Each char

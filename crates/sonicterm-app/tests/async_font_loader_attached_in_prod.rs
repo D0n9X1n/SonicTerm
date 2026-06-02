@@ -18,7 +18,7 @@
 //!    end-to-end by running the loader against a stub `load_fn` and
 //!    observing that the simulated proxy receives the variant.
 //! 3. The loader is plumb-compatible with
-//!    `sonicterm_shared::render::GpuRenderer::set_async_loader` — verified
+//!    `sonicterm_gpu::core::GpuRenderer::set_async_loader` — verified
 //!    structurally via the `AsyncFallbackLoader` type re-export so a
 //!    future refactor that drops the wire surface would fail to
 //!    compile.

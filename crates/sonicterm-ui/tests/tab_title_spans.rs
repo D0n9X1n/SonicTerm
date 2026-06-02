@@ -5,7 +5,7 @@
 //! mismatched against the prefix glyphs.
 
 use glyphon::Color as GColor;
-use sonicterm_shared::render::{build_tab_title_spans, TabSpanInput};
+use sonicterm_ui::tab_spans::{build_tab_title_spans, TabSpanInput};
 
 const ACTIVE: GColor = GColor::rgb(0xfa, 0xbd, 0x2f);
 const INACTIVE: GColor = GColor::rgb(0x92, 0x83, 0x74);
