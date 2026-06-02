@@ -27,19 +27,32 @@ Push-Location $ScriptRoot
 $LibRoot = Resolve-Path (Join-Path $ScriptRoot '..\lib')
 . (Join-Path $LibRoot 'Resolve-BashExe.ps1')
 
-# Gate-the-gate: byte-scan production run_case.ps1 for any 0x08
-# backspace bytes. If '\b' escape interpretation ever re-corrupts the
-# file, this assert fires before the behavioural tests run.
-$ProdScript = Resolve-Path (Join-Path $ScriptRoot '..\run_case.ps1')
-$prodBytes  = [System.IO.File]::ReadAllBytes($ProdScript)
-$bsCount    = @($prodBytes | Where-Object { $_ -eq 0x08 }).Count
-if ($bsCount -gt 0) {
-  Write-Host "  FAIL run_case.ps1 contains $bsCount literal 0x08 (backspace) byte(s)" -ForegroundColor Red
-  Write-Host "       likely '\b' escape corruption — quote hard-coded paths with single quotes" -ForegroundColor Red
-  exit 1
-} else {
-  Write-Host "  PASS run_case.ps1 contains no 0x08 corruption bytes" -ForegroundColor Green
+# Gate-the-gate: byte-scan production sources for any 0x08 backspace
+# bytes. If '\b' escape interpretation ever re-corrupts a file, this
+# assert fires before the behavioural tests run. Covers both
+# run_case.ps1 (where the original #500 corruption lived) and every
+# *.ps1 under testing/workflows/lib/ (where the bash candidates now
+# live, and where future helpers will land — keeping this glob-based
+# makes the gate future-proof).
+$WorkflowsRoot = Resolve-Path (Join-Path $ScriptRoot '..')
+$ScanTargets   = @( (Join-Path $WorkflowsRoot 'run_case.ps1') )
+$ScanTargets  += @( Get-ChildItem -Path (Join-Path $WorkflowsRoot 'lib') -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty FullName )
+$gateFail = 0
+foreach ($target in $ScanTargets) {
+  if (-not (Test-Path -LiteralPath $target)) { continue }
+  $rel     = (Resolve-Path -LiteralPath $target).Path.Substring($WorkflowsRoot.Path.Length).TrimStart('\','/')
+  $bytes   = [System.IO.File]::ReadAllBytes($target)
+  $bsCount = @($bytes | Where-Object { $_ -eq 0x08 }).Count
+  if ($bsCount -gt 0) {
+    Write-Host "  FAIL $rel contains $bsCount literal 0x08 (backspace) byte(s)" -ForegroundColor Red
+    Write-Host "       likely '\b' escape corruption — quote hard-coded paths with single quotes" -ForegroundColor Red
+    $gateFail++
+  } else {
+    Write-Host "  PASS $rel contains no 0x08 corruption bytes" -ForegroundColor Green
+  }
 }
+if ($gateFail -gt 0) { exit 1 }
 
 $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sonic493-test-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $TmpRoot | Out-Null
