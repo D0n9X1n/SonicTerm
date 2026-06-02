@@ -15,7 +15,6 @@ default = []
 ssh = ["sonicterm-io/ssh"]
 
 [dependencies]
-sonicterm-core.workspace = true
 sonicterm-app-core.workspace = true
 sonicterm-types.workspace = true
 bytes = "1"
@@ -28,7 +27,6 @@ sonicterm-io.workspace = true
 sonicterm-text.workspace = true
 sonicterm-gpu.workspace = true
 sonicterm-ui.workspace = true
-sonicterm-shared.workspace = true
 sonicterm-render-model.workspace = true
 winit.workspace = true
 raw-window-handle.workspace = true

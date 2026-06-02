@@ -58,8 +58,6 @@ milestone ship.
 | `sonicterm-windows` | ConPTY, muda, Mica, OLE drag |
 | `sonicterm-mux` | Persistent PTY mux daemon |
 | `sonicterm-logging` | Panic hook + rolling logs |
-| `sonicterm-core` | 💀 deprecated façade — removed v1.1 |
-| `sonicterm-shared` | 💀 dissolved at M7 |
 
 Dep-graph rationale: `docs/ARCHITECTURE.md`.
 
@@ -76,9 +74,9 @@ bash scripts/check-deny.sh
 bash tools/check-landmines.sh
 bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
-cargo run --example pty_dump -p sonicterm-core --release
-cargo run --example pty_dump_unicode -p sonicterm-core --release
-cargo run --example pty_dump_unicode -p sonicterm-core --release
+cargo run --example pty_dump -p sonicterm-vt --release
+cargo run --example pty_dump_unicode -p sonicterm-vt --release
+cargo run --example pty_dump_unicode -p sonicterm-vt --release
 bash scripts/check-visual-snapshots.sh
 cargo build --release -p sonicterm-mac
 bash scripts/bench.sh

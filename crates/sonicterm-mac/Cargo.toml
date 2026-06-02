@@ -11,11 +11,9 @@ description = "SonicTerm Terminal — macOS app"
 workspace = true
 
 [dependencies]
-sonicterm-core.workspace = true
-sonicterm-cfg.workspace = true
-sonicterm-shared.workspace = true
 sonicterm-app.workspace = true
 sonicterm-app-core.workspace = true
+sonicterm-cfg.workspace = true
 sonicterm-ui.workspace = true
 sonicterm-logging.workspace = true
 anyhow.workspace = true

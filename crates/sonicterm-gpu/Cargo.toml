@@ -14,7 +14,6 @@ workspace = true
 sonicterm-types.workspace = true
 sonicterm-text.workspace = true
 sonicterm-render-model.workspace = true
-sonicterm-core.workspace = true
 sonicterm-grid.workspace = true
 sonicterm-cfg.workspace = true
 sonicterm-ui.workspace = true
