@@ -92,7 +92,7 @@ fi
 # (would kill the user's dev build). At spawn time SONIC_PIDS is
 # typically empty; this iteration is a no-op safety net for any PIDs
 # a prior step (e.g. a wrapping harness) may have already tracked.
-for pid in "${SONIC_PIDS[@]}"; do
+for pid in "${SONIC_PIDS[@]:-}"; do
   kill -9 "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 done
@@ -256,7 +256,7 @@ send_chord() {
     key="${parts[$last_idx]}"
     unset 'parts[last_idx]'
     local mlist=()
-    for p in "${parts[@]}"; do
+    for p in "${parts[@]}"; do # harness-safe-empty: populated inline at L254 via mapfile
       case "$p" in
         cmd|command) mlist+=("command down") ;;
         shift)       mlist+=("shift down") ;;
@@ -550,7 +550,7 @@ osascript -e 'tell application "sonicterm-mac" to quit' >/dev/null 2>&1 || true
 
 _any_alive() {
   local pid
-  for pid in "${SONIC_PIDS[@]}"; do
+  for pid in "${SONIC_PIDS[@]:-}"; do
     kill -0 "$pid" 2>/dev/null && return 0
   done
   return 1
@@ -560,12 +560,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   _any_alive || break
   sleep 0.1
 done
-for pid in "${SONIC_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+for pid in "${SONIC_PIDS[@]:-}"; do kill -TERM "$pid" 2>/dev/null || true; done
 for _ in 1 2 3 4 5; do
   _any_alive || break
   sleep 0.1
 done
-for pid in "${SONIC_PIDS[@]}"; do
+for pid in "${SONIC_PIDS[@]:-}"; do
   kill -9 "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 done
@@ -579,7 +579,7 @@ if [[ -n "$remaining" ]]; then
   pre_sorted=$(printf '%s\n' "${PRE_RUN_USER_PIDS:-}" | sort -u)
   unexpected=$(comm -23 <(printf '%s\n' "$remaining") <(printf '%s\n' "$pre_sorted"))
   if [[ -n "$unexpected" ]]; then
-    tracked_sorted=$(printf '%s\n' "${SONIC_PIDS[@]}" | sort -u)
+    tracked_sorted=$(printf '%s\n' "${SONIC_PIDS[@]:-}" | sort -u)
     ours_alive=$(comm -12 <(printf '%s\n' "$unexpected") <(printf '%s\n' "$tracked_sorted"))
     user_mid_run=$(comm -23 <(printf '%s\n' "$unexpected") <(printf '%s\n' "$tracked_sorted"))
     if [[ -n "$ours_alive" ]]; then

@@ -121,7 +121,7 @@ PASS=0
 FAIL=0
 SKIP=0
 
-for id in "${IDS[@]}"; do
+for id in "${IDS[@]}"; do # harness-safe-empty: non-empty asserted upstream at mac.sh:113
   echo
   echo "=== $id ==="
   if bash "$DRIVER_DIR/run_case.sh" "$id" "$OUT"; then

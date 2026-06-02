@@ -162,6 +162,7 @@ cargo test --workspace
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-deny.sh
 bash tools/check-landmines.sh
+bash tools/check-harness-bash-strict.sh
 bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
 bash scripts/check-visual-snapshots.sh
