@@ -24,6 +24,21 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
+# ----- Guard: refuse if a competing terminal is alive (issues #464, #473). --
+COMPETITOR_RE='^(WezTerm|wezterm-gui|Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
+if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
+  hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
+    n=split($2,a,"/"); name=a[n]
+    if (name ~ re) print $1" "name
+  }')
+  if [[ -n "$hits" ]]; then
+    echo "SKIP: competing terminal detected — keystrokes would leak." >&2
+    echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
+    echo "$hits" >&2
+    exit 77
+  fi
+fi
+
 pkill -9 -f "target/release/sonicterm-mac" 2>/dev/null || true
 sleep 0.3
 rm -f "$LOG"
@@ -58,23 +73,45 @@ IDLE=$(sample_cpu_avg 5)
 # ---- attempt scroll burst via osascript (graceful if blocked) ------------
 SCROLL="null"
 TYPING_OK=0
-if osascript -e 'tell application "System Events" to keystroke ""' >/dev/null 2>&1; then
-  # Bring sonic to the front by PID
+verify_front_sonic() {
+  local front
+  front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
+  [[ "$front" == "sonicterm-mac" ]]
+}
+# Bring sonic to the front by PID before any keystroke (even the empty
+# capability probe), so the Accessibility-permission check doesn't leak
+# focus into a bystander app. See #473.
+osascript >/dev/null 2>&1 <<EOF || true
+tell application "System Events"
+  set frontmost of (first process whose unix id is $PID) to true
+end tell
+EOF
+sleep 0.4
+if ! verify_front_sonic; then
+  echo "warn: sonicterm-mac not frontmost; skipping keystroke probe" >&2
+elif osascript -e 'tell application "System Events" to keystroke ""' >/dev/null 2>&1; then
+  # Re-assert frontmost just before the real keystroke burst.
   osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
   set frontmost of (first process whose unix id is $PID) to true
 end tell
 EOF
   sleep 0.4
-  osascript >/dev/null 2>&1 <<'EOF' || true
+  # Pre-keystroke focus gate — skip the keystroke block if sonic isn't
+  # frontmost, instead of leaking into whatever else is. See #473.
+  if verify_front_sonic; then
+    osascript >/dev/null 2>&1 <<'EOF' || true
 tell application "System Events"
   keystroke "seq 1 2000"
   key code 36
 end tell
 EOF
-  TYPING_OK=1
-  sleep 0.5
-  SCROLL=$(sample_cpu_avg 10)
+    TYPING_OK=1
+    sleep 0.5
+    SCROLL=$(sample_cpu_avg 10)
+  else
+    echo "warn: sonicterm-mac not frontmost; skipping keystroke burst" >&2
+  fi
 fi
 
 # ---- parse frame-skip lines from the trace log --------------------------

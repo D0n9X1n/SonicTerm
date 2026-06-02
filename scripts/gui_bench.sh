@@ -24,6 +24,25 @@ BIN="$ROOT/target/release/sonicterm-mac"
 APP="/tmp/sonic-bench/SonicTerm.app"
 BUNDLE_ID="com.d0n9x1n.sonicterm.bench"
 
+# ----- Guard: refuse to run if a competing terminal is foreground-able. -----
+# osascript keystrokes go to whatever app is frontmost — if WezTerm/iTerm/etc.
+# are alive AND sonicterm-mac drops focus mid-run, keystrokes leak into them.
+# Override with SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1. See issues #464, #473.
+# Runs BEFORE the binary check so a missing build still trips the guard.
+COMPETITOR_RE='^(WezTerm|wezterm-gui|Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
+if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
+  hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
+    n=split($2,a,"/"); name=a[n]
+    if (name ~ re) print $1" "name
+  }')
+  if [[ -n "$hits" ]]; then
+    echo "SKIP: competing terminal detected — keystrokes would leak." >&2
+    echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
+    echo "$hits" >&2
+    exit 77
+  fi
+fi
+
 if [ ! -x "$BIN" ]; then
   echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
   exit 1
@@ -84,9 +103,27 @@ end tell
 EOF
 }
 
+# ----- Pre-keystroke focus gate (mirrors testing/workflows/run_case.sh) -----
+verify_front() {
+  local front
+  front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
+  [[ "$front" == "sonicterm-mac" ]]
+}
+ensure_front_or_skip() {
+  for try in 1 2 3 4 5; do
+    verify_front && return 0
+    frontmost
+    sleep 0.25
+  done
+  echo "SKIP: cannot keep sonicterm-mac frontmost — keystrokes would leak." >&2
+  pkill -9 -f "SonicTerm" 2>/dev/null || true
+  exit 77
+}
+
 type_str() {
   # Use cliclick if available (no Accessibility prompt for keystrokes),
   # otherwise fall back to osascript.
+  ensure_front_or_skip
   if command -v cliclick >/dev/null 2>&1; then
     cliclick -w 0 "t:$1" "kp:return" >/dev/null
   else
@@ -101,6 +138,7 @@ case "$SCENARIO" in
   idle|all)
     frontmost
     sleep 0.3
+    ensure_front_or_skip
     IDLE=$(sample_cpu 3)
     echo "  \"idle_cpu_pct_3s\": $IDLE," >&2
     ;;
@@ -110,8 +148,10 @@ case "$SCENARIO" in
   typing|all)
     frontmost
     sleep 0.3
+    ensure_front_or_skip
     T0=$(date +%s%N)
     for i in $(seq 1 60); do
+      ensure_front_or_skip
       if command -v cliclick >/dev/null 2>&1; then
         cliclick -w 0 "t:a" >/dev/null
       else
@@ -125,6 +165,7 @@ case "$SCENARIO" in
     echo "  \"typing_avg_ms_per_key\": $MS_PER_KEY," >&2
     TYPE_CPU=$(sample_cpu 1)
     echo "  \"typing_cpu_pct_after\": $TYPE_CPU," >&2
+    ensure_front_or_skip
     if command -v cliclick >/dev/null 2>&1; then
       cliclick -w 0 "kp:return" >/dev/null
     else
@@ -137,6 +178,7 @@ case "$SCENARIO" in
   scroll|all)
     frontmost
     sleep 0.3
+    ensure_front_or_skip
     # Force a heavy burst: 5000 lines via `yes | head -5000`
     type_str 'yes hello | head -5000'
     sleep 0.4
