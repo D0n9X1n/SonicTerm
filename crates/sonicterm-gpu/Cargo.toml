@@ -29,3 +29,6 @@ pollster.workspace = true
 
 [dev-dependencies]
 pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+image_hasher = "3"
+tempfile = "3"

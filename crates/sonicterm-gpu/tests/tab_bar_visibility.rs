@@ -145,11 +145,8 @@ fn tab_bar_background_visibly_contrasts_with_theme_background() {
 /// `palette_chrome_follows_active_theme.rs`.
 #[test]
 fn tab_bar_render_path_uses_theme_derived_bar_bg() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../sonicterm-gpu/src/core.rs"
-    ))
-    .expect("read render/core.rs");
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core.rs"))
+        .expect("read render/core.rs");
 
     let start = src.find("// -------- Tab bar").expect("tab bar block present");
     let end_off = src[start..]

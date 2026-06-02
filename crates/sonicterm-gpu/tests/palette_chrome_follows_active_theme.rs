@@ -2,7 +2,7 @@
 //! (scrim, panel background, query field, selected-row highlight,
 //! selected-row accent strip, footer border) was hardcoded to
 //! Tokyo Night literals (`#05070D`, `#10131A`, `#0B0E14`, `#7AA2F7`,
-//! `#FFFFFF`) in `sonicterm-shared/../sonicterm-gpu/src/core.rs`. As a result the
+//! `#FFFFFF`) in `sonicterm-shared/src/core.rs`. As a result the
 //! palette did NOT follow the active theme — a gruvbox user
 //! opening Cmd-P still saw a Tokyo-Night-blue panel.
 //!
@@ -113,11 +113,8 @@ fn palette_chrome_follows_active_theme() {
     // contain the historical Tokyo-Night literals inside the palette
     // overlay block. This protects against a future revert that
     // re-hardcodes the chrome.
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../sonicterm-gpu/src/core.rs"
-    ))
-    .expect("read render.rs");
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core.rs"))
+        .expect("read render.rs");
     let start = src.find("Command palette overlay").expect("palette overlay block present");
     let end_off = src[start..]
         .find("// -------- IME preedit overlay")
