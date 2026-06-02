@@ -10,6 +10,7 @@
 //! `size_px = [0, 0]` and the shader skips the SDF math.
 
 use bytemuck::{Pod, Zeroable};
+use sonicterm_types::GeometryQuad;
 
 /// One quad instance — what the vertex stage reads per draw — packing a
 /// rectangle, color, and optional rounded-rect / line-segment SDF parameters
@@ -458,5 +459,55 @@ pub fn push_mask_icon_quads(out: &mut Vec<QuadInstance>, params: MaskIconParams<
                 c,
             ));
         }
+    }
+}
+
+/// Lossless adapter: turn the renderer-agnostic [`GeometryQuad`] value type
+/// from `sonicterm-types` into the wgpu-bound [`QuadInstance`] used by this
+/// pipeline. The conversion is a 1:1 field copy — `GeometryQuad` has the
+/// same field set and `#[repr(C)]` layout, but deliberately omits the
+/// `bytemuck::Pod`/`Zeroable` derives (the types crate stays dep-free), so
+/// this `From` is the supported bridge.
+impl From<GeometryQuad> for QuadInstance {
+    fn from(g: GeometryQuad) -> Self {
+        Self {
+            rect: g.rect,
+            color: g.color,
+            size_px: g.size_px,
+            radius_px: g.radius_px,
+            line_thickness_px: g.line_thickness_px,
+            line_a: g.line_a,
+            line_b: g.line_b,
+        }
+    }
+}
+
+#[cfg(test)]
+mod geometry_quad_adapter_tests {
+    use super::*;
+
+    /// Every field of a fully-populated `GeometryQuad` must survive the
+    /// `From` adapter into `QuadInstance` unchanged (lossless 1:1 copy).
+    /// Guards against a future field drift between the value type in
+    /// `sonicterm-types` and the GPU-side instance struct.
+    #[test]
+    fn geometry_quad_roundtrip_preserves_all_fields() {
+        let g = GeometryQuad {
+            rect: [0.1, 0.2, 0.3, 0.4],
+            color: [0.5, 0.6, 0.7, 0.8],
+            size_px: [12.0, 24.0],
+            radius_px: 3.5,
+            line_thickness_px: 1.25,
+            line_a: [-4.0, -6.0],
+            line_b: [4.0, 6.0],
+        };
+        let q: QuadInstance = g.into();
+        assert_eq!(q.rect, g.rect);
+        assert_eq!(q.color, g.color);
+        assert_eq!(q.size_px, g.size_px);
+        assert_eq!(q.radius_px, g.radius_px);
+        assert_eq!(q.line_thickness_px, g.line_thickness_px);
+        assert_eq!(q.line_a, g.line_a);
+        assert_eq!(q.line_b, g.line_b);
     }
 }
