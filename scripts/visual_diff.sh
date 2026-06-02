@@ -63,6 +63,12 @@ PAYLOAD
 
 PAYLOAD=$(if [[ -n "$PAYLOAD_FILE" ]]; then cat "$PAYLOAD_FILE"; else default_payload; fi)
 
+# Materialize payload as a fixture so we can `bash <file>` it via keystroke
+# instead of clobbering the user's pbcopy buffer (see #474 Bug A).
+PAYLOAD_FIXTURE=$(mktemp -t visual_diff_payload)
+printf %s "$PAYLOAD" > "$PAYLOAD_FIXTURE"
+trap 'rm -f "$PAYLOAD_FIXTURE"' EXIT
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -86,13 +92,12 @@ EOF
 
 paste_payload() {
   local app_name="$1"
-  printf %s "$PAYLOAD" | /usr/bin/pbcopy
   /usr/bin/osascript <<EOF
 tell application "System Events"
   tell process "$app_name"
     set frontmost to true
     delay 0.3
-    keystroke "v" using {command down}
+    keystroke "bash $PAYLOAD_FIXTURE"
     delay 0.2
     key code 36   -- return
   end tell
@@ -101,10 +106,20 @@ EOF
   sleep 1.2
 }
 
-# screencapture -R x,y,w,h of region; macOS scales for Retina automatically
-shoot_region() {
-  local out="$1" x="$2" y="$3"
-  /usr/sbin/screencapture -x -R "${x},${y},${WIN_W},${WIN_H}" "$out"
+# Look up the front window id for a given process; empty on failure.
+window_id_for() {
+  local app_name="$1"
+  /usr/bin/osascript -e "tell application \"System Events\" to tell process \"$app_name\" to get id of front window" 2>/dev/null || true
+}
+
+# Window-local capture (mirrors testing/workflows/run_case.sh; see #474 Bug B).
+shoot_window() {
+  local out="$1" win_id="$2"
+  if [[ -z "$win_id" ]]; then
+    echo "warn: no window id; skipping screencap for $out" >&2
+    return 0
+  fi
+  /usr/sbin/screencapture -x -l "$win_id" "$out"
 }
 
 crop_titlebar() {
@@ -162,10 +177,20 @@ sleep 0.8
 # Capture
 # ---------------------------------------------------------------------------
 if [[ -n "$WEZTERM_BIN" ]]; then
-  shoot_region /tmp/parity-wezterm.png "$WEZ_X" "$WEZ_Y"
+  WEZ_WIN_ID="$(window_id_for WezTerm)"
+  if [[ -z "$WEZ_WIN_ID" ]]; then
+    echo "warn: no WezTerm front window id; soft-skipping visual_diff" >&2
+    exit 77
+  fi
+  shoot_window /tmp/parity-wezterm.png "$WEZ_WIN_ID"
   crop_titlebar /tmp/parity-wezterm.png /tmp/parity-wezterm-crop.png
 fi
-shoot_region /tmp/parity-sonic.png "$SONIC_X" "$SONIC_Y"
+SONIC_WIN_ID="$(window_id_for sonicterm-mac)"
+if [[ -z "$SONIC_WIN_ID" ]]; then
+  echo "warn: no sonicterm-mac front window id; soft-skipping visual_diff" >&2
+  exit 77
+fi
+shoot_window /tmp/parity-sonic.png "$SONIC_WIN_ID"
 crop_titlebar /tmp/parity-sonic.png /tmp/parity-sonic-crop.png
 
 echo "Captured:"
