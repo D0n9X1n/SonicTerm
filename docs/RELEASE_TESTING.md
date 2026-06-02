@@ -36,6 +36,13 @@ How to use:
 4. Commit the checked-off file as part of the release commit:
    `chore(release): v0.8.1 — release testing complete`.
 
+> **Pre-flight automation.** Before working through this manual gate,
+> run the harness drivers first to catch regressions cheaply:
+> `just visual mac` and `pwsh -File testing/workflows/windows.ps1 -All`.
+> See `testing/README.md` and `docs/WINDOWS_TESTING.md` for invocation,
+> prereqs, guards, and the exit-code contract. This checklist remains
+> the canonical UX gate; the harness is the cheap pre-filter.
+
 ---
 
 ## Table of contents
