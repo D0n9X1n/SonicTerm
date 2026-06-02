@@ -2500,6 +2500,17 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
+        // #559 PR-A: per-frame buffer for Phase-A geometry quads
+        // (Box-Drawing + Block-Element codepoints routed through
+        // `geometry_emit::emit_geometry_for_char`). Filled by the per-row
+        // emit loop's calls into `flush_shape_run`; merged into the
+        // frame's main `quads` buffer AFTER the per-pane loop so quads
+        // layer above per-cell background fills and below the text
+        // pipeline. PR-B (#560) will move replay into the row cache;
+        // until then rows containing a covered codepoint are invalidated
+        // before the cache lookup so the geometry is re-emitted each
+        // frame.
+        let mut geometry_quads: Vec<QuadInstance> = Vec::new();
         // `config.width/height` are PHYSICAL pixels (winit 0.30
         // `WindowEvent::Resized` reports PhysicalSize, which we forward
         // straight into wgpu surface configure). All layout math in
@@ -2601,6 +2612,25 @@ impl GpuRenderer {
                         continue;
                     };
                     // ------ Cache lookup ------
+                    // #559 PR-A: invalidate-on-geometry-codepoint. Any row
+                    // whose cells contain a Phase-A Box-Drawing or
+                    // Block-Element codepoint must re-shape (and re-emit
+                    // its geometry quads) every frame — `CachedRow` doesn't
+                    // yet store `geometry_quads`, so a cache hit would
+                    // silently drop the procedural line/rect quads emitted
+                    // by `geometry_emit::emit_geometry_for_char` and the
+                    // box drawing would disappear on frame 2. PR-B (#560)
+                    // extends `CachedRow` with replayable geometry; until
+                    // then this invalidation is the workaround.
+                    let row_has_geometry_codepoint = row.iter().any(|c| {
+                        sonicterm_text::box_drawing_geometry::is_covered_box_drawing(c.ch)
+                            || sonicterm_text::block_element_geometry::is_covered_block_element(
+                                c.ch,
+                            )
+                    });
+                    if row_has_geometry_codepoint {
+                        self.row_glyph_cache.invalidate_row_abs(pane_id, row_abs);
+                    }
                     let key = sonicterm_text::row_glyph_cache::row_hash(
                         view_top_abs,
                         r as usize,
@@ -2689,6 +2719,7 @@ impl GpuRenderer {
                                     &mut glyph_instances,
                                     &mut missing_tofu,
                                     &mut missing_chars_this_frame,
+                                    &mut geometry_quads,
                                     r,
                                     run_first_col,
                                     s,
@@ -2722,6 +2753,7 @@ impl GpuRenderer {
                             &mut glyph_instances,
                             &mut missing_tofu,
                             &mut missing_chars_this_frame,
+                            &mut geometry_quads,
                             r,
                             run_first_col,
                             s,
@@ -2880,6 +2912,14 @@ impl GpuRenderer {
                 );
             }
         }
+
+        // #559 PR-A: drain the per-frame geometry buffer into the main
+        // `quads` list. Layering: backgrounds (already pushed in the
+        // per-row bg loop above) → geometry → text-pipeline glyphs (the
+        // text pipeline draws AFTER the quad pipeline). Geometry must
+        // NOT go into `quads_overlay` — overlays paint above the text
+        // pipeline and would cover the surrounding ASCII.
+        quads.append(&mut geometry_quads);
 
         // #386 PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
         // the per-row bg quads so the bar paints above any colored cell
@@ -4637,6 +4677,16 @@ impl GpuRenderer {
         glyph_instances: &mut Vec<GlyphInstance>,
         missing_tofu: &mut Vec<(f32, f32, f32, f32, GColor)>,
         missing_chars_this_frame: &mut Vec<char>,
+        // #559 PR-A: per-row geometry-quad buffer. Phase-A Box-Drawing and
+        // Block-Element codepoints route through `emit_geometry_for_char`
+        // here instead of through the glyph atlas. The caller drains this
+        // into the frame's `quads` buffer AFTER the per-pane loop so
+        // geometry quads layer above backgrounds and below text. PR-B
+        // (#560) will move this into `CachedRow.geometry_quads` so cache
+        // hits can replay; until then `core.rs` invalidates rows
+        // containing a covered codepoint so they always re-shape and
+        // re-emit.
+        geometry_quads: &mut Vec<QuadInstance>,
         row: u16,
         _run_first_col: u16,
         style: RunStyle,
@@ -4670,6 +4720,33 @@ impl GpuRenderer {
         // straight from each cell's GlyphKey.
         if run_is_ascii_fast(cells) {
             for (col, cell) in cells {
+                // #559 PR-A: route Phase-A Box-Drawing / Block-Element
+                // codepoints through the geometry funnel BEFORE the glyph
+                // atlas lookup. For ASCII fast path the helper is always
+                // None today (run_is_ascii_fast filters to U+0020..=U+007E),
+                // but the wiring is intentional — it keeps the funnel
+                // identical across all three emit branches so future
+                // expansion (e.g. Phase B's heavy box drawing, or any
+                // policy that admits a covered codepoint into the fast
+                // path) cannot regress the "fix only one branch"
+                // anti-pattern flagged in #542's diagnosis.
+                let cx = snapped_cell_x[*col as usize];
+                let cy = top_inset + f32::from(row) * cell_h;
+                let cell_pixel_width_fast = snapped_cell_x[(*col as usize) + 1] - cx;
+                let fg = cell_fg(cell, theme, fg_default);
+                let fg_rgba = glyphon_color_to_linear_rgba(fg);
+                if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
+                    cell.ch,
+                    (cx, cy),
+                    (cell_pixel_width_fast, cell_h),
+                    fg_rgba,
+                    sw,
+                    sh,
+                    scale_factor,
+                ) {
+                    geometry_quads.extend(quads);
+                    continue;
+                }
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch: cell.ch,
                     font_slot: 0,
@@ -4848,6 +4925,35 @@ impl GpuRenderer {
                     missing_chars_this_frame.push(ch);
                     continue;
                 };
+                // #559 PR-A: Phase-A geometry funnel for the char-fallback
+                // branch. The check sits AFTER tofu resolution (we still
+                // want a tofu box for genuinely-unsupported codepoints)
+                // and BEFORE the glyph atlas lookup. `lead_cell.ch` is
+                // the visible cell's codepoint (#538 rule); the cell box
+                // anchors against the snapped column edges so adjacent
+                // box-drawing cells line up at fractional DPI (#470).
+                {
+                    let cx = snapped_cell_x[g.lead_col as usize];
+                    let cy = top_inset + f32::from(row) * cell_h;
+                    let span = if is_wide { 2usize } else { 1usize };
+                    let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
+                    let cell_pixel_width_snapped =
+                        snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
+                    let fg = cell_fg(&lead_cell, theme, fg_default);
+                    let fg_rgba = glyphon_color_to_linear_rgba(fg);
+                    if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
+                        lead_cell.ch,
+                        (cx, cy),
+                        (cell_pixel_width_snapped, cell_h),
+                        fg_rgba,
+                        sw,
+                        sh,
+                        scale_factor,
+                    ) {
+                        geometry_quads.extend(quads);
+                        continue;
+                    }
+                }
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch,
                     font_slot: slot,
@@ -4961,6 +5067,35 @@ impl GpuRenderer {
                     flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 });
                 continue;
+            }
+
+            // #559 PR-A: Phase-A geometry funnel for the primary shaped
+            // branch (the dominant code path for non-ASCII glyphs).
+            // Classify against `lead_cell.ch` per the #538 rule — `g.ch`
+            // is the cluster lead, often a space for chevron-as-cont
+            // clusters. Falls through to the regular shaped-glyph path
+            // when the codepoint isn't covered.
+            {
+                let cx = snapped_cell_x[g.lead_col as usize];
+                let cy = top_inset + f32::from(row) * cell_h;
+                let span = if is_wide { 2usize } else { 1usize };
+                let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
+                let cell_pixel_width_snapped =
+                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
+                let fg = cell_fg(&lead_cell, theme, fg_default);
+                let fg_rgba = glyphon_color_to_linear_rgba(fg);
+                if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
+                    lead_cell.ch,
+                    (cx, cy),
+                    (cell_pixel_width_snapped, cell_h),
+                    fg_rgba,
+                    sw,
+                    sh,
+                    scale_factor,
+                ) {
+                    geometry_quads.extend(quads);
+                    continue;
+                }
             }
 
             let key = sonicterm_types::glyph_key::GlyphKey::shaped(
