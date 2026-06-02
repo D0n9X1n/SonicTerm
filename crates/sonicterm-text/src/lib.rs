@@ -14,6 +14,7 @@
 
 pub mod async_fallback;
 pub mod block_element_geometry;
+pub mod box_drawing_geometry;
 pub mod glyph_atlas;
 pub mod metrics;
 pub mod prewarm;
