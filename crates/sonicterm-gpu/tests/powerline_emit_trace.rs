@@ -147,11 +147,8 @@ fn negative_control_cluster_lead_dispatch_emits_baseline_slice() {
 
 #[test]
 fn shaped_emit_branch_does_not_classify_on_cluster_lead() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/core.rs"
-    ))
-    .expect("read core.rs");
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core.rs"))
+        .expect("read core.rs");
     // Look for the exact buggy call shape inside the shaped-emit branch.
     // `g.ch` may still appear elsewhere (it's the shape cluster's lead
     // codepoint, used as a glyph-cache key etc.) — what we forbid is

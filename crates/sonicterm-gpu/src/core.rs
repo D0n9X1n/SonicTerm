@@ -4858,7 +4858,15 @@ impl GpuRenderer {
             // `snapped_cell_x` (#470) so adjacent Powerline cells share an
             // edge at fractional DPI; tofu boxes have an explicit inset and
             // don't need the abutting-edge guarantee.
-            let cell_pixel_width = if is_wide { cell_w * 2.0 } else { cell_w };
+            // #567: ligature / nerd-font clusters span N cells (cluster_cells
+            // from shape.rs). Without honoring it the glyph was squeezed into
+            // a single cell, clipping ligatures like `=>` and NF icons that
+            // shape as multi-cell composed clusters. WIDE (CJK) still forces
+            // 2 cells regardless of cluster_cells (CJK shapes 1 glyph / 1
+            // cluster cell + WIDE flag, so the union biases toward 2).
+            let cluster_cells = g.cluster_cells.max(1) as usize;
+            let cells_to_span = if is_wide { 2 } else { cluster_cells };
+            let cell_pixel_width = cell_w * cells_to_span as f32;
 
             // glyph_id == 0 from the shaper means one of two things:
             //   (a) true notdef — cosmic-text couldn't shape it at all
@@ -4935,7 +4943,8 @@ impl GpuRenderer {
                 {
                     let cx = snapped_cell_x[g.lead_col as usize];
                     let cy = top_inset + f32::from(row) * cell_h;
-                    let span = if is_wide { 2usize } else { 1usize };
+                    // #567: honor cluster_cells for ligatures + NF composed clusters.
+                    let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
                     let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
                     let cell_pixel_width_snapped =
                         snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
@@ -4986,7 +4995,9 @@ impl GpuRenderer {
                 // anchors against from snapped column edges, so Powerline
                 // chevrons in adjacent cells produce identical device-pixel
                 // widths at fractional DPI. Span is 1 for narrow, 2 for WIDE.
-                let span = if is_wide { 2usize } else { 1usize };
+                // #567: honor cluster_cells so multi-cell ligatures + NF
+                // composed clusters use the full reserved cell range.
+                let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
                 let cell_pixel_width_snapped =
                     snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
@@ -5078,7 +5089,8 @@ impl GpuRenderer {
             {
                 let cx = snapped_cell_x[g.lead_col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
-                let span = if is_wide { 2usize } else { 1usize };
+                // #567: honor cluster_cells.
+                let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
                 let cell_pixel_width_snapped =
                     snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
@@ -5121,7 +5133,9 @@ impl GpuRenderer {
             // #470: derive cell-box width from snapped column edges (span=1
             // for narrow, 2 for WIDE). Adjacent Powerline chevrons then
             // produce identical device-pixel widths at fractional DPI.
-            let span = if is_wide { 2usize } else { 1usize };
+            // #567: honor cluster_cells so ligatures + NF composed
+            // multi-cell clusters get the full reserved cell range.
+            let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
             let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
             let cell_pixel_width_snapped =
                 snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
