@@ -16,6 +16,12 @@ description = "SonicTerm visual test cases. Single source of truth for mac.sh + 
 #                   if neither is on PATH. Mac harness ignores this field
 #                   (mac defaults to bash/zsh which handle the common subset of
 #                   all four dialects). See #493 for the shell-dialect background.
+#   requires_elevation OPTIONAL bool (default false). When true the windows
+#                   harness (run_case.ps1) fast-fails BEFORE spawning
+#                   sonicterm-windows if pwsh is not running as Administrator,
+#                   logging `[FAIL unelevated_only]` and exiting 1. Avoids a
+#                   30s+ wait on a UAC consent dialog the harness can't
+#                   dismiss. Mac harness ignores this field. See #488.
 #   covers_bugs     ["#196", ...]   — issues/PRs this case guards
 #   covers_landmines ["try-lock-no-deadlock", ...]  — ids from CLAUDE.md §4
 #   setup           array of step strings: "open-3-tabs", "clear", "type:echo hi", "enter", "wait:0.3"
@@ -1414,3 +1420,22 @@ expect = [
   { kind = "text-in-region", region = "body", value = "OLDNEW" },
 ]
 fail_on = "Row still shows OLDOLD suffix after NEW — ECH silently dropped, neo-tree-style tail-clear no-op'd."
+
+# ==========================================================================
+# §38 Elevated-only fixtures  (covers #488 — UAC fast-fail)
+# ==========================================================================
+
+[[case]]
+id = "windows-elevation-fixture-uac-fast-fail"
+section = 38
+title = "Sample case demonstrating requires_elevation; FAILs fast with unelevated_only on a non-admin pwsh"
+applies_to = ["windows"]
+requires_elevation = true
+covers_bugs = ["#488"]
+covers_landmines = []
+setup = ["wait:0.1"]
+keystrokes = []
+expect = [
+  { kind = "screenshot", region = "window" },
+]
+fail_on = "Harness spawns sonicterm-windows and stalls on a UAC consent dialog instead of fast-failing with [FAIL unelevated_only] (#488)."

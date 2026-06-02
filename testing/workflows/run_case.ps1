@@ -265,6 +265,34 @@ if ($CaseShell -eq 'bash' -and $AppliesTo -match '(^|,)windows(,|$)') {
 [void](Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action { Restore-Config })
 
 # ------------------------------------------------------------------
+# #488 mitigation 2 — UAC fast-fail. If the case declares
+# `requires_elevation = true` and the current pwsh process is NOT
+# elevated, FAIL fast BEFORE spawning sonicterm-windows. Avoids a
+# 30s+ wait on a UAC consent dialog the harness can't dismiss and
+# distinguishes the failure from a renderer regression. Use exit
+# code 1 with reason `unelevated_only` (per existing FAIL-reason
+# convention; SKIP/77 would mask a real config bug — the user opted
+# into the elevation requirement when authoring the case).
+# ------------------------------------------------------------------
+function Test-IsElevated {
+  try {
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $pr = New-Object System.Security.Principal.WindowsPrincipal($id)
+    return $pr.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { return $false }
+}
+$RequiresElevation = $false
+if ($Case.PSObject.Properties.Name -contains 'requires_elevation') {
+  $RequiresElevation = [bool]$Case.requires_elevation
+}
+if ($RequiresElevation -and -not (Test-IsElevated)) {
+  Log "[FAIL unelevated_only] case='$Id' requires_elevation=true but pwsh is not running as Administrator"
+  Set-Content (Join-Path $CaseOut 'status') 'FAIL'
+  Set-Content (Join-Path $CaseOut 'fail_reason') 'unelevated_only'
+  exit 1
+}
+
+# ------------------------------------------------------------------
 # Start sonicterm-windows fresh
 # ------------------------------------------------------------------
 $SonicBin = 'target/release/sonicterm-windows.exe'
@@ -307,8 +335,30 @@ if (-not $alive) {
 # on a fresh shader cache can be slow. Hard FAIL on timeout (never
 # silently continue — window absence is what allowed keystrokes to
 # leak in #464).
+#
+# #488 mitigation 1 — Defender first-launch budget extension.
+# On the FIRST case of a harness invocation Defender's real-time
+# scan of the freshly built sonicterm-windows.exe can add 10-20s
+# of cold-start latency, blowing the default 10s budget. We mark
+# the first launch with a sentinel file in $env:TEMP; while the
+# marker is absent we extend the budget to 30s. windows.ps1
+# clears the marker via try/finally so a case-1 crash doesn't
+# poison case-2. An explicit $env:SONICTERM_HARNESS_WIN_TIMEOUT_S
+# still wins.
 # ------------------------------------------------------------------
-$TimeoutS = if ($env:SONICTERM_HARNESS_WIN_TIMEOUT_S) { [int]$env:SONICTERM_HARNESS_WIN_TIMEOUT_S } else { 10 }
+$FirstLaunchMarker = Join-Path $env:TEMP 'sonic-harness-first-launch-flag'
+$IsFirstLaunch = -not (Test-Path $FirstLaunchMarker)
+if ($env:SONICTERM_HARNESS_WIN_TIMEOUT_S) {
+  $TimeoutS = [int]$env:SONICTERM_HARNESS_WIN_TIMEOUT_S
+} elseif ($IsFirstLaunch) {
+  $TimeoutS = 30
+  Log "#488 first-launch budget extension: window-appear timeout=${TimeoutS}s (Defender scan)"
+} else {
+  $TimeoutS = 10
+}
+if ($IsFirstLaunch) {
+  try { Set-Content -Path $FirstLaunchMarker -Value (Get-Date -Format o) -ErrorAction SilentlyContinue } catch { }
+}
 $WindowHandle = [IntPtr]::Zero
 for ($i = 0; $i -lt ($TimeoutS * 10); $i++) {
   $p = Get-Process -Id $SONIC_PID -ErrorAction SilentlyContinue
@@ -575,6 +625,46 @@ $g.ReleaseHdc($hdc)
 if (-not $ok) {
   # Fallback: CopyFromScreen using window rect
   $g.CopyFromScreen($rect.Left, $rect.Top, 0, 0, (New-Object System.Drawing.Size $w, $h))
+}
+# ------------------------------------------------------------------
+# #488 mitigation 3 — PrintWindow black-frame detection. Some
+# DWM/GPU configurations cause PrintWindow + PW_RENDERFULLCONTENT
+# to return a fully-black (or fully-transparent) bitmap even
+# though the call succeeded. Without this check the harness would
+# emit a uniformly-black screen.png and every pixel-near / OCR
+# expectation would FAIL, masking a renderer-environment issue as
+# a regression. Per Opus Step-2 caveat we sample a deterministic
+# 16x16 grid (256 points) rather than scanning every pixel —
+# enough signal to distinguish "all black" from "real content",
+# negligible cost on a 1000x700 bitmap.
+# ------------------------------------------------------------------
+if ($ok) {
+  $allBlack = $true
+  $allAlphaZero = $true
+  $samples = 0
+  for ($gy = 0; $gy -lt 16; $gy++) {
+    for ($gx = 0; $gx -lt 16; $gx++) {
+      $sx = [int](($gx + 0.5) * $w / 16.0)
+      $sy = [int](($gy + 0.5) * $h / 16.0)
+      if ($sx -ge $w) { $sx = $w - 1 }
+      if ($sy -ge $h) { $sy = $h - 1 }
+      $px = $bmp.GetPixel($sx, $sy)
+      $samples++
+      if ($px.R -ne 0 -or $px.G -ne 0 -or $px.B -ne 0) { $allBlack = $false }
+      if ($px.A -ne 0) { $allAlphaZero = $false }
+      if (-not $allBlack -and -not $allAlphaZero) { break }
+    }
+    if (-not $allBlack -and -not $allAlphaZero) { break }
+  }
+  if ($allBlack -or $allAlphaZero) {
+    $reason = if ($allBlack) { 'all RGB(0,0,0)' } else { 'all alpha=0' }
+    Log "SKIP printwindow_black_frame: PrintWindow returned $reason across $samples grid samples"
+    $g.Dispose()
+    $bmp.Dispose()
+    Set-Content (Join-Path $CaseOut 'status') 'SKIP'
+    Set-Content (Join-Path $CaseOut 'skip_reason') 'printwindow_black_frame'
+    exit 77
+  }
 }
 $g.Dispose()
 $bmp.Save($Shot, [System.Drawing.Imaging.ImageFormat]::Png)

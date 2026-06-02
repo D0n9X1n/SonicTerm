@@ -166,15 +166,32 @@ if ($Ids.Count -eq 0) { Write-Error "no matching cases for filter='$Filter'"; ex
 
 Write-Host "[plan] $($Ids.Count) case(s) to run; results -> $Out"
 
+# ------------------------------------------------------------------
+# #488 mitigation 1 — first-launch marker reset. run_case.ps1
+# creates $env:TEMP\sonic-harness-first-launch-flag on the first
+# case so case-1 gets the extended Defender budget and case-2+
+# get the default. Clear any stale flag from a previous harness
+# invocation BEFORE the loop, and clean it up via try/finally so
+# a case-1 crash doesn't poison the next driver run.
+# ------------------------------------------------------------------
+$FirstLaunchMarker = Join-Path $env:TEMP 'sonic-harness-first-launch-flag'
+if (Test-Path $FirstLaunchMarker) { Remove-Item -Force $FirstLaunchMarker -ErrorAction SilentlyContinue }
+
 $Pass = 0; $Fail = 0; $Skip = 0
-foreach ($id in $Ids) {
-  Write-Host ''
-  Write-Host "=== $id ==="
-  & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'run_case.ps1') $id $Out
-  switch ($LASTEXITCODE) {
-    0  { $Pass++ }
-    77 { $Skip++ }
-    default { $Fail++ }
+try {
+  foreach ($id in $Ids) {
+    Write-Host ''
+    Write-Host "=== $id ==="
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'run_case.ps1') $id $Out
+    switch ($LASTEXITCODE) {
+      0  { $Pass++ }
+      77 { $Skip++ }
+      default { $Fail++ }
+    }
+  }
+} finally {
+  if (Test-Path $FirstLaunchMarker) {
+    Remove-Item -Force $FirstLaunchMarker -ErrorAction SilentlyContinue
   }
 }
 
