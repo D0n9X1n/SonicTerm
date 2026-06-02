@@ -157,7 +157,19 @@ pub fn push_hollow_rect_clipped(
     }
 }
 
-/// Recolor every glyph instance whose center falls inside the cursor
+/// Axis-aligned bounding-box intersection test.
+///
+/// Treats each rect as `(x, y, w, h)` in the same coordinate space and
+/// returns `true` iff the two rects overlap on both axes. Touching
+/// edges (zero-area overlap) do NOT count as an intersection.
+#[inline]
+fn aabb_intersects(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
+}
+
+/// Recolor every glyph instance whose rectangle intersects the cursor
 /// cell to `bg_rgba`. Used to produce the wezterm-style "inverted"
 /// block cursor: the foreground glyph is painted in the theme
 /// background colour so it stays readable on top of the solid
@@ -165,12 +177,23 @@ pub fn push_hollow_rect_clipped(
 ///
 /// Walks the already-emitted instance list and rewrites their `color`
 /// in place. Glyph rectangles are stored in NDC; we invert the
-/// [`crate::quad::px_to_ndc`] mapping to test cell containment in
+/// [`crate::quad::px_to_ndc`] mapping to test rect intersection in
 /// pixel space (cleaner than reasoning about NDC sign conventions).
 ///
+/// **AABB intersection** (issue #568) rather than a center-point test:
+/// shaped glyphs for ligatures (`=>`, `===`) and wide characters
+/// (CJK, emoji) emit a single [`GlyphInstance`] whose `rect` spans the
+/// full cluster of cells. A center-point test misses every cluster
+/// whose geometric centre lies in a cell other than the cursor cell,
+/// so the lead cell of a `=>` ligature or the trail cell of a CJK
+/// pair would render with the wrong foreground colour. The intersect
+/// test recolours the glyph whenever any pixel of its rect falls
+/// inside the cursor cell, matching the user's "cursor is on this
+/// glyph" intuition.
+///
 /// O(N) over visible glyphs, with N being one frame's instance count.
-/// In practice the cursor cell holds one glyph, so this is effectively
-/// a single rewrite per frame.
+/// In practice only a handful of glyphs overlap the cursor cell, so
+/// this is effectively a single rewrite per frame.
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn recolor_cursor_glyphs(
@@ -186,10 +209,7 @@ pub fn recolor_cursor_glyphs(
     if sw <= 0.0 || sh <= 0.0 {
         return;
     }
-    let x_min = cell_x;
-    let x_max = cell_x + cell_w;
-    let y_min = cell_y;
-    let y_max = cell_y + cell_h;
+    let cursor_rect = (cell_x, cell_y, cell_w, cell_h);
     for g in glyphs.iter_mut() {
         let [gx, gy, gw, gh] = g.rect;
         // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
@@ -199,10 +219,31 @@ pub fn recolor_cursor_glyphs(
         let pw = gw * sw * 0.5;
         let py = (1.0 - gy - gh) * sh * 0.5;
         let ph = gh * sh * 0.5;
-        let cx = px + pw * 0.5;
-        let cy = py + ph * 0.5;
-        if cx >= x_min && cx < x_max && cy >= y_min && cy < y_max {
+        if aabb_intersects(cursor_rect, (px, py, pw, ph)) {
             g.color = bg_rgba;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aabb_intersects_basic() {
+        // Overlapping rects intersect.
+        assert!(aabb_intersects((0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 10.0, 10.0)));
+        // Disjoint rects don't intersect.
+        assert!(!aabb_intersects(
+            (0.0, 0.0, 10.0, 10.0),
+            (20.0, 0.0, 10.0, 10.0)
+        ));
+        // Touching edges (zero-area overlap) don't count.
+        assert!(!aabb_intersects(
+            (0.0, 0.0, 10.0, 10.0),
+            (10.0, 0.0, 10.0, 10.0)
+        ));
+        // Contained rect intersects.
+        assert!(aabb_intersects((0.0, 0.0, 10.0, 10.0), (2.0, 2.0, 4.0, 4.0)));
     }
 }
