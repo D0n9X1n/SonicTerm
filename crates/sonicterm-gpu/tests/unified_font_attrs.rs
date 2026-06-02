@@ -64,7 +64,6 @@ fn render_source_has_no_hardcoded_monospace_family() {
         include_str!("../../sonicterm-ui/src/tab_spans.rs"),
         include_str!("../../sonicterm-gpu/src/cursor.rs"),
         include_str!("../../sonicterm-ui/src/drag_chip.rs"),
-        include_str!("../src/render/mod.rs"),
     );
     // Strip comments and doc-strings first (we mention Monospace in a
     // doc-comment as historical context).
@@ -96,7 +95,6 @@ fn render_source_has_no_hardcoded_font_name_literal() {
         include_str!("../../sonicterm-ui/src/tab_spans.rs"),
         include_str!("../../sonicterm-gpu/src/cursor.rs"),
         include_str!("../../sonicterm-ui/src/drag_chip.rs"),
-        include_str!("../src/render/mod.rs"),
     );
     let mut code_only = String::new();
     for line in src.lines() {

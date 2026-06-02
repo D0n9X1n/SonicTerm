@@ -12,7 +12,7 @@
 
 #[test]
 fn render_core_does_not_paint_caption_buttons() {
-    let source = include_str!("../../sonicterm-gpu/src/core.rs");
+    let source = include_str!("../src/core.rs");
     assert!(
         !source.contains("paint_caption_buttons"),
         "render/core.rs must not call paint_caption_buttons (#366): \
@@ -26,7 +26,7 @@ fn render_core_does_not_paint_caption_buttons() {
 
 #[test]
 fn gpu_quad_does_not_define_paint_caption_buttons() {
-    let source = include_str!("../../sonicterm-gpu/src/quad.rs");
+    let source = include_str!("../src/quad.rs");
     assert!(
         !source.contains("pub fn paint_caption_buttons"),
         "sonicterm-gpu/src/quad.rs must not define paint_caption_buttons (#366): \

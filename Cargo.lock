@@ -4640,6 +4640,8 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "glyphon",
+ "image",
+ "image_hasher",
  "pollster",
  "sonicterm-cfg",
  "sonicterm-core",
@@ -4648,6 +4650,7 @@ dependencies = [
  "sonicterm-text",
  "sonicterm-types",
  "sonicterm-ui",
+ "tempfile",
  "tracing",
  "wgpu",
  "winit",
@@ -4658,6 +4661,7 @@ name = "sonicterm-grid"
 version = "0.3.0"
 dependencies = [
  "sonicterm-types",
+ "sonicterm-vt",
  "unicode-width",
 ]
 
@@ -4674,6 +4678,8 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "russh",
+ "serde_json",
+ "sonicterm-cfg",
  "sonicterm-grid",
  "sonicterm-io",
  "sonicterm-types",
@@ -4801,6 +4807,7 @@ dependencies = [
  "cosmic-text",
  "fontdb",
  "lru 0.12.5",
+ "sonicterm-grid",
  "sonicterm-types",
  "swash",
  "tracing",
@@ -4831,8 +4838,10 @@ dependencies = [
  "serde",
  "sonicterm-cfg",
  "sonicterm-grid",
+ "sonicterm-io",
  "sonicterm-text",
  "sonicterm-types",
+ "sonicterm-vt",
  "sys-locale",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",

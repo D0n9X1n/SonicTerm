@@ -47,6 +47,8 @@ libc = "0.2"
 [dev-dependencies]
 sonicterm-grid.workspace = true
 sonicterm-vt.workspace = true
+sonicterm-cfg.workspace = true
+serde_json = "1"
 # Examples need the ShellDialect helpers. Enable test_support via dev-deps
 # so `cargo build --examples` / `cargo run --example` pull it in automatically.
 sonicterm-io = { path = ".", features = ["test_support"] }
