@@ -133,6 +133,12 @@ platforms before merge. Originating PM runs §13 on their platform; the
 other-platform PM posts the screenshot path as a PR comment. See
 `docs/HOT_FILES.md` for the full list.
 
+The mac §13 smoke (`just visual mac` or the ad-hoc snippet in
+`crates/sonicterm-app/CLAUDE.md`) MUST verify sonicterm-mac is
+frontmost before any keystroke and use window-local `screencapture
+-l "$WINDOW_ID"` rather than `-D 1`. The full-display fallback and
+unverified-focus pattern leaked keystrokes into other apps (#464).
+
 ---
 
 ## See also

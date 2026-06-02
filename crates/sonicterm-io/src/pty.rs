@@ -4,8 +4,9 @@
 //! directly. `PtyHandle` owns the slave-side child and the master read/write
 //! pair, all decoupled by channels for use from the render thread.
 
+use std::path::Path;
 #[cfg(target_os = "windows")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{
     io::{Read, Write},
     sync::Arc,
@@ -343,9 +344,8 @@ fn path_lookup(name: &str) -> Option<String> {
         return Some(candidate.to_string_lossy().to_string());
     }
     let path = std::env::var_os("PATH")?;
-    let allow_windowsapps = std::env::var("SONICTERM_ALLOW_WINDOWSAPPS_SHELL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let allow_windowsapps =
+        std::env::var("SONICTERM_ALLOW_WINDOWSAPPS_SHELL").map(|v| v == "1").unwrap_or(false);
     std::env::split_paths(&path)
         .map(|dir: PathBuf| dir.join(name))
         .find(|candidate| {
@@ -357,8 +357,7 @@ fn path_lookup(name: &str) -> Option<String> {
             // under ConPTY when spawned bare, so the e2e gates silently fail.
             // Escape hatch: SONICTERM_ALLOW_WINDOWSAPPS_SHELL=1 to opt back in.
             let lname = name.to_ascii_lowercase();
-            let is_powershell =
-                lname.ends_with("pwsh.exe") || lname.ends_with("powershell.exe");
+            let is_powershell = lname.ends_with("pwsh.exe") || lname.ends_with("powershell.exe");
             if is_powershell && !allow_windowsapps {
                 let lpath = candidate.to_string_lossy().to_lowercase();
                 if lpath.contains("\\windowsapps\\") {
@@ -423,12 +422,19 @@ mod tests {
 
     #[test]
     fn clean_e2e_args_powershell_returns_nologo_noprofile() {
-        for shell in [
-            "pwsh.exe",
-            "powershell.exe",
+        // `mut` only needed on Windows where we extend with absolute paths.
+        #[cfg(target_os = "windows")]
+        let mut shells: Vec<&str> = vec!["pwsh.exe", "powershell.exe"];
+        #[cfg(not(target_os = "windows"))]
+        let shells: Vec<&str> = vec!["pwsh.exe", "powershell.exe"];
+        // Windows-style absolute paths only parse via Path::new on Windows
+        // (Unix Path treats '\\' as literal characters, not separators).
+        #[cfg(target_os = "windows")]
+        shells.extend([
             "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
             "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-        ] {
+        ]);
+        for shell in shells {
             assert_eq!(clean_e2e_args(shell), vec!["-NoLogo", "-NoProfile"], "shell={shell}");
         }
     }

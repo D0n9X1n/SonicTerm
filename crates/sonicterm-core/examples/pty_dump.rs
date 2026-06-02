@@ -13,7 +13,12 @@ use sonicterm_core::{
 };
 
 fn main() {
-    let pty = PtyHandle::spawn_default_shell(80, 24, sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true }).expect("spawn shell");
+    let pty = PtyHandle::spawn_default_shell(
+        80,
+        24,
+        sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true },
+    )
+    .expect("spawn shell");
     let mut parser = Parser::new(Grid::new(80, 24));
 
     drain(&pty, &mut parser, 1500);

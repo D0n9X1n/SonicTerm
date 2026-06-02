@@ -38,16 +38,42 @@ to clean up the drag chip after OS drag completion; `tests/os_drag_cleanup.rs`
 guards the cleanup invariant.
 
 ### §13 GUI smoke (must include RED-BG + CJK + emoji)
+
+Prefer `just visual mac` — it runs the hardened harness (focus-verify,
+window-local screencap, multi-PID tracking — see issue #464). The ad-hoc
+snippet below is for one-off checks; it follows the same focus-verify
+pattern so a stray focus loss can't silently leak keystrokes.
+
 ```bash
 pkill -9 -f sonicterm-mac 2>/dev/null; sleep 0.3
 ./target/release/sonicterm-mac > /tmp/gui-smoke.log 2>&1 &
+SONIC_PID=$!
 sleep 2.5
+
+# Position window + verify frontmost BEFORE any keystroke.
+osascript >/dev/null 2>&1 <<'EOF'
+tell application "System Events"
+  tell process "sonicterm-mac"
+    set frontmost to true
+    set position of window 1 to {500, 200}
+    set size of window 1 to {1000, 700}
+  end tell
+end tell
+EOF
+sleep 0.3
+front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true')
+[[ "$front" == "sonicterm-mac" ]] || { echo "ABORT: front=$front (would leak); not running keystrokes"; kill -9 $SONIC_PID; exit 1; }
+
 osascript -e 'tell application "System Events" to keystroke "printf '"'"'\\033[41mRED-BG\\033[0m echo 中文 🎉\\n'"'"' && date"'
 osascript -e 'tell application "System Events" to key code 36'
 sleep 1
-screencapture -x -D 1 /tmp/gui-smoke.png
-kill -9 $(pgrep -f sonicterm-mac)
+
+# Window-local screencap (avoids capturing whatever is behind sonicterm-mac).
+WID=$(osascript -e 'tell application "System Events" to tell process "sonicterm-mac" to get id of window 1')
+screencapture -x -l "$WID" /tmp/gui-smoke.png
+kill -9 "$SONIC_PID"
 ```
+
 Inspect: theme bg matches, RED-BG cells red, CJK glyphs render, emoji
 color, cursor visible, sharp on Retina, CPU < 5%.
 

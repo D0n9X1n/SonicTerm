@@ -41,10 +41,10 @@ fn default_filter_has_no_dead_sonic_crate_rule() {
 #[test]
 fn default_filter_contains_required_directives() {
     for needle in [
-        "sonicterm=info",   // umbrella INFO floor for renamed crates
-        "sonicterm_vt=warn", // noisy parser pinned
+        "sonicterm=info",      // umbrella INFO floor for renamed crates
+        "sonicterm_vt=warn",   // noisy parser pinned
         "sonicterm_grid=warn", // noisy grid pinned
-        "sonic_exit=warn",  // exit-marker target
+        "sonic_exit=warn",     // exit-marker target
         "wgpu=warn",
         "naga=warn",
         "cosmic_text=warn",
@@ -110,10 +110,7 @@ fn default_filter_levels_match_expectations() {
         !tracing::event_enabled!(target: "wgpu", Level::INFO),
         "INFO must be suppressed for wgpu"
     );
-    assert!(
-        tracing::event_enabled!(target: "wgpu", Level::WARN),
-        "WARN must be enabled for wgpu"
-    );
+    assert!(tracing::event_enabled!(target: "wgpu", Level::WARN), "WARN must be enabled for wgpu");
 
     // sonic_exit => WARN enabled (preserved exit-marker target).
     assert!(
