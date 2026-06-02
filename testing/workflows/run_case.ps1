@@ -195,8 +195,8 @@ Log "window handle: $WindowHandle"
 function Verify-Front {
   $fg = [SonicWin32]::GetForegroundWindow()
   if ($fg -eq [IntPtr]::Zero) { return $false }
-  $pid = 0; [void][SonicWin32]::GetWindowThreadProcessId($fg, [ref]$pid)
-  return ($pid -eq $SONIC_PID)
+  $fgPid = 0; [void][SonicWin32]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+  return ($fgPid -eq $SONIC_PID)
 }
 function Focus-Sonic {
   for ($t = 1; $t -le 5; $t++) {
