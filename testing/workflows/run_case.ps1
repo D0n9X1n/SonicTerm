@@ -360,13 +360,26 @@ function Focus-Sonic {
   }
   return $false
 }
+# #502 fix — three-bucket input delivery. Buckets A (text) and B
+# (named-key-no-modifier) post messages directly to the SonicTerm HWND
+# and do NOT require foreground, so RDP-locked sessions no longer SKIP
+# the whole case. Only Bucket C (real modifier chords) needs the
+# AttachThreadInput + GetForegroundWindow re-verify dance from #491,
+# and a Bucket-C foreground failure now SKIPs ONLY that chord step
+# (logged as `chord_no_foreground`).
+. (Join-Path $PSScriptRoot 'lib\Send-InputToHwnd.ps1')
 function Ensure-FrontOrSkip {
-  if (Verify-Front) { return }
-  if (Focus-Sonic)  { return }
-  Log 'SKIP: cannot keep sonicterm-windows frontmost — keystrokes would leak'
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
+  param([switch]$RequireForeground)
+  if (-not $RequireForeground) {
+    # Soft check — try to bring forward but never SKIP the case.
+    if (-not (Verify-Front)) { [void](Focus-Sonic) }
+    return $true
+  }
+  if (Verify-Front) { return $true }
+  if (Focus-Sonic)  { return $true }
+  return $false
 }
-Ensure-FrontOrSkip
+[void](Ensure-FrontOrSkip)
 
 # ------------------------------------------------------------------
 # Keystroke helpers — SendKeys, with Guard-4 gate before each call.
@@ -406,17 +419,34 @@ function ConvertTo-SendKeys([string]$chord) {
   return $mods + $sk
 }
 function Send-Chord([string]$chord) {
-  Ensure-FrontOrSkip
-  [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeys $chord))
+  # Bucket B (no real modifier) → PostMessage path, no foreground needed.
+  if (-not (Test-ChordHasModifier $chord)) {
+    $key = ($chord -split '\+')[-1]
+    try {
+      Send-NamedKeyToHwnd -Hwnd $WindowHandle -Key $key
+      return
+    } catch {
+      Log "Send-Chord: Bucket-B fallthrough for '$chord': $_"
+    }
+  }
+  # Bucket C — real modifier chord. Best-effort foreground via attach;
+  # SKIP only this step on failure (not the whole case).
+  if (-not (Ensure-FrontOrSkip -RequireForeground)) {
+    Log "SKIP-STEP chord_no_foreground: '$chord' (Bucket C)"
+    return
+  }
+  $ok = Send-ChordToHwnd -Hwnd $WindowHandle -Chord $chord
+  if (-not $ok) {
+    Log "SKIP-STEP chord_no_foreground: '$chord' (SendInput foreground re-check failed)"
+  }
 }
 function Send-Text([string]$text) {
-  Ensure-FrontOrSkip
-  # SendKeys treats these as metacharacters — escape with braces
-  $esc = $text -replace '([+^%~(){}\[\]])', '{$1}'
-  [System.Windows.Forms.SendKeys]::SendWait($esc)
+  # Bucket A — text payload via per-char WM_KEYDOWN+WM_CHAR+WM_KEYUP.
+  # No foreground required; safe under RDP / locked desktops.
+  Send-TextToHwnd -Hwnd $WindowHandle -Text $text
 }
 function Do-Setup([string]$step) {
-  Ensure-FrontOrSkip
+  [void](Ensure-FrontOrSkip)
   switch -Wildcard ($step) {
     'open-3-tabs'         { Send-Chord 'ctrl+t'; Start-Sleep -Milliseconds 300; Send-Chord 'ctrl+t'; Start-Sleep -Milliseconds 300 }
     'open-second-window'  { Send-Chord 'ctrl+n'; Start-Sleep -Milliseconds 500 }
