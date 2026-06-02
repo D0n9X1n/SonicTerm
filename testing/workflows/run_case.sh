@@ -88,7 +88,14 @@ if [[ ! -x "$SONIC_BIN" ]]; then
   exit 1
 fi
 
-pkill -9 -f "sonicterm-mac" 2>/dev/null || true
+# B2: scoped cleanup only — never broadcast `pkill -f sonicterm-mac`
+# (would kill the user's dev build). At spawn time SONIC_PIDS is
+# typically empty; this iteration is a no-op safety net for any PIDs
+# a prior step (e.g. a wrapping harness) may have already tracked.
+for pid in "${SONIC_PIDS[@]}"; do
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+done
 sleep 0.4
 # `disown` the backgrounded child so bash does not write its own
 # "Terminated: 15" job-notification text to stderr when we later signal
