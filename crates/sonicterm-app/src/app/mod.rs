@@ -254,6 +254,39 @@ impl WindowState {
             *marker = false;
         }
     }
+
+    /// #535 + #540 — intra-window tab reorder that keeps `tabs` and
+    /// `tab_states` in lock-step. Extracted from `window_event.rs`'s
+    /// main-window `ReorderTab` branch so the production path and the
+    /// regression tests exercise the SAME code.
+    ///
+    /// Semantics match `tab_transfer::reorder_within`:
+    /// - `from` out of range → no-op.
+    /// - `to` clamped to `len - 1` (#540 — drop-past-last must land at
+    ///   the end, not silently no-op like `TabBar::reorder` does).
+    /// - `to == from` after clamp → no-op.
+    /// - Otherwise: `tabs.reorder(from, to)` AND
+    ///   `tab_states.remove(from) → insert(to)` so the title's TabState
+    ///   (active pane id + PaneTree leaf-ids) travels WITH the title.
+    ///
+    /// Returns `true` if any mutation happened.
+    pub fn reorder_tab(&mut self, from: usize, to: usize) -> bool {
+        let len = self.tabs.len();
+        if from >= len || len == 0 {
+            return false;
+        }
+        let last = len - 1;
+        let to = to.min(last);
+        if to == from {
+            return false;
+        }
+        self.tabs.reorder(from, to);
+        if from < self.tab_states.len() && to < self.tab_states.len() {
+            let st = self.tab_states.remove(from);
+            self.tab_states.insert(to, st);
+        }
+        true
+    }
 }
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
