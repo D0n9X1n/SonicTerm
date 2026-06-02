@@ -2649,6 +2649,18 @@ impl App {
         }
     }
 
+    /// Test-only (#533 Haiku Step-4): remove a window from `self.windows`
+    /// without going through the production teardown paths. Used by
+    /// `os_drag_cleanup.rs` to simulate the "window vanished between
+    /// snapshot collection and iteration" race that `cancel_drag_session`
+    /// tolerates via its `windows.get_mut(...) else { continue }` branch
+    /// (see #462 defensive snapshot at `mod.rs:3337`). Returns `true` if
+    /// the window existed and was removed, `false` otherwise.
+    #[doc(hidden)]
+    pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
+        self.windows.remove(&id).is_some()
+    }
+
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
         self.windows.len().saturating_sub(self.shadow_main_count())

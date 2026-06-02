@@ -304,3 +304,109 @@ fn pending_os_teardown_handles_window_inserted_after_flag_set() {
     assert_eq!(app.__test_child_has_drag_session(new_child), Some(false));
     assert_eq!(app.__test_window_drag_chip_marker(new_child), Some(false));
 }
+
+// ---------------------------------------------------------------------
+// PR #533 Haiku Step-4 REVISE — additional guard rails
+// ---------------------------------------------------------------------
+
+/// PR #533 Haiku Step-4 REVISE (1/2): `cancel_drag_session` snapshots
+/// `self.windows.keys()` BEFORE the mutation loop (#462 defensive fix
+/// at `mod.rs:3337`). The loop body must not panic if a window vanishes
+/// between snapshot collection and the `windows.get_mut(...)` lookup —
+/// the `else { continue }` branch covers it. This test mutates
+/// `app.windows` by REMOVING a window after seeding residue, then
+/// invokes `cancel_drag_session`. The pre-iteration snapshot still
+/// references the removed id; the loop body must skip it without
+/// panicking and still clear residue on every surviving window.
+///
+/// Insertion is also exercised indirectly: see
+/// `pending_os_teardown_handles_window_inserted_after_flag_set` above,
+/// which proves the snapshot is taken at drain time. This test pairs
+/// with that one to cover removal-during-the-window equivalent.
+#[test]
+fn cancel_drag_session_tolerates_window_removed_before_iteration() {
+    let mut app = make_app();
+    let survivor = app.__test_seed_child_window(&["s1"]);
+    let doomed = app.__test_seed_child_window(&["d1"]);
+
+    // Seed residue + drag-chip markers on EVERY window.
+    app.__test_set_pressed_tab(Some(0));
+    app.__test_set_mouse_down(true);
+    assert!(app.__test_seed_child_drag_residue(survivor, Some(2), true, true));
+    assert!(app.__test_seed_child_drag_residue(doomed, Some(3), true, true));
+    assert!(app.__test_set_main_drag_chip_marker(true));
+    assert!(app.__test_set_window_drag_chip_marker(survivor, true));
+    assert!(app.__test_set_window_drag_chip_marker(doomed, true));
+
+    // Simulate the race: a window vanishes between the (logical)
+    // snapshot collection and the per-window loop body. We do the
+    // removal BEFORE the call here — same observable effect from the
+    // loop body's perspective: `windows.get_mut(&id)` returns `None`
+    // for the removed id, and the `else { continue }` arm fires.
+    assert!(app.__test_remove_window(doomed));
+    assert_eq!(app.__test_window_drag_chip_marker(doomed), None);
+
+    // The call must NOT panic and must complete the iteration over
+    // every still-live window.
+    let _ = app.cancel_drag_session();
+
+    // Surviving windows: residue + marker cleared as usual.
+    assert_eq!(app.__test_pressed_tab(), None);
+    assert!(!app.__test_mouse_down());
+    assert_eq!(app.__test_main_drag_chip_marker(), Some(false));
+    assert_eq!(app.__test_child_pressed_tab(survivor), Some(None));
+    assert_eq!(app.__test_child_mouse_down(survivor), Some(false));
+    assert_eq!(app.__test_child_has_drag_session(survivor), Some(false));
+    assert_eq!(app.__test_window_drag_chip_marker(survivor), Some(false));
+
+    // Removed window stays removed — the tolerant lookup did NOT
+    // resurrect it.
+    assert_eq!(app.__test_child_pressed_tab(doomed), None);
+}
+
+/// PR #533 Haiku Step-4 REVISE (2/2): `WindowState::clear_drag_chip`
+/// is documented as **tolerant** (see contract block at `mod.rs:235`):
+/// it must be a safe no-op when BOTH `renderer` is `None` AND
+/// `test_drag_chip_marker` is `None` — the "transitional window"
+/// case where a tear-out spawn lands during the `pending_os_teardown`
+/// race window (#462) and produces a half-initialized `WindowState`.
+/// Seeded child windows from `__test_seed_child_window` are exactly
+/// this shape: `renderer: None`, `test_drag_chip_marker: None`. Drive
+/// `cancel_drag_session` against such a window and assert the call
+/// completes without panic and leaves the marker as `None` (i.e. the
+/// `if let Some(marker) = ...` short-circuit fired, not the
+/// `*marker = false` branch).
+#[test]
+fn clear_drag_chip_tolerant_when_renderer_and_marker_both_none() {
+    let mut app = make_app();
+    let transitional = app.__test_seed_child_window(&["t1"]);
+
+    // Confirm the precondition: BOTH branches of `clear_drag_chip` see
+    // `None` on this window. `test_drag_chip_marker` is `None` because
+    // we deliberately do NOT seed it; `renderer` is `None` for every
+    // `__test_seed_child_window`-produced entry by construction.
+    assert_eq!(
+        app.__test_window_drag_chip_marker(transitional),
+        None,
+        "precondition: marker must be None for the transitional case"
+    );
+
+    // Drive `cancel_drag_session` — its per-window loop body calls
+    // `ws.clear_drag_chip()` on EVERY window including this one. Must
+    // not panic.
+    let _ = app.cancel_drag_session();
+
+    // Marker stayed `None` — the `if let Some(marker) = ...` branch
+    // short-circuited as documented (it did NOT flip `None` to
+    // `Some(false)`). This is the no-op contract.
+    assert_eq!(
+        app.__test_window_drag_chip_marker(transitional),
+        None,
+        "clear_drag_chip must NOT mutate a `None` marker into `Some(false)`"
+    );
+    // The window's scalar residue fields are still touched by the
+    // surrounding `cancel_drag_session` loop body — `clear_drag_chip`
+    // only owns the renderer + marker pair.
+    assert_eq!(app.__test_child_pressed_tab(transitional), Some(None));
+    assert_eq!(app.__test_child_mouse_down(transitional), Some(false));
+}
