@@ -96,3 +96,14 @@ The classifier is intentionally restricted to GUI terminal apps. Host shells / c
 | `SONICTERM_HARNESS_EXTRA_TERMS=name1,name2` | Comma-separated process names appended to the built-in list (case-insensitive, whitespace trimmed, empties ignored). No `.exe` suffix. |
 
 **Self-test:** `pwsh -NoProfile -File testing\workflows\tests\Test-Guard1Classifier.ps1` (exits 0 on pass).
+
+### Harness hardening mitigations (#488)
+
+Three harness-hardening guards layered on top of Guards 1–6:
+
+1. **First-launch Defender budget extension.** On the very first case of a `windows.ps1` invocation, Defender's real-time scan of the freshly built `sonicterm-windows.exe` can add 10–20s of cold-start latency. `run_case.ps1` checks for `$env:TEMP\sonic-harness-first-launch-flag`; while absent, the Guard-3 window-appear budget is bumped from **10s → 30s** and the marker is created. Subsequent cases revert to 10s. `windows.ps1` clears the marker via `try/finally` so a case-1 crash doesn't poison the next driver run. `$env:SONICTERM_HARNESS_WIN_TIMEOUT_S` still wins.
+
+2. **UAC fast-fail (`requires_elevation`).** Cases may set `requires_elevation = true` in `testing/cases.toml`. When the harness is not running as Administrator, `run_case.ps1` logs `[FAIL unelevated_only]` and exits 1 **before** spawning `sonicterm-windows.exe` — avoiding a 30s+ stall on a UAC consent dialog the harness cannot dismiss. Fixture: `windows-elevation-fixture-uac-fast-fail` (§38).
+
+3. **PrintWindow black-frame detection.** Some DWM/GPU configurations cause `PrintWindow(PW_RENDERFULLCONTENT)` to return a fully-black or fully-transparent bitmap even though the call succeeded. After PrintWindow returns true, the harness samples a deterministic 16×16 grid (256 points) across the captured bitmap; if every sample is RGB(0,0,0) or every sample has alpha=0, the case is demoted to SKIP with exit 77 and `skip_reason=printwindow_black_frame`. Full pixel scans are deliberately avoided (Opus #488 Step-2 caveat).
+
