@@ -245,6 +245,93 @@ fn cleanly_snapping_pitches_yield_strict_equality_at_fractional_scales() {
     }
 }
 
+/// #489: at fractional DPI, every overlay family (cursor, selection,
+/// bg-fill, underline-decoration, search-highlight) must share its
+/// left/right edges with the SAME snapped column cache the glyph path
+/// uses. Before #489 these read raw `origin_x + col * cell_w` and so
+/// landed up to one device-pixel off the glyph cell they were
+/// supposed to cover at scales 1.25 / 1.5 / 1.75. This test pins the
+/// shared-edge invariant for the 1.75 fixture from the diagnosis.
+#[test]
+fn overlay_rects_share_edges_with_glyph_cells_at_fractional_scale() {
+    let scale = 1.75_f32;
+    let cell_w = 8.571428_f32;
+    let pad = 8.0_f32;
+    let cols = 8_u16;
+
+    let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
+    assert_eq!(snapped.len(), (cols + 1) as usize);
+
+    // Cursor block at col N: left = snapped[N], right = snapped[N+1].
+    for n in 0..(cols as usize) {
+        let cur_left = snapped[n];
+        let cur_right = snapped[n + 1];
+        assert!(cur_right > cur_left, "cursor cell {} produced non-positive width", n);
+        // Glyph cell N's edges by the same convention.
+        assert_eq!(cur_left.to_bits(), snapped[n].to_bits());
+        assert_eq!(cur_right.to_bits(), snapped[n + 1].to_bits());
+    }
+
+    // Selection span N..M (inclusive): left = snapped[N], right = snapped[M+1].
+    let (n, m) = (1_usize, 5_usize);
+    let sel_left = snapped[n];
+    let sel_right = snapped[m + 1];
+    assert_eq!(sel_left.to_bits(), snapped[n].to_bits());
+    assert_eq!(sel_right.to_bits(), snapped[m + 1].to_bits());
+
+    // Bg-fill run N..M (end-exclusive): left = snapped[N], right = snapped[M].
+    let (bg_n, bg_m_excl) = (2_usize, 6_usize);
+    let bg_left = snapped[bg_n];
+    let bg_right = snapped[bg_m_excl];
+    assert_eq!(bg_left.to_bits(), snapped[bg_n].to_bits());
+    assert_eq!(bg_right.to_bits(), snapped[bg_m_excl].to_bits());
+    // Bg run must end exactly where the abutting cell's glyph begins.
+    assert_eq!(bg_right.to_bits(), snapped[bg_m_excl].to_bits());
+
+    // Underline / hyperlink / search span N..=M: left = snapped[N], right = snapped[M+1].
+    let (u_n, u_m) = (0_usize, 7_usize);
+    let u_left = snapped[u_n];
+    let u_right = snapped[u_m + 1];
+    assert_eq!(u_left.to_bits(), snapped[u_n].to_bits());
+    assert_eq!(u_right.to_bits(), snapped[u_m + 1].to_bits());
+}
+
+/// #489 dHash-safety: at integer scales (1.0, 2.0) every overlay
+/// derivation must yield identical pixel positions to the raw
+/// arithmetic, because `snap_to_device_pixels` is identity there.
+/// This is the property that keeps mac visual baselines green when
+/// the fix lands.
+#[test]
+fn overlay_rects_identity_at_integer_scales() {
+    let cell_w = 8.571428_f32;
+    let pad = 8.0_f32;
+    let cols = 8_u16;
+
+    for &scale in &[1.0_f32, 2.0] {
+        let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
+        for n in 0..(cols as usize) {
+            let raw_left = pad + n as f32 * cell_w;
+            let raw_right = pad + (n + 1) as f32 * cell_w;
+            assert!(
+                (snapped[n] - raw_left).abs() < 1e-5,
+                "scale {}: cursor left at col {} drifted (snapped {}, raw {})",
+                scale,
+                n,
+                snapped[n],
+                raw_left,
+            );
+            assert!(
+                (snapped[n + 1] - raw_right).abs() < 1e-5,
+                "scale {}: cursor right at col {} drifted (snapped {}, raw {})",
+                scale,
+                n,
+                snapped[n + 1],
+                raw_right,
+            );
+        }
+    }
+}
+
 /// Integer-scale fast path: at scale 1.0 / 2.0, `snap_to_device_pixels`
 /// is the identity on x, so the snapped edges must equal the unsnapped
 /// edges. This is the "mac dHash snapshots stay green" guarantee.

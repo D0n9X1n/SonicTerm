@@ -43,6 +43,7 @@ fn selection_past_right_edge_is_clipped_to_pane() {
         LEFT_ORIGIN_Y,
         CELL_W,
         CELL_H,
+        &[],
     );
     assert_eq!(rects.len(), 1, "single-row selection should emit one quad");
     let pre = rects[0];
@@ -101,6 +102,7 @@ fn multirow_selection_every_quad_within_pane() {
         LEFT_ORIGIN_Y,
         CELL_W,
         CELL_H,
+        &[],
     );
     assert_eq!(rects.len(), 5, "rows 3..=7 inclusive == 5 quads");
     for r in rects {
@@ -192,6 +194,7 @@ fn empty_selection_emits_nothing() {
         LEFT_ORIGIN_Y,
         CELL_W,
         CELL_H,
+        &[],
     );
     assert!(rects.is_empty());
 }

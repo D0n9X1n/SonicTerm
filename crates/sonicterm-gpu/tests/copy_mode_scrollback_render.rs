@@ -39,6 +39,7 @@ fn copy_mode_absolute_cursor_auto_scrolls_and_renders_viewport_relative() {
         [0.0, 0.0, 1.0, 0.5],
         cursor_color,
         &mut quads,
+        &[],
     )
     .expect("cursor overlay should render after auto-scroll");
     assert_eq!(cursor_px, (70.0, f32::from(visible_row) * 20.0));
@@ -72,6 +73,7 @@ fn copy_mode_selection_uses_absolute_rows_and_clips_to_viewport() {
         selection_color,
         cursor_color,
         &mut quads,
+        &[],
     )
     .expect("cursor row 6 should be visible when view starts at 5");
 
@@ -102,6 +104,7 @@ fn copy_mode_cursor_overlay_suppressed_when_absolute_row_off_viewport() {
         [0.0, 0.0, 1.0, 0.5],
         [1.0, 0.0, 0.0, 1.0],
         &mut quads,
+        &[],
     );
 
     assert!(cursor_px.is_none());
