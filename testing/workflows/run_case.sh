@@ -234,9 +234,21 @@ ensure_front_or_skip() {
 
 ensure_front_or_skip
 
-# Capture the actual sonic window id (used for window-only screenshots)
+# Capture the actual sonic window id (used for window-only screenshots).
+# #549: AppleScript `id of window 1` returns nothing for winit apps (sonicterm-mac
+# is not AppleScript-aware), so the previous probe always yielded "" and every case
+# skipped with "no window id captured". Use CGWindowID via in-tree Swift helper —
+# CoreGraphics window IDs are what `screencapture -l` actually accepts. The window
+# may not be on-screen immediately after spawn, so retry briefly (up to ~3s).
 WINDOW_ID=""
-WIN_ID_RAW=$(osascript -e 'tell application "System Events" to tell process "sonicterm-mac" to get id of window 1' 2>/dev/null || echo "")
+WIN_ID_RAW=""
+for _try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  WIN_ID_RAW=$(testing/workflows/cg-window-id.swift "$SONIC_PID" 2>/dev/null || echo "")
+  if [[ -n "$WIN_ID_RAW" ]]; then
+    break
+  fi
+  sleep 0.2
+done
 if [[ -n "$WIN_ID_RAW" ]]; then
   WINDOW_ID="$WIN_ID_RAW"
 fi
