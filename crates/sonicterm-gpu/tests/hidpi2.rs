@@ -19,6 +19,7 @@
 //! Visual evidence of the fix is in `target/screenshots/` from the
 //! manual GUI smoke per CLAUDE.md §13.
 
+use sonicterm_gpu::core::{build_snapped_cell_x, pixel_to_local_col};
 use sonicterm_gpu::quad::px_to_ndc;
 
 /// `cells()` divides logical surface width by logical `cell_w`. On a
@@ -201,4 +202,118 @@ fn pane_outer_rect_uses_logical_dims() {
     let bad_h = physical_h as f32 - top_inset - pad;
     assert!(bad_w > outer_w * 1.9, "sanity: physical-px width would be ~2× the logical one");
     assert!(bad_h > outer_h * 1.9, "sanity: physical-px height would be ~2× the logical one");
+}
+
+// ---------------------------------------------------------------------------
+// #569: pane-aware pixel_to_cell using snapped_cell_x edge cache.
+//
+// At fractional DPI scales the per-column edge cache (`snapped_cell_x`)
+// has jitter — adjacent cell widths differ by 1 device pixel so they
+// align to integer pixels. The legacy `(x / cell_w).floor()` math
+// disagrees with those edges near the right side of wide grids and
+// produces an off-by-one column. The fix is a linear scan over the
+// same edge cache the renderer drew on.
+//
+// These tests cover the pure column-search helper at the 5 DPI scales
+// called out in the spec, plus the split-pane case where pane B's
+// column 0 is not at the window's `padding_left`.
+// ---------------------------------------------------------------------------
+
+/// Click at a known boundary px in a single pane at each scale must
+/// resolve to the cell that owns the right-hand side of the boundary
+/// (half-open buckets `edge[c] <= px < edge[c+1]`).
+#[test]
+fn pixel_to_local_col_boundary_resolves_to_rhs_cell_at_each_scale() {
+    let cell_w: f32 = 8.4;
+    let origin_x: f32 = 8.0; // padding_left
+    let cols: u16 = 120;
+    for &scale in &[1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+        let edges = build_snapped_cell_x(origin_x, cell_w, cols, scale);
+        // Boundary exactly on edges[30] must land on col 30, not 29.
+        let boundary = edges[30];
+        let got = pixel_to_local_col(boundary, &edges, cols)
+            .unwrap_or_else(|| panic!("scale {scale}: boundary px {boundary} returned None"));
+        assert_eq!(
+            got, 30,
+            "scale {scale}: px on edge[30] must resolve to col 30 (RHS), got {got}"
+        );
+        // Just-below the boundary belongs to col 29.
+        let before = edges[30] - 0.0001;
+        let got_before = pixel_to_local_col(before, &edges, cols).unwrap();
+        assert_eq!(
+            got_before, 29,
+            "scale {scale}: px just below edge[30] must resolve to col 29, got {got_before}"
+        );
+        // Mid-cell sanity at col 60.
+        let mid = (edges[60] + edges[61]) / 2.0;
+        let got_mid = pixel_to_local_col(mid, &edges, cols).unwrap();
+        assert_eq!(got_mid, 60, "scale {scale}: midpoint of cell 60 must be col 60");
+    }
+}
+
+/// At fractional scales the legacy `(x / cell_w).floor()` math disagrees
+/// with the snapped edges at the right end of the grid. The scan-based
+/// helper must agree with the snapped edges for every column, end-to-end.
+#[test]
+fn pixel_to_local_col_agrees_with_snapped_edges_across_the_grid() {
+    let cell_w: f32 = 7.6;
+    let origin_x: f32 = 8.0;
+    let cols: u16 = 200;
+    for &scale in &[1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+        let edges = build_snapped_cell_x(origin_x, cell_w, cols, scale);
+        for c in 0..cols {
+            // Center of each cell must round-trip to its own column.
+            let center = (edges[c as usize] + edges[c as usize + 1]) / 2.0;
+            let got = pixel_to_local_col(center, &edges, cols).unwrap_or_else(|| {
+                panic!("scale {scale}: center of col {c} ({center}) returned None")
+            });
+            assert_eq!(got, c, "scale {scale}: center of col {c} must round-trip, got {got}");
+        }
+        // Out-of-range guards.
+        assert!(pixel_to_local_col(edges[0] - 0.5, &edges, cols).is_none());
+        assert!(pixel_to_local_col(edges[cols as usize], &edges, cols).is_none());
+        assert!(pixel_to_local_col(edges[cols as usize] + 10.0, &edges, cols).is_none());
+    }
+}
+
+/// Split-pane case: pane A occupies cols 0..30 starting at x=8, pane B
+/// occupies its own edge cache starting at a non-zero origin (e.g.
+/// after a vertical split at the midpoint). A click in pane B's column
+/// 0 must resolve to col 0 of pane B's local edge cache, NOT to
+/// column ~30 of pane A's edge cache. This is what was breaking in
+/// real-world split layouts (#569).
+#[test]
+fn split_pane_click_resolves_to_local_column_zero_not_pane_a_col_30() {
+    let cell_w: f32 = 8.4;
+    let scale: f32 = 1.5;
+    let pane_a_origin: f32 = 8.0;
+    let pane_a_cols: u16 = 30;
+    let edges_a = build_snapped_cell_x(pane_a_origin, cell_w, pane_a_cols, scale);
+    // Pane B starts right where pane A ends (split with no gutter for
+    // the test — gutters only shift origin_b further right, which is
+    // strictly easier).
+    let pane_b_origin = edges_a[pane_a_cols as usize];
+    let pane_b_cols: u16 = 30;
+    let edges_b = build_snapped_cell_x(pane_b_origin, cell_w, pane_b_cols, scale);
+    // Click at the dead center of pane B's column 0.
+    let click_x = (edges_b[0] + edges_b[1]) / 2.0;
+    // Pane-aware path: edges_b says col 0.
+    let got = pixel_to_local_col(click_x, &edges_b, pane_b_cols).unwrap();
+    assert_eq!(got, 0, "click in pane B col 0 must resolve to col 0 of pane B's cache, got {got}");
+    // And critically: the same click against pane A's edge cache would
+    // (correctly) say None because click_x >= edges_a[pane_a_cols].
+    // That's the cue the pane-resolution step in pixel_to_cell uses to
+    // pick pane B before invoking this helper.
+    assert!(
+        pixel_to_local_col(click_x, &edges_a, pane_a_cols).is_none(),
+        "click_x is past pane A's last edge — helper must return None so \
+         the pane-resolution step routes the hit-test to pane B"
+    );
+}
+
+/// Empty / degenerate inputs: a 0-col pane has no addressable cell.
+#[test]
+fn pixel_to_local_col_handles_degenerate_inputs() {
+    let edges = build_snapped_cell_x(8.0, 8.4, 0, 1.5);
+    assert!(pixel_to_local_col(10.0, &edges, 0).is_none());
 }
