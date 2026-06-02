@@ -74,6 +74,17 @@ pub const ACTIVE_TOP_ACCENT_H: f32 = 2.0;
 /// to the tab background rect — so the accent is `tab_w - 2 * inset` wide.
 pub const ACTIVE_TOP_ACCENT_INSET: f32 = 6.0;
 
+/// Reserved drop zone at the right edge of the tab bar, in logical pixels.
+/// This region is subtracted from the per-tab allocation width so there is
+/// always an empty slice between the last tab's right edge and the bar's
+/// right edge that the user can drop a dragged tab into to request
+/// "append at the end" (insertion slot `tabs.len()`). The bar background
+/// still extends the full window width — no extra drawing is required;
+/// the reserved zone simply shows the existing tab-bar background.
+///
+/// See issue #541.
+pub const TAB_END_DROP_ZONE_PX: f32 = 96.0;
+
 /// Rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -282,8 +293,13 @@ impl TabBarLayout {
         }
 
         // Region available for tabs is from BAR_LEFT_PAD to the right edge
-        // of the bar, minus another BAR_LEFT_PAD of breathing room.
-        let tabs_region = (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD).max(0.0);
+        // of the bar, minus another BAR_LEFT_PAD of breathing room, and
+        // minus TAB_END_DROP_ZONE_PX so there is always an empty slice on
+        // the right that a dragged tab can be dropped into to mean
+        // "append at the end" (issue #541). The bar background itself
+        // (`bar_rect.w`) still spans the full window width.
+        let tabs_region =
+            (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD - TAB_END_DROP_ZONE_PX).max(0.0);
         let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
