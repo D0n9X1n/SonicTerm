@@ -35,19 +35,19 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | PaneTree model (recursive splits, collapse-on-close) | ✅ | bootstrap |
 | TOML config + 4 themes + WezTerm keymap | ✅ | bootstrap |
 | Original SVG icon (terminal window + cyan speed trails + `>_`) | ✅ v0.3 | `assets/icons/source/sonic.svg` |
-| **wgpu+glyphon character rendering** | ✅ v0.2 | `sonicterm-shared/src/render.rs` |
-| **Keyboard input → PTY** | ✅ v0.2 | `sonicterm-shared/src/app.rs::encode_logical` |
-| Cursor rendering + selection + keymap dispatcher + clipboard | ✅ v0.3a | `sonicterm-shared/src/app.rs` |
-| Per-cell color + bold / italic / underline | ✅ v0.3b | `sonicterm-shared/src/render.rs` |
-| Browser-style tab bar UI | ✅ v0.3c | `sonicterm-shared/src/tabbar_view.rs` + `render.rs` |
-| Bound keymap actions | ✅ v0.3d | `sonicterm-shared/src/app.rs::run_action` (Split/Close/Focus wired) |
-| Pane rendering + per-pane PTY | ✅ v0.3d | `sonicterm-shared/src/pane.rs` + `render.rs` border pass |
-| OSC 8 hyperlinks (registry + URL opener) | ✅ v0.4 | `sonicterm-core::vt` + `sonicterm-shared` |
-| OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonicterm-shared/src/render.rs` + `app.rs` |
-| In-page search (`Cmd+F`) | ✅ v0.4 | `sonicterm-shared/src/search.rs` |
-| Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonicterm-core::vt` |
+| **wgpu+glyphon character rendering** | ✅ v0.2 | `sonicterm-gpu/src/core.rs` |
+| **Keyboard input → PTY** | ✅ v0.2 | `sonicterm-app/src/app/key_encoding.rs` |
+| Cursor rendering + selection + keymap dispatcher + clipboard | ✅ v0.3a | `sonicterm-app/src/app/*.rs` |
+| Per-cell color + bold / italic / underline | ✅ v0.3b | `sonicterm-gpu/src/core.rs` |
+| Browser-style tab bar UI | ✅ v0.3c | `sonicterm-ui/src/tabs.rs` + `sonicterm-gpu/src/core.rs` |
+| Bound keymap actions | ✅ v0.3d | `sonicterm-app/src/app/keymap_dispatch.rs` (Split/Close/Focus wired) |
+| Pane rendering + per-pane PTY | ✅ v0.3d | `sonicterm-app/src/app/spawn_pane.rs` + `sonicterm-gpu/src/core.rs` border pass |
+| OSC 8 hyperlinks (registry + URL opener) | ✅ v0.4 | `sonicterm-vt` + `sonicterm-ui` |
+| OSC 8 visual + Cmd-click activation | ✅ v0.4 | `sonicterm-gpu/src/core.rs` + `sonicterm-app/src/app/hovered_url.rs` |
+| In-page search (`Cmd+F`) | ✅ v0.4 | `sonicterm-ui/src/search.rs` |
+| Alt-screen + DEC `?1049` / `?47` / `?25` / `?2004` / `?1006` | ✅ v0.5 | `sonicterm-vt` |
 | **Palette config-file editing** | ✅ v1.0-RC | `Edit sonicterm.toml` / `Edit keymap.toml` palette actions replace the removed prefs UI (#326) |
-| Tab tear-out + cross-window merge | ✅ v0.8 | `sonicterm-shared/src/tabs.rs` (#43, #48, #59, #62, #64) |
+| Tab tear-out + cross-window merge | ✅ v0.8 | `sonicterm-ui/src/tabs.rs` + `sonicterm-app/src/tab_drag.rs` (#43, #48, #59, #62, #64) |
 | Command palette (`super+shift+P`) | ✅ v0.8 | (#41, #45) |
 | IME composition + preedit anchoring | ✅ v0.8 | (#40, #50) |
 | In-page + scrollback search | ✅ v0.8 | (#51) |
@@ -62,7 +62,7 @@ Linux is **deferred**. SSH / mux / Sixel / Kitty graphics are deferred.
 | WezTerm visual parity (≤ 3 ΔE on standard recipe) | ✅ v0.8 | (#70, #75) |
 | Windows MVP (MSI, titlebar+Mica, menu, OLE drag, fg-proc probe) | ✅ v1.0 | (#133, #134, #135, #137, #139) |
 | Renderer + VT + PTY perf pass (8 wins) | ⏳ partial | landed: #129, #130, #131, #132, #136, #138, #140, #141, #142; still 6–302× behind WezTerm on vtebench — Phase E continues |
-| Crate decomposition (sonicterm-core → sonic-{vt,grid,cfg,io} + sonic-{types,text,ui,render-model,gpu,app}) | ✅ v1.0-RC | (#145, #151, #152, #153, #154, #155, #156, #157, #158, #160) |
+| Crate decomposition (16 focused crates: sonicterm-{types, vt, grid, cfg, io, text, render-model, ui, gpu, app-core, app, mac, windows, mux, logging}; legacy sonicterm-{core, shared} façades fully removed in #469) | ✅ v1.0-RC | (#145..#160, #469) |
 | Per-cell ANSI background colors render correctly (P0 regression fix) | ✅ v1.0-RC | (#161 spec → #163 fix) |
 | PTY burst flag converted to generation counter (race fix) | ✅ v1.0-RC | (#162) |
 | Default font switched to St Helens (system-installed, not bundled) | ✅ v1.0-RC | (#148) |
@@ -161,14 +161,13 @@ procurement AND an honest perf-parity sign-off (see below).
 PRs landed this session:
 
 - **Crate decomposition (refactor)**: #145 (move to `crates/` nesting),
-  #151 (extract `sonicterm-types`), #152 (split `sonicterm-core` into
-  `sonicterm-vt` / `sonicterm-grid` / `sonicterm-cfg` / `sonicterm-io` + façade), #153
-  (extract `sonicterm-text`: shape + atlas + raster), #154 (extract
-  `sonicterm-ui`: tabs / panes / search / palette / IME / i18n),
-  #155 (extract `sonicterm-render-model`), #156 (extract `sonicterm-gpu`),
-  #157 (split `render.rs` → `render/{color,metrics,tab_spans,cursor,drag_chip,core}.rs`),
-  #158 (extract `sonicterm-app`), #160 (split `app.rs` into 16 modules
-  under `app/`).
+  see #469 for the legacy-façade removal arc that completed crate decomposition
+  into 16 focused crates (#153 extract `sonicterm-text`: shape + atlas + raster,
+  #154 extract `sonicterm-ui`: tabs / panes / search / palette / IME / i18n,
+  #155 extract `sonicterm-render-model`, #156 extract `sonicterm-gpu`,
+  #157 split `render.rs` → `render/{color,metrics,tab_spans,cursor,drag_chip,core}.rs`,
+  #158 extract `sonicterm-app`, #160 split `app.rs` into 16 modules
+  under `app/`, #469 delete the legacy façades).
 - **P0 correctness fix**: #161 (spec) → #163 (fix) — per-cell ANSI
   background colors were silently dropped before reaching the text
   pipeline; htop/tmux/fzf rendered with theme bg instead of cell bg.
