@@ -35,15 +35,21 @@ fi
 # terminal sits behind sonicterm-mac and won't steal focus unless
 # something more dramatic goes wrong, in which case Guard 4 catches it).
 # ------------------------------------------------------------------
-COMPETITORS='WezTerm|Terminal\.app|iTerm|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio'
+# Match the EXECUTABLE basename only (not full cmdline), to avoid
+# false-positives like `rio` matching `--no-periodic-tasks` in Teams
+# crashpad cmdlines. Use BSD `ps` then awk over the binary name.
+COMPETITOR_RE='^(WezTerm|wezterm-gui|Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
 if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
-  if hits=$(pgrep -lf -i "$COMPETITORS" 2>/dev/null); then
-    if [[ -n "$hits" ]]; then
-      echo "FATAL: competing terminal(s) running — keystrokes will leak." >&2
-      echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
-      echo "$hits" >&2
-      exit 2
-    fi
+  hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
+    # comm field can be a path (e.g. /Applications/WezTerm.app/Contents/MacOS/wezterm-gui)
+    n=split($2,a,"/"); name=a[n]
+    if (name ~ re) print $1" "name
+  }')
+  if [[ -n "$hits" ]]; then
+    echo "FATAL: competing terminal(s) running — keystrokes will leak." >&2
+    echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
+    echo "$hits" >&2
+    exit 2
   fi
 fi
 
