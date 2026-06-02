@@ -17,7 +17,7 @@ by BOTH the mac-PM and the win-PM before merge, and MUST include the
 | `crates/sonicterm-cfg/src/keymap.rs` | Public `Action` enum. Adding a variant without the dispatcher arm fails silently. | — |
 | `crates/sonicterm-cfg/src/url_open.rs` | URL validation — security boundary for OSC 8 + cmd.exe re-tokenization. | LM-008 |
 | `crates/sonicterm-io/src/pty.rs` | PTY backend + `Drop` kill discipline. Orphan-shell regression class. | LM-007 |
-| `crates/sonicterm-shared/src/render/core.rs` | Per-cell bg + rich-text path. Dropped-bg regression (#163) shipped past local gate from here. | — |
+| `crates/sonicterm-gpu/src/core.rs` | Per-cell bg + rich-text path. Dropped-bg regression (#163) shipped past local gate from here. Legacy `sonicterm-shared/src/render/mod.rs` re-exports `sonicterm_gpu::core` for back-compat. | — |
 | `crates/sonicterm-gpu/src/text_pipeline.rs` | glyphon wiring. wgpu/glyphon/cosmic-text coherence + dropped-bg class. | — |
 | `crates/sonicterm-text/src/glyph_atlas.rs` | Texture-page allocation. Atlas-eviction races + HiDPI blur class. | — |
 | `crates/sonicterm-text/src/swash_rasterizer.rs` | Primary-only-vs-fallback path that shipped PR #42 CJK tofu. | — |

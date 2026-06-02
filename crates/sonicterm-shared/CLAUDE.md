@@ -20,11 +20,18 @@ shim. After M7 every public item carries `#[deprecated]` (M9).
 
 ## Tests
 Until dissolution, hosts:
-- `tests/render_capability_matrix.rs`
 - `tests/snapshots/*.hash` (dHash visual baselines, gated by
   `bash scripts/check-visual-snapshots.sh`)
 
-The matrix moves to `sonicterm-gpu` at M7; snapshots move with it.
+The render capability matrix now lives at
+`crates/sonicterm-text/tests/render_capability_matrix.rs`; snapshots
+move to `sonicterm-gpu` at v1.1 deletion.
+
+## Test gate (local)
+```bash
+cargo test -p sonicterm-shared --tests
+# Dissolved façade — only re-export sanity is exercised here.
+```
 
 ## Owning PM(s)
 - Primary: tag-owner during v1.1 release window (deletes the crate)

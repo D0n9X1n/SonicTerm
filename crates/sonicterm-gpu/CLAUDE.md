@@ -29,11 +29,14 @@ visual-snapshot-gated file. Bump dHash baselines OR keep
 ## Test gate (local)
 ```bash
 cargo test -p sonicterm-gpu
-cargo test -p sonicterm-shared --test render_capability_matrix
+cargo test -p sonicterm-text --test render_capability_matrix
 bash scripts/check-visual-snapshots.sh
 cargo run --example pty_dump_unicode -p sonicterm-core --release
 # Plus §13 GUI smoke (mac) — see crates/sonicterm-app/CLAUDE.md
 ```
+
+PR #459: adapter selection in `src/core.rs` emits a WARN when wgpu
+falls back to the GLES backend (helps diagnose missing Vulkan/Metal).
 
 ## Common pitfalls
 - Using `set_text` instead of `set_rich_text` — per-cell color/weight
@@ -47,4 +50,4 @@ cargo run --example pty_dump_unicode -p sonicterm-core --release
 
 ## Cross-references
 - Consumes: `sonicterm-text`, `sonicterm-render-model`, `sonicterm-types::Painter`
-- Consumed by: `sonicterm-shared::render`, `sonicterm-app`
+- Consumed by: `sonicterm-app` directly; legacy `sonicterm-shared::render` shim re-exports `sonicterm_gpu::core` for back-compat (will be removed in v1.1).

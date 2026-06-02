@@ -21,6 +21,12 @@ The crate still hosts the historical capability matrices used by §11:
 - The two `pty_dump` and `pty_dump_unicode` examples
 These move to their owner crates before this crate is deleted at v1.1.
 
+## Test gate (local)
+```bash
+cargo test -p sonicterm-core --tests
+# Deprecated façade — only re-export sanity is exercised here.
+```
+
 ## Owning PM(s)
 - Primary: tag-owner during v1.1 release window (deletes the crate)
 

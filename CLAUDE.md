@@ -124,7 +124,7 @@ The one exception is GUI-smoke comments on render/input/VT PRs.
 |---|---|
 | `crates/sonicterm-mac/` + macOS-only paths | mac-PM |
 | `crates/sonicterm-windows/` + Windows-only paths | win-PM |
-| Hot files (`render/core.rs`, `app/*.rs`, `keymap.rs`, `vt.rs`, `grid.rs`) | first to claim, blocks the other |
+| Hot files (see `docs/HOT_FILES.md` — incl. `sonicterm-gpu/src/core.rs`, `app/*.rs`, `keymap.rs`, `vt.rs`, `grid.rs`) | first to claim, blocks the other |
 | Cross-platform pure-data (vt, grid, cfg, themes) | either, coordinate via `touches:` |
 | `CLAUDE.md`, `ROADMAP.md`, `RELEASE_TESTING.md`, `CHANGELOG.md` | current release-tag owner |
 

@@ -20,8 +20,12 @@ Retention: ~60 MB rolling + 10 crash dumps. Full spec: `docs/LOGGING.md`.
 ## Test gate (local)
 ```bash
 cargo test -p sonicterm-logging
+cargo test -p sonicterm-logging --test default_filter  # PR #455
 bash scripts/check-no-raw-process-exit.sh
 ```
+PR #455 renamed the `DEFAULT_FILTER` const in `src/lib.rs`; the
+`sonic_exit` target MUST stay in the filter so exit-routing remains
+observable. `tests/default_filter.rs` guards that invariant.
 
 ## Common pitfalls
 - Initializing logging AFTER config load — bootstrap errors lost

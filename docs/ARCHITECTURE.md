@@ -49,7 +49,7 @@ crate owns a given concern or where to put a new module.
 | `sonicterm-render-model` | sonicterm-types | renderer-agnostic geometry / inputs / `Painter` trait — what to draw |
 | `sonicterm-gpu` | sonicterm-types, sonicterm-text | wgpu pipelines: quad, text, atlas upload |
 | `sonicterm-ui` | sonicterm-types, sonicterm-cfg, sonicterm-grid, sonicterm-render-model | tabs, tabbar_view, pane, selection, search, command_palette, cursor, IME, i18n |
-| `sonicterm-core` | sonic-{vt,grid,cfg,io} | **deprecated façade** — re-exports leaf modules under their historical paths |
+| `sonicterm-core` | sonicterm-{vt,grid,cfg,io} | **deprecated façade** — re-exports leaf modules under their historical paths |
 | `sonicterm-shared` | sonicterm-ui, sonicterm-gpu, sonicterm-app | **thin façade** — re-exports + `render/{core,color,metrics,tab_spans,cursor,drag_chip}.rs` |
 | `sonicterm-app` | everything above | winit ApplicationHandler split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; menu, os_drag, tab_drag, config_watch |
 | `sonicterm-mac` | sonicterm-app (via sonicterm-shared) | macOS binary, ~30 LOC main |
