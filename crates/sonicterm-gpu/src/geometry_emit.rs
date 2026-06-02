@@ -56,6 +56,18 @@ use crate::quad::{px_to_ndc, QuadInstance};
 /// dimensions in physical pixels (needed for the NDC conversion).
 /// `scale_factor` translates logical → physical pixels so the
 /// line-SDF stroke width can be expressed in physical pixels.
+///
+/// **Contract (#567 follow-up):** today the only codepoints covered
+/// by this funnel are Box-Drawing (U+2500..=U+257F) and Block-Element
+/// (U+2580..=U+259F) — both always single-cell clusters per shape.rs.
+/// `cell_size` is therefore safe to be `(cell_w, cell_h)`. If a
+/// future expansion admits a codepoint that can shape as a multi-cell
+/// cluster (`cluster_cells > 1`), the caller MUST pass the wider
+/// `cell_size` (matching the snapped-edge derivation in the shaped
+/// emit branches) — otherwise the geometry will collapse into the
+/// lead cell and the #567 bug shape returns. The assert in the
+/// caller (`flush_shape_run`) keys on `is_covered_by_geometry_emit`
+/// and is not re-checkable here.
 #[must_use]
 pub fn emit_geometry_for_char(
     ch: char,
@@ -66,6 +78,17 @@ pub fn emit_geometry_for_char(
     sh: f32,
     scale_factor: f32,
 ) -> Option<Vec<QuadInstance>> {
+    // #567 guard: the two covered ranges are single-cell-cluster only
+    // (Box-Drawing / Block-Element). If a future expansion admits a
+    // multi-cell-cluster codepoint, this funnel will collapse it into
+    // the lead cell because cell_size is derived without consulting
+    // cluster_cells at the call site (geometry_emit short-circuits
+    // before the snapped-edge cell-box calc). The doc-comment above
+    // pins the contract; we cannot debug_assert here because the
+    // funnel is called speculatively for every glyph and returns None
+    // for unhandled codepoints — an assert would trip on every ASCII
+    // char. The Box/Block helpers below are charmap-keyed and return
+    // None for anything else.
     if let Some(geom) = box_drawing_geometry(ch, cell_origin, cell_size) {
         return Some(box_geometry_to_quads(&geom, fg_rgba, sw, sh, scale_factor));
     }

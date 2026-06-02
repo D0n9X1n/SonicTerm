@@ -61,8 +61,8 @@ fn inactive_wider_pane_underline_not_truncated() {
 
     let expected_cells = f32::from(col_b - col_a + 1);
     let expected_w_nominal = expected_cells * cell_w; // 210.0
-    // Snap rounding budget: ≤ 2 device pixels (one at each edge),
-    // converted back to logical px via /scale.
+                                                      // Snap rounding budget: ≤ 2 device pixels (one at each edge),
+                                                      // converted back to logical px via /scale.
     let snap_budget = 2.0 / scale;
 
     assert!(
