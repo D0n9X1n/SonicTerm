@@ -238,6 +238,9 @@ fn row_text(grid: &Grid, row: usize) -> Option<String> {
             continue;
         }
         text.push(cell.ch);
+        if let Some(extras) = cell.extras() {
+            text.push_str(extras);
+        }
     }
     Some(text)
 }
