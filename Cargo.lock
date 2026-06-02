@@ -4638,6 +4638,7 @@ dependencies = [
  "sonicterm-ui",
  "tempfile",
  "tracing",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

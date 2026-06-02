@@ -32,6 +32,7 @@ winit.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 pollster.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 pollster = "0.4"
