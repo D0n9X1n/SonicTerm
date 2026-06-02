@@ -177,10 +177,20 @@ sleep 0.8
 # Capture
 # ---------------------------------------------------------------------------
 if [[ -n "$WEZTERM_BIN" ]]; then
-  shoot_window /tmp/parity-wezterm.png "$(window_id_for WezTerm)"
+  WEZ_WIN_ID="$(window_id_for WezTerm)"
+  if [[ -z "$WEZ_WIN_ID" ]]; then
+    echo "warn: no WezTerm front window id; soft-skipping visual_diff" >&2
+    exit 77
+  fi
+  shoot_window /tmp/parity-wezterm.png "$WEZ_WIN_ID"
   crop_titlebar /tmp/parity-wezterm.png /tmp/parity-wezterm-crop.png
 fi
-shoot_window /tmp/parity-sonic.png "$(window_id_for sonicterm-mac)"
+SONIC_WIN_ID="$(window_id_for sonicterm-mac)"
+if [[ -z "$SONIC_WIN_ID" ]]; then
+  echo "warn: no sonicterm-mac front window id; soft-skipping visual_diff" >&2
+  exit 77
+fi
+shoot_window /tmp/parity-sonic.png "$SONIC_WIN_ID"
 crop_titlebar /tmp/parity-sonic.png /tmp/parity-sonic-crop.png
 
 echo "Captured:"
