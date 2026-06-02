@@ -1500,6 +1500,15 @@ impl App {
         self.main_is_hidden()
     }
 
+    /// Test-only: drive the production `hide_main_window` path from
+    /// integration tests (the helper itself is `pub(super)`). #509
+    /// REVISE 3: lets the harness-sink test fixture install a real PTY
+    /// pane, hide main, and assert the sink was republished as `None`.
+    #[doc(hidden)]
+    pub fn __test_hide_main_window(&mut self) {
+        self.hide_main_window();
+    }
+
     /// Test-only: read the deferred-exit flag set by `run_action`
     /// when the user's Cmd+W chain has drained the last tab of the
     /// last window in `quit_on_last_window_close = true` mode.
@@ -1585,7 +1594,16 @@ impl App {
     #[cfg(all(target_os = "windows", feature = "harness"))]
     pub(crate) fn refresh_harness_sink(&self) {
         let Some(sink) = self.harness_sink.as_ref() else { return };
-        let tx = self.active_pane().and_then(|p| p.pty.as_ref()).map(|pty| pty.in_tx.clone());
+        // #509 REVISE 1: when the main window is hidden, the active pane
+        // may still resolve to a real PTY sender (the panes are kept
+        // alive for un-hide). Publishing that stale `Some(sender)` would
+        // let the pipe reader inject bytes into a window the user can't
+        // see. Force `None` so chunks are dropped.
+        let tx = if self.main_is_hidden() {
+            None
+        } else {
+            self.active_pane().and_then(|p| p.pty.as_ref()).map(|pty| pty.in_tx.clone())
+        };
         crate::harness::publish(sink, tx);
     }
 
@@ -3382,6 +3400,12 @@ impl App {
                 // hiding the main window when its tabs vec empties).
             }
         }
+        // #509 REVISE 2: tab_transfer moves a tab (and its active pane)
+        // between windows. Either side may have a different active pane
+        // afterwards; republish the sink so the pipe reader targets the
+        // window the user is now focused on (or `None` if main was
+        // drained + hidden by the source-empty branch above).
+        self.refresh_harness_sink();
         Ok(())
     }
 }
