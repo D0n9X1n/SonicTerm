@@ -16,7 +16,7 @@ cosmic-text.workspace = true
 swash.workspace = true
 fontdb.workspace = true
 bytemuck.workspace = true
-lru = "0.12"
+lru = "0.16"
 tracing.workspace = true
 
 [dev-dependencies]
