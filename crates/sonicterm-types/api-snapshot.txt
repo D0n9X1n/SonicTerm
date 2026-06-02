@@ -352,6 +352,29 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub struct sonicterm_types::geom::GeometryQuad
+pub sonicterm_types::geom::GeometryQuad::color: [f32; 4]
+pub sonicterm_types::geom::GeometryQuad::line_a: [f32; 2]
+pub sonicterm_types::geom::GeometryQuad::line_b: [f32; 2]
+pub sonicterm_types::geom::GeometryQuad::line_thickness_px: f32
+pub sonicterm_types::geom::GeometryQuad::radius_px: f32
+pub sonicterm_types::geom::GeometryQuad::rect: [f32; 4]
+pub sonicterm_types::geom::GeometryQuad::size_px: [f32; 2]
+impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
+impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
+impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
+impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
+impl core::marker::Send for sonicterm_types::geom::GeometryQuad
+impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
+impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
 pub mod sonicterm_types::glyph_key
 pub struct sonicterm_types::glyph_key::GlyphKey
 pub sonicterm_types::glyph_key::GlyphKey::ch: char
@@ -1141,6 +1164,29 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub struct sonicterm_types::GeometryQuad
+pub sonicterm_types::GeometryQuad::color: [f32; 4]
+pub sonicterm_types::GeometryQuad::line_a: [f32; 2]
+pub sonicterm_types::GeometryQuad::line_b: [f32; 2]
+pub sonicterm_types::GeometryQuad::line_thickness_px: f32
+pub sonicterm_types::GeometryQuad::radius_px: f32
+pub sonicterm_types::GeometryQuad::rect: [f32; 4]
+pub sonicterm_types::GeometryQuad::size_px: [f32; 2]
+impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
+impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
+impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
+impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
+impl core::marker::Send for sonicterm_types::geom::GeometryQuad
+impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
+impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
 pub struct sonicterm_types::WindowKey(pub u64)
 impl sonicterm_types::window_key::WindowKey
 pub const fn sonicterm_types::window_key::WindowKey::new(u64) -> Self
