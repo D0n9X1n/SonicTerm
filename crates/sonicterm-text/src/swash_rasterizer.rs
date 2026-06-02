@@ -236,22 +236,23 @@ pub fn apply_symbol_fit(
             if gw <= 0.0 || gh <= 0.0 {
                 return (cx, cy, cell_w, cell_h);
             }
+            // #461 PR-B2b: previously preserved aspect ratio, which made
+            // square Nerd Font icons render at only ~55% cell height in
+            // terminals where cell_h > cell_w (most fonts). Nerd Font PUA
+            // icons are designed for terminal use and expect to FILL the
+            // cell vertically (matching WT's behavior with builtinGlyphs).
+            // New policy: scale to fit BOTH dimensions independently,
+            // capped by cell_w on width and cell_h on height (no aspect
+            // preservation). This matches Windows Terminal output for the
+            // user's NF icons (tomato, water droplet, MCP plug, etc.)
+            // captured in PR-B1 instrumentation at issue #461.
+            let target_w = cell_w;
             let target_h = (ICON_FIT_TARGET * cell_h).max(0.0);
-            let scale = target_h / gh;
-            let out_w = gw * scale;
-            let out_h = gh * scale;
-            // If the resulting width is wider than the cell, clamp on
-            // width instead (preserving aspect) so the glyph never
-            // bleeds into the neighbour.
-            let (out_w, out_h) = if out_w > cell_w {
-                let clamp = cell_w / out_w;
-                (out_w * clamp, out_h * clamp)
-            } else {
-                (out_w, out_h)
-            };
-            let out_x = cx + (cell_w - out_w) * 0.5;
-            let out_y = cy + (cell_h - out_h) * 0.5;
-            (out_x, out_y, out_w, out_h)
+            // Center within the cell (target_h is < cell_h so leaves
+            // a tiny vertical margin; width fills exactly).
+            let out_x = cx + (cell_w - target_w) * 0.5;
+            let out_y = cy + (cell_h - target_h) * 0.5;
+            (out_x, out_y, target_w, target_h)
         }
     }
 }

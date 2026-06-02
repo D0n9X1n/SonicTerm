@@ -76,21 +76,17 @@ fn apply_symbol_fit_powerline_returns_exact_cell_rect() {
 }
 
 #[test]
-fn apply_symbol_fit_icon_scales_to_target_band_centered() {
-    // Input: 4x6 glyph at origin (0, 0); cell: 12x16 at origin (0, 0).
-    // 4:6 aspect ensures scaled width stays under cell_w when height
-    // fills to 0.95*16 (so we test the no-clamp path).
+fn apply_symbol_fit_icon_fills_cell_width_and_target_band_height() {
+    // #461 PR-B2b: IconCellFit no longer preserves aspect ratio for NF
+    // PUA icons. It fills cell_w exactly and target_h * cell_h vertically,
+    // matching Windows Terminal's builtinGlyphs behavior so icons fill
+    // the cell as designed.
     let natural = (0.0_f32, 0.0_f32, 4.0_f32, 6.0_f32);
     let (x, y, w, h) = apply_symbol_fit(natural, (0.0, 0.0), (12.0, 16.0), SymbolFit::IconCellFit);
-    // Height should land in [0.85, 1.0] * 16.
+    // Width fills cell exactly.
+    assert!((w - 12.0).abs() < 0.001, "expected w=12 (full cell), got {}", w);
+    // Height lands in [0.85, 1.0] * 16.
     assert!((0.85 * 16.0..=16.0).contains(&h), "height {} out of [0.85*16, 16]", h);
-    // Aspect ratio preserved (input was 4:6 = 2:3).
-    assert!(
-        (w / h - 4.0 / 6.0).abs() < 0.001,
-        "aspect ratio not preserved: w={} h={}",
-        w,
-        h
-    );
     // Horizontally centered: x + w/2 == cell_w / 2.
     let cx_glyph = x + w * 0.5;
     assert!((cx_glyph - 6.0).abs() < 0.001, "glyph not horizontally centered: cx={}", cx_glyph);
