@@ -215,13 +215,10 @@ fn parse_dotted_version(output: &str) -> Option<(u32, u32, u32)> {
             if c.is_ascii_digit() {
                 current.push(c);
                 chars.next();
-            } else if c == '.' && !current.is_empty() {
-                if let Ok(n) = current.parse() {
-                    numbers.push(n);
-                }
-                current.clear();
-                chars.next();
             } else if !current.is_empty() {
+                // Non-digit terminates the current run. Flush whether it's
+                // a '.' (in-version separator) or any other delimiter —
+                // both cases close the current number and advance.
                 if let Ok(n) = current.parse() {
                     numbers.push(n);
                 }
