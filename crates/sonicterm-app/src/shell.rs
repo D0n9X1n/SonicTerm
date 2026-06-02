@@ -35,7 +35,9 @@ use crate::app::os_drag::OsTabDragBackend;
 use crate::app::{App, KeymapLoader, ThemeLoader, UserEvent};
 use crate::os_drag::{OsDragSink, TabPayload};
 use sonicterm_app_core::AppStateMachine;
-use sonicterm_core::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::Keymap;
+use sonicterm_cfg::theme::Theme;
 
 /// macOS platform shell. Owns the externally-built
 /// [`AppStateMachine`] and the winit event loop; translates winit

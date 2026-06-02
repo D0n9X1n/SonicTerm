@@ -3,7 +3,7 @@
 //!
 //! Extracted from `app/mod.rs` in refactor PR 8b.
 
-use sonicterm_core::keymap::ScrollAction;
+use sonicterm_cfg::keymap::ScrollAction;
 use winit::{
     event::KeyEvent,
     keyboard::{Key, ModifiersState, NamedKey},

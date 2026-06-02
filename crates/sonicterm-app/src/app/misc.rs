@@ -11,19 +11,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    keymap::{Action, Direction, Keymap, ScrollAction},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{Parser, VtEvent},
-};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -66,7 +64,7 @@ impl App {
             row_text.push(r[i as usize].ch);
         }
         drop(guard);
-        sonicterm_core::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
+        sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
     /// OSC 8-only lookup: returns the cell's interned hyperlink URI,
@@ -166,7 +164,7 @@ impl App {
         }
     }
     pub(super) fn open_ssh_pane(&mut self, target: &str) {
-        match sonicterm_core::ssh::parse_target(target) {
+        match sonicterm_io::ssh::parse_target(target) {
             Ok(parsed) => {
                 #[cfg(feature = "ssh")]
                 {
@@ -323,7 +321,7 @@ impl App {
             window.clone(),
             el,
             &self.theme,
-            sonicterm_shared::render::RendererSettings {
+            sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
@@ -333,7 +331,7 @@ impl App {
                     self.config.window.padding_top,
                     self.config.window.padding_bottom,
                 ],
-                appearance: sonicterm_shared::render::SurfaceAppearance {
+                appearance: sonicterm_gpu::core::SurfaceAppearance {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,

@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 default = []
-ssh = ["sonicterm-core/ssh", "sonicterm-shared/ssh"]
+ssh = ["sonicterm-io/ssh"]
 
 [dependencies]
 sonicterm-core.workspace = true
@@ -21,6 +21,10 @@ sonicterm-types.workspace = true
 bytes = "1"
 smallvec = "1"
 sonicterm-logging.workspace = true
+sonicterm-cfg.workspace = true
+sonicterm-grid.workspace = true
+sonicterm-vt.workspace = true
+sonicterm-io.workspace = true
 sonicterm-text.workspace = true
 sonicterm-gpu.workspace = true
 sonicterm-ui.workspace = true

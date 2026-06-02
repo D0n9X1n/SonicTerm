@@ -10,20 +10,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    keymap::{Action, Direction, Keymap, ScrollAction},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{Parser, VtEvent},
-};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},

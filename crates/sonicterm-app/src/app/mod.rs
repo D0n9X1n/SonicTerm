@@ -14,14 +14,12 @@ use std::{
 use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::{BackdropKind, Config},
-    grid::Grid,
-    keymap::{Action, Keymap},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{CommandEvent, Parser},
-};
+use sonicterm_cfg::config::{BackdropKind, Config};
+use sonicterm_cfg::keymap::{Action, Keymap};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_vt::vt::{CommandEvent, Parser};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -56,7 +54,7 @@ pub fn with_backdrop_transparency(
 }
 
 use crate::config_watch::ConfigWatcher;
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::broadcast::BroadcastState;
 use sonicterm_ui::cheatsheet::CheatsheetState;
 use sonicterm_ui::command_palette::CommandPalette;
@@ -370,7 +368,7 @@ pub fn shell_quote_posix(s: &str) -> String {
 /// prompt". Returns `None` if there is no prompt in the requested
 /// direction. Pure function so tests can drive it without a window.
 pub fn pick_prompt_target(
-    grid: &sonicterm_core::grid::Grid,
+    grid: &sonicterm_grid::grid::Grid,
     current_top_abs: u64,
     forward: bool,
 ) -> Option<u64> {
@@ -483,7 +481,7 @@ pub fn refresh_active_tab_title(
             .pty
             .as_ref()
             .and_then(|p| p.pid())
-            .and_then(sonicterm_core::proc_info::foreground_process);
+            .and_then(sonicterm_io::proc_info::foreground_process);
         pane.fg_proc_cache = Some((now, probed));
     }
     let proc_name = pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone());
@@ -1664,8 +1662,8 @@ impl App {
                     // tests. Real text payloads land in 2c.
                 }
                 AppEffect::OpenURL { url } => {
-                    if sonicterm_core::url_open::validate(&url).is_ok() {
-                        let _ = sonicterm_core::url_open::open(&url);
+                    if sonicterm_cfg::url_open::validate(&url).is_ok() {
+                        let _ = sonicterm_cfg::url_open::open(&url);
                     }
                 }
                 AppEffect::Quit => {
@@ -2427,7 +2425,7 @@ impl App {
     pub fn __test_invoke_split_active_pane_in_child(
         &mut self,
         id: WindowId,
-        dir: sonicterm_core::keymap::Direction,
+        dir: sonicterm_cfg::keymap::Direction,
     ) -> bool {
         self.split_active_pane_in_child(id, dir)
     }
@@ -2454,7 +2452,7 @@ impl App {
     pub fn __test_invoke_focus_pane_dir_in_child(
         &mut self,
         id: WindowId,
-        dir: sonicterm_core::keymap::Direction,
+        dir: sonicterm_cfg::keymap::Direction,
     ) -> bool {
         self.focus_pane_dir_in_child(id, dir)
     }
@@ -2470,7 +2468,7 @@ impl App {
     pub fn __test_invoke_resize_active_split_in_child(
         &mut self,
         id: WindowId,
-        dir: sonicterm_core::keymap::Direction,
+        dir: sonicterm_cfg::keymap::Direction,
     ) -> bool {
         self.resize_active_split_in_child(id, dir)
     }
@@ -2755,7 +2753,7 @@ impl App {
     /// `Action::SplitRight` dispatch but skips the `Action` round-trip.
     #[doc(hidden)]
     pub fn __test_split_active_right(&mut self) {
-        self.split_active(sonicterm_core::keymap::Direction::Right);
+        self.split_active(sonicterm_cfg::keymap::Direction::Right);
     }
 
     /// Test-only: tab count.
@@ -3160,13 +3158,13 @@ impl App {
 
     /// Test-only accessor: live theme.
     #[doc(hidden)]
-    pub fn theme_for_test(&self) -> &sonicterm_core::theme::Theme {
+    pub fn theme_for_test(&self) -> &sonicterm_cfg::theme::Theme {
         &self.theme
     }
 
     /// Test-only accessor: snapshot of the live `Config`.
     #[doc(hidden)]
-    pub fn config_for_test(&self) -> &sonicterm_core::config::Config {
+    pub fn config_for_test(&self) -> &sonicterm_cfg::config::Config {
         &self.config
     }
 
