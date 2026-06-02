@@ -43,6 +43,15 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# #548: track spawned bench PIDs so an early exit (e.g. set -e trip) reaps them.
+_BENCH_SONIC_PIDS=()
+_bench_trap_cleanup() {
+  for pid in "${_BENCH_SONIC_PIDS[@]:-}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+trap _bench_trap_cleanup EXIT INT TERM
 cd "$REPO_ROOT"
 
 MODE="local"
@@ -117,6 +126,7 @@ measure_idle_cpu() {
   # Spawn briefly, sample, kill.
   "$bin" >/dev/null 2>&1 &
   local pid=$!
+  _BENCH_SONIC_PIDS+=("$pid")  # #548
   sleep 1.5
   local cpu=""
   if kill -0 "$pid" 2>/dev/null; then
@@ -134,6 +144,7 @@ measure_rss_mb() {
   fi
   "$bin" >/dev/null 2>&1 &
   local pid=$!
+  _BENCH_SONIC_PIDS+=("$pid")  # #548
   sleep 1.5
   local rss_kb=""
   if kill -0 "$pid" 2>/dev/null; then

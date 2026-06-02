@@ -47,6 +47,16 @@ sleep 0.2
 SONIC_PIDS=()
 _PRE_PIDS=""
 
+# #548: trap-based reap so `exit 77` early-skip paths still clean up the
+# spawned sonicterm-mac. Final cleanup block below remains the primary
+# path; this is the belt-and-suspenders for non-zero exits.
+_run_case_trap_cleanup() {
+  for pid in "${SONIC_PIDS[@]:-}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+trap _run_case_trap_cleanup EXIT INT TERM
+
 snapshot_sonic_pids_before() {
   _PRE_PIDS=$(pgrep -f "./target/release/sonicterm-mac" 2>/dev/null | sort -u)
 }
@@ -138,6 +148,7 @@ sleep 0.4
 SONIC_PID=$!
 disown "$SONIC_PID" 2>/dev/null || true
 SONIC_PIDS+=("$SONIC_PID")
+echo "$SONIC_PID" >> "$CASE_OUT/spawned-pids.txt"  # #548
 export SONIC_PID  # exposed for shell-cmd payloads that want to target our spawned instance
 log "spawned sonicterm-mac pid=$SONIC_PID"
 

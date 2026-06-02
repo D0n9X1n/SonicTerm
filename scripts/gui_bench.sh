@@ -22,6 +22,16 @@ SCENARIO="${1:-all}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sonicterm-mac"
 APP="/tmp/sonic-bench/SonicTerm.app"
+APP_BIN="$APP/Contents/MacOS/sonicterm-mac"
+
+# #548 + #464: path-scoped reap. Catches both the bench-app copy actually
+# spawned by `open "$APP"` and the repo's own release binary; never the
+# user's dev/release builds elsewhere.
+_gui_bench_cleanup() {
+  pkill -9 -f "$APP_BIN" 2>/dev/null || true
+  pkill -9 -f "$BIN" 2>/dev/null || true
+}
+trap _gui_bench_cleanup EXIT INT TERM
 BUNDLE_ID="com.d0n9x1n.sonicterm.bench"
 
 # ----- Guard: refuse to run if a competing terminal is foreground-able. -----
@@ -69,7 +79,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-pkill -9 -f "SonicTerm" 2>/dev/null || true
+pkill -9 -f "$APP_BIN" 2>/dev/null || true  # #464: path-scoped
 sleep 0.3
 
 open "$APP"
@@ -116,7 +126,7 @@ ensure_front_or_skip() {
     sleep 0.25
   done
   echo "SKIP: cannot keep sonicterm-mac frontmost — keystrokes would leak." >&2
-  pkill -9 -f "SonicTerm" 2>/dev/null || true
+  pkill -9 -f "$APP_BIN" 2>/dev/null || true  # #464: path-scoped
   exit 77
 }
 
@@ -193,4 +203,4 @@ echo "  \"final_rss_kb\": $RSS" >&2
 echo "}" >&2
 
 # Cleanup
-pkill -9 -f "SonicTerm" 2>/dev/null || true
+pkill -9 -f "$APP_BIN" 2>/dev/null || true  # #464: path-scoped

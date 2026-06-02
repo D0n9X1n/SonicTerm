@@ -9,6 +9,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
+# #548: reap any leaked sonicterm-mac processes on exit (catches subshell + early-skip leaks).
+# Path-scoped per #464 — only kills this repo's release binary, not user's dev builds elsewhere.
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+SONIC_BIN_PATH="$REPO_ROOT/target/release/sonicterm-mac"
+cleanup_sonic_leaks() {
+  pkill -9 -f "$SONIC_BIN_PATH" 2>/dev/null || true
+}
+trap cleanup_sonic_leaks EXIT INT TERM
+
 # ------------------------------------------------------------------
 # Tool checks
 # ------------------------------------------------------------------

@@ -19,6 +19,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sonicterm-mac"
 LOG="/tmp/sonic-headless-bench.log"
 
+# #548: trap-reap any spawned BIN PID on early exit (incl. the `exit 77` skip above).
+_HEADLESS_PIDS=()
+_headless_trap_cleanup() {
+  for pid in "${_HEADLESS_PIDS[@]:-}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+trap _headless_trap_cleanup EXIT INT TERM
+
 if [ ! -x "$BIN" ]; then
   echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
   exit 1
@@ -46,6 +55,7 @@ rm -f "$LOG"
 # Launch in background with trace logging so we can count skipped frames.
 RUST_LOG=sonicterm_shared::render=trace "$BIN" >"$LOG" 2>&1 &
 PID=$!
+_HEADLESS_PIDS+=("$PID")  # #548
 sleep 2
 
 if ! kill -0 "$PID" 2>/dev/null; then
