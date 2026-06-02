@@ -1213,8 +1213,47 @@ impl App {
                                 // bar before releasing cancels the drag.
                             }
                             crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                if let Some(t) = self.main_tabs_mut() {
-                                    t.reorder(from, to);
+                                // #535 + #540 — must move Tab +
+                                // TabState in lock-step, otherwise the
+                                // title moves but `tab_states[i]`
+                                // (active pane + PaneTree leaf-ids)
+                                // stays bound to the old slot →
+                                // title-N points at the OTHER tab's
+                                // PTY. Mirror the inline pattern from
+                                // `child_window.rs:496-506`;
+                                // consolidating both into
+                                // `tab_transfer::reorder_within`
+                                // requires a `WindowState`→
+                                // `TabContainer` shim — follow-up.
+                                //
+                                // #540 — `compute_action` may yield
+                                // `to == tabs.len()` for a drop past
+                                // the last slot. `TabBar::reorder`
+                                // silently no-ops in that case, which
+                                // visually looks like the tab vanished
+                                // (title at the source slot is gone
+                                // because the renderer was already
+                                // drawing the drag chip there).
+                                // Clamp to `len - 1` so the drop is
+                                // treated as "move to the end", which
+                                // matches `tab_transfer::reorder_within`.
+                                if let Some(id) = self.main_window_id {
+                                    if let Some(ws) = self.windows.get_mut(&id) {
+                                        let len = ws.tabs.len();
+                                        if from < len && len > 0 {
+                                            let last = len - 1;
+                                            let to = to.min(last);
+                                            if to != from {
+                                                ws.tabs.reorder(from, to);
+                                                if from < ws.tab_states.len()
+                                                    && to < ws.tab_states.len()
+                                                {
+                                                    let st = ws.tab_states.remove(from);
+                                                    ws.tab_states.insert(to, st);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             crate::tab_drag::DragAction::MergeIntoWindow(target) => {
