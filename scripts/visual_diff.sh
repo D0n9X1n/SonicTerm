@@ -67,7 +67,7 @@ PAYLOAD=$(if [[ -n "$PAYLOAD_FILE" ]]; then cat "$PAYLOAD_FILE"; else default_pa
 # instead of clobbering the user's pbcopy buffer (see #474 Bug A).
 PAYLOAD_FIXTURE=$(mktemp -t visual_diff_payload)
 printf %s "$PAYLOAD" > "$PAYLOAD_FIXTURE"
-trap 'rm -f "$PAYLOAD_FIXTURE"' EXIT
+trap 'rm -f "$PAYLOAD_FIXTURE"; pkill -9 -f "$SONIC_BIN" 2>/dev/null || true' EXIT  # #548
 
 # ---------------------------------------------------------------------------
 # Guard: refuse if a NON-WezTerm competing terminal is running. WezTerm is
