@@ -697,6 +697,10 @@ impl App {
         if let Some(w) = self.main_window() {
             w.request_redraw();
         }
+        // #508: drop-into-main could have changed the active main pane
+        // (re-attach to main + show window on un-hide). Also covers
+        // tab_transfer drop (#508 spec item 7).
+        self.refresh_harness_sink();
     }
     pub(super) fn reap_empty_child(&mut self, win_id: WindowId) {
         // PR #302 follow-up: bump the test-observable counter on EVERY
@@ -750,6 +754,10 @@ impl App {
             ws.hidden = true;
         }
         tracing::info!("main window hidden (drained); windows={}", self.windows.len());
+        // #508: main window hidden → no pane to inject into. Publish
+        // None so the pipe server drops chunks (per Opus Step-2 spec
+        // item 9: explicit close-path publish over implicit Drop).
+        self.refresh_harness_sink();
     }
     pub(super) fn show_main_window(&mut self) {
         if let Some(w) = self.main_window() {
@@ -758,6 +766,8 @@ impl App {
         if let Some(ws) = self.main_mut() {
             ws.hidden = false;
         }
+        // #508: window re-shown → republish current active pane.
+        self.refresh_harness_sink();
     }
 
     /// Build a fresh `PaneState` bound to the given child window's

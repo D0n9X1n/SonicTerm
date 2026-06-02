@@ -14,6 +14,8 @@
 
 pub mod app;
 pub mod config_watch;
+#[cfg(all(target_os = "windows", feature = "harness"))]
+pub mod harness;
 pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;
