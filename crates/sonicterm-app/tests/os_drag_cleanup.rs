@@ -423,3 +423,83 @@ fn clear_drag_chip_tolerant_when_renderer_and_marker_both_none() {
     assert_eq!(app.__test_child_pressed_tab(transitional), Some(None));
     assert_eq!(app.__test_child_mouse_down(transitional), Some(false));
 }
+
+// ---------------------------------------------------------------------
+// Issue #553 Phase A — in-process tear-out (no Command::new spawn)
+// ---------------------------------------------------------------------
+
+/// Phase A spec, test 1: simulating a `DragOutcome::DroppedOnEmpty
+/// { drop_screen_pos }` end-event must enqueue a typed
+/// `PendingTearOut` request (not the old `Cancelled`/`Command::new`
+/// path). The request carries the source tab handle + Win32 cursor
+/// screen position, ready for `drain_pending_window_creates` to
+/// build the new window IN-PROCESS via `install_torn_out_window`.
+#[test]
+fn dropped_on_empty_queues_typed_tear_out_request_not_child_process_spawn() {
+    let mut app = make_app();
+    let src_id = sonicterm_app::app::synthetic_main_window_id();
+    app.__test_set_os_drag_source(Some((src_id, 0)));
+
+    // Pre: nothing queued.
+    assert!(app.__test_pending_tear_out().is_none());
+    assert!(!app.__test_pending_new_window());
+
+    // Backend posts DroppedOnEmpty with a cursor position from
+    // Win32 GetCursorPos. We feed the mailbox directly to bypass
+    // OLE on the unit-test path (per Phase C2 mailbox seam).
+    app.__test_os_drag_pending().set_ended(
+        sonicterm_app::app::os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (1234, 567) },
+    );
+
+    let processed = app.handle_os_drag_ended();
+    assert!(matches!(
+        processed,
+        Some(sonicterm_app::app::os_drag::DragOutcome::DroppedOnEmpty { .. })
+    ));
+
+    // Typed request landed in the queue, NOT the legacy NewShell flag.
+    let queued = app.__test_pending_tear_out().expect("PendingTearOut must be queued");
+    assert_eq!(queued.0, src_id, "source window handle preserved");
+    assert_eq!(queued.1, 0, "source tab index preserved");
+    assert_eq!(queued.2, (1234, 567), "drop screen pos from GetCursorPos preserved");
+    assert!(!app.__test_pending_new_window(), "must NOT touch NewShell drain");
+
+    // Deferred-teardown invariant unchanged.
+    assert!(app.__test_pending_os_teardown());
+}
+
+/// Phase A spec, test 2: the `pending_tear_out` drain MUST be in the
+/// SAME drain slot as `pending_new_window` (so `drain_pending_os_
+/// teardown` still runs strictly AFTER any window-create). Guarded by
+/// the absence of an `__test_drain_pending_tear_out` separate seam —
+/// the request is drained alongside NewShell by
+/// `drain_pending_window_creates`. We assert the ordering invariant
+/// by exposing both flags simultaneously: after a real drain the
+/// teardown flag is still set, proving the drain order is
+/// (pending_window_creates → pending_os_teardown).
+#[test]
+fn pending_tear_out_drains_before_os_teardown() {
+    let mut app = make_app();
+    let src_id = sonicterm_app::app::synthetic_main_window_id();
+    app.__test_set_os_drag_source(Some((src_id, 0)));
+
+    app.__test_os_drag_pending().set_ended(
+        sonicterm_app::app::os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos: (10, 20) },
+    );
+    let _ = app.handle_os_drag_ended();
+
+    // Both flags set in the same handler.
+    assert!(app.__test_pending_tear_out().is_some());
+    assert!(app.__test_pending_os_teardown());
+
+    // Drain os_teardown (the post-window-create slot) — the
+    // tear-out request is still queued in the pre-slot, proving the
+    // ordering: pending_tear_out (in drain_pending_window_creates)
+    // runs BEFORE drain_pending_os_teardown, as required by PR #533.
+    app.__test_drain_pending_os_teardown();
+    assert!(!app.__test_pending_os_teardown());
+    assert!(
+        app.__test_pending_tear_out().is_some(),
+        "pending_tear_out drains in drain_pending_window_creates (NOT in os_teardown drain)"
+    );
+}

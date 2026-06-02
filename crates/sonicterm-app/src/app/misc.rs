@@ -282,6 +282,65 @@ impl App {
             self.pending_new_window = false;
             self.create_new_terminal_window(el);
         }
+        // Issue #553 Phase A: in-process tear-out drain. Replaces the
+        // legacy `Command::new`-based spawn — Phase B will delete the
+        // dead `spawn_tearout_child` + `--tear-out-payload` CLI flag.
+        // Ordering MUST stay before `drain_pending_os_teardown` (the
+        // PR #533 invariant — `cancel_drag_session` must see the new
+        // child window already inserted).
+        if let Some(req) = self.pending_tear_out.take() {
+            self.drain_pending_tear_out(el, req);
+        }
+    }
+
+    /// Issue #553 Phase A: resolve a queued `PendingTearOut` request
+    /// into a real torn-out window. Locates the source tab via the
+    /// recorded `(WindowId, tab_idx)` handle, detaches the tab state
+    /// (which MOVES the live `PtyHandle` — see `tear_out.rs` for the
+    /// `detach_tab_state` contract), and hands it to the reusable
+    /// `install_torn_out_window` builder positioned at the drop screen
+    /// position from Win32 `GetCursorPos`.
+    fn drain_pending_tear_out(&mut self, el: &ActiveEventLoop, req: crate::app::PendingTearOut) {
+        // Only main-window tear-out is wired in Phase A; child-window
+        // tear-out continues to flow through `tear_out_tab` directly.
+        // The source check guards against a stale request after the
+        // source window has gone away.
+        let main_id = match self.main_window().map(|w| w.id()) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    src = ?req.source_window,
+                    "drain_pending_tear_out: no main window — dropping request"
+                );
+                return;
+            }
+        };
+        if req.source_window != main_id {
+            tracing::warn!(
+                src = ?req.source_window, main = ?main_id,
+                "drain_pending_tear_out: source is not main — falling back to noop \
+                 (child-window tear-out drained via tear_out_tab inline)"
+            );
+            return;
+        }
+        let Some((tab, state, panes)) = self.detach_tab_state(req.source_tab_idx) else {
+            tracing::warn!(
+                idx = req.source_tab_idx,
+                "drain_pending_tear_out: detach_tab_state returned None — dropping request"
+            );
+            return;
+        };
+        if self.install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos)).is_none()
+        {
+            tracing::warn!("drain_pending_tear_out: install_torn_out_window failed");
+            return;
+        }
+        self.tear_out_apply_source_side(req.source_tab_idx);
+        self.refresh_harness_sink();
+        tracing::info!(
+            at = ?req.drop_screen_pos,
+            "in-process tear-out completed (Issue #553 Phase A — no child process spawned)"
+        );
     }
 
     /// Issue #462 (speculative defensive fix): drain a deferred
