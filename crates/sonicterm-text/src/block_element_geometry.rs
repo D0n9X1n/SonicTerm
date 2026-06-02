@@ -98,3 +98,47 @@ pub fn primary_rect(geom: &BlockGeometry) -> (f32, f32, f32, f32) {
         BlockGeometry::MultiRect(rects) => rects.first().copied().unwrap_or((0.0, 0.0, 0.0, 0.0)),
     }
 }
+
+/// Returns `true` if `ch` is a Block Elements codepoint covered by
+/// [`block_element_rect`] (i.e. anywhere in `U+2580..=U+259F`).
+///
+/// Mirrors `box_drawing_geometry::is_covered_box_drawing` and is the
+/// cheap predicate used by `core.rs` to invalidate the row-glyph cache
+/// on any row containing a Phase-A geometry codepoint — without this
+/// hook, a cached row replay would lose the geometry quads emitted by
+/// `geometry_emit::emit_geometry_for_char` (see #559 PR-A; the proper
+/// fix is the contract-affecting `CachedRow.geometry_quads` extension
+/// tracked in #560 PR-B).
+#[must_use]
+pub fn is_covered_block_element(ch: char) -> bool {
+    matches!(ch as u32, 0x2580..=0x259F)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_covered_block_element_matches_block_element_rect() {
+        // Every codepoint in the Block Elements range should report
+        // covered, and `block_element_rect` should agree.
+        for cp in 0x2580_u32..=0x259F {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(is_covered_block_element(ch), "U+{cp:04X} should be covered");
+            assert!(
+                block_element_rect(ch, (0.0, 0.0), (8.0, 16.0)).is_some(),
+                "U+{cp:04X} should return Some from block_element_rect"
+            );
+        }
+    }
+
+    #[test]
+    fn is_covered_block_element_rejects_outside_range() {
+        // Just outside both ends of the Block Elements range.
+        assert!(!is_covered_block_element('\u{257F}'));
+        assert!(!is_covered_block_element('\u{25A0}'));
+        // ASCII letters obviously aren't covered.
+        assert!(!is_covered_block_element('A'));
+        assert!(!is_covered_block_element(' '));
+    }
+}
