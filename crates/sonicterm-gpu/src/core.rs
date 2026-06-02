@@ -11,6 +11,7 @@ use glyphon::{
 use sonicterm_cfg::config::BackdropKind;
 use sonicterm_cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
@@ -735,16 +736,16 @@ pub fn emit_tab_title_glyphs(
             bold: attrs.weight.0 >= glyphon::fontdb::Weight::BOLD.0,
             italic: attrs.style == Style::Italic,
         };
-        let cells: Vec<(u16, Cell)> = text
-            .chars()
-            .enumerate()
-            .map(|(i, ch)| {
-                (
-                    pen_cols.saturating_add(i as u16),
-                    Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()),
-                )
-            })
-            .collect();
+        let mut cells: Vec<(u16, Cell)> = Vec::with_capacity(text.chars().count());
+        let mut local_col: u16 = 0;
+        for ch in text.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            cells.push((
+                pen_cols.saturating_add(local_col),
+                Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()),
+            ));
+            local_col = local_col.saturating_add(w.max(1));
+        }
         let shaped = shape_run(rasterizer, font_family, raster_px, style, &cells);
         let mut cell_by_col: HashMap<u16, Cell> = HashMap::with_capacity(cells.len());
         for (col, cell) in &cells {
@@ -805,7 +806,7 @@ pub fn emit_tab_title_glyphs(
                 });
             }
         }
-        pen_cols = pen_cols.saturating_add(text.chars().count() as u16);
+        pen_cols = pen_cols.saturating_add(UnicodeWidthStr::width(*text) as u16);
     }
 }
 
