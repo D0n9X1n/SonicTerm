@@ -13,6 +13,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod async_fallback;
+pub mod block_element_geometry;
 pub mod glyph_atlas;
 pub mod metrics;
 pub mod prewarm;

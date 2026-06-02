@@ -145,6 +145,12 @@ pub enum SymbolFit {
     /// Target: 0.95 of cell_h (slight padding so adjacent icons don't
     /// visually kiss).
     IconCellFit,
+    /// Block Elements (U+2580..=U+259F): per-codepoint sub-cell geometry
+    /// drawn directly via [`crate::block_element_geometry::block_element_rect`],
+    /// not via the font's natural glyph (#461). Renderer must consult
+    /// the geometry enum to detect `MultiRect` / `ShadedRect` variants
+    /// that require extra quads / alpha multipliers.
+    BlockCellFill,
     /// Natural swash placement (text, CJK, emoji).
     Natural,
 }
@@ -164,6 +170,9 @@ const ICON_FIT_TARGET: f32 = 0.95;
 ///   `IconCellFit`.
 /// * `U+25B6..=U+25C1` — filled / outlined geometric triangle arrows
 ///   commonly used in TUI prompts (full 12-codepoint range) → `IconCellFit`.
+/// * `U+2580..=U+259F` — Block Elements (full block, halves, eighths,
+///   shades, quadrants) → `BlockCellFill`. Per-codepoint sub-cell
+///   geometry in [`crate::block_element_geometry`] (#461).
 /// * Everything else → `Natural`.
 #[inline]
 pub fn classify_symbol(ch: char) -> SymbolFit {
@@ -177,6 +186,8 @@ pub fn classify_symbol(ch: char) -> SymbolFit {
         // Filled geometric arrows commonly used in TUI prompts (full range,
         // not just 4 codepoints — Haiku review of PR #456 cycle 1).
         0x25B6..=0x25C1 => SymbolFit::IconCellFit,
+        // Block Elements: per-codepoint sub-cell geometry (#461).
+        0x2580..=0x259F => SymbolFit::BlockCellFill,
         _ => SymbolFit::Natural,
     }
 }
@@ -205,6 +216,20 @@ pub fn apply_symbol_fit(
     match fit {
         SymbolFit::Natural => rect,
         SymbolFit::PowerlineCellFill => (cx, cy, cell_w, cell_h),
+        SymbolFit::BlockCellFill => {
+            // Block Elements (#461): delegate to per-codepoint sub-cell
+            // geometry. Callers that only need a single bounding rect
+            // (e.g. the existing 3 emit paths in flush_shape_run) get
+            // `primary_rect`; renderer-level handling of MultiRect /
+            // ShadedRect variants happens via direct calls to
+            // `crate::block_element_geometry::block_element_rect`.
+            //
+            // `apply_symbol_fit` is char-agnostic, so we fall back to
+            // the full cell rect — this keeps the single-rect contract
+            // intact while the renderer (which DOES have `ch`) can
+            // opt into the multi-rect path.
+            (cx, cy, cell_w, cell_h)
+        }
         SymbolFit::IconCellFit => {
             let (_, _, gw, gh) = rect;
             // Degenerate glyph (zero-size) — fall back to centered cell.
