@@ -734,6 +734,33 @@ impl<'a> SwashRasterizer<'a> {
         None
     }
 
+    /// Return the charmap-resolved glyph id for `ch` against the
+    /// physically-loaded font at slot `slot` (using the same
+    /// fontdb-resolved file `lookup_id(family[slot])` would pick). Used
+    /// by the shaper-driven render path to detect whether a shaped
+    /// glyph id for a 1-cell cluster is a *real* GSUB substitution
+    /// (charmap returns a DIFFERENT id) versus a trivial 1:1
+    /// charmap-equivalent shape. Returns `None` when the slot has no
+    /// font in the live fontdb at the requested (bold, italic) style.
+    ///
+    /// This is the third leg of the refined gate that protects `calt`
+    /// 1:1 substitutions like the `=>` digraph (a single-cell cluster
+    /// whose shaped id is the ligated glyph) from being zeroed out by
+    /// the CJK-safety fallback in `shape_run`.
+    pub fn charmap_glyph_for_slot(
+        &mut self,
+        slot: u8,
+        ch: char,
+        weight_bold: bool,
+        italic: bool,
+    ) -> Option<u16> {
+        let family = self.families.get(slot as usize)?.clone();
+        let id = self.lookup_id(&family, weight_bold, italic)?;
+        let weight = if weight_bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
+        let font = self.font_system.get_font(id, weight)?;
+        Some(font.as_swash().charmap().map(ch))
+    }
+
     /// Walk the fallback chain and return the first slot whose face
     /// has a non-zero glyph for `ch`. Memoized per (ch, bold, italic).
     /// Returns `None` only if every face in the chain returns a zero

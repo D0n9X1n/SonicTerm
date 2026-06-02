@@ -257,8 +257,9 @@ pub fn shape_run(
         }
         let ch_first = text[g.start..end].chars().next().unwrap_or('\0');
         // Resolve the cosmic-text-chosen font back to a slot in our
-        // fallback chain. Two production failure modes if we trust the
-        // shaped (slot, glyph_id) pair blindly for 1:1 cells:
+        // fallback chain. See the 3-rule gate below for the full
+        // rationale. Historical context preserved here because the two
+        // CJK failure modes drove the original zero-out:
         //
         //   1. `slot_for_font_id` returns None — cosmic-text shaped
         //      through an OS-resolved font that isn't in our
@@ -278,19 +279,65 @@ pub fn shape_run(
         //      file we eventually rasterize through — bug: '中'
         //      rendered as '恶'.
         //
-        // Both modes hit 1:1 cells (cluster_cells == 1) — for those the
-        // shaped id buys us nothing (it would be a charmap lookup
-        // either way), so zero the glyph_id and let the renderer take
-        // the char-based fallback path (resolve_slot + charmap().map(ch)
-        // against the actually-loaded font). Composed clusters
-        // (ligatures `=>`, ZWJ emoji 👨‍👩‍👧) keep the shaped id —
-        // cluster_cells > 1 and the shaped id is the ONLY way to get
-        // the composed glyph; for those we accept the slot risk because
-        // the composed visual is otherwise unreachable.
+        // Issue #563 added rule 2 below: programming-ligature `calt`
+        // substitutions can produce a single-cell cluster whose shaped
+        // id is a *real* GSUB substitution (e.g. fonts that emit a 1:1
+        // `=>` substitute rather than a multi-cell composed ligature).
+        // Blindly zeroing those defeats ligature rendering. The refined
+        // gate distinguishes "real substitution" from "charmap-trivial
+        // 1:1" by comparing the shaped id to the slot's own charmap
+        // glyph for `ch_first`.
+        // Refined 3-rule gate (issue #563):
+        //
+        //   1. `cluster_cells > 1` → preserve shaped id (ligatures,
+        //      ZWJ — composed visual is unreachable any other way).
+        //   2. `slot_for_font_id == Some(s)` AND the charmap glyph for
+        //      `ch_first` on that same physical file DIFFERS from the
+        //      shaped `glyph_id` → preserve shaped id. This is a real
+        //      GSUB substitution on a 1-cell cluster (e.g. `calt` 1:1
+        //      ligatures like the `=>` digraph in fonts that emit a
+        //      single substituted glyph rather than a composed multi-
+        //      cluster ligature). The slot returned by
+        //      `slot_for_font_id` already encodes the "same physical
+        //      file" check — cosmic-text shaped through the exact
+        //      fontdb id our `lookup_id(family[s])` resolves to, so
+        //      the shaped id is rasterizable through the slot we'll
+        //      hand the renderer. Without this rule the substitution
+        //      was zeroed out and the renderer fell back to the
+        //      charmap glyph, defeating `calt` (#563).
+        //   3. Otherwise → zero the glyph id and let the renderer take
+        //      the char-based fallback path (`resolve_slot` +
+        //      `charmap().map(ch)` against the actually-loaded font).
+        //      This covers two CJK-safety modes the prior code
+        //      protected against:
+        //        a. `slot_for_font_id` returned None — cosmic-text
+        //           shaped through an OS-resolved font outside our
+        //           PLATFORM_FALLBACK chain; trusting that id against
+        //           slot 0 produced '中' → '臭'.
+        //        b. The same-file slot exists but cosmic-text and the
+        //           rasterizer disagree on which PingFang variant to
+        //           use (rule 2 fires only when charmap returns a
+        //           different id — for plain CJK where charmap returns
+        //           THE SAME id as cosmic-text shaped, rule 2 does NOT
+        //           preserve, so we still fall through to zero and the
+        //           renderer charmaps against its own file: '中' → '恶'
+        //           is prevented).
         let (slot, glyph_id) =
             match rasterizer.slot_for_font_id(g.font_id, style.bold, style.italic) {
                 Some(s) if cluster_cells > 1 => (s, g.glyph_id),
-                Some(s) => (s, 0),
+                Some(s) => {
+                    let charmap_id = rasterizer
+                        .charmap_glyph_for_slot(s, ch_first, style.bold, style.italic)
+                        .unwrap_or(0);
+                    if charmap_id != g.glyph_id {
+                        // Real GSUB substitution (`calt` 1:1) — preserve.
+                        (s, g.glyph_id)
+                    } else {
+                        // Trivial 1:1; zero so renderer charmaps itself
+                        // (CJK family-variant safety, see (3b) above).
+                        (s, 0)
+                    }
+                }
                 None => (0, 0),
             };
         out.push(ShapedGlyph { lead_col, ch: ch_first, font_slot: slot, glyph_id, cluster_cells });
