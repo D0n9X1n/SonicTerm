@@ -161,8 +161,12 @@ layout as mac (`screen.png`, `case.json`, `expect.log`, `status`).
 ### Guards (Guard 1–6)
 
 The driver runs six pre-flight guards before any case executes. Any
-guard failure exits 2 (skip) before keystrokes are dispatched, so a
-misconfigured host never corrupts results.
+guard failure SKIPs the affected case (contributing to the exit 77
+"soft green" tally when zero FAILs) before keystrokes are dispatched,
+so a misconfigured host never corrupts results. (Exit 2 is reserved for
+the separate preflight FATAL path documented in "Quit other terminals
+first" above — it fires before any case runs and is not part of the
+per-case CI contract below.)
 
 | # | Guard | One-liner |
 |---|---|---|
