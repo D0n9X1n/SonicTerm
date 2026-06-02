@@ -90,7 +90,7 @@ impl App {
         // Theme
         if new_cfg.theme != self.config.theme {
             let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
-            match Theme::load(&theme_path) {
+            match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
                     t.apply_accessibility(&new_cfg.accessibility);
                     tracing::info!("live-reload: theme -> {}", t.name);
@@ -125,7 +125,7 @@ impl App {
             && new_cfg.accessibility.high_contrast != self.config.accessibility.high_contrast
         {
             let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
-            let mut t = match Theme::load(&theme_path) {
+            let mut t = match Theme::load_strict(&theme_path) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path);
@@ -312,7 +312,7 @@ impl App {
             match self
                 .keymap_loader
                 .as_ref()
-                .map_or_else(|| Keymap::load(&km_path), |loader| loader(&new_cfg.keymap))
+                .map_or_else(|| Keymap::load_strict(&km_path), |loader| loader(&new_cfg.keymap))
             {
                 Ok(km) => {
                     tracing::info!(
@@ -460,7 +460,7 @@ impl App {
     }
     pub(super) fn force_reload_config(&mut self) {
         let Some(path) = sonicterm_cfg::config::Config::default_path() else { return };
-        match Config::load_or_default(&path) {
+        match Config::load_strict(&path) {
             Ok(cfg) => self.apply_new_config(cfg),
             Err(e) => tracing::warn!("force_reload_config: parse failed: {e:#}"),
         }

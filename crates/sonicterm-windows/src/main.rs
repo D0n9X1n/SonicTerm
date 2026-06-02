@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
@@ -59,16 +59,17 @@ fn main() -> Result<()> {
     // See `crates/sonicterm-logging/src/exit_trace.rs`.
     let _exit_guard = sonicterm_logging::install_exit_logging(&sonicterm_logging::log_dir());
 
-    let config = match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("sonic: config load failed: {e:?}");
-            return Err(e);
-        }
-    };
+    let mut cfg_warnings: Vec<String> = Vec::new();
+    let config = load_config(&mut cfg_warnings);
     let log_cfg = config.logging.clone();
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
+    // Drain any warnings collected during pre-logging Config load so the
+    // #522 parse-failure WARN actually reaches sonicterm.log + stderr
+    // (Haiku review of PR #534).
+    for w in cfg_warnings.drain(..) {
+        tracing::warn!(target: "sonicterm-cfg", "{w}");
+    }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     #[cfg(target_os = "windows")]
     let parsed_cli = cli::parse_cli_from_env()?;
@@ -76,10 +77,16 @@ fn main() -> Result<()> {
     let tearout_payload = parsed_cli.tearout;
     #[cfg(all(target_os = "windows", feature = "harness"))]
     let harness_request = parsed_cli.harness_input_pipe;
-    let theme = load_theme(&config.theme).context("load theme")?;
-    let keymap = load_keymap(&config.keymap).context("load keymap")?;
-    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| load_theme(name));
-    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| load_keymap(name));
+    let theme = load_theme(&config.theme);
+    let keymap = load_keymap(&config.keymap);
+    // Initial load is infallible (#522 fallback); hot-reload loaders use
+    // strict variants so user-visible errors are surfaced after startup.
+    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| {
+        Theme::load_strict(&asset_dir().join("themes").join(format!("{name}.toml")))
+    });
+    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| {
+        Keymap::load_strict(&asset_dir().join("keymaps").join(format!("{name}.toml")))
+    });
     #[cfg(target_os = "windows")]
     {
         use sonicterm_app::menu::{PlatformMenu, Sender};
@@ -161,16 +168,16 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_config() -> Result<Config> {
+fn load_config(warnings: &mut Vec<String>) -> Config {
     match Config::default_path() {
         Some(path) => {
             if path.exists() {
-                Config::load_or_default(&path)
+                Config::load_or_default_collecting(&path, warnings)
             } else {
-                Ok(windows_default_config())
+                windows_default_config()
             }
         }
-        None => Ok(windows_default_config()),
+        None => windows_default_config(),
     }
 }
 
@@ -178,18 +185,19 @@ pub fn windows_default_config() -> Config {
     Config { keymap: "sonicterm-windows".to_string(), ..Config::default() }
 }
 
-fn load_theme(name: &str) -> Result<Theme> {
-    Theme::load(&asset_dir().join("themes").join(format!("{name}.toml")))
+fn load_theme(name: &str) -> Theme {
+    Theme::load_or_default(&asset_dir().join("themes").join(format!("{name}.toml")))
 }
 
-fn load_keymap(name: &str) -> Result<Keymap> {
+fn load_keymap(name: &str) -> Keymap {
     if name == "user" {
         if let Some(path) = sonicterm_cfg::keymap::default_user_keymap_path() {
-            sonicterm_cfg::keymap::ensure_user_keymap_file(&path)?;
-            return Keymap::load(&path);
+            if sonicterm_cfg::keymap::ensure_user_keymap_file(&path).is_ok() {
+                return Keymap::load_or_default(&path);
+            }
         }
     }
-    Keymap::load(&asset_dir().join("keymaps").join(format!("{name}.toml")))
+    Keymap::load_or_default(&asset_dir().join("keymaps").join(format!("{name}.toml")))
 }
 
 /// Installer copies assets next to the .exe; in dev, fall back to workspace.

@@ -11,7 +11,7 @@ fn keymap_default_windows_uses_ctrl_shift() {
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/keymaps/sonicterm-windows.toml");
-    let keymap = Keymap::load(&path).expect("load Windows default keymap");
+    let keymap = Keymap::load_strict(&path).expect("load Windows default keymap");
 
     assert!(
         keymap.bindings.iter().all(|binding| !binding.keys.to_ascii_lowercase().contains("super")),

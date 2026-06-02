@@ -8,8 +8,8 @@ fn bundled_keymaps_do_not_bind_multiple_actions_to_the_same_chord() {
 
     for keymap_name in ["sonicterm", "sonicterm-windows"] {
         let keymap_path = root.join(format!("assets/keymaps/{keymap_name}.toml"));
-        let keymap =
-            Keymap::load(&keymap_path).unwrap_or_else(|err| panic!("load {keymap_name}: {err:#}"));
+        let keymap = Keymap::load_strict(&keymap_path)
+            .unwrap_or_else(|err| panic!("load {keymap_name}: {err:#}"));
         let mut seen = HashMap::new();
 
         for binding in &keymap.bindings {

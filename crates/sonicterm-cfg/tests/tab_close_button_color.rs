@@ -36,7 +36,7 @@ line_height = 1.2
 "##,
     )
     .unwrap();
-    let cfg = Config::load_or_default(&path).unwrap();
+    let cfg = Config::load_strict(&path).unwrap();
     // The value the App reads at startup must already contain the
     // user's override — without it the renderer would init with the
     // default (None) and the × would only become always-visible after
@@ -61,7 +61,7 @@ line_height = 1.2
 "##,
     )
     .unwrap();
-    let before = Config::load_or_default(&path).unwrap();
+    let before = Config::load_strict(&path).unwrap();
     assert_eq!(before.tab_close_button_color, None);
 
     fs::write(
@@ -78,7 +78,7 @@ line_height = 1.2
 "##,
     )
     .unwrap();
-    let after = Config::load_or_default(&path).unwrap();
+    let after = Config::load_strict(&path).unwrap();
     // `apply_new_config` diffs old vs new with `!=` on this field;
     // the test mirrors that exact comparison so a future refactor
     // that, say, normalizes the string at parse-time and breaks the

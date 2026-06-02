@@ -384,8 +384,11 @@ impl Config {
         Ok(path)
     }
 
-    /// Load from `path`, or return defaults if the file does not exist.
-    pub fn load_or_default(path: &Path) -> Result<Self> {
+    /// Strict load from `path`. Returns defaults if the file is absent, but
+    /// surfaces an `Err` when the file exists and fails to read or parse.
+    /// Hot-reload paths and tests use this so a malformed user edit is
+    /// visible rather than silently masked.
+    pub fn load_strict(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -393,6 +396,45 @@ impl Config {
         let mut cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         cfg.window.normalize_padding();
         Ok(cfg)
+    }
+
+    /// Infallible startup loader. Calls [`Self::load_strict`] and, on any
+    /// error, logs a warning at `target = "sonicterm-cfg"` and falls back
+    /// to [`Self::default`] so the app can still launch with a broken
+    /// user config — see issue #522.
+    pub fn load_or_default(path: &Path) -> Self {
+        let mut warnings = Vec::new();
+        let cfg = Self::load_or_default_collecting(path, &mut warnings);
+        for w in warnings {
+            tracing::warn!(target: "sonicterm-cfg", "{w}");
+        }
+        cfg
+    }
+
+    /// Same as [`Self::load_or_default`] but, instead of emitting
+    /// `tracing::warn!` directly, appends any fallback message to
+    /// `warnings`. Use this from `main` BEFORE `sonicterm_logging::init`
+    /// has run — otherwise the parse-failure warn is dropped because no
+    /// subscriber is installed yet (Haiku review of PR #534).
+    ///
+    /// Callers MUST drain `warnings` after logging is initialised, e.g.
+    /// ```ignore
+    /// let mut cfg_warnings = Vec::new();
+    /// let config = Config::load_or_default_collecting(&path, &mut cfg_warnings);
+    /// let _g = sonicterm_logging::init(&config.logging.clone()).ok();
+    /// for w in cfg_warnings { tracing::warn!(target: "sonicterm-cfg", "{w}"); }
+    /// ```
+    pub fn load_or_default_collecting(path: &Path, warnings: &mut Vec<String>) -> Self {
+        match Self::load_strict(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warnings.push(format!(
+                    "config TOML parse failed at {}: {e}; falling back to defaults",
+                    path.display()
+                ));
+                Self::default()
+            }
+        }
     }
 
     /// Serialize to a TOML string.

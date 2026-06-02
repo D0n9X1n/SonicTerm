@@ -16,7 +16,7 @@ fn loads_all_bundled_themes() {
         "wezterm.toml",
         "gruvbox-dark-hard.toml",
     ] {
-        let t = Theme::load(&bundled(n)).unwrap_or_else(|e| panic!("{n}: {e}"));
+        let t = Theme::load_strict(&bundled(n)).unwrap_or_else(|e| panic!("{n}: {e}"));
         assert!(!t.name.is_empty());
         assert!(t.colors.background.rgb().is_some(), "{n} bg parse");
     }
@@ -27,7 +27,7 @@ fn loads_all_bundled_themes() {
 #[test]
 fn tab_bar_bg_is_flush_with_body() {
     for n in ["wezterm.toml", "gruvbox-dark-hard.toml"] {
-        let t = Theme::load(&bundled(n)).unwrap_or_else(|e| panic!("{n}: {e}"));
+        let t = Theme::load_strict(&bundled(n)).unwrap_or_else(|e| panic!("{n}: {e}"));
         assert_eq!(
             t.colors.tab.bar_bg.rgb(),
             t.colors.background.rgb(),
@@ -43,7 +43,7 @@ fn tab_bar_bg_is_flush_with_body() {
 /// running WezTerm). Regression guard for the visual parity fix.
 #[test]
 fn wezterm_theme_matches_actual_wezterm_colors() {
-    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    let t = Theme::load_strict(&bundled("wezterm.toml")).expect("load wezterm.toml");
     assert_eq!(t.colors.background.rgb(), Some((0x14, 0x16, 0x17)), "bg");
     assert_eq!(t.colors.foreground.rgb(), Some((0xcf, 0xbc, 0x97)), "fg");
     assert_eq!(t.colors.tab.bar_bg.rgb(), Some((0x14, 0x16, 0x17)), "tab.bar_bg flush");
@@ -56,7 +56,7 @@ fn wezterm_theme_matches_actual_wezterm_colors() {
 /// hover — matching the user's `wezterm.lua` config exactly.
 #[test]
 fn wezterm_theme_pins_accent_colors() {
-    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    let t = Theme::load_strict(&bundled("wezterm.toml")).expect("load wezterm.toml");
     assert_eq!(t.colors.tab.active_fg.rgb(), Some((0xfa, 0xbd, 0x2f)), "active_fg gold");
     assert_eq!(t.colors.tab.inactive_fg.rgb(), Some((0x92, 0x83, 0x74)), "inactive_fg dim");
     assert_eq!(t.colors.tab.hover_fg.rgb(), Some((0xd5, 0xc4, 0xa1)), "hover_fg cream");
@@ -69,7 +69,7 @@ fn wezterm_theme_pins_accent_colors() {
 /// parity with the user's running WezTerm.
 #[test]
 fn wezterm_theme_pins_gruvbox_hard_base16_ansi_palette() {
-    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    let t = Theme::load_strict(&bundled("wezterm.toml")).expect("load wezterm.toml");
     // Normal: ansi = [base00, base08, base0B, base0A, base0D, base0E, base0C, base05]
     assert_eq!(t.colors.ansi.black.rgb(), Some((0x1d, 0x20, 0x21)), "ansi.black base00");
     assert_eq!(t.colors.ansi.red.rgb(), Some((0xfb, 0x49, 0x34)), "ansi.red base08");
@@ -103,7 +103,7 @@ fn hex_parser() {
 /// is not applied to glyphs), mirroring WezTerm's fallthrough.
 #[test]
 fn wezterm_theme_selection_matches_gruvbox_bg2() {
-    let t = Theme::load(&bundled("wezterm.toml")).expect("load wezterm.toml");
+    let t = Theme::load_strict(&bundled("wezterm.toml")).expect("load wezterm.toml");
     assert_eq!(
         t.colors.selection_bg.rgb(),
         Some((0x3c, 0x38, 0x36)),
