@@ -8,11 +8,11 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::BackdropKind,
-    grid::{Cell, CellFlags, Color, Grid},
     theme::{Color as ThemeColor, Theme},
 };
+use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
@@ -765,7 +765,7 @@ pub fn emit_tab_title_glyphs(
                 else {
                     continue;
                 };
-                sonicterm_core::glyph_key::GlyphKey {
+                sonicterm_types::GlyphKey {
                     ch: lead_cell.ch,
                     font_slot: slot,
                     weight_bold: style.bold,
@@ -773,7 +773,7 @@ pub fn emit_tab_title_glyphs(
                     glyph_id: 0,
                 }
             } else {
-                sonicterm_core::glyph_key::GlyphKey::shaped(
+                sonicterm_types::GlyphKey::shaped(
                     g.ch,
                     g.font_slot,
                     g.glyph_id,
@@ -897,7 +897,7 @@ pub fn emit_overlay_text_glyphs(
             let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic) else {
                 continue;
             };
-            sonicterm_core::glyph_key::GlyphKey {
+            sonicterm_types::GlyphKey {
                 ch: lead_cell.ch,
                 font_slot: slot,
                 weight_bold: style.bold,
@@ -905,7 +905,7 @@ pub fn emit_overlay_text_glyphs(
                 glyph_id: 0,
             }
         } else {
-            sonicterm_core::glyph_key::GlyphKey::shaped(
+            sonicterm_types::GlyphKey::shaped(
                 g.ch,
                 g.font_slot,
                 g.glyph_id,
@@ -1103,8 +1103,8 @@ impl GpuRenderer {
         let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         let splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_core::theme::Appearance::Dark => 0.14,
-            sonicterm_core::theme::Appearance::Light => 0.10,
+            sonicterm_cfg::theme::Appearance::Dark => 0.14,
+            sonicterm_cfg::theme::Appearance::Light => 0.10,
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -1998,8 +1998,8 @@ impl GpuRenderer {
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         self.splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_core::theme::Appearance::Dark => 0.14,
-            sonicterm_core::theme::Appearance::Light => 0.10,
+            sonicterm_cfg::theme::Appearance::Dark => 0.14,
+            sonicterm_cfg::theme::Appearance::Light => 0.10,
         };
         self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -4478,7 +4478,7 @@ impl GpuRenderer {
         // straight from each cell's GlyphKey.
         if run_is_ascii_fast(cells) {
             for (col, cell) in cells {
-                let key = sonicterm_core::glyph_key::GlyphKey {
+                let key = sonicterm_types::GlyphKey {
                     ch: cell.ch,
                     font_slot: 0,
                     weight_bold: style.bold,
@@ -4626,7 +4626,7 @@ impl GpuRenderer {
                     missing_chars_this_frame.push(ch);
                     continue;
                 };
-                let key = sonicterm_core::glyph_key::GlyphKey {
+                let key = sonicterm_types::GlyphKey {
                     ch,
                     font_slot: slot,
                     weight_bold: style.bold,
@@ -4712,7 +4712,7 @@ impl GpuRenderer {
                 continue;
             }
 
-            let key = sonicterm_core::glyph_key::GlyphKey::shaped(
+            let key = sonicterm_types::GlyphKey::shaped(
                 g.ch,
                 g.font_slot,
                 g.glyph_id,
@@ -5070,7 +5070,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     for r in 0..grid.rows {
         let row = grid.row(r);
         let mut start: Option<u16> = None;
-        let mut current: Option<sonicterm_core::hyperlink::HyperlinkId> = None;
+        let mut current: Option<sonicterm_grid::hyperlink::HyperlinkId> = None;
         let mut last_col: u16 = 0;
         for (col, cell) in row.iter().enumerate() {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
