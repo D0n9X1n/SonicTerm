@@ -45,23 +45,38 @@ without editing the other will fail `tools/check-landmines.sh`.
 
 ## 5-step rotation (mandatory for every non-trivial change)
 
-Per CLAUDE.md §3, every PR follows this 5-step cycle. Models alternate
+Per CLAUDE.md §3, every PR follows this cycle. Models alternate
 deliberately so no single model's blind spot drives a change.
+
+PM is the dispatcher between steps, **never the author at any step.**
 
 | Step | Who | What | Output |
 |---|---|---|---|
-| 1. Raise | Haiku | Draft + intake-review the issue (title front-loads symptom; concrete repro; evidence bundle; dedupe; labels). | `gh issue create` |
-| 2. Investigate | Opus | Diagnose-only. **NO production code.** | `gh issue comment` with diagnosis report |
-| 3. Review diagnosis | Haiku | Audit Step 2: is the root cause specific (file:line)? Fix sound? Test plan right shape? Size realistic? | `gh issue comment` `APPROVED-DIAG` / `REVISE-DIAG` |
+| 0. Clarify | PM | When the user files a request, **first** restate it in PM's own words + name unstated constraints + ask any blocking questions BEFORE filing the issue. No issue gets filed until PM has confirmed scope with the user (single confirmation message OK; no need for AskUserQuestion if scope is unambiguous). | PM message to user |
+| 1. Raise | Haiku | Draft + intake-review the issue from the Step-0 clarified scope (title front-loads symptom; concrete repro; evidence bundle; dedupe; labels). | `gh issue create` |
+| 2. Investigate | Opus | Diagnose-only. **NO production code.** Mandatory adjacency check (see "widen-the-net" below). | `gh issue comment` with diagnosis report |
+| 3. Review diagnosis | Haiku | Audit Step 2: root cause specific (file:line)? Fix sound? Test plan right shape? Size realistic? Adjacency check actually applied? | `gh issue comment` `APPROVED-DIAG` / `REVISE-DIAG` |
 | 4. Implement | Opus | Open PR. Prompt MUST quote the diagnosis verbatim — no scope drift. | `gh pr create` |
 | 5. Review code | Haiku | Audit the PR: gate green, scope matches diagnosis, no §4 land-mine regression. | `gh pr comment` `APPROVED` / `REVISE` |
 
-PM is the dispatcher between steps, **never the author at any step**. If a step says REVISE, the same model re-runs (Haiku re-audits Haiku's draft; Opus re-implements; etc.).
+If a step says REVISE, the same model re-runs (Haiku re-audits Haiku's draft; Opus re-implements; etc.) — never let PM "just fix it quickly" past a REVISE.
 
-**Skip allowed only for**:
-- Trivial: typo, single-line config flip the user explicitly requested.
+**Skip Step 0 + Step 1 allowed only for**:
+- Trivial: typo, single-line config flip the user explicitly requested with no design ambiguity.
 - fmt/clippy followup commits on an already-reviewed PR.
-- PM-authored docs the user directly instructed.
+- PM-authored docs the user directly instructed AND that don't touch §4 land-mines.
+
+For anything else, **even one-line testing-harness fixes go through the full rotation.** Skipping is what produces the "fix one place, miss the next" failure mode.
+
+### Step 0 clarify rule
+
+PM MUST do this for every user ask before dispatching anyone:
+1. **Restate the ask** in 1–2 sentences so the user can confirm or correct.
+2. **Name unstated constraints** (e.g. "this implies a breaking change for users with pinned dependencies — confirm OK?"; "this conflicts with existing doc X — should we update X?"; "this touches hot file Y per §15 — needs 2-PM coord").
+3. **Ask blocking questions** only when scope is ambiguous — prefer narrow concrete clarifications over open-ended "what do you want?".
+4. **Then** dispatch Step 1 with the clarified scope quoted verbatim into the Haiku prompt.
+
+If the user's ask is unambiguous and already names constraints, the Step-0 restate can collapse into a single line in the Step-1 dispatch prompt ("user said: X, confirmed").
 
 ### Step 2 widen-the-net rule
 
