@@ -623,6 +623,15 @@ pub struct GpuRenderer {
     /// on it. Part B step 7 hook for the per-pane render integration
     /// test.
     last_emit_origins: Vec<(u64, [f32; 2])>,
+    /// Per-pane layout snapshot recorded on the most recent `render()`
+    /// call, in LOGICAL pixels (same units `pixel_to_cell` operates
+    /// in after dividing winit's physical-px input by `scale_factor`).
+    /// Drives the pane-aware hit-test in [`Self::pixel_to_cell`] (#569)
+    /// so clicks land on the correct pane and column even when the
+    /// per-column edge cache (`snapped_cell_x`) has jitter at fractional
+    /// DPI scales. Empty before the first render — callers must handle
+    /// the fallback path.
+    last_pane_layout: Vec<PaneLayoutSnapshot>,
     /// Monotonic counter bumped on theme / default-fg / default-bg
     /// changes. Folded into every `row_hash` so palette swaps
     /// invalidate cached colours without iterating the cache.
@@ -706,6 +715,46 @@ pub struct TabTitleGlyphDebug {
     pub raster_px: f32,
     pub rect: [f32; 4],
     pub px_size: [u32; 2],
+}
+
+/// Snapshot of one pane's layout in LOGICAL pixels, captured at the
+/// end of each `render()` call. Used by [`GpuRenderer::pixel_to_cell`]
+/// (#569) to (a) figure out which pane was clicked and (b) reconstruct
+/// that pane's `snapped_cell_x` edge cache on-demand so the column
+/// search uses the same device-pixel-snapped edges the renderer drew.
+///
+/// All coordinates are in logical pixels relative to the window's
+/// top-left, matching what `pixel_to_cell` produces after dividing
+/// winit's physical-px input by `scale_factor`.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct PaneLayoutSnapshot {
+    /// Stable id of the pane this snapshot describes.
+    pub id: u64,
+    /// Logical-px left edge of the pane (== that pane's `padding_left`
+    /// equivalent — the origin `build_snapped_cell_x` was passed).
+    pub origin_x_logical: f32,
+    /// Logical-px top edge of the pane (already adjusted for tab-bar /
+    /// top inset).
+    pub origin_y_logical: f32,
+    /// Logical-px width of the pane's content rect.
+    pub w_logical: f32,
+    /// Logical-px height of the pane's content rect.
+    pub h_logical: f32,
+    /// Cell width in logical pixels for the pane (currently identical
+    /// across panes but kept per-pane for forward-compat with per-pane
+    /// fonts).
+    pub cell_w_logical: f32,
+    /// Cell height in logical pixels for the pane.
+    pub cell_h_logical: f32,
+    /// Number of columns in the pane's grid at snapshot time.
+    pub cols: u16,
+    /// Number of rows in the pane's grid at snapshot time.
+    pub rows: u16,
+    /// Scale factor in effect when the snapshot was taken — needed to
+    /// rebuild `snapped_cell_x` with the same device-pixel snapping
+    /// the renderer used.
+    pub scale_factor: f32,
 }
 
 #[doc(hidden)]
@@ -1285,6 +1334,7 @@ impl GpuRenderer {
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
+            last_pane_layout: Vec::new(),
             style_rev: 0,
             drag_chip: None,
             async_loader: None,
@@ -2106,19 +2156,29 @@ impl GpuRenderer {
     }
 
     /// Translate physical-pixel `(px, py)` (as winit reports) into a
-    /// `(col, row)` cell address inside the grid, or `None` if the point
+    /// `(row, col)` cell address inside the grid, or `None` if the point
     /// falls outside the grid (in the tab bar, padding, etc.).
+    ///
+    /// #569: pane-aware. After the first `render()` call, this resolves
+    /// the click against the per-pane layout captured in
+    /// `last_pane_layout` and uses that pane's reconstructed
+    /// `snapped_cell_x` cache to pick a column. This matters at
+    /// fractional DPI (1.25/1.5/1.75) where naive `(x / cell_w).floor()`
+    /// disagrees with the device-pixel-snapped edges the renderer
+    /// actually drew on — off-by-one column near the right side of wide
+    /// grids — and at split layouts where the right pane's column 0 is
+    /// not at `padding_left`.
+    ///
+    /// Before the first render the layout snapshot is empty and we fall
+    /// back to the legacy single-grid arithmetic; callers should not
+    /// hit-test before rendering, but tests / early input events
+    /// previously did and the legacy behaviour is preserved for them.
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
         // Winit reports cursor positions in PHYSICAL pixels; our cell
         // grid is in LOGICAL pixels. Normalize at the boundary so click
         // targeting lands on the cell the user actually sees on Retina.
         let px = px / self.scale_factor;
         let py = py / self.scale_factor;
-        let x = px - self.padding_left;
-        let y = py - self.top_inset();
-        if x < 0.0 || y < 0.0 {
-            return None;
-        }
         // When the tab bar is pinned to the bottom of the window, clicks
         // inside the bar strip must NOT resolve to a phantom grid cell —
         // otherwise selection drags initiated in the bar would extend
@@ -2129,12 +2189,60 @@ impl GpuRenderer {
         if py >= content_bottom {
             return None;
         }
-        let col = (x / self.cell_w).floor() as i32;
-        let row = (y / self.cell_h).floor() as i32;
-        if col < 0 || row < 0 {
+        if py < self.top_inset() {
             return None;
         }
-        Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16))
+        if self.last_pane_layout.is_empty() {
+            // Fallback: no render has run yet. Use the legacy
+            // single-grid arithmetic (window-wide padding + cell_w).
+            let x = px - self.padding_left;
+            let y = py - self.top_inset();
+            if x < 0.0 || y < 0.0 {
+                return None;
+            }
+            let col = (x / self.cell_w).floor() as i32;
+            let row = (y / self.cell_h).floor() as i32;
+            if col < 0 || row < 0 {
+                return None;
+            }
+            return Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
+        }
+        // Pane resolution: find the pane whose logical-px rect contains
+        // (px, py). Split panes have different origins, so this MUST
+        // happen before the column search.
+        let pane = self.last_pane_layout.iter().find(|p| {
+            px >= p.origin_x_logical
+                && px < p.origin_x_logical + p.w_logical
+                && py >= p.origin_y_logical
+                && py < p.origin_y_logical + p.h_logical
+        })?;
+        let local_x = px - pane.origin_x_logical;
+        let local_y = py - pane.origin_y_logical;
+        if local_x < 0.0 || local_y < 0.0 {
+            return None;
+        }
+        // Column: linear scan over the pane's snapped_cell_x edges so we
+        // pick the bucket the renderer actually drew. Half-open
+        // `edge[col] <= px < edge[col+1]`; boundaries resolve to the
+        // RHS cell, which matches `partition_point`'s contract.
+        let edges = build_snapped_cell_x(
+            pane.origin_x_logical,
+            pane.cell_w_logical,
+            pane.cols,
+            pane.scale_factor,
+        );
+        let col = pixel_to_local_col(px, &edges, pane.cols)?;
+        // Row: cell_h has no per-cell snapping cache today, so the
+        // straight division is correct. Clamp to the pane's grid.
+        let row_f = local_y / pane.cell_h_logical;
+        if row_f < 0.0 {
+            return None;
+        }
+        let row = row_f.floor() as i32;
+        if row < 0 || row >= pane.rows as i32 {
+            return None;
+        }
+        Some((row as u16, col))
     }
 
     // `render` threads 11 distinct slices of borrowed app state through
@@ -2179,6 +2287,29 @@ impl GpuRenderer {
         // the expected x/y in physical pixels.
         self.last_emit_origins =
             panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
+        // #569: per-pane logical-px layout snapshot for the pane-aware
+        // hit-test in `pixel_to_cell`. PaneRender::rect_px is in physical
+        // pixels; convert at the boundary so the hit-test (which works
+        // in logical px after dividing winit input by scale_factor) can
+        // resolve the pane purely by point-in-rect.
+        let scale_now = self.scale_factor;
+        let cell_w_log = self.cell_w;
+        let cell_h_log = self.cell_h;
+        self.last_pane_layout = panes
+            .iter()
+            .map(|p| PaneLayoutSnapshot {
+                id: p.id,
+                origin_x_logical: p.rect_px.x as f32 / scale_now,
+                origin_y_logical: p.rect_px.y as f32 / scale_now,
+                w_logical: p.rect_px.w as f32 / scale_now,
+                h_logical: p.rect_px.h as f32 / scale_now,
+                cell_w_logical: cell_w_log,
+                cell_h_logical: cell_h_log,
+                cols: p.grid.cols,
+                rows: p.grid.rows,
+                scale_factor: scale_now,
+            })
+            .collect();
         let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
         let active_pane: u64 = panes[active_idx].id;
         // Derive the legacy `pane_rects` vector from the slice so downstream
@@ -5381,6 +5512,45 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16, scale: f32) -
             .0
         })
         .collect()
+}
+
+/// Pure column-from-pixel lookup that mirrors the renderer's
+/// device-pixel-snapped edge cache (#569). `edges` is the output of
+/// `build_snapped_cell_x` for the pane in question (length `cols + 1`).
+/// Returns `Some(col)` for any `px` in `[edges[0], edges[cols])` using
+/// half-open buckets `edges[col] <= px < edges[col+1]` — boundary px
+/// resolve to the RHS cell, matching the renderer's draw bias.
+///
+/// Returns `None` if `px` is left of `edges[0]` or `>= edges[cols]`
+/// (caller already gated negatives via the pane resolution step, but
+/// this is defensive). Returns `None` if `edges` is malformed
+/// (`len < 2`) — that only happens for a 0-col pane, which has no
+/// addressable cell to begin with.
+#[doc(hidden)]
+#[must_use]
+pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
+    if cols == 0 || edges.len() < 2 {
+        return None;
+    }
+    if px < edges[0] {
+        return None;
+    }
+    if px >= edges[cols as usize] {
+        return None;
+    }
+    // Linear scan: half-open buckets edges[i] <= px < edges[i+1].
+    // Cell counts are bounded (<= a few hundred) so a scan beats the
+    // branch overhead of binary search at typical widths. For very wide
+    // grids (cols >> 200) this could switch to `partition_point` — the
+    // input is monotone non-decreasing by construction.
+    for i in 0..cols as usize {
+        if px < edges[i + 1] {
+            return Some(i as u16);
+        }
+    }
+    // Unreachable given the `>= edges[cols]` guard above, but keep the
+    // total function obvious.
+    None
 }
 
 /// Emit background quads for a single visible row. Extracted so the
