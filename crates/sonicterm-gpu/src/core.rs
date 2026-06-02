@@ -2451,13 +2451,21 @@ impl GpuRenderer {
         // swash rasterizer + atlas. No per-row cache, no rich-text
         // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
-        // Underline runs collected per pane. We record (origin_x, origin_y, row,
-        // col_a, col_b) where origin_{x,y} is the PANE's origin (pad / top_inset)
-        // captured at insert time. Pre-fix this was (row, col_a, col_b) and the
-        // emit loop used `active_origin_x/y` for every entry — that placed
-        // inactive-pane underlines under the active pane's coordinates (Haiku
-        // round-3 finding on PR #199).
-        let mut underlines: Vec<(f32, f32, u16, u16, u16)> = Vec::new();
+        // Underline runs collected per pane. We record
+        // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
+        // origin_{x,y} is the PANE's origin (pad / top_inset) and
+        // `pane_cols` is the originating pane's column count, captured
+        // at insert time. Pre-fix #199 this was (row, col_a, col_b) and
+        // the emit loop used `active_origin_x/y` for every entry —
+        // placing inactive-pane underlines under the active pane's
+        // coordinates. Pre-fix #532 the tuple gained origin_{x,y} but
+        // the emit loop still sized the per-origin snapped cache from
+        // `grid.cols` (== ACTIVE pane); a wider inactive pane with
+        // underlines past active.cols was clamped and truncated. We
+        // now carry `pane_cols` (option (a) per Haiku Step-4 revise)
+        // so the per-origin cache is built from the originating pane's
+        // width, not the active pane's.
+        let mut underlines: Vec<(f32, f32, u16, u16, u16, u16)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Overlay glyph instances — palette text + (future) other modals.
@@ -2589,7 +2597,7 @@ impl GpuRenderer {
                     if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for (s, e) in &cached.underlines {
-                            underlines.push((pad, top_inset, r, *s, *e));
+                            underlines.push((pad, top_inset, grid.cols, r, *s, *e));
                         }
                         for t in &cached.tofu {
                             missing_tofu.push(*t);
@@ -2623,12 +2631,12 @@ impl GpuRenderer {
                         } else if let Some(s) = ul_start.take() {
                             let end = (col as u16).saturating_sub(1);
                             row_underlines.push((s, end));
-                            underlines.push((pad, top_inset, r, s, end));
+                            underlines.push((pad, top_inset, grid.cols, r, s, end));
                         }
                     }
                     if let Some(s) = ul_start.take() {
                         row_underlines.push((s, last_visible_col));
-                        underlines.push((pad, top_inset, r, s, last_visible_col));
+                        underlines.push((pad, top_inset, grid.cols, r, s, last_visible_col));
                     }
 
                     // Second pass: group cells into style runs and shape
@@ -3263,16 +3271,24 @@ impl GpuRenderer {
         // carries its own `origin_x` == pane pad), so memoize a snapped
         // cache per distinct pane pad. Most frames have ≤ 2 panes, so
         // the linear-scan map is cheaper than a HashMap.
-        let mut underline_caches: Vec<(u32, Vec<f32>)> = Vec::new();
-        for (origin_x, origin_y, row, col_a, col_b) in &underlines {
+        // #532 Step-4 revise (option (a)): each entry also carries the
+        // ORIGINATING pane's column count. Previously this loop sized
+        // the cache from `grid.cols` (== ACTIVE pane), which clamped
+        // and truncated underlines on wider INACTIVE panes. Key the
+        // cache by (pad_bits, pane_cols) and size it accordingly.
+        let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
+        for (origin_x, origin_y, pane_cols, row, col_a, col_b) in &underlines {
             let pad_bits = origin_x.to_bits();
-            let cache = if let Some((_, c)) = underline_caches.iter().find(|(b, _)| *b == pad_bits)
+            let cache = if let Some((_, _, c)) = underline_caches
+                .iter()
+                .find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
             {
                 c
             } else {
-                let c = build_snapped_cell_x(*origin_x, self.cell_w, grid.cols, self.scale_factor);
-                underline_caches.push((pad_bits, c));
-                &underline_caches.last().unwrap().1
+                let c =
+                    build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
+                underline_caches.push((pad_bits, *pane_cols, c));
+                &underline_caches.last().unwrap().2
             };
             let end_exclusive = (*col_b as usize).saturating_add(1);
             let cache_end = end_exclusive.min(cache.len().saturating_sub(1));
