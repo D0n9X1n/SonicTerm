@@ -17,6 +17,25 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# ------------------------------------------------------------------
+# OCR availability re-detect (issue #492).
+# windows.ps1 sets its own preflight state, but this script is
+# launched as `pwsh -NoProfile -File ...` so script-scope state in
+# the parent does not cross the child boundary. Re-detect here,
+# honoring an optional SONICTERM_HARNESS_OCR_AVAILABLE=0/1 hint
+# from the driver for parity, with a local Get-Command fallback for
+# standalone direct invocations.
+# ------------------------------------------------------------------
+if ($env:SONICTERM_HARNESS_OCR_AVAILABLE -eq '1') {
+  $Script:OCR_AVAILABLE = $true
+} elseif ($env:SONICTERM_HARNESS_OCR_AVAILABLE -eq '0') {
+  $Script:OCR_AVAILABLE = $false
+} else {
+  $Script:OCR_AVAILABLE = [bool](Get-Command tesseract -ErrorAction SilentlyContinue)
+}
+$Script:OCR_KINDS = @('text-in-region','ocr-text','not-text-in-region')
+
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $CaseOut = Join-Path $OutDir $Id
 New-Item -ItemType Directory -Force -Path $CaseOut | Out-Null
@@ -128,6 +147,29 @@ $AppliesTo = ($Case.applies_to -join ',')
 Log "applies_to: $AppliesTo"
 if ($AppliesTo -match 'windows-manual' -and $AppliesTo -notmatch '(^|,)windows(,|$)') {
   Log 'SKIP — manual-only on this platform'; exit 77
+}
+
+# ------------------------------------------------------------------
+# Issue #492 — early-skip OCR-only cases when tesseract is missing.
+# If every expect is one of $Script:OCR_KINDS and OCR is unavailable,
+# bail before spawning the app. Mixed cases fall through and the
+# per-expect OCR-skip handling in the Python block below picks them
+# up. Per-skip log lines include case id + expect index so silently
+# skipped coverage is auditable.
+# ------------------------------------------------------------------
+$AllExpects = @($Case.expect)
+if (-not $Script:OCR_AVAILABLE -and $AllExpects.Count -gt 0) {
+  $allOcr = $true
+  foreach ($e in $AllExpects) {
+    if ($Script:OCR_KINDS -notcontains $e.kind) { $allOcr = $false; break }
+  }
+  if ($allOcr) {
+    for ($i = 0; $i -lt $AllExpects.Count; $i++) {
+      Log ("[SKIP ocr_unavailable] case={0} expect[{1}]={2}" -f $Id, $i, $AllExpects[$i].kind)
+    }
+    Log 'SKIP: ocr_unavailable (all expects are OCR-only and tesseract is not on PATH)'
+    Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
+  }
 }
 
 # ------------------------------------------------------------------
@@ -393,8 +435,10 @@ Set-Content -Path $ExpectLog -Value ''
 $py2 = @"
 import json, sys, os, subprocess
 case_path, shot, elog = sys.argv[1:4]
+ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE','1') == '1')
+OCR_KINDS = ('text-in-region','ocr-text','not-text-in-region')
 c = json.load(open(case_path))
-results = []
+results = []  # (status, kind, reason)  status in {'PASS','FAIL','SKIP'}
 def have(p): return os.path.exists(p) and os.path.getsize(p) > 0
 def pixel_near(shot, x, y, rgba, tol):
     try:
@@ -416,28 +460,55 @@ def ocr_contains(shot, value):
         return (value in out.stdout), out.stdout[:200].replace('\n',' / ')
     except Exception as e:
         return False, f"err {e}"
-for e in c.get('expect', []):
+for idx, e in enumerate(c.get('expect', [])):
     kind = e.get('kind')
+    if kind in OCR_KINDS and not ocr_available:
+        # Issue #492: per-expect OCR skip in mixed cases.
+        results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+        continue
     if kind == 'screenshot':
         ok = have(shot); reason = f"exists={ok} path={shot}"
+        results.append(('PASS' if ok else 'FAIL', kind, reason))
     elif kind == 'pixel-near':
         ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20))
+        results.append(('PASS' if ok else 'FAIL', kind, reason))
     elif kind in ('text-in-region','ocr-text'):
         ok, reason = ocr_contains(shot, e['value'])
+        results.append(('PASS' if ok else 'FAIL', kind, reason))
     elif kind == 'not-text-in-region':
         contains, sample = ocr_contains(shot, e['value']); ok = not contains
         reason = f"absent={ok} sample='{sample}'"
+        results.append(('PASS' if ok else 'FAIL', kind, reason))
     else:
-        ok = True; reason = f"heuristic-pass (kind='{kind}' not yet implemented on windows)"
-    results.append((ok, kind, reason))
+        reason = f"heuristic-pass (kind='{kind}' not yet implemented on windows)"
+        results.append(('PASS', kind, reason))
 with open(elog, 'w') as f:
-    for ok, kind, reason in results:
-        f.write(f"{'PASS' if ok else 'FAIL'}\t{kind}\t{reason}\n")
-fails = [r for r in results if not r[0]]
-sys.exit(0 if not fails else 1)
+    for status, kind, reason in results:
+        f.write(f"{status}\t{kind}\t{reason}\n")
+fails = [r for r in results if r[0] == 'FAIL']
+skips = [r for r in results if r[0] == 'SKIP']
+if fails:
+    sys.exit(1)
+if skips:
+    sys.exit(77)
+sys.exit(0)
 "@
+$env:SONICTERM_HARNESS_OCR_AVAILABLE = if ($Script:OCR_AVAILABLE) { '1' } else { '0' }
 $py2 | python3 - $CaseJson $Shot $ExpectLog
 $expectRc = $LASTEXITCODE
+
+# Issue #492: surface per-expect SKIP lines to case.log so silently
+# skipped OCR coverage is auditable from the main log.
+if (Test-Path $ExpectLog) {
+  foreach ($line in Get-Content $ExpectLog) {
+    if ($line -match '^SKIP\t([^\t]+)\t(.*)$') {
+      $kind = $matches[1]; $reason = $matches[2]
+      # Pull expect index from reason if present, else 'N/A'.
+      $eidx = if ($reason -match 'expect\[(\d+)\]') { $matches[1] } else { 'N/A' }
+      Log ("[SKIP ocr_unavailable] case={0} expect[{1}]={2}" -f $Id, $eidx, $kind)
+    }
+  }
+}
 
 # ------------------------------------------------------------------
 # Cleanup — kill exactly the PIDs we tracked in $SONIC_PIDS (B2 v3).
@@ -484,6 +555,11 @@ if ($userMidRun) {
 if ($expectRc -eq 0) {
   Log 'RESULT: PASS'
   Set-Content (Join-Path $CaseOut 'status') 'PASS'; exit 0
+} elseif ($expectRc -eq 77) {
+  Log 'RESULT: SKIP (ocr_unavailable; no failures, at least one OCR skip)'
+  Set-Content (Join-Path $CaseOut 'status') 'SKIP'
+  Get-Content $ExpectLog | Add-Content -Path $LogPath
+  exit 77
 } else {
   Log 'RESULT: FAIL'
   Set-Content (Join-Path $CaseOut 'status') 'FAIL'
