@@ -15,7 +15,13 @@ workspace = true
 # harness (`--harness-input-pipe`). Off by default — release builds
 # MUST NOT carry the symbol (`scripts/check-no-harness-in-release.ps1`
 # enforces). See issue #506.
-harness = []
+#
+# #508: also enables the same-named feature on `sonicterm-app` so the
+# App-side `harness` module (sink type alias + per-pane-change publish
+# helper) is compiled in lockstep. Without this propagation the bin
+# can't see `sonicterm_app::harness::*` or
+# `WindowsShell::with_harness_sink`.
+harness = ["sonicterm-app/harness"]
 
 [dependencies]
 sonicterm-app.workspace = true

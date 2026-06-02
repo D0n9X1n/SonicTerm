@@ -24,16 +24,12 @@
 //! pub type HarnessSink = Arc<Mutex<Option<Sender<Vec<u8>>>>>;
 //! ```
 //!
-//! Whoever owns the App is expected to update that slot whenever the
-//! active pane changes (the sender is `PtyHandle::in_tx`). The shell
-//! wiring that swaps the sender on focus change lives in
-//! `crates/sonicterm-app/src/app/mod.rs` and is a HOT_FILE
-//! (`docs/HOT_FILES.md`) — that cross-crate change is tracked as a
-//! follow-up so this PR can ship the pipe scaffolding and the symbol
-//! gate without touching shared state. The default behaviour when the
-//! slot is empty is to drop the chunk and log at trace level, which
-//! still exercises the secure-pipe path end-to-end and lets the
-//! random-bytes test verify the read loop is robust.
+//! #508 (this PR) wires the App side: `sonicterm_app::harness` owns
+//! the canonical type alias, and `sonicterm_app::App` publishes the
+//! active main-window pane's `PtyHandle::in_tx` into the slot on
+//! every active-pane change (focus click, tab switch, spawn, close,
+//! tear-out, drop). When the slot is empty (main hidden, no panes
+//! yet, no PTY) the read loop drops the chunk and logs at trace.
 
 #![cfg(all(target_os = "windows", feature = "harness"))]
 
@@ -73,9 +69,15 @@ const READ_CHUNK: usize = 4096;
 /// Shared sink the App is expected to keep pointing at the active
 /// pane's `PtyHandle::in_tx`. `None` means "no pane to inject into
 /// right now" — the read loop drops the chunk and logs at trace.
+///
+/// #508: the canonical home for this type alias is now
+/// `sonicterm_app::harness::HarnessSink`. We re-export the structural
+/// equivalent here so the pipe-server signatures don't have to take
+/// a cross-crate dep just for the type alias.
 pub type HarnessSink = Arc<Mutex<Option<Sender<Vec<u8>>>>>;
 
 /// Build a fresh, empty sink. Cheap, no syscalls.
+#[allow(dead_code)] // bin now calls sonicterm_app::harness::new_sink()
 pub fn new_sink() -> HarnessSink {
     Arc::new(Mutex::new(None))
 }

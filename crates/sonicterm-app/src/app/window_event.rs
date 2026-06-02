@@ -984,6 +984,8 @@ impl App {
                                     ws.drag_session =
                                         Some(crate::tab_drag::DragSession::new(i, (px, py)));
                                 }
+                                // #508: tab click changed active tab → republish.
+                                self.refresh_harness_sink();
                             }
                             Some(sonicterm_ui::tabbar_view::TabHit::Close(i)) => {
                                 self.close_tab_at(i)
@@ -1104,6 +1106,8 @@ impl App {
                                             if let Some(panes) = self.main_panes() {
                                                 mark_all_panes_dirty(panes);
                                             }
+                                            // #508: pane-click focus → republish.
+                                            self.refresh_harness_sink();
                                         }
                                     }
                                     break;

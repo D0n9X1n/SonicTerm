@@ -108,12 +108,14 @@ fn main() -> Result<()> {
                 }
             });
         #[cfg(feature = "harness")]
-        let _harness_sink = if let Some(req) = harness_request.as_deref() {
-            // Hold the Arc so the slot outlives the App; the read
-            // thread also holds a clone. Sender publication (focus
-            // change → active pane sender) is a follow-up — see
-            // `harness_pipe.rs` module doc for the seam.
-            let sink = harness_pipe::new_sink();
+        let harness_sink_for_app = if let Some(req) = harness_request.as_deref() {
+            // #508: construct the shared slot via the App-side helper so
+            // both halves agree on the type alias. The Arc is cloned —
+            // one clone stays with the pipe-reader thread, the other is
+            // installed on the App via `WindowsShell::with_harness_sink`
+            // so every active-pane-change publishes the current
+            // `PtyHandle::in_tx` into the slot.
+            let sink = sonicterm_app::harness::new_sink();
             match harness_pipe::spawn(req, sink.clone()) {
                 Ok(name) => tracing::info!(pipe = %name, "harness pipe thread spawned"),
                 Err(e) => tracing::error!(error = ?e, "failed to spawn harness pipe"),
@@ -134,6 +136,10 @@ fn main() -> Result<()> {
                 .with_os_drag_sink(os_drag_win::WinOsDragSink::arc())
                 .with_os_drag_backend(tab_drag_os::WinOsTabDragBackend::boxed())
                 .with_on_window_ready(on_window_ready);
+            #[cfg(feature = "harness")]
+            if let Some(sink) = harness_sink_for_app {
+                shell = shell.with_harness_sink(sink);
+            }
             if let Some(p) = tearout_payload.or_else(os_drag_win::take_pending_payload) {
                 shell = shell.with_pending_payload(p);
             }

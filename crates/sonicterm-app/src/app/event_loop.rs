@@ -312,6 +312,9 @@ impl App {
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
         self.drain_pending_os_drag_payloads();
+        // #508: publish the freshly-spawned active pane into the harness
+        // sink (no-op without `--features harness`).
+        self.refresh_harness_sink();
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(

@@ -489,6 +489,8 @@ impl App {
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
+        // #508: new tab → new active pane → republish into harness sink.
+        self.refresh_harness_sink();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
         let Some(ws) = self.main_mut() else { return };
@@ -503,6 +505,9 @@ impl App {
         for id in st.tree.leaves() {
             ws.panes.remove(&id);
         }
+        // #508: tab close shifts active tab → republish (may be None if
+        // we just closed the last tab on the main window).
+        self.refresh_harness_sink();
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {
         if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {

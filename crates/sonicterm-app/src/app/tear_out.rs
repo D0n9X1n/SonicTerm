@@ -218,6 +218,12 @@ impl App {
         // activate the LEFT neighbor of the removed slot (spec §B4).
         self.tear_out_apply_source_side(index);
         tracing::info!("tab torn out as new window; windows={}", self.windows.len());
+        // #508: tear-out shifted main's active tab to a neighbor (or
+        // hid main entirely). Republish so the harness sink reflects
+        // whichever main pane (if any) is now active. `hide_main_window`
+        // already publishes None, but the post-hide republish here is
+        // idempotent — the slot just gets set to None twice.
+        self.refresh_harness_sink();
         true
     }
 
