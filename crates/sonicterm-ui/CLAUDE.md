@@ -23,8 +23,9 @@ cargo test -p sonicterm-ui
 ## Common pitfalls
 - IME composition state lost on focus change — `commit_preedit` is
   load-bearing
-- Tab-bar drag chip is rendered by `sonicterm-shared::render::drag_chip`,
-  NOT here — coordinate model + view crate edits together
+- Tab-bar drag chip is owned by `sonicterm-ui::drag_chip` (the
+  `sonicterm-shared::render::drag_chip` path is a back-compat re-export
+  of this module) — coordinate model + view crate edits together
 - Search overlay z-order: must paint above selection, below command
   palette
 

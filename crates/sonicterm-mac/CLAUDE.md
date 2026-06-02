@@ -3,7 +3,8 @@
 ## Purpose
 macOS binary + macOS-only platform glue (NSMenu via objc, libproc-based
 foreground process detection, OS-drag). `main.rs` is ~30 lines: loads
-config + invokes `sonicterm_shared::run` (post-M7: `sonicterm_app::run`).
+config, builds `sonicterm_app_core::AppStateMachine`, then runs
+`sonicterm_app::shell::MacShell`.
 
 ## Public surface
 - `main` — bin entry point

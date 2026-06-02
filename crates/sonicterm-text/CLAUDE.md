@@ -15,7 +15,7 @@ The render-regression rule (CLAUDE.md §11) applies: any change here
 MUST pass the capability matrix:
 ```bash
 cargo test -p sonicterm-core --test vt_capability_matrix
-cargo test -p sonicterm-shared --test render_capability_matrix
+cargo test -p sonicterm-text --test render_capability_matrix
 cargo run --example pty_dump_unicode -p sonicterm-core --release
 ```
 PR #42 shipped CJK tofu past the local gate because every test was
@@ -31,7 +31,9 @@ append a row to README).
 ```bash
 cargo test -p sonicterm-text
 cargo test -p sonicterm-core --test vt_capability_matrix
-cargo test -p sonicterm-shared --test render_capability_matrix
+cargo test -p sonicterm-text --test render_capability_matrix
+cargo test -p sonicterm-text --test symbol_fit         # PR #456 SymbolFit policy
+cargo test -p sonicterm-text --test font_coverage_pua  # PR #453 PUA coverage
 cargo run --example pty_dump_unicode -p sonicterm-core --release
 bash scripts/check-visual-snapshots.sh
 # Plus §13 GUI smoke (mac) — see crates/sonicterm-app/CLAUDE.md
@@ -48,4 +50,4 @@ bash scripts/check-visual-snapshots.sh
 
 ## Cross-references
 - Consumes traits from: `sonicterm-types::Painter`
-- Consumed by: `sonicterm-gpu`, `sonicterm-shared::render`
+- Consumed by: `sonicterm-gpu` directly; legacy `sonicterm-shared::render` shim re-exports for back-compat.
