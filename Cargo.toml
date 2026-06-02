@@ -38,7 +38,7 @@ unicode-segmentation = "1.13"
 tokio = { version = "1.52", features = ["full"] }
 crossbeam-channel = "0.5"
 # SSH client (optional; enabled via sonicterm-core/ssh feature)
-russh = "0.46"
+russh = "0.61"
 parking_lot = "0.12"
 
 # Rendering — these three move as a coherent triple
