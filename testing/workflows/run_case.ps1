@@ -261,13 +261,18 @@ foreach ($p in @($script:SONIC_PIDS)) {
 Start-Sleep -Milliseconds 400
 
 $proc = Start-Process -FilePath $SonicBin `
+  -ArgumentList @('--harness-input-pipe','auto') `
   -RedirectStandardOutput (Join-Path $CaseOut 'sonicterm.out.log') `
   -RedirectStandardError  (Join-Path $CaseOut 'sonicterm.err.log') `
   -PassThru -WindowStyle Normal
 $SONIC_PID = $proc.Id
 [void]$script:SONIC_PIDS.Add($SONIC_PID)
 $env:SONIC_PID = "$SONIC_PID"
-Log "spawned sonicterm-windows pid=$SONIC_PID"
+Log "spawned sonicterm-windows pid=$SONIC_PID (--harness-input-pipe auto)"
+# Resolved on first Send-Text call; null until then to avoid blocking
+# cases that never type text. Throws if the binary crashed or never
+# announced the pipe.
+$script:HarnessPipeName = $null
 
 # ------------------------------------------------------------------
 # Guard 2 — process-exists post-spawn. If sonicterm-windows died
@@ -441,15 +446,31 @@ function Send-Chord([string]$chord) {
   }
 }
 function Send-Text([string]$text) {
-  # Partial-land per #502 R4: Bucket A (text payload) is blocked on the
-  # harness-input-pipe (#506). Text-only steps are SKIPped here rather
-  # than calling into the throwing Send-TextToHwnd stub. The full
-  # #502 close lands in a follow-up consumer PR that wires this through
-  # --harness-input-pipe.
-  Log "SKIP: bucket_a_blocked_on_506 (text payload '$text' — needs #506 harness pipe)"
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'
-  Set-Content (Join-Path $CaseOut 'skip_reason') 'bucket_a_blocked_on_506'
-  exit 77
+  # #502 R5 consumer: text payload is delivered via the harness named
+  # pipe announced on the binary's stdout. The pipe name is resolved
+  # lazily on the first text step (so cases that never type don't burn
+  # the timeout). Pipe-write failure FAILs the case (per Opus caveat 3
+  # — Bucket A is no longer SKIP-able now that the pipe exists).
+  if (-not $script:HarnessPipeName) {
+    $logPath = Join-Path $CaseOut 'sonicterm.out.log'
+    try {
+      $script:HarnessPipeName = Get-HarnessPipeName -LogPath $logPath -Proc $proc -TimeoutSec 10
+      Log "harness pipe: $($script:HarnessPipeName)"
+    } catch {
+      Log "FAIL bucket_a_pipe_resolve: $_"
+      Set-Content (Join-Path $CaseOut 'status') 'FAIL'
+      Set-Content (Join-Path $CaseOut 'fail_reason') 'bucket_a_pipe_resolve'
+      exit 1
+    }
+  }
+  try {
+    Send-TextToPipe -PipeName $script:HarnessPipeName -Text $text
+  } catch {
+    Log "FAIL bucket_a_pipe_write: $_"
+    Set-Content (Join-Path $CaseOut 'status') 'FAIL'
+    Set-Content (Join-Path $CaseOut 'fail_reason') 'bucket_a_pipe_write'
+    exit 1
+  }
 }
 function Do-Setup([string]$step) {
   [void](Ensure-FrontOrSkip)

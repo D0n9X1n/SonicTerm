@@ -2,8 +2,10 @@
 # Send-InputToHwnd.ps1 — three-bucket input delivery for SonicTerm
 # Windows test harness (issue #502, Guard-4 RDP SKIP fix).
 #
-# Bucket A (text payload)      : STUB — blocked on #506 (harness pipe).
-#                                Signature preserved for future wiring.
+# Bucket A (text payload)      : NamedPipeClientStream → `--harness-
+#                                input-pipe` (#506 / #511 consumer wire-up
+#                                under #502 R5). See Send-TextToPipe +
+#                                Get-HarnessPipeName below.
 # Bucket B (named-key, no mod) : WM_KEYDOWN + WM_KEYUP posted to HWND.
 #                                Does NOT require foreground.
 # Bucket C (real modifier chord): SendInput, AFTER AttachThreadInput +
@@ -237,23 +239,90 @@ function _Invoke-PostMessage {
 }
 
 # ----------------------------------------------------------------------
-# Bucket A — text payload. NOT IMPLEMENTED in this PR.
+# Bucket A — text payload via the `--harness-input-pipe` named pipe
+# (PR #506 / #511). The Rust side spawns a NamedPipe accept loop and
+# prints "harness pipe ready: \\.\pipe\sonicterm-harness-<stem>" on
+# stdout once the pipe truly exists; we extract the name from
+# `sonicterm.out.log` and connect with NamedPipeClientStream.
 #
-# Partial-land per #502 R4 Opus review: synthetic WM_CHAR PostMessages
-# are not consumed by SonicTerm's PTY-side input path (the harness needs
-# a dedicated byte-injection pipe instead). The signature is preserved
-# so the future consumer PR (#502) can wire it up once the underlying
-# harness pipe lands.
-#
-# Blocked-by: #506 (feat(sonicterm-windows): --harness-input-pipe for
-# headless byte injection (harness-only feature gate)).
+# The pipe is single-instance (max=1, PIPE_TYPE_BYTE + PIPE_WAIT) and
+# is recreated after every disconnect, so each Send-TextToPipe call
+# performs a full Connect/Write/Flush/Dispose cycle. Failing to
+# Dispose() leaves the previous client attached and the next call
+# blocks the 5s Connect timeout.
 # ----------------------------------------------------------------------
+
+# Poll the sonicterm stdout log for the "harness pipe ready: ..." line.
+# Breaks early if the spawned process has already exited so we don't
+# burn the full timeout on a binary that crashed at startup.
+function Get-HarnessPipeName {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory=$true)][string]$LogPath,
+    [Parameter(Mandatory=$true)][System.Diagnostics.Process]$Proc,
+    [int]$TimeoutSec = 10
+  )
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $rx = [regex]'harness pipe ready: (\\\\\.\\pipe\\sonicterm-harness-\S+)'
+  while ((Get-Date) -lt $deadline) {
+    if (Test-Path $LogPath) {
+      try {
+        $text = Get-Content -LiteralPath $LogPath -Raw -ErrorAction Stop
+        $m = $rx.Match($text)
+        if ($m.Success) { return $m.Groups[1].Value.Trim() }
+      } catch { }
+    }
+    try { $Proc.Refresh() } catch { }
+    if ($Proc.HasExited) {
+      $tail = if (Test-Path $LogPath) {
+        (Get-Content -LiteralPath $LogPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+      } else { '<no log>' }
+      throw ("Get-HarnessPipeName: sonicterm exited (code={0}) before announcing pipe. Tail:`n{1}" -f $Proc.ExitCode, $tail)
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  $tail = if (Test-Path $LogPath) {
+    (Get-Content -LiteralPath $LogPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+  } else { '<no log>' }
+  throw ("Get-HarnessPipeName: timed out after {0}s waiting for 'harness pipe ready:' in {1}. Tail:`n{2}" -f $TimeoutSec, $LogPath, $tail)
+}
+
+# Connect → write UTF-8 bytes → flush → dispose. Throws on any I/O
+# failure (caller is expected to FAIL the case, per Opus caveat 3 —
+# Bucket A is no longer SKIP-able now that the pipe exists).
+function Send-TextToPipe {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory=$true)][string]$PipeName,
+    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Text
+  )
+  # .NET NamedPipeClientStream wants the stem only (no `\\.\pipe\` prefix).
+  $stem = $PipeName -replace '^\\\\\.\\pipe\\',''
+  $client = New-Object System.IO.Pipes.NamedPipeClientStream(
+    '.', $stem, [System.IO.Pipes.PipeDirection]::Out)
+  try {
+    $client.Connect(5000)
+    if ([string]::IsNullOrEmpty($Text)) { return }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    $client.Write($bytes, 0, $bytes.Length)
+    $client.Flush()
+  } finally {
+    # MANDATORY — pipe is single-instance, leaking the client blocks
+    # the next Connect() for the full timeout.
+    $client.Dispose()
+  }
+}
+
 function Send-TextToHwnd {
   param(
     [Parameter(Mandatory=$true)][IntPtr]$Hwnd,
     [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Text
   )
-  throw "Bucket A requires harness pipe — blocked on #506"
+  # Deprecated as of #502 consumer: HWND is no longer the channel for
+  # text payload. Callers should resolve the harness pipe name and use
+  # Send-TextToPipe directly. Kept as a clearer error for any stale
+  # call site we missed in this PR.
+  throw "Send-TextToHwnd is deprecated — use Send-TextToPipe with the case's harness pipe name (#502)"
 }
 
 # ----------------------------------------------------------------------
