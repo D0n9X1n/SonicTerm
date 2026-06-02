@@ -166,6 +166,7 @@ bash tools/check-harness-bash-strict.sh
 bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
 bash scripts/check-visual-snapshots.sh
+bash testing/workflows/test-ocr-skip.sh
 ```
 
 Code-touching PRs MUST also run the per-crate `## Test gate (local)`
