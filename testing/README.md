@@ -1,5 +1,12 @@
 # SonicTerm visual test harness
 
+> ⚠️ The harness drives `sonicterm-mac` via AppleScript keystrokes. Before
+> running, **quit any other terminal emulator** (WezTerm, iTerm2,
+> Terminal.app, kitty, alacritty, etc.) — focus tracking is not perfect and
+> stray keystrokes will leak to whichever app the macOS foreground is on.
+> The harness now pre-flights this check and refuses to start if a known
+> terminal is running. See issue #464.
+
 Local-session visual gate for render/UX-affecting changes. PM (mac side) runs
 `just visual mac` before merging any PR that touches the GUI smoke surface
 (see CLAUDE.md §13). The Windows PM will add `testing/workflows/windows.ps1`

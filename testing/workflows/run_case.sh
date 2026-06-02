@@ -65,7 +65,24 @@ SONIC_PID=$!
 disown "$SONIC_PID" 2>/dev/null || true
 log "spawned sonicterm-mac pid=$SONIC_PID"
 
-# Wait for window — poll until AppleScript reports a window count > 0.
+# Guard #464.2: verify the process actually launched. If pgrep can't find
+# sonicterm-mac after 4s, the binary crashed or never started — SKIP rather
+# than silently sending keystrokes to whatever app is frontmost.
+PROC_READY=0
+for _ in $(seq 1 40); do
+  if pgrep -f 'target/release/sonicterm-mac' >/dev/null 2>&1; then
+    PROC_READY=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ $PROC_READY -ne 1 ]]; then
+  log "SKIP: sonicterm-mac failed to launch within 4s (see #464)"
+  exit 77
+fi
+
+# Guard #464.3: verify the window actually exists. Without a window there's
+# nothing to drive — SKIP rather than warning and continuing.
 WINDOW_READY=0
 for _ in $(seq 1 40); do
   count=$(osascript -e 'tell application "System Events" to count windows of (first process whose name is "sonicterm-mac")' 2>/dev/null || echo 0)
@@ -76,7 +93,9 @@ for _ in $(seq 1 40); do
   sleep 0.1
 done
 if [[ $WINDOW_READY -ne 1 ]]; then
-  log "WARN: sonicterm-mac window did not appear within 4s — case may be flaky"
+  log "SKIP: sonicterm-mac window did not appear within 4s (see #464)"
+  pkill -9 -f sonicterm-mac 2>/dev/null || true
+  exit 77
 fi
 
 osascript >/dev/null 2>&1 <<EOF || true
@@ -89,6 +108,16 @@ tell application "System Events"
 end tell
 EOF
 sleep 0.4
+
+# Guard #464.4: VERIFY frontmost. If System Events focus failed silently
+# (Accessibility perms / another app grabbed focus), subsequent keystrokes
+# leak to whatever's frontmost (WezTerm tabs, Claude Code chat, etc.).
+front=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null || echo "")
+if [[ "$front" != "sonicterm-mac" ]]; then
+  log "ERROR: sonicterm-mac not frontmost (got '$front') — skipping case (see #464)"
+  pkill -9 -f sonicterm-mac 2>/dev/null || true
+  exit 77
+fi
 
 # ----- focus helper with retry -----
 focus_sonic() {
@@ -278,14 +307,21 @@ focus_sonic || true
 source "$CASE_OUT/steps.sh"
 
 # ------------------------------------------------------------------
-# Capture screenshot — window-only when possible
+# Capture screenshot — window-only when possible (Guard #464.5).
+# Window-local screencap means pixel-near coords are relative to the
+# top-left of the sonicterm window, NOT the desktop. The pixel_near
+# scaler below assumes a 1000×700 logical window (the size we set
+# above) and rescales by image dimensions for Retina.
+# If WINDOW_ID is empty (Accessibility perms gap), fall back to a
+# full-display capture and log a warning so the user knows pixel
+# checks may sample from the wrong region.
 # ------------------------------------------------------------------
 SHOT="$CASE_OUT/screen.png"
 if [[ -n "$WINDOW_ID" ]] && screencapture -x -l "$WINDOW_ID" "$SHOT" 2>/dev/null && [[ -s "$SHOT" ]]; then
   log "screenshot (window-only): $SHOT"
 else
   screencapture -x -D 1 "$SHOT" 2>/dev/null || true
-  log "screenshot (full display): $SHOT"
+  log "WARN: screenshot fell back to full display (WINDOW_ID empty? check Accessibility perms) — pixel-near checks may be flaky (see #464). path=$SHOT"
 fi
 
 # ------------------------------------------------------------------
@@ -308,7 +344,11 @@ def pixel_near(shot, x, y, rgba, tol):
     try:
         from PIL import Image
         im = Image.open(shot).convert('RGBA')
-        # screencapture is Retina — scale coords by ratio of img-w / 1000 (logical)
+        # Coords are WINDOW-LOCAL (relative to sonicterm-mac top-left),
+        # NOT desktop-absolute. The screencap is taken with
+        # `screencapture -l $WINDOW_ID` so the image bounds == the window.
+        # We set the window to logical 1000×700 in run_case.sh; rescale
+        # by the actual image dimensions (Retina = 2×). See #464.
         sx = int(x * (im.width / 1000.0))
         sy = int(y * (im.height / 700.0))
         if not (0 <= sx < im.width and 0 <= sy < im.height):

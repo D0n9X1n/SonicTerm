@@ -25,6 +25,23 @@ if ! python3 -c "from PIL import Image" 2>/dev/null; then
 fi
 
 # ------------------------------------------------------------------
+# Pre-flight: refuse to run if another terminal emulator is running.
+# AppleScript keystrokes are routed to whatever app is frontmost at the
+# moment of dispatch; if any other terminal is around the harness will
+# leak keystrokes into it (Cmd+T opens stray tabs, `clear`/`echo` lines
+# appear in chat apps, etc.) and screencap pixels come from the wrong
+# window. See issue #464.
+# ------------------------------------------------------------------
+OTHER_TERMS=$(pgrep -lf 'WezTerm|Terminal\.app|iTerm|kitty|alacritty' 2>/dev/null | grep -v 'pgrep' || true)
+if [[ -n "$OTHER_TERMS" ]]; then
+  echo "FATAL: another terminal emulator is running — quit it before running the harness." >&2
+  echo "Detected:" >&2
+  echo "$OTHER_TERMS" >&2
+  echo "(focus tracking is not perfect; stray keystrokes would leak. See issue #464.)" >&2
+  exit 2
+fi
+
+# ------------------------------------------------------------------
 # Arg parsing
 # ------------------------------------------------------------------
 DO_BUILD=0
