@@ -987,7 +987,7 @@ covers_bugs = []
 covers_landmines = ["pty-drop-kills-child"]
 setup = ["open-3-tabs"]
 keystrokes = [
-  { kind = "shell-cmd", value = "pkill -9 -f sonicterm-mac" },
+  { kind = "shell-cmd", value = "kill -9 \"$SONIC_PID\"" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
