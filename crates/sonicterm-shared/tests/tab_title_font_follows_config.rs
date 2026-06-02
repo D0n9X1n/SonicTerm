@@ -12,8 +12,8 @@
 //! PR #113.
 
 use glyphon::Family;
-use sonicterm_core::config::FontConfig;
-use sonicterm_shared::render::terminal_font_attrs;
+use sonicterm_cfg::config::FontConfig;
+use sonicterm_gpu::core::terminal_font_attrs;
 
 #[test]
 fn tab_title_attrs_follow_configured_family() {

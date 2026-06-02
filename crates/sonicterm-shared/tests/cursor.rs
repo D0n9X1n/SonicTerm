@@ -1,16 +1,16 @@
 //! Cursor shape + blink tests.
 //!
-//! Covers the pure helpers in [`sonicterm_shared::cursor`] plus the
+//! Covers the pure helpers in [`sonicterm_ui::cursor`] plus the
 //! glyph-recolor used by the block cursor to invert the cell. GPU
 //! state is deliberately out of scope here — `tests/render.rs` and
 //! the `pty_dump` example exercise the on-screen pipeline.
 
 use std::time::Duration;
 
-use sonicterm_shared::cursor::{self, CursorShape};
-use sonicterm_shared::quad::px_to_ndc;
-use sonicterm_shared::render::recolor_cursor_glyphs;
-use sonicterm_shared::text_pipeline::GlyphInstance;
+use sonicterm_gpu::cursor::recolor_cursor_glyphs;
+use sonicterm_gpu::quad::px_to_ndc;
+use sonicterm_gpu::text_pipeline::GlyphInstance;
+use sonicterm_ui::cursor::{self, CursorShape};
 
 #[test]
 fn default_shape_matches_wezterm() {
@@ -175,8 +175,8 @@ fn blink_schedule_is_silenced_when_window_unfocused() {
 /// via the public quad helper so the test stays GPU-free.
 #[test]
 fn unfocused_pane_cursor_is_hollow() {
-    use sonicterm_shared::quad::QuadInstance;
-    use sonicterm_shared::render::push_hollow_rect;
+    use sonicterm_gpu::cursor::push_hollow_rect;
+    use sonicterm_gpu::quad::QuadInstance;
     let mut quads: Vec<QuadInstance> = Vec::new();
     push_hollow_rect(&mut quads, 50.0, 30.0, 10.0, 20.0, 100.0, 100.0, [1.0, 1.0, 1.0, 1.0], 2.0);
     assert_eq!(quads.len(), 4, "hollow rect = top+bottom+left+right");
@@ -205,9 +205,9 @@ fn unfocused_pane_cursor_is_hollow() {
 /// `(bg.r, bg.g, bg.b, 0.5)` would blend wrong and produce a halo.
 #[test]
 fn inverted_glyph_recolor_is_premultiplied_during_blink() {
-    use sonicterm_shared::quad::px_to_ndc;
-    use sonicterm_shared::render::recolor_cursor_glyphs;
-    use sonicterm_shared::text_pipeline::GlyphInstance;
+    use sonicterm_gpu::cursor::recolor_cursor_glyphs;
+    use sonicterm_gpu::quad::px_to_ndc;
+    use sonicterm_gpu::text_pipeline::GlyphInstance;
 
     let sw = 100.0;
     let sh = 100.0;

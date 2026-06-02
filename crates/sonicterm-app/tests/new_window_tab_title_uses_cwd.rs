@@ -17,8 +17,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use sonicterm_core::{grid::Grid, vt::Parser};
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::Parser;
 
 use sonicterm_app::app::{refresh_active_tab_title, PaneState};
 

@@ -8,7 +8,7 @@
 //!
 //! Pairs with the forthcoming fix PR (TBD).
 
-use sonicterm_core::config::Config;
+use sonicterm_cfg::config::Config;
 
 #[test]
 fn font_family_overridable_from_toml() {

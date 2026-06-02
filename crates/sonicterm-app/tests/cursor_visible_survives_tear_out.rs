@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use sonicterm_app::app::PaneState;
-use sonicterm_core::{grid::Grid, vt::Parser};
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 
 fn make_pane() -> PaneState {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));

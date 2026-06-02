@@ -1,11 +1,11 @@
-//! Integration tests for [`sonicterm_core::ssh`].
+//! Integration tests for [`sonicterm_io::ssh`].
 //!
 //! Scope: parser + validator only — no network. The live `SshHandle`
 //! connect path is gated behind `feature = "ssh"` and pulls a tokio
 //! runtime + russh; exercising it would require a mock SSH server,
 //! which is out of scope for v1.
 
-use sonicterm_core::ssh::{parse_target, validate_host, validate_user, SshError, SshTarget};
+use sonicterm_io::ssh::{parse_target, validate_host, validate_user, SshError, SshTarget};
 
 #[test]
 fn parses_user_at_host_default_port() {
@@ -125,7 +125,7 @@ fn validators_reject_empty_and_overlong() {
 
 #[test]
 fn action_round_trips_through_serde_plain() {
-    use sonicterm_core::keymap::Action;
+    use sonicterm_cfg::keymap::Action;
     let a = Action::OpenSshPane("alice@host:2222".into());
     // serde_json is enough to confirm the variant participates in
     // serialize/deserialize cleanly (we don't bind it as a bare string
@@ -145,7 +145,7 @@ fn handle_drop_signals_shutdown() {
     // fast, but the parser path stays clean. We don't drive a real
     // connection here; a mock SSH server is tracked as follow-up.
     let target = parse_target("alice@127.0.0.1:1").unwrap();
-    let res = sonicterm_core::ssh::SshHandle::connect(target, None, 80, 24);
+    let res = sonicterm_io::ssh::SshHandle::connect(target, None, 80, 24);
     // Either Ok (background thread will fail) or Err (build-time spawn
     // failed) — both must drop cleanly without hanging the test.
     drop(res);
@@ -160,7 +160,7 @@ fn handle_drop_signals_shutdown() {
 #[cfg(feature = "ssh")]
 #[test]
 fn connect_rejects_bypass_attempts_in_host() {
-    use sonicterm_core::ssh::SshHandle;
+    use sonicterm_io::ssh::SshHandle;
     let bad_hosts = [
         "host with space",
         "host;rm",
@@ -192,7 +192,7 @@ fn connect_rejects_dotdot_is_allowed_but_overlong_is_not() {
     // it's not a path traversal risk because the host is never used
     // as a filesystem path. But a wildly oversized host MUST be
     // rejected before reaching russh.
-    use sonicterm_core::ssh::SshHandle;
+    use sonicterm_io::ssh::SshHandle;
     let target = SshTarget { user: "alice".into(), host: "a".repeat(300), port: 22 };
     let r = SshHandle::connect(target, None, 80, 24);
     assert!(matches!(r, Err(SshError::ParseTarget(_))), "overlong host must be rejected");
@@ -201,7 +201,7 @@ fn connect_rejects_dotdot_is_allowed_but_overlong_is_not() {
 #[cfg(feature = "ssh")]
 #[test]
 fn connect_rejects_bypass_attempts_in_user() {
-    use sonicterm_core::ssh::SshHandle;
+    use sonicterm_io::ssh::SshHandle;
     let bad_users = ["al ice", "al;ice", "al|x", "al`x`", "al\nice", "al\0x", "al$x"];
     for u in bad_users {
         let target = SshTarget { user: u.into(), host: "example.com".into(), port: 22 };
@@ -217,7 +217,7 @@ fn connect_rejects_bypass_attempts_in_user() {
 #[cfg(feature = "ssh")]
 #[test]
 fn connect_rejects_port_zero_bypass() {
-    use sonicterm_core::ssh::SshHandle;
+    use sonicterm_io::ssh::SshHandle;
     let target = SshTarget { user: "alice".into(), host: "example.com".into(), port: 0 };
     let r = SshHandle::connect(target, None, 80, 24);
     assert!(matches!(r, Err(SshError::ParseTarget(_))), "port 0 must be rejected");
@@ -229,7 +229,7 @@ fn connect_accepts_valid_hosts() {
     // Smoke: each of these passes validation. The background tokio
     // thread will fail to actually connect (unroutable / no shell), but
     // `connect` itself must return Ok with the validators happy.
-    use sonicterm_core::ssh::SshHandle;
+    use sonicterm_io::ssh::SshHandle;
     for h in ["example.com", "192.168.1.1", "::1", "host.sub.example.com"] {
         let target = SshTarget { user: "alice".into(), host: h.into(), port: 22 };
         let r = SshHandle::connect(target, None, 80, 24);

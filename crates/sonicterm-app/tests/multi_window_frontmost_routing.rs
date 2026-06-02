@@ -31,7 +31,7 @@
 //! `frontmost_child_routes_close_tab_away_from_main`.
 
 use sonicterm_app::app::{App, FrontmostKind};
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Action, Direction, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

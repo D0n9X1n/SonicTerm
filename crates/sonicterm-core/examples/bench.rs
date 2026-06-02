@@ -29,12 +29,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sonicterm_core::{
-    glyph_key::GlyphKey,
-    grid::{CellFlags, Color, Grid},
-    pty::PtyHandle,
-    vt::Parser,
-};
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_types::glyph_key::GlyphKey;
+use sonicterm_vt::vt::Parser;
 
 #[derive(serde::Serialize, Default)]
 struct Report {
@@ -89,9 +87,8 @@ fn main() {
 /// when the just-typed character appears in the grid; difference is the
 /// echo latency. Done with a real local shell.
 fn measure_typing(r: &mut Report) {
-    let pty =
-        PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default())
-            .expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_io::pty::ShellSpawnOpts::default())
+        .expect("spawn");
     let parser = Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(120, 40))));
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -161,9 +158,8 @@ fn measure_typing(r: &mut Report) {
 /// sooner and shows a higher throughput instead of being clipped by a
 /// fixed 6-second wall.
 fn measure_scroll_and_parse(r: &mut Report) {
-    let pty =
-        PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default())
-            .expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_io::pty::ShellSpawnOpts::default())
+        .expect("spawn");
     let mut parser = Parser::new(Grid::new(120, 40));
     std::thread::sleep(Duration::from_millis(800));
     while let Ok(b) = pty.out_rx.try_recv() {
@@ -271,9 +267,8 @@ fn measure_idle(r: &mut Report) {
     // without sampling threads; the value reported here is "what the
     // VT thread consumed sampling pty for 1s of quiescence" (proxy for
     // total idle behavior since the renderer isn't in the loop).
-    let pty =
-        PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default())
-            .expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_io::pty::ShellSpawnOpts::default())
+        .expect("spawn");
     let parser = Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(120, 40))));
     std::thread::sleep(Duration::from_millis(1500));
 
@@ -510,7 +505,7 @@ impl CachedWalker {
 
 // ------- B3: glyph-atlas walker (pure CPU, no GPU) ----------------------
 //
-// Mirrors what `sonicterm_shared::glyph_atlas::GlyphAtlas` will do every
+// Mirrors what `sonicterm_text::glyph_atlas::GlyphAtlas` will do every
 // frame: derive a `GlyphKey` per non-WIDE_CONT cell and look it up in a
 // `HashMap`, populating on miss. The "fake GlyphInfo" stored is the
 // same shape as the real one (uv rect + advance) so the bench's

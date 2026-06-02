@@ -40,7 +40,7 @@ fn cell_height_includes_font_line_gap_for_rec_mono_casual() {
     let size = 14.0_f32;
     let line_height_mult = 1.1_f32;
 
-    let natural = sonicterm_shared::render::natural_line_h_px(&mut fs, "Rec Mono St.Helens", size);
+    let natural = sonicterm_text::metrics::natural_line_h_px(&mut fs, "Rec Mono St.Helens", size);
     let logical_cell_h = natural * line_height_mult;
     // 2x Retina is the canonical case the user reported the parity bug on.
     let physical_cell_h = logical_cell_h * 2.0;

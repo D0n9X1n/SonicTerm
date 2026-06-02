@@ -1,4 +1,4 @@
-use sonicterm_core::config::Config;
+use sonicterm_cfg::config::Config;
 use sonicterm_ui::{pane::Rect, tabbar_view::tab_bar_height};
 
 #[test]

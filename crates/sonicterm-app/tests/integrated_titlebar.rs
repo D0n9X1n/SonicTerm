@@ -33,7 +33,7 @@ fn integrated_titlebar_is_noop_off_macos() {
 
 #[test]
 fn backdrop_transparency_tracks_opaque_vs_material_backdrop() {
-    use sonicterm_core::config::BackdropKind;
+    use sonicterm_cfg::config::BackdropKind;
     use winit::window::Window;
 
     let opaque = sonicterm_app::app::with_backdrop_transparency(
@@ -59,7 +59,7 @@ fn backdrop_transparency_tracks_opaque_vs_material_backdrop() {
 
 #[test]
 fn top_inset_helper_adds_titlebar_band() {
-    use sonicterm_shared::render::tab_bar_top_inset_with_titlebar;
+    use sonicterm_ui::tabbar_view::tab_bar_top_inset_with_titlebar;
     // Tab bar visible: titlebar inset stacks above the bar.
     let with = tab_bar_top_inset_with_titlebar(true, 4.0, 28.0);
     let without = tab_bar_top_inset_with_titlebar(true, 4.0, 0.0);

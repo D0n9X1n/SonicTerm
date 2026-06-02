@@ -16,8 +16,8 @@
 //! Added in `perf/dirty-bitset-foundation` — see PR for the renderer
 //! work it unblocks.
 
-use sonicterm_core::grid::Grid;
-use sonicterm_core::vt::Parser;
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 
 const COLS: u16 = 20;
 const ROWS: u16 = 8;

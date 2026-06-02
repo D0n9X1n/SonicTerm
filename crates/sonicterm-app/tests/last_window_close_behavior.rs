@@ -7,7 +7,7 @@
 //! call-site is a one-liner that forwards to it.
 
 use sonicterm_app::app::App;
-use sonicterm_core::config::Config;
+use sonicterm_cfg::config::Config;
 
 #[cfg(target_os = "macos")]
 #[test]

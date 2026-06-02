@@ -6,8 +6,8 @@
 //! VT220-standard status queries.
 
 use crossbeam_channel::unbounded;
-use sonicterm_core::grid::Grid;
-use sonicterm_core::vt::{Parser, SONIC_VERSION};
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::{Parser, SONIC_VERSION};
 
 fn parser_with_reply() -> (Parser, crossbeam_channel::Receiver<Vec<u8>>) {
     let (tx, rx) = unbounded();

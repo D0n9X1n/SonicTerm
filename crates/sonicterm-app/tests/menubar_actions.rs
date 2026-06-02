@@ -8,7 +8,7 @@
 //! existing `font_live_reload.rs` + config-watch tests.
 
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::{Config, FontConfig},
     keymap::{Action, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
@@ -142,8 +142,8 @@ fn toggle_tab_bar_flips_visibility_flag() {
 /// rewrite this assertion.
 #[test]
 fn tab_bar_top_inset_drops_bar_band_when_hidden() {
-    use sonicterm_shared::render::tab_bar_top_inset;
-    use sonicterm_shared::tabbar_view::TAB_BAR_HEIGHT;
+    use sonicterm_ui::tabbar_view::tab_bar_top_inset;
+    use sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT;
     let pad = 4.0_f32;
     let shown = tab_bar_top_inset(true, pad);
     let hidden = tab_bar_top_inset(false, pad);

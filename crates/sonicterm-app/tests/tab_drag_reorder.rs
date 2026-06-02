@@ -20,8 +20,8 @@
 //! `compute_action` + `TabBar::reorder` covers the real code path.
 
 use sonicterm_app::tab_drag::{compute_action, DragAction, DragSession};
-use sonicterm_shared::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn three_tab_bar() -> TabBar {
     let mut b = TabBar::new();

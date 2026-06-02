@@ -3,12 +3,12 @@
 //! Mirrors the structure of `sonicterm_text::tests::row_glyph_cache` for
 //! the quad cache layer added in Epic #300 Phase P2.
 
-use sonicterm_core::grid::Cell;
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::render::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQuadCache};
+use sonicterm_gpu::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQuadCache};
+use sonicterm_grid::grid::Cell;
 
 fn dummy_row(s: &str) -> Vec<Cell> {
-    use sonicterm_core::grid::{CellFlags, Color};
+    use sonicterm_grid::grid::{CellFlags, Color};
 
     s.chars()
         .map(|c| Cell::plain(c, Color::default(), Color::default(), CellFlags::empty()))

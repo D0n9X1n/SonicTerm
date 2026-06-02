@@ -28,8 +28,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use sonicterm_app::app::{resize_all_panes, PaneState};
 use sonicterm_app::config_watch::ConfigWatcher;
-use sonicterm_core::grid::Grid;
-use sonicterm_core::vt::Parser;
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 
 fn make_pane(cols: u16, rows: u16) -> PaneState {
     let parser = Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows))));

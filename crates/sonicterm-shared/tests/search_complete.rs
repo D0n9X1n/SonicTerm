@@ -2,10 +2,8 @@
 //! search, case toggle, regex mode, next/prev wrap, viewport scroll
 //! request, and close-clears semantics.
 
-use sonicterm_core::grid::{CellFlags, Color, Grid};
-use sonicterm_shared::search::{
-    find_in_grid, find_regex_in_grid, MatchRange, SearchMode, SearchState,
-};
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_ui::search::{find_in_grid, find_regex_in_grid, MatchRange, SearchMode, SearchState};
 
 fn put(g: &mut Grid, s: &str) {
     for ch in s.chars() {

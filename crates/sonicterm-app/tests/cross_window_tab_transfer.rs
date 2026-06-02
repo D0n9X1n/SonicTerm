@@ -19,7 +19,8 @@ use sonicterm_app::app::tab_transfer::{
     reorder_within, transfer_tab_between, TabContainer, TransferOutcome,
 };
 use sonicterm_app::app::PaneState;
-use sonicterm_core::{grid::Grid, vt::Parser};
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::Parser;
 use std::sync::Arc;
 
 fn make_pane() -> PaneState {
@@ -194,7 +195,7 @@ fn drop_on_other_window_then_cmd_t_goes_to_target() {
 
 use sonicterm_app::app::App;
 use sonicterm_app::app::TransferError;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

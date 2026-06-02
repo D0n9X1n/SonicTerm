@@ -1,6 +1,6 @@
 //! Integration tests for tabs.
 
-use sonicterm_shared::tabs::*;
+use sonicterm_ui::tabs::*;
 
 #[test]
 fn push_and_activate() {

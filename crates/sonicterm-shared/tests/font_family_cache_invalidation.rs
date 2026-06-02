@@ -1,5 +1,5 @@
-use sonicterm_core::grid::{Cell, Color};
-use sonicterm_shared::{
+use sonicterm_grid::grid::{Cell, Color};
+use sonicterm_text::{
     row_glyph_cache::{CachedRow, RowGlyphCache},
     shape::{RunStyle, ShapeCache},
     swash_rasterizer::{load_bundled_fonts, SwashRasterizer, DEFAULT_RASTER_PX},

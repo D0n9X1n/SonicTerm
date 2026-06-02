@@ -19,7 +19,7 @@
 //! Visual evidence of the fix is in `target/screenshots/` from the
 //! manual GUI smoke per CLAUDE.md §13.
 
-use sonicterm_shared::quad::px_to_ndc;
+use sonicterm_gpu::quad::px_to_ndc;
 
 /// `cells()` divides logical surface width by logical `cell_w`. On a
 /// 2× display, passing physical width (the bug) doubled the reported

@@ -1,6 +1,6 @@
 //! Integration tests for the IME composition state machine.
 
-use sonicterm_shared::ime::ImeState;
+use sonicterm_ui::ime::ImeState;
 
 #[test]
 fn fresh_state_is_idle() {
@@ -92,7 +92,7 @@ fn disabled_clears_preedit_but_preserves_pending_commit() {
 // with `IMKCFRunLoopWakeUpReliable` errors. We now gate the winit
 // call behind a (row, col) change.
 
-use sonicterm_shared::ime::ImeCursorThrottle;
+use sonicterm_ui::ime::ImeCursorThrottle;
 
 #[test]
 fn throttle_fires_once_for_initial_position() {

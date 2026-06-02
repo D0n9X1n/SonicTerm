@@ -1,4 +1,4 @@
-use sonicterm_core::keymap::{Action, Keymap};
+use sonicterm_cfg::keymap::{Action, Keymap};
 use winit::keyboard::{Key, ModifiersState};
 
 #[test]

@@ -13,8 +13,8 @@
 
 use sonicterm_cfg::config::ScrollbarMode;
 use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_gpu::core::emit_pane_scrollbar;
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::render::emit_pane_scrollbar;
 use sonicterm_ui::pane::Rect as PaneRect;
 
 fn test_theme() -> Theme {

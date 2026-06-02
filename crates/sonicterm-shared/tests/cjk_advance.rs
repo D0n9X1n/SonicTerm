@@ -33,9 +33,9 @@
 //! tests in `text_pipeline_offscreen.rs`.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::glyph_atlas::GlyphAtlas;
-use sonicterm_shared::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_text::glyph_atlas::GlyphAtlas;
+use sonicterm_text::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_types::glyph_key::GlyphKey;
 
 fn font_system() -> FontSystem {
     // `FontSystem::new()` already loads OS sources on Mac/Win so the

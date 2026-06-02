@@ -227,7 +227,7 @@ fn tab_title_no_truncation_when_fits() {
 
 #[test]
 fn tab_font_size_one_pt_larger_than_body() {
-    use sonicterm_shared::render::tab_title_font_size;
+    use sonicterm_ui::tab_spans::tab_title_font_size;
     // The +1.0 contract holds across the configurable size range.
     for body in [10.0_f32, 12.0, 14.0, 15.0, 16.0, 18.0, 22.0, 28.0] {
         let tab = tab_title_font_size(body);

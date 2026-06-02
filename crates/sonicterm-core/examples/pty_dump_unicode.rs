@@ -28,12 +28,10 @@
 
 use std::time::{Duration, Instant};
 
-use sonicterm_core::{
-    grid::{CellFlags, Grid},
-    pty::PtyHandle,
-    test_support::shell_dialect::dialect_for_shell,
-    vt::Parser,
-};
+use sonicterm_core::test_support::shell_dialect::dialect_for_shell;
+use sonicterm_grid::grid::{CellFlags, Grid};
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_vt::vt::Parser;
 
 /// One character from every class the capability matrix covers. Each char
 /// here MUST appear verbatim in the asserted region; anything else is the
@@ -58,7 +56,7 @@ fn main() {
     let pty = PtyHandle::spawn_default_shell(
         120,
         24,
-        sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true },
+        sonicterm_io::pty::ShellSpawnOpts { clean_e2e: true },
     )
     .expect("spawn shell");
     let mut parser = Parser::new(Grid::new(120, 24));

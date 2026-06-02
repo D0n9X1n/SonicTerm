@@ -1,6 +1,6 @@
 use sonicterm_app::app::App;
 use sonicterm_app::os_drag::TabPayload;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

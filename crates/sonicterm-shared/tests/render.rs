@@ -1,11 +1,11 @@
 //! Integration tests for sonicterm-shared render.
 
-use sonicterm_core::{
+use sonicterm_grid::{
     grid::{Cell, CellFlags, Color, Grid},
     hyperlink::HyperlinkId,
 };
 
-use sonicterm_shared::render::collect_hyperlink_runs;
+use sonicterm_gpu::core::collect_hyperlink_runs;
 
 #[test]
 fn collect_hyperlink_runs_coalesces_three_contiguous_cells() {
@@ -55,7 +55,7 @@ fn wezterm_bg_survives_gamma_roundtrip() {
         let s = if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
         (s.clamp(0.0, 1.0) * 255.0).round() as u8
     }
-    let c = sonicterm_shared::render::hex_to_wgpu("#141617");
+    let c = sonicterm_gpu::color::hex_to_wgpu("#141617");
     let r = linear_to_srgb_u8(c.r);
     let g = linear_to_srgb_u8(c.g);
     let b = linear_to_srgb_u8(c.b);
@@ -79,12 +79,12 @@ fn wezterm_fg_linearized_round_trips_to_authored_hex() {
     }
     let theme_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/wezterm.toml");
-    let theme = sonicterm_core::theme::Theme::load(&theme_path).expect("load wezterm.toml");
+    let theme = sonicterm_cfg::theme::Theme::load(&theme_path).expect("load wezterm.toml");
     let (er, eg, eb) = theme.colors.foreground.rgb().expect("parse #cfbc97");
     assert_eq!((er, eg, eb), (0xcf, 0xbc, 0x97), "PR #92 hex pinned");
 
     let g = glyphon::Color::rgb(er, eg, eb);
-    let rgba = sonicterm_shared::render::glyphon_color_to_linear_rgba(g);
+    let rgba = sonicterm_gpu::color::glyphon_color_to_linear_rgba(g);
     let r = linear_to_srgb_u8(rgba[0]);
     let gc = linear_to_srgb_u8(rgba[1]);
     let b = linear_to_srgb_u8(rgba[2]);

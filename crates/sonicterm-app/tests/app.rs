@@ -98,8 +98,8 @@ fn modifier_aware_click_only_opens_with_super() {
     // Any URI the app forwards must clear url_open::validate. We mock
     // url_open::open by calling the same validate() entry point the
     // production path runs first.
-    assert!(sonicterm_core::url_open::validate("https://example.com/path").is_ok());
-    assert!(sonicterm_core::url_open::validate("javascript:alert(1)").is_err());
+    assert!(sonicterm_cfg::url_open::validate("https://example.com/path").is_ok());
+    assert!(sonicterm_cfg::url_open::validate("javascript:alert(1)").is_err());
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn wrap_paste_empty_text_still_emits_brackets() {
 
 #[test]
 fn pick_prompt_target_forward_and_back() {
-    use sonicterm_core::grid::Grid;
+    use sonicterm_grid::grid::Grid;
     let mut g = Grid::new(10, 6);
     g.record_prompt_start();
     g.goto(2, 0);
@@ -142,7 +142,7 @@ fn scroll_to_prev_prompt_view_top_matches_prompt_row() {
     // logic end-to-end: a prompt recorded mid-scrollback, when used as
     // the viewport top, must resolve to the very row that was current
     // when record_prompt_start() ran.
-    use sonicterm_core::grid::{CellFlags, Color, Grid};
+    use sonicterm_grid::grid::{CellFlags, Color, Grid};
     let mut g = Grid::new(4, 3);
     // Row content "A" at scrollback origin; record a prompt there.
     g.put_char('A', Color::Default, Color::Default, CellFlags::empty());

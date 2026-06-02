@@ -5,15 +5,13 @@ use sonicterm_app::app::{
     __test_capture_command_notifications, __test_drain_command_notifications,
     poll_command_events_for_tab_state, PaneCommandEvent, PaneState, TabState,
 };
-use sonicterm_core::{
-    config::{Config, NotificationsConfig},
-    grid::Grid,
-    vt::{CommandEvent, Parser},
-};
+use sonicterm_cfg::config::{Config, NotificationsConfig};
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::{
     pane::PaneTree,
     tabs::{CommandStatus, Tab, TabBar},
 };
+use sonicterm_vt::vt::{CommandEvent, Parser};
 
 #[test]
 fn cmd_end_followed_by_prompt_start_keeps_done_status_and_badge() {

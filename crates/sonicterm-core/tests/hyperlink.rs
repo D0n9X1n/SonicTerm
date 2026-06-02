@@ -1,6 +1,6 @@
 //! Integration tests for the sonicterm-core hyperlink re-exports.
 
-use sonicterm_core::hyperlink::*;
+use sonicterm_grid::hyperlink::*;
 
 #[test]
 fn intern_dedups_same_key() {

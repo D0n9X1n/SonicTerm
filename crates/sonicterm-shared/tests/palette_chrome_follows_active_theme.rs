@@ -22,8 +22,8 @@
 //!    tokyo-night accent (`#7aa2f7`). This guards the data path
 //!    that the palette renderer now reads from.
 
-use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
-use sonicterm_shared::ui_tokens::UiPalette;
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_ui::ui_tokens::UiPalette;
 
 fn hex(s: &str) -> Hex {
     Hex(s.to_string())

@@ -12,7 +12,7 @@ use sonicterm_app::app::scrollbar_input::{
     apply_drag, apply_drag_at, hit, page_down, page_up, HitOutcome, ScrollbarDragState,
     SCROLLBAR_WIDTH_PX,
 };
-use sonicterm_core::config::ScrollbarMode;
+use sonicterm_cfg::config::ScrollbarMode;
 use sonicterm_ui::scrollbar::{Point, Rect};
 
 const PANE: Rect = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };

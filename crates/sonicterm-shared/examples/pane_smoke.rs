@@ -3,8 +3,8 @@
 //!
 //! Run with: `cargo run --example pane_smoke -p sonicterm-shared --release`
 
-use sonicterm_core::keymap::Direction;
-use sonicterm_shared::pane::{PaneTree, Rect};
+use sonicterm_cfg::keymap::Direction;
+use sonicterm_ui::pane::{PaneTree, Rect};
 
 fn main() {
     // Build:   1 | (2 top / 3 bottom)

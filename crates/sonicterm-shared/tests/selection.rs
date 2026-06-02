@@ -1,8 +1,8 @@
 //! Integration tests for sonicterm-shared selection.
 
-use sonicterm_core::grid::{CellFlags, Color, Grid};
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
 
-use sonicterm_shared::selection::*;
+use sonicterm_ui::selection::*;
 
 fn grid_with(text: &[&str]) -> Grid {
     let cols = text.iter().map(|s| s.chars().count()).max().unwrap_or(1) as u16;

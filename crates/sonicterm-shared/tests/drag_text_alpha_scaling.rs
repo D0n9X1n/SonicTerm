@@ -11,7 +11,7 @@
 //! tripping the test floor.
 
 use glyphon::Color as GColor;
-use sonicterm_shared::render::scale_glyphon_alpha;
+use sonicterm_gpu::core::scale_glyphon_alpha;
 
 #[test]
 fn scale_glyphon_alpha_half_matches_ghost_spec() {

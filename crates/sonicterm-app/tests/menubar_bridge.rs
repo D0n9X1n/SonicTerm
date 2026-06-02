@@ -5,7 +5,7 @@
 //! need access to the crate-private `drain`.
 
 use sonicterm_app::menubar_bridge::{__test_drain, push_action};
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 
 #[test]
 fn push_then_drain_preserves_order() {

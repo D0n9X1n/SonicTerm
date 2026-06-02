@@ -1,7 +1,7 @@
 //! Integration tests for pane.
 
-use sonicterm_core::keymap::Direction;
-use sonicterm_shared::pane::*;
+use sonicterm_cfg::keymap::Direction;
+use sonicterm_ui::pane::*;
 
 #[test]
 fn split_right_then_down() {

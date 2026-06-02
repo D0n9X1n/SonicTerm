@@ -18,8 +18,8 @@
 //! `global_to_local` returns logical coords end-to-end.
 
 use sonicterm_app::tab_drag::{find_drop_target, global_to_local, WindowGeom};
-use sonicterm_shared::tabbar_view::{TabBarLayout, TabHit, TAB_BAR_HEIGHT};
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit, TAB_BAR_HEIGHT};
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn bar_with(n: usize) -> TabBar {
     let mut b = TabBar::new();

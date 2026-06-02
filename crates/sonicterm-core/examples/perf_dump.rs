@@ -8,17 +8,14 @@
 
 use std::time::Instant;
 
-use sonicterm_core::{
-    grid::{CellFlags, Color, Grid},
-    pty::PtyHandle,
-    vt::Parser,
-};
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_vt::vt::Parser;
 
 fn main() {
     // 1. parse-side: how fast does Parser::advance handle a burst?
-    let pty =
-        PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default())
-            .expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_io::pty::ShellSpawnOpts::default())
+        .expect("spawn");
     let mut parser = Parser::new(Grid::new(120, 40));
     std::thread::sleep(std::time::Duration::from_millis(800));
     while let Ok(b) = pty.out_rx.try_recv() {

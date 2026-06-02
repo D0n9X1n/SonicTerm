@@ -13,12 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sonicterm_core::{grid::Grid, pty::PtyHandle, vt::Parser};
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
+use sonicterm_vt::vt::Parser;
 
 fn main() {
-    let pty =
-        PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default())
-            .expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_io::pty::ShellSpawnOpts::default())
+        .expect("spawn");
     let parser = Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(120, 40))));
 
     let redraws = Arc::new(AtomicUsize::new(0));

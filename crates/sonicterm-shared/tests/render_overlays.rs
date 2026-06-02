@@ -1,16 +1,16 @@
-//! Tests for the state-overlay layout module (`sonicterm_shared::overlays`).
+//! Tests for the state-overlay layout module (`sonicterm_ui::overlays`).
 //!
 //! These are pure-data tests: no wgpu device is required. They cover the
 //! contract that the renderer relies on — that overlays appear when the
 //! state machine is open and disappear when it is closed.
 
-use sonicterm_shared::command_palette::CommandPalette;
-use sonicterm_shared::ime::ImeState;
-use sonicterm_shared::overlays::{
+use sonicterm_ui::command_palette::CommandPalette;
+use sonicterm_ui::ime::ImeState;
+use sonicterm_ui::overlays::{
     search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_FOOTER_HEIGHT,
     PALETTE_HEIGHT, PALETTE_QUERY_HEIGHT, PALETTE_ROW_ACCENT_W, PALETTE_ROW_HEIGHT, PALETTE_WIDTH,
 };
-use sonicterm_shared::search::SearchState;
+use sonicterm_ui::search::SearchState;
 
 #[test]
 fn palette_layout_is_none_when_closed() {
@@ -100,7 +100,7 @@ fn palette_layout_scrolls_to_keep_selection_visible() {
 fn search_bar_label_with_matches() {
     let mut s = SearchState::new();
     s.query = "abc".to_string();
-    use sonicterm_shared::search::MatchRange;
+    use sonicterm_ui::search::MatchRange;
     s.matches = vec![
         MatchRange { row: 0, col_start: 0, col_end: 3 },
         MatchRange { row: 1, col_start: 0, col_end: 3 },

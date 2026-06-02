@@ -11,10 +11,10 @@
 //!    before the reload and no quads after the cached mode is updated.
 
 use sonicterm_app::app::renderer_scrollbar_mode_differs;
-use sonicterm_core::config::{Config, ScrollbarMode};
-use sonicterm_core::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_cfg::config::{Config, ScrollbarMode};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
+use sonicterm_gpu::core::emit_pane_scrollbar;
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::render::emit_pane_scrollbar;
 use sonicterm_ui::pane::Rect as PaneRect;
 
 fn hex(s: &str) -> Hex {

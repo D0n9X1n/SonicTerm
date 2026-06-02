@@ -4,10 +4,10 @@
 //! `invalidate_row_abs` for every row reported by
 //! `grid.dirty_rows()`, so this test simulates that exact dance.
 
-use sonicterm_core::grid::Cell;
-use sonicterm_core::grid::{CellFlags, Color};
 use sonicterm_gpu::quad::QuadInstance;
-use sonicterm_shared::render::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQuadCache};
+use sonicterm_gpu::row_quad_cache::{row_quad_hash, CachedRowQuads, LineQuadCache};
+use sonicterm_grid::grid::Cell;
+use sonicterm_grid::grid::{CellFlags, Color};
 
 fn row_of(ch: char) -> Vec<Cell> {
     (0..20).map(|_| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty())).collect()

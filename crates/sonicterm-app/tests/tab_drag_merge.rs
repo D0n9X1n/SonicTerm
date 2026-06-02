@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use sonicterm_app::app::App;
 use sonicterm_app::tab_drag::{find_drop_target, global_to_local, local_to_global, WindowGeom};
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
 };
-use sonicterm_shared::tabbar_view::TabBarLayout;
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::TabBarLayout;
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn synth_theme() -> Theme {
     let hex = || Hex("#000000".to_string());

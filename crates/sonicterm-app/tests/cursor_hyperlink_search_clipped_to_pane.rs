@@ -14,7 +14,7 @@
 //! in `crates/sonicterm-shared/src/render/core.rs` would otherwise push to
 //! the GPU.
 
-use sonicterm_shared::render::clip_rect_to_pane;
+use sonicterm_gpu::core::clip_rect_to_pane;
 
 const CELL_W: f32 = 10.0;
 const CELL_H: f32 = 20.0;

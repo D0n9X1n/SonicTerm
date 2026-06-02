@@ -25,7 +25,7 @@
 //! for the implementation that all three paths now flow through.
 
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},

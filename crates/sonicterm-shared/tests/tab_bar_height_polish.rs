@@ -3,8 +3,8 @@
 //! text is vertically centered inside the bar, plus the 6px per-tab
 //! horizontal padding matching WezTerm's chrome.
 
-use sonicterm_shared::tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT, TAB_INNER_PAD};
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::{tab_bar_height, TabBarLayout, TAB_BAR_HEIGHT, TAB_INNER_PAD};
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn bar_with(n: usize) -> TabBar {
     let mut b = TabBar::new();

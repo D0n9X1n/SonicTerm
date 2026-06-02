@@ -1,4 +1,4 @@
-//! Tests for `sonicterm_shared::swash_rasterizer::SwashRasterizer`.
+//! Tests for `sonicterm_text::swash_rasterizer::SwashRasterizer`.
 //!
 //! These exercise real glyph rasterization against the bundled
 //! Rec Mono Casual font shipped in `assets/fonts/`. The test harness
@@ -7,9 +7,9 @@
 //! installed system-wide.
 
 use cosmic_text::FontSystem;
-use sonicterm_core::glyph_key::GlyphKey;
-use sonicterm_shared::glyph_atlas::Rasterizer;
-use sonicterm_shared::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_text::glyph_atlas::Rasterizer;
+use sonicterm_text::swash_rasterizer::{SwashRasterizer, DEFAULT_RASTER_PX};
+use sonicterm_types::glyph_key::GlyphKey;
 
 /// Build a font system populated with the four Rec Mono Casual cuts
 /// shipped under `assets/fonts/`. Returns the system; the rasterizer
@@ -130,7 +130,7 @@ fn rgba_straight_to_bgra_premul_opaque_red() {
     // Opaque red in RGBA straight → opaque red in BGRA premul.
     // (No premultiply effect because alpha == 255.)
     let mut px = [255u8, 0, 0, 255];
-    sonicterm_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    sonicterm_text::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
     assert_eq!(px, [0, 0, 255, 255], "expected BGRA = (0,0,255,255)");
 }
 
@@ -141,7 +141,7 @@ fn rgba_straight_to_bgra_premul_translucent_gray() {
     // After BGR swap: B,G,R order — but values are identical here so
     // the channel swap is invisible. We still assert all four bytes.
     let mut px = [100u8, 100, 100, 128];
-    sonicterm_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    sonicterm_text::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
     // (100 * 128 + 127) / 255 = 12927 / 255 = 50.69 → 50 with truncating div.
     assert_eq!(px, [50, 50, 50, 128], "expected BGRA premul = (50,50,50,128)");
 }
@@ -152,7 +152,7 @@ fn rgba_straight_to_bgra_premul_translucent_blue_swaps_channels() {
     // ends up in the first byte) AND premultiplication scaling the
     // single non-zero channel.
     let mut px = [0u8, 0, 200, 128];
-    sonicterm_shared::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
+    sonicterm_text::swash_rasterizer::rgba_straight_to_bgra_premul(&mut px);
     // B = 200 * 128 / 255 ≈ 100, G = 0, R = 0, A = 128.
     let expected_b = ((200u16 * 128 + 127) / 255) as u8;
     assert_eq!(px, [expected_b, 0, 0, 128]);

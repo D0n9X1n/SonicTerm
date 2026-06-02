@@ -1,5 +1,5 @@
-use sonicterm_core::grid::{CellFlags, Color, Grid};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
 use sonicterm_ui::copy_mode::CopyModeState;
 
 #[test]

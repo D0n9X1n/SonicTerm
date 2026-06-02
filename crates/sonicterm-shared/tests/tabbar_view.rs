@@ -1,8 +1,8 @@
 //! Integration tests for sonicterm-shared tabbar_view.
 
 #![allow(deprecated)] // Pending migration to UiPalette (PR #119 follow-up).
-use sonicterm_shared::tabbar_view::*;
-use sonicterm_shared::tabs::{Tab, TabBar};
+use sonicterm_ui::tabbar_view::*;
+use sonicterm_ui::tabs::{Tab, TabBar};
 
 fn bar_with(n: usize) -> TabBar {
     let mut b = TabBar::new();
@@ -298,7 +298,7 @@ fn active_tab_top_accent_2px_blue() {
     // ACCENT_BLUE. Issue #257: its width must equal the laid-out active
     // tab width exactly; it must not stretch into the remaining strip.
     assert_eq!(ACTIVE_TOP_ACCENT_H, 2.0);
-    let blue = sonicterm_shared::ui_tokens::color::ACCENT_BLUE();
+    let blue = sonicterm_ui::ui_tokens::color::ACCENT_BLUE();
     assert!((blue[3] - 1.0).abs() < 1e-4);
     assert!(blue[0] <= blue[3] + 1e-5);
 }
@@ -319,7 +319,7 @@ fn inactive_tab_hover_bg_uses_white_6pct() {
     // The renderer paints the hover overlay on an inactive tab using
     // `ui_tokens::color::BG_HOVER` which is #FFFFFF @ 6 % — verify the
     // alpha here so the token is the source of truth.
-    let c = sonicterm_shared::ui_tokens::color::BG_HOVER();
+    let c = sonicterm_ui::ui_tokens::color::BG_HOVER();
     let expected_a = 0x0F as f32 / 255.0; // hex "0F" ≈ 6 %
     assert!((c[3] - expected_a).abs() < 1e-3, "got alpha {}", c[3]);
 }

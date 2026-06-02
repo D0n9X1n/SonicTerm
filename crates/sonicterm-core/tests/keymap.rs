@@ -1,6 +1,6 @@
 //! Integration tests for the sonicterm-core keymap re-exports.
 
-use sonicterm_core::keymap::*;
+use sonicterm_cfg::keymap::*;
 
 #[test]
 fn parses_bundled_wezterm_map() {

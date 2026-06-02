@@ -36,7 +36,7 @@
 //! Adds 5 tests; bumps the floor by +5.
 
 use sonicterm_app::app::App;
-use sonicterm_core::{
+use sonicterm_cfg::{
     config::Config,
     keymap::{Action, ActionWrapper, Binding, Keymap, Meta},
     theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
