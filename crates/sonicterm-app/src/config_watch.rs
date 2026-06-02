@@ -22,7 +22,6 @@ use notify::event::EventKind;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
-
 /// Handle to a running watcher thread. Drop it to stop watching (the
 /// underlying [`RecommendedWatcher`] is freed and the background thread
 /// shuts down on its next event poll).

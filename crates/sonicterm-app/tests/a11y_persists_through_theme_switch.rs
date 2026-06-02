@@ -1,10 +1,7 @@
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::{AccessibilityConfig, Config},
-    keymap::{Action, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
-
+use sonicterm_cfg::config::{AccessibilityConfig, Config};
+use sonicterm_cfg::keymap::{Action, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 fn hex(value: &str) -> Hex {
     Hex(value.to_string())
 }

@@ -1,10 +1,7 @@
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Action, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
-
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 fn drain(rx: &crossbeam_channel::Receiver<Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::new();
     while let Ok(chunk) = rx.try_recv() {

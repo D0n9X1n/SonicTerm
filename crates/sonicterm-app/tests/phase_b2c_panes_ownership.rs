@@ -18,11 +18,9 @@
 
 use parking_lot::Mutex;
 use sonicterm_app::app::{App, PaneState};
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Action, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 use std::collections::BTreeSet;

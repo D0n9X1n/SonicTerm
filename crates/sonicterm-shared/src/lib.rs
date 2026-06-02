@@ -43,23 +43,12 @@ pub use sonicterm_ui::{
 #[deprecated(since = "0.9.0", note = "use `sonicterm_text::*` directly")]
 pub use sonicterm_text::{glyph_atlas, row_glyph_cache, shape, swash_rasterizer};
 
-/// Locate the bundled `assets/` directory: prefers
-/// `<binary>/../Resources/assets` (macOS .app layout) and falls back to
-/// the workspace-root `assets/` next to the source tree.
+/// Locate the bundled `assets/` directory.
 ///
-/// This lives here so that both the platform binary (one-shot at
-/// startup) and the live-reload path (re-loading themes/keymaps on
-/// `sonicterm.toml` change) compute the same path.
+/// As of issue #469 PR-C-residual this lives in
+/// [`sonicterm_cfg::assets::asset_dir`]; this façade just re-exports it so that
+/// legacy `sonicterm_shared::asset_dir()` callers keep compiling.
+#[deprecated(since = "0.9.0", note = "use `sonicterm_cfg::assets::asset_dir` directly")]
 pub fn asset_dir() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos) = exe.parent() {
-            if let Some(contents) = macos.parent() {
-                let bundled = contents.join("Resources").join("assets");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
+    sonicterm_cfg::assets::asset_dir()
 }

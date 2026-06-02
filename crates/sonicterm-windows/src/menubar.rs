@@ -7,7 +7,7 @@
 //!
 //! `Binding::System(...)` selectors are macOS-only Objective-C names
 //! and are skipped here (logged WARN). `Binding::Url(...)` is opened
-//! through `sonicterm_core::url_open`, which already applies the allow-
+//! through `sonicterm_cfg::url_open`, which already applies the allow-
 //! list / control-char denylist mandated by §4 of CLAUDE.md.
 
 #![cfg(target_os = "windows")]
@@ -23,7 +23,7 @@ use muda::{
 use windows::Win32::Foundation::HWND;
 
 use sonicterm_app::menu::{self, Binding, Item, KeyMods, PlatformMenu, Sender, Submenu};
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 
 /// What activating a `muda` item should do once the event reaches the
 /// winit loop. Mirrors `MenuEntry` on the macOS side.
@@ -214,7 +214,7 @@ fn muda_pump(sender: Sender) {
                 sender.push(action);
             }
             WinEntry::Url(url) => {
-                if let Err(e) = sonicterm_core::url_open::open(&url) {
+                if let Err(e) = sonicterm_cfg::url_open::open(&url) {
                     tracing::warn!("muda url open failed: {e}");
                 }
             }

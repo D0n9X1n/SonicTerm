@@ -7,7 +7,7 @@
 //! This crate is pure CPU — **no wgpu, no winit**. Downstream `sonicterm-gpu`
 //! consumes [`GlyphInstance`] records produced here and uploads them.
 //!
-//! Imports of the form `sonicterm_shared::shape::*`, `sonicterm_shared::glyph_atlas::*`,
+//! Imports of the form `sonicterm_text::shape::*`, `sonicterm_text::glyph_atlas::*`,
 //! etc. continue to work via `pub use` re-exports in `sonicterm-shared`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]

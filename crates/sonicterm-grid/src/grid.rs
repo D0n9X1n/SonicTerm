@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 // Value types live in `sonicterm-types` so non-engine crates can use them
 // without depending on this crate. Re-exported here for source compatibility:
-// every existing `use sonicterm_core::grid::{Cell, CellFlags, Color, Pos}` keeps
+// every existing `use sonicterm_grid::grid::{Cell, CellFlags, Color, Pos}` keeps
 // compiling unchanged.
 pub use sonicterm_types::{Cell, CellFlags, Color, Pos};
 

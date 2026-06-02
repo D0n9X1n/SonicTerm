@@ -8,10 +8,8 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use sonicterm_cfg::{
-    config::BackdropKind,
-    theme::{Color as ThemeColor, Theme},
-};
+use sonicterm_cfg::config::BackdropKind;
+use sonicterm_cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
@@ -765,7 +763,7 @@ pub fn emit_tab_title_glyphs(
                 else {
                     continue;
                 };
-                sonicterm_types::GlyphKey {
+                sonicterm_types::glyph_key::GlyphKey {
                     ch: lead_cell.ch,
                     font_slot: slot,
                     weight_bold: style.bold,
@@ -773,7 +771,7 @@ pub fn emit_tab_title_glyphs(
                     glyph_id: 0,
                 }
             } else {
-                sonicterm_types::GlyphKey::shaped(
+                sonicterm_types::glyph_key::GlyphKey::shaped(
                     g.ch,
                     g.font_slot,
                     g.glyph_id,
@@ -897,7 +895,7 @@ pub fn emit_overlay_text_glyphs(
             let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic) else {
                 continue;
             };
-            sonicterm_types::GlyphKey {
+            sonicterm_types::glyph_key::GlyphKey {
                 ch: lead_cell.ch,
                 font_slot: slot,
                 weight_bold: style.bold,
@@ -905,7 +903,7 @@ pub fn emit_overlay_text_glyphs(
                 glyph_id: 0,
             }
         } else {
-            sonicterm_types::GlyphKey::shaped(
+            sonicterm_types::glyph_key::GlyphKey::shaped(
                 g.ch,
                 g.font_slot,
                 g.glyph_id,
@@ -4508,7 +4506,7 @@ impl GpuRenderer {
         // straight from each cell's GlyphKey.
         if run_is_ascii_fast(cells) {
             for (col, cell) in cells {
-                let key = sonicterm_types::GlyphKey {
+                let key = sonicterm_types::glyph_key::GlyphKey {
                     ch: cell.ch,
                     font_slot: 0,
                     weight_bold: style.bold,
@@ -4661,7 +4659,7 @@ impl GpuRenderer {
                     missing_chars_this_frame.push(ch);
                     continue;
                 };
-                let key = sonicterm_types::GlyphKey {
+                let key = sonicterm_types::glyph_key::GlyphKey {
                     ch,
                     font_slot: slot,
                     weight_bold: style.bold,
@@ -4755,7 +4753,7 @@ impl GpuRenderer {
                 continue;
             }
 
-            let key = sonicterm_types::GlyphKey::shaped(
+            let key = sonicterm_types::glyph_key::GlyphKey::shaped(
                 g.ch,
                 g.font_slot,
                 g.glyph_id,

@@ -36,11 +36,9 @@
 //! Adds 5 tests; bumps the floor by +5.
 
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Action, ActionWrapper, Binding, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, ActionWrapper, Binding, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use winit::window::WindowId;
 
 fn hex() -> Hex {

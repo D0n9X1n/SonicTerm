@@ -6,7 +6,7 @@
 //! `sonicterm-gpu` consumes these types to produce draw commands.
 //!
 //! `sonicterm-shared` re-exports every module here, so existing imports
-//! of the form `use sonicterm_shared::tabs::TabBar;` continue to work.
+//! of the form `use sonicterm_ui::tabs::TabBar;` continue to work.
 //!
 //! ## Deviations from the PR-5 plan
 //!

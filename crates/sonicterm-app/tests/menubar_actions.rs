@@ -8,12 +8,9 @@
 //! existing `font_live_reload.rs` + config-watch tests.
 
 use sonicterm_app::app::App;
-use sonicterm_cfg::{
-    config::{Config, FontConfig},
-    keymap::{Action, Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
-
+use sonicterm_cfg::config::{Config, FontConfig};
+use sonicterm_cfg::keymap::{Action, Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 fn hex() -> Hex {
     Hex("#000000".to_string())
 }

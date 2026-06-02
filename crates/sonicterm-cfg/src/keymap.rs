@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 // Value types (Action, Direction, ScrollAction) live in `sonicterm-types` so any
 // crate can match on an Action without pulling in toml/notify/etc. Re-exported
 // for source compatibility: every existing
-// `use sonicterm_core::keymap::{Action, Direction, ScrollAction}` keeps compiling.
+// `use sonicterm_cfg::keymap::{Action, Direction, ScrollAction}` keeps compiling.
 pub use sonicterm_types::{Action, BroadcastScope, Direction, ScrollAction};
 
 /// Platform-specific bundled default keymap name used to seed the editable

@@ -1,5 +1,5 @@
 //! GPU glyph atlas: a single R8 texture that stores rasterized glyph
-//! coverage masks, keyed by [`sonicterm_core::glyph_key::GlyphKey`].
+//! coverage masks, keyed by [`sonicterm_types::glyph_key::GlyphKey`].
 //!
 //! The atlas is the centerpiece of the B3 GPU text path. Once warm, a
 //! cell renders by:

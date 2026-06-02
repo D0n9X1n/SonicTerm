@@ -19,7 +19,7 @@ use wgpu::{
 
 // `GlyphInstance` moved to `sonicterm-text` (it's a pure bytemuck struct used by
 // the row-glyph cache, which lives below the GPU layer). Re-exported here so
-// `sonicterm_shared::text_pipeline::GlyphInstance` still resolves.
+// `sonicterm_gpu::text_pipeline::GlyphInstance` still resolves.
 pub use sonicterm_text::GlyphInstance;
 
 /// WGSL for the text pass. The vertex shader builds a quad from a

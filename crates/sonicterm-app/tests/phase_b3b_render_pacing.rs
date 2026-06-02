@@ -20,11 +20,9 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sonicterm_app::app::{App, PaneState, WindowRole, WindowState};
-use sonicterm_cfg::{
-    config::Config,
-    keymap::{Keymap, Meta},
-    theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme},
-};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Keymap, Meta};
+use sonicterm_cfg::theme::{AnsiColors, Appearance, Hex, Palette, TabColors, Theme};
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::ime::ImeState;
 use sonicterm_ui::tabs::TabBar;

@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use sonicterm_core::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::Keymap;
+use sonicterm_cfg::theme::Theme;
 
 #[cfg(target_os = "macos")]
 use sonicterm_mac::menubar;
