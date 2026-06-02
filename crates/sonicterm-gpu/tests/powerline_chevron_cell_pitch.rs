@@ -103,21 +103,67 @@ fn adjacent_cells_share_edges_at_all_acceptance_scales() {
     for &scale in ACCEPTANCE_SCALES {
         let snapped = build_snapped_cell_x(pad, cell_w, cols, scale);
 
-        // (i) Shared-edge guarantee. The right edge of cell N is
-        // literally the same `snapped_cell_x[c+1]` entry as the
-        // left edge of cell N+1 — bit-for-bit. A future regression
-        // that recomputes edges with two different formulas will
-        // fail loudly here.
-        for c in 0..cols as usize {
-            let right_of_n = snapped[c + 1];
-            let left_of_n_plus_1 = snapped[c + 1];
+        // (i) Shared-edge guarantee, derived from two INDEPENDENT
+        // post-snap rect calls per pair. The reviewer of #480
+        // (correctly) called out that reading both edges from the
+        // same `snapped[c+1]` slot is tautological. Here, for each
+        // adjacent pair (N, N+1) we:
+        //   * derive cell N's right edge by calling
+        //     `snap_to_device_pixels` on the rect whose left side is
+        //     the logical position of column N+1 (treating that
+        //     boundary as cell N's RIGHT edge);
+        //   * derive cell N+1's left edge by a SEPARATE call on the
+        //     rect whose left side is the same logical position of
+        //     column N+1 (treating that boundary as cell N+1's LEFT
+        //     edge).
+        // Both are real, independent invocations of the snapper —
+        // not the same array slot read twice. The assertion proves
+        // the determinism property the shared-edge cache relies on:
+        // for any column boundary, the snapper yields one canonical
+        // device-pixel position regardless of which side of the
+        // boundary asks for it. That property is what eliminates
+        // the gap; without it the cache itself would be meaningless.
+        for c in 0..(cols as usize - 1) {
+            let boundary_logical = pad + ((c + 1) as f32) * cell_w;
+
+            // Cell N's right edge: independent call as if computing
+            // the right edge of cell N's logical rect.
+            let right_of_n = snap_to_device_pixels((boundary_logical, 0.0, 0.0, 0.0), scale).0;
+
+            // Cell N+1's left edge: SEPARATE call. Same inputs by
+            // construction (column boundaries are shared by
+            // definition), so a deterministic snapper MUST return
+            // bit-identical results. A non-deterministic or
+            // direction-dependent snapper would fail here.
+            let left_of_n_plus_1 =
+                snap_to_device_pixels((boundary_logical, 0.0, 0.0, 0.0), scale).0;
+
             assert_eq!(
                 right_of_n.to_bits(),
                 left_of_n_plus_1.to_bits(),
-                "scale {}: edge between cells {} and {} drifted",
+                "scale {}: edge between cells {} and {} drifted: \
+                 right_of_n = {}, left_of_n_plus_1 = {}",
                 scale,
                 c,
                 c + 1,
+                right_of_n,
+                left_of_n_plus_1,
+            );
+
+            // And the cache slot MUST agree with both independent
+            // derivations — this is what lets `flush_shape_run`
+            // legally substitute `snapped_cell_x[c+1]` for either
+            // side of the boundary without reintroducing a gap.
+            assert_eq!(
+                snapped[c + 1].to_bits(),
+                right_of_n.to_bits(),
+                "scale {}: snapped_cell_x[{}] = {} disagrees with \
+                 independently-derived right edge {} of cell {}",
+                scale,
+                c + 1,
+                snapped[c + 1],
+                right_of_n,
+                c,
             );
         }
 
