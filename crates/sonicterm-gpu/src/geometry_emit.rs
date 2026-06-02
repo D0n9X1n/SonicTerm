@@ -114,6 +114,30 @@ fn box_geometry_to_quads(
     }
 }
 
+/// Translate a [`LineSegment`] into a single [`QuadInstance`].
+///
+/// Dispatches on segment orientation:
+///
+/// - **Axis-aligned** (purely horizontal `dy == 0` or purely vertical
+///   `dx == 0`) → [`QuadInstance::sharp`] solid rectangle. This is the
+///   #564 fix: the capsule SDF's `fwidth(d)` AA falloff at the segment
+///   endpoints leaves a sub-pixel-alpha gap of the cell background
+///   between adjacent cells when a horizontal run like `─────` is
+///   composed from per-cell segments. A sharp rect has full alpha all
+///   the way to the rect edge, so adjacent cells' rects meet flush at
+///   the cell boundary with no dashed/dotted look. (Diagnosis on #542
+///   issuecomment-4607154811 → tracked as #564.)
+/// - **Diagonal** (both `dx != 0` and `dy != 0`) → keep the existing
+///   capsule SDF path, since axis-aligned-rect substitution would
+///   either staircase the diagonal or require a rotated quad. The tab
+///   close `×` (`push_close_x_quads`) is the canonical diagonal
+///   consumer and continues to take the SDF path through
+///   `QuadInstance::line`.
+///
+/// Phase B heavy strokes (`━`, `┃`) and the future B2 double-line set
+/// also flow through here once their geometry tables come online — they
+/// are axis-aligned and so will pick up the sharp-rect path
+/// automatically.
 fn line_segment_to_quad(
     s: &LineSegment,
     fg_rgba: [f32; 4],
@@ -121,16 +145,46 @@ fn line_segment_to_quad(
     sh: f32,
     scale_factor: f32,
 ) -> QuadInstance {
-    // Bounding box for the line: the AABB of the two endpoints inflated
-    // by half-thickness + 1 logical px of AA padding so the SDF capsule
-    // and the 1-px AA band have room. `QuadInstance::line` expects
-    // endpoints relative to the rect *center* in physical pixels, with
-    // the rect itself in NDC and `size_px` in physical pixels.
-    let thickness_px = (s.thickness * scale_factor).max(1.0);
-    let half_t_logical = (thickness_px * 0.5) / scale_factor;
-    let pad = half_t_logical + 1.0; // 1 logical px AA padding
     let (ax, ay) = s.from;
     let (bx, by) = s.to;
+    // Stroke is clamped to >= 1 device px after scale (matches the
+    // legacy capsule path), then converted back to logical so we can
+    // size the rect in the same coordinate space as the segment.
+    let thickness_px = (s.thickness * scale_factor).max(1.0);
+    let half_t_logical = (thickness_px * 0.5) / scale_factor;
+
+    // Axis-aligned dispatch (#564). Use a strict equality check on the
+    // axis-of-zero-extent — Box Drawing segments are constructed from
+    // cell-aligned anchors (top/bottom/left/right/center) so the
+    // endpoints are exactly equal on the orthogonal axis. Anything
+    // even slightly off-axis stays on the capsule SDF so we don't
+    // staircase a diagonal by accident.
+    if (ay - by).abs() < f32::EPSILON {
+        // Horizontal: rect spans full x extent, centered on y.
+        let x_min = ax.min(bx);
+        let x_max = ax.max(bx);
+        let y_top = ay - half_t_logical;
+        let w = x_max - x_min;
+        let h = 2.0 * half_t_logical;
+        return QuadInstance::sharp(px_to_ndc(x_min, y_top, w, h, sw, sh), fg_rgba);
+    }
+    if (ax - bx).abs() < f32::EPSILON {
+        // Vertical: rect spans full y extent, centered on x.
+        let y_min = ay.min(by);
+        let y_max = ay.max(by);
+        let x_left = ax - half_t_logical;
+        let w = 2.0 * half_t_logical;
+        let h = y_max - y_min;
+        return QuadInstance::sharp(px_to_ndc(x_left, y_min, w, h, sw, sh), fg_rgba);
+    }
+
+    // Diagonal: bounding box for the line is the AABB of the two
+    // endpoints inflated by half-thickness + 1 logical px of AA padding
+    // so the SDF capsule and the 1-px AA band have room.
+    // `QuadInstance::line` expects endpoints relative to the rect
+    // *center* in physical pixels, with the rect itself in NDC and
+    // `size_px` in physical pixels.
+    let pad = half_t_logical + 1.0; // 1 logical px AA padding
     let x_min = ax.min(bx) - pad;
     let y_min = ay.min(by) - pad;
     let x_max = ax.max(bx) + pad;
@@ -156,35 +210,44 @@ mod tests {
     const FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
     #[test]
-    fn box_drawing_horizontal_emits_one_line_quad() {
-        // Phase A: ─ emits one line-SDF QuadInstance with thickness > 0.
+    fn box_drawing_horizontal_emits_one_sharp_rect_quad() {
+        // Phase A + #564: ─ emits one sharp-rect QuadInstance (NOT the
+        // capsule SDF), so adjacent cells abut flush with no dashed
+        // appearance at cell joins.
         let quads =
             emit_geometry_for_char('─', (10.0, 20.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
         assert_eq!(quads.len(), 1);
-        assert!(quads[0].line_thickness_px >= 1.0, "line stroke must clamp to >= 1 device px");
+        assert_eq!(
+            quads[0].line_thickness_px, 0.0,
+            "#564: axis-aligned ─ must use the sharp-rect path, not the capsule SDF"
+        );
     }
 
     #[test]
-    fn box_drawing_corner_emits_two_line_quads() {
-        // ┌ is two perpendicular segments meeting at the cell center —
-        // exactly the case where the "fix only one branch" anti-pattern
-        // would drop the second line.
+    fn box_drawing_corner_emits_two_axis_aligned_sharp_rects() {
+        // ┌ is two perpendicular axis-aligned segments meeting at the
+        // cell center. After #564 both halves are sharp rects.
         let quads = emit_geometry_for_char('┌', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
         assert_eq!(quads.len(), 2);
         for q in &quads {
-            assert!(q.line_thickness_px > 0.0, "corner segments must use the line-SDF path");
+            assert_eq!(
+                q.line_thickness_px, 0.0,
+                "#564: axis-aligned corner halves must use the sharp-rect path"
+            );
         }
     }
 
     #[test]
-    fn box_drawing_cross_emits_two_full_line_quads_at_fractional_dpi() {
-        // ┼ at 1.5× — the line-quad count and the use of the SDF path
-        // must hold regardless of scale.
+    fn box_drawing_cross_emits_two_full_sharp_rects_at_fractional_dpi() {
+        // ┼ at 1.5× — axis-aligned dispatch must hold regardless of
+        // scale.
         let quads = emit_geometry_for_char('┼', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.5).unwrap();
         assert_eq!(quads.len(), 2);
         for q in &quads {
-            // Stroke is clamped to >= 1 device px after scale.
-            assert!(q.line_thickness_px >= 1.0);
+            assert_eq!(
+                q.line_thickness_px, 0.0,
+                "#564: axis-aligned ┼ halves must use the sharp-rect path"
+            );
         }
     }
 
@@ -230,58 +293,164 @@ mod tests {
 
     #[test]
     fn three_by_three_top_row_continuity_after_quad_translation() {
-        // End-to-end: after translating `┌─┐` to QuadInstances, the
-        // QuadInstances' line-SDF endpoints (in physical pixels offset
-        // from rect center) must still describe a continuous line at
-        // the row centerline. This catches off-by-one regressions in
-        // `line_segment_to_quad`'s padding / center math.
+        // End-to-end: after #564, `┌─┐` translate to sharp-rect
+        // QuadInstances; the rects MUST abut flush at cell boundaries
+        // (no bg-color gap), since the capsule-SDF endpoint falloff is
+        // gone.
         let cw = 8.0_f32;
         let ch = 16.0_f32;
-        // Reconstruct each segment's absolute pixel endpoints from the
-        // QuadInstance's rect (NDC → logical via the inverse formula)
-        // and its line_a/line_b (physical offsets from rect center).
-        let abs_endpoints = |q: &QuadInstance, scale: f32| -> ((f32, f32), (f32, f32)) {
-            // rect = [nx, ny, nw, nh]; logical x = (nx + 1) * sw/2;
-            // logical y = (1 - ny - nh) * sh/2; w = nw * sw/2; h = nh * sh/2.
+        // For an axis-aligned sharp-rect QuadInstance, reconstruct the
+        // rect's logical (x_min, y_min, x_max, y_max) from its NDC
+        // `rect` field by inverting `px_to_ndc`.
+        let abs_rect = |q: &QuadInstance| -> (f32, f32, f32, f32) {
             let x = (q.rect[0] + 1.0) * SW * 0.5;
             let y = (1.0 - q.rect[1] - q.rect[3]) * SH * 0.5;
             let w = q.rect[2] * SW * 0.5;
             let h = q.rect[3] * SH * 0.5;
-            let cx = x + w * 0.5;
-            let cy = y + h * 0.5;
-            let a = (cx + q.line_a[0] / scale, cy + q.line_a[1] / scale);
-            let b = (cx + q.line_b[0] / scale, cy + q.line_b[1] / scale);
-            (a, b)
+            (x, y, x + w, y + h)
         };
         let tl = emit_geometry_for_char('┌', (0.0, 0.0), (cw, ch), FG, SW, SH, 1.0).unwrap();
         let h0 = emit_geometry_for_char('─', (cw, 0.0), (cw, ch), FG, SW, SH, 1.0).unwrap();
         let tr = emit_geometry_for_char('┐', (2.0 * cw, 0.0), (cw, ch), FG, SW, SH, 1.0).unwrap();
-        // Find ┌'s horizontal half (center → right edge of cell 0).
+        // The row centerline (y) lies at cell-top + ch/2.
         let cy = ch * 0.5;
-        let tl_horiz = tl
-            .iter()
-            .map(|q| abs_endpoints(q, 1.0))
-            .find(|(a, b)| (a.1 - cy).abs() < 1e-3 && (b.1 - cy).abs() < 1e-3)
-            .expect("┌ must have a horizontal half");
-        let h0_seg = abs_endpoints(&h0[0], 1.0);
-        let tr_horiz = tr
-            .iter()
-            .map(|q| abs_endpoints(q, 1.0))
-            .find(|(a, b)| (a.1 - cy).abs() < 1e-3 && (b.1 - cy).abs() < 1e-3)
-            .expect("┐ must have a horizontal half");
-        // ┌ right endpoint ≈ ─ left endpoint; ─ right endpoint ≈ ┐ left.
+        // Filter to each cell's horizontal half (rect whose vertical
+        // range straddles the centerline and width > 0).
+        let horiz = |quads: &[QuadInstance]| -> (f32, f32) {
+            quads
+                .iter()
+                .map(abs_rect)
+                .find(|(_, y0, _, y1)| *y0 <= cy + 1e-3 && *y1 >= cy - 1e-3 && (y1 - y0) <= 4.0)
+                .map(|(x0, _, x1, _)| (x0, x1))
+                .expect("expected an axis-aligned horizontal half")
+        };
+        let (tl_x0, tl_x1) = horiz(&tl);
+        let (h0_x0, h0_x1) = horiz(&h0);
+        let (tr_x0, tr_x1) = horiz(&tr);
+        // ┌'s horizontal half goes from cell-0 center → cell-0 right edge,
+        // ─ spans cell-1 entirely (left → right), ┐ goes cell-2 left → center.
+        // For continuity the right edge of one rect must equal the left edge
+        // of the next; no bg gap is allowed.
         let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(near(tl_x1, h0_x0), "┌→─ x-join {} vs {}", tl_x1, h0_x0);
+        assert!(near(h0_x1, tr_x0), "─→┐ x-join {} vs {}", h0_x1, tr_x0);
+        // Sanity: the row of three covers exactly cw..2*cw across the
+        // junctions (the painted center band is contiguous from ┌-center
+        // through to ┐-center).
+        assert!(near(tl_x0, cw * 0.5), "┌ starts at cell-0 center");
+        assert!(near(tr_x1, 2.0 * cw + cw * 0.5), "┐ ends at cell-2 center");
+    }
+
+    /// #564 continuity scan: a 5-cell row of `─────` translated to
+    /// QuadInstances must paint a contiguous x-band with no bg-color
+    /// gap at any cell boundary, at 100/125/150% DPI.
+    #[test]
+    fn horizontal_run_has_no_bg_gap_at_cell_boundaries() {
+        let cw_logical = 8.0_f32;
+        let ch_logical = 16.0_f32;
+        for &scale in &[1.0_f32, 1.25, 1.5] {
+            let mut x_intervals: Vec<(f32, f32)> = Vec::new();
+            for cell in 0..5 {
+                let origin = (cell as f32 * cw_logical, 0.0);
+                let quads = emit_geometry_for_char(
+                    '─',
+                    origin,
+                    (cw_logical, ch_logical),
+                    FG,
+                    SW,
+                    SH,
+                    scale,
+                )
+                .unwrap();
+                assert_eq!(quads.len(), 1, "─ should emit exactly 1 quad at scale {scale}");
+                let q = &quads[0];
+                assert_eq!(
+                    q.line_thickness_px, 0.0,
+                    "#564: ─ must use sharp-rect at scale {scale}, not capsule SDF"
+                );
+                // Recover the logical x-range from the NDC rect.
+                let x0 = (q.rect[0] + 1.0) * SW * 0.5;
+                let w = q.rect[2] * SW * 0.5;
+                x_intervals.push((x0, x0 + w));
+            }
+            // Adjacent intervals must meet flush — right edge of cell N
+            // == left edge of cell N+1, no daylight (would imply a
+            // bg-color column between cells).
+            for w in x_intervals.windows(2) {
+                let (_, right_n) = w[0];
+                let (left_np1, _) = w[1];
+                let gap = left_np1 - right_n;
+                assert!(
+                    gap.abs() < 1e-3,
+                    "#564 dashed-line regression at scale {scale}: gap {} between cell rects (left {}, right {})",
+                    gap,
+                    right_n,
+                    left_np1,
+                );
+            }
+        }
+    }
+
+    /// #564 continuity scan: a 3-row column of `│││` (one per row) must
+    /// paint a contiguous y-band with no bg-color gap at row joins,
+    /// at 100/125/150% DPI.
+    #[test]
+    fn vertical_run_has_no_bg_gap_at_row_boundaries() {
+        let cw_logical = 8.0_f32;
+        let ch_logical = 16.0_f32;
+        for &scale in &[1.0_f32, 1.25, 1.5] {
+            let mut y_intervals: Vec<(f32, f32)> = Vec::new();
+            for row in 0..3 {
+                let origin = (0.0, row as f32 * ch_logical);
+                let quads = emit_geometry_for_char(
+                    '│',
+                    origin,
+                    (cw_logical, ch_logical),
+                    FG,
+                    SW,
+                    SH,
+                    scale,
+                )
+                .unwrap();
+                assert_eq!(quads.len(), 1);
+                let q = &quads[0];
+                assert_eq!(
+                    q.line_thickness_px, 0.0,
+                    "#564: │ must use sharp-rect at scale {scale}"
+                );
+                // Recover logical y-range. Note: px_to_ndc Y-flips
+                // (ndc_y is the *bottom* of the rect in NDC space),
+                // so logical y_top = (1 - ndc_y - ndc_h) * sh / 2.
+                let y_top = (1.0 - q.rect[1] - q.rect[3]) * SH * 0.5;
+                let h = q.rect[3] * SH * 0.5;
+                y_intervals.push((y_top, y_top + h));
+            }
+            for w in y_intervals.windows(2) {
+                let (_, bottom_n) = w[0];
+                let (top_np1, _) = w[1];
+                let gap = top_np1 - bottom_n;
+                assert!(
+                    gap.abs() < 1e-3,
+                    "#564 dashed-line regression at scale {scale}: gap {} between row rects",
+                    gap,
+                );
+            }
+        }
+    }
+
+    /// Regression guard for the tab-close `×`: diagonal segments MUST
+    /// continue to flow through the capsule SDF path. The `×` itself
+    /// is emitted by `push_close_x_quads` in `quad.rs`, but any
+    /// future diagonal BoxGeometry (arcs, slashes) must also stay on
+    /// the SDF path so they don't staircase. We construct a synthetic
+    /// LineSegment to exercise the dispatch directly.
+    #[test]
+    fn diagonal_segment_stays_on_capsule_sdf() {
+        let seg = LineSegment { from: (0.0, 0.0), to: (8.0, 16.0), thickness: 1.0 };
+        let quad = line_segment_to_quad(&seg, FG, SW, SH, 1.0);
         assert!(
-            near(tl_horiz.1 .0, h0_seg.0 .0),
-            "┌→─ x-join {} vs {}",
-            tl_horiz.1 .0,
-            h0_seg.0 .0
-        );
-        assert!(
-            near(h0_seg.1 .0, tr_horiz.0 .0),
-            "─→┐ x-join {} vs {}",
-            h0_seg.1 .0,
-            tr_horiz.0 .0
+            quad.line_thickness_px > 0.0,
+            "diagonal must keep the capsule SDF — tab-close × depends on it"
         );
     }
 }
