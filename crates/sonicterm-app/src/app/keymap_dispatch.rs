@@ -400,4 +400,292 @@ impl App {
         }
         true
     }
+
+    /// Issue #539 — source-aware action dispatch. Identical to
+    /// [`Self::run_action`] for every action that does NOT depend on
+    /// the frontmost window, but for the ~16 routed arms (NewTab,
+    /// CloseTab, tab nav, Split*, ClosePane, FocusPane, resize/zoom,
+    /// CloseActivePaneOrTab) it classifies `source_window_id` rather
+    /// than reading `self.frontmost_window`.
+    ///
+    /// Bug: when a Ctrl+T fires in window A but `self.frontmost_window`
+    /// still references B (race: Focused(B) event scheduled but not yet
+    /// drained by the time A's KeyboardInput is processed, or any other
+    /// frontmost-tracking glitch), the cached-frontmost path opens the
+    /// new tab in B. Routing keyboard chords through this helper with
+    /// the WindowId from the KeyboardInput event itself eliminates the
+    /// race — the chord ALWAYS lands on the window that produced it.
+    ///
+    /// Source-less callers (menubar, palette execution, overlay
+    /// dismissal, scrollbar) should continue calling [`Self::run_action`]
+    /// which falls back to the cached frontmost.
+    ///
+    /// `NewWindow` is intentionally NOT routed — it is correct for it
+    /// to create a fresh window regardless of the source.
+    pub fn run_action_for_window(&mut self, action: &Action, source_window_id: WindowId) -> bool {
+        let _ = self.clear_stale_frontmost();
+        let source_kind = self.kind_for(source_window_id);
+        match action {
+            Action::CopyToClipboard => self.copy_selection(),
+            Action::EnterCopyMode => self.enter_copy_mode(),
+            Action::EnterQuickSelect => self.enter_quick_select(),
+            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::ReloadConfig => self.force_reload_config(),
+            Action::NewTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    cwd: None,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.spawn_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                let n = self.main_tabs().map(|t| t.len() + 1).unwrap_or(1);
+                self.new_tab(format!("shell {n}"));
+            }
+            Action::CloseTab => {
+                let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                self.dispatch_intent(sonicterm_app_core::AppIntent::CloseTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: active_idx,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.close_active_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                let i = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                self.close_tab_at(i);
+                self.reap_empty_main_window_after_close();
+            }
+            Action::NextTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::NextTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.next_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                if let Some(t) = self.main_tabs_mut() {
+                    t.next();
+                }
+                self.refresh_harness_sink();
+            }
+            Action::PrevTab => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.prev_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                if let Some(t) = self.main_tabs_mut() {
+                    t.prev();
+                }
+                self.refresh_harness_sink();
+            }
+            Action::ActivateTab(i) => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
+                    window: sonicterm_types::WindowKey::new(0),
+                    idx: *i,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.activate_tab_in_child(id, *i) {
+                        return true;
+                    }
+                }
+                if let Some(t) = self.main_tabs_mut() {
+                    t.activate(*i);
+                }
+                self.refresh_harness_sink();
+            }
+            Action::ActivateLastTab => {
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.activate_last_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                if let Some(t) = self.main_tabs_mut() {
+                    let last = t.len().saturating_sub(1);
+                    t.activate(last);
+                }
+                self.refresh_harness_sink();
+            }
+            Action::SplitRight => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.split_active_pane_in_child(id, Direction::Right) {
+                        return true;
+                    }
+                }
+                self.split_active(Direction::Right);
+            }
+            Action::SplitDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.split_active_pane_in_child(id, Direction::Down) {
+                        return true;
+                    }
+                }
+                self.split_active(Direction::Down);
+            }
+            Action::ClosePane => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ClosePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.close_active_pane_in_child(id) {
+                        return true;
+                    }
+                }
+                self.close_active_pane();
+            }
+            Action::CloseActivePaneOrTab => {
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.close_active_pane_or_tab_in_child(id) {
+                        return true;
+                    }
+                }
+                let (i, pane_count) = {
+                    let ws = self.main();
+                    let i = ws.map(|w| w.tabs.active_index()).unwrap_or(0);
+                    let pc = ws
+                        .and_then(|w| w.tab_states.get(i))
+                        .map(|st| st.tree.leaves().len())
+                        .unwrap_or(0);
+                    (i, pc)
+                };
+                if pane_count > 1 {
+                    self.close_active_pane();
+                } else {
+                    self.close_tab_at(i);
+                }
+                self.reap_empty_main_window_after_close();
+            }
+            Action::TogglePaneZoom => {
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.toggle_active_pane_zoom_in_child(id) {
+                        return true;
+                    }
+                }
+                self.toggle_active_pane_zoom();
+            }
+            Action::FocusPane(d) => {
+                let dir = match d {
+                    Direction::Left => sonicterm_app_core::SplitDir::Left,
+                    Direction::Right => sonicterm_app_core::SplitDir::Right,
+                    Direction::Up => sonicterm_app_core::SplitDir::Up,
+                    Direction::Down => sonicterm_app_core::SplitDir::Down,
+                };
+                let wkey = sonicterm_types::WindowKey::new(0);
+                let intent = match dir {
+                    sonicterm_app_core::SplitDir::Left => {
+                        sonicterm_app_core::AppIntent::FocusPaneLeft { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Right => {
+                        sonicterm_app_core::AppIntent::FocusPaneRight { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Up => {
+                        sonicterm_app_core::AppIntent::FocusPaneUp { window: wkey }
+                    }
+                    sonicterm_app_core::SplitDir::Down => {
+                        sonicterm_app_core::AppIntent::FocusPaneDown { window: wkey }
+                    }
+                };
+                self.dispatch_intent(intent);
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.focus_pane_dir_in_child(id, *d) {
+                        return true;
+                    }
+                }
+                self.focus_pane_dir(*d);
+            }
+            Action::ResizePaneLeft => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Left,
+                    cells: 1,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.resize_active_split_in_child(id, Direction::Left) {
+                        return true;
+                    }
+                }
+                self.resize_active_split(Direction::Left);
+            }
+            Action::ResizePaneRight => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Right,
+                    cells: 1,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.resize_active_split_in_child(id, Direction::Right) {
+                        return true;
+                    }
+                }
+                self.resize_active_split(Direction::Right);
+            }
+            Action::ResizePaneUp => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Up,
+                    cells: 1,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.resize_active_split_in_child(id, Direction::Up) {
+                        return true;
+                    }
+                }
+                self.resize_active_split(Direction::Up);
+            }
+            Action::ResizePaneDown => {
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: sonicterm_app_core::SplitDir::Down,
+                    cells: 1,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    if self.resize_active_split_in_child(id, Direction::Down) {
+                        return true;
+                    }
+                }
+                self.resize_active_split(Direction::Down);
+            }
+            // Non-routed arms — delegate to the cached-frontmost
+            // dispatcher. These either don't touch per-window state
+            // (clipboard, theme, config) or have their own routing
+            // (NewWindow correctly creates a new top-level regardless
+            // of source). OpenSearch / palette use the main-window
+            // overlay singleton today — see #539 follow-up for
+            // per-window overlay routing.
+            _ => return self.run_action(action),
+        }
+        true
+    }
+
+    /// Classify an explicit window id (rather than `self.frontmost_window`).
+    /// Mirrors [`Self::frontmost_kind`] but takes the id from the caller —
+    /// used by [`Self::run_action_for_window`] to route a keyboard chord
+    /// to the window that produced it.
+    fn kind_for(&self, id: WindowId) -> FrontmostKind {
+        if let Some(w) = self.main_window() {
+            if w.id() == id {
+                return FrontmostKind::Main;
+            }
+        }
+        if self.windows.contains_key(&id) {
+            return FrontmostKind::Child(id);
+        }
+        FrontmostKind::None
+    }
 }
