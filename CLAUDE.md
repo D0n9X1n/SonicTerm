@@ -142,3 +142,5 @@ other-platform PM posts the screenshot path as a PR comment. See
 - `docs/HOT_FILES.md` — 2-PM sign-off list with rationale
 - `docs/MODULARIZATION_PILOT.md` — exit criteria for the modularization epic
 - `docs/migrations/` — one per breaking `sonicterm-types` change
+- `docs/WINDOWS_TESTING.md` — PM repro recipe for Windows visual + log-scrape testing (PowerShell + Win32 + SendKeys)
+- `docs/VISUAL_PARITY.md` — track parity targets vs Windows Terminal for glyph rendering (#461)

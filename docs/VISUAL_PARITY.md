@@ -1,128 +1,36 @@
-# Visual Parity vs WezTerm
+# Visual parity — SonicTerm vs Windows Terminal
 
-This document is the **side-by-side checklist** we walk down after running
-`scripts/visual_diff.sh`. The goal is not pixel-identical output — that's
-impossible across two renderers — but **no surprising visual gap** when a
-user with muscle memory from WezTerm tries SonicTerm.
+Target: SonicTerm should render the same visual output as Windows Terminal for the same shell + font + DPI combination. WT is the reference because it's the default Windows terminal experience and is what users compare against.
 
-Capture method: `bash scripts/visual_diff.sh` (see that script's header
-comment for prerequisites). Both terminals are positioned at the same
-size and fed the same payload via clipboard paste.
+## Reference setup
+- Font: `Rec Mono St.Helens` (bundled Nerd-patched in SonicTerm; available system-wide via the same TTF)
+- Size: 14pt (SonicTerm default) — 11.25pt + cellHeight=20px (WT default profile)
+- DPI: any (test 100%, 125%, 150%, 175%)
+- Shell: PowerShell with oh-my-posh prompt + Claude Code TUI
 
-**Expected non-bugs:** macOS titlebar style (traffic lights, title text)
-is OS-controlled and will always match the system, not the peer terminal.
-Strip the titlebar (`*-crop.png` outputs) before eyeballing.
+## Parity matrix (#461 tracking)
 
-**Reference theme for both:** Tokyo Night, JetBrainsMono Nerd Font 14pt,
-1.0 line-height. SonicTerm ships this as default; configure WezTerm to match.
+| Category | Codepoint(s) | WT renders | SonicTerm renders | Status |
+|---|---|---|---|---|
+| Block elements (Claude logo) | U+2580–U+259F | ✅ proper sub-cell rects | ✅ since PR #463 | OK |
+| Powerline chevrons | U+E0B0–U+E0BF | ✅ butt-up edge-to-edge | ⚠️ 1-device-px gap at fractional DPI | #470 open |
+| NF icons | U+E000–U+F8FF | ✅ fills cell | ✅ since PR #468 | OK |
+| Plane-1 NF (Material) | U+F0000–U+FFFFD | ✅ fills cell | ✅ since PR #468 | OK |
+| Black filled arrows | U+25B6–U+25C1 | ✅ filled triangles | ✅ classified IconCellFit | OK |
+| **Black MEDIUM arrows** | **U+23F5–U+23F8** | ✅ filled triangles | ❌ tofu (`[]`) — resolve_slot=None | PR-B2c TODO |
+| CJK / emoji | various | ✅ via fallback chain | ✅ via PLATFORM_FALLBACK_CHAIN | OK |
+| Box drawing | U+2500–U+257F | ✅ proper | ✅ via Natural placement | OK |
 
----
+## Confirmed parity
+- Claude logo block elements (after PR #463)
+- All NF PUA icons render at full cell width (after PR #468)
+- Tab title NF glyphs render correctly
+- Powerline chevrons render correctly at integer DPI scales (1.0, 2.0)
 
-## Axes
+## Known gaps
+1. **U+23F5 family tofu** — Claude Code uses these for bypass-mode arrows; WT renders them, SonicTerm shows `[]`. Bundled St.Helens cmap byte-pair search found U+23F5 present, but our `resolve_slot` returns None. Investigation in PR-B2c.
+2. **Powerline 1-device-pixel gap** at fractional DPI (1.25/1.5/1.75) — issue #470. WT uses fixed integer cell pitch; SonicTerm uses fractional logical cell_w + per-cell device-pixel snap that doesn't guarantee adjacent-cell butt-up.
+3. **LCD subpixel AA** — deferred. WT uses ClearType; SonicTerm uses grayscale alpha. Tracked in #388 (closed deferred).
 
-### 1. Background color
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Hex | `#1a1b26` (Tokyo Night default ported) | `#1a1b26` (`assets/themes/tokyo-night.toml`) |
-| Notes | Solid fill, no gradient | Solid fill via wgpu clear color |
-
-**Verify:** sample a pixel in the middle of the content area in both
-crops. Tolerance: identical hex.
-
-### 2. Foreground color (default text)
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Hex | `#c0caf5` | `#c0caf5` |
-| Notes | sRGB; no gamma correction in 20240203+ | Currently passes color straight to glyphon (sRGB) — gamma PR pending |
-
-**Known gap:** until the gamma PR lands, thin strokes may look slightly
-heavier in SonicTerm at low DPI. TBD after merge.
-
-### 3. Cell padding (px from cell edge to glyph)
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Inter-cell horizontal | 0 px (cells abut) | 0 px |
-| Window edge → first column | ~4 px (`window_padding.left = 4`) | 8 px (hardcoded in `GpuRenderer::layout`) |
-| Window edge → top row | ~4 px (`top = 4`) | tab-bar height + 4 px |
-
-**Known gap:** SonicTerm's left/right margin is 2× WezTerm's. Track as
-follow-up; surface it in `Config` so users can match.
-
-### 4. Line-height
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Multiplier | 1.0 (configurable via `line_height`) | 1.0 (fixed; metrics from cosmic-text font) |
-| Effect | Tight, traditional terminal feel | Same |
-
-### 5. Tab-bar style
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Bar background | `#16161e` (theme `tab_bar.background`) | `#16161e` (`theme.tab.bar_bg`) |
-| Active tab bg | `#1a1b26` (matches content for "no border" look) | `#1a1b26` |
-| Active tab indicator | None — active tab simply matches content bg | Same |
-| Inactive tab fg | `#565f89` | `#565f89` |
-| Close button | `×` glyph on hover | `×` glyph always shown (`tabbar_view.rs`) |
-| Height | 28 px (font-size dependent) | 28 px |
-
-**Known gap:** SonicTerm shows the `×` unconditionally; WezTerm reveals on
-hover. Cosmetic, low priority.
-
-### 6. Cursor
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Default shape | `SteadyBlock` (filled block, no blink) | Filled block (quad pipeline) |
-| Color | `#c0caf5` with cursor_text `#1a1b26` (inverted glyph) | Same — `theme.colors.cursor` + `cursor_text` |
-| Blink | Optional, off by default | Off (blink not yet implemented) |
-| Unfocused | Hollow outline | Hollow outline (`render.rs` checks pane focus) |
-
-### 7. Selection
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Highlight color | `#283457` | `#283457` (`selection_bg`) |
-| Behavior | Click-drag, shift-click extends | Same (sonicterm-shared/src/selection.rs) |
-| Copy on release | Configurable; on by default with WezTerm-compat keymap | Cmd+C only; auto-copy on release not yet wired |
-
-### 8. Scrollbar
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Visibility | Optional (`enable_scroll_bar = false` default) | Not rendered |
-| Style when shown | Thin strip on right edge, theme `scrollbar_thumb` | TBD |
-
-**Known gap:** SonicTerm has no scrollbar UI; scrollback works via keyboard
-(`super+shift+up/down`). Not a bug — matches WezTerm's default — but
-worth a config knob in v1.0.
-
-### 9. Underlines & decorations
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Underline | 1 px solid at descent | 1 px quad at descent (`quad.rs`) |
-| Curly/dotted/dashed | Supported (SGR 4:3 etc.) | Solid only; SGR 4:N treated as 4:1 |
-| Hyperlink tint | Subtle on hover | Subtle on hover (`hyperlink.rs`) |
-
-### 10. HiDPI / CJK width
-
-| | WezTerm | SonicTerm |
-|---|---|---|
-| Wide chars | 2 cells, glyph centered | 2 cells (`grid.rs` width tracking) — visual centering PR pending |
-| Retina sharpness | Native @2x | Native @2x (wgpu surface configured with `scale_factor`) |
-
-**Known gap:** CJK PR + HiDPI PR are in flight; this baseline capture
-exists specifically so we can diff after they land.
-
----
-
-## How to update this doc
-
-When you ship a parity fix, move that row out of "Known gap" and update
-the column. When you find a NEW divergence during eyeballing, add a row
-with both columns filled and a one-line note. Keep the table compact —
-one screen tall per axis section is the budget.
+## How to verify parity
+See `docs/WINDOWS_TESTING.md` for the full PM recipe. Quick version: open SonicTerm + WT side-by-side at the same DPI, run the same shell session, compare screenshots cell-by-cell. The instrumented build (`RUST_LOG=sonic::render::glyph=debug`) captures per-glyph emit data so divergences show up in the log as `classify` + `resolve_slot` + `final_rect` mismatches against expected behavior.
