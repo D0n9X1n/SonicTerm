@@ -497,7 +497,13 @@ mod tests {
     /// LineSegment to exercise the dispatch directly.
     #[test]
     fn diagonal_segment_stays_on_capsule_sdf() {
-        let seg = LineSegment { from: (0.0, 0.0), to: (8.0, 16.0), thickness: 1.0 };
+        let seg = LineSegment {
+            from: (0.0, 0.0),
+            to: (8.0, 16.0),
+            thickness: 1.0,
+            weight: sonicterm_text::box_drawing_geometry::StrokeWeight::Light,
+            style: sonicterm_text::box_drawing_geometry::StrokeStyle::Single,
+        };
         let quad = line_segment_to_quad(&seg, FG, SW, SH, 1.0);
         assert!(
             quad.line_thickness_px > 0.0,
