@@ -77,3 +77,22 @@ $hits = 0; for ($i=0; $i -lt $bytes.Length-1; $i++) { if ($bytes[$i] -eq 0x23 -a
 - **No log output**: `RUST_LOG` filter must match the tracing target exactly. PR-B1's glyph instrumentation uses target `sonic::render::glyph` (NOT `sonicterm_gpu::render`). Use `sonic::render::glyph=debug` to see those lines.
 - **Stale .ttf font marker check**: byte-pair search isn't 100% reliable for cmap format 12 (4-byte ranges encode the start codepoint differently). When in doubt: launch with the instrumentation and check `resolve_slot=Some(N)` vs `None` for the suspect codepoint.
 - **Stuck worktree on disk**: even after `git worktree remove --force`, the `target/` directory may keep file locks via running processes. Kill processes first, then `Remove-Item -Recurse -Force Q:\tmp\sonicterm-*`.
+
+### Guard 1: competing terminal detection
+
+`testing/workflows/windows.ps1` refuses to start if a competing **GUI terminal application** is already running, because SendKeys lands in whatever window has foreground — a stray Windows Terminal stealing focus mid-case would silently corrupt results (#464).
+
+The classifier is intentionally restricted to GUI terminal apps. Host shells / console hosts (`conhost`, `cmd`, `pwsh`, `powershell`) are NOT in the list — they don't compete for foreground in the way SendKeys cares about, and including them broke launching the harness from any `pwsh` session (#490). Bug #494 narrowed the list accordingly.
+
+**Built-in list (16 names, matched case-insensitively against `.ProcessName`, no `.exe` suffix):**
+
+`WindowsTerminal`, `wt`, `alacritty`, `mintty`, `wezterm-gui`, `wezterm`, `kitty`, `tabby`, `Hyper`, `ghostty`, `Warp`, `rio`, `ConEmu64`, `ConEmuC64`, `FluentTerminal`, `MobaXterm`.
+
+**Environment overrides:**
+
+| Variable | Effect |
+|---|---|
+| `SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1` | Global bypass — skip Guard 1 entirely. Use when running the driver from a competitor terminal during dev. |
+| `SONICTERM_HARNESS_EXTRA_TERMS=name1,name2` | Comma-separated process names appended to the built-in list (case-insensitive, whitespace trimmed, empties ignored). No `.exe` suffix. |
+
+**Self-test:** `pwsh -NoProfile -File testing\workflows\tests\Test-Guard1Classifier.ps1` (exits 0 on pass).

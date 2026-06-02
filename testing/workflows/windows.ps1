@@ -50,27 +50,62 @@ if (-not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
 }
 
 # ------------------------------------------------------------------
-# Guard 1 — pre-flight: refuse to start if a competing terminal is
-# running. SendKeys go to whatever window is foreground at the moment;
-# if a competitor (Windows Terminal, alacritty, mintty, conhost, ...)
-# is alive AND sonicterm-windows drops focus mid-case, our SendKeys
-# calls land in that competitor instead. Documented in issue #464.
-# Override with $env:SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 when running
-# the harness FROM one of these terminals during dev (the dev's source
-# terminal sits behind sonicterm-windows and won't steal focus unless
-# something dramatic goes wrong, in which case Guard 4 catches it).
-# Whitelist the host shell ($PID) so we don't reject our own pwsh.
+# Guard 1 — pre-flight: refuse to start if a competing GUI terminal
+# application is running. SendKeys go to whatever window is foreground
+# at the moment; if a competitor GUI terminal (Windows Terminal,
+# alacritty, mintty, wezterm-gui, ...) is alive AND sonicterm-windows
+# drops focus mid-case, our SendKeys calls land in that competitor.
+# Documented in issues #464, #494, #490.
+#
+# The list is intentionally restricted to actual GUI terminal apps —
+# NOT host shells/console hosts (conhost, cmd, pwsh, powershell). Those
+# don't compete for foreground in the way SendKeys cares about, and
+# including them means the driver refuses to launch from any pwsh
+# session (regression #490).
+#
+# Override with $env:SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to bypass
+# entirely. Extend the list at runtime with
+# $env:SONICTERM_HARNESS_EXTRA_TERMS='name1,name2' (comma-separated
+# process names, no `.exe` suffix; matched case-insensitively).
 # ------------------------------------------------------------------
-$Competitors = @('wt','WindowsTerminal','alacritty','mintty','conhost','kitty','ghostty','Hyper','Warp','tabby','rio','wezterm-gui','WezTerm')
-# Note: cmd/pwsh/powershell intentionally excluded — host shell. Self-PID
-# whitelist below handles the case where someone runs the driver from
-# Windows Terminal (allowed by env override only).
+$Competitors = @(
+  'WindowsTerminal',  # Windows Terminal main process
+  'wt',               # Windows Terminal CLI alias
+  'alacritty',
+  'mintty',
+  'wezterm-gui',
+  'wezterm',
+  'kitty',
+  'tabby',
+  'Hyper',
+  'ghostty',
+  'Warp',
+  'rio',
+  'ConEmu64',
+  'ConEmuC64',
+  'FluentTerminal',
+  'MobaXterm'
+)
+# Note: conhost/cmd/pwsh/powershell intentionally EXCLUDED — these are
+# host shells / console hosts, not foreground-competing GUI terminals.
+# Including them breaks running the harness from any pwsh window (#490).
+
+# Extension point: $env:SONICTERM_HARNESS_EXTRA_TERMS (comma-separated).
+if ($env:SONICTERM_HARNESS_EXTRA_TERMS) {
+  $extra = $env:SONICTERM_HARNESS_EXTRA_TERMS -split ',' |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ }
+  if ($extra) { $Competitors = @($Competitors) + @($extra) }
+}
+
 if (-not $env:SONICTERM_HARNESS_ALLOW_OTHER_TERMS -or $env:SONICTERM_HARNESS_ALLOW_OTHER_TERMS -ne '1') {
+  # Case-insensitive match against .ProcessName (no .exe suffix).
+  $compLower = $Competitors | ForEach-Object { $_.ToLowerInvariant() }
   $hits = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $Competitors -contains $_.ProcessName -and $_.Id -ne $PID
+    $compLower -contains $_.ProcessName.ToLowerInvariant() -and $_.Id -ne $PID
   }
   if ($hits) {
-    Write-Host 'FATAL: competing terminal(s) running — keystrokes will leak.' -ForegroundColor Red
+    Write-Host 'FATAL: competing GUI terminal(s) running — keystrokes will leak.' -ForegroundColor Red
     Write-Host 'Quit them, or set $env:SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override.' -ForegroundColor Red
     $hits | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) -ForegroundColor Red }
     exit 2
