@@ -755,6 +755,25 @@ expect = [
 ]
 fail_on = "Orphan zsh/bash remain"
 
+[[case]]
+id = "alt-f4-leaves-no-orphan-shells-windows"
+section = 15
+title = "Alt+F4 quit leaves no orphan shell children (windows)"
+applies_to = ["windows"]
+covers_bugs = [487]
+covers_landmines = ["pty-drop-kills-child"]
+setup = ["open-3-tabs"]
+keystrokes = [
+  { kind = "snapshot-sonic-shells" },
+  { kind = "key", value = "alt+f4" },
+  { kind = "wait", value = 1.5 },
+]
+expect = [
+  { kind = "process-count", program = "sonicterm-windows", max = 0 },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
+]
+fail_on = "Orphan pwsh/cmd remain after sonicterm-windows quits"
+
 # ==========================================================================
 # §16-§36 — additional coverage from docs/RELEASE_TESTING.md
 # ==========================================================================

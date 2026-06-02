@@ -530,7 +530,16 @@ foreach ($k in @($Case.keystrokes)) {
       Snapshot-SonicPidsAfter
     }
     'snapshot-sonic-shells' {
-      Log 'snapshot-sonic-shells: not implemented on windows (no orphan-shell checker yet)'
+      # #487: capture every shell descendant of the live sonicterm-windows
+      # process so 'orphan-shells-from-sonic' can verify PtyHandle::Drop
+      # actually killed them after the kill step.
+      $snap = Join-Path $CaseOut 'sonic-shells.txt'
+      $checker = Join-Path $PSScriptRoot 'check_orphans.ps1'
+      try {
+        & pwsh -NoProfile -File $checker snapshot $SONIC_PID $snap 2>&1 | ForEach-Object { Log "snapshot: $_" }
+      } catch {
+        Log "snapshot-sonic-shells error: $_"
+      }
     }
     default { Log "WARN unknown keystroke kind: $($k.kind)" }
   }
@@ -583,7 +592,7 @@ $ExpectLog = Join-Path $CaseOut 'expect.log'
 Set-Content -Path $ExpectLog -Value ''
 $py2 = @"
 import json, sys, os, subprocess
-case_path, shot, elog = sys.argv[1:4]
+case_path, shot, elog, case_out, script_root = sys.argv[1:6]
 ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE','1') == '1')
 OCR_KINDS = ('text-in-region','ocr-text','not-text-in-region')
 c = json.load(open(case_path))
@@ -628,6 +637,30 @@ for idx, e in enumerate(c.get('expect', [])):
         contains, sample = ocr_contains(shot, e['value']); ok = not contains
         reason = f"absent={ok} sample='{sample}'"
         results.append(('PASS' if ok else 'FAIL', kind, reason))
+    elif kind == 'orphan-shells-from-sonic':
+        # #487: verify PtyHandle::Drop killed every shell sonicterm-windows
+        # spawned. Snapshot is produced by the 'snapshot-sonic-shells'
+        # keystroke kind earlier in the case. Missing snapshot => case is
+        # mis-authored; FAIL so it can't masquerade as passing (mirrors
+        # mac.sh behaviour).
+        snap = os.path.join(case_out, 'sonic-shells.txt')
+        expected = int(e.get('expected', 0))
+        if not os.path.exists(snap):
+            ok = False
+            reason = f"snapshot missing - case must include 'snapshot-sonic-shells' before the kill step ({snap})"
+        else:
+            checker = os.path.join(script_root, 'check_orphans.ps1')
+            r = subprocess.run(['pwsh', '-NoProfile', '-File', checker, 'check', snap],
+                               capture_output=True, text=True)
+            n = -1
+            for line in (r.stdout or '').strip().splitlines():
+                if line.startswith('orphans='):
+                    try: n = int(line.split('=',1)[1])
+                    except ValueError: n = -1
+            ok = (n == expected)
+            stderr_tail = (r.stderr or '').strip().replace('\n',' | ')[:300]
+            reason = f"orphans={n} expected={expected} snap={snap} stderr='{stderr_tail}'"
+        results.append(('PASS' if ok else 'FAIL', kind, reason))
     else:
         reason = f"heuristic-pass (kind='{kind}' not yet implemented on windows)"
         results.append(('PASS', kind, reason))
@@ -643,7 +676,7 @@ if skips:
 sys.exit(0)
 "@
 $env:SONICTERM_HARNESS_OCR_AVAILABLE = if ($Script:OCR_AVAILABLE) { '1' } else { '0' }
-$py2 | python3 - $CaseJson $Shot $ExpectLog
+$py2 | python3 - $CaseJson $Shot $ExpectLog $CaseOut $PSScriptRoot
 $expectRc = $LASTEXITCODE
 
 # Issue #492: surface per-expect SKIP lines to case.log so silently
