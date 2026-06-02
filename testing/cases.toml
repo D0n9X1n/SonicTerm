@@ -8,6 +8,14 @@ description = "SonicTerm visual test cases. Single source of truth for mac.sh + 
 #   section         matches docs/RELEASE_TESTING.md section (1..37)
 #   title           human-readable
 #   applies_to      ["mac"] | ["windows"] | ["mac","windows"] | ["mac-manual"] | ["windows-manual"]
+#   shell           OPTIONAL "bash" | "cmd" | "pwsh" | "cross" (default "cross").
+#                   Marks which shell dialect the keystroke/text payloads target.
+#                   Windows harness (run_case.ps1) uses this to force-spawn the
+#                   child shell as bash.exe when shell="bash" (git-bash preferred,
+#                   WSL fallback); SKIPs with exit 77 + reason `bash_unavailable`
+#                   if neither is on PATH. Mac harness ignores this field
+#                   (mac defaults to bash/zsh which handle the common subset of
+#                   all four dialects). See #493 for the shell-dialect background.
 #   covers_bugs     ["#196", ...]   — issues/PRs this case guards
 #   covers_landmines ["try-lock-no-deadlock", ...]  — ids from CLAUDE.md §4
 #   setup           array of step strings: "open-3-tabs", "clear", "type:echo hi", "enter", "wait:0.3"
@@ -21,6 +29,7 @@ description = "SonicTerm visual test cases. Single source of truth for mac.sh + 
 
 [[case]]
 id = "render-baseline-cells-cursor-cjk-emoji-bg"
+shell = "bash"
 section = 1
 title = "Cells render with cursor, RED-BG, CJK, emoji, theme bg match"
 applies_to = ["mac", "windows"]
@@ -487,6 +496,7 @@ fail_on = "SonicTerm hangs or crashes during burst output (#195)"
 
 [[case]]
 id = "per-cell-bg-color-renders"
+shell = "bash"
 section = 8
 title = "Per-cell ANSI background color reaches the GPU"
 applies_to = ["mac", "windows"]
@@ -505,6 +515,7 @@ fail_on = "Bg silently dropped — cell rendered with theme background (#163)"
 
 [[case]]
 id = "256-color-palette-renders"
+shell = "bash"
 section = 8
 title = "256-color palette renders all swatches distinctly"
 applies_to = ["mac", "windows"]
@@ -523,6 +534,7 @@ fail_on = "Palette swatches missing or all rendered with same color"
 
 [[case]]
 id = "truecolor-rgb-renders"
+shell = "bash"
 section = 8
 title = "Truecolor 24-bit RGB sequence renders the requested color"
 applies_to = ["mac", "windows"]
@@ -541,6 +553,7 @@ fail_on = "Truecolor falls back to palette or wrong color"
 
 [[case]]
 id = "bold-italic-underline-attrs"
+shell = "bash"
 section = 8
 title = "Bold + italic + underline render distinctly"
 applies_to = ["mac", "windows"]
@@ -586,6 +599,7 @@ fail_on = "Cmd-click does not launch the browser"
 
 [[case]]
 id = "osc8-javascript-scheme-rejected"
+shell = "bash"
 section = 9
 title = "OSC 8 javascript: scheme is rejected by url_open::validate"
 applies_to = ["mac", "windows"]
@@ -607,6 +621,7 @@ fail_on = "Anything is spawned for a non-allowlist scheme"
 
 [[case]]
 id = "osc8-shell-metachar-rejected"
+shell = "bash"
 section = 9
 title = "OSC 8 URI containing shell metacharacters is rejected"
 applies_to = ["mac", "windows"]
@@ -907,6 +922,7 @@ fail_on = "No SGR-mouse byte sequence echoed"
 
 [[case]]
 id = "wide-chars-cjk-spans-two-cells"
+shell = "bash"
 section = 24
 title = "CJK wide chars span two cells (no overlap with next column)"
 applies_to = ["mac", "windows"]
@@ -926,6 +942,7 @@ fail_on = "X overlaps the CJK glyph"
 
 [[case]]
 id = "emoji-zwj-family-renders-single-glyph"
+shell = "bash"
 section = 25
 title = "Emoji ZWJ family sequence renders as one glyph"
 applies_to = ["mac", "windows"]
@@ -944,6 +961,7 @@ fail_on = "ZWJ family rendered as four separate emojis"
 
 [[case]]
 id = "grapheme-clusters-flag-renders"
+shell = "bash"
 section = 26
 title = "Regional-indicator flag pair renders as a flag glyph"
 applies_to = ["mac", "windows"]
@@ -962,6 +980,7 @@ fail_on = "Flag rendered as 🇯🇵 split into two regional letters"
 
 [[case]]
 id = "cursor-styles-block-beam-underline-bar"
+shell = "bash"
 section = 27
 title = "DECSCUSR cursor-style escape changes the cursor shape"
 applies_to = ["mac", "windows"]
@@ -1194,6 +1213,7 @@ fail_on = "Beachball or 'app not responding' indicator"
 
 [[case]]
 id = "landmine-csi-j-mode-preserves-above"
+shell = "bash"
 section = 37
 title = "CSI J0/J1/J2 modes honored — shell prompt redraw does not wipe scrollback above"
 applies_to = ["mac", "windows"]
@@ -1278,6 +1298,7 @@ fail_on = "wgpu panic 'texture still alive'"
 
 [[case]]
 id = "landmine-set-rich-text-shaping"
+shell = "bash"
 section = 37
 title = "set_rich_text path produces per-cell color + weight + style correctly"
 applies_to = ["mac", "windows"]
