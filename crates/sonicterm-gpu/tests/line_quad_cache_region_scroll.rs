@@ -32,6 +32,7 @@ fn region_scroll_evicts_affected_rows_via_dirty_invalidation() {
         let row = row_of('A');
         let key = row_quad_hash(
             0, r as usize, &row, style_rev, geom.0, geom.1, geom.2, geom.3, geom.4, geom.5, None,
+            1.0,
         );
         cache.insert(pane_id, r, key, CachedRowQuads { quads: vec![quad_for(r as f32)] });
         keys_before.push((r, key));
@@ -58,6 +59,7 @@ fn region_scroll_evicts_affected_rows_via_dirty_invalidation() {
         let row = row_of('B');
         let key = row_quad_hash(
             0, r as usize, &row, style_rev, geom.0, geom.1, geom.2, geom.3, geom.4, geom.5, None,
+            1.0,
         );
         // A naively-recomputed hash on the OLD ('A') content would
         // match an old entry — that's the #348 failure mode. With the
@@ -85,7 +87,7 @@ fn unaffected_rows_outside_region_keep_their_cache_entries() {
     for r in 0..30u64 {
         let row = row_of('X');
         let key = row_quad_hash(
-            0, r as usize, &row, 0, geom.0, geom.1, geom.2, geom.3, geom.4, geom.5, None,
+            0, r as usize, &row, 0, geom.0, geom.1, geom.2, geom.3, geom.4, geom.5, None, 1.0,
         );
         cache.insert(pane_id, r, key, CachedRowQuads { quads: vec![quad_for(r as f32)] });
         keys.push(key);

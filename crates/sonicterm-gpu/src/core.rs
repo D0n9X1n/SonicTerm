@@ -1610,7 +1610,16 @@ impl GpuRenderer {
         selection_color: [f32; 4],
         cursor_color: [f32; 4],
         quads: &mut Vec<QuadInstance>,
+        snapped_cell_x: &[f32],
     ) -> Option<(f32, f32)> {
+        // #489: derive selection-row x/w and copy-cursor cx from the
+        // shared snapped-edge cache so copy-mode overlays share
+        // device-pixel edges with adjacent glyph cells at fractional
+        // DPI. Empty-cache fallback preserves the raw arithmetic for
+        // callers (debug/test helpers) that don't carry a real cache;
+        // integer scales make the two identical via the identity fast
+        // path in `snap_to_device_pixels`.
+        let raw_fallback = snapped_cell_x.is_empty();
         if let Some((start, end)) = copy_mode.selected_range() {
             for row_abs in start.1..=end.1 {
                 let Some(visible_row) =
@@ -1627,9 +1636,16 @@ impl GpuRenderer {
                 if col_b < col_a {
                     continue;
                 }
-                let x = origin_x + col_a as f32 * cell_w;
+                let end_exclusive = col_b + 1;
+                let (x, w) = if raw_fallback {
+                    (origin_x + col_a as f32 * cell_w, (end_exclusive - col_a) as f32 * cell_w)
+                } else {
+                    let cache_end = end_exclusive.min(snapped_cell_x.len() - 1);
+                    let lo = snapped_cell_x[col_a];
+                    let hi = snapped_cell_x[cache_end];
+                    (lo, hi - lo)
+                };
                 let y = origin_y + f32::from(visible_row) * cell_h;
-                let w = (col_b - col_a + 1) as f32 * cell_w;
                 quads.push(QuadInstance {
                     rect: px_to_ndc(x, y, w, cell_h, sw, sh),
                     color: selection_color,
@@ -1640,10 +1656,16 @@ impl GpuRenderer {
 
         let visible_row = Self::viewport_relative_row(copy_mode.cursor.1, view_top_abs, grid.rows)?;
         let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
-        let cx = origin_x + copy_col as f32 * cell_w;
+        let (cx, cw) = if raw_fallback {
+            (origin_x + copy_col as f32 * cell_w, cell_w)
+        } else {
+            let lo = snapped_cell_x[copy_col];
+            let hi = snapped_cell_x[(copy_col + 1).min(snapped_cell_x.len() - 1)];
+            (lo, hi - lo)
+        };
         let cy = origin_y + f32::from(visible_row) * cell_h;
         quads.push(QuadInstance {
-            rect: px_to_ndc(cx, cy, cell_w, cell_h, sw, sh),
+            rect: px_to_ndc(cx, cy, cw, cell_h, sw, sh),
             color: cursor_color,
             ..Default::default()
         });
@@ -2546,15 +2568,8 @@ impl GpuRenderer {
                 // cells then share an edge by construction. Integer-scale
                 // fast path in `snap_to_device_pixels` makes this a no-op at
                 // scale 1.0/2.0 (mac dHash snapshots stay green).
-                let snapped_cell_x: Vec<f32> = (0..=grid.cols)
-                    .map(|col| {
-                        sonicterm_render_model::geometry::snap_to_device_pixels(
-                            (pad + (col as f32) * cell_w, 0.0, 0.0, 0.0),
-                            self.scale_factor,
-                        )
-                        .0
-                    })
-                    .collect();
+                let snapped_cell_x: Vec<f32> =
+                    build_snapped_cell_x(pad, cell_w, grid.cols, self.scale_factor);
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -2726,6 +2741,21 @@ impl GpuRenderer {
         // terminal glyphs were bleeding through overlay dialogs.)
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
+        // #489: build the active pane's shared device-pixel-snapped
+        // column-edge cache once per frame, hoisted above every overlay
+        // path. Every overlay anchored to the active pane (selection,
+        // cursor, copy-mode, quick-select, hyperlink, search-highlight,
+        // underline-decoration, IME preedit) reads its x edges from
+        // this cache so it stays edge-aligned with adjacent glyph cells
+        // at fractional DPI. Integer scales (1.0/2.0) are an identity
+        // fast path inside `snap_to_device_pixels`, so mac dHash
+        // baselines stay green by construction. Per #489 diagnosis,
+        // per-pane bg fill and inactive-pane cursors build their OWN
+        // caches (see the per-pane bg loop above and inactive-cursor
+        // loop below) — they MUST NOT share the active pane's cache.
+        let active_snapped_cell_x: Vec<f32> =
+            build_snapped_cell_x(active_origin_x, self.cell_w, grid.cols, self.scale_factor);
+
         // Per-cell ANSI background colors. Must be pushed FIRST so that
         // selection / cursor / overlay quads draw on top — otherwise an
         // ANSI-colored cell would obscure the selection highlight. The
@@ -2771,6 +2801,12 @@ impl GpuRenderer {
             if max_cols == 0 || max_rows == 0 {
                 continue;
             }
+            // #489: per-pane snapped-edge cache for bg-fill runs. Per
+            // diagnosis Recommendation, per-pane bg must NOT reuse the
+            // active pane's cache because each split-pane has its own
+            // pad and the snapped column edges differ.
+            let snapped_cell_x_bg =
+                build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols, self.scale_factor);
             for r in 0..max_rows {
                 let row_abs = view_top_abs_bg + r as u64;
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
@@ -2788,6 +2824,7 @@ impl GpuRenderer {
                     pane_rect.w,
                     pane_rect.h,
                     sel_bbox_for_quads,
+                    self.scale_factor,
                 );
                 if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
                     quads.extend_from_slice(&cached.quads);
@@ -2807,6 +2844,7 @@ impl GpuRenderer {
                     max_cols,
                     r,
                     &mut quads,
+                    &snapped_cell_x_bg,
                 );
                 let row_quads = quads[base..].to_vec();
                 self.line_quad_cache.insert(
@@ -2878,6 +2916,7 @@ impl GpuRenderer {
                     active_origin_y,
                     self.cell_w,
                     self.cell_h,
+                    &active_snapped_cell_x,
                 )
                 .into_iter()
                 .filter_map(|r| clip_rect_to_pane(r, pane_x, pane_y, pane_w, pane_h))
@@ -2903,6 +2942,7 @@ impl GpuRenderer {
                     sw,
                     sh,
                     &mut quads_overlay,
+                    &active_snapped_cell_x,
                 );
             }
             let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
@@ -2919,6 +2959,7 @@ impl GpuRenderer {
                 self.selection_color,
                 self.cursor_color,
                 &mut quads,
+                &active_snapped_cell_x,
             ) {
                 let mut bg = self.bg_rgba;
                 bg[0] *= bg[3];
@@ -2943,7 +2984,19 @@ impl GpuRenderer {
             let live_top = grid.scrollback_len() as u64;
             let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
             if view_top == live_top {
-                let cx = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
+                // #489: read both cursor cell left edge AND width from the
+                // shared snapped-edge cache so the cursor (block / bar /
+                // underline) lines up with its glyph cell at fractional DPI.
+                let cur_col = grid.cursor.col as usize;
+                let cur_col_clamped = cur_col.min(active_snapped_cell_x.len().saturating_sub(2));
+                let cx = active_snapped_cell_x
+                    .get(cur_col_clamped)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
+                let cw = active_snapped_cell_x
+                    .get(cur_col_clamped + 1)
+                    .map(|r| r - cx)
+                    .unwrap_or(self.cell_w);
                 let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
                 // Modulate the cursor accent with the current blink alpha.
                 // The base color is opaque (set at theme load) so we can
@@ -2964,7 +3017,7 @@ impl GpuRenderer {
                     CursorShape::Block => {
                         if self.window_focused {
                             if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                                (cx, cy, self.cell_w, self.cell_h),
+                                (cx, cy, cw, self.cell_h),
                                 active_pane_x,
                                 active_pane_y,
                                 active_pane_w,
@@ -2995,7 +3048,7 @@ impl GpuRenderer {
                                 &mut glyph_instances,
                                 cx,
                                 cy,
-                                self.cell_w,
+                                cw,
                                 self.cell_h,
                                 sw,
                                 sh,
@@ -3013,7 +3066,7 @@ impl GpuRenderer {
                                 &mut quads,
                                 cx,
                                 cy,
-                                self.cell_w,
+                                cw,
                                 self.cell_h,
                                 sw,
                                 sh,
@@ -3043,7 +3096,7 @@ impl GpuRenderer {
                     }
                     CursorShape::Underline => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                            (cx, cy + self.cell_h - SUBSHAPE_PX, self.cell_w, SUBSHAPE_PX),
+                            (cx, cy + self.cell_h - SUBSHAPE_PX, cw, SUBSHAPE_PX),
                             active_pane_x,
                             active_pane_y,
                             active_pane_w,
@@ -3074,7 +3127,23 @@ impl GpuRenderer {
                 // are already padded by the layout (they line up with
                 // pane.rs::Rect) so we anchor cells at the rect's
                 // top-left without re-applying the global padding.
-                let icx = ic.rect_x + f32::from(ic.col) * self.cell_w;
+                //
+                // #489: per-pane snapped-edge cache for THIS inactive
+                // pane (not the active pane's cache). Diagnosis flags
+                // sharing the active pane's cache here as a bug because
+                // each pane has its own pad and its own snapped column
+                // edges. Cache size is one cell past the cursor column
+                // so we can look up both `icx` and `icx + width`.
+                let pane_cols =
+                    ((ic.rect_w / self.cell_w).floor() as i32).max(i32::from(ic.col) + 1) as u16;
+                let ic_snapped =
+                    build_snapped_cell_x(ic.rect_x, self.cell_w, pane_cols, self.scale_factor);
+                let col_idx = (ic.col as usize).min(ic_snapped.len().saturating_sub(2));
+                let icx = ic_snapped
+                    .get(col_idx)
+                    .copied()
+                    .unwrap_or(ic.rect_x + f32::from(ic.col) * self.cell_w);
+                let icw = ic_snapped.get(col_idx + 1).map(|r| r - icx).unwrap_or(self.cell_w);
                 let icy = ic.rect_y + f32::from(ic.row) * self.cell_h;
                 // Clip to the pane rect so a stale cursor position from a
                 // pre-resize grid never bleeds onto a sibling. Routed
@@ -3085,7 +3154,7 @@ impl GpuRenderer {
                     &mut quads,
                     icx,
                     icy,
-                    self.cell_w,
+                    icw,
                     self.cell_h,
                     sw,
                     sh,
@@ -3139,9 +3208,21 @@ impl GpuRenderer {
         let hl_runs = collect_hyperlink_runs(grid);
         let hl_thickness = (self.cell_h * 0.08).max(1.0);
         for (row, col_a, col_b) in &hl_runs {
-            let x = active_origin_x + f32::from(*col_a) * self.cell_w;
+            // #489: derive x/w from the shared active-pane snapped-edge
+            // cache so the hyperlink tint + underline share device-pixel
+            // edges with adjacent glyph cells at fractional DPI.
+            let end_exclusive = (*col_b as usize).saturating_add(1);
+            let cache_end = end_exclusive.min(active_snapped_cell_x.len().saturating_sub(1));
+            let col_a_usize = (*col_a as usize).min(cache_end);
+            let x = active_snapped_cell_x
+                .get(col_a_usize)
+                .copied()
+                .unwrap_or(active_origin_x + f32::from(*col_a) * self.cell_w);
+            let w = active_snapped_cell_x
+                .get(cache_end)
+                .map(|r| r - x)
+                .unwrap_or_else(|| f32::from(*col_b - *col_a + 1) * self.cell_w);
             let y = active_origin_y + f32::from(*row) * self.cell_h;
-            let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             // Clip hyperlink tint + underline to active pane (PR #270
             // follow-up) — a hyperlinked run that reaches the last column
             // of a narrowed pane would otherwise bleed into the neighbour.
@@ -3178,10 +3259,33 @@ impl GpuRenderer {
         // surface format doesn't double-encode (matches the body glyph path).
         let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
+        // #489: underlines are collected from every pane (each entry
+        // carries its own `origin_x` == pane pad), so memoize a snapped
+        // cache per distinct pane pad. Most frames have ≤ 2 panes, so
+        // the linear-scan map is cheaper than a HashMap.
+        let mut underline_caches: Vec<(u32, Vec<f32>)> = Vec::new();
         for (origin_x, origin_y, row, col_a, col_b) in &underlines {
-            let x = *origin_x + f32::from(*col_a) * self.cell_w;
+            let pad_bits = origin_x.to_bits();
+            let cache = if let Some((_, c)) = underline_caches.iter().find(|(b, _)| *b == pad_bits)
+            {
+                c
+            } else {
+                let c = build_snapped_cell_x(*origin_x, self.cell_w, grid.cols, self.scale_factor);
+                underline_caches.push((pad_bits, c));
+                &underline_caches.last().unwrap().1
+            };
+            let end_exclusive = (*col_b as usize).saturating_add(1);
+            let cache_end = end_exclusive.min(cache.len().saturating_sub(1));
+            let col_a_usize = (*col_a as usize).min(cache_end);
+            let x = cache
+                .get(col_a_usize)
+                .copied()
+                .unwrap_or(*origin_x + f32::from(*col_a) * self.cell_w);
+            let w = cache
+                .get(cache_end)
+                .map(|r| r - x)
+                .unwrap_or_else(|| f32::from(*col_b - *col_a + 1) * self.cell_w);
             let y = *origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
-            let w = f32::from(*col_b - *col_a + 1) * self.cell_w;
             quads.push(QuadInstance {
                 rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
                 color: underline_color,
@@ -3462,9 +3566,21 @@ impl GpuRenderer {
                 if visible_row >= grid.rows || m.col_end <= m.col_start {
                     continue;
                 }
-                let x = active_origin_x + f32::from(m.col_start) * self.cell_w;
+                // #489: derive x/w from the active-pane snapped-edge
+                // cache so match highlights share device-pixel edges
+                // with adjacent glyph cells at fractional DPI.
+                let cache_end =
+                    (m.col_end as usize).min(active_snapped_cell_x.len().saturating_sub(1));
+                let cs = (m.col_start as usize).min(cache_end);
+                let x = active_snapped_cell_x
+                    .get(cs)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(m.col_start) * self.cell_w);
                 let y = active_origin_y + f32::from(visible_row) * self.cell_h;
-                let w = f32::from(m.col_end - m.col_start) * self.cell_w;
+                let w = active_snapped_cell_x
+                    .get(cache_end)
+                    .map(|r| r - x)
+                    .unwrap_or_else(|| f32::from(m.col_end - m.col_start) * self.cell_w);
                 let color = if Some(i) == cur_idx {
                     self.search_highlight_current
                 } else {
@@ -3891,7 +4007,12 @@ impl GpuRenderer {
 
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
-            let cursor_x = active_origin_x + f32::from(grid.cursor.col) * self.cell_w;
+            // #489: anchor IME preedit at the snapped cursor cell edge
+            // so the preedit underline lines up with the cursor cell.
+            let cursor_x = active_snapped_cell_x
+                .get(grid.cursor.col as usize)
+                .copied()
+                .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
             let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
             ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
         });
@@ -4419,17 +4540,29 @@ impl GpuRenderer {
         sw: f32,
         sh: f32,
         quads_overlay: &mut Vec<QuadInstance>,
+        snapped_cell_x: &[f32],
     ) {
+        // #489: derive each hint cell's x/w from the shared snapped-edge
+        // cache so quick-select hint backgrounds share device-pixel
+        // edges with adjacent glyph cells at fractional DPI.
+        let raw_fallback = snapped_cell_x.is_empty();
         let mut overlay = String::new();
         for hint in &quick_select.hints {
             let Some(visible_row) = hint.row.checked_sub(scrollback_len) else { continue };
             if visible_row >= visible_rows {
                 continue;
             }
-            let x = origin_x + hint.col_start as f32 * self.cell_w;
+            let (x, w) = if raw_fallback {
+                (origin_x + hint.col_start as f32 * self.cell_w, self.cell_w)
+            } else {
+                let col = (hint.col_start).min(snapped_cell_x.len().saturating_sub(2));
+                let lo = snapped_cell_x[col];
+                let hi = snapped_cell_x[col + 1];
+                (lo, hi - lo)
+            };
             let y = origin_y + visible_row as f32 * self.cell_h;
             quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(x, y, self.cell_w, self.cell_h, sw, sh),
+                rect: px_to_ndc(x, y, w, self.cell_h, sw, sh),
                 color: self.cursor_color,
                 ..Default::default()
             });
@@ -4959,6 +5092,14 @@ pub fn emit_cell_bg_quads_clipped(
     if max_cols == 0 || max_rows == 0 {
         return;
     }
+    // #489: build this pane's snapped-edge cache once. Per the
+    // diagnosis, per-pane bg builds its own cache (not the active
+    // pane's) so split-pane bg edges stay aligned with that pane's
+    // glyph cells. Test/debug helper takes scale = 1.0 here because
+    // its callers (debug surfaces) don't carry a real scale_factor;
+    // at integer scales `build_snapped_cell_x` is identity so this
+    // matches the prior raw-arithmetic behavior exactly.
+    let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols, 1.0);
     for r in 0..max_rows {
         emit_cell_bg_quads_for_row(
             grid,
@@ -4973,8 +5114,31 @@ pub fn emit_cell_bg_quads_clipped(
             max_cols,
             r,
             out,
+            &snapped_cell_x,
         );
     }
+}
+
+/// #489: shared device-pixel-snapped column-edge cache. Returns
+/// `cols + 1` entries where slot `c` is the snapped left edge of cell
+/// `c`, and slot `c + span` is its right edge. Every overlay/glyph
+/// path that derives a horizontal rect from a column index must read
+/// from this cache so adjacent overlays share an exact device-pixel
+/// edge with the glyph cells they cover. Integer scales (1.0 / 2.0)
+/// are an identity fast path inside `snap_to_device_pixels`, so this
+/// helper is a no-op there and mac dHash snapshots stay green.
+#[doc(hidden)]
+#[must_use]
+pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16, scale: f32) -> Vec<f32> {
+    (0..=cols)
+        .map(|col| {
+            sonicterm_render_model::geometry::snap_to_device_pixels(
+                (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+                scale,
+            )
+            .0
+        })
+        .collect()
 }
 
 /// Emit background quads for a single visible row. Extracted so the
@@ -4995,6 +5159,7 @@ pub fn emit_cell_bg_quads_for_row(
     max_cols: u16,
     r: u16,
     out: &mut Vec<QuadInstance>,
+    snapped_cell_x: &[f32],
 ) {
     {
         let row_abs = view_top_abs + r as u64;
@@ -5005,15 +5170,25 @@ pub fn emit_cell_bg_quads_for_row(
         let mut run_start: Option<u16> = None;
         let mut run_color: Option<[f32; 4]> = None;
         let mut col: u16 = 0;
+        // #489: derive x/w from the shared snapped-edge cache so bg
+        // runs share device-pixel edges with adjacent glyph cells at
+        // fractional DPI. Falls back to raw arithmetic if the cache is
+        // empty (defensive — production always passes the full cache).
+        let raw_fallback = snapped_cell_x.is_empty();
         let flush =
             |start: u16, end_exclusive: u16, color: [f32; 4], out: &mut Vec<QuadInstance>| {
-                let x = pad + f32::from(start) * cell_w;
-                let y = top_inset + f32::from(r) * cell_h;
                 let clipped_end = end_exclusive.min(max_cols);
                 if clipped_end <= start {
                     return;
                 }
-                let w = f32::from(clipped_end - start) * cell_w;
+                let (x, w) = if raw_fallback {
+                    (pad + f32::from(start) * cell_w, f32::from(clipped_end - start) * cell_w)
+                } else {
+                    let lo = snapped_cell_x[start as usize];
+                    let hi = snapped_cell_x[clipped_end as usize];
+                    (lo, hi - lo)
+                };
+                let y = top_inset + f32::from(r) * cell_h;
                 out.push(QuadInstance::sharp(px_to_ndc(x, y, w, cell_h, sw, sh), color));
             };
         for cell in row.iter().take(max_cols as usize) {
@@ -5191,6 +5366,7 @@ pub fn command_status_hash(status: &sonicterm_ui::tabs::CommandStatus, now: Inst
 ///
 /// Each returned tuple is `(x, y, w, h)` in physical pixels.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub fn selection_quad_rects(
     sel: &sonicterm_ui::selection::Selection,
     rows: u16,
@@ -5199,12 +5375,19 @@ pub fn selection_quad_rects(
     origin_y: f32,
     cell_w: f32,
     cell_h: f32,
+    snapped_cell_x: &[f32],
 ) -> Vec<(f32, f32, f32, f32)> {
     if sel.is_empty() {
         return Vec::new();
     }
     let (a, b) = sel.normalized();
     let mut out = Vec::with_capacity(usize::from(b.0.saturating_sub(a.0)) + 1);
+    // #489: derive each row's x/w from the shared snapped-edge cache so
+    // selection rects share device-pixel edges with adjacent glyph
+    // cells at fractional DPI. Empty-cache fallback preserves the old
+    // raw-arithmetic behavior for callers (debug/test helpers) that
+    // don't carry a real cache; integer scales make the two identical.
+    let raw_fallback = snapped_cell_x.is_empty();
     for r in a.0..=b.0 {
         if r >= rows {
             break;
@@ -5220,9 +5403,21 @@ pub fn selection_quad_rects(
         if col_b < col_a {
             continue;
         }
-        let x = origin_x + f32::from(col_a) * cell_w;
+        let end_exclusive = col_b.saturating_add(1);
+        let (x, w) = if raw_fallback {
+            (origin_x + f32::from(col_a) * cell_w, f32::from(end_exclusive - col_a) * cell_w)
+        } else {
+            // Clamp the right edge to the cache bounds (`cols + 1`); a
+            // selection that touches col `cols - 1` reads `snapped[cols]`.
+            let cache_end = end_exclusive.min((snapped_cell_x.len() - 1) as u16);
+            if cache_end <= col_a {
+                continue;
+            }
+            let lo = snapped_cell_x[col_a as usize];
+            let hi = snapped_cell_x[cache_end as usize];
+            (lo, hi - lo)
+        };
         let y = origin_y + f32::from(r) * cell_h;
-        let w = f32::from(col_b - col_a + 1) * cell_w;
         out.push((x, y, w, cell_h));
     }
     out
