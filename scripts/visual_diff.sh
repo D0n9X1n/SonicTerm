@@ -70,6 +70,26 @@ printf %s "$PAYLOAD" > "$PAYLOAD_FIXTURE"
 trap 'rm -f "$PAYLOAD_FIXTURE"' EXIT
 
 # ---------------------------------------------------------------------------
+# Guard: refuse if a NON-WezTerm competing terminal is running. WezTerm is
+# the intentional comparison target here, but iTerm/kitty/etc. would steal
+# keystrokes meant for sonicterm-mac. Override with
+# SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1. See issues #464, #473.
+# ---------------------------------------------------------------------------
+COMPETITOR_RE='^(Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
+if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
+  hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
+    n=split($2,a,"/"); name=a[n]
+    if (name ~ re) print $1" "name
+  }')
+  if [[ -n "$hits" ]]; then
+    echo "SKIP: competing terminal detected — keystrokes would leak." >&2
+    echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
+    echo "$hits" >&2
+    exit 77
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -92,6 +112,24 @@ EOF
 
 paste_payload() {
   local app_name="$1"
+  # Pre-keystroke focus gate — abort the paste if $app_name isn't frontmost
+  # after up to 5 retries, instead of leaking keystrokes into whatever else
+  # has focus. See issue #473. (#474 owns the pbcopy + screencap fixes here.)
+  local front try
+  for try in 1 2 3 4 5; do
+    /usr/bin/osascript >/dev/null 2>&1 <<EOF || true
+tell application "System Events"
+  set frontmost of (first process whose name is "$app_name") to true
+end tell
+EOF
+    sleep 0.25
+    front=$(/usr/bin/osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
+    [[ "$front" == "$app_name" ]] && break
+  done
+  if [[ "$front" != "$app_name" ]]; then
+    echo "warn: $app_name not frontmost (front=$front); skipping paste" >&2
+    return 0
+  fi
   /usr/bin/osascript <<EOF
 tell application "System Events"
   tell process "$app_name"
