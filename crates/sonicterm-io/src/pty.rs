@@ -422,7 +422,11 @@ mod tests {
 
     #[test]
     fn clean_e2e_args_powershell_returns_nologo_noprofile() {
+        // `mut` only needed on Windows where we extend with absolute paths.
+        #[cfg(target_os = "windows")]
         let mut shells: Vec<&str> = vec!["pwsh.exe", "powershell.exe"];
+        #[cfg(not(target_os = "windows"))]
+        let shells: Vec<&str> = vec!["pwsh.exe", "powershell.exe"];
         // Windows-style absolute paths only parse via Path::new on Windows
         // (Unix Path treats '\\' as literal characters, not separators).
         #[cfg(target_os = "windows")]
