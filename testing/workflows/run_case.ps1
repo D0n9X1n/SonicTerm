@@ -441,9 +441,15 @@ function Send-Chord([string]$chord) {
   }
 }
 function Send-Text([string]$text) {
-  # Bucket A — text payload via per-char WM_KEYDOWN+WM_CHAR+WM_KEYUP.
-  # No foreground required; safe under RDP / locked desktops.
-  Send-TextToHwnd -Hwnd $WindowHandle -Text $text
+  # Partial-land per #502 R4: Bucket A (text payload) is blocked on the
+  # harness-input-pipe (#506). Text-only steps are SKIPped here rather
+  # than calling into the throwing Send-TextToHwnd stub. The full
+  # #502 close lands in a follow-up consumer PR that wires this through
+  # --harness-input-pipe.
+  Log "SKIP: bucket_a_blocked_on_506 (text payload '$text' — needs #506 harness pipe)"
+  Set-Content (Join-Path $CaseOut 'status') 'SKIP'
+  Set-Content (Join-Path $CaseOut 'skip_reason') 'bucket_a_blocked_on_506'
+  exit 77
 }
 function Do-Setup([string]$step) {
   [void](Ensure-FrontOrSkip)

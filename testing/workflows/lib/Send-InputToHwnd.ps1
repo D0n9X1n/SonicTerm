@@ -2,9 +2,8 @@
 # Send-InputToHwnd.ps1 — three-bucket input delivery for SonicTerm
 # Windows test harness (issue #502, Guard-4 RDP SKIP fix).
 #
-# Bucket A (text payload)      : per-char WM_KEYDOWN + WM_CHAR + WM_KEYUP
-#                                posted directly to the SonicTerm HWND.
-#                                Does NOT require foreground.
+# Bucket A (text payload)      : STUB — blocked on #506 (harness pipe).
+#                                Signature preserved for future wiring.
 # Bucket B (named-key, no mod) : WM_KEYDOWN + WM_KEYUP posted to HWND.
 #                                Does NOT require foreground.
 # Bucket C (real modifier chord): SendInput, AFTER AttachThreadInput +
@@ -238,37 +237,23 @@ function _Invoke-PostMessage {
 }
 
 # ----------------------------------------------------------------------
-# Bucket A — text payload via WM_KEYDOWN + WM_CHAR + WM_KEYUP per char.
-# Foreground NOT required. Returns $true on success; throws on any
-# PostMessage failure (REVISE blocker 2).
+# Bucket A — text payload. NOT IMPLEMENTED in this PR.
+#
+# Partial-land per #502 R4 Opus review: synthetic WM_CHAR PostMessages
+# are not consumed by SonicTerm's PTY-side input path (the harness needs
+# a dedicated byte-injection pipe instead). The signature is preserved
+# so the future consumer PR (#502) can wire it up once the underlying
+# harness pipe lands.
+#
+# Blocked-by: #506 (feat(sonicterm-windows): --harness-input-pipe for
+# headless byte injection (harness-only feature gate)).
 # ----------------------------------------------------------------------
 function Send-TextToHwnd {
   param(
     [Parameter(Mandatory=$true)][IntPtr]$Hwnd,
     [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Text
   )
-  if ($Hwnd -eq [IntPtr]::Zero) { throw 'Send-TextToHwnd: zero HWND' }
-  foreach ($ch in $Text.ToCharArray()) {
-    $vkScan = [SonicInput]::VkKeyScanW([char]$ch)
-    if ($vkScan -eq -1) {
-      # Fall back to WM_CHAR only (no VK info; covers ESC, BEL, etc.).
-      _Invoke-PostMessage -Hwnd $Hwnd -Msg ([SonicInput]::WM_CHAR) `
-        -WParam ([IntPtr][int][char]$ch) -LParam ([IntPtr]1)
-      continue
-    }
-    $vk = [int]($vkScan -band 0xFF)
-    $lpDown = _Build-KeyLParam -VK $vk -KeyUp:$false
-    $lpUp   = _Build-KeyLParam -VK $vk -KeyUp:$true
-    # Strict ordering: KEYDOWN → CHAR → KEYUP. PostMessage is FIFO per
-    # target thread, so we don't need a sleep between them.
-    _Invoke-PostMessage -Hwnd $Hwnd -Msg ([SonicInput]::WM_KEYDOWN) `
-      -WParam ([IntPtr]$vk) -LParam $lpDown
-    _Invoke-PostMessage -Hwnd $Hwnd -Msg ([SonicInput]::WM_CHAR) `
-      -WParam ([IntPtr][int][char]$ch) -LParam $lpDown
-    _Invoke-PostMessage -Hwnd $Hwnd -Msg ([SonicInput]::WM_KEYUP) `
-      -WParam ([IntPtr]$vk) -LParam $lpUp
-  }
-  return $true
+  throw "Bucket A requires harness pipe — blocked on #506"
 }
 
 # ----------------------------------------------------------------------
