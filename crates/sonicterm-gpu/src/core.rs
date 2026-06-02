@@ -3279,14 +3279,12 @@ impl GpuRenderer {
         let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
         for (origin_x, origin_y, pane_cols, row, col_a, col_b) in &underlines {
             let pad_bits = origin_x.to_bits();
-            let cache = if let Some((_, _, c)) = underline_caches
-                .iter()
-                .find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
+            let cache = if let Some((_, _, c)) =
+                underline_caches.iter().find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
             {
                 c
             } else {
-                let c =
-                    build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
+                let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
                 underline_caches.push((pad_bits, *pane_cols, c));
                 &underline_caches.last().unwrap().2
             };
@@ -4690,6 +4688,31 @@ impl GpuRenderer {
                     (cell_w, cell_h),
                     sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
                 );
+                // #537: Block Elements (U+2580..=U+259F) override the
+                // font glyph entirely with per-codepoint sub-cell rects.
+                // For multi-rect variants we still emit only the primary
+                // rect here (consistent with single-quad pipeline) —
+                // proper multi-rect emit is tracked in the geometry epic.
+                let (gx, gy, gw, gh) = if let Some(geom) =
+                    sonicterm_text::block_element_geometry::block_element_rect(
+                        cell.ch,
+                        (cx, cy),
+                        (cell_w, cell_h),
+                    ) {
+                    sonicterm_text::block_element_geometry::primary_rect(&geom)
+                } else {
+                    (gx, gy, gw, gh)
+                };
+                // #537: emit NF icon-cell-fit decision trace so PMs can
+                // diagnose IconCellFit on a per-codepoint basis without
+                // recompiling. Cheap: it's a `tracing::debug!` gated by
+                // the env-filter; the formatting only runs when enabled.
+                sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
+                    cell.ch,
+                    Some(0),
+                    gw_nat,
+                    cell_w,
+                );
                 // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
                 let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
                     (gx, gy, gw, gh),
@@ -4848,11 +4871,32 @@ impl GpuRenderer {
                 // separators — anchor them to the cell rect. NerdFont PUA
                 // icons (#438) scale-to-fit to ~0.95 cell_h centered.
                 // See `swash_rasterizer::{classify_symbol, apply_symbol_fit}`.
-                let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                     (gx_nat, gy_nat, gw_nat, gh_nat),
                     (cx, cy),
                     (cell_pixel_width_snapped, cell_h),
                     sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                );
+                // #537: Block Elements override font glyph with per-codepoint
+                // sub-cell rects (see ASCII-fast path above for rationale).
+                let (gx, gy, mut gw, mut gh) = if let Some(geom) =
+                    sonicterm_text::block_element_geometry::block_element_rect(
+                        ch,
+                        (cx, cy),
+                        (cell_pixel_width_snapped, cell_h),
+                    ) {
+                    let (px, py, pw, ph) =
+                        sonicterm_text::block_element_geometry::primary_rect(&geom);
+                    (px, py, pw, ph)
+                } else {
+                    (gx, gy, gw, gh)
+                };
+                // #537: NF icon-cell-fit decision trace (char-fallback path).
+                sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
+                    ch,
+                    Some(slot as usize),
+                    gw_nat,
+                    cell_pixel_width_snapped,
                 );
                 // Clamp tile to the cell box the codepoint reserves
                 // (1 cell for narrow, 2 for WIDE). Some fallback faces
@@ -4933,11 +4977,31 @@ impl GpuRenderer {
             // icon-cell-fit (#438) — see the matching call in the
             // char-fallback branch above. `g.ch` is the shaped cluster's
             // lead codepoint.
-            let (gx, gy, mut gw, mut gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+            let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
                 (gx_nat, gy_nat, gw_nat, gh_nat),
                 (cx, cy),
                 (cell_pixel_width_snapped, cell_h),
                 sonicterm_text::swash_rasterizer::classify_symbol(g.ch),
+            );
+            // #537: Block Elements override font glyph with per-codepoint
+            // sub-cell rects (see ASCII-fast path above for rationale).
+            let (gx, gy, mut gw, mut gh) = if let Some(geom) =
+                sonicterm_text::block_element_geometry::block_element_rect(
+                    g.ch,
+                    (cx, cy),
+                    (cell_pixel_width_snapped, cell_h),
+                ) {
+                let (px, py, pw, ph) = sonicterm_text::block_element_geometry::primary_rect(&geom);
+                (px, py, pw, ph)
+            } else {
+                (gx, gy, gw, gh)
+            };
+            // #537: NF icon-cell-fit decision trace (shaped path).
+            sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
+                g.ch,
+                Some(g.font_slot as usize),
+                gw_nat,
+                cell_pixel_width_snapped,
             );
             // See the fallback path above for why we clamp to
             // `cell_pixel_width_snapped` — the same overflow class can occur

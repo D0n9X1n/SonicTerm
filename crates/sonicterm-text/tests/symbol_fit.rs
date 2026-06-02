@@ -101,3 +101,120 @@ fn apply_symbol_fit_natural_returns_input_unchanged() {
     let out = apply_symbol_fit(natural, (10.0, 20.0), (12.0, 16.0), SymbolFit::Natural);
     assert_eq!(out, natural);
 }
+
+// ---------------------------------------------------------------------------
+// #537: Box Drawing cell-stretch + Block Element geometry wiring.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classify_box_drawing_u2500_to_u257f_returns_box_drawing_cell_fill() {
+    for cp in 0x2500u32..=0x257Fu32 {
+        let ch = char::from_u32(cp).expect("valid scalar");
+        assert_eq!(
+            classify_symbol(ch),
+            SymbolFit::BoxDrawingCellFill,
+            "U+{:04X} should be BoxDrawingCellFill",
+            cp
+        );
+    }
+}
+
+#[test]
+fn box_drawing_u2500_horizontal_stretches_to_cell_w() {
+    // Simulate a font glyph whose natural advance is narrower than
+    // cell_w (typical for box-drawing in Nerd Font patched faces):
+    // natural rect is 6.0 wide inside a 10.0-wide cell.
+    let cell_origin = (0.0_f32, 0.0_f32);
+    let cell_size = (10.0_f32, 20.0_f32);
+    let natural = (2.0_f32, 8.0_f32, 6.0_f32, 4.0_f32); // gx, gy, gw, gh
+    let (gx, gy, gw, gh) =
+        apply_symbol_fit(natural, cell_origin, cell_size, classify_symbol('\u{2500}'));
+    // X must snap to cell left, width must equal cell_w.
+    assert!((gx - cell_origin.0).abs() < 1e-4, "gx should snap to cell.x");
+    assert!((gw - cell_size.0).abs() < 1e-4, "gw should equal cell_w, got {gw}");
+    // Y / H preserved from natural placement.
+    assert!((gy - natural.1).abs() < 1e-4, "gy should preserve natural placement");
+    assert!((gh - natural.3).abs() < 1e-4, "gh should preserve natural placement");
+}
+
+#[test]
+fn block_element_u2588_full_block_emits_full_cell_via_geometry() {
+    // Full-block U+2588 routed through block_element_rect / primary_rect
+    // (the renderer-side wiring) must produce a rect covering the entire
+    // cell, regardless of what the font's natural glyph looks like.
+    let cell_origin = (5.0_f32, 7.0_f32);
+    let cell_size = (10.0_f32, 20.0_f32);
+    let geom = sonicterm_text::block_element_geometry::block_element_rect(
+        '\u{2588}',
+        cell_origin,
+        cell_size,
+    )
+    .expect("U+2588 must have geometry");
+    let (gx, gy, gw, gh) = sonicterm_text::block_element_geometry::primary_rect(&geom);
+    assert!((gx - cell_origin.0).abs() < 1e-4);
+    assert!((gy - cell_origin.1).abs() < 1e-4);
+    assert!((gw - cell_size.0).abs() < 1e-4, "U+2588 quad width must == cell_w");
+    assert!((gh - cell_size.1).abs() < 1e-4, "U+2588 quad height must == cell_h");
+}
+
+#[test]
+fn nf_icon_fit_decision_is_logged_via_tracing() {
+    // Capture tracing output via a minimal custom Subscriber. We avoid
+    // pulling in `tracing-subscriber` as a dev-dep — the workspace
+    // already depends on `tracing`, and the harness contract is just
+    // "the IconCellFit decision emits a log line on the expected target".
+    use std::sync::{Arc, Mutex};
+    use tracing::span;
+    use tracing::subscriber::with_default;
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct Capture {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+    impl Subscriber for Capture {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _attrs: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let meta = event.metadata();
+            if meta.target() == "sonic::render::glyph::nf_icon_fit" {
+                self.events.lock().unwrap().push(meta.target());
+            }
+        }
+        fn enter(&self, _span: &span::Id) {}
+        fn exit(&self, _span: &span::Id) {}
+    }
+
+    let capture = Capture::default();
+    let events = capture.events.clone();
+    with_default(capture, || {
+        // U+F0001 is in NF Plane-1 PUA → IconCellFit.
+        sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
+            char::from_u32(0xF0001).unwrap(),
+            Some(2),
+            7.5,
+            10.0,
+        );
+        // 'A' is Natural — log still fires (the decision is "no fit applied").
+        sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision('A', Some(0), 6.0, 10.0);
+    });
+
+    let lines = events.lock().unwrap().clone();
+    assert!(
+        lines.len() >= 2,
+        "expected >=2 nf_icon_fit log events, got {}: {:?}",
+        lines.len(),
+        lines
+    );
+    assert!(
+        lines.iter().all(|l| *l == "sonic::render::glyph::nf_icon_fit"),
+        "all captured lines must come from nf_icon_fit target: {:?}",
+        lines
+    );
+}
