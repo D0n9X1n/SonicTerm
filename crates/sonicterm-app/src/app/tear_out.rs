@@ -39,6 +39,11 @@ use crate::app::window_geom;
 
 impl App {
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
+        // #536 profile: outer span around the whole tear-out handler so
+        // dev captures show total wall-clock vs the inner spans
+        // (`tear_out_spawn_exe`, `gpu_renderer_new`, `font_atlas_warmup`,
+        // `tear_out_child_init`). Profile-only — behavior unchanged.
+        let _tear_out_span = tracing::info_span!("tear_out_handler", tab_index = index).entered();
         // M6a-expand-2c-misc: notify reducer of the tear-out
         // cascade. The reducer emits Render(TabRemoved) on the
         // source window AND a WindowOpen for the destination, all

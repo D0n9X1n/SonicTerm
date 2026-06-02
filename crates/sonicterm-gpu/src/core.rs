@@ -965,6 +965,10 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
+        // #536 profile: span around wgpu instance/adapter/device init
+        // + surface configuration. One of the two suspect cost centers
+        // motivating the tear-out-spawn investigation.
+        let _gpu_init_span = tracing::info_span!("gpu_renderer_new").entered();
         let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
             settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -1058,6 +1062,10 @@ impl GpuRenderer {
         // launch don't pay the font-fallback charmap-walk cost per cell
         // in the first paint. See `swash_rasterizer::prebake_box_and_powerline`.
         {
+            // #536 profile: span the prebake/prewarm pass — box drawing,
+            // Powerline, ASCII, Nerd Font PUA. Per-glyph cost is ~3 ms on
+            // a cold font_system; this is the second suspect cost center.
+            let _warmup_span = tracing::info_span!("font_atlas_warmup").entered();
             let mut prebake_raster =
                 SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
             let _inserted =

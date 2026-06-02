@@ -396,6 +396,11 @@ fn drag_ack_for_outcome(
 }
 
 fn spawn_tearout_child(payload_json: &str) -> DragAck {
+    // #536 profile: span around the new-exe spawn — Opus diagnosis
+    // expects this to dominate tear-out wall-clock cost. The child's
+    // wgpu/atlas warmup is instrumented separately in main.rs and
+    // sonicterm-gpu/src/core.rs.
+    let _span = tracing::info_span!("tear_out_spawn_exe").entered();
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(e) => {

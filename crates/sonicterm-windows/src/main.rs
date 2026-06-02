@@ -43,6 +43,12 @@ mod tab_drag_os;
 mod win_sid;
 
 fn main() -> Result<()> {
+    // #536 profile: span the whole main() so dev captures see
+    // "tear_out_child_init" wall-clock in the spawned child process.
+    // The `tear_out_child` field is recorded after CLI parse below.
+    let _main_span =
+        tracing::info_span!("tear_out_child_init", tear_out_child = tracing::field::Empty)
+            .entered();
     set_process_dpi_awareness();
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
@@ -75,6 +81,8 @@ fn main() -> Result<()> {
     let parsed_cli = cli::parse_cli_from_env()?;
     #[cfg(target_os = "windows")]
     let tearout_payload = parsed_cli.tearout;
+    #[cfg(target_os = "windows")]
+    tracing::Span::current().record("tear_out_child", tearout_payload.is_some());
     #[cfg(all(target_os = "windows", feature = "harness"))]
     let harness_request = parsed_cli.harness_input_pipe;
     let theme = load_theme(&config.theme);
