@@ -151,6 +151,16 @@ pub enum SymbolFit {
     /// the geometry enum to detect `MultiRect` / `ShadedRect` variants
     /// that require extra quads / alpha multipliers.
     BlockCellFill,
+    /// Box Drawing (U+2500..=U+257F): the font's natural glyph advance is
+    /// often narrower than `cell_w` (especially in Nerd Font patched fonts
+    /// where light/heavy/double variants have different advances), leaving
+    /// visible gaps between adjacent box-drawing cells. This policy stretches
+    /// the glyph quad horizontally to fill `cell_w` exactly while preserving
+    /// the natural vertical placement (baseline + bearing) so corners /
+    /// junctions still line up roughly. This is a CELL-STRETCH override —
+    /// not a geometry rewrite. True corner / junction continuity needs
+    /// procedural geometry (tracked in the follow-up epic #542).
+    BoxDrawingCellFill,
     /// Natural swash placement (text, CJK, emoji).
     Natural,
 }
@@ -188,6 +198,10 @@ pub fn classify_symbol(ch: char) -> SymbolFit {
         0x25B6..=0x25C1 => SymbolFit::IconCellFit,
         // Block Elements: per-codepoint sub-cell geometry (#461).
         0x2580..=0x259F => SymbolFit::BlockCellFill,
+        // Box Drawing (#537): stretch glyph to cell_w so adjacent
+        // box-drawing cells don't show gaps. Geometry continuity
+        // (corners, junctions, arcs) is tracked in follow-up #542.
+        0x2500..=0x257F => SymbolFit::BoxDrawingCellFill,
         _ => SymbolFit::Natural,
     }
 }
@@ -230,6 +244,20 @@ pub fn apply_symbol_fit(
             // opt into the multi-rect path.
             (cx, cy, cell_w, cell_h)
         }
+        SymbolFit::BoxDrawingCellFill => {
+            // Box Drawing (#537): stretch the glyph horizontally so its
+            // quad fills `cell_w` exactly, anchored to the cell's left
+            // edge. Preserve the natural vertical placement (the font's
+            // baseline + bearing already line up cell-center for these
+            // glyphs in well-designed monospace faces). For degenerate
+            // (zero-size) glyphs, fall back to the full cell rect so we
+            // emit a sensible placeholder.
+            let (_, gy, _, gh) = rect;
+            if gh <= 0.0 {
+                return (cx, cy, cell_w, cell_h);
+            }
+            (cx, gy, cell_w, gh)
+        }
         SymbolFit::IconCellFit => {
             let (_, _, gw, gh) = rect;
             // Degenerate glyph (zero-size) — fall back to centered cell.
@@ -255,6 +283,39 @@ pub fn apply_symbol_fit(
             (out_x, out_y, target_w, target_h)
         }
     }
+}
+
+/// Emit a single `tracing::debug!` line documenting the IconCellFit
+/// decision for a Nerd Font icon glyph (#537). The line is gated by
+/// classification so it only fires for the IconCellFit policy — callers
+/// can dispatch unconditionally without flooding logs for plain text.
+///
+/// Fields logged:
+/// * `codepoint` — `U+XXXX` formatted scalar value.
+/// * `font_slot` — the resolved font slot index (or `None`).
+/// * `advance` — the glyph's natural advance in logical pixels (width
+///   of the rasterized tile before fitting).
+/// * `cell_w` — the cell-box width the renderer is targeting.
+/// * `fit_applied` — `true` iff `classify_symbol(ch) == IconCellFit`.
+///
+/// The target is `sonic::render::glyph::nf_icon_fit` so PR tests using
+/// `tracing-test` can assert the line by substring without coupling to
+/// the format string.
+#[inline]
+pub fn log_nf_icon_fit_decision(ch: char, font_slot: Option<usize>, advance: f32, cell_w: f32) {
+    let classify = classify_symbol(ch);
+    let fit_applied = matches!(classify, SymbolFit::IconCellFit);
+    tracing::debug!(
+        target: "sonic::render::glyph::nf_icon_fit",
+        codepoint = format!("U+{:04X}", ch as u32),
+        code_u32 = ch as u32,
+        font_slot = ?font_slot,
+        advance = advance,
+        cell_w = cell_w,
+        classify = ?classify,
+        fit_applied = fit_applied,
+        "nerd-font IconCellFit decision"
+    );
 }
 
 /// Eagerly rasterize every codepoint in [`PREBAKE_RANGES`] into `atlas`
