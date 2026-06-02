@@ -39,6 +39,8 @@ mod menubar;
 mod os_drag_win;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
+#[cfg(all(target_os = "windows", feature = "harness"))]
+mod win_sid;
 
 fn main() -> Result<()> {
     set_process_dpi_awareness();

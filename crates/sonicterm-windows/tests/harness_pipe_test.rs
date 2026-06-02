@@ -53,39 +53,20 @@ fn sonicterm_windows_harness_pipe_resolve(req: &str) -> String {
     }
 }
 
-/// Spec test (5.a) — full e2e against the running exe. The active-
-/// pane sender publication side landed in #508 (this PR) and is
-/// verified by:
-///   * `harness_sink_publish.rs` (sonicterm-app unit test) — App
-///     publishes the active pane's sender into the sink on every
-///     pane-change.
-///   * `harness_race_test.rs` (this crate) — per-chunk atomicity
-///     across focus-change-mid-write.
+/// Asserts:
+/// - Pipe creation succeeds (no ERROR_INVALID_OWNER 1307 — #510)
+/// - "harness pipe ready" stdout line appears AFTER pipe is actually open (no race — #511)
+/// - CreateFileW from another process succeeds (SDDL grants owner access)
 ///
-/// However, running this e2e test against the real exe revealed a
-/// **pre-existing #507 bug** that #508 cannot fix in-scope:
-/// `CreateNamedPipeW` returns `WIN32_ERROR(1307)` (`ERROR_INVALID_OWNER`)
-/// when given the SDDL `O:OWG:OWD:P(A;;GA;;;OW)`. The pipe is never
-/// created, the read thread never spawns, and any client `CreateFileW`
-/// returns `ERROR_FILE_NOT_FOUND (0x80070002)`.
+/// Does NOT assert:
+/// - Sentinel bytes reach the active pane's PTY (blocked on #513 —
+///   drain_until_eof drops every chunk; sink never read).
+/// - Window title updates from OSC sentinel.
 ///
-/// Repro (interactive desktop session on Windows host):
-/// ```pwsh
-/// .\target\debug\sonicterm-windows.exe --harness-input-pipe auto
-/// # logs: "failed to spawn harness pipe error=CreateNamedPipeW failed: WIN32_ERROR(1307)"
-/// ```
-///
-/// Filed as follow-up: harness-pipe SDDL needs the owner SID
-/// resolved at runtime via `GetTokenInformation(TokenOwner)` rather
-/// than the literal `OW` shorthand, OR the pipe needs to be created
-/// with `NULL` security attributes (Windows-default DACL — full
-/// access to the creator) and the SDDL approach abandoned.
-///
-/// Kept `#[ignore]` so the test is buildable + runnable manually but
-/// doesn't block CI until the #507 SDDL bug is fixed.
+/// Once #513 lands, a follow-up `e2e_window_title_sentinel` test should
+/// be added that writes the OSC sentinel and polls GetWindowText.
 #[test]
-#[ignore = "blocked by #507 pre-existing bug: CreateNamedPipeW fails ERROR_INVALID_OWNER on the SDDL. See test docstring."]
-fn e2e_window_title_sentinel() {
+fn e2e_sddl_and_ready_line_ordering() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::time::Instant;
@@ -104,7 +85,7 @@ fn e2e_window_title_sentinel() {
 
     let Some(exe) = locate_exe() else {
         eprintln!(
-            "e2e_window_title_sentinel: sonicterm.exe not found next to test binary; \
+            "e2e_sddl_and_ready_line_ordering: sonicterm.exe not found next to test binary; \
              run `cargo build -p sonicterm-windows --features harness` first."
         );
         return;
@@ -134,38 +115,42 @@ fn e2e_window_title_sentinel() {
         }
     };
 
-    std::thread::sleep(Duration::from_millis(500));
-
+    // No retry loop here: #511 fix guarantees that once we see the
+    // ready line on stdout, the pipe is already published. A failure
+    // to open the pipe at this point is a real bug, not a race.
     let pipe_wide = to_wide(&pipe_name);
-    let connect_deadline = Instant::now() + Duration::from_secs(5);
-    let h = loop {
-        let attempt = unsafe {
-            CreateFileW(
-                PCWSTR(pipe_wide.as_ptr()),
-                GENERIC_WRITE.0,
-                FILE_SHARE_NONE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-        };
-        match attempt {
-            Ok(h) => break h,
-            Err(_) if Instant::now() < connect_deadline => {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                panic!(
-                    "connect to harness pipe {pipe_name:?} after 5s: {e:?}\n\
-                     (NB: #507 SDDL bug — see this test's ignore reason)"
-                );
-            }
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(pipe_wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_NONE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    let h = match h {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = child.kill();
+            let code = unsafe { GetLastError() }.0;
+            panic!(
+                "CreateFileW to harness pipe {pipe_name:?} failed: {e:?} (LastError={code}); \
+                 expected success — #510 (1307 ERROR_INVALID_OWNER) and \
+                 #511 (2 ERROR_FILE_NOT_FOUND race) should both be fixed."
+            );
         }
     };
 
-    let sentinel = b"\x1b]0;SONIC508-WT-OK\x07";
+    // Smoke-write the OSC sentinel. This is intentionally a
+    // "doesn't crash / WriteFile returns success" check only — it
+    // does NOT assert the sentinel reaches the active pane's PTY or
+    // updates the window title. The end-to-end title path is wired
+    // by #513 (drain_until_eof drops every chunk today; the sink is
+    // never read), and a real `e2e_window_title_sentinel` test that
+    // polls `GetWindowText` should be added once that lands.
+    let sentinel = b"\x1b]0;SONIC510-WT-OK\x07";
     let mut bytes_written: u32 = 0;
     unsafe {
         windows::Win32::Storage::FileSystem::WriteFile(
