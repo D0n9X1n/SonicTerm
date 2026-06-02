@@ -54,7 +54,7 @@ const BEGIN: &str = "BEGIN_UNICODE";
 const END: &str = "END_UNICODE";
 
 fn main() {
-    let pty = PtyHandle::spawn_default_shell(120, 24).expect("spawn shell");
+    let pty = PtyHandle::spawn_default_shell(120, 24, sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true }).expect("spawn shell");
     let mut parser = Parser::new(Grid::new(120, 24));
 
     drain(&pty, &mut parser, 1500);

@@ -16,7 +16,7 @@ use sonicterm_core::{
 
 fn main() {
     // 1. parse-side: how fast does Parser::advance handle a burst?
-    let pty = PtyHandle::spawn_default_shell(120, 40).expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default()).expect("spawn");
     let mut parser = Parser::new(Grid::new(120, 40));
     std::thread::sleep(std::time::Duration::from_millis(800));
     while let Ok(b) = pty.out_rx.try_recv() {
