@@ -182,14 +182,19 @@ enum EdgeDir {
 struct EdgeStroke {
     dir: EdgeDir,
     weight: StrokeWeight,
+    /// Stroke style for this half-edge. Phase B3a only emits
+    /// [`StrokeStyle::Single`]; the field exists now so Phase B3b
+    /// (mixed light/double) can carry per-edge style without another
+    /// data-model bump.
+    style: StrokeStyle,
 }
 
 impl EdgeStroke {
     const fn light(dir: EdgeDir) -> Self {
-        Self { dir, weight: StrokeWeight::Light }
+        Self { dir, weight: StrokeWeight::Light, style: StrokeStyle::Single }
     }
     const fn heavy(dir: EdgeDir) -> Self {
-        Self { dir, weight: StrokeWeight::Heavy }
+        Self { dir, weight: StrokeWeight::Heavy, style: StrokeStyle::Single }
     }
 }
 
@@ -220,44 +225,44 @@ fn emit_edge_strokes(
         StrokeWeight::Light => LIGHT_THICKNESS_PX,
         StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
     };
-    let mk_seg = |from: (f32, f32), to: (f32, f32), weight: StrokeWeight| LineSegment {
+    let mk_seg = |from: (f32, f32), to: (f32, f32), weight: StrokeWeight, style: StrokeStyle| LineSegment {
         from,
         to,
         thickness: thickness_for(weight),
         weight,
-        style: StrokeStyle::Single,
+        style,
     };
 
     let find = |dir: EdgeDir| edges.iter().copied().find(|e| e.dir == dir);
 
     let mut out: Vec<LineSegment> = Vec::with_capacity(edges.len());
 
-    // Vertical axis: merge Up+Down if same weight, else emit independently.
+    // Vertical axis: merge Up+Down if same weight AND style, else emit independently.
     match (find(EdgeDir::Up), find(EdgeDir::Down)) {
-        (Some(u), Some(d)) if u.weight == d.weight => {
-            out.push(mk_seg((cx, top), (cx, bottom), u.weight));
+        (Some(u), Some(d)) if u.weight == d.weight && u.style == d.style => {
+            out.push(mk_seg((cx, top), (cx, bottom), u.weight, u.style));
         }
         (u_opt, d_opt) => {
             if let Some(u) = u_opt {
-                out.push(mk_seg((cx, top), (cx, cy), u.weight));
+                out.push(mk_seg((cx, top), (cx, cy), u.weight, u.style));
             }
             if let Some(d) = d_opt {
-                out.push(mk_seg((cx, cy), (cx, bottom), d.weight));
+                out.push(mk_seg((cx, cy), (cx, bottom), d.weight, d.style));
             }
         }
     }
 
-    // Horizontal axis: merge Left+Right if same weight, else emit independently.
+    // Horizontal axis: merge Left+Right if same weight AND style, else emit independently.
     match (find(EdgeDir::Left), find(EdgeDir::Right)) {
-        (Some(l), Some(r)) if l.weight == r.weight => {
-            out.push(mk_seg((left, cy), (right, cy), l.weight));
+        (Some(l), Some(r)) if l.weight == r.weight && l.style == r.style => {
+            out.push(mk_seg((left, cy), (right, cy), l.weight, l.style));
         }
         (l_opt, r_opt) => {
             if let Some(l) = l_opt {
-                out.push(mk_seg((left, cy), (cx, cy), l.weight));
+                out.push(mk_seg((left, cy), (cx, cy), l.weight, l.style));
             }
             if let Some(r) = r_opt {
-                out.push(mk_seg((cx, cy), (right, cy), r.weight));
+                out.push(mk_seg((cx, cy), (right, cy), r.weight, r.style));
             }
         }
     }
