@@ -1,13 +1,23 @@
 <#
 .SYNOPSIS
-  Two-bucket input delivery probe for #502 (Guard-4 RDP SKIP fix).
+  Three-bucket input delivery probe for #502 (Guard-4 RDP SKIP fix +
+  R5 harness-pipe consumer).
 .DESCRIPTION
-  Spawns sonicterm-windows.exe and exercises Buckets B + C from
-  lib/Send-InputToHwnd.ps1. Bucket A (text payload) is intentionally
-  NOT tested here — it is blocked on #506 (harness-input-pipe) and
-  the OSC-sentinel assertion belongs in the future #502 consumer PR
-  that wires the pipe through.
+  Spawns sonicterm-windows.exe (built with `--features harness`) and
+  exercises Buckets A + B + C from lib/Send-InputToHwnd.ps1.
 
+    Bucket A — text payload via `--harness-input-pipe auto`. Sends a
+               UTF-8 payload through Send-TextToPipe; verifies pipe
+               resolution + Connect + Write + Flush all succeed and
+               the SonicTerm process stays alive. We do NOT assert an
+               OSC-0 title sentinel here: the harness sink feeds the
+               *PTY stdin* (shell input), not the VT parser, so the
+               bytes are received by the shell (which echoes them
+               literally) — the window title is owned by the shell's
+               own prompt. End-to-end "bytes reach the VT parser and
+               update the title" belongs to #513 (drain_until_eof
+               currently drops chunks even with the sink published),
+               flagged in the existing Rust e2e test header.
     Bucket B — single named key (Enter alone) via WM_KEYDOWN+WM_KEYUP.
                Verification: Send-NamedKeyToHwnd returns $true (every
                PostMessage returned BOOL true) AND the SonicTerm
@@ -42,9 +52,16 @@ if (-not $SonicExe -or -not (Test-Path $SonicExe)) {
 Log "exe: $SonicExe"
 
 # ----------------------------------------------------------------------
-# Spawn SonicTerm and wait for its top-level HWND.
+# Spawn SonicTerm and wait for its top-level HWND. Redirect stdout to
+# a tempfile so Get-HarnessPipeName can read the "pipe ready" line.
 # ----------------------------------------------------------------------
-$proc = Start-Process -FilePath $SonicExe -PassThru
+$logPath = Join-Path $env:TEMP ("sonic-probe-{0}.out.log" -f ([guid]::NewGuid().ToString('N')))
+$errPath = "$logPath.err"
+$proc = Start-Process -FilePath $SonicExe `
+  -ArgumentList @('--harness-input-pipe','auto') `
+  -RedirectStandardOutput $logPath `
+  -RedirectStandardError  $errPath `
+  -PassThru
 $deadline = (Get-Date).AddSeconds($WindowTimeoutSec)
 $hwnd = [IntPtr]::Zero
 while ((Get-Date) -lt $deadline) {
@@ -64,11 +81,46 @@ if ($hwnd -eq [IntPtr]::Zero) {
 Log "hwnd: $hwnd, pid: $($proc.Id)"
 Start-Sleep -Milliseconds 600  # give the shell prompt time to settle
 
+$bucketAPass = $false
+$bucketASkipped = $false
 $bucketBPass = $false
 $bucketCPass = $false
 $bucketCSkipped = $false
+$titleObserved = ''
 
 try {
+  # ------------------------------------------------------------------
+  # Bucket A — pipe Connect + Write smoke. We send a plain ASCII
+  # payload and assert: (a) Get-HarnessPipeName resolves a name from
+  # the binary's stdout log, (b) Send-TextToPipe Connects + Writes +
+  # Flushes without throwing, (c) sonicterm-windows survives the
+  # write (no crash). Per the Rust harness_pipe_test header, this is
+  # a "doesn't crash / WriteFile returns success" check only — the
+  # bytes feed PTY stdin, so asserting a window-title sentinel would
+  # require #513 (drain_until_eof currently drops chunks).
+  # ------------------------------------------------------------------
+  $payload = "sonic-502-probe-bucket-a`n"
+  Log "Bucket A: writing $($payload.Length)B via harness pipe"
+  try {
+    $pipeName = Get-HarnessPipeName -LogPath $logPath -Proc $proc -TimeoutSec 10
+    Log "Bucket A: pipe resolved -> $pipeName"
+    Send-TextToPipe -PipeName $pipeName -Text $payload
+    Start-Sleep -Milliseconds 250
+    $proc.Refresh()
+    if ($proc.HasExited) {
+      Log "Bucket A FAIL: process exited after pipe write (code=$($proc.ExitCode))"
+    } else {
+      $bucketAPass = $true
+      # Snapshot the title for the report (informational only — we
+      # do NOT assert anything about its content here).
+      $titleObserved = Get-SonicWindowTitle -Hwnd $hwnd
+      Log "Bucket A PASS: pipe Connect+Write+Flush succeeded; binary alive; title='$titleObserved'"
+    }
+  } catch {
+    # Per spec: pipe-resolve or write failure is a real FAIL, not a SKIP.
+    Log "Bucket A FAIL: $_"
+  }
+
   # ------------------------------------------------------------------
   # Bucket B — Enter alone (named-key, no modifier).
   # ------------------------------------------------------------------
@@ -110,16 +162,19 @@ try {
   }
 } finally {
   try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+  Remove-Item -LiteralPath $logPath,$errPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
-Write-Host '=== Two-Bucket Probe Results (Bucket A blocked on #506) ==='
+Write-Host '=== Three-Bucket Probe Results (Bucket A = pipe smoke; full e2e via #513) ==='
+Write-Host ("Bucket A (text via pipe): {0}" -f $(if ($bucketAPass) { 'PASS' } else { 'FAIL' }))
+Write-Host ("  title (info only)    : '{0}'" -f $titleObserved)
 Write-Host ("Bucket B (named key)   : {0}" -f $(if ($bucketBPass) { 'PASS' } else { 'FAIL' }))
 Write-Host ("Bucket C (chord)       : {0}" -f $(if ($bucketCPass) { 'PASS' } elseif ($bucketCSkipped) { 'SKIP (chord_no_foreground)' } else { 'FAIL' }))
 
-# Bucket B must pass (no foreground required, can't fail for env reasons).
+# Bucket A and Bucket B must pass — neither needs foreground.
 # Bucket C may self-skip in RDP — that's by design.
-if ($bucketBPass -and ($bucketCPass -or $bucketCSkipped)) {
+if ($bucketAPass -and $bucketBPass -and ($bucketCPass -or $bucketCSkipped)) {
   Log 'OVERALL: PASS'
   exit 0
 } else {

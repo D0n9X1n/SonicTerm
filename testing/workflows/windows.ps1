@@ -137,8 +137,11 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 # ------------------------------------------------------------------
 $Bin = 'target\release\sonicterm-windows.exe'
 if ($Build -or -not (Test-Path $Bin)) {
-  Write-Host '[build] cargo build --release -p sonicterm-windows'
-  & cargo build --release -p sonicterm-windows
+  # #502 consumer: build with `harness` feature so the binary accepts
+  # `--harness-input-pipe` (Bucket A text input via NamedPipeClientStream).
+  # The feature is off by default; release builds for end users won't carry it.
+  Write-Host '[build] cargo build --release -p sonicterm-windows --features harness'
+  & cargo build --release -p sonicterm-windows --features harness
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
