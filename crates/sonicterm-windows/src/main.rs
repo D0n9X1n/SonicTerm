@@ -43,12 +43,14 @@ mod tab_drag_os;
 mod win_sid;
 
 fn main() -> Result<()> {
-    // #536 profile: span the whole main() so dev captures see
-    // "tear_out_child_init" wall-clock in the spawned child process.
-    // The `tear_out_child` field is recorded after CLI parse below.
-    let _main_span =
-        tracing::info_span!("tear_out_child_init", tear_out_child = tracing::field::Empty)
-            .entered();
+    // #536 profile: explicit Instant timing for tear_out_child_init.
+    // We CANNOT use `tracing::info_span!(...).entered()` here because
+    // the span is created BEFORE `sonicterm_logging::init` runs ~20
+    // lines below, so the global subscriber is not yet attached and
+    // the span's CLOSE event would never reach the log. Explicit
+    // `Instant::now()` + a deferred `tracing::info!` emitted AFTER
+    // logging init avoids the subscriber-coupling entirely.
+    let __t_tear_out_child_init = std::time::Instant::now();
     set_process_dpi_awareness();
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
@@ -82,7 +84,16 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     let tearout_payload = parsed_cli.tearout;
     #[cfg(target_os = "windows")]
-    tracing::Span::current().record("tear_out_child", tearout_payload.is_some());
+    tracing::info!(
+        tear_out_child = tearout_payload.is_some(),
+        elapsed = ?__t_tear_out_child_init.elapsed(),
+        "[perf] tear_out_child_init"
+    );
+    #[cfg(not(target_os = "windows"))]
+    tracing::info!(
+        elapsed = ?__t_tear_out_child_init.elapsed(),
+        "[perf] tear_out_child_init"
+    );
     #[cfg(all(target_os = "windows", feature = "harness"))]
     let harness_request = parsed_cli.harness_input_pipe;
     let theme = load_theme(&config.theme);

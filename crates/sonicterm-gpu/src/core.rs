@@ -965,10 +965,14 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
-        // #536 profile: span around wgpu instance/adapter/device init
-        // + surface configuration. One of the two suspect cost centers
-        // motivating the tear-out-spawn investigation.
-        let _gpu_init_span = tracing::info_span!("gpu_renderer_new").entered();
+        // #536 profile: explicit Instant timing for gpu_renderer_new.
+        // One of the two suspect cost centers motivating the
+        // tear-out-spawn investigation. Using `Instant::now()` instead
+        // of `info_span!.entered()` because the default
+        // `sonicterm-logging` subscriber doesn't have
+        // `with_span_events(FmtSpan::CLOSE)` configured, so span
+        // timing would never be emitted.
+        let __t_gpu_init = std::time::Instant::now();
         let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
             settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -1062,10 +1066,13 @@ impl GpuRenderer {
         // launch don't pay the font-fallback charmap-walk cost per cell
         // in the first paint. See `swash_rasterizer::prebake_box_and_powerline`.
         {
-            // #536 profile: span the prebake/prewarm pass — box drawing,
-            // Powerline, ASCII, Nerd Font PUA. Per-glyph cost is ~3 ms on
-            // a cold font_system; this is the second suspect cost center.
-            let _warmup_span = tracing::info_span!("font_atlas_warmup").entered();
+            // #536 profile: explicit Instant timing for font_atlas_warmup.
+            // Per-glyph cost is ~3 ms on a cold font_system; this is the
+            // second suspect cost center. Using `Instant::now()` instead
+            // of `info_span!.entered()` because the default
+            // `sonicterm-logging` subscriber doesn't have
+            // `with_span_events(FmtSpan::CLOSE)` configured.
+            let __t_warmup = std::time::Instant::now();
             let mut prebake_raster =
                 SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
             let _inserted =
@@ -1077,6 +1084,7 @@ impl GpuRenderer {
                 &mut prebake_raster,
                 &mut glyph_atlas,
             );
+            tracing::info!(elapsed = ?__t_warmup.elapsed(), "[perf] font_atlas_warmup");
         }
         let glyph_upload =
             AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
@@ -1198,6 +1206,7 @@ impl GpuRenderer {
         let mut drag_chip_buffer = Buffer::new(&mut font_system, drag_chip_metrics);
         drag_chip_buffer.set_size(&mut font_system, Some(220.0), Some(font_size * 1.5));
 
+        tracing::info!(elapsed = ?__t_gpu_init.elapsed(), "[perf] gpu_renderer_new");
         Ok(Self {
             instance,
             device,
@@ -3287,14 +3296,12 @@ impl GpuRenderer {
         let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
         for (origin_x, origin_y, pane_cols, row, col_a, col_b) in &underlines {
             let pad_bits = origin_x.to_bits();
-            let cache = if let Some((_, _, c)) = underline_caches
-                .iter()
-                .find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
+            let cache = if let Some((_, _, c)) =
+                underline_caches.iter().find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
             {
                 c
             } else {
-                let c =
-                    build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
+                let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
                 underline_caches.push((pad_bits, *pane_cols, c));
                 &underline_caches.last().unwrap().2
             };
