@@ -8,8 +8,9 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use sonicterm_core::{grid::Grid, keymap::Action};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::keymap::Action;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::TabBarLayout;
@@ -254,7 +255,7 @@ impl App {
                 let main_panes_for_arcs = self.main_panes();
                 let parser_arcs: Vec<(
                     u64,
-                    std::sync::Arc<parking_lot::Mutex<sonicterm_core::vt::Parser>>,
+                    std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
                     sonicterm_ui::pane::Rect,
                 )> = pane_rects
                     .iter()
@@ -266,7 +267,7 @@ impl App {
                     .collect();
                 let mut guards: Vec<(
                     u64,
-                    parking_lot::MutexGuard<'_, sonicterm_core::vt::Parser>,
+                    parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser>,
                     sonicterm_ui::pane::Rect,
                 )> = Vec::with_capacity(parser_arcs.len());
                 let mut all_locked = true;
@@ -279,7 +280,7 @@ impl App {
                             // the underlying Mutex outlives every guard.
                             // parking_lot guards carry a `*const Mutex`
                             // internally and no `'a` tied to `arc`.
-                            let g_ext: parking_lot::MutexGuard<'_, sonicterm_core::vt::Parser> =
+                            let g_ext: parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser> =
                                 unsafe { std::mem::transmute(g) };
                             guards.push((*id, g_ext, *rect));
                         }
@@ -299,12 +300,12 @@ impl App {
                 // Inactive-pane cursor outlines come from the same guard set
                 // (no extra lock pass — PR #81's separate try_lock loop is
                 // subsumed by the global pass above).
-                let inactive_cursors: Vec<sonicterm_shared::render::InactivePaneCursor> = guards
+                let inactive_cursors: Vec<sonicterm_gpu::cursor::InactivePaneCursor> = guards
                     .iter()
                     .filter(|(id, _, _)| *id != active_id)
                     .map(|(_, g, rect)| {
                         let grid = g.grid();
-                        sonicterm_shared::render::InactivePaneCursor {
+                        sonicterm_gpu::cursor::InactivePaneCursor {
                             row: grid.cursor.row,
                             col: grid.cursor.col,
                             rect_x: rect.x,
@@ -1115,17 +1116,17 @@ impl App {
                             // On macOS the modifier is Cmd (super); on
                             // Windows / Linux it's Ctrl. The parser lock
                             // is released inside hyperlink_uri_at before
-                            // we ever call sonicterm_core::url_open::open,
+                            // we ever call sonicterm_cfg::url_open::open,
                             // so no grid lock is held across the spawn.
                             // Dispatch decision lives in the pure
                             // `dispatch_modifier_click` helper so it can
                             // be unit-tested without a real winit mouse
                             // event (see its tests in sonicterm-cfg).
-                            let opened = sonicterm_core::url_open::dispatch_modifier_click(
+                            let opened = sonicterm_cfg::url_open::dispatch_modifier_click(
                                 self.url_open_modifier_held(),
                                 self.hyperlink_uri_at(row, col),
                                 |uri| {
-                                    let r = sonicterm_core::url_open::open(uri);
+                                    let r = sonicterm_cfg::url_open::open(uri);
                                     if let Err(ref e) = r {
                                         tracing::warn!("url_open failed: {e}");
                                     }
@@ -1489,7 +1490,7 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
         let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
         let mut line = String::new();
         for cell in row.get_range(col_start.min(row.len()), col_end) {
-            if cell.flags.contains(sonicterm_core::grid::CellFlags::WIDE_CONT) {
+            if cell.flags.contains(sonicterm_grid::grid::CellFlags::WIDE_CONT) {
                 continue;
             }
             line.push(cell.ch);
@@ -1502,7 +1503,7 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
     (!out.is_empty()).then_some(out)
 }
 
-fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_core::grid::Row> {
+fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::Row> {
     let sb = grid.scrollback_len();
     if row_idx < sb {
         grid.scrollback_row(row_idx)

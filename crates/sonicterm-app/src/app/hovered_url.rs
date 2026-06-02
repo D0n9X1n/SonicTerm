@@ -5,7 +5,7 @@
 //! - Modifier required: macOS = Super (Cmd); Windows/Linux = Control.
 //! - Underline appears only when the modifier is held AND the cursor
 //!   sits on a cell whose row+col falls inside a `UrlMatch` returned
-//!   by [`sonicterm_core::url_scan::url_at_char_col`].
+//!   by [`sonicterm_cfg::url_scan::url_at_char_col`].
 //! - Underline is a 2px-thick quad at the row's baseline, spanning
 //!   every char of the URL on that row. (Multi-row / wrapped URLs are
 //!   out of scope for v1 — they yield `None` because `url_at_char_col`
@@ -98,14 +98,14 @@ pub fn compute_hovered_url_underline(
 
 /// Build a `HoveredUrl` from a reconstructed row string + a column
 /// index, returning `None` when the column does not fall inside any
-/// detected URL. Thin wrapper over [`sonicterm_core::url_scan::url_at_char_col`]
+/// detected URL. Thin wrapper over [`sonicterm_cfg::url_scan::url_at_char_col`]
 /// that fills in the row coordinate and converts byte offsets to char
 /// columns (the URL row reconstruction in `App::hyperlink_uri_at`
 /// pushes one char per cell, so the byte→char mapping is the natural
 /// `char_indices().position(...)`).
 #[must_use]
 pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl> {
-    let m = sonicterm_core::url_scan::url_at_char_col(row_text, col as usize)?;
+    let m = sonicterm_cfg::url_scan::url_at_char_col(row_text, col as usize)?;
     // Convert byte offsets back to char columns. The grid lays one
     // char per visual cell, so chars_count(prefix) == column index.
     let start_chars = row_text.get(..m.start).map(|s| s.chars().count()).unwrap_or(0);

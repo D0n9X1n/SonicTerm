@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 use winit::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;

@@ -10,20 +10,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    keymap::{Action, Direction, Keymap, ScrollAction},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{Parser, VtEvent},
-};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -162,7 +160,7 @@ impl App {
                 // the main-window path in window_event.rs.
                 let parser_arcs: Vec<(
                     u64,
-                    std::sync::Arc<parking_lot::Mutex<sonicterm_core::vt::Parser>>,
+                    std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
                     sonicterm_ui::pane::Rect,
                 )> = pane_rects
                     .iter()
@@ -172,7 +170,7 @@ impl App {
                     .collect();
                 let mut guards: Vec<(
                     u64,
-                    parking_lot::MutexGuard<'_, sonicterm_core::vt::Parser>,
+                    parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser>,
                     sonicterm_ui::pane::Rect,
                 )> = Vec::with_capacity(parser_arcs.len());
                 let mut all_locked = true;
@@ -182,7 +180,7 @@ impl App {
                             // SAFETY: `parser_arcs` outlives `guards`; see
                             // window_event.rs Fix 1 for the full lifetime
                             // argument.
-                            let g_ext: parking_lot::MutexGuard<'_, sonicterm_core::vt::Parser> =
+                            let g_ext: parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser> =
                                 unsafe { std::mem::transmute(g) };
                             guards.push((*id, g_ext, *rect));
                         }
@@ -776,7 +774,8 @@ impl App {
         rows: u16,
         child_window: Arc<Window>,
     ) -> PaneState {
-        use sonicterm_core::{grid::Grid, vt::Parser};
+        use sonicterm_grid::grid::Grid;
+        use sonicterm_vt::vt::Parser;
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
         // Seed theme defaults for OSC 10/11/12 query replies (#369).
@@ -800,7 +799,7 @@ impl App {
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
-            sonicterm_core::pty::ShellSpawnOpts::default(),
+            sonicterm_io::pty::ShellSpawnOpts::default(),
         ) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
@@ -1283,7 +1282,7 @@ fn child_copy_mode_selected_text(
         let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
         let mut line = String::new();
         for cell in row.get_range(col_start.min(row.len()), col_end) {
-            if cell.flags.contains(sonicterm_core::grid::CellFlags::WIDE_CONT) {
+            if cell.flags.contains(sonicterm_grid::grid::CellFlags::WIDE_CONT) {
                 continue;
             }
             line.push(cell.ch);
@@ -1296,7 +1295,7 @@ fn child_copy_mode_selected_text(
     (!out.is_empty()).then_some(out)
 }
 
-fn child_copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_core::grid::Row> {
+fn child_copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::Row> {
     let sb = grid.scrollback_len();
     if row_idx < sb {
         grid.scrollback_row(row_idx)

@@ -99,7 +99,7 @@ pub fn build_drag_chip_overlay(
     session: &DragSession,
     source_bar: &TabBarLayout,
     title: String,
-) -> Option<sonicterm_shared::render::DragChipOverlay> {
+) -> Option<sonicterm_ui::drag_chip::DragChipOverlay> {
     if !drag_moved_enough(session) {
         return None;
     }
@@ -117,7 +117,7 @@ pub fn build_drag_chip_overlay(
     let scale = if over_bar { 1.0 } else { 1.02 };
     let chip_x = cx - 30.0;
     let chip_y = cy - 12.0;
-    Some(sonicterm_shared::render::DragChipOverlay {
+    Some(sonicterm_ui::drag_chip::DragChipOverlay {
         top_left: (chip_x, chip_y),
         title,
         drop_line_x,

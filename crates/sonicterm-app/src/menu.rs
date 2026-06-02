@@ -16,7 +16,7 @@
 //! accelerators — is identical across platforms so docs, tests, and
 //! user muscle memory agree.
 
-use sonicterm_core::keymap::Action;
+use sonicterm_cfg::keymap::Action;
 
 use crate::menubar_bridge;
 
@@ -115,7 +115,7 @@ pub fn blueprint() -> MenuBlueprint {
                     title: "Edit sonicterm.toml…",
                     key: ",",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::EditConfigFile),
+                    binding: Action(sonicterm_cfg::keymap::Action::EditConfigFile),
                 },
                 sep(),
                 Item { title: "Hide SonicTerm", key: "h", mods: Cmd, binding: System("hide:") },
@@ -147,39 +147,39 @@ pub fn blueprint() -> MenuBlueprint {
                     title: "New Tab",
                     key: "t",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::NewTab),
+                    binding: Action(sonicterm_cfg::keymap::Action::NewTab),
                 },
                 Item {
                     title: "New Window",
                     key: "n",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::NewWindow),
+                    binding: Action(sonicterm_cfg::keymap::Action::NewWindow),
                 },
                 sep(),
                 Item {
                     title: "Split Right",
                     key: "d",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::SplitRight),
+                    binding: Action(sonicterm_cfg::keymap::Action::SplitRight),
                 },
                 Item {
                     title: "Split Down",
                     key: "d",
                     mods: CmdShift,
-                    binding: Action(sonicterm_core::keymap::Action::SplitDown),
+                    binding: Action(sonicterm_cfg::keymap::Action::SplitDown),
                 },
                 sep(),
                 Item {
                     title: "Close",
                     key: "w",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::CloseActivePaneOrTab),
+                    binding: Action(sonicterm_cfg::keymap::Action::CloseActivePaneOrTab),
                 },
                 Item {
                     title: "Close Pane",
                     key: "w",
                     mods: CmdShift,
-                    binding: Action(sonicterm_core::keymap::Action::ClosePane),
+                    binding: Action(sonicterm_cfg::keymap::Action::ClosePane),
                 },
             ],
         },
@@ -190,26 +190,26 @@ pub fn blueprint() -> MenuBlueprint {
                     title: "Copy",
                     key: "c",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::CopyToClipboard),
+                    binding: Action(sonicterm_cfg::keymap::Action::CopyToClipboard),
                 },
                 Item {
                     title: "Paste",
                     key: "v",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::PasteFromClipboard),
+                    binding: Action(sonicterm_cfg::keymap::Action::PasteFromClipboard),
                 },
                 sep(),
                 Item {
                     title: "Find…",
                     key: "f",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::OpenSearch),
+                    binding: Action(sonicterm_cfg::keymap::Action::OpenSearch),
                 },
                 Item {
                     title: "Command Palette",
                     key: "p",
                     mods: CmdShift,
-                    binding: Action(sonicterm_core::keymap::Action::OpenCommandPalette),
+                    binding: Action(sonicterm_cfg::keymap::Action::OpenCommandPalette),
                 },
             ],
         },
@@ -220,13 +220,13 @@ pub fn blueprint() -> MenuBlueprint {
                     title: "Toggle Tab Bar",
                     key: "t",
                     mods: CmdShift,
-                    binding: Action(sonicterm_core::keymap::Action::ToggleTabBar),
+                    binding: Action(sonicterm_cfg::keymap::Action::ToggleTabBar),
                 },
                 Item {
                     title: "Reset Zoom",
                     key: "0",
                     mods: Cmd,
-                    binding: Action(sonicterm_core::keymap::Action::ResetFontSize),
+                    binding: Action(sonicterm_cfg::keymap::Action::ResetFontSize),
                 },
             ],
         },

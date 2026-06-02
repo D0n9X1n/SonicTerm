@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_gpu::core::GpuRenderer;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -211,7 +211,7 @@ impl App {
             window.clone(),
             el,
             &self.theme,
-            sonicterm_shared::render::RendererSettings {
+            sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
@@ -221,7 +221,7 @@ impl App {
                     self.config.window.padding_top,
                     self.config.window.padding_bottom,
                 ],
-                appearance: sonicterm_shared::render::SurfaceAppearance {
+                appearance: sonicterm_gpu::core::SurfaceAppearance {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
@@ -328,7 +328,7 @@ impl App {
         // user has no config path or the parent dir is unreadable, the
         // app still runs — just without live reload).
         if self.config_watcher.is_none() {
-            if let Some(path) = sonicterm_core::config::Config::default_path() {
+            if let Some(path) = sonicterm_cfg::config::Config::default_path() {
                 let proxy = self.event_loop_proxy.clone();
                 let spawn_result = if let Some(p) = proxy {
                     ConfigWatcher::spawn_with_wake(path.clone(), move || {

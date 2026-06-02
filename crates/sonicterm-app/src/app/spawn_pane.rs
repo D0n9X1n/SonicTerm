@@ -10,19 +10,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    keymap::{Action, Direction, Keymap, ScrollAction},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{CommandEvent, Parser, VtEvent},
-};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::{CommandEvent, Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -74,7 +72,7 @@ impl App {
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
-            sonicterm_core::pty::ShellSpawnOpts::default(),
+            sonicterm_io::pty::ShellSpawnOpts::default(),
         ) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
@@ -410,7 +408,7 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_broadcast(&mut self, scope: sonicterm_core::keymap::BroadcastScope) {
+    pub(super) fn toggle_broadcast(&mut self, scope: sonicterm_cfg::keymap::BroadcastScope) {
         let Some(source_pane) = self.active_pane_id() else { return };
         self.broadcast = self.broadcast.toggled(scope, source_pane);
         if let Some(w) = self.main_window() {

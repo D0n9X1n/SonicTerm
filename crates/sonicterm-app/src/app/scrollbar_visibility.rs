@@ -15,7 +15,7 @@
 //!
 //! Always / Never short-circuit to alpha 1.0 / 0.0 with no animation.
 
-use sonicterm_core::config::ScrollbarMode;
+use sonicterm_cfg::config::ScrollbarMode;
 use std::time::{Duration, Instant};
 
 /// Logical-pixel distance from the pane's right edge that counts as

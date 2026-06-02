@@ -158,7 +158,8 @@ pub fn reorder_within(c: &mut TabContainer, src_idx: usize, dst_idx: usize) -> T
 mod tests {
     use super::*;
     use parking_lot::Mutex;
-    use sonicterm_core::{grid::Grid, vt::Parser};
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::Parser;
     use std::sync::Arc;
 
     fn pane() -> PaneState {

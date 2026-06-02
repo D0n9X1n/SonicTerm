@@ -13,7 +13,7 @@
 //! scroll semantics themselves and the host must not synthesize a viewport
 //! shift behind their back.
 
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_gpu::core::GpuRenderer;
 
 use super::App;
 

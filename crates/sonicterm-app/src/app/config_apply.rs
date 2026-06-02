@@ -10,19 +10,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_core::{
-    config::Config,
-    grid::Grid,
-    keymap::{Action, Direction, Keymap, ScrollAction},
-    pty::PtyHandle,
-    theme::Theme,
-    vt::{Parser, VtEvent},
-};
-use sonicterm_shared::render::GpuRenderer;
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use sonicterm_cfg::theme::Theme;
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
+use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -87,7 +85,7 @@ impl App {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
         // and must render immediately, not at the next vsync deadline.
         self.input_dirty = true;
-        let assets = sonicterm_shared::asset_dir();
+        let assets = sonicterm_cfg::assets::asset_dir();
 
         // Theme
         if new_cfg.theme != self.config.theme {
@@ -403,7 +401,7 @@ impl App {
         self.set_font_size(next);
     }
     pub(super) fn reset_font_size(&mut self) {
-        let default = sonicterm_core::config::FontConfig::default().size;
+        let default = sonicterm_cfg::config::FontConfig::default().size;
         if (self.config.font.size - default).abs() < f32::EPSILON {
             return;
         }
@@ -461,7 +459,7 @@ impl App {
         }
     }
     pub(super) fn force_reload_config(&mut self) {
-        let Some(path) = sonicterm_core::config::Config::default_path() else { return };
+        let Some(path) = sonicterm_cfg::config::Config::default_path() else { return };
         match Config::load_or_default(&path) {
             Ok(cfg) => self.apply_new_config(cfg),
             Err(e) => tracing::warn!("force_reload_config: parse failed: {e:#}"),
@@ -469,14 +467,14 @@ impl App {
     }
 
     pub(super) fn open_config_file(&mut self) {
-        match sonicterm_core::config::Config::open_user_config_file() {
+        match sonicterm_cfg::config::Config::open_user_config_file() {
             Ok(path) => tracing::info!("opened config file {path:?}"),
             Err(e) => tracing::warn!("open config file failed: {e:#}"),
         }
     }
 
     pub(super) fn open_keymap_file(&mut self) {
-        match sonicterm_core::keymap::open_user_keymap_file() {
+        match sonicterm_cfg::keymap::open_user_keymap_file() {
             Ok(path) => tracing::info!("opened keymap file {path:?}"),
             Err(e) => tracing::warn!("open keymap file failed: {e:#}"),
         }

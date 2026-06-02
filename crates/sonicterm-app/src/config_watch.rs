@@ -20,7 +20,8 @@ use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use notify::event::EventKind;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use sonicterm_core::{config::Config, keymap::Keymap};
+use sonicterm_cfg::config::Config;
+use sonicterm_cfg::keymap::Keymap;
 
 /// Handle to a running watcher thread. Drop it to stop watching (the
 /// underlying [`RecommendedWatcher`] is freed and the background thread
@@ -124,7 +125,7 @@ fn spawn_inner(
     std::fs::create_dir_all(&parent).ok();
 
     let target = path.clone();
-    let keymap_path = sonicterm_core::keymap::default_user_keymap_path();
+    let keymap_path = sonicterm_cfg::keymap::default_user_keymap_path();
     let keymap_basename = keymap_path.as_ref().and_then(|p| p.file_name().map(|s| s.to_owned()));
     let basename_clone = basename.clone();
     // notify's event channel is std::sync::mpsc — we forward into a
