@@ -21,6 +21,26 @@ $ErrorActionPreference = 'Stop'
 $ScriptRoot = $PSScriptRoot
 Push-Location $ScriptRoot
 
+# PR #500 revise — dot-source the SAME Resolve-BashExe used by
+# production run_case.ps1, eliminating the mirror-drift bug that
+# previously hid \x08 corruption in the production candidate strings.
+$LibRoot = Resolve-Path (Join-Path $ScriptRoot '..\lib')
+. (Join-Path $LibRoot 'Resolve-BashExe.ps1')
+
+# Gate-the-gate: byte-scan production run_case.ps1 for any 0x08
+# backspace bytes. If '\b' escape interpretation ever re-corrupts the
+# file, this assert fires before the behavioural tests run.
+$ProdScript = Resolve-Path (Join-Path $ScriptRoot '..\run_case.ps1')
+$prodBytes  = [System.IO.File]::ReadAllBytes($ProdScript)
+$bsCount    = @($prodBytes | Where-Object { $_ -eq 0x08 }).Count
+if ($bsCount -gt 0) {
+  Write-Host "  FAIL run_case.ps1 contains $bsCount literal 0x08 (backspace) byte(s)" -ForegroundColor Red
+  Write-Host "       likely '\b' escape corruption — quote hard-coded paths with single quotes" -ForegroundColor Red
+  exit 1
+} else {
+  Write-Host "  PASS run_case.ps1 contains no 0x08 corruption bytes" -ForegroundColor Green
+}
+
 $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sonic493-test-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $TmpRoot | Out-Null
 $origAppData = $env:APPDATA
@@ -40,10 +60,12 @@ function Reset-Env {
 
 $AllowedShells = @('bash','cmd','pwsh','cross')
 
-# Mirror of run_case.ps1's pre-spawn block. Kept in sync intentionally —
-# the production code is short enough to duplicate, and a unit-style
-# test of just this slice is more reliable than spawning run_case.ps1
-# end-to-end (which requires a built sonicterm-windows.exe).
+# Mirror of run_case.ps1's pre-spawn block. The bash-resolver itself is
+# now dot-sourced from the shared lib (see top of file), so this stub
+# can no longer drift from production on path resolution. The rest of
+# the slice (shell validation + override write) remains duplicated here
+# because it is a few lines and easier to test in isolation than
+# spawning run_case.ps1 end-to-end (which requires sonicterm-windows).
 function Test-Shell-Selection {
   param([object]$Case, [string]$ConfigPath)
   $caseShell = if ($Case.PSObject.Properties.Name -contains 'shell' -and $Case.shell) {
@@ -54,18 +76,7 @@ function Test-Shell-Selection {
   }
   $appliesTo = ($Case.applies_to -join ',')
   if ($caseShell -eq 'bash' -and $appliesTo -match '(^|,)windows(,|$)') {
-    $bashPath = $null
-    foreach ($c in @('C:\Program Files\Git\bin\bash.exe','C:\Program Files (x86)\Git\bin\bash.exe')) {
-      if (Test-Path $c) { $bashPath = $c; break }
-    }
-    if (-not $bashPath) {
-      $cmd = Get-Command bash.exe -ErrorAction SilentlyContinue
-      if ($cmd) { $bashPath = $cmd.Source }
-    }
-    if (-not $bashPath) {
-      $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
-      if ($wsl) { $bashPath = $wsl.Source }
-    }
+    $bashPath = Resolve-BashExe
     if (-not $bashPath) {
       return @{ ExitCode = 77; Reason = 'bash_unavailable' }
     }

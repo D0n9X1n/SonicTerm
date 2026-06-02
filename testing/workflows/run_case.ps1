@@ -197,18 +197,14 @@ if ($AllowedShells -notcontains $CaseShell) {
 }
 Log "shell-dialect: $CaseShell"
 
-function Resolve-BashExe {
-  $candidates = @(
-    'C:\Program Files\Gitinash.exe',
-    'C:\Program Files (x86)\Gitinash.exe'
-  )
-  foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
-  $cmd = Get-Command bash.exe -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
-  $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
-  if ($wsl) { return $wsl.Source }   # wsl.exe with default distro invokes its bash
-  return $null
-}
+# #493 / PR #500 revise — Resolve-BashExe is dot-sourced from a shared
+# lib so the production resolver and Test-ShellDialect.ps1's mirror
+# cannot drift. The previous inline copy had literal 0x08 backspace
+# bytes embedded in the Git\bin\bash.exe hard-coded paths (written from
+# an editor that interpreted '\b' as a string escape); the mirrored
+# resolver in the test had clean strings, so the gate test passed while
+# production was broken. Shared file fixes both at once.
+. (Join-Path $PSScriptRoot 'lib\Resolve-BashExe.ps1')
 
 $ConfigPath = Join-Path $env:APPDATA 'SonicTerm\sonicterm.toml'
 $script:ConfigBackup = $null
