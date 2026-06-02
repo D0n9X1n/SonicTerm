@@ -53,11 +53,7 @@ pub struct UnsupportedShellError {
 
 impl std::fmt::Display for UnsupportedShellError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "e2e gate doesn't support shell at {:?} — see issue #457",
-            self.shell_path
-        )
+        write!(f, "e2e gate doesn't support shell at {:?} — see issue #457", self.shell_path)
     }
 }
 
@@ -96,11 +92,8 @@ impl ShellDialect for PosixDialect {
     }
 
     fn emit_unicode_markers(&self, payload: &str) -> Vec<u8> {
-        format!(
-            "printf 'BEGIN_UNICODE\\n%s\\nEND_UNICODE\\n' {}\n",
-            posix_quote(payload)
-        )
-        .into_bytes()
+        format!("printf 'BEGIN_UNICODE\\n%s\\nEND_UNICODE\\n' {}\n", posix_quote(payload))
+            .into_bytes()
     }
 
     fn emit_colored_text(&self, text: &str) -> Vec<u8> {

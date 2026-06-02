@@ -74,11 +74,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    eprintln!(
-        "[unicode-e2e] shell={:?} dialect={}",
-        pty.shell_program_path(),
-        dialect.name()
-    );
+    eprintln!("[unicode-e2e] shell={:?} dialect={}", pty.shell_program_path(), dialect.name());
 
     drain(&pty, &mut parser, 1500);
 
@@ -106,12 +102,18 @@ fn main() {
 
     let Some(begin_row) = rows.iter().rposition(|r| r.contains(BEGIN)) else {
         eprintln!("FAIL: BEGIN sentinel '{BEGIN}' not found in grid.");
-        eprintln!("Shell ({} dialect) never produced output, or the parser dropped the sentinel.", dialect.name());
+        eprintln!(
+            "Shell ({} dialect) never produced output, or the parser dropped the sentinel.",
+            dialect.name()
+        );
         std::process::exit(1);
     };
     let Some(end_offset) = rows[begin_row + 1..].iter().position(|r| r.contains(END)) else {
         eprintln!("FAIL: END sentinel '{END}' not found after BEGIN row {begin_row}.");
-        eprintln!("Shell ({} dialect) produced BEGIN sentinel but truncated before END.", dialect.name());
+        eprintln!(
+            "Shell ({} dialect) produced BEGIN sentinel but truncated before END.",
+            dialect.name()
+        );
         std::process::exit(1);
     };
     let end_row = begin_row + 1 + end_offset;
@@ -157,7 +159,11 @@ fn main() {
 
     pty.in_tx.send(b"exit\r".to_vec()).unwrap();
     drain(&pty, &mut parser, 500);
-    println!("\n[unicode-e2e] OK ({} shibboleth chars verified via {} dialect)", SHIBBOLETH.len(), dialect.name());
+    println!(
+        "\n[unicode-e2e] OK ({} shibboleth chars verified via {} dialect)",
+        SHIBBOLETH.len(),
+        dialect.name()
+    );
 }
 
 fn drain(pty: &PtyHandle, parser: &mut Parser, ms: u64) {
