@@ -10,3 +10,6 @@ pub mod foreground_proc;
 pub mod proc_info;
 pub mod pty;
 pub mod ssh;
+
+#[cfg(feature = "test_support")]
+pub mod test_support;

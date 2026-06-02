@@ -18,7 +18,7 @@ ssh = ["sonicterm-io/ssh"]
 # Exposes test-only helpers (ShellDialect for the e2e gate examples + integration tests).
 # Not for shipping use — gated behind cfg(feature = "test_support") so production builds
 # don't pull it in.
-test_support = []
+test_support = ["sonicterm-io/test_support"]
 
 [dependencies]
 sonicterm-types.workspace = true
