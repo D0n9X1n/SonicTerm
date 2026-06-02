@@ -797,7 +797,11 @@ impl App {
         // PR #400: per-pane cursor_visible Arc.
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let pty = match PtyHandle::spawn_default_shell(cols, rows, sonicterm_core::pty::ShellSpawnOpts::default()) {
+        let pty = match PtyHandle::spawn_default_shell(
+            cols,
+            rows,
+            sonicterm_core::pty::ShellSpawnOpts::default(),
+        ) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();

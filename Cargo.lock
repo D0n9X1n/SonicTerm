@@ -4619,6 +4619,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonicterm-cfg",
+ "sonicterm-core",
  "sonicterm-grid",
  "sonicterm-io",
  "sonicterm-types",

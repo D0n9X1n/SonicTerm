@@ -31,16 +31,17 @@ use std::time::{Duration, Instant};
 use sonicterm_core::{
     grid::{CellFlags, Grid},
     pty::PtyHandle,
+    test_support::shell_dialect::dialect_for_shell,
     vt::Parser,
 };
 
-/// One character from every class the capability matrix covers, modulo
-/// the ones that can't survive POSIX `printf` quoting (combining marks,
-/// raw ZWJ scalar — those have dedicated parser tests). Each char here
-/// MUST appear verbatim in the asserted region; anything else is the
-/// PR-#42-class of silent regression we're trying to catch.
+/// One character from every class the capability matrix covers. Each char
+/// here MUST appear verbatim in the asserted region; anything else is the
+/// PR-#42-class of silent regression we're trying to catch. Includes the
+/// CJK regression chars (中恶臭) per #461 to lock down the wrong-glyph-id
+/// safety from `shape.rs:259-289`.
 const SHIBBOLETH: &[char] = &[
-    '中', '文', // CJK
+    '中', '文', '恶', '臭', // CJK + #461 regression guards
     'ひ', 'カ', // Hiragana / Katakana
     '한', // Hangul
     '🎉', // Emoji single
@@ -54,27 +55,40 @@ const BEGIN: &str = "BEGIN_UNICODE";
 const END: &str = "END_UNICODE";
 
 fn main() {
-    let pty = PtyHandle::spawn_default_shell(120, 24, sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true }).expect("spawn shell");
+    let pty = PtyHandle::spawn_default_shell(
+        120,
+        24,
+        sonicterm_core::pty::ShellSpawnOpts { clean_e2e: true },
+    )
+    .expect("spawn shell");
     let mut parser = Parser::new(Grid::new(120, 24));
+
+    // #457: pick the dialect for whatever shell got resolved (pwsh /
+    // powershell / bash / zsh / sh). Errors out loudly if cmd.exe /
+    // fish / unknown — those will never produce expected output.
+    let dialect = match dialect_for_shell(pty.shell_program_path()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("FAIL: {e}");
+            eprintln!("e2e gate doesn't support {:?} — see #457", pty.shell_program_path());
+            std::process::exit(2);
+        }
+    };
+    eprintln!("[unicode-e2e] shell={:?} dialect={}", pty.shell_program_path(), dialect.name());
 
     drain(&pty, &mut parser, 1500);
 
-    // Bracket the actual printf output with ASCII-only sentinels. The
-    // shell will echo the entire command line back (containing all the
-    // shibboleth chars AND both sentinels), and then `printf` will
-    // write its own lines after a CR/LF. The sentinels let us identify
-    // the printf OUTPUT region — not the echoed command — to assert
-    // against.
+    // Bracket the actual output with BEGIN/END sentinels via the dialect.
+    // PosixDialect emits `printf '...'` syntax; PowerShellDialect emits
+    // `[Console]::Out.WriteLine(...)` with UTF-8 OutputEncoding forced.
     let payload: String = SHIBBOLETH.iter().collect::<String>();
-    let line = format!("printf '{BEGIN}\\n%s\\n{END}\\n' '{payload}'\r");
-    pty.in_tx.send(line.into_bytes()).unwrap();
-    drain(&pty, &mut parser, 2000);
+    let cmd = dialect.emit_unicode_markers(&payload);
+    pty.in_tx.send(cmd).unwrap();
+    drain(&pty, &mut parser, 2500);
 
-    println!("\n=== grid after unicode printf ===");
+    println!("\n=== grid after unicode emit ({} dialect) ===", dialect.name());
     dump(&parser);
 
-    // Collect rows as strings (one per grid row), skipping WIDE_CONT
-    // continuation cells so multi-column glyphs only show up once.
     let rows: Vec<String> = parser
         .grid()
         .rows_iter()
@@ -86,25 +100,24 @@ fn main() {
         })
         .collect();
 
-    // Find the LAST row containing BEGIN_UNICODE — that's the row
-    // printf wrote, not the echoed command (which appears earlier).
-    // Then find the FIRST row containing END_UNICODE strictly after
-    // that. The asserted region is the rows strictly between them.
     let Some(begin_row) = rows.iter().rposition(|r| r.contains(BEGIN)) else {
         eprintln!("FAIL: BEGIN sentinel '{BEGIN}' not found in grid.");
-        eprintln!("printf never produced output, or the parser dropped the sentinel.");
+        eprintln!(
+            "Shell ({} dialect) never produced output, or the parser dropped the sentinel.",
+            dialect.name()
+        );
         std::process::exit(1);
     };
     let Some(end_offset) = rows[begin_row + 1..].iter().position(|r| r.contains(END)) else {
         eprintln!("FAIL: END sentinel '{END}' not found after BEGIN row {begin_row}.");
-        eprintln!("printf produced the BEGIN sentinel but truncated before END.");
+        eprintln!(
+            "Shell ({} dialect) produced BEGIN sentinel but truncated before END.",
+            dialect.name()
+        );
         std::process::exit(1);
     };
     let end_row = begin_row + 1 + end_offset;
 
-    // Sanity: there must be at least one row of actual content between
-    // the sentinels. If printf wrote BEGIN and END but nothing between
-    // them, that's a regression.
     if end_row <= begin_row + 1 {
         eprintln!("FAIL: no content rows between BEGIN (row {begin_row}) and END (row {end_row}).");
         std::process::exit(1);
@@ -117,9 +130,10 @@ fn main() {
     let missing: Vec<char> = SHIBBOLETH.iter().copied().filter(|c| !region.contains(*c)).collect();
     if !missing.is_empty() {
         eprintln!(
-            "FAIL: {} of {} shibboleth chars are missing from the printf output region: {:?}",
+            "FAIL: {} of {} shibboleth chars are missing from the {} output region: {:?}",
             missing.len(),
             SHIBBOLETH.len(),
+            dialect.name(),
             missing
         );
         eprintln!(
@@ -131,30 +145,25 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Substitution guards on the ASSERTED REGION ONLY (the echoed
-    // command line, if it contains '?' from the shell prompt, must
-    // not pollute these checks).
-    //
-    // - U+FFFD: any occurrence is a bad UTF-8 decode somewhere.
-    // - '?': in the printf output region there is no legitimate
-    //   reason for a literal question mark — the payload contains
-    //   none — so any '?' here is a substitution for an unrenderable
-    //   byte.
     let fffd = region.chars().filter(|c| *c == '\u{fffd}').count();
     if fffd > 0 {
-        eprintln!("FAIL: U+FFFD REPLACEMENT CHARACTER appeared {fffd} times in printf output region — bad UTF-8 decode somewhere.");
+        eprintln!("FAIL: U+FFFD REPLACEMENT CHARACTER appeared {fffd} times in output region — bad UTF-8 decode somewhere.");
         std::process::exit(1);
     }
     let qmarks = region.chars().filter(|c| *c == '?').count();
     if qmarks > 0 {
-        eprintln!("FAIL: '?' appeared {qmarks} times in printf output region — likely '?' substitution for unrenderable bytes.");
+        eprintln!("FAIL: '?' appeared {qmarks} times in output region — likely '?' substitution for unrenderable bytes.");
         eprintln!("The payload contains no literal '?', so any '?' here is a substitution.");
         std::process::exit(1);
     }
 
     pty.in_tx.send(b"exit\r".to_vec()).unwrap();
     drain(&pty, &mut parser, 500);
-    println!("\n[unicode-e2e] OK ({} shibboleth chars verified)", SHIBBOLETH.len());
+    println!(
+        "\n[unicode-e2e] OK ({} shibboleth chars verified via {} dialect)",
+        SHIBBOLETH.len(),
+        dialect.name()
+    );
 }
 
 fn drain(pty: &PtyHandle, parser: &mut Parser, ms: u64) {

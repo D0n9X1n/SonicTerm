@@ -78,6 +78,30 @@ PM MUST do this for every user ask before dispatching anyone:
 
 If the user's ask is unambiguous and already names constraints, the Step-0 restate can collapse into a single line in the Step-1 dispatch prompt ("user said: X, confirmed").
 
+### Long-term-greater-good rule (applies to every step where there's a design choice)
+
+When PM or any agent faces uncertainty between options, the first priority is **what's best for the project long-term**, not what's the smallest diff right now. Heuristics:
+
+- Prefer fixing the underlying anti-pattern over patching the symptom — even if it touches more files.
+- Prefer the design that won't need re-architecture in 6 months over the one that ships today.
+- Prefer reducing maintenance surface (delete code, collapse duplication) over preserving every existing pattern.
+- "Minimum changes" is a soft preference, NOT a hard constraint. Override it whenever the small change paints the project into a worse corner.
+- When the tradeoff is unclear, dispatch a cross-model second opinion (see "Cross-model agreement" below). Don't let "the path of least change" win by default.
+
+This is why we file structural sub-issues during Step-2 widen-the-net rather than rolling them in piecemeal — short-term effort, long-term clarity.
+
+### Cross-model agreement rule (resolving uncertainty)
+
+When PM or any agent is uncertain between two design choices:
+
+1. Dispatch the SAME question to two agents using the **two cross-check model slots from environment**: `$SONIC_REVIEWER_MODEL_A` and `$SONIC_REVIEWER_MODEL_B` (configured via shell env, e.g. `export SONIC_REVIEWER_MODEL_A=haiku SONIC_REVIEWER_MODEL_B=sonnet`). Defaults if unset: A=haiku, B=sonnet.
+2. **NEVER hardcode model names** (`haiku`, `sonnet`, `opus`) in dispatch prompts when doing cross-model checks. Read the env var into the prompt at dispatch time.
+3. If both agents independently agree on the same direction → follow it.
+4. If they disagree → escalate to the implementer model (`$SONIC_IMPLEMENTER_MODEL`, default `opus`) for a tiebreaker reasoning pass, then PM picks.
+5. Both agents must reach their verdict WITHOUT seeing each other's response (otherwise it's not independent).
+
+This is distinct from the 5-step rotation (where Haiku and Opus play fixed roles per step). The cross-model check is an ad-hoc tiebreaker for design uncertainty inside any step.
+
 ### Step 2 widen-the-net rule
 
 When investigating, the Opus diagnose agent MUST ask: *is this symptom one instance of a class of bugs?* Look for:

@@ -6,6 +6,21 @@ Local-session visual gate for render/UX-affecting changes. PM (mac side) runs
 in a follow-up; both drivers consume `testing/cases.toml` — that file is the
 **single source of truth** for what we promise to verify.
 
+## ⚠️ Quit other terminals first
+
+The harness drives sonicterm-mac via macOS `osascript` UI keystrokes, which
+always land in whatever app is **frontmost at that instant**. If WezTerm,
+iTerm, kitty, Claude Code, Terminal.app, or any other terminal is running,
+the harness will refuse to start (`exit 2`) — its keystrokes can otherwise
+leak into those windows if sonicterm-mac loses focus mid-case (issue #464).
+
+Quit every other terminal before `just visual mac`. If you must run the
+harness FROM another terminal during dev, set
+`SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1` — but be aware that any case where
+sonicterm-mac fails to stay frontmost may then execute keystrokes against
+the source terminal. The Guard 4 frontmost-verify catches the common case
+and exits 77 (skip) instead of leaking.
+
 ## Quick start
 
 ```bash

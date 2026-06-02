@@ -25,6 +25,45 @@ if ! python3 -c "from PIL import Image" 2>/dev/null; then
 fi
 
 # ------------------------------------------------------------------
+# Guard 1 — pre-flight: refuse to start if a competing terminal is
+# running. macOS UI keystrokes go to whatever app is frontmost at the
+# moment; if a competitor (WezTerm, iTerm, kitty, ...) is alive AND
+# sonicterm-mac drops focus mid-case, our `osascript ... keystroke`
+# calls land in that competitor instead. Documented in issue #464.
+# Override with SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 when running the
+# harness FROM one of these terminals during dev (the dev's source
+# terminal sits behind sonicterm-mac and won't steal focus unless
+# something more dramatic goes wrong, in which case Guard 4 catches it).
+# ------------------------------------------------------------------
+# Match the EXECUTABLE basename only (not full cmdline), to avoid
+# false-positives like `rio` matching `--no-periodic-tasks` in Teams
+# crashpad cmdlines. Use BSD `ps` then awk over the binary name.
+COMPETITOR_RE='^(WezTerm|wezterm-gui|Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
+if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
+  hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
+    # comm field can be a path (e.g. /Applications/WezTerm.app/Contents/MacOS/wezterm-gui)
+    n=split($2,a,"/"); name=a[n]
+    if (name ~ re) print $1" "name
+  }')
+  if [[ -n "$hits" ]]; then
+    echo "FATAL: competing terminal(s) running — keystrokes will leak." >&2
+    echo "Quit them, or set SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1 to override." >&2
+    echo "$hits" >&2
+    exit 2
+  fi
+fi
+
+# ------------------------------------------------------------------
+# B2 boundary-verify support: snapshot the user's pre-existing
+# sonicterm-mac PIDs once. Anything OUTSIDE this set after a run is
+# either a harness-tracked PID we failed to reap (warn + force-kill)
+# or a user-launched instance mid-run (log only — not ours to kill).
+# Exported so run_case.sh can read it.
+# ------------------------------------------------------------------
+export PRE_RUN_USER_PIDS
+PRE_RUN_USER_PIDS=$(pgrep -f "./target/release/sonicterm-mac" 2>/dev/null | sort -u || true)
+
+# ------------------------------------------------------------------
 # Arg parsing
 # ------------------------------------------------------------------
 DO_BUILD=0
@@ -102,5 +141,13 @@ echo "[done] pass=$PASS fail=$FAIL skip=$SKIP / total=${#IDS[@]}"
 
 bash "$DRIVER_DIR/summarize.sh" "$OUT" > "$OUT/report.md"
 cat "$OUT/report.md"
+
+# ------------------------------------------------------------------
+# Guard 6 epilogue — close any stray Finder windows opened by leaked
+# keystrokes that hit Finder during the Finder-park escape hatch (e.g.
+# a stray `t` from Cmd+T landed on Finder mid-case and opened a
+# Finder window). Harmless if there are none.
+# ------------------------------------------------------------------
+osascript -e 'tell application "Finder" to close every window' >/dev/null 2>&1 || true
 
 [[ $FAIL -eq 0 ]]

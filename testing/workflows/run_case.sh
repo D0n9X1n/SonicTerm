@@ -16,6 +16,42 @@ LOG="$CASE_OUT/case.log"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
 # ------------------------------------------------------------------
+# Guard 6 — Finder-park escape hatch. Park focus on Finder BEFORE
+# spawning sonicterm-mac so any pre-spawn keystroke leak (which can
+# happen during the ~0.5s between case-N cleanup and case-N+1
+# focus_sonic) lands on Finder. Finder will, at worst, open a stray
+# window (swept by mac.sh's epilogue), never execute shell commands.
+# Documented in issue #464 (v3 diagnosis, Guard 6 carry-forward).
+# ------------------------------------------------------------------
+osascript -e 'tell application "Finder" to activate' >/dev/null 2>&1 || true
+sleep 0.2
+
+# ------------------------------------------------------------------
+# B2 — multi-PID tracking. Every sonicterm-mac PID we spawn (either
+# directly or via a case shell-cmd that backgrounds another instance,
+# e.g. cases.toml:1008 `config-validation-bad-toml-falls-back`) goes
+# into SONIC_PIDS; cleanup kills exactly those, never broadcasts
+# `pkill -f sonicterm-mac` (which would kill the user's dev build).
+# Snapshot-delta around each shell-cmd block captures launchd-
+# reparented grandchildren that `pgrep -P $$` would miss.
+# ------------------------------------------------------------------
+SONIC_PIDS=()
+_PRE_PIDS=""
+
+snapshot_sonic_pids_before() {
+  _PRE_PIDS=$(pgrep -f "./target/release/sonicterm-mac" 2>/dev/null | sort -u)
+}
+snapshot_sonic_pids_after() {
+  local post new pid
+  post=$(pgrep -f "./target/release/sonicterm-mac" 2>/dev/null | sort -u)
+  new=$(comm -13 <(printf '%s\n' "$_PRE_PIDS") <(printf '%s\n' "$post"))
+  for pid in $new; do
+    SONIC_PIDS+=("$pid")
+    log "B2: tracked new harness sonicterm-mac pid=$pid (from shell-cmd)"
+  done
+}
+
+# ------------------------------------------------------------------
 # Extract case as JSON for easy reading
 # ------------------------------------------------------------------
 CASE_JSON="$CASE_OUT/case.json"
@@ -52,7 +88,14 @@ if [[ ! -x "$SONIC_BIN" ]]; then
   exit 1
 fi
 
-pkill -9 -f "sonicterm-mac" 2>/dev/null || true
+# B2: scoped cleanup only — never broadcast `pkill -f sonicterm-mac`
+# (would kill the user's dev build). At spawn time SONIC_PIDS is
+# typically empty; this iteration is a no-op safety net for any PIDs
+# a prior step (e.g. a wrapping harness) may have already tracked.
+for pid in "${SONIC_PIDS[@]}"; do
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+done
 sleep 0.4
 # `disown` the backgrounded child so bash does not write its own
 # "Terminated: 15" job-notification text to stderr when we later signal
@@ -63,20 +106,44 @@ sleep 0.4
 "$SONIC_BIN" > "$CASE_OUT/sonicterm.log" 2>&1 &
 SONIC_PID=$!
 disown "$SONIC_PID" 2>/dev/null || true
+SONIC_PIDS+=("$SONIC_PID")
+export SONIC_PID  # exposed for shell-cmd payloads that want to target our spawned instance
 log "spawned sonicterm-mac pid=$SONIC_PID"
 
-# Wait for window — poll until AppleScript reports a window count > 0.
+# Guard 2 — process-exists verify. If sonicterm-mac died between
+# spawn and now (panic on init, missing dylib, ...), fail fast rather
+# than walk into a focusless keystroke storm.
+sleep 0.4
+if ! kill -0 "$SONIC_PID" 2>/dev/null; then
+  log "FATAL: sonicterm-mac (pid=$SONIC_PID) died before window appeared — see $CASE_OUT/sonicterm.log"
+  echo "FAIL" > "$CASE_OUT/status"
+  exit 1
+fi
+
+# Guard 3 — window-exists verify with longer budget + hard FAIL.
+# Cold wgpu init on a fresh shader cache can exceed 6s on M-series;
+# default 10s, overrideable. Convert previous WARN-and-continue to
+# hard FAIL — window absence is never benign and was what allowed
+# subsequent keystrokes to leak (issue #464).
+TIMEOUT_S="${SONICTERM_HARNESS_WIN_TIMEOUT_S:-10}"
 WINDOW_READY=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 $((TIMEOUT_S * 10))); do
   count=$(osascript -e 'tell application "System Events" to count windows of (first process whose name is "sonicterm-mac")' 2>/dev/null || echo 0)
   if [[ "${count:-0}" -gt 0 ]]; then
     WINDOW_READY=1
     break
   fi
+  if ! kill -0 "$SONIC_PID" 2>/dev/null; then
+    log "FATAL: pid $SONIC_PID died waiting for window"
+    echo FAIL > "$CASE_OUT/status"
+    exit 1
+  fi
   sleep 0.1
 done
 if [[ $WINDOW_READY -ne 1 ]]; then
-  log "WARN: sonicterm-mac window did not appear within 4s — case may be flaky"
+  log "FATAL: sonicterm-mac window did not appear within ${TIMEOUT_S}s"
+  echo FAIL > "$CASE_OUT/status"
+  exit 1
 fi
 
 osascript >/dev/null 2>&1 <<EOF || true
@@ -90,27 +157,40 @@ end tell
 EOF
 sleep 0.4
 
-# ----- focus helper with retry -----
+# ----- Guard 4 — frontmost-verify with retry, hard SKIP on failure -----
+verify_front() {
+  local front
+  front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
+  [[ "$front" == "sonicterm-mac" ]]
+}
+
 focus_sonic() {
-  for try in 1 2 3; do
+  for try in 1 2 3 4 5; do
     osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
   set frontmost of (first process whose name is "sonicterm-mac") to true
 end tell
 EOF
-    sleep 0.2
-    local front
-    front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
-    if [[ "$front" == "sonicterm-mac" ]]; then
-      return 0
-    fi
-    log "focus retry $try (front was: $front)"
+    sleep 0.25
+    verify_front && return 0
+    log "focus retry $try (front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null))"
   done
-  log "WARN: could not bring sonicterm-mac to front"
   return 1
 }
 
-focus_sonic || true
+# Pre-keystroke gate: invoked by every send_chord/send_text/do_setup.
+# If we can't keep sonicterm-mac frontmost, SKIP (exit 77) rather than
+# fire keystrokes into whatever else has focus. This is the core fix
+# for #464 — the previous `focus_sonic || true` swallowed the failure.
+ensure_front_or_skip() {
+  verify_front && return 0
+  focus_sonic && return 0
+  log "SKIP: cannot keep sonicterm-mac frontmost — keystrokes would leak"
+  echo "SKIP" > "$CASE_OUT/status"
+  exit 77
+}
+
+ensure_front_or_skip
 
 # Capture the actual sonic window id (used for window-only screenshots)
 WINDOW_ID=""
@@ -124,6 +204,7 @@ log "window id: ${WINDOW_ID:-<unknown>}"
 # Setup helpers
 # ------------------------------------------------------------------
 do_setup() {
+  ensure_front_or_skip
   local step="$1"
   case "$step" in
     open-3-tabs)
@@ -162,6 +243,7 @@ do_setup() {
 # ------------------------------------------------------------------
 # Map chord like "cmd+t" -> osascript keystroke
 send_chord() {
+  ensure_front_or_skip
   local chord="$1"
   local mods=""
   local key="$chord"
@@ -211,6 +293,7 @@ send_chord() {
 }
 
 send_text() {
+  ensure_front_or_skip
   local text="$1"
   # escape backslashes + double quotes for osascript
   local esc
@@ -244,7 +327,15 @@ for k in c.get('keystrokes', []):
             out.append(f"send_chord {shlex.quote(chord)}")
             out.append(f"sleep {delay}")
     elif kind == 'shell-cmd':
+        # B2 (v3): snapshot-delta around every shell-cmd. Any new
+        # sonicterm-mac PID that appears as a side effect of the
+        # payload (e.g. cases.toml's `config-validation-bad-toml-
+        # falls-back` backgrounds a second instance) is tracked in
+        # SONIC_PIDS so cleanup kills exactly it, never the user's
+        # dev build.
+        out.append('snapshot_sonic_pids_before')
         out.append(k['value'])
+        out.append('snapshot_sonic_pids_after')
     elif kind == 'snapshot-sonic-shells':
         # Snapshot every shell descendant of the live sonicterm-mac process.
         # Used by orphan-shells-from-sonic expect kind to verify
@@ -273,20 +364,32 @@ for k in c.get('keystrokes', []):
 print('\n'.join(out))
 PY
 
-focus_sonic || true
+ensure_front_or_skip
 # shellcheck source=/dev/null
 source "$CASE_OUT/steps.sh"
 
 # ------------------------------------------------------------------
-# Capture screenshot — window-only when possible
+# Guard 5 — window-only screencap is now MANDATORY. The previous
+# full-display fallback was masking focus bugs: when sonicterm-mac
+# wasn't at the (500, 200) corner the case assumed, the 1000×700
+# logical-coord pixel-near checks sampled desktop pixels outside the
+# window (the "Class B black pixel" failure mode in #464). If we
+# don't have a usable window id, SKIP — never sample wrong pixels.
+# Note: cases.toml coords are unchanged; pixel_near() already maps
+# image-w / 1000 logical units onto whatever screencap size we hand it.
 # ------------------------------------------------------------------
 SHOT="$CASE_OUT/screen.png"
-if [[ -n "$WINDOW_ID" ]] && screencapture -x -l "$WINDOW_ID" "$SHOT" 2>/dev/null && [[ -s "$SHOT" ]]; then
-  log "screenshot (window-only): $SHOT"
-else
-  screencapture -x -D 1 "$SHOT" 2>/dev/null || true
-  log "screenshot (full display): $SHOT"
+if [[ -z "$WINDOW_ID" ]]; then
+  log "SKIP: no window id captured — refusing to screencap full display (would leak coords)"
+  echo SKIP > "$CASE_OUT/status"
+  exit 77
 fi
+if ! screencapture -x -l "$WINDOW_ID" "$SHOT" 2>/dev/null || [[ ! -s "$SHOT" ]]; then
+  log "SKIP: window-local screencap failed (window may have closed)"
+  echo SKIP > "$CASE_OUT/status"
+  exit 77
+fi
+log "screenshot (window-only): $SHOT"
 
 # ------------------------------------------------------------------
 # Evaluate expectations (best-effort; reports per-check pass/fail)
@@ -438,29 +541,56 @@ PY
 expect_rc=$?
 
 # ------------------------------------------------------------------
-# Cleanup app — graceful Cmd+Q first, then SIGTERM grace, then SIGKILL.
-# The aggressive pkill -9 in older versions raced with cases that were
-# still finishing their last keystroke, producing spurious
-# "Terminated: 15" entries that the harness counted as failures.
+# Cleanup — kill exactly the PIDs we tracked in SONIC_PIDS (B2 v3).
+# No broadcast `pkill -f sonicterm-mac` (would kill the user's dev
+# build). Order: graceful Cmd+Q first, then SIGTERM grace, then
+# SIGKILL each tracked pid individually.
 # ------------------------------------------------------------------
 osascript -e 'tell application "sonicterm-mac" to quit' >/dev/null 2>&1 || true
-for _ in $(seq 1 10); do
-  kill -0 "$SONIC_PID" 2>/dev/null || break
+
+_any_alive() {
+  local pid
+  for pid in "${SONIC_PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  _any_alive || break
   sleep 0.1
 done
-if kill -0 "$SONIC_PID" 2>/dev/null; then
-  kill -TERM "$SONIC_PID" 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    kill -0 "$SONIC_PID" 2>/dev/null || break
-    sleep 0.1
-  done
+for pid in "${SONIC_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+for _ in 1 2 3 4 5; do
+  _any_alive || break
+  sleep 0.1
+done
+for pid in "${SONIC_PIDS[@]}"; do
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+done
+
+# Boundary verify (per v3): if anything sonicterm-mac-named is alive
+# that isn't in PRE_RUN_USER_PIDS, log it. Force-kill if it's one of
+# ours that survived; log-only if it appeared mid-run (user launched
+# their own instance during the case window — not ours to kill).
+remaining=$(pgrep -f "./target/release/sonicterm-mac" 2>/dev/null | sort -u || true)
+if [[ -n "$remaining" ]]; then
+  pre_sorted=$(printf '%s\n' "${PRE_RUN_USER_PIDS:-}" | sort -u)
+  unexpected=$(comm -23 <(printf '%s\n' "$remaining") <(printf '%s\n' "$pre_sorted"))
+  if [[ -n "$unexpected" ]]; then
+    tracked_sorted=$(printf '%s\n' "${SONIC_PIDS[@]}" | sort -u)
+    ours_alive=$(comm -12 <(printf '%s\n' "$unexpected") <(printf '%s\n' "$tracked_sorted"))
+    user_mid_run=$(comm -23 <(printf '%s\n' "$unexpected") <(printf '%s\n' "$tracked_sorted"))
+    if [[ -n "$ours_alive" ]]; then
+      log "WARN: harness-tracked sonicterm-mac still alive after cleanup; force-killing: $ours_alive"
+      for pid in $ours_alive; do kill -9 "$pid" 2>/dev/null || true; done
+    fi
+    if [[ -n "$user_mid_run" ]]; then
+      log "INFO: user-launched sonicterm-mac PID(s) appeared mid-run; NOT killing: $user_mid_run"
+    fi
+  fi
 fi
-kill -9 "$SONIC_PID" 2>/dev/null || true
-wait "$SONIC_PID" 2>/dev/null || true
-# Belt-and-suspenders: any orphans from setup steps that spawned extra
-# windows should also be reaped, but quietly — we don't want their
-# termination signals to leak into the next case's capture.
-pkill -9 -f "sonicterm-mac" 2>/dev/null || true
 
 if [[ $expect_rc -eq 0 ]]; then
   log "RESULT: PASS"
