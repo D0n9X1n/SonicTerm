@@ -770,6 +770,24 @@ pub struct App {
     /// WHETHER (preserves the `os_drag_cleanup.rs:172-201`
     /// idempotence guarantee).
     pub(super) pending_os_teardown: bool,
+    /// PR #533 Haiku Step-4 2nd-pass REVISE: test-only callback fired
+    /// inside [`Self::cancel_drag_session`] AFTER the `self.windows.keys()`
+    /// snapshot is collected but BEFORE the per-id iteration body runs.
+    /// Lets the regression test (`os_drag_cleanup.rs::
+    /// cancel_drag_session_tolerates_window_removed_before_iteration`)
+    /// mutate `self.windows` in the exact race window that the
+    /// `get_mut(&id).else { continue }` arm is designed to tolerate.
+    /// Consumed (`take()`-d) at the call site so the closure is invoked
+    /// at most once per `cancel_drag_session` run and the mutable
+    /// borrow on `self.windows` is not held while it runs. Production
+    /// cost is one extra `Option::take()` per `cancel_drag_session`
+    /// invocation (always `None` outside tests) — gated by
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]` because the test
+    /// living in `tests/os_drag_cleanup.rs` is an INTEGRATION test
+    /// that compiles the crate without `cfg(test)`.
+    #[doc(hidden)]
+    pub(super) test_post_snapshot_hook:
+        Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request. Set from `run_action` when the user's
     /// Cmd+W chain has just closed the last tab of the last window AND
     /// `Config::quit_on_last_window_close` is true (or non-macOS).
@@ -1117,6 +1135,7 @@ impl App {
             clipboard: Clipboard::new().ok(),
             pending_new_window: false,
             pending_os_teardown: false,
+            test_post_snapshot_hook: None,
             pending_exit: false,
             command_palette: CommandPalette::new(),
             palette_attached_window: None,
@@ -2661,6 +2680,20 @@ impl App {
         self.windows.remove(&id).is_some()
     }
 
+    /// Test-only (#533 Haiku Step-4 2nd-pass REVISE): install a callback
+    /// that fires INSIDE [`Self::cancel_drag_session`], AFTER the
+    /// `self.windows.keys()` snapshot is collected but BEFORE the
+    /// per-id iteration body runs. Lets tests exercise the exact
+    /// `get_mut(&id).else { continue }` race-tolerance branch by
+    /// removing (or inserting) a window in between.
+    #[doc(hidden)]
+    pub fn __test_set_post_snapshot_hook<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut App) + Send + 'static,
+    {
+        self.test_post_snapshot_hook = Some(Box::new(f));
+    }
+
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
         self.windows.len().saturating_sub(self.shadow_main_count())
@@ -3347,6 +3380,17 @@ impl App {
         // `os_drag_cleanup.rs:172-201` asserts this on a re-armed
         // second invocation.
         let ids: Vec<_> = self.windows.keys().copied().collect();
+        // PR #533 Haiku Step-4 2nd-pass REVISE: invoke the test-only
+        // post-snapshot hook AFTER `ids` is collected but BEFORE the
+        // iteration body starts. The `take()` releases the hook so it
+        // never re-fires, and (more importantly) leaves no live borrow
+        // on `self` — the closure can freely mutate `self.windows`,
+        // which is the exact race we need to exercise to prove the
+        // `get_mut(&id).else { continue }` arm below fires. Always
+        // `None` in production (the setter is `__test_*`-gated).
+        if let Some(hook) = self.test_post_snapshot_hook.take() {
+            hook(self);
+        }
         // Issue #438: clear ALL per-window drag residue, not just
         // drag_session / drag_target. Previously `pressed_tab` and
         // `mouse_down` were only cleared on the main window, and the

@@ -309,20 +309,20 @@ fn pending_os_teardown_handles_window_inserted_after_flag_set() {
 // PR #533 Haiku Step-4 REVISE — additional guard rails
 // ---------------------------------------------------------------------
 
-/// PR #533 Haiku Step-4 REVISE (1/2): `cancel_drag_session` snapshots
-/// `self.windows.keys()` BEFORE the mutation loop (#462 defensive fix
-/// at `mod.rs:3337`). The loop body must not panic if a window vanishes
-/// between snapshot collection and the `windows.get_mut(...)` lookup —
-/// the `else { continue }` branch covers it. This test mutates
-/// `app.windows` by REMOVING a window after seeding residue, then
-/// invokes `cancel_drag_session`. The pre-iteration snapshot still
-/// references the removed id; the loop body must skip it without
-/// panicking and still clear residue on every surviving window.
+/// PR #533 Haiku Step-4 2nd-pass REVISE (1/2): `cancel_drag_session`
+/// snapshots `self.windows.keys()` BEFORE the mutation loop (#462
+/// defensive fix at `mod.rs:3349`). The loop body must not panic if a
+/// window vanishes between snapshot collection and the
+/// `windows.get_mut(...)` lookup — the `else { continue }` branch
+/// covers it.
 ///
-/// Insertion is also exercised indirectly: see
-/// `pending_os_teardown_handles_window_inserted_after_flag_set` above,
-/// which proves the snapshot is taken at drain time. This test pairs
-/// with that one to cover removal-during-the-window equivalent.
+/// To exercise the ACTUAL `get_mut`-after-snapshot branch (not just
+/// the trivial "removed before the call" case Haiku flagged on the
+/// 1st REVISE), this test uses the production
+/// `__test_set_post_snapshot_hook` seam to remove a window in the
+/// exact race window: after the `ids` snapshot is taken, before the
+/// iteration body runs. The hook fires once and is `take()`-d, so it
+/// cannot re-arm or interfere with other tests.
 #[test]
 fn cancel_drag_session_tolerates_window_removed_before_iteration() {
     let mut app = make_app();
@@ -338,16 +338,28 @@ fn cancel_drag_session_tolerates_window_removed_before_iteration() {
     assert!(app.__test_set_window_drag_chip_marker(survivor, true));
     assert!(app.__test_set_window_drag_chip_marker(doomed, true));
 
-    // Simulate the race: a window vanishes between the (logical)
-    // snapshot collection and the per-window loop body. We do the
-    // removal BEFORE the call here — same observable effect from the
-    // loop body's perspective: `windows.get_mut(&id)` returns `None`
-    // for the removed id, and the `else { continue }` arm fires.
-    assert!(app.__test_remove_window(doomed));
-    assert_eq!(app.__test_window_drag_chip_marker(doomed), None);
+    // Both windows must be live BEFORE the call — this is the precondition
+    // that proves the snapshot DOES contain `doomed`, so removing it
+    // inside the hook exercises the `get_mut(&id).else { continue }`
+    // branch (rather than the never-was-snapshotted path).
+    assert_eq!(app.__test_window_drag_chip_marker(doomed), Some(true));
+    assert_eq!(app.__test_window_drag_chip_marker(survivor), Some(true));
 
-    // The call must NOT panic and must complete the iteration over
-    // every still-live window.
+    // Install the post-snapshot hook. It fires AFTER `ids = windows.keys()`
+    // has captured `doomed` AND BEFORE the per-id loop body runs. The
+    // closure removes `doomed`; when the loop reaches that id its
+    // `get_mut(&id)` returns `None` and the `else { continue }` arm
+    // (the entire point of the #462 defensive snapshot) fires.
+    app.__test_set_post_snapshot_hook(move |inner| {
+        assert!(
+            inner.__test_remove_window(doomed),
+            "post-snapshot hook: doomed window must still be present at hook time \
+             (proves the snapshot contains it)"
+        );
+    });
+
+    // The call must NOT panic, must complete the iteration on every
+    // still-live window, and must NOT resurrect the removed window.
     let _ = app.cancel_drag_session();
 
     // Surviving windows: residue + marker cleared as usual.
@@ -360,8 +372,9 @@ fn cancel_drag_session_tolerates_window_removed_before_iteration() {
     assert_eq!(app.__test_window_drag_chip_marker(survivor), Some(false));
 
     // Removed window stays removed — the tolerant lookup did NOT
-    // resurrect it.
+    // resurrect it via `get_mut`.
     assert_eq!(app.__test_child_pressed_tab(doomed), None);
+    assert_eq!(app.__test_window_drag_chip_marker(doomed), None);
 }
 
 /// PR #533 Haiku Step-4 REVISE (2/2): `WindowState::clear_drag_chip`
