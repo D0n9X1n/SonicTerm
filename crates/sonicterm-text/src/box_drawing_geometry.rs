@@ -37,6 +37,17 @@
 //! - `┻` U+253B heavy bottom-T
 //! - `╋` U+254B heavy cross
 //!
+//! Phase B3a adds the 46 mixed-weight junction codepoints — each
+//! junction has 2–4 edges meeting at the center, with explicit
+//! per-edge `StrokeWeight`. The internal [`EdgeStroke`] descriptor
+//! captures one half-edge (center→cell-edge) with its own weight; the
+//! [`emit_edge_strokes`] helper expands a list of [`EdgeStroke`]s into
+//! the public [`LineSegment`] vector consumed by the renderer. The
+//! public `LineSegment` shape is unchanged — only the *construction*
+//! gains per-edge weight resolution. Codepoints covered (U+250D … U+254A):
+//! `┍ ┎ ┑ ┒ ┕ ┖ ┙ ┚ ┝ ┞ ┟ ┠ ┡ ┢ ┥ ┦ ┧ ┨ ┩ ┪ ┭ ┮ ┯ ┰ ┱ ┲ ┵ ┶ ┷ ┸ ┹ ┺
+//!  ┽ ┾ ┿ ╀ ╁ ╂ ╃ ╄ ╅ ╆ ╇ ╈ ╉ ╊`.
+//!
 //! All other codepoints in the Box Drawing block (double/dashed/arc/
 //! diagonal) return `None`; callers fall back to the existing
 //! `BoxDrawingCellFill` glyph stretch path in
@@ -139,6 +150,120 @@ pub const HEAVY_THICKNESS_PX: f32 = 2.0;
 /// splay for ═ ║ meets the corner lanes at pixel-identical inner
 /// corners.
 pub const DOUBLE_LANE_OFFSET_PX: f32 = 1.5;
+
+/// Compass direction of one half-edge radiating from the cell center.
+///
+/// INTERNAL to Phase B3a: each mixed-weight junction codepoint is
+/// modelled as a small set of [`EdgeStroke`]s — one per direction the
+/// glyph extends — that the builder converts into the public
+/// [`LineSegment`] list. The public data shape (`LineSegment`) is
+/// unchanged; this enum only exists inside the codepoint table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EdgeDir {
+    /// Center → top edge (upward stem).
+    Up,
+    /// Center → bottom edge (downward stem).
+    Down,
+    /// Center → left edge (leftward stem).
+    Left,
+    /// Center → right edge (rightward stem).
+    Right,
+}
+
+/// One half-edge of a mixed-weight junction.
+///
+/// Captures the direction from the cell center to the cell edge and
+/// the stroke weight that should be applied to that single half-edge.
+/// Two opposite [`EdgeStroke`]s with the same weight (e.g. `Up`+`Down`
+/// Light) collapse into one full edge-to-edge `LineSegment` during
+/// emission so the renderer continues to see the same number of
+/// segments as the Phase B1 table for uniform-weight cases.
+#[derive(Clone, Copy, Debug)]
+struct EdgeStroke {
+    dir: EdgeDir,
+    weight: StrokeWeight,
+}
+
+impl EdgeStroke {
+    const fn light(dir: EdgeDir) -> Self {
+        Self { dir, weight: StrokeWeight::Light }
+    }
+    const fn heavy(dir: EdgeDir) -> Self {
+        Self { dir, weight: StrokeWeight::Heavy }
+    }
+}
+
+/// Translate a slice of [`EdgeStroke`]s into the [`LineSegment`]
+/// vector that the renderer consumes.
+///
+/// Same-weight collinear pairs (e.g. `Up`+`Down` both `Light`) are
+/// merged into a single edge-to-edge segment so the resulting geometry
+/// matches the Phase A/B1 shapes when all edges share a weight. Mixed
+/// weights stay as two separate center-anchored half-segments — that
+/// is exactly what lets `┝` (light vert + heavy right) render as
+/// `│` + heavy half-`━` with no overlap at the join.
+fn emit_edge_strokes(
+    edges: &[EdgeStroke],
+    cell_origin: (f32, f32),
+    cell_size: (f32, f32),
+) -> Vec<LineSegment> {
+    let (x, y) = cell_origin;
+    let (w, h) = cell_size;
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let left = x;
+    let right = x + w;
+    let top = y;
+    let bottom = y + h;
+
+    let thickness_for = |weight: StrokeWeight| match weight {
+        StrokeWeight::Light => LIGHT_THICKNESS_PX,
+        StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
+    };
+    let mk_seg = |from: (f32, f32), to: (f32, f32), weight: StrokeWeight| LineSegment {
+        from,
+        to,
+        thickness: thickness_for(weight),
+        weight,
+        style: StrokeStyle::Single,
+    };
+
+    let find = |dir: EdgeDir| edges.iter().copied().find(|e| e.dir == dir);
+
+    let mut out: Vec<LineSegment> = Vec::with_capacity(edges.len());
+
+    // Vertical axis: merge Up+Down if same weight, else emit independently.
+    match (find(EdgeDir::Up), find(EdgeDir::Down)) {
+        (Some(u), Some(d)) if u.weight == d.weight => {
+            out.push(mk_seg((cx, top), (cx, bottom), u.weight));
+        }
+        (u_opt, d_opt) => {
+            if let Some(u) = u_opt {
+                out.push(mk_seg((cx, top), (cx, cy), u.weight));
+            }
+            if let Some(d) = d_opt {
+                out.push(mk_seg((cx, cy), (cx, bottom), d.weight));
+            }
+        }
+    }
+
+    // Horizontal axis: merge Left+Right if same weight, else emit independently.
+    match (find(EdgeDir::Left), find(EdgeDir::Right)) {
+        (Some(l), Some(r)) if l.weight == r.weight => {
+            out.push(mk_seg((left, cy), (right, cy), l.weight));
+        }
+        (l_opt, r_opt) => {
+            if let Some(l) = l_opt {
+                out.push(mk_seg((left, cy), (cx, cy), l.weight));
+            }
+            if let Some(r) = r_opt {
+                out.push(mk_seg((cx, cy), (right, cy), r.weight));
+            }
+        }
+    }
+
+    out
+}
 
 /// Returns the procedural geometry for the Phase A + B1 Box Drawing
 /// subset, or `None` for any codepoint outside that subset. `None`
@@ -393,6 +518,457 @@ pub fn box_drawing_geometry(
             ((cx + off, cy - off), (right, cy - off)),
             ((cx + off, cy + off), (right, cy + off)),
         ])),
+        // ── Phase B3a: 46 mixed-weight junction codepoints ──────────
+        // Each arm specifies the half-edges radiating from center with
+        // explicit per-edge weight; `emit_edge_strokes` translates the
+        // list into `LineSegment`s, merging same-weight collinear pairs
+        // into single edge-to-edge segments (so e.g. `┿` returns 2
+        // segments — one full heavy horizontal + one full light vertical
+        // — exactly like `╋`/`┼` do for uniform weights). Unicode names
+        // dictate weights: U+250D "BOX DRAWINGS DOWN LIGHT AND RIGHT
+        // HEAVY" → Down=Light, Right=Heavy, etc.
+        // ┍ U+250D — Down Light, Right Heavy
+        0x250D => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::light(EdgeDir::Down), EdgeStroke::heavy(EdgeDir::Right)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┎ U+250E — Down Heavy, Right Light
+        0x250E => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::heavy(EdgeDir::Down), EdgeStroke::light(EdgeDir::Right)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┑ U+2511 — Down Light, Left Heavy
+        0x2511 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::light(EdgeDir::Down), EdgeStroke::heavy(EdgeDir::Left)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┒ U+2512 — Down Heavy, Left Light
+        0x2512 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::heavy(EdgeDir::Down), EdgeStroke::light(EdgeDir::Left)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┕ U+2515 — Up Light, Right Heavy
+        0x2515 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::light(EdgeDir::Up), EdgeStroke::heavy(EdgeDir::Right)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┖ U+2516 — Up Heavy, Right Light
+        0x2516 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::heavy(EdgeDir::Up), EdgeStroke::light(EdgeDir::Right)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┙ U+2519 — Up Light, Left Heavy
+        0x2519 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::light(EdgeDir::Up), EdgeStroke::heavy(EdgeDir::Left)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┚ U+251A — Up Heavy, Left Light
+        0x251A => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[EdgeStroke::heavy(EdgeDir::Up), EdgeStroke::light(EdgeDir::Left)],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┝ U+251D — Vertical Light, Right Heavy
+        0x251D => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┞ U+251E — Up Heavy, Down Light, Right Light
+        0x251E => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┟ U+251F — Up Light, Down Heavy, Right Light
+        0x251F => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┠ U+2520 — Vertical Heavy, Right Light
+        0x2520 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┡ U+2521 — Up Heavy, Down Light, Right Heavy
+        0x2521 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┢ U+2522 — Up Light, Down Heavy, Right Heavy
+        0x2522 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┥ U+2525 — Vertical Light, Left Heavy
+        0x2525 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┦ U+2526 — Up Heavy, Down Light, Left Light
+        0x2526 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┧ U+2527 — Up Light, Down Heavy, Left Light
+        0x2527 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┨ U+2528 — Vertical Heavy, Left Light
+        0x2528 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┩ U+2529 — Up Heavy, Down Light, Left Heavy
+        0x2529 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┪ U+252A — Up Light, Down Heavy, Left Heavy
+        0x252A => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┭ U+252D — Left Heavy, Right Light, Down Light
+        0x252D => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┮ U+252E — Left Light, Right Heavy, Down Light
+        0x252E => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┯ U+252F — Horizontal Heavy, Down Light
+        0x252F => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┰ U+2530 — Horizontal Light, Down Heavy
+        0x2530 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┱ U+2531 — Left Heavy, Right Light, Down Heavy
+        0x2531 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┲ U+2532 — Left Light, Right Heavy, Down Heavy
+        0x2532 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┵ U+2535 — Left Heavy, Right Light, Up Light
+        0x2535 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┶ U+2536 — Left Light, Right Heavy, Up Light
+        0x2536 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┷ U+2537 — Horizontal Heavy, Up Light
+        0x2537 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┸ U+2538 — Horizontal Light, Up Heavy
+        0x2538 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┹ U+2539 — Left Heavy, Right Light, Up Heavy
+        0x2539 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┺ U+253A — Left Light, Right Heavy, Up Heavy
+        0x253A => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┽ U+253D — Left Heavy, Right Light, Vertical Light
+        0x253D => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┾ U+253E — Left Light, Right Heavy, Vertical Light
+        0x253E => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ┿ U+253F — Horizontal Heavy, Vertical Light
+        0x253F => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╀ U+2540 — Up Heavy, Down Light, Horizontal Light
+        0x2540 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╁ U+2541 — Up Light, Down Heavy, Horizontal Light
+        0x2541 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::light(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╂ U+2542 — Vertical Heavy, Horizontal Light
+        0x2542 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╃ U+2543 — Left Heavy, Up Heavy, Right Light, Down Light
+        0x2543 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╄ U+2544 — Right Heavy, Up Heavy, Left Light, Down Light
+        0x2544 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╅ U+2545 — Left Heavy, Down Heavy, Right Light, Up Light
+        0x2545 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╆ U+2546 — Right Heavy, Down Heavy, Left Light, Up Light
+        0x2546 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╇ U+2547 — Horizontal Heavy, Up Heavy, Down Light
+        0x2547 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::light(EdgeDir::Down),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╈ U+2548 — Horizontal Heavy, Down Heavy, Up Light
+        0x2548 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::light(EdgeDir::Up),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╉ U+2549 — Vertical Heavy, Left Heavy, Right Light
+        0x2549 => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Left),
+                EdgeStroke::light(EdgeDir::Right),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
+        // ╊ U+254A — Vertical Heavy, Right Heavy, Left Light
+        0x254A => Some(BoxGeometry::Lines(emit_edge_strokes(
+            &[
+                EdgeStroke::heavy(EdgeDir::Up),
+                EdgeStroke::heavy(EdgeDir::Down),
+                EdgeStroke::heavy(EdgeDir::Right),
+                EdgeStroke::light(EdgeDir::Left),
+            ],
+            cell_origin,
+            cell_size,
+        ))),
 
         _ => None,
     }
@@ -444,6 +1020,53 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x2566
             | 0x2569
             | 0x256C
+            // Phase B3a — 46 mixed light/heavy junctions
+            | 0x250D
+            | 0x250E
+            | 0x2511
+            | 0x2512
+            | 0x2515
+            | 0x2516
+            | 0x2519
+            | 0x251A
+            | 0x251D
+            | 0x251E
+            | 0x251F
+            | 0x2520
+            | 0x2521
+            | 0x2522
+            | 0x2525
+            | 0x2526
+            | 0x2527
+            | 0x2528
+            | 0x2529
+            | 0x252A
+            | 0x252D
+            | 0x252E
+            | 0x252F
+            | 0x2530
+            | 0x2531
+            | 0x2532
+            | 0x2535
+            | 0x2536
+            | 0x2537
+            | 0x2538
+            | 0x2539
+            | 0x253A
+            | 0x253D
+            | 0x253E
+            | 0x253F
+            | 0x2540
+            | 0x2541
+            | 0x2542
+            | 0x2543
+            | 0x2544
+            | 0x2545
+            | 0x2546
+            | 0x2547
+            | 0x2548
+            | 0x2549
+            | 0x254A
     )
 }
 
@@ -794,6 +1417,263 @@ mod tests {
         match box_drawing_geometry(ch, origin, size).expect("covered") {
             BoxGeometry::Lines(v) => v,
         }
+    }
+
+    #[test]
+    fn b3a_all_46_codepoints_return_some_and_are_covered() {
+        // Phase B3a: every mixed-weight junction codepoint must produce
+        // geometry AND be in the covered predicate so cache invalidation
+        // (#559) catches it and the renderer doesn't fall back to glyph
+        // stretch.
+        for ch in B3A_CODEPOINTS {
+            let geom = box_drawing_geometry(*ch, ORIGIN, (CELL_W, CELL_H));
+            assert!(
+                geom.is_some(),
+                "Phase B3a codepoint U+{:04X} ('{ch}') must return geometry",
+                *ch as u32
+            );
+            assert!(
+                is_covered_box_drawing(*ch),
+                "Phase B3a codepoint U+{:04X} ('{ch}') must be in is_covered_box_drawing",
+                *ch as u32
+            );
+            let BoxGeometry::Lines(segs) = geom.unwrap();
+            assert!(!segs.is_empty(), "U+{:04X} produced empty Lines", *ch as u32);
+            // Every B3a codepoint must contain at least one heavy AND at
+            // least one light stroke — that's the definition of "mixed".
+            let has_light = segs.iter().any(|s| s.weight == StrokeWeight::Light);
+            let has_heavy = segs.iter().any(|s| s.weight == StrokeWeight::Heavy);
+            assert!(
+                has_light && has_heavy,
+                "U+{:04X} must mix both Light and Heavy strokes (got light={has_light} heavy={has_heavy})",
+                *ch as u32
+            );
+            // Each emitted segment must have a thickness matching its
+            // weight tag — the renderer (line_segment_to_quad) reads
+            // seg.thickness directly so this is the load-bearing
+            // invariant for B3a.
+            for s in &segs {
+                let expected = match s.weight {
+                    StrokeWeight::Light => LIGHT_THICKNESS_PX,
+                    StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
+                };
+                assert!(
+                    (s.thickness - expected).abs() < f32::EPSILON,
+                    "U+{:04X} seg thickness {} != expected {} for weight {:?}",
+                    *ch as u32,
+                    s.thickness,
+                    expected,
+                    s.weight
+                );
+                assert_eq!(
+                    s.style,
+                    StrokeStyle::Single,
+                    "B3a codepoints are single-stroke; Double is B2"
+                );
+            }
+        }
+    }
+
+    const B3A_CODEPOINTS: &[char] = &[
+        '┍', '┎', '┑', '┒', '┕', '┖', '┙', '┚', '┝', '┞', '┟', '┠', '┡', '┢', '┥', '┦', '┧', '┨',
+        '┩', '┪', '┭', '┮', '┯', '┰', '┱', '┲', '┵', '┶', '┷', '┸', '┹', '┺', '┽', '┾', '┿', '╀',
+        '╁', '╂', '╃', '╄', '╅', '╆', '╇', '╈', '╉', '╊',
+    ];
+
+    #[test]
+    fn b3a_codepoint_count_is_46() {
+        // Guard: spec is 46 codepoints. Trip if anyone edits the table
+        // without updating the spec.
+        assert_eq!(B3A_CODEPOINTS.len(), 46);
+    }
+
+    #[test]
+    fn b3a_edge_weights_match_unicode_names() {
+        // Spot-check a representative set covering each junction family
+        // (corners, side-Ts, top/bottom-Ts, crosses, asymmetric crosses).
+        // The check: each expected (direction, weight) appears as either
+        // a center-anchored half-segment OR as an edge-to-edge segment
+        // that crosses the cell center along that axis.
+        struct Case {
+            ch: char,
+            // (dir_label, weight) pairs we expect to find geometry for.
+            edges: &'static [(EdgeDir, StrokeWeight)],
+        }
+        let cases = [
+            // ┍: Down Light, Right Heavy
+            Case {
+                ch: '┍',
+                edges: &[
+                    (EdgeDir::Down, StrokeWeight::Light),
+                    (EdgeDir::Right, StrokeWeight::Heavy),
+                ],
+            },
+            // ┝: Vertical Light + Right Heavy
+            Case {
+                ch: '┝',
+                edges: &[
+                    (EdgeDir::Up, StrokeWeight::Light),
+                    (EdgeDir::Down, StrokeWeight::Light),
+                    (EdgeDir::Right, StrokeWeight::Heavy),
+                ],
+            },
+            // ┿: Horizontal Heavy + Vertical Light
+            Case {
+                ch: '┿',
+                edges: &[
+                    (EdgeDir::Left, StrokeWeight::Heavy),
+                    (EdgeDir::Right, StrokeWeight::Heavy),
+                    (EdgeDir::Up, StrokeWeight::Light),
+                    (EdgeDir::Down, StrokeWeight::Light),
+                ],
+            },
+            // ╂: Vertical Heavy + Horizontal Light
+            Case {
+                ch: '╂',
+                edges: &[
+                    (EdgeDir::Up, StrokeWeight::Heavy),
+                    (EdgeDir::Down, StrokeWeight::Heavy),
+                    (EdgeDir::Left, StrokeWeight::Light),
+                    (EdgeDir::Right, StrokeWeight::Light),
+                ],
+            },
+            // ╃: Left Heavy, Up Heavy, Right Light, Down Light
+            Case {
+                ch: '╃',
+                edges: &[
+                    (EdgeDir::Left, StrokeWeight::Heavy),
+                    (EdgeDir::Up, StrokeWeight::Heavy),
+                    (EdgeDir::Right, StrokeWeight::Light),
+                    (EdgeDir::Down, StrokeWeight::Light),
+                ],
+            },
+        ];
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let right = ORIGIN.0 + CELL_W;
+        let top = ORIGIN.1;
+        let bottom = ORIGIN.1 + CELL_H;
+        for c in &cases {
+            let segs = lines(c.ch);
+            for &(dir, weight) in c.edges {
+                let edge_pt = match dir {
+                    EdgeDir::Up => (cx, top),
+                    EdgeDir::Down => (cx, bottom),
+                    EdgeDir::Left => (left, cy),
+                    EdgeDir::Right => (right, cy),
+                };
+                let center = (cx, cy);
+                let found = segs.iter().any(|s| {
+                    s.weight == weight
+                        && ((s.from == edge_pt && s.to == center)
+                            || (s.from == center && s.to == edge_pt)
+                            || (dir == EdgeDir::Up || dir == EdgeDir::Down)
+                                && s.from == (cx, top)
+                                && s.to == (cx, bottom)
+                            || (dir == EdgeDir::Left || dir == EdgeDir::Right)
+                                && s.from == (left, cy)
+                                && s.to == (right, cy))
+                });
+                assert!(
+                    found,
+                    "U+{:04X} ('{}') missing edge ({:?}, {:?}); segs = {:#?}",
+                    c.ch as u32, c.ch, dir, weight, segs
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b3a_horizontal_continuity_with_neighbours() {
+        // The whole point of per-edge weights: a row like `─┿━` must
+        // join pixel-identically at both cell-cell midline points and
+        // the renderer must be told each side's weight independently so
+        // the visible stroke transitions cleanly mid-row.
+        let cw = 8.0_f32;
+        let ch = 16.0_f32;
+        let cy = ch * 0.5;
+
+        let light_left = lines_at('─', (0.0, 0.0), (cw, ch));
+        let mid = lines_at('┿', (cw, 0.0), (cw, ch));
+        let heavy_right = lines_at('━', (2.0 * cw, 0.0), (cw, ch));
+
+        let left_h = light_left[0];
+        let mid_h = mid.iter().find(|s| s.from.1 == cy && s.to.1 == cy).unwrap();
+        assert_eq!(
+            left_h.to, mid_h.from,
+            "─→┿ horizontal join must be pixel-identical (Phase B3a continuity)"
+        );
+        let right_h = heavy_right[0];
+        assert_eq!(
+            mid_h.to, right_h.from,
+            "┿→━ horizontal join must be pixel-identical (Phase B3a continuity)"
+        );
+        assert_eq!(mid_h.weight, StrokeWeight::Heavy);
+        let mid_v =
+            mid.iter().find(|s| s.from.0 == cw + cw * 0.5 && s.to.0 == cw + cw * 0.5).unwrap();
+        assert_eq!(mid_v.weight, StrokeWeight::Light);
+    }
+
+    #[test]
+    fn b3a_vertical_continuity_with_neighbours() {
+        // Column like:  │      (light vert)
+        //               ╂      (heavy vert + light horiz cross)
+        //               ┃      (heavy vert)
+        let cw = 8.0_f32;
+        let ch = 16.0_f32;
+        let cx = cw * 0.5;
+
+        let v_top = lines_at('│', (0.0, 0.0), (cw, ch));
+        let mid = lines_at('╂', (0.0, ch), (cw, ch));
+        let v_bot = lines_at('┃', (0.0, 2.0 * ch), (cw, ch));
+
+        let v_top_seg = v_top[0];
+        let mid_v = mid.iter().find(|s| s.from.0 == cx && s.to.0 == cx).unwrap();
+        assert_eq!(v_top_seg.to, mid_v.from, "│→╂ vertical join must be pixel-identical");
+        assert_eq!(mid_v.weight, StrokeWeight::Heavy, "╂ vertical lane must be Heavy");
+
+        let v_bot_seg = v_bot[0];
+        assert_eq!(mid_v.to, v_bot_seg.from, "╂→┃ vertical join must be pixel-identical");
+
+        let mid_h =
+            mid.iter().find(|s| s.from.1 == ch + ch * 0.5 && s.to.1 == ch + ch * 0.5).unwrap();
+        assert_eq!(mid_h.weight, StrokeWeight::Light);
+    }
+
+    #[test]
+    fn b3a_heavy_cross_baseline_still_emits_two_full_segments() {
+        // Regression guard for B1's ╋ shape — it must keep emitting
+        // exactly 2 segments (full heavy horizontal + full heavy
+        // vertical), unchanged by the B3a additions.
+        let segs = lines('╋');
+        assert_eq!(segs.len(), 2);
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        assert!(segs.iter().any(|s| s.from == (ORIGIN.0, cy)
+            && s.to == (ORIGIN.0 + CELL_W, cy)
+            && s.weight == StrokeWeight::Heavy));
+        assert!(segs.iter().any(|s| s.from == (cx, ORIGIN.1)
+            && s.to == (cx, ORIGIN.1 + CELL_H)
+            && s.weight == StrokeWeight::Heavy));
+    }
+
+    #[test]
+    fn b3a_same_weight_opposite_edges_merge_into_full_segment() {
+        // Internal contract of emit_edge_strokes: when Up+Down (or
+        // Left+Right) share a weight, they collapse into one full
+        // edge-to-edge segment — so e.g. ┝ produces exactly 2 segs
+        // (full light vertical + half heavy horizontal).
+        let segs = lines('┝');
+        assert_eq!(segs.len(), 2, "┝ should produce one merged vertical + one half horizontal");
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        assert!(segs.iter().any(|s| s.from == (cx, ORIGIN.1)
+            && s.to == (cx, ORIGIN.1 + CELL_H)
+            && s.weight == StrokeWeight::Light));
+        assert!(segs.iter().any(|s| s.from == (cx, cy)
+            && s.to == (ORIGIN.0 + CELL_W, cy)
+            && s.weight == StrokeWeight::Heavy));
     }
 
     fn check_continuity_at_scale(scale: f32) {
