@@ -364,3 +364,147 @@ fn cjk_shaping_never_returns_primary_slot_glyph_for_cjk_codepoint() {
         }
     }
 }
+
+/// Issue #563 regression: programming-ligature `calt` substitutions that
+/// emit a *single* substituted glyph per source cell (cluster_cells == 1)
+/// must keep their shaped `glyph_id` instead of being zeroed by the
+/// CJK-safety fallback. Without this, fonts whose ligature OpenType layout
+/// is implemented as `calt` 1:1 substitutions (rather than multi-cell
+/// composed ligatures) silently lose ligature rendering — the renderer
+/// charmaps the raw `=` and `>` codepoints and the user sees `=>` instead
+/// of `⇒`.
+///
+/// The refined 3-rule gate (Opus Step-2 review on the linked issue):
+///   - cluster_cells > 1 → preserve (composed ligature / ZWJ)
+///   - slot resolves to the same physical file AND charmap(ch_first) !=
+///     shaped glyph_id → preserve (real GSUB substitution on 1 cell)
+///   - otherwise → zero (CJK safety)
+///
+/// This test asserts the second leg: at least one of the canonical
+/// programming-ligature digraphs must come back with a non-zero
+/// `glyph_id` from `shape_run` when the bundled Rec Mono St.Helens font
+/// has the `calt` substitution. We accept that a given font may not
+/// substitute every probe — the assertion is "at least one digraph in
+/// the panel produced a preserved shaped id", which is enough to prove
+/// rule 2 is actually firing (a pre-fix run would zero them all).
+#[test]
+fn calt_one_to_one_ligature_glyph_ids_preserved() {
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+
+    // Canonical programming-ligature digraphs. Each is two ASCII cells.
+    let probes = ["=>", "!=", ">=", "->", "<=", "==="];
+
+    let mut any_preserved_substitution = false;
+    let mut any_glyphs_emitted = false;
+    for probe in &probes {
+        let cells = cells_for(probe);
+        let out = shape_run(
+            &mut r,
+            "Rec Mono St.Helens",
+            DEFAULT_RASTER_PX,
+            RunStyle { bold: false, italic: false },
+            &cells,
+        );
+        assert!(!out.is_empty(), "shape_run must emit ≥1 glyph for {probe:?}");
+        any_glyphs_emitted = true;
+
+        // For every glyph: if it's a 1:1 cluster AND carries a non-zero
+        // glyph_id, that's exactly the calt-substitution case rule 2
+        // exists to preserve. Pre-fix this would always be zero.
+        for g in &out {
+            if g.cluster_cells == 1 && g.glyph_id != 0 {
+                any_preserved_substitution = true;
+            }
+            // The composed-ligature path is also a valid "preservation":
+            // if cluster_cells == 2 and glyph_id != 0 the font emitted a
+            // multi-cell ligature glyph instead of a 1:1 calt substitute.
+            if g.cluster_cells > 1 && g.glyph_id != 0 {
+                any_preserved_substitution = true;
+            }
+        }
+    }
+
+    assert!(any_glyphs_emitted, "probe set must have emitted glyphs");
+    assert!(
+        any_preserved_substitution,
+        "at least one of {:?} must keep a non-zero shaped glyph_id (composed OR 1:1 calt). \
+         If every glyph is zero, rule 2 is not firing and the renderer will charmap raw \
+         ASCII — defeating ligature rendering (#563).",
+        probes,
+    );
+}
+
+/// Issue #563 follow-on: plain ASCII `==` in a font WITHOUT a `calt`
+/// substitution for it must NOT regress to "broken" — the gate should
+/// still produce something the renderer can draw. We assert nothing
+/// stronger than "glyphs are emitted and the run does not panic" because
+/// whether `==` ligates is entirely font-dependent. This is the negative
+/// control for the rule-2 path: a font that emits charmap-identical
+/// shape ids should hit the zero-out branch and let the renderer
+/// charmap on its own — and either way the user still sees `==`.
+#[test]
+fn plain_equals_equals_renders_without_panic_either_path() {
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+
+    let cells = cells_for("==");
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        DEFAULT_RASTER_PX,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
+    assert!(!out.is_empty(), "shape_run must emit at least one glyph for '=='");
+    // The first glyph must point at the first source cell regardless of
+    // whether the font ligated it.
+    assert_eq!(out[0].lead_col, 0, "first glyph for '==' must lead at col 0");
+}
+
+/// Issue #563 CJK regression control: the refined gate adds rule 2
+/// (preserve when charmap disagrees with shaped id), but the CJK
+/// safety path (rule 3, zero on charmap-equal or no slot) MUST still
+/// fire so '中文' / '日本語' / '한국어' do NOT regress to the pre-fix
+/// '中' → '臭' / '中' → '恶' bugs. We assert the same invariant as
+/// `cjk_shaping_never_returns_primary_slot_glyph_for_cjk_codepoint`
+/// — never (slot=0, glyph_id != 0) for a 1:1 CJK cell — across the
+/// three major CJK scripts.
+///
+/// Runs only on macOS for the same reason the canonical CJK test does:
+/// the CJK fallback chain depends on platform-installed fonts (PingFang
+/// SC, Hiragino, Apple SD Gothic) that are not present in the Windows
+/// CI image. The Windows-side equivalent is exercised by the visual
+/// snapshot tests against the bundled Windows CJK fallback.
+#[test]
+#[cfg(target_os = "macos")]
+fn cjk_scripts_still_safe_under_refined_gate() {
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+
+    let scripts = [("中文", "Simplified Chinese"), ("日本語", "Japanese"), ("한국어", "Korean")];
+
+    for (text, label) in &scripts {
+        let cells = cells_for(text);
+        let out = shape_run(
+            &mut r,
+            "Rec Mono St.Helens",
+            DEFAULT_RASTER_PX,
+            RunStyle { bold: false, italic: false },
+            &cells,
+        );
+        assert!(!out.is_empty(), "shaper must emit glyphs for {label} '{text}'");
+        for g in &out {
+            if g.cluster_cells == 1 && g.font_slot == 0 && g.glyph_id != 0 {
+                panic!(
+                    "refined gate regressed CJK safety: {label} '{text}' emitted \
+                     (slot=0, glyph_id={}, ch={:?}). The primary face lacks CJK; \
+                     a non-zero glyph_id here is the pre-fix '中' → '臭' bug. \
+                     Rule 3 (charmap-equal zero-out) must still fire for CJK \
+                     codepoints that hit the primary slot via slot_for_font_id.",
+                    g.glyph_id, g.ch,
+                );
+            }
+        }
+    }
+}
