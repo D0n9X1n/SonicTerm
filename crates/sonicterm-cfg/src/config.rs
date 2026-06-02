@@ -351,20 +351,13 @@ impl Default for TerminalConfig {
 impl Config {
     /// Where the user's config lives, by platform convention.
     ///
-    /// Post–R3 rename: the new on-disk layout uses `SonicTerm/sonicterm.toml`.
-    /// The legacy `Sonic/sonic.toml` layout is migrated on first launch by
-    /// [`migrate_legacy_config_if_needed`].
+    /// On-disk layout: `SonicTerm/sonicterm.toml` under the platform
+    /// config dir. The pre-R3 `Sonic/sonic.toml` layout is no longer
+    /// auto-migrated; see `docs/migrations/0.9.0.md` for the manual
+    /// rename instructions.
     pub fn default_path() -> Option<PathBuf> {
         let base = default_config_dir()?;
         Some(base.join("sonicterm.toml"))
-    }
-
-    /// Legacy (pre-R3) config path. Used only by the one-shot migration
-    /// in [`migrate_legacy_config_if_needed`]; never returned to callers
-    /// at runtime.
-    pub fn legacy_default_path() -> Option<PathBuf> {
-        let base = legacy_config_dir()?;
-        Some(base.join("sonic.toml"))
     }
 
     /// Ensure the editable user config exists, creating a small commented
@@ -435,7 +428,7 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Post–R3 config directory (the new on-disk layout).
+/// Post–R3 config directory (the on-disk layout).
 pub fn default_config_dir() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
         Some(dirs_home()?.join("Library/Application Support/SonicTerm"))
@@ -443,65 +436,6 @@ pub fn default_config_dir() -> Option<PathBuf> {
         Some(std::env::var_os("APPDATA").map(PathBuf::from)?.join("SonicTerm"))
     } else {
         Some(dirs_home()?.join(".config/sonicterm"))
-    }
-}
-
-/// Pre–R3 (legacy) config directory. Used only by the migration shim.
-pub fn legacy_config_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        Some(dirs_home()?.join("Library/Application Support/Sonic"))
-    } else if cfg!(target_os = "windows") {
-        Some(std::env::var_os("APPDATA").map(PathBuf::from)?.join("Sonic"))
-    } else {
-        Some(dirs_home()?.join(".config/sonic"))
-    }
-}
-
-/// One-shot migration from the pre-R3 layout (`Sonic/sonic.toml`) to the
-/// post-R3 layout (`SonicTerm/sonicterm.toml`).
-///
-/// Behaviour:
-///   - If the new config file already exists → no-op.
-///   - Else if the legacy file exists → COPY it (not move) to the new
-///     location, creating the new directory as needed. The legacy file
-///     is left intact for safety so the user can roll back.
-///   - Else → no-op (first launch will create defaults on save).
-///
-/// Returns `Ok(true)` when a migration copy was performed, `Ok(false)`
-/// otherwise. Errors during the copy are returned to the caller so the
-/// app can log them; they are not fatal.
-///
-/// The two arguments make this testable without touching real HOME paths.
-pub fn migrate_legacy_config(legacy: Option<&Path>, new: Option<&Path>) -> Result<bool> {
-    let Some(new_path) = new else { return Ok(false) };
-    if new_path.exists() {
-        return Ok(false);
-    }
-    let Some(legacy_path) = legacy else { return Ok(false) };
-    if !legacy_path.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
-    }
-    std::fs::copy(legacy_path, new_path)
-        .with_context(|| format!("copy {legacy_path:?} -> {new_path:?}"))?;
-    Ok(true)
-}
-
-/// Run [`migrate_legacy_config`] against the platform default paths and
-/// log the outcome. Safe to call once at process start before the first
-/// `Config::load_or_default`.
-pub fn migrate_legacy_config_if_needed() {
-    let legacy = Config::legacy_default_path();
-    let new = Config::default_path();
-    match migrate_legacy_config(legacy.as_deref(), new.as_deref()) {
-        Ok(true) => eprintln!(
-            "[sonicterm-cfg] migrated config from {:?} -> {:?}; old left intact for safety",
-            legacy, new
-        ),
-        Ok(false) => {}
-        Err(e) => eprintln!("[sonicterm-cfg] legacy config migration failed: {e:?}"),
     }
 }
 

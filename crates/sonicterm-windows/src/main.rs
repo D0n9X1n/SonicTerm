@@ -131,7 +131,6 @@ fn main() -> Result<()> {
 }
 
 fn load_config() -> Result<Config> {
-    sonicterm_core::config::migrate_legacy_config_if_needed();
     match Config::default_path() {
         Some(path) => {
             if path.exists() {
