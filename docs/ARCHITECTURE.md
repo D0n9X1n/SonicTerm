@@ -12,28 +12,22 @@ crate owns a given concern or where to put a new module.
         ┌─────────┬─────────┼─────────┬──────────┐
         │         │         │         │          │
    sonicterm-vt  sonicterm-grid  sonicterm-cfg  sonicterm-io  sonicterm-text
-        │         │         │         │          │
-        └─────────┴────┬────┴─────────┘          │
-                       │                          │
-                  sonicterm-core ◀── (deprecated façade)
-                       ▲                          │
-                       │                          │
-                  sonicterm-render-model              │
-                       ▲                          │
-                       │                          │
-                  sonicterm-ui ─────────────▶ sonicterm-gpu
-                       ▲                          ▲
-                       │                          │
-                  sonicterm-shared ◀── (thin façade) ─┘
-                       ▲
-                       │
-                  sonicterm-app
-                       ▲
-              ┌────────┴────────┐
-              │                  │
-         sonicterm-mac          sonicterm-windows
-              │
-         sonicterm-mux (post-v1.0 daemon, optional)
+                                                              │
+                  sonicterm-render-model                       │
+                       ▲                                       │
+                       │                                       │
+                  sonicterm-ui ─────────────────────────▶ sonicterm-gpu
+                       ▲                                       ▲
+                       │                                       │
+                       └───────────────┬───────────────────────┘
+                                       │
+                                  sonicterm-app
+                                       ▲
+                              ┌────────┴────────┐
+                              │                  │
+                         sonicterm-mac          sonicterm-windows
+
+                         sonicterm-mux (post-v1.0 daemon, optional)
 ```
 
 ## Crate-by-crate
@@ -49,11 +43,9 @@ crate owns a given concern or where to put a new module.
 | `sonicterm-render-model` | sonicterm-types | renderer-agnostic geometry / inputs / `Painter` trait — what to draw |
 | `sonicterm-gpu` | sonicterm-types, sonicterm-text | wgpu pipelines: quad, text, atlas upload |
 | `sonicterm-ui` | sonicterm-types, sonicterm-cfg, sonicterm-grid, sonicterm-render-model | tabs, tabbar_view, pane, selection, search, command_palette, cursor, IME, i18n |
-| `sonicterm-core` | sonicterm-{vt,grid,cfg,io} | **deprecated façade** — re-exports leaf modules under their historical paths |
-| `sonicterm-shared` | sonicterm-ui, sonicterm-gpu, sonicterm-app | **thin façade** — re-exports + `render/{core,color,metrics,tab_spans,cursor,drag_chip}.rs` |
 | `sonicterm-app` | everything above | winit ApplicationHandler split across `app/{mod,window_event,event_loop,spawn_pane,keymap_dispatch,key_encoding,input,redraw,overlays,tab_state,tear_out,child_window,config_apply,search_handle,misc}.rs`; menu, os_drag, tab_drag, config_watch |
-| `sonicterm-mac` | sonicterm-app (via sonicterm-shared) | macOS binary, ~30 LOC main |
-| `sonicterm-windows` | sonicterm-app (via sonicterm-shared) | Windows binary, ~30 LOC main |
+| `sonicterm-mac` | sonicterm-app | macOS binary, ~30 LOC main |
+| `sonicterm-windows` | sonicterm-app | Windows binary, ~30 LOC main |
 | `sonicterm-mux` | sonicterm-io, sonicterm-grid | persistent PTY session daemon |
 
 ## Why this shape?
@@ -65,9 +57,6 @@ crate owns a given concern or where to put a new module.
 3. **Honest dependencies** — `sonicterm-render-model` codifies the
    renderer/UI boundary: UI code can produce a frame model without
    linking wgpu, which is what the headless snapshot harness exploits.
-4. **Backwards compatibility** — the `sonicterm-core` and `sonicterm-shared`
-   façades let pre-#152 imports compile unchanged during the
-   transition.
 
 ## Where to put a new module
 

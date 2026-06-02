@@ -76,3 +76,16 @@ fn decstbm_full_screen_does_not_clear() {
     // Cursor moved to home per spec.
     assert_eq!((p.grid().cursor.row, p.grid().cursor.col), (0, 0));
 }
+
+#[test]
+fn shell_prompt_redraw_preserves_above_cursor() {
+    // The real-world bug the e2e test caught: a shell that runs `ls`,
+    // sees the output, then redraws its prompt via ED 0 should NOT
+    // wipe prior output.
+    let mut p = Parser::new(Grid::new(20, 4));
+    p.advance(b"prompt$ ls\r\nfile1 file2\r\nprompt$ ");
+    p.advance(b"\x1b[0J");
+    assert_eq!(p.grid().row(0)[0].ch, 'p');
+    assert_eq!(p.grid().row(1)[0].ch, 'f');
+    assert_eq!(p.grid().row(2)[0].ch, 'p');
+}

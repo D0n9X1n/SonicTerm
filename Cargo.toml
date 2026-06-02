@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-core", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-shared", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging"]
-default-members = ["crates/sonicterm-core", "crates/sonicterm-shared"]
+members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging"]
+default-members = ["crates/sonicterm-app"]
 
 [workspace.package]
 version = "0.3.0"
@@ -20,12 +20,10 @@ sonicterm-vt = { path = "crates/sonicterm-vt", version = "0.3.0" }
 sonicterm-grid = { path = "crates/sonicterm-grid", version = "0.3.0" }
 sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "0.3.0" }
 sonicterm-io = { path = "crates/sonicterm-io", version = "0.3.0" }
-sonicterm-core = { path = "crates/sonicterm-core", version = "0.3.0" }
 sonicterm-text = { path = "crates/sonicterm-text", version = "0.3.0" }
 sonicterm-ui = { path = "crates/sonicterm-ui", version = "0.3.0" }
 sonicterm-render-model = { path = "crates/sonicterm-render-model", version = "0.3.0" }
 sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "0.3.0" }
-sonicterm-shared = { path = "crates/sonicterm-shared", version = "0.3.0" }
 sonicterm-app = { path = "crates/sonicterm-app", version = "0.3.0" }
 sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "0.3.0" }
 sonicterm-logging = { path = "crates/sonicterm-logging", version = "0.3.0" }

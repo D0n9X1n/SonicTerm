@@ -19,7 +19,6 @@ name = "sonicterm_mux"
 path = "src/lib.rs"
 
 [dependencies]
-sonicterm-core = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
