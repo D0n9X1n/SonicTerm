@@ -78,8 +78,19 @@ verify_front_sonic() {
   front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")
   [[ "$front" == "sonicterm-mac" ]]
 }
-if osascript -e 'tell application "System Events" to keystroke ""' >/dev/null 2>&1; then
-  # Bring sonic to the front by PID
+# Bring sonic to the front by PID before any keystroke (even the empty
+# capability probe), so the Accessibility-permission check doesn't leak
+# focus into a bystander app. See #473.
+osascript >/dev/null 2>&1 <<EOF || true
+tell application "System Events"
+  set frontmost of (first process whose unix id is $PID) to true
+end tell
+EOF
+sleep 0.4
+if ! verify_front_sonic; then
+  echo "warn: sonicterm-mac not frontmost; skipping keystroke probe" >&2
+elif osascript -e 'tell application "System Events" to keystroke ""' >/dev/null 2>&1; then
+  # Re-assert frontmost just before the real keystroke burst.
   osascript >/dev/null 2>&1 <<EOF || true
 tell application "System Events"
   set frontmost of (first process whose unix id is $PID) to true

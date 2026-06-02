@@ -24,15 +24,11 @@ BIN="$ROOT/target/release/sonicterm-mac"
 APP="/tmp/sonic-bench/SonicTerm.app"
 BUNDLE_ID="com.d0n9x1n.sonicterm.bench"
 
-if [ ! -x "$BIN" ]; then
-  echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
-  exit 1
-fi
-
 # ----- Guard: refuse to run if a competing terminal is foreground-able. -----
 # osascript keystrokes go to whatever app is frontmost — if WezTerm/iTerm/etc.
 # are alive AND sonicterm-mac drops focus mid-run, keystrokes leak into them.
 # Override with SONICTERM_HARNESS_ALLOW_OTHER_TERMS=1. See issues #464, #473.
+# Runs BEFORE the binary check so a missing build still trips the guard.
 COMPETITOR_RE='^(WezTerm|wezterm-gui|Terminal|iTerm|iTerm2|kitty|alacritty|ghostty|Hyper|Warp|tabby|rio)$'
 if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
   hits=$(ps -A -o pid=,comm= 2>/dev/null | awk -v re="$COMPETITOR_RE" '{
@@ -45,6 +41,11 @@ if [[ "${SONICTERM_HARNESS_ALLOW_OTHER_TERMS:-0}" != "1" ]]; then
     echo "$hits" >&2
     exit 77
   fi
+fi
+
+if [ ! -x "$BIN" ]; then
+  echo "missing $BIN — run: cargo build --release -p sonicterm-mac" >&2
+  exit 1
 fi
 
 # Build a tiny bundle so it gets a Dock icon + can be focused by osascript.
