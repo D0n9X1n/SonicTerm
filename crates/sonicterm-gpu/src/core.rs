@@ -4520,6 +4520,21 @@ impl GpuRenderer {
                 );
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba = glyphon_color_to_linear_rgba(color);
+                // #461 PR-B1: instrument live render path (ASCII fast path glyph emit).
+                // PM repro: RUST_LOG=sonicterm_gpu=debug ./target/release/sonicterm-windows.exe
+                tracing::debug!(
+                    target: "sonic::render::glyph",
+                    ch = ?cell.ch,
+                    codepoint = format!("U+{:04X}", cell.ch as u32),
+                    code_u32 = cell.ch as u32,
+                    scale_factor = scale_factor,
+                    classify = ?sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
+                    final_rect = ?(gx, gy, gw, gh),
+                    final_rgba = ?rgba,
+                    is_color = info.is_color,
+                    path = "ascii_fast",
+                    "glyph render emit"
+                );
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4574,6 +4589,33 @@ impl GpuRenderer {
                     let cx = pad + f32::from(g.lead_col) * cell_w;
                     let cy = top_inset + f32::from(row) * cell_h;
                     let inset = (cell_h * 0.12).max(1.0);
+                    // #461 PR-B1: log every tofu emit so we can pin which
+                    // codepoint dropped + why. Critical for diagnosing the
+                    // U+25B6 / Powerline / NF tofu reported visually.
+                    let tofu_rect = (
+                        cx + inset,
+                        cy + inset,
+                        cell_pixel_width - inset * 2.0,
+                        cell_h - inset * 2.0,
+                    );
+                    let tofu_color = cell_fg(&lead_cell, theme, fg_default);
+                    let tofu_rgba = glyphon_color_to_linear_rgba(tofu_color);
+                    tracing::debug!(
+                        target: "sonic::render::glyph",
+                        ch = ?ch,
+                        codepoint = format!("U+{:04X}", ch as u32),
+                        code_u32 = ch as u32,
+                        bold = style.bold,
+                        italic = style.italic,
+                        scale_factor = scale_factor,
+                        classify = ?sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                        resolve_slot = ?resolved,
+                        final_rect = ?tofu_rect,
+                        final_rgba = ?tofu_rgba,
+                        is_color = false,
+                        path = "char_fallback_tofu",
+                        "tofu emitted — every face in chain lacks codepoint"
+                    );
                     missing_tofu.push((
                         cx + inset,
                         cy + inset,
@@ -4647,6 +4689,20 @@ impl GpuRenderer {
                     (gx, gy, gw, gh),
                     scale_factor,
                 );
+                // #461 PR-B1: char-fallback shaped path emit.
+                tracing::debug!(
+                    target: "sonic::render::glyph",
+                    ch = ?ch,
+                    codepoint = format!("U+{:04X}", ch as u32),
+                    code_u32 = ch as u32,
+                    scale_factor = scale_factor,
+                    classify = ?sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                    final_rect = ?(gx, gy, gw, gh),
+                    final_rgba = ?rgba,
+                    is_color = info.is_color,
+                    path = "char_fallback_shaped",
+                    "glyph render emit"
+                );
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4705,6 +4761,21 @@ impl GpuRenderer {
             let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
                 (gx, gy, gw, gh),
                 scale_factor,
+            );
+            // #461 PR-B1: shaped path emit (the primary path for Powerline + NF icons).
+            tracing::debug!(
+                target: "sonic::render::glyph",
+                ch = ?lead_cell.ch,
+                codepoint = format!("U+{:04X}", lead_cell.ch as u32),
+                code_u32 = lead_cell.ch as u32,
+                glyph_id = g.glyph_id,
+                scale_factor = scale_factor,
+                classify = ?sonicterm_text::swash_rasterizer::classify_symbol(lead_cell.ch),
+                final_rect = ?(gx, gy, gw, gh),
+                final_rgba = ?rgba,
+                is_color = info.is_color,
+                path = "shaped",
+                "glyph render emit"
             );
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
