@@ -31,7 +31,9 @@
 //! See #542 (Box Drawing geometry epic — Phase A + A0).
 
 use sonicterm_text::block_element_geometry::{block_element_rect, BlockGeometry};
-use sonicterm_text::box_drawing_geometry::{box_drawing_geometry, BoxGeometry, LineSegment};
+use sonicterm_text::box_drawing_geometry::{
+    box_drawing_geometry, BoxGeometry, LineSegment, StrokeStyle, DOUBLE_LANE_OFFSET_PX,
+};
 
 use crate::quad::{px_to_ndc, QuadInstance};
 
@@ -132,8 +134,78 @@ fn box_geometry_to_quads(
 ) -> Vec<QuadInstance> {
     match geom {
         BoxGeometry::Lines(segs) => {
-            segs.iter().map(|s| line_segment_to_quad(s, fg_rgba, sw, sh, scale_factor)).collect()
+            let mut out = Vec::with_capacity(segs.len());
+            for s in segs {
+                match s.style {
+                    StrokeStyle::Single => {
+                        out.push(line_segment_to_quad(s, fg_rgba, sw, sh, scale_factor));
+                    }
+                    // Phase B2: `Double` axis-aligned centerline →
+                    // splay into two parallel lanes offset
+                    // ±DOUBLE_LANE_OFFSET_PX perpendicular to the
+                    // segment axis. Diagonals are NOT used in B2; any
+                    // future diagonal Double should reach here only
+                    // after the geometry table has decided on a splay
+                    // direction (we deliberately do not infer one for
+                    // diagonals — there is no diagonal Double in the
+                    // covered Box Drawing subset).
+                    StrokeStyle::Double => {
+                        for lane in splay_double_axis_aligned(s) {
+                            out.push(line_segment_to_quad(&lane, fg_rgba, sw, sh, scale_factor));
+                        }
+                    }
+                }
+            }
+            out
         }
+    }
+}
+
+/// Splay one axis-aligned `Double`-style centerline into the two
+/// parallel lanes the renderer actually paints. Each emitted lane is a
+/// `Single`-style segment offset by `DOUBLE_LANE_OFFSET_PX` perpendicular
+/// to the segment axis. Panics in debug if handed a non-axis-aligned
+/// segment — Phase B2 has no diagonal double codepoints.
+fn splay_double_axis_aligned(s: &LineSegment) -> [LineSegment; 2] {
+    let (ax, ay) = s.from;
+    let (bx, by) = s.to;
+    let off = DOUBLE_LANE_OFFSET_PX;
+    let horiz = (ay - by).abs() < f32::EPSILON;
+    let vert = (ax - bx).abs() < f32::EPSILON;
+    debug_assert!(
+        horiz || vert,
+        "Double-style segment must be axis-aligned (B2 has no diagonal doubles)"
+    );
+    if horiz {
+        [
+            LineSegment {
+                from: (ax, ay - off),
+                to: (bx, by - off),
+                style: StrokeStyle::Single,
+                ..*s
+            },
+            LineSegment {
+                from: (ax, ay + off),
+                to: (bx, by + off),
+                style: StrokeStyle::Single,
+                ..*s
+            },
+        ]
+    } else {
+        [
+            LineSegment {
+                from: (ax - off, ay),
+                to: (bx - off, by),
+                style: StrokeStyle::Single,
+                ..*s
+            },
+            LineSegment {
+                from: (ax + off, ay),
+                to: (bx + off, by),
+                style: StrokeStyle::Single,
+                ..*s
+            },
+        ]
     }
 }
 
@@ -227,6 +299,7 @@ fn line_segment_to_quad(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sonicterm_text::box_drawing_geometry::{StrokeWeight, DOUBLE_LANE_OFFSET_PX};
 
     const SW: f32 = 800.0;
     const SH: f32 = 600.0;
@@ -305,40 +378,48 @@ mod tests {
 
     #[test]
     fn uncovered_char_returns_none() {
-        // ASCII 'A' is neither block element nor Phase-A box drawing —
-        // must NOT route through this helper. Returning None tells the
-        // caller to keep using the glyph atlas path.
+        // ASCII 'A' is neither block element nor Phase-A/B box drawing —
+        // must NOT route through this helper.
         assert!(emit_geometry_for_char('A', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
-        // Double box drawing (U+2550 ═) is still out of Phase A/B1 scope
-        // (deferred to B2), so it must fall back to glyph stretch.
-        assert!(emit_geometry_for_char('═', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
+        // Dashed (U+254C) is still out of scope (deferred), so it must
+        // fall back to glyph stretch.
+        assert!(emit_geometry_for_char('╌', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
     }
 
     #[test]
     fn box_drawing_heavy_horizontal_emits_thicker_line_than_light() {
-        // Phase B1: ━ must route through the line-SDF path with a
-        // stroke thickness strictly greater than ─'s. The exact value
-        // depends on scale_factor (we ask for 2 logical px @ 1.0×).
+        // Phase B1 (post-#565): ━ now flows through the sharp-rect
+        // path (axis-aligned), so "thicker" is measured by the rect's
+        // pixel height in NDC rather than `line_thickness_px`. The
+        // heavy rect must be strictly taller than the light one.
         let light = emit_geometry_for_char('─', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
         let heavy = emit_geometry_for_char('━', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
         assert_eq!(light.len(), 1);
         assert_eq!(heavy.len(), 1);
+        let light_h = light[0].rect[3];
+        let heavy_h = heavy[0].rect[3];
         assert!(
-            heavy[0].line_thickness_px > light[0].line_thickness_px,
-            "heavy ━ stroke ({}) must exceed light ─ stroke ({})",
-            heavy[0].line_thickness_px,
-            light[0].line_thickness_px
+            heavy_h > light_h,
+            "heavy ━ rect height ({}) must exceed light ─ rect height ({})",
+            heavy_h,
+            light_h
         );
     }
 
     #[test]
     fn box_drawing_heavy_cross_emits_two_thick_line_quads() {
-        // ╋ — Phase B1 heavy cross — same shape as ┼ but with the
-        // heavy stroke width.
+        // ╋ — heavy cross. Post-#565 axis-aligned dispatch: both quads
+        // are sharp rects (line_thickness_px == 0); thickness is
+        // observable as the rect's short-axis size. Each rect must be
+        // at least the heavy logical thickness in physical px (≥ 2 @ 1×).
         let quads = emit_geometry_for_char('╋', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
         assert_eq!(quads.len(), 2);
         for q in &quads {
-            assert!(q.line_thickness_px >= 2.0, "heavy stroke must be ≥ 2 device px @ 1×");
+            assert_eq!(q.line_thickness_px, 0.0, "axis-aligned ╋ halves use sharp-rect");
+            let h_px = q.rect[3] * SH * 0.5;
+            let w_px = q.rect[2] * SW * 0.5;
+            let short = h_px.min(w_px);
+            assert!(short >= 2.0, "heavy stroke must be ≥ 2 device px @ 1×, got {short}");
         }
     }
 
@@ -489,25 +570,119 @@ mod tests {
         }
     }
 
-    /// Regression guard for the tab-close `×`: diagonal segments MUST
-    /// continue to flow through the capsule SDF path. The `×` itself
-    /// is emitted by `push_close_x_quads` in `quad.rs`, but any
-    /// future diagonal BoxGeometry (arcs, slashes) must also stay on
-    /// the SDF path so they don't staircase. We construct a synthetic
-    /// LineSegment to exercise the dispatch directly.
     #[test]
     fn diagonal_segment_stays_on_capsule_sdf() {
         let seg = LineSegment {
             from: (0.0, 0.0),
             to: (8.0, 16.0),
             thickness: 1.0,
-            weight: sonicterm_text::box_drawing_geometry::StrokeWeight::Light,
-            style: sonicterm_text::box_drawing_geometry::StrokeStyle::Single,
+            weight: StrokeWeight::Light,
+            style: StrokeStyle::Single,
         };
         let quad = line_segment_to_quad(&seg, FG, SW, SH, 1.0);
         assert!(
             quad.line_thickness_px > 0.0,
             "diagonal must keep the capsule SDF — tab-close × depends on it"
         );
+    }
+
+    // ─── Phase B2 GPU tests ────────────────────────────────────────
+
+    #[test]
+    fn double_horizontal_emits_two_sharp_lanes() {
+        let quads = emit_geometry_for_char('═', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        assert_eq!(quads.len(), 2, "═ must splay into exactly 2 lane quads");
+        for q in &quads {
+            assert_eq!(q.line_thickness_px, 0.0, "═ lanes use the sharp-rect path");
+        }
+    }
+
+    #[test]
+    fn double_vertical_emits_two_sharp_lanes() {
+        let quads = emit_geometry_for_char('║', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        assert_eq!(quads.len(), 2);
+        for q in &quads {
+            assert_eq!(q.line_thickness_px, 0.0);
+        }
+    }
+
+    #[test]
+    fn double_corners_emit_four_pre_clipped_sharp_quads() {
+        for ch in ['╔', '╗', '╚', '╝'] {
+            let quads =
+                emit_geometry_for_char(ch, (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+            assert_eq!(quads.len(), 4, "U+{:04X} corner must emit 4 lane quads", ch as u32);
+            for q in &quads {
+                assert_eq!(q.line_thickness_px, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn double_cross_emits_eight_pre_clipped_sharp_quads() {
+        let quads = emit_geometry_for_char('╬', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).unwrap();
+        assert_eq!(quads.len(), 8, "╬ must emit 8 lane quads");
+        for q in &quads {
+            assert_eq!(q.line_thickness_px, 0.0);
+        }
+    }
+
+    #[test]
+    fn double_lane_gap_at_least_one_device_px_across_dpis() {
+        for &scale in &[1.0_f32, 1.25, 1.5] {
+            let cw = 8.0_f32;
+            let ch = 16.0_f32;
+            let quads =
+                emit_geometry_for_char('═', (0.0, 0.0), (cw, ch), FG, SW, SH, scale).unwrap();
+            assert_eq!(quads.len(), 2);
+            let mut bands: Vec<(f32, f32)> = quads
+                .iter()
+                .map(|q| {
+                    let y_top = (1.0 - q.rect[1] - q.rect[3]) * SH * 0.5;
+                    let h = q.rect[3] * SH * 0.5;
+                    (y_top, y_top + h)
+                })
+                .collect();
+            bands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let (_, upper_bottom) = bands[0];
+            let (lower_top, _) = bands[1];
+            let gap_logical = lower_top - upper_bottom;
+            let gap_device = gap_logical * scale;
+            assert!(
+                gap_device >= 1.0 - 1e-3,
+                "scale {scale}× ═ inter-lane gap {gap_device} device-px must be ≥ 1"
+            );
+        }
+    }
+
+    #[test]
+    fn double_cross_no_quad_overshoots_junction_window() {
+        // ╬ — the central junction window (cx ± off, cy ± off) must
+        // contain NO rect interior. Inner-corner overshoot test per
+        // Opus Step-2.
+        let cw = 8.0_f32;
+        let ch = 16.0_f32;
+        let quads = emit_geometry_for_char('╬', (0.0, 0.0), (cw, ch), FG, SW, SH, 1.0).unwrap();
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = cw * 0.5;
+        let cy = ch * 0.5;
+        let win_x0 = cx - off;
+        let win_x1 = cx + off;
+        let win_y0 = cy - off;
+        let win_y1 = cy + off;
+        for q in &quads {
+            let x0 = (q.rect[0] + 1.0) * SW * 0.5;
+            let w = q.rect[2] * SW * 0.5;
+            let x1 = x0 + w;
+            let y_top = (1.0 - q.rect[1] - q.rect[3]) * SH * 0.5;
+            let h = q.rect[3] * SH * 0.5;
+            let y1 = y_top + h;
+            let strict_x = x0 < win_x1 - 1e-3 && x1 > win_x0 + 1e-3;
+            let strict_y = y_top < win_y1 - 1e-3 && y1 > win_y0 + 1e-3;
+            assert!(
+                !(strict_x && strict_y),
+                "╬ quad rect ({x0},{y_top})..({x1},{y1}) overshoots junction window"
+            );
+        }
     }
 }
