@@ -44,7 +44,35 @@ pub struct PtyHandle {
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// Resolved shell program path (the command we actually spawned).
+    /// Used by the e2e gates to pick the right `ShellDialect`. For
+    /// `for_test`, this is a sentinel `"<sonicterm-pty-test-sentinel>"`.
+    shell_program_path: String,
 }
+
+/// Options controlling how `spawn_default_shell` constructs the shell
+/// command line. Default is interactive behavior (preserve user profile,
+/// banner, prompt). E2E gates / examples that need deterministic output
+/// pass `clean_e2e: true` to suppress profile/logo and emit shell-family-
+/// specific clean-startup args.
+///
+/// Added per #457 — pre-PR examples sent POSIX `printf` to PowerShell,
+/// producing zero output. PLAN v5 split the fix into:
+///   1. (this) — add opts + WindowsApps stub filter + shell-path accessor
+///   2. (next PR) — ShellDialect trait + golden fixtures + actual e2e fix
+#[derive(Clone, Debug, Default)]
+pub struct ShellSpawnOpts {
+    /// Suppress shell startup banner/profile and emit clean-mode args
+    /// (PowerShell `-NoLogo -NoProfile`, bash `--norc --noprofile`,
+    /// zsh `-f`). For e2e gates only — production app keeps default.
+    pub clean_e2e: bool,
+}
+
+/// Sentinel value `PtyHandle::shell_program_path` returns for the test-only
+/// constructor `for_test`. `dialect_for_shell` (in `sonicterm-core::test_support::shell_dialect`,
+/// follow-up PR) explicitly rejects it so test fixtures fail loud if
+/// misused as a real shell.
+pub const TEST_SENTINEL_SHELL_PATH: &str = "<sonicterm-pty-test-sentinel>";
 
 impl PtyHandle {
     /// Explicitly terminate the child shell. Idempotent — second call is a
@@ -63,6 +91,16 @@ impl PtyHandle {
     pub fn pid(&self) -> Option<u32> {
         self.child.lock().process_id()
     }
+
+    /// Resolved shell program path (the command we actually spawned).
+    /// For `for_test`, returns the sentinel `<sonicterm-pty-test-sentinel>`.
+    ///
+    /// Added per #457 so the e2e gates (`pty_dump`, `pty_dump_unicode`)
+    /// can pick the right `ShellDialect` for the shell that was actually
+    /// resolved (pwsh, powershell, bash, zsh, etc.).
+    pub fn shell_program_path(&self) -> &str {
+        &self.shell_program_path
+    }
 }
 
 impl Drop for PtyHandle {
@@ -78,18 +116,35 @@ impl Drop for PtyHandle {
 
 impl PtyHandle {
     /// Spawn the user's default shell.
-    pub fn spawn_default_shell(cols: u16, rows: u16) -> Result<Self> {
+    ///
+    /// `opts.clean_e2e=true` suppresses shell startup banner/profile and
+    /// emits clean-mode args (PowerShell `-NoLogo -NoProfile`, bash
+    /// `--norc --noprofile`, zsh `-f`). E2E gates pass `true`; the
+    /// production app passes `ShellSpawnOpts::default()` to preserve
+    /// interactive behavior.
+    pub fn spawn_default_shell(cols: u16, rows: u16, opts: ShellSpawnOpts) -> Result<Self> {
         let shell = default_shell();
-        Self::spawn(&shell, cols, rows)
+        let args = if opts.clean_e2e { clean_e2e_args(&shell) } else { Vec::new() };
+        Self::spawn_with_args(&shell, &args, cols, rows)
     }
 
     /// Spawn `cmd` (may include arguments via shell-style splitting handled
     /// upstream — we expect a single program path here for simplicity).
     pub fn spawn(cmd: &str, cols: u16, rows: u16) -> Result<Self> {
+        Self::spawn_with_args(cmd, &[], cols, rows)
+    }
+
+    /// Internal: spawn `cmd` with `args`. The public `spawn` + `spawn_default_shell`
+    /// converge here so opts-derived args (e.g. `-NoLogo -NoProfile` for
+    /// PowerShell clean_e2e) reach `CommandBuilder` consistently.
+    fn spawn_with_args(cmd: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
         let mut builder = CommandBuilder::new(cmd);
+        for a in args {
+            builder.arg(a);
+        }
         if let Ok(home) = std::env::var("HOME") {
             builder.cwd(home);
         }
@@ -122,7 +177,13 @@ impl PtyHandle {
             });
         });
 
-        Ok(Self { out_rx, in_tx, resize, child: Arc::new(Mutex::new(child)) })
+        Ok(Self {
+            out_rx,
+            in_tx,
+            resize,
+            child: Arc::new(Mutex::new(child)),
+            shell_program_path: cmd.to_string(),
+        })
     }
 
     /// Test-only constructor. Builds a `PtyHandle` whose `resize` invokes
@@ -146,6 +207,7 @@ impl PtyHandle {
             in_tx,
             resize: Box::new(resize),
             child: Arc::new(Mutex::new(Box::new(NoopChild) as Box<dyn Child + Send + Sync>)),
+            shell_program_path: TEST_SENTINEL_SHELL_PATH.to_string(),
         }
     }
 }
@@ -281,15 +343,64 @@ fn path_lookup(name: &str) -> Option<String> {
         return Some(candidate.to_string_lossy().to_string());
     }
     let path = std::env::var_os("PATH")?;
+    let allow_windowsapps = std::env::var("SONICTERM_ALLOW_WINDOWSAPPS_SHELL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     std::env::split_paths(&path)
         .map(|dir: PathBuf| dir.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| {
+            if !candidate.is_file() {
+                return false;
+            }
+            // #457: skip Microsoft Store WindowsApps stubs for `pwsh.exe` /
+            // `powershell.exe`. The App Execution Alias produces zero output
+            // under ConPTY when spawned bare, so the e2e gates silently fail.
+            // Escape hatch: SONICTERM_ALLOW_WINDOWSAPPS_SHELL=1 to opt back in.
+            let lname = name.to_ascii_lowercase();
+            let is_powershell =
+                lname.ends_with("pwsh.exe") || lname.ends_with("powershell.exe");
+            if is_powershell && !allow_windowsapps {
+                let lpath = candidate.to_string_lossy().to_lowercase();
+                if lpath.contains("\\windowsapps\\") {
+                    return false;
+                }
+            }
+            true
+        })
         .map(|path| path.to_string_lossy().to_string())
+}
+
+/// Returns clean-startup args appropriate for the resolved shell. For
+/// PowerShell (`pwsh.exe` / `powershell.exe`), emits `-NoLogo -NoProfile`.
+/// For bash, emits `--norc --noprofile`. For zsh, emits `-f` (skips
+/// `.zshrc` but NOT `.zshenv` — `.zshenv` is for required env setup,
+/// and replacing `-f` with `--no-rcs` would be a behavior change rather
+/// than a fix). Unknown shells get no args.
+///
+/// Used only when `ShellSpawnOpts::clean_e2e = true`.
+pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
+    let name = Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "pwsh.exe" | "powershell.exe" | "pwsh" | "powershell" => {
+            vec!["-NoLogo".to_string(), "-NoProfile".to_string()]
+        }
+        "bash" | "bash.exe" => {
+            vec!["--norc".to_string(), "--noprofile".to_string()]
+        }
+        "zsh" | "zsh.exe" => {
+            vec!["-f".to_string()]
+        }
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::default_shell_program;
+    use super::*;
 
     #[test]
     fn default_shell_program_returns_platform_default() {
@@ -306,5 +417,57 @@ mod tests {
         }
         #[cfg(not(target_os = "windows"))]
         assert!(!shell.is_empty());
+    }
+
+    // #457 clean_e2e_args coverage
+
+    #[test]
+    fn clean_e2e_args_powershell_returns_nologo_noprofile() {
+        for shell in [
+            "pwsh.exe",
+            "powershell.exe",
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        ] {
+            assert_eq!(clean_e2e_args(shell), vec!["-NoLogo", "-NoProfile"], "shell={shell}");
+        }
+    }
+
+    #[test]
+    fn clean_e2e_args_bash_returns_norc_noprofile() {
+        assert_eq!(clean_e2e_args("bash"), vec!["--norc", "--noprofile"]);
+        assert_eq!(clean_e2e_args("/bin/bash"), vec!["--norc", "--noprofile"]);
+        assert_eq!(clean_e2e_args("bash.exe"), vec!["--norc", "--noprofile"]);
+    }
+
+    #[test]
+    fn clean_e2e_args_zsh_returns_dash_f() {
+        // -f skips .zshrc/.zlogin/.zlogout but intentionally NOT .zshenv
+        // (required env setup). Switching to --no-rcs would change behavior.
+        assert_eq!(clean_e2e_args("zsh"), vec!["-f"]);
+        assert_eq!(clean_e2e_args("/bin/zsh"), vec!["-f"]);
+        assert_eq!(clean_e2e_args("zsh.exe"), vec!["-f"]);
+    }
+
+    #[test]
+    fn clean_e2e_args_unknown_shell_returns_empty() {
+        // Unknown shells get no args — passing unsupported flags can
+        // prevent shell startup entirely.
+        assert!(clean_e2e_args("cmd.exe").is_empty());
+        assert!(clean_e2e_args("fish").is_empty());
+        assert!(clean_e2e_args("nu").is_empty());
+        assert!(clean_e2e_args("").is_empty());
+    }
+
+    #[test]
+    fn shell_spawn_opts_default_is_interactive() {
+        let opts = ShellSpawnOpts::default();
+        assert!(!opts.clean_e2e, "Default opts must preserve interactive shell behavior");
+    }
+
+    #[test]
+    fn for_test_handle_returns_sentinel_shell_path() {
+        let h = PtyHandle::for_test(|_, _| {});
+        assert_eq!(h.shell_program_path(), TEST_SENTINEL_SHELL_PATH);
     }
 }

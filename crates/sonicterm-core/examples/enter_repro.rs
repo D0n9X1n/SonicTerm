@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use sonicterm_core::{grid::Grid, pty::PtyHandle, vt::Parser};
 
 fn main() {
-    let pty = PtyHandle::spawn_default_shell(120, 40).expect("spawn");
+    let pty = PtyHandle::spawn_default_shell(120, 40, sonicterm_core::pty::ShellSpawnOpts::default()).expect("spawn");
     let parser = Arc::new(parking_lot::Mutex::new(Parser::new(Grid::new(120, 40))));
 
     let redraws = Arc::new(AtomicUsize::new(0));
