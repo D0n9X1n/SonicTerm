@@ -2743,25 +2743,14 @@ impl GpuRenderer {
                         continue;
                     };
                     // ------ Cache lookup ------
-                    // #559 PR-A: invalidate-on-geometry-codepoint. Any row
-                    // whose cells contain a Phase-A Box-Drawing or
-                    // Block-Element codepoint must re-shape (and re-emit
-                    // its geometry quads) every frame — `CachedRow` doesn't
-                    // yet store `geometry_quads`, so a cache hit would
-                    // silently drop the procedural line/rect quads emitted
-                    // by `geometry_emit::emit_geometry_for_char` and the
-                    // box drawing would disappear on frame 2. PR-B (#560)
-                    // extends `CachedRow` with replayable geometry; until
-                    // then this invalidation is the workaround.
-                    let row_has_geometry_codepoint = row.iter().any(|c| {
-                        sonicterm_text::box_drawing_geometry::is_covered_box_drawing(c.ch)
-                            || sonicterm_text::block_element_geometry::is_covered_block_element(
-                                c.ch,
-                            )
-                    });
-                    if row_has_geometry_codepoint {
-                        self.row_glyph_cache.invalidate_row_abs(pane_id, row_abs);
-                    }
+                    // #560 PR-B2: `CachedRow` now carries
+                    // `geometry_quads`, so the #561 PR-A
+                    // invalidate-on-geometry-codepoint workaround
+                    // (`row_has_geometry_codepoint` →
+                    // `invalidate_row_abs`) has been removed. Rows
+                    // containing Box-Drawing or Block-Element
+                    // codepoints hit the cache normally and the
+                    // captured geometry quads are replayed below.
                     let key = sonicterm_text::row_glyph_cache::row_hash(
                         view_top_abs,
                         r as usize,
@@ -2781,6 +2770,13 @@ impl GpuRenderer {
                             missing_tofu.push(*t);
                         }
                         missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
+                        // #560 PR-B2: replay captured geometry quads
+                        // (Box-Drawing / Block-Element) by converting
+                        // each `GeometryQuad` back into a wgpu-bound
+                        // `QuadInstance` via the reverse adapter.
+                        for gq in &cached.geometry_quads {
+                            geometry_quads.push((*gq).into());
+                        }
                         continue;
                     }
                     // ------ Miss: shape into row-local buffers, then
@@ -2791,6 +2787,13 @@ impl GpuRenderer {
                     let glyph_base = glyph_instances.len();
                     let tofu_base = missing_tofu.len();
                     let miss_base = missing_chars_this_frame.len();
+                    // #560 PR-B2: snapshot the frame-level geometry
+                    // quad list length BEFORE this row shapes, so the
+                    // tail slice after shaping is exactly this row's
+                    // contribution from the three `emit_geometry_for_char`
+                    // sites in `flush_shape_run`. Captured into
+                    // `CachedRow.geometry_quads` below for replay.
+                    let geom_base = geometry_quads.len();
                     let mut row_underlines: Vec<(u16, u16)> = Vec::new();
                     let mut ul_start: Option<u16> = None;
                     let mut last_visible_col: u16 = 0;
@@ -2907,6 +2910,11 @@ impl GpuRenderer {
                     let row_glyphs = glyph_instances[glyph_base..].to_vec();
                     let row_tofu = missing_tofu[tofu_base..].to_vec();
                     let row_missing = missing_chars_this_frame[miss_base..].to_vec();
+                    // #560 PR-B2: snapshot this row's geometry quads
+                    // (the tail slice from `geom_base`) converted into
+                    // renderer-agnostic `GeometryQuad` for the cache.
+                    let row_geometry: Vec<sonicterm_types::GeometryQuad> =
+                        geometry_quads[geom_base..].iter().map(|q| (*q).into()).collect();
                     self.row_glyph_cache.insert(
                         pane_id,
                         row_abs,
@@ -2916,6 +2924,7 @@ impl GpuRenderer {
                             underlines: row_underlines,
                             tofu: row_tofu,
                             missing_chars: row_missing,
+                            geometry_quads: row_geometry,
                         },
                     );
                 }

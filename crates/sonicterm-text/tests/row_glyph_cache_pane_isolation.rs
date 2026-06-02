@@ -27,6 +27,7 @@ fn distinct_row(marker: f32) -> CachedRow {
         underlines: Vec::new(),
         tofu: Vec::new(),
         missing_chars: Vec::new(),
+        geometry_quads: Vec::new(),
     }
 }
 
