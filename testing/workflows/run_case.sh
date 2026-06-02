@@ -15,6 +15,15 @@ LOG="$CASE_OUT/case.log"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
+# OCR preflight (issue #497, mirrors PR #498 on run_case.ps1).
+# Honor SONICTERM_HARNESS_OCR_AVAILABLE from driver; else probe PATH.
+if [[ "${SONICTERM_HARNESS_OCR_AVAILABLE:-}" == "1" ]]; then OCR_AVAILABLE=1
+elif [[ "${SONICTERM_HARNESS_OCR_AVAILABLE:-}" == "0" ]]; then OCR_AVAILABLE=0
+elif command -v tesseract >/dev/null 2>&1; then OCR_AVAILABLE=1
+else OCR_AVAILABLE=0
+fi
+export SONICTERM_HARNESS_OCR_AVAILABLE="$OCR_AVAILABLE"
+
 # ------------------------------------------------------------------
 # Guard 6 — Finder-park escape hatch. Park focus on Finder BEFORE
 # spawning sonicterm-mac so any pre-spawn keystroke leak (which can
@@ -77,6 +86,28 @@ log "applies_to: $APPLIES_TO"
 if [[ ",$APPLIES_TO," == *",mac-manual,"* && ",$APPLIES_TO," != *",mac,"* ]]; then
   log "SKIP — manual-only on this platform"
   exit 77
+fi
+
+# Issue #497 — early-skip if every expect is OCR and tesseract is missing.
+if [[ "$OCR_AVAILABLE" -eq 0 ]]; then
+  ALL_OCR=$(python3 - "$CASE_JSON" <<'PY'
+import json, sys
+OCR = {'text-in-region','ocr-text','not-text-in-region'}
+exp = json.load(open(sys.argv[1])).get('expect', [])
+print('yes' if exp and all(e.get('kind') in OCR for e in exp) else 'no')
+PY
+)
+  if [[ "$ALL_OCR" == "yes" ]]; then
+    python3 -c "
+import json
+for i,e in enumerate(json.load(open('$CASE_JSON')).get('expect',[])):
+    print(f'{i}\t{e.get(\"kind\")}')" | while IFS=$'\t' read -r i kind; do
+      log "[SKIP ocr_unavailable] case=$ID expect[$i]=$kind"
+    done
+    log "SKIP: ocr_unavailable (all expects are OCR-only and tesseract is not on PATH)"
+    echo "SKIP" > "$CASE_OUT/status"
+    exit 77
+  fi
 fi
 
 # ------------------------------------------------------------------
@@ -402,7 +433,9 @@ import json, sys, os, subprocess
 case_path, shot, elog, case_out = sys.argv[1:5]
 c = json.load(open(case_path))
 expectations = c.get('expect', [])
-results = []
+ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE', '1') == '1')
+OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
+results = []  # (status, kind, reason) status in {'PASS','FAIL','SKIP'}
 
 def have(p):
     return os.path.exists(p) and os.path.getsize(p) > 0
@@ -423,6 +456,10 @@ def pixel_near(shot, x, y, rgba, tol):
         return False, f"err {e}"
 
 def ocr_contains(shot, value):
+    # Returns (status, sample) where status in {True, False, None}.
+    # None = OCR unavailable, caller should treat as SKIP. Mirrors PR #498.
+    if not ocr_available:
+        return None, "ocr_unavailable"
     try:
         out = subprocess.run(['tesseract', shot, '-', '--psm', '6'],
                              capture_output=True, text=True, timeout=20)
@@ -437,16 +474,27 @@ def proc_count(prog):
     except Exception:
         return -1
 
-for e in expectations:
+for idx, e in enumerate(expectations):
     kind = e.get('kind')
+    status = None  # 'PASS' | 'FAIL' | 'SKIP'
+    if kind in OCR_KINDS and not ocr_available:
+        # Issue #497: per-expect OCR skip in mixed cases.
+        results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+        continue
     if kind == 'screenshot':
         ok = have(shot); reason = f"exists={ok} path={shot}"
     elif kind == 'pixel-near':
         ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20))
     elif kind in ('text-in-region', 'ocr-text'):
         ok, reason = ocr_contains(shot, e['value'])
+        if ok is None:
+            results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+            continue
     elif kind == 'not-text-in-region':
         contains, sample = ocr_contains(shot, e['value'])
+        if contains is None:
+            results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+            continue
         ok = not contains
         reason = f"absent={ok} sample='{sample}'"
     elif kind == 'process-count':
@@ -528,15 +576,23 @@ for e in expectations:
             reason = f"heuristic-pass (kind='{kind}' needs internal hook; not yet implemented)"
     else:
         ok = False; reason = f"unknown kind '{kind}'"
-    results.append((ok, kind, reason))
+    results.append(('PASS' if ok else 'FAIL', kind, reason))
 
 with open(elog, 'w') as f:
-    for ok, kind, reason in results:
-        f.write(f"{'PASS' if ok else 'FAIL'}\t{kind}\t{reason}\n")
+    for status, kind, reason in results:
+        f.write(f"{status}\t{kind}\t{reason}\n")
 
-# Exit 0 if all true; 1 otherwise. Empty expect list => pass (case ran without errors).
-fails = [r for r in results if not r[0]]
-sys.exit(0 if not fails else 1)
+# Tri-state aggregation (issue #497, mirrors PR #498):
+#   any FAIL -> exit 1 (fail wins over skip)
+#   else any SKIP -> exit 77
+#   else exit 0
+fails = [r for r in results if r[0] == 'FAIL']
+skips = [r for r in results if r[0] == 'SKIP']
+if fails:
+    sys.exit(1)
+if skips:
+    sys.exit(77)
+sys.exit(0)
 PY
 expect_rc=$?
 
@@ -592,10 +648,25 @@ if [[ -n "$remaining" ]]; then
   fi
 fi
 
+# Issue #497: surface per-expect SKIP lines to case.log.
+if [[ -f "$EXPECT_LOG" ]]; then
+  while IFS=$'\t' read -r status kind reason; do
+    [[ "$status" == "SKIP" ]] || continue
+    eidx="N/A"
+    [[ "$reason" =~ expect\[([0-9]+)\] ]] && eidx="${BASH_REMATCH[1]}"
+    log "[SKIP ocr_unavailable] case=$ID expect[$eidx]=$kind"
+  done < "$EXPECT_LOG"
+fi
+
 if [[ $expect_rc -eq 0 ]]; then
   log "RESULT: PASS"
   echo "PASS" > "$CASE_OUT/status"
   exit 0
+elif [[ $expect_rc -eq 77 ]]; then
+  log "RESULT: SKIP (ocr_unavailable; no failures, at least one OCR skip)"
+  echo "SKIP" > "$CASE_OUT/status"
+  cat "$EXPECT_LOG" >> "$LOG"
+  exit 77
 else
   log "RESULT: FAIL"
   echo "FAIL" > "$CASE_OUT/status"
