@@ -603,20 +603,27 @@ foreach ($k in @($Case.keystrokes)) {
 # of the window rect if PrintWindow returns false.
 # ------------------------------------------------------------------
 $Shot = Join-Path $CaseOut 'screen.png'
+$ScreenPng = $Shot
+# #597: re-validate window post-action. If the case just closed the
+# window (Alt+F4, Stop-Process, etc.), leave $ScreenPng empty so
+# visual expects SKIP while non-visual expects still drive the verdict.
 if (-not [SonicWin32]::IsWindow($WindowHandle)) {
-  Log 'SKIP: window handle invalid — refusing screencap (would leak coords)'
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
+  Log 'WARN screencap-skipped: window closed (handle invalid post-action)'
+  $ScreenPng = ''
+} else {
+  $rect = New-Object SonicWin32+RECT
+  if (-not [SonicWin32]::GetWindowRect($WindowHandle, [ref]$rect)) {
+    Log 'WARN screencap-skipped: GetWindowRect failed (window may have closed)'
+    $ScreenPng = ''
+  } else {
+    $w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
+    if ($w -le 0 -or $h -le 0) {
+      Log "WARN screencap-skipped: bogus window rect ${w}x${h} (window may have closed)"
+      $ScreenPng = ''
+    }
+  }
 }
-$rect = New-Object SonicWin32+RECT
-if (-not [SonicWin32]::GetWindowRect($WindowHandle, [ref]$rect)) {
-  Log 'SKIP: GetWindowRect failed — refusing screencap'
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
-}
-$w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
-if ($w -le 0 -or $h -le 0) {
-  Log "SKIP: bogus window rect ${w}x${h}"
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
-}
+if ($ScreenPng) {
 $bmp = New-Object System.Drawing.Bitmap $w, $h
 $g   = [System.Drawing.Graphics]::FromImage($bmp)
 $hdc = $g.GetHdc()
@@ -670,10 +677,12 @@ $g.Dispose()
 $bmp.Save($Shot, [System.Drawing.Imaging.ImageFormat]::Png)
 $bmp.Dispose()
 if (-not (Test-Path $Shot) -or (Get-Item $Shot).Length -eq 0) {
-  Log 'SKIP: window-local screencap failed (window may have closed)'
-  Set-Content (Join-Path $CaseOut 'status') 'SKIP'; exit 77
+  Log 'WARN screencap-skipped: window-local screencap failed (window may have closed)'
+  $ScreenPng = ''
+} else {
+  Log "screenshot (window-only): $Shot"
 }
-Log "screenshot (window-only): $Shot"
+}  # end if ($ScreenPng)
 
 # ------------------------------------------------------------------
 # Evaluate expectations — best-effort, mirrors mac.sh's python block.
@@ -685,6 +694,10 @@ import json, sys, os, subprocess
 case_path, shot, elog, case_out, script_root = sys.argv[1:6]
 ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE','1') == '1')
 OCR_KINDS = ('text-in-region','ocr-text','not-text-in-region')
+# #597: visual expects need a screenshot; non-visual ones (orphan-
+# shells-from-sonic, ...) run fine without one.
+VISUAL_KINDS = ('screenshot','pixel-near') + OCR_KINDS
+screen_ok = bool(shot) and os.path.exists(shot) and os.path.getsize(shot) > 0
 c = json.load(open(case_path))
 results = []  # (status, kind, reason)  status in {'PASS','FAIL','SKIP'}
 def have(p): return os.path.exists(p) and os.path.getsize(p) > 0
@@ -710,6 +723,11 @@ def ocr_contains(shot, value):
         return False, f"err {e}"
 for idx, e in enumerate(c.get('expect', [])):
     kind = e.get('kind')
+    if kind in VISUAL_KINDS and not screen_ok:
+        # #597: window closed before screencap — visual expect cannot be
+        # evaluated; SKIP so non-visual expects still drive the verdict.
+        results.append(('SKIP', kind, f"screencap_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+        continue
     if kind in OCR_KINDS and not ocr_available:
         # Issue #492: per-expect OCR skip in mixed cases.
         results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
@@ -766,7 +784,7 @@ if skips:
 sys.exit(0)
 "@
 $env:SONICTERM_HARNESS_OCR_AVAILABLE = if ($Script:OCR_AVAILABLE) { '1' } else { '0' }
-$py2 | python3 - $CaseJson $Shot $ExpectLog $CaseOut $PSScriptRoot
+$py2 | python3 - $CaseJson $ScreenPng $ExpectLog $CaseOut $PSScriptRoot
 $expectRc = $LASTEXITCODE
 
 # Issue #492: surface per-expect SKIP lines to case.log so silently
@@ -777,7 +795,8 @@ if (Test-Path $ExpectLog) {
       $kind = $matches[1]; $reason = $matches[2]
       # Pull expect index from reason if present, else 'N/A'.
       $eidx = if ($reason -match 'expect\[(\d+)\]') { $matches[1] } else { 'N/A' }
-      Log ("[SKIP ocr_unavailable] case={0} expect[{1}]={2}" -f $Id, $eidx, $kind)
+      $tag = if ($reason -like 'screencap_unavailable*') { 'screencap_unavailable' } else { 'ocr_unavailable' }
+      Log ("[SKIP {0}] case={1} expect[{2}]={3}" -f $tag, $Id, $eidx, $kind)
     }
   }
 }
