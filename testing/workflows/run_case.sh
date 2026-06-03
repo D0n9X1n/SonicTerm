@@ -467,26 +467,36 @@ source "$CASE_OUT/steps.sh"
 # image-w / 1000 logical units onto whatever screencap size we hand it.
 # ------------------------------------------------------------------
 SHOT="$CASE_OUT/screen.png"
-if [[ -z "$WINDOW_ID" ]]; then
-  log "SKIP: no window id captured — refusing to screencap full display (would leak coords)"
-  echo SKIP > "$CASE_OUT/status"
-  exit 77
-fi
-if ! screencapture -x -l "$WINDOW_ID" "$SHOT" 2>/dev/null || [[ ! -s "$SHOT" ]]; then
-  log "SKIP: window-local screencap failed (window may have closed)"
-  echo SKIP > "$CASE_OUT/status"
-  exit 77
+SCREEN_PNG="$SHOT"
+# #597: re-query CGWindowID *post-action* — the case may have just
+# closed its window (Cmd+Q, kill -9 of sonicterm-mac). If gone, leave
+# SCREEN_PNG empty so visual expects SKIP while non-visual expects
+# (orphan-shells-from-sonic, process-count, ...) still evaluate.
+# Guard 5 pixel-coord safety is preserved: we only screencap when a
+# live CGWindowID exists for $SONIC_PID.
+WIN_ID_POST=$(testing/workflows/cg-window-id.swift "$SONIC_PID" 2>/dev/null || echo "")
+if [[ -z "$WIN_ID_POST" ]]; then
+  log "WARN screencap-skipped: window closed (no CGWindowID for pid=$SONIC_PID post-action)"
+  SCREEN_PNG=""
+elif ! screencapture -x -l "$WIN_ID_POST" "$SHOT" 2>/dev/null || [[ ! -s "$SHOT" ]]; then
+  log "WARN screencap-skipped: window-local screencap failed (window may have closed)"
+  SCREEN_PNG=""
+else
+  log "screenshot (window-only): $SHOT"
 fi
 # #589 Bug B: crop ~120px (titlebar + tab strip @ 2× Retina) for OCR; pixel-near keeps full image.
+# #597: only crop if we actually captured a screenshot (window may have closed).
 SHOT_BODY="$CASE_OUT/screen-body.png"
-python3 - "$SHOT" "$SHOT_BODY" <<'PY' >>"$LOG" 2>&1 || true
+if [[ -n "$SCREEN_PNG" && -s "$SHOT" ]]; then
+  python3 - "$SHOT" "$SHOT_BODY" <<'PY' >>"$LOG" 2>&1 || true
 import sys
 from PIL import Image
 src, dst = sys.argv[1:3]
 im = Image.open(src); w, h = im.size
 im.crop((0, min(120, max(0, h - 1)), w, h)).save(dst)
 PY
-log "screenshot (window-only): $SHOT  body=$SHOT_BODY"
+  log "screenshot (window-only): $SHOT  body=$SHOT_BODY"
+fi
 
 # ------------------------------------------------------------------
 # Evaluate expectations (best-effort; reports per-check pass/fail)
@@ -494,7 +504,7 @@ log "screenshot (window-only): $SHOT  body=$SHOT_BODY"
 EXPECT_LOG="$CASE_OUT/expect.log"
 : > "$EXPECT_LOG"
 
-python3 - "$CASE_JSON" "$SHOT" "$EXPECT_LOG" "$CASE_OUT" "$SHOT_BODY" <<'PY'
+python3 - "$CASE_JSON" "$SCREEN_PNG" "$EXPECT_LOG" "$CASE_OUT" "$SHOT_BODY" <<'PY'
 import json, sys, os, subprocess
 case_path, shot, elog, case_out, shot_body = sys.argv[1:6]
 c = json.load(open(case_path))
@@ -508,7 +518,12 @@ _CJK_RE = _re.compile(r'[぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿]')
 def has_cjk(s):
     return bool(_CJK_RE.search(s or ''))
 OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
-OCR_SHOT = shot_body if (os.path.exists(shot_body) and os.path.getsize(shot_body) > 0) else shot
+# #597: visual expects need a screenshot. Non-visual expects (orphan-
+# shells-from-sonic, process-count, exit-code, log-contains, file-*,
+# process-*) run fine without one.
+VISUAL_KINDS = ('screenshot', 'pixel-near') + OCR_KINDS
+screen_ok = bool(shot) and os.path.exists(shot) and os.path.getsize(shot) > 0
+OCR_SHOT = shot_body if (shot_body and os.path.exists(shot_body) and os.path.getsize(shot_body) > 0) else shot
 results = []  # (status, kind, reason) status in {'PASS','FAIL','SKIP'}
 
 def have(p):
@@ -560,6 +575,11 @@ def proc_count(prog):
 for idx, e in enumerate(expectations):
     kind = e.get('kind')
     status = None  # 'PASS' | 'FAIL' | 'SKIP'
+    if kind in VISUAL_KINDS and not screen_ok:
+        # #597: window closed before screencap — visual expect cannot be
+        # evaluated; SKIP so non-visual expects still drive the verdict.
+        results.append(('SKIP', kind, f"screencap_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+        continue
     if kind in OCR_KINDS and not ocr_available:
         # Issue #497: per-expect OCR skip in mixed cases.
         results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
@@ -744,7 +764,9 @@ if [[ -f "$EXPECT_LOG" ]]; then
     [[ "$status" == "SKIP" ]] || continue
     eidx="N/A"
     [[ "$reason" =~ expect\[([0-9]+)\] ]] && eidx="${BASH_REMATCH[1]}"
-    log "[SKIP ocr_unavailable] case=$ID expect[$eidx]=$kind"
+    tag="ocr_unavailable"
+    [[ "$reason" == screencap_unavailable* ]] && tag="screencap_unavailable"
+    log "[SKIP $tag] case=$ID expect[$eidx]=$kind"
   done < "$EXPECT_LOG"
 fi
 
