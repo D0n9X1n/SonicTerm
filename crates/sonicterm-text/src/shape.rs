@@ -338,31 +338,74 @@ pub fn shape_run(
     shape_run_with_cell_w(rasterizer, family, font_size, style, cells, 0.0)
 }
 
-/// Nerd Font PUA codepoint ranges. If a font reports a glyph for a
-/// codepoint that falls in one of these ranges, the renderer should
-/// allocate two cells for the glyph even when the advance width is
-/// ambiguous. Source: Nerd Fonts v3 cheat-sheet groupings.
+/// Nerd Font codepoint ranges (mostly PUA, with a few BMP non-PUA
+/// entries such as the IEC Power Symbols). If a font reports a glyph
+/// for a codepoint that falls in one of these ranges, the renderer
+/// should allocate two cells for the glyph even when the advance width
+/// is ambiguous. Source: Nerd Fonts v3 cheat-sheet groupings.
 ///
 /// Used by the singleton post-pass in [`shape_run_with_cell_w`] as a
-/// fallback when the advance-threshold heuristic declines (advance
-/// ≤ 1.5 * cell_w). See issue #595 for the diagnosis chain.
-const NERD_FONT_RANGES: &[std::ops::RangeInclusive<u32>] = &[
-    0xE000..=0xE0D7, // Powerline + Powerline Extra
-    0xE200..=0xE2A9, // Font Linux
-    0xE300..=0xE3D6, // Pomicons
-    0xE5FA..=0xE62F, // Codicons (≠ unicode-width WIDE)
-    0xE700..=0xE7E0, // Devicons
-    0xEE00..=0xEE0B, // IEC Power symbols
-    0xF000..=0xF2FF, // Font Awesome
-    0xF300..=0xF381, // Font Logos
-    0xF400..=0xF533, // Octicons
-    0xF500..=0xFD46, // Material Design
+/// fallback when the advance-threshold heuristic declines, and as the
+/// gate that tightens the advance threshold from `>1.5×` to `>1.0×`
+/// inside known icon ranges (issue #610 sym-3 corrections).
+///
+/// Historical correction (#610 sym-3): the v3 cheat-sheet was re-audited.
+/// - `0xE5FA..=0xE62F` was mislabeled "Codicons" — it is actually Seti UI;
+///   the tail is extended to U+E6B5 to match the canonical NF v3 range.
+/// - Codicons live at U+EA60..U+EBEB (added).
+/// - Material Design moved to Plane-1 in NF v3 (U+F0001..U+F1AF0); the
+///   legacy `0xF500..=0xFD46` range was dead-fonts only and is removed.
+/// - Weather Icons tail extended from U+E3D6 to U+E3EB; Devicons tail
+///   from U+E7E0 to U+E8EF.
+/// - IEC Power Symbols are at BMP U+23FB..U+23FE and U+2B58, not the
+///   previously-listed `0xEE00..=0xEE0B`.
+pub const NERD_FONT_RANGES: &[std::ops::RangeInclusive<u32>] = &[
+    0x23FB..=0x23FE,   // IEC Power Symbols (BMP, non-PUA)
+    0x2B58..=0x2B58,   // IEC Power Symbol — power-off circle (BMP)
+    0xE000..=0xE0D7,   // Powerline + Powerline Extra
+    0xE200..=0xE2A9,   // Font Awesome Extension (mislabeled "Font Linux" pre-#610)
+    0xE300..=0xE3EB,   // Weather Icons (extended past E3D6 per #610 sym-3)
+    0xE5FA..=0xE6B5,   // Seti UI (was mislabeled "Codicons" pre-#610, tail extended)
+    0xE700..=0xE8EF,   // Devicons (extended past E7E0 per #610 sym-3)
+    0xEA60..=0xEBEB,   // Codicons (added per #610 sym-3)
+    0xF000..=0xF2FF,   // Font Awesome
+    0xF300..=0xF381,   // Font Logos
+    0xF400..=0xF533,   // Octicons
+    0xF0001..=0xF1AF0, // Material Design Icons (Plane-1, NF v3)
 ];
 
+/// True iff `ch`'s codepoint is in [`NERD_FONT_RANGES`]. Public so the
+/// crate's integration tests can assert the table shape directly.
 #[inline]
-fn is_nerd_font_pua(ch: char) -> bool {
+pub fn is_nerd_font_pua(ch: char) -> bool {
     let n = ch as u32;
     NERD_FONT_RANGES.iter().any(|r| r.contains(&n))
+}
+
+/// Codepoints that unicode-width already treats as 2-cells wide.
+/// MUST short-circuit the [`NERD_FONT_RANGES`] widening path or
+/// e.g. U+3001 IDEOGRAPHIC COMMA would be double-widened to 3 cells
+/// (the grid hands us a single cell with the WIDE flag, we widen to
+/// 2, then the renderer's WIDE_CONT slot also reserves one — net 3).
+/// Issue #610 sym-3 mandates this guard at the widening entry point.
+///
+/// Ranges covered: CJK Unified `U+4E00..U+9FFF`, CJK Ext-A
+/// `U+3400..U+4DBF`, Hiragana `U+3040..U+309F`, Katakana
+/// `U+30A0..U+30FF`, Hangul Syllables `U+AC00..U+D7AF`, Fullwidth
+/// `+` Halfwidth `U+FF00..U+FFEF`, CJK Symbols `&` Punctuation
+/// `U+3000..U+303F`.
+#[inline]
+fn is_cjk_unicode_width_wide(ch: char) -> bool {
+    let n = ch as u32;
+    matches!(n,
+        0x3000..=0x303F   // CJK Symbols & Punctuation (incl. 〃〇 and U+3001)
+      | 0x3040..=0x309F   // Hiragana
+      | 0x30A0..=0x30FF   // Katakana
+      | 0x3400..=0x4DBF   // CJK Unified Extension A
+      | 0x4E00..=0x9FFF   // CJK Unified Ideographs
+      | 0xAC00..=0xD7AF   // Hangul Syllables
+      | 0xFF00..=0xFFEF   // Fullwidth + Halfwidth
+    )
 }
 
 /// Same as [`shape_run`] but also takes the per-cell pixel width
@@ -663,14 +706,28 @@ pub fn shape_run_with_cell_w(
                 .find(|(c, _)| *c == lead_col)
                 .map(|(_, cell)| cell.flags.contains(CellFlags::WIDE))
                 .unwrap_or(false);
-            if !lead_is_wide {
+            // #610 sym-3 CJK guard: codepoints that unicode-width
+            // already treats as 2-cells wide MUST short-circuit BOTH
+            // the advance-threshold and the PUA-range branches.
+            // Otherwise U+3001 IDEOGRAPHIC COMMA (and friends) would
+            // be double-widened: grid hands us 1 cell, we widen to 2,
+            // then the renderer's WIDE_CONT slot also fires.
+            let is_cjk_wide = is_cjk_unicode_width_wide(ch_first);
+            if !lead_is_wide && !is_cjk_wide {
                 let mut widen = false;
-                // (a) advance threshold
-                if g.w > cell_w_px * 1.5 {
+                // #610 sym-3: the advance threshold is `> 1.0×
+                // cell_w_px` ONLY when the codepoint is in a known
+                // NERD_FONT_RANGES band. Outside the table the older
+                // conservative `> 1.5×` gate stays in place so a
+                // freak shaper advance on, say, an italic 'M' does
+                // not start widening text.
+                let is_pua = is_nerd_font_pua(ch_first);
+                let threshold = if is_pua { 1.0 } else { 1.5 };
+                if g.w > cell_w_px * threshold {
                     widen = true;
                 }
                 // (b) PUA range — only consult if (a) declined.
-                if !widen && is_nerd_font_pua(ch_first) {
+                if !widen && is_pua {
                     if let Some(s) = meta[i].slot {
                         let charmap_id = rasterizer
                             .charmap_glyph_for_slot(s, ch_first, style.bold, style.italic)
