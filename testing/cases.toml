@@ -752,12 +752,13 @@ covers_bugs = []
 covers_landmines = ["pty-drop-kills-child"]
 setup = ["open-3-tabs"]
 keystrokes = [
+  { kind = "snapshot-sonic-shells" },
   { kind = "key", value = "cmd+q" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
   { kind = "process-count", program = "sonicterm-mac", max = 0 },
-  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
 fail_on = "Orphan zsh/bash remain"
 
@@ -1031,11 +1032,12 @@ covers_bugs = []
 covers_landmines = ["pty-drop-kills-child"]
 setup = ["open-3-tabs"]
 keystrokes = [
+  { kind = "snapshot-sonic-shells" },
   { kind = "shell-cmd", value = "kill -9 \"$SONIC_PID\"" },
   { kind = "wait", value = 1.5 },
 ]
 expect = [
-  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
 fail_on = "Orphan zsh/bash remain after SIGKILL"
 
@@ -1335,11 +1337,12 @@ setup = ["wait:0.5"]
 keystrokes = [
   { kind = "key", value = "cmd+t" },
   { kind = "wait", value = 0.5 },
+  { kind = "snapshot-sonic-shells" },
   { kind = "key", value = "cmd+w" },
   { kind = "wait", value = 1.0 },
 ]
 expect = [
-  { kind = "no-orphan-shells", parent = "sonicterm-mac" },
+  { kind = "orphan-shells-from-sonic", expected = 0 },
 ]
 fail_on = "Orphan shell remains after tab close"
 
