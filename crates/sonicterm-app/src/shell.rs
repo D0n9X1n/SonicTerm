@@ -58,6 +58,12 @@ pub struct MacShell {
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
     pending: Option<TabPayload>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
+    /// #554: one-shot hook fired the instant `create_window` returns
+    /// with the raw AppKit window handle. The mac bin uses this slot
+    /// to emit the `SONICTERM_WINDOW_READY` stdout marker carrying
+    /// the CGWindowID so the harness can skip the ~3s Swift-helper
+    /// poll loop. Mirrors [`WindowsShell::with_on_window_ready`].
+    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
 }
 
 impl MacShell {
@@ -78,6 +84,7 @@ impl MacShell {
             os_drag_backend: None,
             pending: None,
             on_resumed: None,
+            on_window_ready: None,
         }
     }
 
@@ -124,6 +131,22 @@ impl MacShell {
         self
     }
 
+    /// #554: one-shot hook fired the instant `create_window` returns,
+    /// with the raw AppKit window handle. Mirrors
+    /// [`WindowsShell::with_on_window_ready`] — same signature, same
+    /// plumbing into the cross-platform firing site in
+    /// `app/event_loop.rs`. The mac bin uses this slot to print the
+    /// `SONICTERM_WINDOW_READY` stdout marker carrying the CGWindowID
+    /// so the harness can grep it instead of polling CoreGraphics.
+    #[must_use]
+    pub fn with_on_window_ready(
+        mut self,
+        hook: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>,
+    ) -> Self {
+        self.on_window_ready = Some(hook);
+        self
+    }
+
     /// Consume the shell, build the winit event loop, install the
     /// menubar / OS-drag bridges, and run until the loop exits.
     pub fn run(self) -> Result<()> {
@@ -138,6 +161,7 @@ impl MacShell {
             os_drag_backend,
             pending,
             on_resumed,
+            on_window_ready,
         } = self;
 
         crate::app::init_tracing_public();
@@ -159,6 +183,9 @@ impl MacShell {
         }
         if let Some(hook) = on_resumed {
             app.on_resumed = Some(hook);
+        }
+        if let Some(hook) = on_window_ready {
+            app.set_on_window_ready(hook);
         }
         if let Some(p) = pending {
             let _ = app.new_tab_from_payload(&p);

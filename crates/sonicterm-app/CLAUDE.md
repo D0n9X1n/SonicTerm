@@ -86,6 +86,18 @@ color, cursor visible, sharp on Retina, CPU < 5%.
 SonicTerm is **6×–302× slower than WezTerm** on `vtebench` depending on
 workload. Don't describe perf work as "done" in commit messages.
 
+## Window-ready hook (`with_on_window_ready`)
+Both `MacShell` and `WindowsShell` expose a one-shot
+`with_on_window_ready(Box<dyn FnOnce(RawWindowHandle) + Send>)` builder
+method, plumbed into the cross-platform firing site at
+`app/event_loop.rs` (`App::resumed`). Fired exactly once, the instant
+winit's `create_window` returns. Per-platform usage today:
+
+- **Windows**: muda menubar install + DWM backdrop (HWND-bound APIs).
+- **mac (#554)**: prints the `SONICTERM_WINDOW_READY cg_window_id=…
+  pid=… window_index=0` stdout marker for the test harness. Stable
+  contract — see `crates/sonicterm-mac/CLAUDE.md`.
+
 ## Owning PM(s)
 - Primary: cross-platform — first PM to claim a hot file blocks the other
 - Hot-file: every file in `app/` is a hot file

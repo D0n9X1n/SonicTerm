@@ -36,3 +36,25 @@ cargo build --release -p sonicterm-mac
 ## Cross-references
 - Consumes: `sonicterm-app` (post-M6: `sonicterm-app-core` + `sonicterm-app`)
 - Consumed by: nothing (bin)
+
+## Stable contract: `SONICTERM_WINDOW_READY` stdout marker (#554)
+The bin prints one line to **stdout** (NOT tracing — the harness greps
+raw stdout) the instant winit hands AppKit the window, from the
+`with_on_window_ready` hook in `main.rs`:
+
+```
+SONICTERM_WINDOW_READY cg_window_id=<u32> pid=<u32> window_index=0
+```
+
+- `cg_window_id` — CoreGraphics window number from `[NSWindow windowNumber]`.
+  Directly feedable to `screencapture -l <id>`. `-1` means the NSView
+  had no attached NSWindow (should not happen post-`create_window`;
+  harness must treat as missing and fall back).
+- `pid` — `std::process::id()` of the mac bin, for cross-checking.
+- `window_index=0` — reserved for future torn-out child windows;
+  always `0` today.
+
+The harness (`testing/workflows/run_case.sh`) greps this marker to
+skip the ~3s `cg-window-id.swift` poll. Mirrors the Windows path —
+**do not rename, reorder, or repurpose the keys** without bumping
+both run_case.sh and run_case.ps1 in the same commit.
