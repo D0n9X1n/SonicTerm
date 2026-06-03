@@ -111,7 +111,7 @@ fi
 if [[ "$OCR_AVAILABLE" -eq 0 ]]; then
   ALL_OCR=$(python3 - "$CASE_JSON" <<'PY'
 import json, sys
-OCR = {'text-in-region','ocr-text','not-text-in-region'}
+OCR = {'text-in-region','ocr-text','not-text-in-region','ocr_line_regex'}
 exp = json.load(open(sys.argv[1])).get('expect', [])
 print('yes' if exp and all(e.get('kind') in OCR for e in exp) else 'no')
 PY
@@ -538,7 +538,7 @@ import re as _re
 _CJK_RE = _re.compile(r'[぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿]')
 def has_cjk(s):
     return bool(_CJK_RE.search(s or ''))
-OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
+OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region', 'ocr_line_regex')
 # #597: visual expects need a screenshot. Non-visual expects (orphan-
 # shells-from-sonic, process-count, exit-code, log-contains, file-*,
 # process-*) run fine without one.
@@ -634,6 +634,24 @@ def ocr_contains(shot, value):
     except Exception as e:
         return False, f"err {e}"
 
+def ocr_line_regex(shot, marker, regex):
+    # #615/#616: returns (status, sample) where status in {True, False, None}.
+    # Runs eng-only OCR over the body-cropped shot, finds FIRST line that
+    # contains `marker`, and matches `regex` against it. PASS on match;
+    # FAIL with the offending line as evidence otherwise. None => SKIP.
+    if not ocr_available:
+        return None, "ocr_unavailable"
+    try:
+        out = subprocess.run(['tesseract', shot, '-', '-l', 'eng', '--psm', '6'],
+                             capture_output=True, text=True, timeout=20)
+        pat = _re.compile(regex)
+        for ln in out.stdout.splitlines():
+            if marker in ln:
+                return bool(pat.search(ln)), f"line={ln!r} regex={regex!r}"
+        return False, f"marker {marker!r} not found in OCR; head={out.stdout[:200]!r}"
+    except Exception as e:
+        return False, f"err {e}"
+
 # Issue #607: path-scoped pgrep + baseline subtraction.
 # Path-unscoped `pgrep -f sonicterm-mac` matches the user's dev/debug
 # build, IDE windows containing the string, etc. Scope to the release
@@ -690,6 +708,11 @@ for idx, e in enumerate(expectations):
             continue
         ok = not contains
         reason = f"absent={ok} sample='{sample}'"
+    elif kind == 'ocr_line_regex':
+        ok, reason = ocr_line_regex(OCR_SHOT, e['marker'], e['regex'])
+        if ok is None:
+            results.append(('SKIP', kind, f"{reason} case={c.get('id')} expect[{idx}]={kind}"))
+            continue
     elif kind == 'process-count':
         n = proc_count(e['program'])
         if 'value' in e:
