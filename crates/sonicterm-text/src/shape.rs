@@ -237,9 +237,119 @@ pub fn shape_run(
         }
     }
 
+    // ── Post-pass: collapse placeholder-visible groups (issue #585) ──
+    //
+    // For some `calt` ligatures (e.g. JetBrains Mono `<=`, `===`)
+    // cosmic-text returns N glyphs per source cluster: the LAST is the
+    // visible substituted glyph, the preceding ones are placeholders.
+    // If we emit one ShapedGlyph per raw entry the renderer paints the
+    // ligature N times, each at width=1 cell -- so `<=` shows up as two
+    // stacked glyphs in cells 0 and 1 instead of one 2-cell ligature.
+    //
+    // Diagnosis chain on the issue:
+    //   - WezTerm study (Mike): `<=` cluster returns multiple glyphs
+    //     and the renderer must group them into one 2-cell ligature.
+    //   - Haiku Step-1: identified the placeholder pattern.
+    //   - Opus Step-2 APPROVED-DIAG: spelled out the 2-condition gate.
+    //
+    // Detection gate (per Opus Step-2, conservative on purpose so CJK
+    // and ZWJ paths are untouched):
+    //   (a) GSUB-substituted: `charmap(ch) != shaped_glyph_id` on the
+    //       slot cosmic-text picked (same probe rule 2 below uses for
+    //       the #563 fix).
+    //   (b) Source char is in the ligature-trigger set (`=`, `!`, `<`,
+    //       `>`, `-`, `:`, `|`, `&`). Tighter than `is_ligature_trigger`
+    //       (no `_` or `*`) to keep underscore-heavy idents safe.
+    //
+    // Grouping rule: consecutive raw glyphs that all pass (a) and (b)
+    // collapse into ONE ShapedGlyph using the LAST raw glyph's
+    // `glyph_id`/`font_slot` (the visible substituted form). `lead_col`
+    // = first source cell of the group; `cluster_cells` = distinct
+    // source cells the group spans. Singletons (size 1) flow through
+    // the existing per-glyph 3-rule gate unchanged.
+    fn is_group_trigger(ch: char) -> bool {
+        matches!(ch, '=' | '!' | '<' | '>' | '-' | ':' | '|' | '&')
+    }
+
+    // Per-raw-glyph metadata snapshot. Pre-computed so the grouping
+    // loop doesn't re-borrow the rasterizer per pair.
+    struct GlyphMeta {
+        slot: Option<u8>,
+        ch_first: char,
+        is_gsub_sub: bool,
+        is_trigger: bool,
+    }
+    let mut meta: Vec<GlyphMeta> = Vec::with_capacity(raw.len());
+    for g in &raw {
+        let end = g.end.min(byte_to_col.len());
+        let ch_first =
+            if g.start < end { text[g.start..end].chars().next().unwrap_or(' ') } else { ' ' };
+        let slot = rasterizer.slot_for_font_id(g.font_id, style.bold, style.italic);
+        let is_gsub_sub = match slot {
+            Some(s) => {
+                let charmap_id = rasterizer
+                    .charmap_glyph_for_slot(s, ch_first, style.bold, style.italic)
+                    .unwrap_or(0);
+                charmap_id != g.glyph_id
+            }
+            None => false,
+        };
+        let is_trigger = is_group_trigger(ch_first);
+        meta.push(GlyphMeta { slot, ch_first, is_gsub_sub, is_trigger });
+    }
+
     let mut out: Vec<ShapedGlyph> = Vec::new();
     let last_col = cells.last().map(|(c, _)| *c).unwrap_or(0);
-    for g in raw {
+    let mut i = 0;
+    while i < raw.len() {
+        // Candidate group iff this glyph itself passes (a) and (b).
+        let mut j = i;
+        if meta[i].is_gsub_sub && meta[i].is_trigger {
+            while j + 1 < raw.len() && meta[j + 1].is_gsub_sub && meta[j + 1].is_trigger {
+                j += 1;
+            }
+        }
+
+        if j > i {
+            // ── Multi-glyph group → emit as a single composed glyph ──
+            // cosmic-text may give each glyph in the group the SAME
+            // (start,end) byte cluster or distinct consecutive ones;
+            // compute the source span as [min(starts), max(ends)).
+            let first_start = raw[i..=j].iter().map(|r| r.start).min().unwrap_or(raw[i].start);
+            let last_end_raw = raw[i..=j].iter().map(|r| r.end).max().unwrap_or(raw[j].end);
+            let last_end = last_end_raw.min(byte_to_col.len());
+            let lead_col =
+                if first_start < byte_to_col.len() { byte_to_col[first_start] } else { last_col };
+            let mut cluster_cells: u16 = 0;
+            if first_start < last_end {
+                let mut last_seen: Option<u16> = None;
+                for c in &byte_to_col[first_start..last_end] {
+                    if Some(*c) != last_seen {
+                        cluster_cells += 1;
+                        last_seen = Some(*c);
+                    }
+                }
+            }
+            if cluster_cells == 0 {
+                cluster_cells = 1;
+            }
+            let ch_first = meta[i].ch_first;
+            // meta[j].slot is Some(_) by construction (is_gsub_sub true
+            // requires a resolved slot).
+            let slot = meta[j].slot.unwrap_or(0);
+            out.push(ShapedGlyph {
+                lead_col,
+                ch: ch_first,
+                font_slot: slot,
+                glyph_id: raw[j].glyph_id,
+                cluster_cells,
+            });
+            i = j + 1;
+            continue;
+        }
+
+        // ── Singleton path — original 3-rule gate (#563) ──
+        let g = &raw[i];
         let lead_col = if g.start < byte_to_col.len() { byte_to_col[g.start] } else { last_col };
         let mut cluster_cells: u16 = 0;
         let end = g.end.min(byte_to_col.len());
@@ -255,92 +365,26 @@ pub fn shape_run(
         if cluster_cells == 0 {
             cluster_cells = 1;
         }
-        let ch_first = text[g.start..end].chars().next().unwrap_or('\0');
-        // Resolve the cosmic-text-chosen font back to a slot in our
-        // fallback chain. See the 3-rule gate below for the full
-        // rationale. Historical context preserved here because the two
-        // CJK failure modes drove the original zero-out:
-        //
-        //   1. `slot_for_font_id` returns None — cosmic-text shaped
-        //      through an OS-resolved font that isn't in our
-        //      PLATFORM_FALLBACK chain. Previously `unwrap_or(0)`
-        //      pinned the shaped id to slot 0 (primary, e.g. Rec Mono
-        //      Casual). Rasterizing a CJK glyph_id with the primary
-        //      font produces an unrelated glyph at that index — bug:
-        //      '中' rendered as '臭'.
-        //
-        //   2. `slot_for_font_id` returns Some(N), but cosmic-text and
-        //      our `lookup_id(family[N], …)` resolve DIFFERENT files
-        //      that share the family name (PingFang SC ships several
-        //      variants; fontdb's `Name` query returns one variant,
-        //      cosmic-text's shaping may have used another). The two
-        //      files have different glyph orderings, so the shaped
-        //      `glyph_id` points to a different *Chinese* glyph in the
-        //      file we eventually rasterize through — bug: '中'
-        //      rendered as '恶'.
-        //
-        // Issue #563 added rule 2 below: programming-ligature `calt`
-        // substitutions can produce a single-cell cluster whose shaped
-        // id is a *real* GSUB substitution (e.g. fonts that emit a 1:1
-        // `=>` substitute rather than a multi-cell composed ligature).
-        // Blindly zeroing those defeats ligature rendering. The refined
-        // gate distinguishes "real substitution" from "charmap-trivial
-        // 1:1" by comparing the shaped id to the slot's own charmap
-        // glyph for `ch_first`.
-        // Refined 3-rule gate (issue #563):
-        //
-        //   1. `cluster_cells > 1` → preserve shaped id (ligatures,
-        //      ZWJ — composed visual is unreachable any other way).
-        //   2. `slot_for_font_id == Some(s)` AND the charmap glyph for
-        //      `ch_first` on that same physical file DIFFERS from the
-        //      shaped `glyph_id` → preserve shaped id. This is a real
-        //      GSUB substitution on a 1-cell cluster (e.g. `calt` 1:1
-        //      ligatures like the `=>` digraph in fonts that emit a
-        //      single substituted glyph rather than a composed multi-
-        //      cluster ligature). The slot returned by
-        //      `slot_for_font_id` already encodes the "same physical
-        //      file" check — cosmic-text shaped through the exact
-        //      fontdb id our `lookup_id(family[s])` resolves to, so
-        //      the shaped id is rasterizable through the slot we'll
-        //      hand the renderer. Without this rule the substitution
-        //      was zeroed out and the renderer fell back to the
-        //      charmap glyph, defeating `calt` (#563).
-        //   3. Otherwise → zero the glyph id and let the renderer take
-        //      the char-based fallback path (`resolve_slot` +
-        //      `charmap().map(ch)` against the actually-loaded font).
-        //      This covers two CJK-safety modes the prior code
-        //      protected against:
-        //        a. `slot_for_font_id` returned None — cosmic-text
-        //           shaped through an OS-resolved font outside our
-        //           PLATFORM_FALLBACK chain; trusting that id against
-        //           slot 0 produced '中' → '臭'.
-        //        b. The same-file slot exists but cosmic-text and the
-        //           rasterizer disagree on which PingFang variant to
-        //           use (rule 2 fires only when charmap returns a
-        //           different id — for plain CJK where charmap returns
-        //           THE SAME id as cosmic-text shaped, rule 2 does NOT
-        //           preserve, so we still fall through to zero and the
-        //           renderer charmaps against its own file: '中' → '恶'
-        //           is prevented).
-        let (slot, glyph_id) =
-            match rasterizer.slot_for_font_id(g.font_id, style.bold, style.italic) {
-                Some(s) if cluster_cells > 1 => (s, g.glyph_id),
-                Some(s) => {
-                    let charmap_id = rasterizer
-                        .charmap_glyph_for_slot(s, ch_first, style.bold, style.italic)
-                        .unwrap_or(0);
-                    if charmap_id != g.glyph_id {
-                        // Real GSUB substitution (`calt` 1:1) — preserve.
-                        (s, g.glyph_id)
-                    } else {
-                        // Trivial 1:1; zero so renderer charmaps itself
-                        // (CJK family-variant safety, see (3b) above).
-                        (s, 0)
-                    }
+        let ch_first = meta[i].ch_first;
+        // Reuse meta[i] (slot + charmap-disagreement) to avoid a second
+        // rasterizer lookup per glyph. See the historical block above
+        // (kept intact) for the full rationale on each rule.
+        let (slot, glyph_id) = match meta[i].slot {
+            Some(s) if cluster_cells > 1 => (s, g.glyph_id),
+            Some(s) => {
+                if meta[i].is_gsub_sub {
+                    // Real GSUB substitution (`calt` 1:1) -- preserve.
+                    (s, g.glyph_id)
+                } else {
+                    // Trivial 1:1; zero so renderer charmaps itself
+                    // (CJK family-variant safety, see (3b) above).
+                    (s, 0)
                 }
-                None => (0, 0),
-            };
+            }
+            None => (0, 0),
+        };
         out.push(ShapedGlyph { lead_col, ch: ch_first, font_slot: slot, glyph_id, cluster_cells });
+        i += 1;
     }
     out
 }

@@ -508,3 +508,118 @@ fn cjk_scripts_still_safe_under_refined_gate() {
         }
     }
 }
+
+// ── Issue #585: calt 1:1 ligature placeholder grouping ───────────────
+//
+// cosmic-text emits N glyphs per source cluster for some `calt`
+// ligatures (e.g. JetBrains Mono / Rec Mono `<=` -> 2, `===` -> 3): the
+// last is the visible substituted glyph; the preceding ones are
+// placeholders that carry the SAME shaped `glyph_id`. The post-pass in
+// `shape_run` collapses these into a single ShapedGlyph spanning the
+// full source cluster so the renderer draws the ligature ONCE.
+
+fn visible_glyphs(
+    out: &[sonicterm_text::shape::ShapedGlyph],
+) -> Vec<sonicterm_text::shape::ShapedGlyph> {
+    out.iter().copied().filter(|g| g.glyph_id != 0).collect()
+}
+
+fn assert_ligature_groups_to_one(probe: &str, expect_cells: u16) {
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+    let cells = cells_for(probe);
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        DEFAULT_RASTER_PX,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
+    assert!(!out.is_empty(), "shape_run must emit >=1 glyph for {probe:?}");
+    let vis = visible_glyphs(&out);
+    if vis.is_empty() {
+        assert_eq!(
+            out[0].lead_col, 0,
+            "{probe:?}: first glyph must lead at col 0 even without calt"
+        );
+        eprintln!("note: {probe:?} produced no visible substituted glyph (font lacks calt) - skipping grouping assertion");
+        return;
+    }
+    assert_eq!(
+        vis.len(),
+        1,
+        "{probe:?} must group placeholder+visible into 1 ShapedGlyph; got {} visible: {:?}",
+        vis.len(),
+        vis,
+    );
+    let g = vis[0];
+    assert_eq!(g.lead_col, 0, "{probe:?}: composed glyph must lead at col 0");
+    assert_eq!(
+        g.cluster_cells, expect_cells,
+        "{probe:?}: composed glyph must span {expect_cells} source cells; got {}",
+        g.cluster_cells,
+    );
+}
+
+#[test]
+fn calt_le_groups_to_single_two_cell_glyph() {
+    assert_ligature_groups_to_one("<=", 2);
+}
+
+#[test]
+fn calt_fat_arrow_groups_to_single_two_cell_glyph() {
+    assert_ligature_groups_to_one("=>", 2);
+}
+
+#[test]
+fn calt_not_equal_groups_to_single_two_cell_glyph() {
+    assert_ligature_groups_to_one("!=", 2);
+}
+
+#[test]
+fn calt_triple_equal_groups_to_single_three_cell_glyph() {
+    assert_ligature_groups_to_one("===", 3);
+}
+
+#[test]
+fn cjk_pair_unchanged_by_grouping_post_pass() {
+    // Negative-control: CJK chars are not in the group trigger set, so
+    // the post-pass MUST NOT collapse them. Result: 2 ShapedGlyph
+    // entries, one per source cell (cluster_cells == 1 each).
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+    let cells = cells_for("\u{4e2d}\u{6587}");
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        DEFAULT_RASTER_PX,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
+    assert!(!out.is_empty(), "shaper must emit glyphs for CJK pair");
+    for g in &out {
+        assert_eq!(
+            g.cluster_cells, 1,
+            "CJK char {:?} must NOT be grouped by the post-pass (cluster_cells must stay 1)",
+            g.ch,
+        );
+    }
+}
+
+#[test]
+fn singleton_gsub_not_grouped() {
+    // A single `=` on its own MUST NOT be grouped (group size 1 -> no-op).
+    let mut fs = font_system();
+    let mut r = SwashRasterizer::new(&mut fs, "Rec Mono St.Helens", DEFAULT_RASTER_PX);
+    let cells = cells_for("=");
+    let out = shape_run(
+        &mut r,
+        "Rec Mono St.Helens",
+        DEFAULT_RASTER_PX,
+        RunStyle { bold: false, italic: false },
+        &cells,
+    );
+    assert_eq!(out.len(), 1, "single `=` must shape to exactly 1 ShapedGlyph");
+    assert_eq!(out[0].lead_col, 0);
+    assert_eq!(out[0].cluster_cells, 1);
+}
