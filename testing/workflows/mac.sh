@@ -33,6 +33,16 @@ if ! python3 -c "from PIL import Image" 2>/dev/null; then
   exit 2
 fi
 
+# Issue #593 — tesseract CJK language pack preflight. Exported so run_case.sh
+# can SKIP (not FAIL) CJK ocr_contains expects when the pack is missing.
+# Install with: brew install tesseract-lang
+if tesseract --list-langs 2>&1 | grep -Eq '^(chi_sim|chi_tra|jpn|kor)$'; then
+  export SONICTERM_HARNESS_CJK_AVAILABLE=1
+else
+  export SONICTERM_HARNESS_CJK_AVAILABLE=0
+  echo "[preflight] tesseract CJK pack missing — CJK ocr_contains cases will SKIP. Install: brew install tesseract-lang" >&2
+fi
+
 # ------------------------------------------------------------------
 # Guard 1 — pre-flight: refuse to start if a competing terminal is
 # running. macOS UI keystrokes go to whatever app is frontmost at the

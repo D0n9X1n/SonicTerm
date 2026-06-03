@@ -171,3 +171,15 @@ bash testing/workflows/test-ocr-skip.sh
 
 Code-touching PRs MUST also run the per-crate `## Test gate (local)`
 block from each touched crate's `CLAUDE.md`.
+
+---
+
+## Visual harness — OCR language packs (issue #593)
+
+CJK ocr expects (e.g. `中文`, `中X`) need the tesseract CJK pack —
+without it OCR returns Latin garbage and cases FAIL instead of SKIP.
+Install: `brew install tesseract-lang` (macOS). `mac.sh` preflights
+`tesseract --list-langs` and exports
+`SONICTERM_HARNESS_CJK_AVAILABLE={0,1}`. `run_case.sh` SKIPs CJK
+ocr_contains expects when 0 (mirrors PR #530 OCR_AVAILABLE pattern),
+and passes `-l chi_sim+chi_tra+jpn+kor+eng` to tesseract when 1.
