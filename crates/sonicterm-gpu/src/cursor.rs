@@ -234,15 +234,9 @@ mod tests {
         // Overlapping rects intersect.
         assert!(aabb_intersects((0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 10.0, 10.0)));
         // Disjoint rects don't intersect.
-        assert!(!aabb_intersects(
-            (0.0, 0.0, 10.0, 10.0),
-            (20.0, 0.0, 10.0, 10.0)
-        ));
+        assert!(!aabb_intersects((0.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)));
         // Touching edges (zero-area overlap) don't count.
-        assert!(!aabb_intersects(
-            (0.0, 0.0, 10.0, 10.0),
-            (10.0, 0.0, 10.0, 10.0)
-        ));
+        assert!(!aabb_intersects((0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0)));
         // Contained rect intersects.
         assert!(aabb_intersects((0.0, 0.0, 10.0, 10.0), (2.0, 2.0, 4.0, 4.0)));
     }

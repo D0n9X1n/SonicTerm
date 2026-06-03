@@ -369,14 +369,7 @@ fn recolor_single_cell_glyph_in_cursor_cell() {
     let cell_x = 50.0;
     let cell_y = 30.0;
     // Glyph entirely inside the cursor cell.
-    let mut glyphs = vec![glyph_at(
-        cell_x + 1.0,
-        cell_y + 2.0,
-        cell_w - 2.0,
-        cell_h - 4.0,
-        sw,
-        sh,
-    )];
+    let mut glyphs = vec![glyph_at(cell_x + 1.0, cell_y + 2.0, cell_w - 2.0, cell_h - 4.0, sw, sh)];
 
     let bg = [0.0, 0.1, 0.2, 0.9];
     recolor_cursor_glyphs(&mut glyphs, cell_x, cell_y, cell_w, cell_h, sw, sh, bg);
@@ -396,14 +389,8 @@ fn no_recolor_single_cell_glyph_in_adjacent_cell() {
     let cell_y = 30.0;
     let neighbour_x = cell_x + cell_w;
     // Glyph entirely inside the NEIGHBOUR cell, fully outside the cursor cell.
-    let mut glyphs = vec![glyph_at(
-        neighbour_x + 1.0,
-        cell_y + 2.0,
-        cell_w - 2.0,
-        cell_h - 4.0,
-        sw,
-        sh,
-    )];
+    let mut glyphs =
+        vec![glyph_at(neighbour_x + 1.0, cell_y + 2.0, cell_w - 2.0, cell_h - 4.0, sw, sh)];
 
     let bg = [0.0, 0.1, 0.2, 0.9];
     let original = glyphs[0].color;

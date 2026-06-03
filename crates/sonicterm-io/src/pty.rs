@@ -116,9 +116,12 @@ impl Drop for PtyHandle {
         //
         // Fix: always kill — send SIGKILL directly via `libc::kill` first,
         // then call portable-pty's `kill()` (covers any pid-namespace edge
-        // cases and the Windows `TerminateProcess` path), then
-        // unconditionally `wait()` to reap the zombie.
+        // cases and the Windows `TerminateProcess` path), then reap with
+        // a bounded `try_wait` poll so a stuck child can never hang the
+        // app on tab close.
         let mut child = self.child.lock();
+        #[cfg(unix)]
+        let pid_for_log = child.process_id();
         #[cfg(unix)]
         if let Some(pid) = child.process_id() {
             // SAFETY: libc::kill is FFI; pid comes from portable-pty's
@@ -127,8 +130,39 @@ impl Drop for PtyHandle {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
+        // portable-pty escalation as defense in depth (Windows
+        // TerminateProcess, Unix pid-namespace edge cases).
         let _ = child.kill();
-        let _ = child.wait();
+        // Bounded reap. After SIGKILL the kernel typically delivers the
+        // exit status in well under 10ms; the 500ms budget is huge
+        // headroom for pathological scheduling. We must never block the
+        // app indefinitely on tab close: if the child somehow doesn't
+        // reap (kernel bug, exotic process-group state) we log and move
+        // on rather than hang Drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    #[cfg(unix)]
+                    {
+                        tracing::warn!(
+                            pid = pid_for_log,
+                            "PtyHandle::Drop: child did not exit within 500ms after SIGKILL"
+                        );
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tracing::warn!(
+                            "PtyHandle::Drop: child did not exit within 500ms after kill"
+                        );
+                    }
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
     }
 }
 
