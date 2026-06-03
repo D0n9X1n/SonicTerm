@@ -538,7 +538,7 @@ import re as _re
 _CJK_RE = _re.compile(r'[぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿]')
 def has_cjk(s):
     return bool(_CJK_RE.search(s or ''))
-OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
+OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region', 'ocr-line-regex')
 # #597: visual expects need a screenshot. Non-visual expects (orphan-
 # shells-from-sonic, process-count, exit-code, log-contains, file-*,
 # process-*) run fine without one.
@@ -634,6 +634,35 @@ def ocr_contains(shot, value):
     except Exception as e:
         return False, f"err {e}"
 
+def ocr_line_regex(shot, marker, regex):
+    # Issue #611 / #610: assert OCR'd output line bracketed by sentinel
+    # markers matches a regex. Used to detect width regressions in PUA /
+    # Powerline glyphs where the rendered cell-count collapses but the
+    # codepoint round-trips through OCR. Returns (status, sample):
+    #   True  -> regex matched the line containing both sentinels
+    #   False -> sentinel line found but regex did not match (real FAIL,
+    #            usually a width regression: pipes collapse together)
+    #   None  -> OCR unavailable OR sentinel line not found (SKIP — the
+    #            harness could not isolate the asserted line, so the
+    #            verdict is not trustworthy either way).
+    if not ocr_available:
+        return None, "ocr_unavailable"
+    try:
+        out = subprocess.run(['tesseract', shot, '-', '-l', 'eng', '--psm', '6'],
+                             capture_output=True, text=True, timeout=20)
+        mre = _re.compile(marker)
+        # Take the LAST match: when shell echo of the typed printf is also
+        # visible, it precedes the rendered output. The asserted line is the
+        # rendered output, which is always last (no further command after it).
+        matches = [ln for ln in out.stdout.splitlines() if mre.search(ln)]
+        line = matches[-1] if matches else None
+        if line is None:
+            return None, f"marker_not_found marker='{marker}' ocr='{out.stdout[:200].replace(chr(10),' / ')}'"
+        ok = _re.search(regex, line) is not None
+        return ok, f"line='{line[:160]}' regex='{regex}'"
+    except Exception as e:
+        return False, f"err {e}"
+
 # Issue #607: path-scoped pgrep + baseline subtraction.
 # Path-unscoped `pgrep -f sonicterm-mac` matches the user's dev/debug
 # build, IDE windows containing the string, etc. Scope to the release
@@ -680,6 +709,11 @@ for idx, e in enumerate(expectations):
         ok, reason = dhash_match(shot, e['reference'], int(e.get('tolerance', 8)))
     elif kind in ('text-in-region', 'ocr-text'):
         ok, reason = ocr_contains(OCR_SHOT, e['value'])
+        if ok is None:
+            results.append(('SKIP', kind, f"{reason} case={c.get('id')} expect[{idx}]={kind}"))
+            continue
+    elif kind == 'ocr-line-regex':
+        ok, reason = ocr_line_regex(OCR_SHOT, e['marker'], e['regex'])
         if ok is None:
             results.append(('SKIP', kind, f"{reason} case={c.get('id')} expect[{idx}]={kind}"))
             continue
