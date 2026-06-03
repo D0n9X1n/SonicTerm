@@ -149,7 +149,7 @@ impl RunStyle {
 /// end index `j` for the group starting at `i`. `j == i` means "no
 /// group, fall through to the singleton path".
 ///
-/// Three independent guards, all required to extend:
+/// Guards, all enforced:
 ///   1. `is_trigger[k]` -- cheap, ordering-independent prefilter (avoids
 ///      touching CJK / alphanumeric runs).
 ///   2. **Shaper cluster boundary** (`starts[k+1] < ends[k]`): the next
@@ -157,25 +157,45 @@ impl RunStyle {
 ///      `next.start >= current.end` we are crossing into a different
 ///      shaper cluster -- e.g. `==<=` where `==` is one cluster and `<=`
 ///      is another -- and merging would over-collapse two independent
-///      ligatures into one (Haiku #594 Step-5 blocker).
-///   3. At least one member of the extended span has `is_gsub_sub[k]`
-///      true, so plain `==` on a calt-less font does NOT get falsely
-///      collapsed into a composed glyph.
+///      ligatures into one (Haiku #594 Step-5 blocker). KEPT INTACT
+///      from PR #602.
+///   3. Acceptance gate: one of
+///      (a) **#610 sym-2 advance-driven** -- when `cell_pitch > 0.0`
+///      and the *summed* `x_advance` across the candidate span
+///      rounds to `cluster_cells >= 2` cells, accept. This catches
+///      `calt` *advance-only* ligatures (no GSUB substitution but
+///      the shaper widened the cluster's advance) which WezTerm
+///      handles via proportional `x_advance / cell_pitch`
+///      distribution (see `wezterm-font/src/shaper/harfbuzz.rs`).
+///      (b) **Legacy any-gsub-sub** -- some member has `is_gsub_sub[k]`
+///      true. Retained so placeholder-first JetBrains-Mono cases
+///      (where the visible glyph swaps GSUB-id but advance per
+///      glyph stays unit) still collapse. Without this fallback
+///      #602's `placeholder_first_two_cell_groups` regresses.
 ///
-/// Extracted to module scope so #594 / #587 tests can exercise the gate
-/// against synthetic placeholder-first and visible-last orderings without
-/// needing a JetBrains-Mono-style font in the bundle.
+/// `advances[k]` is the shaper-reported `x_advance` of raw glyph k in
+/// raster pixels; `cell_pitch` is the one-cell width in the same units.
+/// When `cell_pitch <= 0.0` the advance branch is disabled and the gate
+/// degenerates to the legacy any-gsub-sub behavior (matches callers
+/// that don't know the cell width, e.g. overlay text).
+///
+/// Extracted to module scope so #594 / #587 / #610 tests can exercise
+/// the gate against synthetic orderings without needing a
+/// JetBrains-Mono-style font in the bundle.
 pub(crate) fn extend_ligature_group(
     is_trigger: &[bool],
     is_gsub_sub: &[bool],
     starts: &[usize],
     ends: &[usize],
+    advances: &[f32],
+    cell_pitch: f32,
     i: usize,
 ) -> usize {
     let n = is_trigger.len();
     debug_assert_eq!(n, is_gsub_sub.len());
     debug_assert_eq!(n, starts.len());
     debug_assert_eq!(n, ends.len());
+    debug_assert_eq!(n, advances.len());
     if i >= n || !is_trigger[i] {
         return i;
     }
@@ -183,11 +203,24 @@ pub(crate) fn extend_ligature_group(
     // Extend across consecutive trigger glyphs that ALSO live in the
     // same shaper cluster (overlapping source byte ranges). The moment
     // `next.start >= current.end` we are at a cluster boundary and must
-    // stop -- otherwise two adjacent trigger clusters would merge.
+    // stop -- otherwise two adjacent trigger clusters would merge. This
+    // is PR #602's load-bearing safety net; do not relax.
     while j + 1 < n && is_trigger[j + 1] && starts[j + 1] < ends[j] {
         j += 1;
     }
-    if !(i..=j).any(|k| is_gsub_sub[k]) {
+    // #610 sym-2: proportional x_advance gate. Sum the candidate span's
+    // advances and divide by cell_pitch (rounded) to get cluster_cells.
+    // `>= 2` accepts advance-only `calt` ligatures the prior gate
+    // dropped. Disabled when cell_pitch is non-positive.
+    let advance_widens = if cell_pitch > 0.0 {
+        let sum: f32 = advances[i..=j].iter().copied().sum();
+        let cluster_cells = (sum / cell_pitch).round() as i32;
+        cluster_cells >= 2
+    } else {
+        false
+    };
+    let any_sub = (i..=j).any(|k| is_gsub_sub[k]);
+    if !(advance_widens || any_sub) {
         return i;
     }
     j
@@ -209,6 +242,14 @@ mod gate_tests {
         (vec![0; n], vec![n; n])
     }
 
+    // Pre-#610 tests passed `cell_pitch = 0.0` (advance branch disabled)
+    // so the legacy any-gsub-sub gate is what's under test below. Each
+    // glyph's advance is set to 1.0 cell as a benign default that doesn't
+    // matter when the branch is disabled.
+    fn unit_advances(n: usize) -> Vec<f32> {
+        vec![1.0; n]
+    }
+
     // Visible-last (Rec Mono St.Helens style): lead is itself gsub_sub.
     // The original #587 gate (lead must be gsub_sub) and the broadened
     // #594 gate must BOTH accept this pattern -- 2-cell `<=` collapses.
@@ -217,7 +258,8 @@ mod gate_tests {
         let trig = vec![true, true];
         let sub = vec![true, true];
         let (s, e) = same_cluster_starts_ends(2);
-        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 1);
+        let adv = unit_advances(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 0.0, 0), 1);
     }
 
     // Placeholder-first (JetBrains Mono / Rec Mono Casual style): lead
@@ -230,7 +272,8 @@ mod gate_tests {
         let trig = vec![true, true];
         let sub = vec![false, true];
         let (s, e) = same_cluster_starts_ends(2);
-        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 1);
+        let adv = unit_advances(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 0.0, 0), 1);
     }
 
     // Mid-cluster placeholder (e.g. `===` where only the middle is
@@ -240,7 +283,8 @@ mod gate_tests {
         let trig = vec![true, true, true];
         let sub = vec![false, true, false];
         let (s, e) = same_cluster_starts_ends(3);
-        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 2);
+        let adv = unit_advances(3);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 0.0, 0), 2);
     }
 
     // Plain `==` on a font WITHOUT calt for `==`: both triggers, NEITHER
@@ -251,7 +295,12 @@ mod gate_tests {
         let trig = vec![true, true];
         let sub = vec![false, false];
         let (s, e) = same_cluster_starts_ends(2);
-        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 0);
+        // Each glyph's advance is exactly one cell -- summed advance is
+        // 2 cells, which would naively trigger the #610 sym-2 widen
+        // branch. But cell_pitch=0.0 disables that branch, leaving the
+        // any-gsub-sub gate to (correctly) reject.
+        let adv = unit_advances(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 0.0, 0), 0);
     }
 
     // Singleton trigger: cluster of size 1 should never trigger the
@@ -259,8 +308,9 @@ mod gate_tests {
     #[test]
     fn singleton_trigger_never_groups() {
         let (s, e) = same_cluster_starts_ends(1);
-        assert_eq!(extend_ligature_group(&[true], &[true], &s, &e, 0), 0);
-        assert_eq!(extend_ligature_group(&[true], &[false], &s, &e, 0), 0);
+        let adv = unit_advances(1);
+        assert_eq!(extend_ligature_group(&[true], &[true], &s, &e, &adv, 0.0, 0), 0);
+        assert_eq!(extend_ligature_group(&[true], &[false], &s, &e, &adv, 0.0, 0), 0);
     }
 
     // Non-trigger lead: never enters the group path. Protects CJK and
@@ -270,7 +320,8 @@ mod gate_tests {
         let trig = vec![false, true, true];
         let sub = vec![false, true, true];
         let (s, e) = same_cluster_starts_ends(3);
-        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 0);
+        let adv = unit_advances(3);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 0.0, 0), 0);
     }
 
     // #594 Step-5 negative regression: TWO adjacent trigger clusters
@@ -280,6 +331,15 @@ mod gate_tests {
     // whole trigger run and collapse `==<=` into a single composed
     // glyph, eating the literal `==`. With the guard, group 0 must
     // fall through to singletons (i == 0 returned).
+    //
+    // #610 sym-2 must NOT regress this: with cell_pitch=10.0 and unit
+    // advances of 10.0 each, the boundary guard still stops the walk
+    // *before* the advance branch is evaluated -- the candidate span is
+    // [0..=1] (2 cells of advance), so the advance gate would *want*
+    // to accept, but there's no GSUB and the cluster spans only 2 unit
+    // advances. The crucial property is that the boundary guard keeps
+    // cluster B out of the span entirely; without it the sum would be
+    // 4 cells and merge `==<=` as one ligature.
     #[test]
     fn adjacent_clusters_only_one_substituted_does_not_merge() {
         //   idx:           0     1     2     3
@@ -293,14 +353,22 @@ mod gate_tests {
         // and false at the boundary (2 < 2 is false), so the walk stops.
         let starts = vec![0, 0, 2, 2];
         let ends = vec![2, 2, 4, 4];
+        // Each `=`/`<` in the literal cluster has unit advance; the
+        // ligated cluster has the visible glyph wide (advance 2 cells)
+        // and placeholders narrow. cell_pitch=10.0.
+        let adv = vec![10.0, 10.0, 0.0, 20.0];
 
-        // From i=0 (start of cluster A): no gsub in [0..=1], must NOT
-        // extend into cluster B. Result == i, fall through.
-        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 0), 0);
+        // From i=0 (start of cluster A): no gsub in [0..=1], and the
+        // summed advance (20.0) is exactly 2 cells -- but the gate is
+        // designed so the boundary guard keeps cluster B out, and
+        // *within* cluster A both gates (sub + advance) need to reject
+        // to fall through. cell_pitch=0.0 here disables the advance
+        // branch so the legacy gsub-only gate decides.
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, &adv, 0.0, 0), 0);
 
         // From i=2 (start of cluster B): gsub present on raw[3], extend
         // within B, stop at end of input. Result == 3.
-        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 2), 3);
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, &adv, 0.0, 2), 3);
     }
 
     // Mirror of the above with cluster A substituted, cluster B literal.
@@ -313,9 +381,65 @@ mod gate_tests {
         let sub = vec![false, true, false, false];
         let starts = vec![0, 0, 2, 2];
         let ends = vec![2, 2, 4, 4];
+        let adv = unit_advances(4);
 
-        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 0), 1);
-        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 2), 2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, &adv, 0.0, 0), 1);
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, &adv, 0.0, 2), 2);
+    }
+
+    // ──────── #610 sym-2: x_advance-driven ligature widening ────────
+    //
+    // The pre-#610 gate gated widening on `is_gsub_sub` only. That misses
+    // `calt` advance-only ligatures: the shaper emits multiple glyphs in
+    // one cluster, none of which compare un-equal to the charmap id, but
+    // the visible glyph's `x_advance` is ~ 2 × cell_pitch (the others
+    // collapse to zero advance). WezTerm derives `cluster_cells` from
+    // `round(x_advance / cell_pitch)` so these widen correctly; we now
+    // do the same as an OR-side of the gate.
+
+    // calt advance-only `=>` pair, no gsub-sub on any member, but the
+    // summed cluster advance is exactly 2 × cell_pitch. The pre-#610
+    // gate returned `i` (no merge); the #610 gate must merge to j=1
+    // so the renderer paints the ligature 2 cells wide.
+    #[test]
+    fn calt_advance_only_ligature_widens() {
+        let trig = vec![true, true];
+        let sub = vec![false, false];
+        let (s, e) = same_cluster_starts_ends(2);
+        // cell_pitch = 10.0 px; advances [12.0, 8.0] sum to 20.0 →
+        // round(20.0 / 10.0) = 2 cells. Modeled after the typical
+        // `calt` advance redistribution where the visible glyph gets
+        // most of the cluster's advance and trailing zero-width
+        // placeholders carry the remainder.
+        let adv = vec![12.0, 8.0];
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 10.0, 0), 1);
+    }
+
+    // Same idea for a 3-cell `===` ligature whose summed advance rounds
+    // to 3 cells. Verifies the advance branch is summed (not per-glyph
+    // max) and the walk continues to the third trigger.
+    #[test]
+    fn calt_advance_only_ligature_3_cells() {
+        let trig = vec![true, true, true];
+        let sub = vec![false, false, false];
+        let (s, e) = same_cluster_starts_ends(3);
+        // cell_pitch = 10.0; advances sum to 30.0 → 3 cells.
+        let adv = vec![15.0, 7.5, 7.5];
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 10.0, 0), 2);
+    }
+
+    // Narrow non-ligature pair: total advance just under 1.5 cells
+    // rounds to 1 cell. The advance branch must decline (and there's
+    // no gsub-sub fallback). Falls through to singletons. Guards
+    // against over-eager rounding (e.g. floor vs round).
+    #[test]
+    fn narrow_calt_no_widen() {
+        let trig = vec![true, true];
+        let sub = vec![false, false];
+        let (s, e) = same_cluster_starts_ends(2);
+        // cell_pitch = 10.0; sum = 14.0 → round(1.4) = 1 cell.
+        let adv = vec![10.0, 4.0];
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, &adv, 10.0, 0), 0);
     }
 }
 
@@ -598,13 +722,20 @@ pub fn shape_run_with_cell_w(
     let sub: Vec<bool> = meta.iter().map(|m| m.is_gsub_sub).collect();
     let starts: Vec<usize> = raw.iter().map(|r| r.start).collect();
     let ends: Vec<usize> = raw.iter().map(|r| r.end).collect();
+    // #610 sym-2: feed per-glyph x_advance + cell pitch into the gate so
+    // calt advance-only ligatures (no GSUB substitution but the shaper
+    // widened the cluster's summed advance to ~ N * cell_pitch) collapse
+    // to N cells. WezTerm uses the same proportional distribution; see
+    // `wezterm-font/src/shaper/harfbuzz.rs`.
+    let advances: Vec<f32> = raw.iter().map(|r| r.w).collect();
     let mut i = 0;
     while i < raw.len() {
         // See `extend_ligature_group` (module-level) for the rule and
         // the unit-test fixtures covering visible-last (Rec Mono
         // St.Helens), placeholder-first (JetBrains Mono / Rec Mono
-        // Casual), and the #594 adjacent-cluster negative case.
-        let j = extend_ligature_group(&trig, &sub, &starts, &ends, i);
+        // Casual), the #594 adjacent-cluster negative case, and the
+        // #610 sym-2 advance-driven widening cases.
+        let j = extend_ligature_group(&trig, &sub, &starts, &ends, &advances, cell_w_px, i);
 
         if j > i {
             // ── Multi-glyph group → emit as a single composed glyph ──
