@@ -18,6 +18,7 @@ pub mod box_drawing_geometry;
 pub mod glyph_atlas;
 pub mod metrics;
 pub mod prewarm;
+pub mod resample;
 pub mod row_glyph_cache;
 pub mod shape;
 pub mod swash_rasterizer;

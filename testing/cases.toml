@@ -1485,3 +1485,33 @@ expect = [
   { kind = "screenshot", region = "window" },
 ]
 fail_on = "Harness spawns sonicterm-windows and stalls on a UAC consent dialog instead of fast-failing with [FAIL unelevated_only] (#488)."
+
+# ==========================================================================
+# §39 Nerd-font icon crispness (covers #610 sym-1 — atlas resample)
+# ==========================================================================
+
+[[case]]
+id = "nerd-font-icon-sharp"
+section = 39
+title = "Nerd-font icons render crisp at 1x/1.5x/2x DPI (#610 PR-B sym-1 atlas resample)"
+applies_to = ["windows", "mac"]
+covers_bugs = ["#610"]
+covers_landmines = []
+setup = ["clear", "wait:0.3"]
+# A row of Powerline, Codicons, and MDI samples. Pre-fix these
+# render with visible step-edges/jaggies because the natural-size
+# bitmap is nearest-sampled across an over-stretched quad. Post-fix
+# the bitmap is physically resampled (Lanczos3/Mitchell) to the
+# cell box before atlas insert, so the existing Nearest sampler
+# delivers a crisp 1:1 mapping.
+keystrokes = [
+  { kind = "text", value = "printf '\ue0b0 \uea7a \uf3eb \uf0e7 \uf02e \uf488 \n'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  # dhash baseline captured post-fix; snapshot pending first-run capture
+  # under testing/results/nerd-font-vs-wezterm/nerd-icon-crispness-*.png.
+]
+fail_on = "Icons show staircase aliasing on edges — atlas tile still natural-size, Nearest sampler over-stretches it across the IconCellFit quad (#610 sym-1)."
