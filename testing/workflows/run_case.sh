@@ -536,11 +536,6 @@ for idx, e in enumerate(expectations):
         r = subprocess.run(cmd, shell=True, capture_output=True)
         ok = (r.returncode == e['value'])
         reason = f"cmd '{cmd}' rc={r.returncode}"
-    elif kind == 'no-orphan-shells':
-        # Best-effort: after sonicterm-mac is gone, no orphan zsh/bash with PPID=1 that were spawned by it.
-        r = subprocess.run(['pgrep', '-a', 'sonicterm-mac'], capture_output=True, text=True)
-        ok = (not r.stdout.strip())  # sonicterm-mac is gone -> children should be too
-        reason = f"sonicterm-mac live? '{r.stdout.strip()}'"
     elif kind == 'orphan-shells-from-sonic':
         # Real check: read the pre-Cmd+Q snapshot of sonicterm-mac's shell
         # descendants, then verify each is dead. Snapshot is produced by
