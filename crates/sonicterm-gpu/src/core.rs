@@ -5300,7 +5300,73 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+            // #610 sym-1 PR-D: IconCellFit glyphs (NerdFont PUA,
+            // geometric arrow icons) get routed through the
+            // physical-bitmap resampler PR-B added in
+            // `glyph_atlas::insert_resampled`. The pre-#610 path
+            // inserted the natural-size tile and let
+            // `apply_symbol_fit(IconCellFit)` stretch the QUAD; the
+            // GPU's Nearest sampler then over-stretched the small
+            // bitmap → step-edges and aliasing. By resampling the
+            // bitmap to the cell box (Lanczos3 down / Mitchell up)
+            // at insert time, the QUAD matches the tile 1:1 and the
+            // existing Nearest sampler stays correct (per Opus PR-B
+            // comment: keep Nearest, fix the bitmap upstream). Mirrors
+            // WezTerm's `window/src/bitmaps/mod.rs:380-394`.
+            //
+            // Non-IconCellFit glyphs (text, Powerline cell-fill, box
+            // drawing, block elements) keep the natural-size insert —
+            // they either match the cell box already (text), use
+            // geometry quads instead of bitmaps (box / block / many
+            // Powerline), or anchor cell-fill which is a quad scale
+            // not a bitmap stretch.
+            let lead_classify = sonicterm_text::swash_rasterizer::classify_symbol(lead_cell.ch);
+            let span_cells = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
+            let span_end_col = ((g.lead_col as usize) + span_cells).min(snapped_cell_x.len() - 1);
+            let cell_box_w_logical =
+                snapped_cell_x[span_end_col] - snapped_cell_x[g.lead_col as usize];
+            let Some(info) = (if matches!(
+                lead_classify,
+                sonicterm_text::swash_rasterizer::SymbolFit::IconCellFit
+            ) {
+                // Target box in PHYSICAL pixels — atlas tiles are
+                // stored at raster_px (font_size * scale_factor) so
+                // the resample target must also be physical. The
+                // `apply_symbol_fit(IconCellFit)` policy scales the
+                // QUAD to (cell_pixel_width_snapped, 0.95 * cell_h)
+                // logical px while preserving aspect ratio; we
+                // mirror those same dims (multiplied by scale_factor)
+                // for the bitmap so the QUAD:TILE ratio is 1:1.
+                let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
+                let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
+                let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
+                glyph_atlas.get_or_insert_resampled(key, rasterizer, |tile| {
+                    if tile.width == 0 || tile.height == 0 {
+                        return None;
+                    }
+                    // Preserve aspect ratio: scale to fit inside the
+                    // cell box, height-dominant for the typical
+                    // taller-than-wide NF icon. WezTerm's resize call
+                    // computes the same ratio (`size.height as f32 /
+                    // height_natural as f32`) before the resample.
+                    let aspect = tile.width as f32 / tile.height as f32;
+                    let h = target_h_phys;
+                    let w_from_h = ((h as f32) * aspect).round().max(1.0) as u32;
+                    // Clamp to the cell box width — over-wide icons
+                    // (rare but possible for ligatured NF clusters)
+                    // get height-rescaled back down so they fit.
+                    let (target_w, target_h) = if w_from_h > target_w_phys_box {
+                        let scaled_h =
+                            ((target_w_phys_box as f32) / aspect).round().max(1.0) as u32;
+                        (target_w_phys_box, scaled_h)
+                    } else {
+                        (w_from_h, h)
+                    };
+                    Some((target_w, target_h))
+                })
+            } else {
+                glyph_atlas.get_or_insert(key, rasterizer)
+            }) else {
                 continue;
             };
             if info.px_size[0] == 0 || info.px_size[1] == 0 {

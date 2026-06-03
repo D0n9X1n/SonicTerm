@@ -168,6 +168,17 @@ pub enum SymbolFit {
 /// Target fraction of cell height for `SymbolFit::IconCellFit`.
 const ICON_FIT_TARGET: f32 = 0.95;
 
+/// Public accessor for the IconCellFit target height in logical pixels
+/// for a given cell height. #610 sym-1 PR-D: `core.rs::flush_shape_run`
+/// uses this to mirror `apply_symbol_fit(IconCellFit)`'s height target
+/// when computing the physical resample dimensions, keeping the two in
+/// lockstep so the resampled bitmap matches the QUAD 1:1 at the cell.
+#[inline]
+#[must_use]
+pub fn icon_fit_target_h(cell_h: f32) -> f32 {
+    (ICON_FIT_TARGET * cell_h).max(0.0)
+}
+
 /// Classifies a character for the [`SymbolFit`] policy. Inline-cheap;
 /// called on the per-glyph emit hot path.
 ///
