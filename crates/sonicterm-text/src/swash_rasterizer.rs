@@ -236,60 +236,57 @@ pub fn apply_symbol_fit(
     cell_size: (f32, f32),
     fit: SymbolFit,
 ) -> (f32, f32, f32, f32) {
+    // V1 path: legacy single-cell behavior. Equivalent to V2 with
+    // `num_cells = 1` for backward compat.
+    apply_symbol_fit_v2(rect, cell_origin, cell_size, fit, 1)
+}
+
+/// Same as [`apply_symbol_fit`] but with explicit `num_cells` plumbing
+/// (#621 v0.9.2 sym-A/B fix). `num_cells` is the cluster's logical cell
+/// span (1 for narrow, 2 for wide / Powerline / NF icons that widen).
+///
+/// For `PowerlineCellFill`: returns rect spanning `num_cells * cell_w`
+/// horizontally (matches wezterm's `cell_width * (num_cells + 0.25)`
+/// headroom; we use the exact span, no over-extension).
+///
+/// For `IconCellFit`: scales using `num_cells * cell_w` as the width
+/// budget and the wezterm-style y-scale anchor (`ICON_FIT_TARGET * cell_h`).
+/// Centers within the multi-cell span.
+#[inline]
+pub fn apply_symbol_fit_v2(
+    rect: (f32, f32, f32, f32),
+    cell_origin: (f32, f32),
+    cell_size: (f32, f32),
+    fit: SymbolFit,
+    num_cells: u8,
+) -> (f32, f32, f32, f32) {
     let (cx, cy) = cell_origin;
     let (cell_w, cell_h) = cell_size;
+    let span_w = cell_w * num_cells.max(1) as f32;
     match fit {
         SymbolFit::Natural => rect,
-        SymbolFit::PowerlineCellFill => (cx, cy, cell_w, cell_h),
-        SymbolFit::BlockCellFill => {
-            // Block Elements (#461): delegate to per-codepoint sub-cell
-            // geometry. Callers that only need a single bounding rect
-            // (e.g. the existing 3 emit paths in flush_shape_run) get
-            // `primary_rect`; renderer-level handling of MultiRect /
-            // ShadedRect variants happens via direct calls to
-            // `crate::block_element_geometry::block_element_rect`.
-            //
-            // `apply_symbol_fit` is char-agnostic, so we fall back to
-            // the full cell rect — this keeps the single-rect contract
-            // intact while the renderer (which DOES have `ch`) can
-            // opt into the multi-rect path.
-            (cx, cy, cell_w, cell_h)
-        }
+        // #621 sym-A: Powerline glyph fills the full span (1 or 2 cells).
+        // wezterm allows up to `cell_width * (num_cells + 0.25)`; we use
+        // the conservative exact-span variant for crisp seams.
+        SymbolFit::PowerlineCellFill => (cx, cy, span_w, cell_h),
+        SymbolFit::BlockCellFill => (cx, cy, span_w, cell_h),
         SymbolFit::BoxDrawingCellFill => {
-            // Box Drawing (#537): stretch the glyph horizontally so its
-            // quad fills `cell_w` exactly, anchored to the cell's left
-            // edge. Preserve the natural vertical placement (the font's
-            // baseline + bearing already line up cell-center for these
-            // glyphs in well-designed monospace faces). For degenerate
-            // (zero-size) glyphs, fall back to the full cell rect so we
-            // emit a sensible placeholder.
             let (_, gy, _, gh) = rect;
             if gh <= 0.0 {
-                return (cx, cy, cell_w, cell_h);
+                return (cx, cy, span_w, cell_h);
             }
-            (cx, gy, cell_w, gh)
+            (cx, gy, span_w, gh)
         }
         SymbolFit::IconCellFit => {
             let (_, _, gw, gh) = rect;
-            // Degenerate glyph (zero-size) — fall back to centered cell.
             if gw <= 0.0 || gh <= 0.0 {
-                return (cx, cy, cell_w, cell_h);
+                return (cx, cy, span_w, cell_h);
             }
-            // #461 PR-B2b: previously preserved aspect ratio, which made
-            // square Nerd Font icons render at only ~55% cell height in
-            // terminals where cell_h > cell_w (most fonts). Nerd Font PUA
-            // icons are designed for terminal use and expect to FILL the
-            // cell vertically (matching WT's behavior with builtinGlyphs).
-            // New policy: scale to fit BOTH dimensions independently,
-            // capped by cell_w on width and cell_h on height (no aspect
-            // preservation). This matches Windows Terminal output for the
-            // user's NF icons (tomato, water droplet, MCP plug, etc.)
-            // captured in PR-B1 instrumentation at issue #461.
-            let target_w = cell_w;
+            // #621 sym-B: width budget = num_cells * cell_w (was always
+            // single cell_w pre-#621, which over-scaled wide icons).
+            let target_w = span_w;
             let target_h = (ICON_FIT_TARGET * cell_h).max(0.0);
-            // Center within the cell (target_h is < cell_h so leaves
-            // a tiny vertical margin; width fills exactly).
-            let out_x = cx + (cell_w - target_w) * 0.5;
+            let out_x = cx + (span_w - target_w) * 0.5;
             let out_y = cy + (cell_h - target_h) * 0.5;
             (out_x, out_y, target_w, target_h)
         }

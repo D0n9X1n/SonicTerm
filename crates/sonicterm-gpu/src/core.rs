@@ -4917,11 +4917,15 @@ impl GpuRenderer {
                 // consistent for the rare Powerline/PUA char that slips
                 // through `run_is_ascii_fast` (none today, but the policy
                 // lives in one place).
-                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+                // #621 sym-A/B: pass num_cells=1 (ascii_fast path is always
+                // narrow ascii). For wide/Powerline/NF clusters we hit the
+                // non-ASCII path below which has cluster_cells in scope.
+                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit_v2(
                     (gx_nat, gy_nat, gw_nat, gh_nat),
                     (cx, cy),
                     (cell_w, cell_h),
                     sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
+                    1,
                 );
                 // #537: Block Elements (U+2580..=U+259F) override the
                 // font glyph entirely with per-codepoint sub-cell rects.
@@ -5187,12 +5191,17 @@ impl GpuRenderer {
                 // Powerline PUA (U+E0B0..=U+E0BF) glyphs are cell-filling
                 // separators — anchor them to the cell rect. NerdFont PUA
                 // icons (#438) scale-to-fit to ~0.95 cell_h centered.
-                // See `swash_rasterizer::{classify_symbol, apply_symbol_fit}`.
-                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
+                // See `swash_rasterizer::{classify_symbol, apply_symbol_fit_v2}`.
+                // #621 sym-A/B: pass num_cells = span so PowerlineCellFill
+                // fills the full (snapped) span and IconCellFit scales width
+                // budget to the full span — previously they collapsed to 1 cell.
+                let num_cells = span.min(u8::MAX as usize) as u8;
+                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit_v2(
                     (gx_nat, gy_nat, gw_nat, gh_nat),
                     (cx, cy),
-                    (cell_pixel_width_snapped, cell_h),
+                    (cell_w, cell_h),
                     sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                    num_cells,
                 );
                 // #537: Block Elements override font glyph with per-codepoint
                 // sub-cell rects (see ASCII-fast path above for rationale).
