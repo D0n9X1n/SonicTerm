@@ -1599,3 +1599,131 @@ expect = [
   { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Each PUA icon must occupy 2 cells (#610 sym-3 width classification). Marker/regex tolerate tesseract Z↔2↔z OCR confusion." },
 ]
 fail_on = "OCR sentinel line is too short between pipes → at least one PUA icon mis-widthed (#610 sym-3)."
+
+[[case]]
+id = "ocr-spacing-pua-powerline-4icons"
+shell = "bash"
+section = 40
+title = "Four Powerline PUA glyphs each render 2 cells via sentinel OCR (#618 Powerline range)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#618"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+E0A0 branch, U+E0B0 right-triangle, U+E0B2 left-triangle, U+E0B6 left-half-circle.
+  # All expected 2-cell. Layout: <icon><|><icon><|><icon><|><icon><|>.
+  # #619 echo-poisoning defense: sentinels emitted via separate sub-printfs
+  # so 'ZZQ1...ZZQ2' is never a contiguous substring of the shell command echo.
+  { kind = "text", value = "printf '%s\\xee\\x82\\xa0|\\xee\\x82\\xb0|\\xee\\x82\\xb2|\\xee\\x82\\xb6|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Catches #610 sym-3 PUA-width inconsistency across Powerline range. Expected to FAIL on current main; PASSes after #610 fix." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one Powerline glyph mis-widthed (#610 sym-3)."
+
+[[case]]
+id = "ocr-spacing-pua-fontawesome-4icons"
+shell = "bash"
+section = 40
+title = "Four FontAwesome PUA glyphs each render 2 cells via sentinel OCR (#618 FA range)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#618"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+F002 search, U+F007 user, U+F015 home, U+F0C7 save — FontAwesome PUA-A,
+  # all expected 2-cell. Same echo-poisoning defense as #619 (Case B).
+  { kind = "text", value = "printf '%s\\xef\\x80\\x82|\\xef\\x80\\x87|\\xef\\x80\\x95|\\xef\\x83\\x87|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Catches #610 sym-3 PUA-width inconsistency across FontAwesome range. Expected to FAIL on current main; PASSes after #610 fix." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one FontAwesome glyph mis-widthed (#610 sym-3)."
+
+[[case]]
+id = "ocr-spacing-pua-material-design-4icons"
+shell = "bash"
+section = 40
+title = "Four Material Design Icons (plane-1 PUA-B) glyphs each render 2 cells via sentinel OCR (#618 MDI range)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#618"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+F0413, U+F0E7B, U+F018C, U+F0001 — Material Design Icons (Supplementary
+  # Private Use Area-A, plane 15). 4-byte UTF-8 sequences. All expected 2-cell.
+  # Verified bytes: f3b09093 / f3b0b9bb / f3b0868c / f3b08081.
+  { kind = "text", value = "printf '%s\\xf3\\xb0\\x90\\x93|\\xf3\\xb0\\xb9\\xbb|\\xf3\\xb0\\x86\\x8c|\\xf3\\xb0\\x80\\x81|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Catches #610 sym-3 PUA-width inconsistency across MDI plane-15 range. 4-byte UTF-8 path exercises a separate width-classifier branch from PUA-A. Expected to FAIL on current main; PASSes after #610 fix." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one MDI glyph mis-widthed (#610 sym-3, 4-byte path)."
+
+[[case]]
+id = "ocr-spacing-pua-devicons-4icons"
+shell = "bash"
+section = 40
+title = "Four Devicons PUA glyphs each render 2 cells via sentinel OCR (#618 Devicons range)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#618"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+E73C, U+E7A8, U+E702, U+E62B — Devicons (Nerd Fonts) PUA-A,
+  # all expected 2-cell. Same echo-poisoning defense as #619.
+  { kind = "text", value = "printf '%s\\xee\\x9c\\xbc|\\xee\\x9e\\xa8|\\xee\\x9c\\x82|\\xee\\x98\\xab|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Catches #610 sym-3 PUA-width inconsistency across Devicons range. Expected to FAIL on current main; PASSes after #610 fix." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one Devicons glyph mis-widthed (#610 sym-3)."
+
+[[case]]
+id = "ocr-spacing-pua-octicons-4icons"
+shell = "bash"
+section = 40
+title = "Four Octicons PUA glyphs each render 2 cells via sentinel OCR (#618 Octicons range)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#618"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+F408, U+F407, U+F41B, U+F40D — Octicons (Nerd Fonts) PUA-A,
+  # all expected 2-cell. Same echo-poisoning defense as #619.
+  { kind = "text", value = "printf '%s\\xef\\x90\\x88|\\xef\\x90\\x87|\\xef\\x90\\x9b|\\xef\\x90\\x8d|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Catches #610 sym-3 PUA-width inconsistency across Octicons range. Expected to FAIL on current main; PASSes after #610 fix." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one Octicons glyph mis-widthed (#610 sym-3)."
