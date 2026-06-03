@@ -145,6 +145,180 @@ impl RunStyle {
     }
 }
 
+/// Pure helper for the #594 grouping gate. Returns the inclusive cluster
+/// end index `j` for the group starting at `i`. `j == i` means "no
+/// group, fall through to the singleton path".
+///
+/// Three independent guards, all required to extend:
+///   1. `is_trigger[k]` -- cheap, ordering-independent prefilter (avoids
+///      touching CJK / alphanumeric runs).
+///   2. **Shaper cluster boundary** (`starts[k+1] < ends[k]`): the next
+///      glyph's source-byte range must overlap the current one's. When
+///      `next.start >= current.end` we are crossing into a different
+///      shaper cluster -- e.g. `==<=` where `==` is one cluster and `<=`
+///      is another -- and merging would over-collapse two independent
+///      ligatures into one (Haiku #594 Step-5 blocker).
+///   3. At least one member of the extended span has `is_gsub_sub[k]`
+///      true, so plain `==` on a calt-less font does NOT get falsely
+///      collapsed into a composed glyph.
+///
+/// Extracted to module scope so #594 / #587 tests can exercise the gate
+/// against synthetic placeholder-first and visible-last orderings without
+/// needing a JetBrains-Mono-style font in the bundle.
+pub(crate) fn extend_ligature_group(
+    is_trigger: &[bool],
+    is_gsub_sub: &[bool],
+    starts: &[usize],
+    ends: &[usize],
+    i: usize,
+) -> usize {
+    let n = is_trigger.len();
+    debug_assert_eq!(n, is_gsub_sub.len());
+    debug_assert_eq!(n, starts.len());
+    debug_assert_eq!(n, ends.len());
+    if i >= n || !is_trigger[i] {
+        return i;
+    }
+    let mut j = i;
+    // Extend across consecutive trigger glyphs that ALSO live in the
+    // same shaper cluster (overlapping source byte ranges). The moment
+    // `next.start >= current.end` we are at a cluster boundary and must
+    // stop -- otherwise two adjacent trigger clusters would merge.
+    while j + 1 < n && is_trigger[j + 1] && starts[j + 1] < ends[j] {
+        j += 1;
+    }
+    if !(i..=j).any(|k| is_gsub_sub[k]) {
+        return i;
+    }
+    j
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::extend_ligature_group;
+
+    // Helper: glyphs at consecutive byte positions, one per cell.
+    // Models the typical cosmic-text output where each source cell
+    // produces one glyph and consecutive glyphs share a single
+    // 1-byte-wide cluster span (the cluster collapses internally).
+    fn same_cluster_starts_ends(n: usize) -> (Vec<usize>, Vec<usize>) {
+        // All glyphs in the same shaper cluster share an overlapping
+        // byte range. Model as start=0, end=n for every glyph -- the
+        // simplest representation that satisfies `starts[k+1] < ends[k]`
+        // for every pair.
+        (vec![0; n], vec![n; n])
+    }
+
+    // Visible-last (Rec Mono St.Helens style): lead is itself gsub_sub.
+    // The original #587 gate (lead must be gsub_sub) and the broadened
+    // #594 gate must BOTH accept this pattern -- 2-cell `<=` collapses.
+    #[test]
+    fn visible_last_two_cell_groups() {
+        let trig = vec![true, true];
+        let sub = vec![true, true];
+        let (s, e) = same_cluster_starts_ends(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 1);
+    }
+
+    // Placeholder-first (JetBrains Mono / Rec Mono Casual style): lead
+    // is a trigger char but glyph_id == charmap(ch), so is_gsub_sub is
+    // false. Only the TRAILING glyph carries the substitution. The
+    // original #587 gate rejected this and emitted 2 overlapping
+    // ShapedGlyphs (#594). The broadened gate MUST accept it.
+    #[test]
+    fn placeholder_first_two_cell_groups() {
+        let trig = vec![true, true];
+        let sub = vec![false, true];
+        let (s, e) = same_cluster_starts_ends(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 1);
+    }
+
+    // Mid-cluster placeholder (e.g. `===` where only the middle is
+    // visible-substituted). ANY-member rule still collapses.
+    #[test]
+    fn mid_cluster_placeholder_three_cell_groups() {
+        let trig = vec![true, true, true];
+        let sub = vec![false, true, false];
+        let (s, e) = same_cluster_starts_ends(3);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 2);
+    }
+
+    // Plain `==` on a font WITHOUT calt for `==`: both triggers, NEITHER
+    // substituted. The broadened gate must NOT false-positive into a
+    // composed glyph -- fall through to singleton path.
+    #[test]
+    fn no_calt_pair_falls_through_to_singletons() {
+        let trig = vec![true, true];
+        let sub = vec![false, false];
+        let (s, e) = same_cluster_starts_ends(2);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 0);
+    }
+
+    // Singleton trigger: cluster of size 1 should never trigger the
+    // group path regardless of substitution state.
+    #[test]
+    fn singleton_trigger_never_groups() {
+        let (s, e) = same_cluster_starts_ends(1);
+        assert_eq!(extend_ligature_group(&[true], &[true], &s, &e, 0), 0);
+        assert_eq!(extend_ligature_group(&[true], &[false], &s, &e, 0), 0);
+    }
+
+    // Non-trigger lead: never enters the group path. Protects CJK and
+    // alphanumeric runs from being touched by the post-pass.
+    #[test]
+    fn non_trigger_lead_short_circuits() {
+        let trig = vec![false, true, true];
+        let sub = vec![false, true, true];
+        let (s, e) = same_cluster_starts_ends(3);
+        assert_eq!(extend_ligature_group(&trig, &sub, &s, &e, 0), 0);
+    }
+
+    // #594 Step-5 negative regression: TWO adjacent trigger clusters
+    // (e.g. `==<=` where `==` shapes to one cluster and `<=` shapes to
+    // another). Only the SECOND cluster has a gsub_sub member. Without
+    // the cluster-boundary guard, the ANY-member rule would walk the
+    // whole trigger run and collapse `==<=` into a single composed
+    // glyph, eating the literal `==`. With the guard, group 0 must
+    // fall through to singletons (i == 0 returned).
+    #[test]
+    fn adjacent_clusters_only_one_substituted_does_not_merge() {
+        //   idx:           0     1     2     3
+        //   chars:        '='   '='   '<'   '='
+        //   cluster A:  [0, 2)        — `==` literal, no gsub
+        //   cluster B:        [2, 4)  — `<=` ligated, gsub on raw[3]
+        let trig = vec![true, true, true, true];
+        let sub = vec![false, false, false, true];
+        // Cluster A spans bytes 0..2, cluster B spans 2..4. The guard
+        // `starts[k+1] < ends[k]` is true within each cluster (0 < 2)
+        // and false at the boundary (2 < 2 is false), so the walk stops.
+        let starts = vec![0, 0, 2, 2];
+        let ends = vec![2, 2, 4, 4];
+
+        // From i=0 (start of cluster A): no gsub in [0..=1], must NOT
+        // extend into cluster B. Result == i, fall through.
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 0), 0);
+
+        // From i=2 (start of cluster B): gsub present on raw[3], extend
+        // within B, stop at end of input. Result == 3.
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 2), 3);
+    }
+
+    // Mirror of the above with cluster A substituted, cluster B literal.
+    // From i=0 we must group A only (==0 stops at j=1), and from i=2
+    // we must fall through to singletons. Catches a symmetric bug where
+    // the gate accidentally extended right through the boundary.
+    #[test]
+    fn adjacent_clusters_first_substituted_does_not_merge() {
+        let trig = vec![true, true, true, true];
+        let sub = vec![false, true, false, false];
+        let starts = vec![0, 0, 2, 2];
+        let ends = vec![2, 2, 4, 4];
+
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 0), 1);
+        assert_eq!(extend_ligature_group(&trig, &sub, &starts, &ends, 2), 2);
+    }
+}
+
 /// Shape a contiguous style run of `(col, cell)` pairs (no WIDE_CONT
 /// entries) through cosmic-text and return one [`ShapedGlyph`] per
 /// shaper-emitted glyph.
@@ -300,15 +474,23 @@ pub fn shape_run(
 
     let mut out: Vec<ShapedGlyph> = Vec::new();
     let last_col = cells.last().map(|(c, _)| *c).unwrap_or(0);
+    // Hoist the per-glyph trigger/sub bitvecs out of the loop -- the
+    // grouping helper reads them by index and they don't change. Also
+    // hoist cluster-boundary `starts`/`ends` so the gate can detect
+    // shaper-cluster transitions (Haiku #594 Step-5 blocker: without
+    // this, two adjacent trigger clusters where only one has a gsub_sub
+    // member would falsely merge).
+    let trig: Vec<bool> = meta.iter().map(|m| m.is_trigger).collect();
+    let sub: Vec<bool> = meta.iter().map(|m| m.is_gsub_sub).collect();
+    let starts: Vec<usize> = raw.iter().map(|r| r.start).collect();
+    let ends: Vec<usize> = raw.iter().map(|r| r.end).collect();
     let mut i = 0;
     while i < raw.len() {
-        // Candidate group iff this glyph itself passes (a) and (b).
-        let mut j = i;
-        if meta[i].is_gsub_sub && meta[i].is_trigger {
-            while j + 1 < raw.len() && meta[j + 1].is_gsub_sub && meta[j + 1].is_trigger {
-                j += 1;
-            }
-        }
+        // See `extend_ligature_group` (module-level) for the rule and
+        // the unit-test fixtures covering visible-last (Rec Mono
+        // St.Helens), placeholder-first (JetBrains Mono / Rec Mono
+        // Casual), and the #594 adjacent-cluster negative case.
+        let j = extend_ligature_group(&trig, &sub, &starts, &ends, i);
 
         if j > i {
             // ── Multi-glyph group → emit as a single composed glyph ──
@@ -334,14 +516,19 @@ pub fn shape_run(
                 cluster_cells = 1;
             }
             let ch_first = meta[i].ch_first;
-            // meta[j].slot is Some(_) by construction (is_gsub_sub true
-            // requires a resolved slot).
-            let slot = meta[j].slot.unwrap_or(0);
+            // Pick the VISIBLE substituted glyph (any gsub_sub member),
+            // regardless of position. For "visible-last" fonts this is
+            // raw[j]; for "placeholder-first" fonts (#594) it's an
+            // earlier index. Fall back to raw[j] if -- defensively --
+            // no member is flagged (cannot happen given the any_sub
+            // gate above, but keeps the code total).
+            let visible = (i..=j).find(|k| meta[*k].is_gsub_sub).unwrap_or(j);
+            let slot = meta[visible].slot.unwrap_or(0);
             out.push(ShapedGlyph {
                 lead_col,
                 ch: ch_first,
                 font_slot: slot,
-                glyph_id: raw[j].glyph_id,
+                glyph_id: raw[visible].glyph_id,
                 cluster_cells,
             });
             i = j + 1;
