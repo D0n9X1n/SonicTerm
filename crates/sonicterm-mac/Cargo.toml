@@ -30,6 +30,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSResponder",
     "NSWorkspace",
 ] }
+raw-window-handle = { workspace = true }
 
 [[bin]]
 name = "sonicterm-mac"

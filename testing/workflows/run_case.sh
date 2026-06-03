@@ -249,15 +249,36 @@ ensure_front_or_skip
 # skipped with "no window id captured". Use CGWindowID via in-tree Swift helper —
 # CoreGraphics window IDs are what `screencapture -l` actually accepts. The window
 # may not be on-screen immediately after spawn, so retry briefly (up to ~3s).
+#
+# #554: prefer the `SONICTERM_WINDOW_READY` stdout marker the mac bin
+# prints the instant winit hands AppKit the window — greppable from
+# `$CASE_OUT/sonicterm.log`, saves ~3s/case vs the Swift-helper poll
+# (~3min/sweep at 67 cases). If the marker does not appear within
+# ~5s we fall back to the Swift helper, preserving compatibility with
+# branches built before this fix. Marker contract:
+# `crates/sonicterm-mac/CLAUDE.md`.
 WINDOW_ID=""
 WIN_ID_RAW=""
-for _try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  WIN_ID_RAW=$(testing/workflows/cg-window-id.swift "$SONIC_PID" 2>/dev/null || echo "")
-  if [[ -n "$WIN_ID_RAW" ]]; then
+for _try in $(seq 1 50); do
+  WIN_ID_RAW=$(grep -m1 -E '^SONICTERM_WINDOW_READY ' "$CASE_OUT/sonicterm.log" 2>/dev/null \
+    | sed -nE 's/.*cg_window_id=([0-9]+).*/\1/p')
+  if [[ -n "$WIN_ID_RAW" && "$WIN_ID_RAW" != "-1" ]]; then
+    log "window id (stdout marker): $WIN_ID_RAW"
     break
   fi
-  sleep 0.2
+  WIN_ID_RAW=""
+  sleep 0.1
 done
+if [[ -z "$WIN_ID_RAW" ]]; then
+  log "stdout marker absent after 5s; falling back to cg-window-id.swift"
+  for _try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    WIN_ID_RAW=$(testing/workflows/cg-window-id.swift "$SONIC_PID" 2>/dev/null || echo "")
+    if [[ -n "$WIN_ID_RAW" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+fi
 if [[ -n "$WIN_ID_RAW" ]]; then
   WINDOW_ID="$WIN_ID_RAW"
 fi
