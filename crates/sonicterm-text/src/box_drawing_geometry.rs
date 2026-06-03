@@ -1106,8 +1106,53 @@ pub fn box_drawing_geometry(
             ((cx + off, top), (cx + off, bottom)),
         ])),
 
+        // ── Phase C: dashed / dotted (12 codepoints) ────────────────
+        // N short segments along the main axis (N = 2/3/4). Slot =
+        // axis_len / N; the visible dash spans the middle 2/3 of its
+        // slot, with the outer 1/3 split equally as leading/trailing
+        // gap. Per Opus Step-2 caveat: StrokeStyle stays Single
+        // (Double is reserved for B2 parallel lines like ═ ║).
+        // Light: ╌ ┄ ┈ horiz / ╎ ┆ ┊ vert
+        // Heavy: ╍ ┅ ┉ horiz / ╏ ┇ ┋ vert
+        0x254C => Some(mk(dashes_horizontal(left, right, cy, 2), StrokeWeight::Light)),
+        0x254D => Some(mk(dashes_horizontal(left, right, cy, 2), StrokeWeight::Heavy)),
+        0x254E => Some(mk(dashes_vertical(top, bottom, cx, 2), StrokeWeight::Light)),
+        0x254F => Some(mk(dashes_vertical(top, bottom, cx, 2), StrokeWeight::Heavy)),
+        0x2504 => Some(mk(dashes_horizontal(left, right, cy, 3), StrokeWeight::Light)),
+        0x2505 => Some(mk(dashes_horizontal(left, right, cy, 3), StrokeWeight::Heavy)),
+        0x2506 => Some(mk(dashes_vertical(top, bottom, cx, 3), StrokeWeight::Light)),
+        0x2507 => Some(mk(dashes_vertical(top, bottom, cx, 3), StrokeWeight::Heavy)),
+        0x2508 => Some(mk(dashes_horizontal(left, right, cy, 4), StrokeWeight::Light)),
+        0x2509 => Some(mk(dashes_horizontal(left, right, cy, 4), StrokeWeight::Heavy)),
+        0x250A => Some(mk(dashes_vertical(top, bottom, cx, 4), StrokeWeight::Light)),
+        0x250B => Some(mk(dashes_vertical(top, bottom, cx, 4), StrokeWeight::Heavy)),
+
         _ => None,
     }
+}
+
+/// Subdivide `[start, end]` into `n` equal slots and return the middle
+/// 2/3 of each slot. The 1/3 leftover per slot is split equally into
+/// leading + trailing gap. Shared by horizontal and vertical Phase C
+/// codepoints.
+fn slot_dashes(start: f32, end: f32, n: usize) -> Vec<(f32, f32)> {
+    let slot = (end - start) / n as f32;
+    let dash_len = slot * 2.0 / 3.0;
+    let pad = (slot - dash_len) * 0.5;
+    (0..n)
+        .map(|i| {
+            let slot_start = start + slot * i as f32;
+            (slot_start + pad, slot_start + pad + dash_len)
+        })
+        .collect()
+}
+
+fn dashes_horizontal(left: f32, right: f32, cy: f32, n: usize) -> Vec<((f32, f32), (f32, f32))> {
+    slot_dashes(left, right, n).into_iter().map(|(a, b)| ((a, cy), (b, cy))).collect()
+}
+
+fn dashes_vertical(top: f32, bottom: f32, cx: f32, n: usize) -> Vec<((f32, f32), (f32, f32))> {
+    slot_dashes(top, bottom, n).into_iter().map(|(a, b)| ((cx, a), (cx, b))).collect()
 }
 
 /// Returns `true` if `ch` is a codepoint Phase A or Phase B1 covers
@@ -1117,6 +1162,10 @@ pub fn box_drawing_geometry(
 /// emit entirely when we know we'll draw the cell as line-SDF quads
 /// instead. Mirrors the predicate shape of `block_element_rect(...).is_some()`.
 #[must_use]
+// Hand-picked subset of U+2500..=U+256C — NOT a contiguous range —
+// so clippy's manual_range_patterns hint would silently expand
+// coverage. Suppressed at the function level.
+#[allow(clippy::manual_range_patterns)]
 pub fn is_covered_box_drawing(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -1222,6 +1271,10 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x2568
             | 0x256A
             | 0x256B
+            // Phase C — dashed / dotted (12 codepoints)
+            | 0x254C | 0x254D | 0x254E | 0x254F
+            | 0x2504 | 0x2505 | 0x2506 | 0x2507
+            | 0x2508 | 0x2509 | 0x250A | 0x250B
     )
 }
 
@@ -1312,10 +1365,11 @@ mod tests {
 
     #[test]
     fn out_of_scope_codepoints_return_none() {
-        // Dashed / arc / diagonal variants are explicitly deferred to
-        // phases C/D. NOTE: Phase B2 moved ═ ║ ╔ ╗ ╚ ╝ ╠ ╣ ╦ ╩ ╬ into
-        // the covered set; they are no longer here.
-        for ch in ['╌', '╍', '╭', '╮', '╱', '╲'] {
+        // Arc / diagonal variants remain deferred to Phase D.
+        // NOTE: Phase B2 moved ═ ║ ╔ ╗ ╚ ╝ ╠ ╣ ╦ ╩ ╬ and Phase C moved
+        // ╌ ╍ ┄ ┅ ┈ ┉ ╎ ╏ ┆ ┇ ┊ ┋ into the covered set; they are no
+        // longer here.
+        for ch in ['╭', '╮', '╱', '╲'] {
             assert!(
                 box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
                 "Codepoint U+{:04X} ('{ch}') is out of phase scope and must return None",
@@ -2273,5 +2327,213 @@ mod tests {
     #[test]
     fn b3b_horizontal_double_continuity_at_150_percent_dpi() {
         check_b3b_horiz_double_continuity(1.5);
+    }
+
+    // ── Phase C: dashed / dotted (12 codepoints) ────────────────
+    // Single source of truth for the codepoint table — the predicate-
+    // sync test (Opus Step-2 caveat: don't hand-roll Phase-A lists)
+    // enumerates from these constants so a future phase forces the
+    // predicate to stay in lock-step.
+    const PHASE_C_DASHED_HORIZ_LIGHT: &[char] = &['\u{254C}', '\u{2504}', '\u{2508}'];
+    const PHASE_C_DASHED_HORIZ_HEAVY: &[char] = &['\u{254D}', '\u{2505}', '\u{2509}'];
+    const PHASE_C_DASHED_VERT_LIGHT: &[char] = &['\u{254E}', '\u{2506}', '\u{250A}'];
+    const PHASE_C_DASHED_VERT_HEAVY: &[char] = &['\u{254F}', '\u{2507}', '\u{250B}'];
+
+    fn phase_c_all_twelve() -> Vec<char> {
+        let mut v = Vec::with_capacity(12);
+        v.extend_from_slice(PHASE_C_DASHED_HORIZ_LIGHT);
+        v.extend_from_slice(PHASE_C_DASHED_HORIZ_HEAVY);
+        v.extend_from_slice(PHASE_C_DASHED_VERT_LIGHT);
+        v.extend_from_slice(PHASE_C_DASHED_VERT_HEAVY);
+        v
+    }
+
+    fn phase_c_expected_n(ch: char) -> usize {
+        #[allow(clippy::manual_range_patterns)]
+        match ch as u32 {
+            0x254C | 0x254D | 0x254E | 0x254F => 2,
+            0x2504 | 0x2505 | 0x2506 | 0x2507 => 3,
+            0x2508 | 0x2509 | 0x250A | 0x250B => 4,
+            _ => unreachable!("not a Phase C codepoint"),
+        }
+    }
+
+    fn phase_c_expected_weight(ch: char) -> StrokeWeight {
+        if PHASE_C_DASHED_HORIZ_HEAVY.contains(&ch) || PHASE_C_DASHED_VERT_HEAVY.contains(&ch) {
+            StrokeWeight::Heavy
+        } else {
+            StrokeWeight::Light
+        }
+    }
+
+    fn phase_c_is_horizontal(ch: char) -> bool {
+        PHASE_C_DASHED_HORIZ_LIGHT.contains(&ch) || PHASE_C_DASHED_HORIZ_HEAVY.contains(&ch)
+    }
+
+    #[test]
+    fn phase_c_all_twelve_codepoints_return_some_and_are_covered() {
+        for ch in phase_c_all_twelve() {
+            assert!(
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some(),
+                "Phase C codepoint U+{:04X} must return geometry",
+                ch as u32
+            );
+            assert!(
+                is_covered_box_drawing(ch),
+                "Phase C codepoint U+{:04X} must be in is_covered_box_drawing",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn phase_c_segment_count_matches_pattern_n() {
+        // N-segment assertion per Opus table: N=2 / N=3 / N=4.
+        for ch in phase_c_all_twelve() {
+            let segs = lines(ch);
+            let expected = phase_c_expected_n(ch);
+            assert_eq!(
+                segs.len(),
+                expected,
+                "U+{:04X} must emit {expected} segments, got {}",
+                ch as u32,
+                segs.len()
+            );
+        }
+    }
+
+    #[test]
+    fn phase_c_thickness_matches_weight_and_style_is_single() {
+        // Light → LIGHT_THICKNESS_PX (1.0); Heavy → HEAVY (2.0).
+        // StrokeStyle must remain Single (Opus caveat: Double is reserved
+        // for B2 parallel-line codepoints, not dashes).
+        for ch in phase_c_all_twelve() {
+            let want_w = phase_c_expected_weight(ch);
+            let want_t = match want_w {
+                StrokeWeight::Light => LIGHT_THICKNESS_PX,
+                StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
+            };
+            for s in &lines(ch) {
+                assert_eq!(s.weight, want_w, "U+{:04X} weight mismatch", ch as u32);
+                assert!(
+                    (s.thickness - want_t).abs() < f32::EPSILON,
+                    "U+{:04X} thickness {} != expected {want_t}",
+                    ch as u32,
+                    s.thickness
+                );
+                assert_eq!(
+                    s.style,
+                    StrokeStyle::Single,
+                    "U+{:04X} Phase C must use StrokeStyle::Single",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn phase_c_equal_slot_subdivision_places_dashes_at_expected_centers() {
+        // For each slot i the dash center sits at start + slot*(i+0.5)
+        // and spans 2/3 of the slot. Asserting on dash CENTERS (not
+        // endpoints) locks the equal-slot contract independent of how
+        // we lay out the inner/outer gap split.
+        for ch in phase_c_all_twelve() {
+            let segs = lines(ch);
+            let n = phase_c_expected_n(ch);
+            if phase_c_is_horizontal(ch) {
+                let cy = ORIGIN.1 + CELL_H * 0.5;
+                let slot = CELL_W / n as f32;
+                for (i, s) in segs.iter().enumerate() {
+                    let expected_center = ORIGIN.0 + slot * (i as f32 + 0.5);
+                    let center = (s.from.0 + s.to.0) * 0.5;
+                    assert!(
+                        (center - expected_center).abs() < 1e-4,
+                        "U+{:04X} slot {i} center x {center} != {expected_center}",
+                        ch as u32
+                    );
+                    assert!((s.from.1 - cy).abs() < f32::EPSILON);
+                    assert!((s.to.1 - cy).abs() < f32::EPSILON);
+                    let dash_len = (s.to.0 - s.from.0).abs();
+                    assert!(
+                        (dash_len - slot * 2.0 / 3.0).abs() < 1e-4,
+                        "U+{:04X} slot {i} dash length {dash_len} != 2/3 slot",
+                        ch as u32
+                    );
+                }
+            } else {
+                let cx = ORIGIN.0 + CELL_W * 0.5;
+                let slot = CELL_H / n as f32;
+                for (i, s) in segs.iter().enumerate() {
+                    let expected_center = ORIGIN.1 + slot * (i as f32 + 0.5);
+                    let center = (s.from.1 + s.to.1) * 0.5;
+                    assert!(
+                        (center - expected_center).abs() < 1e-4,
+                        "U+{:04X} slot {i} center y {center} != {expected_center}",
+                        ch as u32
+                    );
+                    assert!((s.from.0 - cx).abs() < f32::EPSILON);
+                    assert!((s.to.0 - cx).abs() < f32::EPSILON);
+                    let dash_len = (s.to.1 - s.from.1).abs();
+                    assert!(
+                        (dash_len - slot * 2.0 / 3.0).abs() < 1e-4,
+                        "U+{:04X} slot {i} dash length {dash_len} != 2/3 slot",
+                        ch as u32
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phase_c_predicate_sync_table_driven() {
+        // Refactor of the historical hand-rolled Phase-A enumeration
+        // (Opus Step-2 caveat): predicate-sync now enumerates from
+        // single-source-of-truth tables so adding a phase forces the
+        // predicate to stay in lock-step instead of going stale.
+        let phase_a_light: &[char] = &[
+            '\u{2500}', '\u{2502}', '\u{250C}', '\u{2510}', '\u{2514}', '\u{2518}', '\u{251C}',
+            '\u{2524}', '\u{252C}', '\u{2534}', '\u{253C}',
+        ];
+        let phase_b1_heavy: &[char] = &[
+            '\u{2501}', '\u{2503}', '\u{250F}', '\u{2513}', '\u{2517}', '\u{251B}', '\u{2523}',
+            '\u{252B}', '\u{2533}', '\u{253B}', '\u{254B}',
+        ];
+        let all = phase_a_light
+            .iter()
+            .chain(phase_b1_heavy)
+            .chain(PHASE_C_DASHED_HORIZ_LIGHT)
+            .chain(PHASE_C_DASHED_HORIZ_HEAVY)
+            .chain(PHASE_C_DASHED_VERT_LIGHT)
+            .chain(PHASE_C_DASHED_VERT_HEAVY)
+            .copied();
+        for ch in all {
+            assert!(
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some(),
+                "predicate-sync: U+{:04X} must have geometry",
+                ch as u32
+            );
+            assert!(
+                is_covered_box_drawing(ch),
+                "predicate-sync: U+{:04X} must be in is_covered_box_drawing",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn phase_c_remaining_arcs_and_diagonals_still_none() {
+        // Phase D (arcs + diagonals) remains deferred — must still
+        // return None so the renderer falls back to glyph stretch.
+        // Update this list when Phase D lands.
+        for ch in
+            ['\u{256D}', '\u{256E}', '\u{256F}', '\u{2570}', '\u{2571}', '\u{2572}', '\u{2573}']
+        {
+            assert!(
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
+                "U+{:04X} is Phase D and must still be None",
+                ch as u32
+            );
+            assert!(!is_covered_box_drawing(ch));
+        }
     }
 }

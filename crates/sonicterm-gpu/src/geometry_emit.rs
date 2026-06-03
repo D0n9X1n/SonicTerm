@@ -381,9 +381,9 @@ mod tests {
         // ASCII 'A' is neither block element nor Phase-A/B box drawing —
         // must NOT route through this helper.
         assert!(emit_geometry_for_char('A', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
-        // Dashed (U+254C) is still out of scope (deferred), so it must
+        // Arc (U+256D) is still out of scope (Phase D), so it must
         // fall back to glyph stretch.
-        assert!(emit_geometry_for_char('╌', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
+        assert!(emit_geometry_for_char('╭', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
     }
 
     #[test]
