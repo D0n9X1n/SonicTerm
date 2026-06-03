@@ -335,6 +335,72 @@ pub fn shape_run(
     style: RunStyle,
     cells: &[(u16, Cell)],
 ) -> Vec<ShapedGlyph> {
+    shape_run_with_cell_w(rasterizer, family, font_size, style, cells, 0.0)
+}
+
+/// Nerd Font PUA codepoint ranges. If a font reports a glyph for a
+/// codepoint that falls in one of these ranges, the renderer should
+/// allocate two cells for the glyph even when the advance width is
+/// ambiguous. Source: Nerd Fonts v3 cheat-sheet groupings.
+///
+/// Used by the singleton post-pass in [`shape_run_with_cell_w`] as a
+/// fallback when the advance-threshold heuristic declines (advance
+/// ≤ 1.5 * cell_w). See issue #595 for the diagnosis chain.
+const NERD_FONT_RANGES: &[std::ops::RangeInclusive<u32>] = &[
+    0xE000..=0xE0D7, // Powerline + Powerline Extra
+    0xE200..=0xE2A9, // Font Linux
+    0xE300..=0xE3D6, // Pomicons
+    0xE5FA..=0xE62F, // Codicons (≠ unicode-width WIDE)
+    0xE700..=0xE7E0, // Devicons
+    0xEE00..=0xEE0B, // IEC Power symbols
+    0xF000..=0xF2FF, // Font Awesome
+    0xF300..=0xF381, // Font Logos
+    0xF400..=0xF533, // Octicons
+    0xF500..=0xFD46, // Material Design
+];
+
+#[inline]
+fn is_nerd_font_pua(ch: char) -> bool {
+    let n = ch as u32;
+    NERD_FONT_RANGES.iter().any(|r| r.contains(&n))
+}
+
+/// Same as [`shape_run`] but also takes the per-cell pixel width
+/// (`cell_w_px`, the raster-px width of one terminal cell at the
+/// current font size). When `cell_w_px > 0.0`, singleton glyphs (those
+/// whose `cluster_cells == 1` after the #587 ligature grouping
+/// post-pass) are widened to `cluster_cells = 2` if either:
+///
+///   (a) `LayoutGlyph.w > 1.5 * cell_w_px` (advance heuristic — the
+///       shaper itself laid the glyph wider than one-and-a-half cells,
+///       so painting it at 1-cell width would visually overflow into
+///       the next column), OR
+///   (b) the source codepoint falls inside [`NERD_FONT_RANGES`] AND the
+///       resolved font slot reports a non-zero charmap glyph for the
+///       codepoint (fallback for icons whose advance is honest-1-cell
+///       but whose drawn ink is still wider than a cell — common for
+///       Powerline / Devicons in many NF builds).
+///
+/// Branch (a) is primary because it's font-agnostic and future-proof;
+/// (b) is a known-bad-actor table for cases the advance check misses.
+/// Both branches clamp to 2 cells — we never over-allocate.
+///
+/// Per the issue #595 implementation note, the NF-family detection
+/// gate is intentionally NOT applied: false-positives on rare wide
+/// PUA glyphs in non-NF fonts are an acceptable trade for the fix
+/// actually firing on the user-affected installs.
+///
+/// Callers that don't have a meaningful cell width (overlay text,
+/// help-line layout, synthetic test runs) pass `0.0` to disable both
+/// branches and fall back to the original behaviour.
+pub fn shape_run_with_cell_w(
+    rasterizer: &mut SwashRasterizer,
+    family: &str,
+    font_size: f32,
+    style: RunStyle,
+    cells: &[(u16, Cell)],
+    cell_w_px: f32,
+) -> Vec<ShapedGlyph> {
     if cells.is_empty() {
         return Vec::new();
     }
@@ -398,6 +464,10 @@ pub fn shape_run(
         end: usize,
         glyph_id: u16,
         font_id: fontdb::ID,
+        /// Shaper-reported advance width in raster pixels. Used by the
+        /// singleton post-pass (#595 branch (a)) to widen icon glyphs
+        /// whose advance overflows one cell.
+        w: f32,
     }
     let mut raw: Vec<RawGlyph> = Vec::new();
     for ll in layout_lines.iter() {
@@ -407,6 +477,7 @@ pub fn shape_run(
                 end: g.end,
                 glyph_id: g.glyph_id,
                 font_id: g.font_id,
+                w: g.w,
             });
         }
     }
@@ -570,6 +641,50 @@ pub fn shape_run(
             }
             None => (0, 0),
         };
+        // ── #595: singleton 1-cell nerd-font widening ──
+        // After the #587 grouping has run, any glyph that is still a
+        // singleton (cluster_cells == 1) may still be a wide icon the
+        // shaper sized to >1 cell. Two-branch detection (see
+        // `shape_run_with_cell_w` docs):
+        //   (a) advance heuristic — primary, font-agnostic.
+        //   (b) Nerd Font PUA table — fallback for honest-1-cell
+        //       advances whose ink overflows.
+        //
+        // Gate: if the grid already marked the lead cell WIDE (CJK,
+        // emoji), skip — the renderer's WIDE/WIDE_CONT path already
+        // allocates the second cell and widening here would
+        // double-count. Singletons that lack the WIDE flag but still
+        // shape wider than the cell are exactly the #595 bug
+        // population (nerd-font PUA icons whose ink the grid
+        // intentionally left at width=1).
+        if cluster_cells == 1 && cell_w_px > 0.0 {
+            let lead_is_wide = cells
+                .iter()
+                .find(|(c, _)| *c == lead_col)
+                .map(|(_, cell)| cell.flags.contains(CellFlags::WIDE))
+                .unwrap_or(false);
+            if !lead_is_wide {
+                let mut widen = false;
+                // (a) advance threshold
+                if g.w > cell_w_px * 1.5 {
+                    widen = true;
+                }
+                // (b) PUA range — only consult if (a) declined.
+                if !widen && is_nerd_font_pua(ch_first) {
+                    if let Some(s) = meta[i].slot {
+                        let charmap_id = rasterizer
+                            .charmap_glyph_for_slot(s, ch_first, style.bold, style.italic)
+                            .unwrap_or(0);
+                        if charmap_id != 0 {
+                            widen = true;
+                        }
+                    }
+                }
+                if widen {
+                    cluster_cells = 2;
+                }
+            }
+        }
         out.push(ShapedGlyph { lead_col, ch: ch_first, font_slot: slot, glyph_id, cluster_cells });
         i += 1;
     }
@@ -719,6 +834,26 @@ impl ShapeCache {
         style: RunStyle,
         cells: &[(u16, Cell)],
     ) -> Vec<ShapedGlyph> {
+        self.get_or_shape_with_cell_w(rasterizer, family, font_size, style, cells, 0.0)
+    }
+
+    /// Same as [`Self::get_or_shape`] but threads the per-cell pixel
+    /// width into the shaper so the singleton nerd-font widening
+    /// post-pass (#595) can fire. See [`shape_run_with_cell_w`] for
+    /// the heuristic. `cell_w_px == 0.0` disables the widening.
+    ///
+    /// `cell_w_px` is NOT part of the cache key — for a given
+    /// (family, font_size) it is fixed, so adding it would only churn
+    /// the key without affecting lookups.
+    pub fn get_or_shape_with_cell_w(
+        &mut self,
+        rasterizer: &mut SwashRasterizer,
+        family: &str,
+        font_size: f32,
+        style: RunStyle,
+        cells: &[(u16, Cell)],
+        cell_w_px: f32,
+    ) -> Vec<ShapedGlyph> {
         let base_col = cells.first().map(|(c, _)| *c).unwrap_or(0);
         let key = Self::make_key(family, font_size, style, cells);
         if let Some(v) = self.map.get(&key) {
@@ -730,7 +865,7 @@ impl ShapeCache {
                 .collect();
         }
         self.misses += 1;
-        let shaped = shape_run(rasterizer, family, font_size, style, cells);
+        let shaped = shape_run_with_cell_w(rasterizer, family, font_size, style, cells, cell_w_px);
         // Store with column-relative `lead_col` (subtract the run's
         // base column) so the same shaped text at a different column
         // produces an identical cache entry on the next call.
