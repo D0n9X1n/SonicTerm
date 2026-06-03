@@ -4980,13 +4980,23 @@ impl GpuRenderer {
             return;
         }
 
+        // #595 unit-fix: shape_run compares the singleton-widening
+        // threshold against LayoutGlyph.w which is in raster pixels
+        // (cosmic-text sizes the buffer at font_size, which is ALREADY
+        // self.font_size * self.scale_factor by the time it reaches
+        // this function — see the flush_shape_run callsite). cell_w
+        // here is the LOGICAL cell pitch (from measure_cell at logical
+        // font size). At 2x DPI those units differ by scale_factor, so
+        // passing cell_w raw would halve the threshold and widen
+        // ordinary 1-cell non-ASCII glyphs. Convert to raster pixels.
+        let cell_w_px = cell_w * scale_factor;
         let shaped = shape_cache.get_or_shape_with_cell_w(
             rasterizer,
             font_family,
             font_size,
             style,
             cells,
-            cell_w,
+            cell_w_px,
         );
 
         // Build a lookup from col → cell so we can recover per-cell

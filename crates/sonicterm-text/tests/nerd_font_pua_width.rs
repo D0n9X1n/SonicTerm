@@ -179,3 +179,57 @@ fn advance_heuristic_widens_when_glyph_advance_exceeds_threshold() {
         "advance heuristic must widen any glyph whose advance > 1.5 * cell_w"
     );
 }
+
+/// 2× DPI regression for blocker #1 of the Step-5 review on PR #605.
+///
+/// `shape_run_with_cell_w` operates in raster pixels (cosmic-text
+/// sizes the buffer at the raster font size). At 2× DPI the GPU
+/// callsite shapes at `font_size * 2.0` raster px while `cell_w`
+/// (logical) doubles to `cell_w * 2.0` raster px. If the call-site
+/// forgets the unit conversion and passes the LOGICAL `cell_w` raw,
+/// the effective threshold halves and ordinary non-icon non-ASCII
+/// glyphs whose raster advance lands above `1.5 * (cell_w_logical)`
+/// but below `1.5 * (cell_w_raster)` get falsely widened.
+///
+/// This test simulates the GPU's 2× call by shaping at `FONT_PX * 2`
+/// and `cell_w * 2`. A narrow non-ASCII codepoint that is NOT in the
+/// nerd-font PUA range must remain `cluster_cells == 1`. A regular
+/// ASCII letter (which the shaper renders at a normal advance) must
+/// also remain 1 cell at 2× DPI so the renderer doesn't double-allocate
+/// every other column on Retina / 4K Windows.
+#[test]
+fn non_pua_glyph_not_widened_at_2x_dpi() {
+    let mut fs = font_system_with_assets();
+    // 2× raster font.
+    let raster_px = FONT_PX * 2.0;
+    // Pick the cell width at the raster scale by measuring "M" at the
+    // raster size — this mirrors what the GPU callsite computes when
+    // it multiplies the logical cell_w by scale_factor. Done BEFORE
+    // the rasterizer borrow so we only hold one mut-borrow of fs.
+    let (cell_w_raster, _) =
+        sonicterm_text::metrics::measure_cell(&mut fs, FAMILY, raster_px, raster_px);
+    let mut r = SwashRasterizer::new(&mut fs, FAMILY, raster_px);
+    // A narrow non-ASCII codepoint OUTSIDE every NERD_FONT_RANGES
+    // band: U+00E9 (é, Latin small letter e with acute). Width-1 per
+    // unicode-width; falls between 0xE0D7 and 0xE200 boundaries → not
+    // PUA. Must NOT widen at 2× DPI.
+    let cells = vec![(0u16, cell('é'))];
+    let out = shape_run_with_cell_w(&mut r, FAMILY, raster_px, STYLE, &cells, cell_w_raster);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out[0].cluster_cells, 1,
+        "non-PUA Latin glyph 'é' must stay 1 cell at 2× DPI (cell_w_raster={cell_w_raster})"
+    );
+    // Plain ASCII 'M' at 2× DPI: the shaper's advance for 'M' is the
+    // cell pitch itself, so `g.w > 1.5 * cell_w_raster` is false and
+    // widening must NOT fire. This is the direct symptom of the bug
+    // Haiku flagged (passing logical cell_w halves the threshold so
+    // 'M's advance trips it).
+    let cells = vec![(0u16, cell('M'))];
+    let out = shape_run_with_cell_w(&mut r, FAMILY, raster_px, STYLE, &cells, cell_w_raster);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out[0].cluster_cells, 1,
+        "ASCII 'M' must stay 1 cell at 2× DPI when cell_w is in matching raster units"
+    );
+}
