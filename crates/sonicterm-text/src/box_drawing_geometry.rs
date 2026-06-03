@@ -1127,8 +1127,155 @@ pub fn box_drawing_geometry(
         0x250A => Some(mk(dashes_vertical(top, bottom, cx, 4), StrokeWeight::Light)),
         0x250B => Some(mk(dashes_vertical(top, bottom, cx, 4), StrokeWeight::Heavy)),
 
+        // ── Phase D: 4 arcs + 3 diagonals (7 codepoints) ────────────
+        // Arcs (rounded corners) — quarter-arc tessellated into
+        // ARC_TESSELLATION_SEGMENTS short straight LineSegments. The
+        // arc endpoints are SNAPPED to cell-edge midpoints so each arc
+        // abuts its straight-line neighbours pixel-identically (same
+        // continuity contract as Phase A corners). Arc centre is the
+        // *opposite* cell corner — i.e. ╭ (top-left rounded) has its
+        // arc centre at the bottom-right of the cell and bulges from
+        // the cell's bottom-edge midpoint up and around to the cell's
+        // right-edge midpoint, occupying the cell's bottom-right
+        // quadrant. Per-arc radii are `w/2` (x) and `h/2` (y) so the
+        // arc remains an elliptical quadrant that always touches the
+        // edge midpoints regardless of cell aspect ratio.
+        //
+        // ╭ U+256D top-left rounded corner — centre at (right, bottom)
+        0x256D => Some(mk(
+            arc_segments_quadrant((right, bottom), w * 0.5, h * 0.5, ArcQuadrant::TopLeftCornerArc),
+            StrokeWeight::Light,
+        )),
+        // ╮ U+256E top-right rounded corner — centre at (left, bottom)
+        0x256E => Some(mk(
+            arc_segments_quadrant((left, bottom), w * 0.5, h * 0.5, ArcQuadrant::TopRightCornerArc),
+            StrokeWeight::Light,
+        )),
+        // ╯ U+256F bottom-right rounded corner — centre at (left, top)
+        0x256F => Some(mk(
+            arc_segments_quadrant((left, top), w * 0.5, h * 0.5, ArcQuadrant::BottomRightCornerArc),
+            StrokeWeight::Light,
+        )),
+        // ╰ U+2570 bottom-left rounded corner — centre at (right, top)
+        0x2570 => Some(mk(
+            arc_segments_quadrant((right, top), w * 0.5, h * 0.5, ArcQuadrant::BottomLeftCornerArc),
+            StrokeWeight::Light,
+        )),
+
+        // Diagonals — emitted as single (or pair) LineSegments with
+        // dx ≠ 0 AND dy ≠ 0, which `sonicterm-gpu::geometry_emit::
+        // line_segment_to_quad` (per #564/#565) routes through the
+        // capsule SDF path automatically. No renderer change needed.
+        //
+        // ╱ U+2571 — bottom-left → top-right
+        0x2571 => Some(mk(vec![((left, bottom), (right, top))], StrokeWeight::Light)),
+        // ╲ U+2572 — top-left → bottom-right
+        0x2572 => Some(mk(vec![((left, top), (right, bottom))], StrokeWeight::Light)),
+        // ╳ U+2573 — both diagonals
+        0x2573 => Some(mk(
+            vec![((left, bottom), (right, top)), ((left, top), (right, bottom))],
+            StrokeWeight::Light,
+        )),
+
         _ => None,
     }
+}
+
+/// Number of straight LineSegments used to tessellate a single
+/// quarter-arc (Phase D rounded corners ╭ ╮ ╯ ╰). 12 segments keep the
+/// per-segment angular step at 7.5° which is below the visible-kink
+/// threshold at 100/125/150% DPI for the cell sizes we target. Bump to
+/// 16 if 1.5× scale shows kinks at segment boundaries.
+pub const ARC_TESSELLATION_SEGMENTS: usize = 12;
+
+/// Which quarter-arc to emit, in screen coordinates (y increases down).
+///
+/// Each variant maps the conceptual "rounded corner sits in this corner
+/// of the cell" to the actual angular sweep around the supplied arc
+/// centre. The arc centre for each variant is the OPPOSITE cell corner
+/// (see Phase D codepoint table comments) so the arc bulges inward
+/// toward the rounded-corner direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum ArcQuadrant {
+    /// ╭ — arc sits in cell's bottom-right quadrant; centre at
+    /// (right, bottom). Sweep traces from cell's bottom-edge midpoint
+    /// (cx, bottom) up to cell's right-edge midpoint (right, cy).
+    TopLeftCornerArc,
+    /// ╮ — arc sits in cell's bottom-left quadrant; centre at
+    /// (left, bottom). Sweep: (left, cy) → (cx, bottom).
+    TopRightCornerArc,
+    /// ╯ — arc sits in cell's top-left quadrant; centre at (left, top).
+    /// Sweep: (left, cy) → (cx, top).
+    BottomRightCornerArc,
+    /// ╰ — arc sits in cell's top-right quadrant; centre at
+    /// (right, top). Sweep: (cx, top) → (right, cy).
+    BottomLeftCornerArc,
+}
+
+/// Tessellate one of the four rounded-corner quadrant arcs into
+/// `ARC_TESSELLATION_SEGMENTS` short straight `((from, to), …)` pairs.
+///
+/// The first segment's `from` and the last segment's `to` are SNAPPED
+/// exactly to the cell-edge midpoints (the centerline anchors that
+/// the Phase A straight-line codepoints terminate at) so adjacent
+/// `╭─╮ / │ │ / ╰─╯` cells abut pixel-identically with no gap.
+/// Intermediate points are sampled along the elliptical quadrant via
+/// `centre + (rx·cos θ, ry·sin θ)` with θ stepped uniformly across the
+/// quadrant.
+fn arc_segments_quadrant(
+    centre: (f32, f32),
+    rx: f32,
+    ry: f32,
+    quadrant: ArcQuadrant,
+) -> Vec<((f32, f32), (f32, f32))> {
+    let (cx_c, cy_c) = centre;
+    // Screen-space angular ranges. Note: y grows DOWN, so e.g. for
+    // ╭ (centre = (right, bottom)) we need the arc to walk from
+    // (cx, bottom)  [θ such that cos=−w/(2·rx), sin=0]
+    // to (right, cy) [θ such that cos=0,        sin=−h/(2·ry)].
+    // Using rx = w/2 and ry = h/2 reduces those to cos = −1, sin = 0
+    // (θ = π) and cos = 0, sin = −1 (θ = 3π/2 ≡ −π/2). Sweep is
+    // π → 3π/2 (i.e. counterclockwise in screen space, which is
+    // mathematically clockwise — y is flipped).
+    let (start_angle, end_angle) = match quadrant {
+        ArcQuadrant::TopLeftCornerArc => (std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+        ArcQuadrant::TopRightCornerArc => (1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
+        ArcQuadrant::BottomRightCornerArc => (0.0, 0.5 * std::f32::consts::PI),
+        ArcQuadrant::BottomLeftCornerArc => (0.5 * std::f32::consts::PI, std::f32::consts::PI),
+    };
+    let n = ARC_TESSELLATION_SEGMENTS;
+    let step = (end_angle - start_angle) / n as f32;
+
+    // Endpoint snap targets — what the first segment's `from` and the
+    // last segment's `to` MUST equal after construction, regardless of
+    // any trig accumulation error. Per-quadrant table; mirrors the
+    // cell-edge midpoint contract from Phase A straight-line corners.
+    let snap_from = match quadrant {
+        ArcQuadrant::TopLeftCornerArc => (cx_c - rx, cy_c),
+        ArcQuadrant::TopRightCornerArc => (cx_c, cy_c - ry),
+        ArcQuadrant::BottomRightCornerArc => (cx_c + rx, cy_c),
+        ArcQuadrant::BottomLeftCornerArc => (cx_c, cy_c + ry),
+    };
+    let snap_to = match quadrant {
+        ArcQuadrant::TopLeftCornerArc => (cx_c, cy_c - ry),
+        ArcQuadrant::TopRightCornerArc => (cx_c + rx, cy_c),
+        ArcQuadrant::BottomRightCornerArc => (cx_c, cy_c + ry),
+        ArcQuadrant::BottomLeftCornerArc => (cx_c - rx, cy_c),
+    };
+
+    let point_at = |i: usize| -> (f32, f32) {
+        let theta = start_angle + step * i as f32;
+        (cx_c + rx * theta.cos(), cy_c + ry * theta.sin())
+    };
+
+    let mut segs: Vec<((f32, f32), (f32, f32))> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p0 = if i == 0 { snap_from } else { point_at(i) };
+        let p1 = if i + 1 == n { snap_to } else { point_at(i + 1) };
+        segs.push((p0, p1));
+    }
+    segs
 }
 
 /// Subdivide `[start, end]` into `n` equal slots and return the middle
@@ -1275,6 +1422,9 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x254C | 0x254D | 0x254E | 0x254F
             | 0x2504 | 0x2505 | 0x2506 | 0x2507
             | 0x2508 | 0x2509 | 0x250A | 0x250B
+            // Phase D — 4 arcs + 3 diagonals (7 codepoints)
+            | 0x256D | 0x256E | 0x256F | 0x2570
+            | 0x2571 | 0x2572 | 0x2573
     )
 }
 
@@ -1365,11 +1515,11 @@ mod tests {
 
     #[test]
     fn out_of_scope_codepoints_return_none() {
-        // Arc / diagonal variants remain deferred to Phase D.
-        // NOTE: Phase B2 moved ═ ║ ╔ ╗ ╚ ╝ ╠ ╣ ╦ ╩ ╬ and Phase C moved
-        // ╌ ╍ ┄ ┅ ┈ ┉ ╎ ╏ ┆ ┇ ┊ ┋ into the covered set; they are no
-        // longer here.
-        for ch in ['╭', '╮', '╱', '╲'] {
+        // Phase D landed → arcs and diagonals are no longer out-of-scope.
+        // The Box Drawing block still contains a handful of legacy
+        // codepoints we don't cover (e.g. U+257A..U+257F half-/quarter-
+        // line variants), so pick from those for the negative check.
+        for ch in ['\u{257A}', '\u{257B}', '\u{257C}', '\u{257D}'] {
             assert!(
                 box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
                 "Codepoint U+{:04X} ('{ch}') is out of phase scope and must return None",
@@ -2522,18 +2672,264 @@ mod tests {
 
     #[test]
     fn phase_c_remaining_arcs_and_diagonals_still_none() {
-        // Phase D (arcs + diagonals) remains deferred — must still
-        // return None so the renderer falls back to glyph stretch.
-        // Update this list when Phase D lands.
+        // Phase D landed — arcs and diagonals are now covered. This
+        // test inverts: every Phase D codepoint MUST now return geometry.
         for ch in
             ['\u{256D}', '\u{256E}', '\u{256F}', '\u{2570}', '\u{2571}', '\u{2572}', '\u{2573}']
         {
             assert!(
-                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_none(),
-                "U+{:04X} is Phase D and must still be None",
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some(),
+                "Phase D U+{:04X} must now return geometry",
                 ch as u32
             );
-            assert!(!is_covered_box_drawing(ch));
+            assert!(is_covered_box_drawing(ch), "Phase D U+{:04X} must be covered", ch as u32);
+        }
+    }
+
+    // ── Phase D (4 arcs + 3 diagonals) tests ──────────────────────
+
+    /// Canonical Phase D codepoint table — single source of truth used
+    /// by the predicate-sync test and the per-arc / per-diagonal asserts.
+    const PHASE_D_ARCS: &[char] = &['\u{256D}', '\u{256E}', '\u{256F}', '\u{2570}'];
+    const PHASE_D_DIAGONALS: &[char] = &['\u{2571}', '\u{2572}', '\u{2573}'];
+
+    fn phase_d_all_seven() -> Vec<char> {
+        let mut v = Vec::with_capacity(7);
+        v.extend_from_slice(PHASE_D_ARCS);
+        v.extend_from_slice(PHASE_D_DIAGONALS);
+        v
+    }
+
+    #[test]
+    fn phase_d_all_seven_return_some_and_are_covered() {
+        for ch in phase_d_all_seven() {
+            assert!(
+                box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some(),
+                "Phase D U+{:04X} must return geometry",
+                ch as u32
+            );
+            assert!(
+                is_covered_box_drawing(ch),
+                "Phase D U+{:04X} must be in is_covered_box_drawing",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn phase_d_arc_segment_count_is_twelve() {
+        for &ch in PHASE_D_ARCS {
+            let segs = lines(ch);
+            assert_eq!(
+                segs.len(),
+                ARC_TESSELLATION_SEGMENTS,
+                "Phase D arc U+{:04X} must emit {ARC_TESSELLATION_SEGMENTS} tessellated segments, got {}",
+                ch as u32,
+                segs.len()
+            );
+            for s in &segs {
+                assert_eq!(s.weight, StrokeWeight::Light, "arc segments must be Light");
+                assert_eq!(s.style, StrokeStyle::Single, "arc segments must be Single");
+                assert!((s.thickness - LIGHT_THICKNESS_PX).abs() < f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn phase_d_arc_top_left_endpoints_snap_and_quadrant() {
+        // ╭ — arc should occupy the bottom-right quadrant of the cell
+        // and have first-segment.from = (cx, bottom), last-segment.to =
+        // (right, cy).
+        let segs = lines('╭');
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let right = ORIGIN.0 + CELL_W;
+        let bottom = ORIGIN.1 + CELL_H;
+        assert_eq!(
+            segs.first().unwrap().from,
+            (cx, bottom),
+            "╭ start endpoint must snap to (cx, bottom)"
+        );
+        assert_eq!(segs.last().unwrap().to, (right, cy), "╭ end endpoint must snap to (right, cy)");
+        // Every intermediate point must lie inside the bottom-right
+        // quadrant rect [cx, right] × [cy, bottom] (with small epsilon).
+        for s in &segs {
+            for &p in &[s.from, s.to] {
+                assert!(
+                    p.0 >= cx - 1e-3 && p.0 <= right + 1e-3,
+                    "╭ point {p:?} x must be in [cx={cx}, right={right}]"
+                );
+                assert!(
+                    p.1 >= cy - 1e-3 && p.1 <= bottom + 1e-3,
+                    "╭ point {p:?} y must be in [cy={cy}, bottom={bottom}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn phase_d_arc_top_right_endpoints_snap() {
+        // ╮ — first.from = (left, cy), last.to = (cx, bottom).
+        let segs = lines('╮');
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let bottom = ORIGIN.1 + CELL_H;
+        assert_eq!(segs.first().unwrap().from, (left, cy));
+        assert_eq!(segs.last().unwrap().to, (cx, bottom));
+    }
+
+    #[test]
+    fn phase_d_arc_bottom_right_endpoints_snap() {
+        // ╯ — first.from = (cx, top), last.to = (left, cy).
+        let segs = lines('╯');
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let top = ORIGIN.1;
+        assert_eq!(segs.first().unwrap().from, (cx, top));
+        assert_eq!(segs.last().unwrap().to, (left, cy));
+    }
+
+    #[test]
+    fn phase_d_arc_bottom_left_endpoints_snap() {
+        // ╰ — first.from = (right, cy), last.to = (cx, top).
+        let segs = lines('╰');
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let right = ORIGIN.0 + CELL_W;
+        let top = ORIGIN.1;
+        assert_eq!(segs.first().unwrap().from, (right, cy));
+        assert_eq!(segs.last().unwrap().to, (cx, top));
+    }
+
+    #[test]
+    fn phase_d_diagonals_have_expected_segment_counts() {
+        assert_eq!(lines('╱').len(), 1, "╱ = 1 segment");
+        assert_eq!(lines('╲').len(), 1, "╲ = 1 segment");
+        assert_eq!(lines('╳').len(), 2, "╳ = 2 segments");
+    }
+
+    #[test]
+    fn phase_d_diagonals_endpoint_geometry() {
+        // ╱ — bottom-left → top-right (so dx > 0, dy < 0)
+        let s = lines('╱')[0];
+        assert_eq!(s.from, (ORIGIN.0, ORIGIN.1 + CELL_H));
+        assert_eq!(s.to, (ORIGIN.0 + CELL_W, ORIGIN.1));
+        // ╲ — top-left → bottom-right
+        let s = lines('╲')[0];
+        assert_eq!(s.from, (ORIGIN.0, ORIGIN.1));
+        assert_eq!(s.to, (ORIGIN.0 + CELL_W, ORIGIN.1 + CELL_H));
+        // ╳ — both diagonals
+        let x = lines('╳');
+        assert!(x
+            .iter()
+            .any(|s| s.from == (ORIGIN.0, ORIGIN.1 + CELL_H)
+                && s.to == (ORIGIN.0 + CELL_W, ORIGIN.1)));
+        assert!(x
+            .iter()
+            .any(|s| s.from == (ORIGIN.0, ORIGIN.1)
+                && s.to == (ORIGIN.0 + CELL_W, ORIGIN.1 + CELL_H)));
+    }
+
+    #[test]
+    fn phase_d_diagonals_have_both_dx_and_dy_nonzero() {
+        // Per #564/#565: line_segment_to_quad routes any segment with
+        // BOTH dx != 0 AND dy != 0 through the capsule SDF path. This
+        // is the load-bearing invariant that lets Phase D diagonals
+        // render without a renderer-side change.
+        for &ch in PHASE_D_DIAGONALS {
+            for s in &lines(ch) {
+                let dx = s.to.0 - s.from.0;
+                let dy = s.to.1 - s.from.1;
+                assert!(
+                    dx.abs() > f32::EPSILON && dy.abs() > f32::EPSILON,
+                    "Phase D diagonal U+{:04X} segment dx={dx} dy={dy} — must both be nonzero so geometry_emit routes through capsule SDF",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    fn check_arc_3x3_continuity(scale: f32) {
+        // ╭─╮
+        // │ │
+        // ╰─╯
+        // Assert every cell-to-cell join is pixel-identical.
+        let cw = 8.0_f32 * scale;
+        let ch = 16.0_f32 * scale;
+        let cell = |col: usize, row: usize| (col as f32 * cw, row as f32 * ch);
+
+        // Row 0: ╭─╮
+        let tl = lines_at('╭', cell(0, 0), (cw, ch));
+        let h0 = lines_at('─', cell(1, 0), (cw, ch));
+        let tr = lines_at('╮', cell(2, 0), (cw, ch));
+        let cy_top = ch * 0.5;
+
+        // ╭ rightmost endpoint sits at (cw, cy_top) (cell 0's right edge).
+        let tl_last = tl.last().unwrap();
+        assert_eq!(tl_last.to, (cw, cy_top), "scale {scale}× ╭ right-edge midpoint snap");
+        let h0_seg = h0[0];
+        assert_eq!(tl_last.to, h0_seg.from, "scale {scale}× ╭→─ join must be pixel-identical");
+
+        // ╮ leftmost endpoint sits at (2cw, cy_top) (cell 2's left edge).
+        let tr_first = tr.first().unwrap();
+        assert_eq!(tr_first.from, (2.0 * cw, cy_top), "scale {scale}× ╮ left-edge midpoint snap");
+        assert_eq!(h0_seg.to, tr_first.from, "scale {scale}× ─→╮ join must be pixel-identical");
+
+        // Row 2: ╰─╯
+        let bl = lines_at('╰', cell(0, 2), (cw, ch));
+        let h2 = lines_at('─', cell(1, 2), (cw, ch));
+        let br = lines_at('╯', cell(2, 2), (cw, ch));
+        let cy_bot = 2.0 * ch + ch * 0.5;
+        let bl_first = bl.first().unwrap();
+        assert_eq!(bl_first.from, (cw, cy_bot), "scale {scale}× ╰ right-edge midpoint snap");
+        let h2_seg = h2[0];
+        assert_eq!(bl_first.from, h2_seg.from, "scale {scale}× ╰→─ join (row 2)");
+        let br_last = br.last().unwrap();
+        assert_eq!(br_last.to, (2.0 * cw, cy_bot), "scale {scale}× ╯ left-edge midpoint snap");
+        assert_eq!(h2_seg.to, br_last.to, "scale {scale}× ─→╯ join (row 2)");
+
+        // Left column: ╭ down endpoint == │ top == ╰ top endpoint.
+        let v1 = lines_at('│', cell(0, 1), (cw, ch));
+        let cx_l = cw * 0.5;
+        let tl_down = tl.first().unwrap();
+        assert_eq!(tl_down.from, (cx_l, ch), "scale {scale}× ╭ bottom-edge midpoint snap");
+        let v1_top = v1[0];
+        assert_eq!(tl_down.from, v1_top.from, "scale {scale}× ╭→│ vertical join");
+        let bl_up = bl.last().unwrap();
+        assert_eq!(bl_up.to, (cx_l, 2.0 * ch), "scale {scale}× ╰ top-edge midpoint snap");
+        assert_eq!(v1_top.to, bl_up.to, "scale {scale}× │→╰ vertical join");
+    }
+
+    #[test]
+    fn phase_d_arc_3x3_continuity_at_100_percent_dpi() {
+        check_arc_3x3_continuity(1.0);
+    }
+
+    #[test]
+    fn phase_d_arc_3x3_continuity_at_125_percent_dpi() {
+        check_arc_3x3_continuity(1.25);
+    }
+
+    #[test]
+    fn phase_d_arc_3x3_continuity_at_150_percent_dpi() {
+        check_arc_3x3_continuity(1.5);
+    }
+
+    #[test]
+    fn phase_d_predicate_sync_table_driven() {
+        // Extends the Phase C predicate-sync test to include Phase D.
+        // Adding a phase MUST force the predicate to stay in lock-step
+        // via this table-driven check (Opus Step-2 caveat).
+        for ch in phase_d_all_seven() {
+            let geom_some = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some();
+            let covered = is_covered_box_drawing(ch);
+            assert!(
+                geom_some && covered,
+                "predicate/geometry mismatch for Phase D U+{:04X}",
+                ch as u32
+            );
         }
     }
 }

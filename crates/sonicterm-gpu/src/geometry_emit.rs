@@ -378,12 +378,15 @@ mod tests {
 
     #[test]
     fn uncovered_char_returns_none() {
-        // ASCII 'A' is neither block element nor Phase-A/B box drawing —
+        // ASCII 'A' is neither block element nor box drawing —
         // must NOT route through this helper.
         assert!(emit_geometry_for_char('A', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
-        // Arc (U+256D) is still out of scope (Phase D), so it must
-        // fall back to glyph stretch.
-        assert!(emit_geometry_for_char('╭', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none());
+        // Phase D landed (#542) → ╭ is now covered. Pick a still-
+        // uncovered Box Drawing codepoint instead — U+257A LEFT HALF
+        // HEAVY LINE has no procedural geometry yet.
+        assert!(
+            emit_geometry_for_char('\u{257A}', (0.0, 0.0), (8.0, 16.0), FG, SW, SH, 1.0).is_none()
+        );
     }
 
     #[test]
