@@ -48,6 +48,16 @@
 //! `┍ ┎ ┑ ┒ ┕ ┖ ┙ ┚ ┝ ┞ ┟ ┠ ┡ ┢ ┥ ┦ ┧ ┨ ┩ ┪ ┭ ┮ ┯ ┰ ┱ ┲ ┵ ┶ ┷ ┸ ┹ ┺
 //!  ┽ ┾ ┿ ╀ ╁ ╂ ╃ ╄ ╅ ╆ ╇ ╈ ╉ ╊`.
 //!
+//! Phase B3b adds the 18 light↔double mixed-junction codepoints —
+//! one axis Single (`Light`), the other Double — emitted as
+//! pre-clipped `Single`/`Light` lanes exactly like the Phase B2
+//! double corners / T-junctions / cross. The double-axis half-edges
+//! become two parallel lanes at `cy ± DOUBLE_LANE_OFFSET_PX` (or
+//! `cx ± DOUBLE_LANE_OFFSET_PX`); the single-axis stem terminates at
+//! the near double-lane (the "junction kernel boundary") so the
+//! stems never cross or overshoot the double lanes. Codepoints:
+//! `╒ ╓ ╕ ╖ ╘ ╙ ╛ ╜ ╞ ╟ ╡ ╢ ╤ ╥ ╧ ╨ ╪ ╫`.
+//!
 //! All other codepoints in the Box Drawing block (double/dashed/arc/
 //! diagonal) return `None`; callers fall back to the existing
 //! `BoxDrawingCellFill` glyph stretch path in
@@ -225,12 +235,8 @@ fn emit_edge_strokes(
         StrokeWeight::Light => LIGHT_THICKNESS_PX,
         StrokeWeight::Heavy => HEAVY_THICKNESS_PX,
     };
-    let mk_seg = |from: (f32, f32), to: (f32, f32), weight: StrokeWeight, style: StrokeStyle| LineSegment {
-        from,
-        to,
-        thickness: thickness_for(weight),
-        weight,
-        style,
+    let mk_seg = |from: (f32, f32), to: (f32, f32), weight: StrokeWeight, style: StrokeStyle| {
+        LineSegment { from, to, thickness: thickness_for(weight), weight, style }
     };
 
     let find = |dir: EdgeDir| edges.iter().copied().find(|e| e.dir == dir);
@@ -975,6 +981,131 @@ pub fn box_drawing_geometry(
             cell_size,
         ))),
 
+        // ── Phase B3b: 18 light↔double mixed-junction codepoints ────
+        // Each codepoint has one axis as light Single and the other as
+        // Double. For Double edges we emit pre-clipped per-lane Single
+        // segments (exactly as Phase B2 does for ╔/╗/etc.) — the inner
+        // lane terminates at the junction kernel boundary so the
+        // crossing single edge connects cleanly without overlap or
+        // gap. All emitted segments are `Light`/`Single`: the doubled
+        // appearance is encoded by emitting two parallel lanes per
+        // double edge rather than by tagging a centerline `Double`.
+        //
+        // Naming convention from Unicode names: "DOWN SINGLE AND RIGHT
+        // DOUBLE" → down-stem light, right-stem double, etc.
+        // ╒ U+2552 — DOWN SINGLE AND RIGHT DOUBLE (top-left corner)
+        0x2552 => Some(mk_lanes(vec![
+            // Right edge double — two lanes from center to right edge
+            ((cx, cy - off), (right, cy - off)),
+            ((cx, cy + off), (right, cy + off)),
+            // Down single — stem at cx spans both lanes down to bottom
+            ((cx, cy - off), (cx, bottom)),
+        ])),
+        // ╓ U+2553 — DOWN DOUBLE AND RIGHT SINGLE (top-left corner)
+        0x2553 => Some(mk_lanes(vec![
+            // Down edge double — two lanes from cy down to bottom
+            ((cx - off, cy), (cx - off, bottom)),
+            ((cx + off, cy), (cx + off, bottom)),
+            // Right single — spans both lanes out to right edge
+            ((cx - off, cy), (right, cy)),
+        ])),
+        // ╕ U+2555 — DOWN SINGLE AND LEFT DOUBLE (top-right corner)
+        0x2555 => Some(mk_lanes(vec![
+            ((left, cy - off), (cx, cy - off)),
+            ((left, cy + off), (cx, cy + off)),
+            ((cx, cy - off), (cx, bottom)),
+        ])),
+        // ╖ U+2556 — DOWN DOUBLE AND LEFT SINGLE (top-right corner)
+        0x2556 => Some(mk_lanes(vec![
+            ((cx - off, cy), (cx - off, bottom)),
+            ((cx + off, cy), (cx + off, bottom)),
+            ((left, cy), (cx + off, cy)),
+        ])),
+        // ╘ U+2558 — UP SINGLE AND RIGHT DOUBLE (bottom-left corner)
+        0x2558 => Some(mk_lanes(vec![
+            ((cx, cy - off), (right, cy - off)),
+            ((cx, cy + off), (right, cy + off)),
+            ((cx, top), (cx, cy + off)),
+        ])),
+        // ╙ U+2559 — UP DOUBLE AND RIGHT SINGLE (bottom-left corner)
+        0x2559 => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, cy)),
+            ((cx + off, top), (cx + off, cy)),
+            ((cx - off, cy), (right, cy)),
+        ])),
+        // ╛ U+255B — UP SINGLE AND LEFT DOUBLE (bottom-right corner)
+        0x255B => Some(mk_lanes(vec![
+            ((left, cy - off), (cx, cy - off)),
+            ((left, cy + off), (cx, cy + off)),
+            ((cx, top), (cx, cy + off)),
+        ])),
+        // ╜ U+255C — UP DOUBLE AND LEFT SINGLE (bottom-right corner)
+        0x255C => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, cy)),
+            ((cx + off, top), (cx + off, cy)),
+            ((left, cy), (cx + off, cy)),
+        ])),
+        // ╞ U+255E — VERTICAL SINGLE AND RIGHT DOUBLE (left-T)
+        0x255E => Some(mk_lanes(vec![
+            ((cx, top), (cx, bottom)),
+            ((cx, cy - off), (right, cy - off)),
+            ((cx, cy + off), (right, cy + off)),
+        ])),
+        // ╟ U+255F — VERTICAL DOUBLE AND RIGHT SINGLE (left-T)
+        0x255F => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, bottom)),
+            ((cx + off, top), (cx + off, bottom)),
+            ((cx + off, cy), (right, cy)),
+        ])),
+        // ╡ U+2561 — VERTICAL SINGLE AND LEFT DOUBLE (right-T)
+        0x2561 => Some(mk_lanes(vec![
+            ((cx, top), (cx, bottom)),
+            ((left, cy - off), (cx, cy - off)),
+            ((left, cy + off), (cx, cy + off)),
+        ])),
+        // ╢ U+2562 — VERTICAL DOUBLE AND LEFT SINGLE (right-T)
+        0x2562 => Some(mk_lanes(vec![
+            ((cx - off, top), (cx - off, bottom)),
+            ((cx + off, top), (cx + off, bottom)),
+            ((left, cy), (cx - off, cy)),
+        ])),
+        // ╤ U+2564 — DOWN SINGLE AND HORIZONTAL DOUBLE (top-T)
+        0x2564 => Some(mk_lanes(vec![
+            ((left, cy - off), (right, cy - off)),
+            ((left, cy + off), (right, cy + off)),
+            ((cx, cy + off), (cx, bottom)),
+        ])),
+        // ╥ U+2565 — DOWN DOUBLE AND HORIZONTAL SINGLE (top-T)
+        0x2565 => Some(mk_lanes(vec![
+            ((left, cy), (right, cy)),
+            ((cx - off, cy), (cx - off, bottom)),
+            ((cx + off, cy), (cx + off, bottom)),
+        ])),
+        // ╧ U+2567 — UP SINGLE AND HORIZONTAL DOUBLE (bottom-T)
+        0x2567 => Some(mk_lanes(vec![
+            ((left, cy - off), (right, cy - off)),
+            ((left, cy + off), (right, cy + off)),
+            ((cx, top), (cx, cy - off)),
+        ])),
+        // ╨ U+2568 — UP DOUBLE AND HORIZONTAL SINGLE (bottom-T)
+        0x2568 => Some(mk_lanes(vec![
+            ((left, cy), (right, cy)),
+            ((cx - off, top), (cx - off, cy)),
+            ((cx + off, top), (cx + off, cy)),
+        ])),
+        // ╪ U+256A — VERTICAL SINGLE AND HORIZONTAL DOUBLE (cross)
+        0x256A => Some(mk_lanes(vec![
+            ((cx, top), (cx, bottom)),
+            ((left, cy - off), (right, cy - off)),
+            ((left, cy + off), (right, cy + off)),
+        ])),
+        // ╫ U+256B — VERTICAL DOUBLE AND HORIZONTAL SINGLE (cross)
+        0x256B => Some(mk_lanes(vec![
+            ((left, cy), (right, cy)),
+            ((cx - off, top), (cx - off, bottom)),
+            ((cx + off, top), (cx + off, bottom)),
+        ])),
+
         _ => None,
     }
 }
@@ -1072,6 +1203,25 @@ pub fn is_covered_box_drawing(ch: char) -> bool {
             | 0x2548
             | 0x2549
             | 0x254A
+            // Phase B3b — 18 light↔double mixed-junction codepoints
+            | 0x2552
+            | 0x2553
+            | 0x2555
+            | 0x2556
+            | 0x2558
+            | 0x2559
+            | 0x255B
+            | 0x255C
+            | 0x255E
+            | 0x255F
+            | 0x2561
+            | 0x2562
+            | 0x2564
+            | 0x2565
+            | 0x2567
+            | 0x2568
+            | 0x256A
+            | 0x256B
     )
 }
 
@@ -1902,5 +2052,226 @@ mod tests {
             let covered = is_covered_box_drawing(ch);
             assert_eq!(geom_some, covered, "predicate/geometry mismatch for U+{:04X}", ch as u32);
         }
+    }
+
+    // ─── Phase B3b (18 light↔double mixed-junction) tests ──────────
+
+    /// Canonical list of the 18 Phase B3b codepoints.
+    const B3B_CODEPOINTS: &[char] =
+        &['╒', '╓', '╕', '╖', '╘', '╙', '╛', '╜', '╞', '╟', '╡', '╢', '╤', '╥', '╧', '╨', '╪', '╫'];
+
+    #[test]
+    fn all_eighteen_phase_b3b_codepoints_return_some() {
+        for &ch in B3B_CODEPOINTS {
+            let geom = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H));
+            assert!(
+                geom.is_some(),
+                "Phase B3b codepoint U+{:04X} ('{ch}') must return geometry",
+                ch as u32
+            );
+            let BoxGeometry::Lines(segs) = geom.unwrap();
+            assert!(segs.len() >= 3, "U+{:04X} ('{ch}') needs ≥ 3 lane segments", ch as u32);
+        }
+    }
+
+    #[test]
+    fn phase_b3b_codepoints_emit_only_single_style_pre_clipped_lanes() {
+        // Like Phase B2 corner/T/cross, Phase B3b emits pre-clipped
+        // Single lanes (the double-axis is expressed by emitting two
+        // parallel lanes rather than one Double centerline). The
+        // renderer-side splay therefore never sees these segments —
+        // mixed junctions stay self-contained per codepoint.
+        for &ch in B3B_CODEPOINTS {
+            let segs = lines(ch);
+            for s in &segs {
+                assert_eq!(
+                    s.style,
+                    StrokeStyle::Single,
+                    "U+{:04X} ('{ch}') lane must be Single (pre-clipped); got {:?}",
+                    ch as u32,
+                    s.style
+                );
+                assert_eq!(
+                    s.weight,
+                    StrokeWeight::Light,
+                    "U+{:04X} ('{ch}') lane weight must be Light",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b3b_predicate_matches_geometry_table() {
+        for &ch in B3B_CODEPOINTS {
+            let geom_some = box_drawing_geometry(ch, ORIGIN, (CELL_W, CELL_H)).is_some();
+            let covered = is_covered_box_drawing(ch);
+            assert!(
+                geom_some && covered,
+                "predicate/geometry mismatch for B3b U+{:04X}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn b3b_cross_horiz_double_vert_single_has_correct_lane_pattern() {
+        // ╪ U+256A: horizontal double + vertical single. Expect:
+        //   - 1 vertical centerline at cx, top→bottom
+        //   - 2 horizontal lanes at cy ± off, left→right
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let right = ORIGIN.0 + CELL_W;
+        let top = ORIGIN.1;
+        let bottom = ORIGIN.1 + CELL_H;
+        let segs = lines('╪');
+        assert_eq!(segs.len(), 3, "╪ = 1 vertical + 2 horizontal lanes");
+        assert!(
+            segs.iter().any(|s| s.from == (cx, top) && s.to == (cx, bottom)),
+            "╪ vertical single centerline missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (left, cy - off) && s.to == (right, cy - off)),
+            "╪ upper horizontal lane missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (left, cy + off) && s.to == (right, cy + off)),
+            "╪ lower horizontal lane missing"
+        );
+    }
+
+    #[test]
+    fn b3b_cross_vert_double_horiz_single_has_correct_lane_pattern() {
+        // ╫ U+256B: vertical double + horizontal single.
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let right = ORIGIN.0 + CELL_W;
+        let top = ORIGIN.1;
+        let bottom = ORIGIN.1 + CELL_H;
+        let segs = lines('╫');
+        assert_eq!(segs.len(), 3, "╫ = 1 horizontal + 2 vertical lanes");
+        assert!(
+            segs.iter().any(|s| s.from == (left, cy) && s.to == (right, cy)),
+            "╫ horizontal single centerline missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx - off, top) && s.to == (cx - off, bottom)),
+            "╫ left vertical lane missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx + off, top) && s.to == (cx + off, bottom)),
+            "╫ right vertical lane missing"
+        );
+    }
+
+    #[test]
+    fn b3b_bottom_t_horiz_double_vert_single_continuity() {
+        // ╧ U+2567: horizontal double + up-stem single. The up stem
+        // must terminate at the upper lane (cy - off) — NOT at cy —
+        // so it kisses the inside of the double horizontal without
+        // crossing it. This is the junction-kernel pre-clip contract
+        // from B2 carried into B3b.
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let left = ORIGIN.0;
+        let right = ORIGIN.0 + CELL_W;
+        let top = ORIGIN.1;
+        let segs = lines('╧');
+        assert_eq!(segs.len(), 3, "╧ = 2 horizontal lanes + 1 up stem");
+        assert!(
+            segs.iter().any(|s| s.from == (left, cy - off) && s.to == (right, cy - off)),
+            "╧ upper lane missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (left, cy + off) && s.to == (right, cy + off)),
+            "╧ lower lane missing"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx, top) && s.to == (cx, cy - off)),
+            "╧ up stem must terminate at upper lane (junction-kernel pre-clip)"
+        );
+    }
+
+    #[test]
+    fn b3b_top_left_corner_right_double_down_single() {
+        // ╒ U+2552: right edge double + down stem single.
+        // The down stem starts at the upper lane (cy - off) so both
+        // lanes are visually anchored to it.
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cx = ORIGIN.0 + CELL_W * 0.5;
+        let cy = ORIGIN.1 + CELL_H * 0.5;
+        let right = ORIGIN.0 + CELL_W;
+        let bottom = ORIGIN.1 + CELL_H;
+        let segs = lines('╒');
+        assert_eq!(segs.len(), 3, "╒ = 2 right lanes + 1 down stem");
+        assert!(
+            segs.iter().any(|s| s.from == (cx, cy - off) && s.to == (right, cy - off)),
+            "╒ upper right lane must originate at (cx, cy-off)"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx, cy + off) && s.to == (right, cy + off)),
+            "╒ lower right lane must originate at (cx, cy+off)"
+        );
+        assert!(
+            segs.iter().any(|s| s.from == (cx, cy - off) && s.to == (cx, bottom)),
+            "╒ down single stem must span from upper lane to bottom"
+        );
+    }
+
+    #[test]
+    fn b3b_baseline_phase_b2_corner_still_unchanged() {
+        // Regression guard: ╔ baseline from Phase B2 must keep its
+        // exact 4-lane shape — B3b additions must not perturb it.
+        let segs = lines('╔');
+        assert_eq!(segs.len(), 4, "╔ must still be exactly 4 lanes (Phase B2 baseline)");
+    }
+
+    fn check_b3b_horiz_double_continuity(scale: f32) {
+        // ═╪═ — the horizontal double centerline crossing a Phase B3b
+        // mixed cross must abut pixel-identically. The neighbour ═ is
+        // a Double centerline (renderer splays to two lanes at cy±off);
+        // ╪'s pre-clipped lanes sit at the same cy±off so the lanes
+        // are visually continuous post-splay.
+        let off = DOUBLE_LANE_OFFSET_PX;
+        let cw = 8.0_f32 * scale;
+        let ch = 16.0_f32 * scale;
+        let cell = |col: usize, row: usize| (col as f32 * cw, row as f32 * ch);
+        let left = lines_at('═', cell(0, 0), (cw, ch));
+        let mid = lines_at('╪', cell(1, 0), (cw, ch));
+        let right = lines_at('═', cell(2, 0), (cw, ch));
+        let cy = ch * 0.5;
+        // Left ═ centerline ends at x=cw.
+        assert_eq!(left.len(), 1);
+        assert!((left[0].to.0 - cw).abs() < 1e-3);
+        assert!((left[0].to.1 - cy).abs() < 1e-3);
+        // Mid ╪ upper lane starts at x=cw, y=cy-off.
+        assert!(
+            mid.iter().any(|s| (s.from.0 - cw).abs() < 1e-3
+                && (s.from.1 - (cy - off)).abs() < 1e-3
+                && (s.to.0 - 2.0 * cw).abs() < 1e-3),
+            "scale {scale}× ═→╪ upper lane must start at left cell-edge midline"
+        );
+        // Right ═ centerline starts at x=2cw.
+        assert!((right[0].from.0 - 2.0 * cw).abs() < 1e-3);
+    }
+
+    #[test]
+    fn b3b_horizontal_double_continuity_at_100_percent_dpi() {
+        check_b3b_horiz_double_continuity(1.0);
+    }
+
+    #[test]
+    fn b3b_horizontal_double_continuity_at_125_percent_dpi() {
+        check_b3b_horiz_double_continuity(1.25);
+    }
+
+    #[test]
+    fn b3b_horizontal_double_continuity_at_150_percent_dpi() {
+        check_b3b_horiz_double_continuity(1.5);
     }
 }
