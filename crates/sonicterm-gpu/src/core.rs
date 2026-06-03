@@ -5344,25 +5344,18 @@ impl GpuRenderer {
                     if tile.width == 0 || tile.height == 0 {
                         return None;
                     }
-                    // Preserve aspect ratio: scale to fit inside the
-                    // cell box, height-dominant for the typical
-                    // taller-than-wide NF icon. WezTerm's resize call
-                    // computes the same ratio (`size.height as f32 /
-                    // height_natural as f32`) before the resample.
-                    let aspect = tile.width as f32 / tile.height as f32;
-                    let h = target_h_phys;
-                    let w_from_h = ((h as f32) * aspect).round().max(1.0) as u32;
-                    // Clamp to the cell box width — over-wide icons
-                    // (rare but possible for ligatured NF clusters)
-                    // get height-rescaled back down so they fit.
-                    let (target_w, target_h) = if w_from_h > target_w_phys_box {
-                        let scaled_h =
-                            ((target_w_phys_box as f32) / aspect).round().max(1.0) as u32;
-                        (target_w_phys_box, scaled_h)
-                    } else {
-                        (w_from_h, h)
-                    };
-                    Some((target_w, target_h))
+                    // #610d revise (Haiku Blocker 1, Option A): match
+                    // the resample target to what `apply_symbol_fit(
+                    // IconCellFit)` will draw. That policy (post-#461
+                    // PR-B2b) is explicit: NO aspect preservation,
+                    // fill `cell_w` × `ICON_FIT_TARGET * cell_h`,
+                    // matching Windows Terminal's builtinGlyphs.
+                    // Resampling to the same (cell_box_w_phys,
+                    // target_h_phys) makes the atlas tile 1:1 with
+                    // the production quad — Nearest sampler stays
+                    // pixel-accurate and the horizontal stretch
+                    // residual that bypassed PR-B is gone.
+                    Some((target_w_phys_box, target_h_phys))
                 })
             } else {
                 glyph_atlas.get_or_insert(key, rasterizer)
@@ -6051,4 +6044,25 @@ pub fn emit_one_glyph_for_trace(
         final_rect,
         cell_rect: (cell_origin.0, cell_origin.1, cell_size.0, cell_size.1),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// #610d revise (Haiku Blocker 2): expose the IconCellFit resample target
+// computed inside `flush_shape_run` so integration tests can prove that
+// the production wiring keeps the atlas TILE 1:1 with the production
+// QUAD. The pair `(tile_w_phys, tile_h_phys)` must equal the QUAD's
+// `(gw_phys, gh_phys)` produced by `apply_symbol_fit(IconCellFit)`
+// against the same (cell_box_w_logical, cell_h, scale_factor); the
+// per-call site in `flush_shape_run` (~L5340) uses exactly this code.
+// ──────────────────────────────────────────────────────────────────────
+#[cfg(any(test, feature = "test-emit-trace"))]
+pub fn icon_fit_resample_target_for_test(
+    cell_box_w_logical: f32,
+    cell_h: f32,
+    scale_factor: f32,
+) -> (u32, u32) {
+    let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
+    let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
+    let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
+    (target_w_phys_box, target_h_phys)
 }
