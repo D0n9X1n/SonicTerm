@@ -5300,7 +5300,66 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+            // #610 sym-1 PR-D: IconCellFit glyphs (NerdFont PUA,
+            // geometric arrow icons) get routed through the
+            // physical-bitmap resampler PR-B added in
+            // `glyph_atlas::insert_resampled`. The pre-#610 path
+            // inserted the natural-size tile and let
+            // `apply_symbol_fit(IconCellFit)` stretch the QUAD; the
+            // GPU's Nearest sampler then over-stretched the small
+            // bitmap → step-edges and aliasing. By resampling the
+            // bitmap to the cell box (Lanczos3 down / Mitchell up)
+            // at insert time, the QUAD matches the tile 1:1 and the
+            // existing Nearest sampler stays correct (per Opus PR-B
+            // comment: keep Nearest, fix the bitmap upstream). Mirrors
+            // WezTerm's `window/src/bitmaps/mod.rs:380-394`.
+            //
+            // Non-IconCellFit glyphs (text, Powerline cell-fill, box
+            // drawing, block elements) keep the natural-size insert —
+            // they either match the cell box already (text), use
+            // geometry quads instead of bitmaps (box / block / many
+            // Powerline), or anchor cell-fill which is a quad scale
+            // not a bitmap stretch.
+            let lead_classify = sonicterm_text::swash_rasterizer::classify_symbol(lead_cell.ch);
+            let span_cells = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
+            let span_end_col = ((g.lead_col as usize) + span_cells).min(snapped_cell_x.len() - 1);
+            let cell_box_w_logical =
+                snapped_cell_x[span_end_col] - snapped_cell_x[g.lead_col as usize];
+            let Some(info) = (if matches!(
+                lead_classify,
+                sonicterm_text::swash_rasterizer::SymbolFit::IconCellFit
+            ) {
+                // Target box in PHYSICAL pixels — atlas tiles are
+                // stored at raster_px (font_size * scale_factor) so
+                // the resample target must also be physical. The
+                // `apply_symbol_fit(IconCellFit)` policy scales the
+                // QUAD to (cell_pixel_width_snapped, 0.95 * cell_h)
+                // logical px while preserving aspect ratio; we
+                // mirror those same dims (multiplied by scale_factor)
+                // for the bitmap so the QUAD:TILE ratio is 1:1.
+                let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
+                let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
+                let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
+                glyph_atlas.get_or_insert_resampled(key, rasterizer, |tile| {
+                    if tile.width == 0 || tile.height == 0 {
+                        return None;
+                    }
+                    // #610d revise (Haiku Blocker 1, Option A): match
+                    // the resample target to what `apply_symbol_fit(
+                    // IconCellFit)` will draw. That policy (post-#461
+                    // PR-B2b) is explicit: NO aspect preservation,
+                    // fill `cell_w` × `ICON_FIT_TARGET * cell_h`,
+                    // matching Windows Terminal's builtinGlyphs.
+                    // Resampling to the same (cell_box_w_phys,
+                    // target_h_phys) makes the atlas tile 1:1 with
+                    // the production quad — Nearest sampler stays
+                    // pixel-accurate and the horizontal stretch
+                    // residual that bypassed PR-B is gone.
+                    Some((target_w_phys_box, target_h_phys))
+                })
+            } else {
+                glyph_atlas.get_or_insert(key, rasterizer)
+            }) else {
                 continue;
             };
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
@@ -5985,4 +6044,25 @@ pub fn emit_one_glyph_for_trace(
         final_rect,
         cell_rect: (cell_origin.0, cell_origin.1, cell_size.0, cell_size.1),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// #610d revise (Haiku Blocker 2): expose the IconCellFit resample target
+// computed inside `flush_shape_run` so integration tests can prove that
+// the production wiring keeps the atlas TILE 1:1 with the production
+// QUAD. The pair `(tile_w_phys, tile_h_phys)` must equal the QUAD's
+// `(gw_phys, gh_phys)` produced by `apply_symbol_fit(IconCellFit)`
+// against the same (cell_box_w_logical, cell_h, scale_factor); the
+// per-call site in `flush_shape_run` (~L5340) uses exactly this code.
+// ──────────────────────────────────────────────────────────────────────
+#[cfg(any(test, feature = "test-emit-trace"))]
+pub fn icon_fit_resample_target_for_test(
+    cell_box_w_logical: f32,
+    cell_h: f32,
+    scale_factor: f32,
+) -> (u32, u32) {
+    let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
+    let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
+    let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
+    (target_w_phys_box, target_h_phys)
 }
