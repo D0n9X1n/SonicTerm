@@ -613,10 +613,29 @@ def ocr_contains(shot, value):
     except Exception as e:
         return False, f"err {e}"
 
+# Issue #607: path-scoped pgrep + baseline subtraction.
+# Path-unscoped `pgrep -f sonicterm-mac` matches the user's dev/debug
+# build, IDE windows containing the string, etc. Scope to the release
+# binary path. Then subtract PRE_RUN_USER_PIDS (the snapshot mac.sh
+# takes before the harness starts, per #464) so user-launched
+# instances don't masquerade as harness-spawned leaks.
+_PRE_PIDS = set(
+    p for p in (os.environ.get('PRE_RUN_USER_PIDS', '') or '').split() if p.strip()
+)
 def proc_count(prog):
     try:
-        r = subprocess.run(['pgrep', '-f', prog], capture_output=True, text=True)
-        return len([l for l in r.stdout.splitlines() if l.strip()])
+        if prog == 'sonicterm-mac':
+            # Path component (leading '/') anchors to release dir, so
+            # the user's `target/debug/sonicterm-mac` and IDE windows
+            # containing the substring don't match. Works for both the
+            # relative launch (`./target/release/...`, run_case.sh:160)
+            # and any future absolute-path invocation under REPO_ROOT.
+            pat = '/target/release/sonicterm-mac'
+        else:
+            pat = prog
+        r = subprocess.run(['pgrep', '-f', pat], capture_output=True, text=True)
+        pids = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        return len([p for p in pids if p not in _PRE_PIDS])
     except Exception:
         return -1
 
