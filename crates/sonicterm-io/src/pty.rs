@@ -106,11 +106,62 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        // Only kill when this is the last live reference. Holding both halves
-        // of `Arc` (e.g. for resize) is fine — the resize closure doesn't
-        // outlive the handle in practice, but be defensive.
-        if Arc::strong_count(&self.child) == 1 {
-            self.kill();
+        // LM-007 (#598): the previous `Arc::strong_count == 1` guard skipped
+        // the kill in any code path that still held a cloned child Arc,
+        // leaving an orphaned shell on tab close. It also relied on
+        // portable-pty's `Child::kill`, which on Unix sends SIGHUP and only
+        // escalates to SIGKILL after a timing window. Shells that trap
+        // SIGHUP (zsh by default, bash with `trap '' HUP`) survive that
+        // window and outlive the PTY as orphans.
+        //
+        // Fix: always kill — send SIGKILL directly via `libc::kill` first,
+        // then call portable-pty's `kill()` (covers any pid-namespace edge
+        // cases and the Windows `TerminateProcess` path), then reap with
+        // a bounded `try_wait` poll so a stuck child can never hang the
+        // app on tab close.
+        let mut child = self.child.lock();
+        #[cfg(unix)]
+        let pid_for_log = child.process_id();
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            // SAFETY: libc::kill is FFI; pid comes from portable-pty's
+            // tracked child handle. ESRCH (already dead) is fine.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        // portable-pty escalation as defense in depth (Windows
+        // TerminateProcess, Unix pid-namespace edge cases).
+        let _ = child.kill();
+        // Bounded reap. After SIGKILL the kernel typically delivers the
+        // exit status in well under 10ms; the 500ms budget is huge
+        // headroom for pathological scheduling. We must never block the
+        // app indefinitely on tab close: if the child somehow doesn't
+        // reap (kernel bug, exotic process-group state) we log and move
+        // on rather than hang Drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    #[cfg(unix)]
+                    {
+                        tracing::warn!(
+                            pid = pid_for_log,
+                            "PtyHandle::Drop: child did not exit within 500ms after SIGKILL"
+                        );
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tracing::warn!(
+                            "PtyHandle::Drop: child did not exit within 500ms after kill"
+                        );
+                    }
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => break,
+            }
         }
     }
 }
@@ -138,7 +189,12 @@ impl PtyHandle {
     /// Internal: spawn `cmd` with `args`. The public `spawn` + `spawn_default_shell`
     /// converge here so opts-derived args (e.g. `-NoLogo -NoProfile` for
     /// PowerShell clean_e2e) reach `CommandBuilder` consistently.
-    fn spawn_with_args(cmd: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
+    ///
+    /// Also `pub` (doc-hidden) so integration tests can spawn shells with
+    /// args (e.g. `bash -c "trap '' HUP; exec cat"` for the #598 LM-007
+    /// regression test) without re-implementing the whole pipeline.
+    #[doc(hidden)]
+    pub fn spawn_with_args(cmd: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 

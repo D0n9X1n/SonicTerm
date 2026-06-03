@@ -82,14 +82,8 @@ fn cjk_title_advances_by_double_width() {
     );
 
     // 1) Output non-empty — guards against silently dropping every glyph.
-    assert!(
-        !glyphs.is_empty(),
-        "expected non-empty glyph_instances for title {title:?}"
-    );
-    assert!(
-        !debug.is_empty(),
-        "expected non-empty debug records for title {title:?}"
-    );
+    assert!(!glyphs.is_empty(), "expected non-empty glyph_instances for title {title:?}");
+    assert!(!debug.is_empty(), "expected non-empty debug records for title {title:?}");
     assert_eq!(
         debug.len(),
         title.chars().count(),
@@ -110,15 +104,9 @@ fn cjk_title_advances_by_double_width() {
     //    so the 3 debug entries correspond 1:1 to the 3 title chars but their
     //    leading x is not zero. We therefore assert on RELATIVE gaps only.
     let chars: Vec<char> = title.chars().collect();
-    let widths: Vec<u16> = chars
-        .iter()
-        .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0).max(1) as u16)
-        .collect();
-    assert_eq!(
-        widths,
-        vec![1, 2, 1],
-        "test setup: expected per-char widths for {title:?}"
-    );
+    let widths: Vec<u16> =
+        chars.iter().map(|c| UnicodeWidthChar::width(*c).unwrap_or(0).max(1) as u16).collect();
+    assert_eq!(widths, vec![1, 2, 1], "test setup: expected per-char widths for {title:?}");
 
     // 4) Per-pair gap assertions — the core regression signal.
     //

@@ -90,3 +90,56 @@ fn errno() -> i32 {
         *libc::__error()
     }
 }
+
+/// LM-007 (#598) regression: a child that ignores SIGHUP (like zsh by
+/// default) must still be killed by `PtyHandle::Drop`. The original
+/// `/bin/sh` test passed even with the bug present because sh has no HUP
+/// trap and exits on SIGHUP from portable-pty's `Child::kill`. This variant
+/// installs `trap '' HUP` then exec's `cat`, simulating zsh's behavior, and
+/// asserts the pid is gone within 100ms of dropping the PtyHandle (the
+/// explicit SIGKILL path).
+#[test]
+fn pty_drop_kills_hup_trapping_child() {
+    let args: Vec<String> = ["-c", "trap '' HUP; exec cat"].iter().map(|s| s.to_string()).collect();
+    let handle =
+        PtyHandle::spawn_with_args("/bin/bash", &args, 80, 24).expect("spawn bash with HUP trap");
+
+    let pid = handle.pid().expect("child pid on unix") as i32;
+    assert!(pid > 1, "implausible pid {pid}");
+
+    struct PidGuard(i32);
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            if self.0 > 1 {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let _guard = PidGuard(pid);
+
+    // Give the child a moment to install its HUP trap before we drop.
+    thread::sleep(Duration::from_millis(50));
+    let alive = unsafe { libc::kill(pid, 0) };
+    assert_eq!(alive, 0, "child pid {pid} should be alive immediately after spawn");
+
+    drop(handle);
+
+    // 100ms budget — SIGKILL is delivered immediately by the kernel; this is
+    // mostly the time for the parent `wait()` to reap.
+    let mut gone = false;
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(5));
+        let rc = unsafe { libc::kill(pid, 0) };
+        if rc == -1 && errno() == libc::ESRCH {
+            gone = true;
+            break;
+        }
+    }
+    assert!(
+        gone,
+        "HUP-trapping child pid {pid} still alive 100ms after PtyHandle drop — \
+         LM-007 (#598) regression: SIGHUP-only kill leaks zsh-like shells",
+    );
+}
