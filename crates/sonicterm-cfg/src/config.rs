@@ -37,6 +37,13 @@ pub struct Config {
     /// Appearance and compositor backdrop settings.
     #[serde(default)]
     pub appearance: AppearanceConfig,
+    /// Render pipeline implementation toggles (#621 v0.9.2 wezterm-parity).
+    /// Each knob selects between v1 (legacy) and v2 (wezterm-parity) impls.
+    /// Defaults to v2 everywhere; flip to v1 to revert per-symptom on a
+    /// regression report. See `crates/sonicterm-text/src/swash_rasterizer.rs`
+    /// and `crates/sonicterm-gpu/src/core.rs`.
+    #[serde(default)]
+    pub render: RenderConfig,
     /// Optional override for the tab close `×` button color. When set
     /// (e.g. `"#ff5555"`), the close button is always visible in this
     /// color, matching WezTerm's `tab_close_button_color` setting.
@@ -172,6 +179,43 @@ impl Default for AppearanceConfig {
         Self { backdrop: BackdropKind::Opaque, opacity: 1.0, scrollbar: ScrollbarMode::default() }
     }
 }
+
+/// Render pipeline knobs (#621 v0.9.2 wezterm-parity).
+///
+/// Each field selects between `v1` (legacy) and `v2` (wezterm-parity) impls.
+/// Defaults are `v2`, matching wezterm's behavior. Set a field to `v1` in
+/// `sonicterm.toml` under `[render]` to revert that specific symptom path
+/// if a regression appears in the field. The two flags are independent so
+/// glyph-fit and alt-screen-bg rollback are decoupled.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct RenderConfig {
+    /// Glyph-fit pipeline used by `sonicterm-text::swash_rasterizer::apply_symbol_fit`.
+    /// `v2` (default) plumbs `num_cells` through shaping → rasterizer and
+    /// allows `cell_width * (num_cells + 0.25)` headroom; `v1` is the
+    /// pre-#621 clamp-to-advance behavior that left Powerline triangles at
+    /// 1-cell width and over-scaled Nerd-Font PUA icons.
+    pub glyph_fit: RenderImpl,
+    /// Alt-screen background fill mode used by `sonicterm-gpu::core` paint.
+    /// `v2` (default) keeps the wgpu clear-color opaque and emits a single
+    /// full-viewport translucent bottom-layer quad carrying `bg_opacity`;
+    /// `v1` is the pre-#621 behavior that baked `bg_opacity` into the
+    /// clear and produced a pale wash in vim/nvim alt-screen because
+    /// default-bg cells skip their quad and reveal the translucent clear.
+    pub alt_screen_bg_fill: RenderImpl,
+}
+
+/// Render-pipeline impl selector for [`RenderConfig`]. Lowercase TOML.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderImpl {
+    /// Legacy pre-#621 impl. Use if v2 regresses something in your env.
+    V1,
+    /// wezterm-parity impl (default). Glyph-fit plumbing or opaque-clear
+    /// + viewport-quad alt-screen bg, depending on which field this is on.
+    #[default]
+    V2,
+}
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Accessibility presentation modes.
@@ -292,6 +336,7 @@ impl Default for Config {
             locale: String::new(),
             notifications: NotificationsConfig::default(),
             appearance: AppearanceConfig::default(),
+            render: RenderConfig::default(),
             tab_close_button_color: None,
             quit_on_last_window_close: default_quit_on_last_window_close(),
             extra: toml::Table::new(),

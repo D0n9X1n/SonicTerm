@@ -28,6 +28,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         locale: String::new(),
         notifications: NotificationsConfig::default(),
         appearance: AppearanceConfig::default(),
+        render: Default::default(),
         tab_close_button_color: Some("#ff5555".to_string()),
         quit_on_last_window_close: false,
         logging: sonicterm_cfg::LoggingConfig::default(),
