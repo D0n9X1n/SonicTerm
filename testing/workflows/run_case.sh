@@ -24,6 +24,15 @@ else OCR_AVAILABLE=0
 fi
 export SONICTERM_HARNESS_OCR_AVAILABLE="$OCR_AVAILABLE"
 
+# Issue #593 — CJK preflight. Honor SONICTERM_HARNESS_CJK_AVAILABLE from driver;
+# else probe `tesseract --list-langs` for any of {chi_sim,chi_tra,jpn,kor}.
+if [[ "${SONICTERM_HARNESS_CJK_AVAILABLE:-}" == "1" ]]; then CJK_AVAILABLE=1
+elif [[ "${SONICTERM_HARNESS_CJK_AVAILABLE:-}" == "0" ]]; then CJK_AVAILABLE=0
+elif [[ "$OCR_AVAILABLE" -eq 1 ]] && tesseract --list-langs 2>&1 | grep -Eq '^(chi_sim|chi_tra|jpn|kor)$'; then CJK_AVAILABLE=1
+else CJK_AVAILABLE=0
+fi
+export SONICTERM_HARNESS_CJK_AVAILABLE="$CJK_AVAILABLE"
+
 # ------------------------------------------------------------------
 # Guard 6 — Finder-park escape hatch. Park focus on Finder BEFORE
 # spawning sonicterm-mac so any pre-spawn keystroke leak (which can
@@ -457,6 +466,13 @@ case_path, shot, elog, case_out = sys.argv[1:5]
 c = json.load(open(case_path))
 expectations = c.get('expect', [])
 ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE', '1') == '1')
+cjk_available = (os.environ.get('SONICTERM_HARNESS_CJK_AVAILABLE', '1') == '1')
+
+# Issue #593: CJK codepoint detection — CJK Unified, Hiragana, Katakana, Hangul.
+import re as _re
+_CJK_RE = _re.compile(r'[぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿]')
+def has_cjk(s):
+    return bool(_CJK_RE.search(s or ''))
 OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
 results = []  # (status, kind, reason) status in {'PASS','FAIL','SKIP'}
 
@@ -483,8 +499,17 @@ def ocr_contains(shot, value):
     # None = OCR unavailable, caller should treat as SKIP. Mirrors PR #498.
     if not ocr_available:
         return None, "ocr_unavailable"
+    # Issue #593: per-call language dispatch. CJK expects need the CJK pack;
+    # without it, the OCR engine returns garbage that never matches and the
+    # case fails instead of correctly skipping.
+    if has_cjk(value):
+        if not cjk_available:
+            return None, "cjk_unavailable"
+        lang = 'chi_sim+chi_tra+jpn+kor+eng'
+    else:
+        lang = 'eng'
     try:
-        out = subprocess.run(['tesseract', shot, '-', '--psm', '6'],
+        out = subprocess.run(['tesseract', shot, '-', '-l', lang, '--psm', '6'],
                              capture_output=True, text=True, timeout=20)
         return (value in out.stdout), out.stdout[:200].replace('\n', ' / ')
     except Exception as e:
@@ -511,12 +536,12 @@ for idx, e in enumerate(expectations):
     elif kind in ('text-in-region', 'ocr-text'):
         ok, reason = ocr_contains(shot, e['value'])
         if ok is None:
-            results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+            results.append(('SKIP', kind, f"{reason} case={c.get('id')} expect[{idx}]={kind}"))
             continue
     elif kind == 'not-text-in-region':
         contains, sample = ocr_contains(shot, e['value'])
         if contains is None:
-            results.append(('SKIP', kind, f"ocr_unavailable case={c.get('id')} expect[{idx}]={kind}"))
+            results.append(('SKIP', kind, f"{sample} case={c.get('id')} expect[{idx}]={kind}"))
             continue
         ok = not contains
         reason = f"absent={ok} sample='{sample}'"
