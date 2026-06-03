@@ -1551,7 +1551,11 @@ keystrokes = [
   { kind = "text", value = "clear" },
   { kind = "key",  value = "enter" },
   { kind = "wait", value = 0.3 },
-  { kind = "text", value = "printf 'ZZQ1|\\xee\\x82\\xb0|ZZQ2\\n'" },
+  # #619 echo-poisoning defense: %s indirection + per-sentinel sub-printfs
+  # ensures the command-text echo never contains the substring 'ZZQ1...ZZQ2'.
+  # The OUTPUT line concatenates to 'ZZQ1|<glyph>|ZZQ2'; the matcher's
+  # marker regex therefore matches only the rendered output, not the echo.
+  { kind = "text", value = "printf '%s|\\xee\\x82\\xb0|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
   { kind = "key",  value = "enter" },
   { kind = "wait", value = 1.0 },
 ]
@@ -1580,7 +1584,10 @@ keystrokes = [
   { kind = "wait", value = 0.3 },
   # U+F002 magnifier, U+F0FB folder-variant, U+F015 home — distinct PUA-A
   # codepoints all expected 2-cell. Layout: <icon><|><icon><|><icon><|>.
-  { kind = "text", value = "printf 'ZZQ1\\xee\\x80\\x82|\\xee\\x83\\xbb|\\xee\\x80\\x95|ZZQ2\\n'" },
+  # #619 echo-poisoning defense: see Case B note. Sentinels emitted via
+  # separate sub-printfs so 'ZZQ1...ZZQ2' is never a contiguous substring
+  # of the shell command echo.
+  { kind = "text", value = "printf '%s\\xee\\x80\\x82|\\xee\\x83\\xbb|\\xee\\x80\\x95|%s\\n' \"$(printf 'ZZQ1')\" \"$(printf 'ZZQ2')\"" },
   { kind = "key",  value = "enter" },
   { kind = "wait", value = 1.0 },
 ]
