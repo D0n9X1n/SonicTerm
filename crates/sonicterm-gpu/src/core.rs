@@ -4980,7 +4980,14 @@ impl GpuRenderer {
             return;
         }
 
-        let shaped = shape_cache.get_or_shape(rasterizer, font_family, font_size, style, cells);
+        let shaped = shape_cache.get_or_shape_with_cell_w(
+            rasterizer,
+            font_family,
+            font_size,
+            style,
+            cells,
+            cell_w,
+        );
 
         // Build a lookup from col → cell so we can recover per-cell
         // attributes (color, WIDE flag, the actual codepoint for tofu
