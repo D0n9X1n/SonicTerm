@@ -584,6 +584,73 @@ expect = [
 fail_on = "Attributes dropped or rendered the same"
 
 # ==========================================================================
+# §8b Nerd-font / ligature / PUA visual cases (covers #610 #611)
+# All three use dHash (not pixel-near) per #588/#603 pattern: pixel-near
+# was unusable here because (1) screen.png dimensions varied between runs
+# under the same `set size 1000,700` (2224×1624 vs 2072×1308), and
+# (2) starship prompt is non-deterministic (1-line vs 2-line) shifting
+# content y by ~185px. dHash resizes to 9×8 internally so geometry drift
+# and prompt-row drift collapse into the same fingerprint.
+# ==========================================================================
+
+[[case]]
+id = "nerd-font-icon-rasterization-quality"
+shell = "bash"
+section = 8
+title = "Nerd Font PUA icon (U+F07B folder) rasterizes as a recognizable glyph"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#611"]
+covers_landmines = []
+setup = ["clear", "wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "printf '%s\\n' $'\\xee\\x83\\xbb'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "dhash", reference = "testing/reference/nerd-font-icon-rasterization-quality.png", tolerance = 20, note = "Structural fingerprint for U+F07B folder Nerd Font icon (#611 — dHash chosen over pixel-near per #603: geometry instability + prompt non-determinism made pixel-near unusable; tol=20 absorbs cursor-blink + prompt-row drift)" },
+]
+fail_on = "Tofu box or missing glyph instead of folder icon — Nerd Font PUA range silently dropped (#610 symptom 1)"
+
+[[case]]
+id = "ligature-spans-two-cells-region"
+shell = "bash"
+section = 8
+title = "Powerline triangle U+E0B0 renders (region/shape fingerprint)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#611"]
+covers_landmines = []
+setup = ["clear", "wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "printf '%s\\n' $'\\xee\\x82\\xb0'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "dhash", reference = "testing/reference/ligature-spans-two-cells-region.png", tolerance = 20, note = "Structural fingerprint for U+E0B0 Powerline triangle (#611 — dHash per #603 pattern; reference captured on green main as known-current shape, guards against rendered-glyph regression. If width is later corrected from 1-cell to 2-cell, reference will need recapture and follow-up issue will close.)" },
+]
+fail_on = "Powerline triangle shape changes from captured reference (regression on #605/#610 fix)"
+
+[[case]]
+id = "pua-icon-widths-consistent"
+shell = "bash"
+section = 8
+title = "Multiple PUA icons in a row render with consistent widths (no smear/overlap)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#611"]
+covers_landmines = []
+setup = ["clear", "wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "printf '%s|%s|%s|\\n' $'\\xee\\x80\\x82' $'\\xee\\x83\\xbb' $'\\xee\\x80\\x95'" },
+  { kind = "key", value = "enter" },
+  { kind = "wait", value = 0.6 },
+]
+expect = [
+  { kind = "dhash", reference = "testing/reference/pua-icon-widths-consistent.png", tolerance = 20, note = "Structural fingerprint for 3 PUA icons (magnifier U+E002, folder U+F07B, home U+E015) separated by ASCII pipes; pipes act as visual cell-width anchors. #611 — dHash per #603 pattern." },
+]
+fail_on = "Icon widths inconsistent — pipe positions shift, indicating cluster-width regression on PUA range"
+
+# ==========================================================================
 # §9 URLs (covers CLAUDE.md §4 url_open::validate)
 # ==========================================================================
 
