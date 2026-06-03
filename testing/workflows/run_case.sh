@@ -498,6 +498,34 @@ def pixel_near(shot, x, y, rgba, tol, sample='1x1'):
     except Exception as e:
         return False, f"err {e}"
 
+def _dhash_64(path):
+    # 8x8 dHash (row-diff): grayscale, resize to 9x8, compare adjacent
+    # horizontal pixels -> 64-bit fingerprint. Tolerates window-placement
+    # variance & minor antialiasing changes; #588 follow-up replacing
+    # fragile pixel-near for 2 cases (cjk-emoji-bg, truecolor).
+    from PIL import Image
+    im = Image.open(path).convert('L').resize((9, 8), Image.LANCZOS)
+    px = list(im.getdata())
+    bits = 0
+    for r in range(8):
+        for c in range(8):
+            left = px[r * 9 + c]
+            right = px[r * 9 + c + 1]
+            bits = (bits << 1) | (1 if left > right else 0)
+    return bits
+
+def dhash_match(shot, reference, tolerance):
+    # tolerance = max Hamming distance (0..64) between shot & reference hashes.
+    try:
+        if not os.path.exists(reference):
+            return False, f"reference not found: {reference}"
+        h_shot = _dhash_64(shot)
+        h_ref = _dhash_64(reference)
+        dist = bin(h_shot ^ h_ref).count('1')
+        return (dist <= tolerance), f"dhash shot={h_shot:016x} ref={h_ref:016x} hamming={dist} tol={tolerance}"
+    except Exception as e:
+        return False, f"err {e}"
+
 def ocr_contains(shot, value):
     # Returns (status, sample) where status in {True, False, None}.
     # None = OCR unavailable, caller should treat as SKIP. Mirrors PR #498.
@@ -528,6 +556,8 @@ for idx, e in enumerate(expectations):
         ok = have(shot); reason = f"exists={ok} path={shot}"
     elif kind == 'pixel-near':
         ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20), e.get('sample', '1x1'))
+    elif kind == 'dhash':
+        ok, reason = dhash_match(shot, e['reference'], int(e.get('tolerance', 8)))
     elif kind in ('text-in-region', 'ocr-text'):
         ok, reason = ocr_contains(shot, e['value'])
         if ok is None:
