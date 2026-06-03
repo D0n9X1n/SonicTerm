@@ -274,21 +274,21 @@ expect = [
 fail_on = "Pane count != 1 after close, or whole tab closed"
 
 [[case]]
-id = "pane-focus-border-themed"
+id = "pane-focus-bg-shift-seam"
 section = 3
-title = "Focused pane border uses theme accent color"
+title = "Focused pane indicated by bg-shift seam between panes (post-#287)"
 applies_to = ["mac"]
-covers_bugs = ["#209"]
+covers_bugs = ["#209", "#287", "#591"]
 covers_landmines = []
 setup = ["split-right"]
 keystrokes = [
   { kind = "wait", value = 0.3 },
 ]
 expect = [
-  { kind = "pixel-near", x = 500, y = 400, rgba = [125, 207, 255, 255], tolerance = 60, note = "Focused-pane border accent" },
+  { kind = "pixel-near", x = 500, y = 300, rgba = [58, 58, 52, 255], tolerance = 24, note = "bg-shift seam between active/inactive pane (#287 design); logical 1000x700 coords" },
   { kind = "screenshot", region = "window" },
 ]
-fail_on = "Border missing or wrong color (#209)"
+fail_on = "bg-shift seam missing or wrong color (post-#287 design regression)"
 
 # ==========================================================================
 # §4 Command palette (covers #198)
