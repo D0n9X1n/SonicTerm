@@ -41,7 +41,9 @@ libproc = "0.14"
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
+# Needed by `PtyHandle::Drop` to send an explicit SIGKILL to the child
+# shell pid before invoking portable-pty's `Child::kill`. See #598 (LM-007).
 libc = "0.2"
 
 [dev-dependencies]
