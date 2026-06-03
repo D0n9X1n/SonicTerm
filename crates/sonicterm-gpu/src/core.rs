@@ -4982,6 +4982,15 @@ impl GpuRenderer {
 
         let shaped = shape_cache.get_or_shape(rasterizer, font_family, font_size, style, cells);
 
+        // Belt-and-braces (#594): once shape.rs groups a ligature cluster
+        // into ONE ShapedGlyph, no SUBSEQUENT glyph should land inside
+        // that cluster's column span. A duplicate here means a future
+        // shape.rs refactor regressed the grouping gate (the original
+        // #587 / #594 bug had N overlapping ShapedGlyphs per cluster).
+        // debug_only — release builds skip the bookkeeping entirely.
+        #[cfg(debug_assertions)]
+        let mut _covered_span_end: Option<u16> = None;
+
         // Build a lookup from col → cell so we can recover per-cell
         // attributes (color, WIDE flag, the actual codepoint for tofu
         // diagnostics) from the shaped output's `lead_col`.
@@ -4992,6 +5001,22 @@ impl GpuRenderer {
         }
 
         for g in shaped {
+            #[cfg(debug_assertions)]
+            {
+                if let Some(end) = _covered_span_end {
+                    debug_assert!(
+                        g.lead_col >= end,
+                        "shape.rs (#594) emitted overlapping ShapedGlyphs: \
+                         lead_col={} lands inside previously-emitted cluster \
+                         ending at col {} (ch={:?}, cluster_cells={})",
+                        g.lead_col,
+                        end,
+                        g.ch,
+                        g.cluster_cells,
+                    );
+                }
+                _covered_span_end = Some(g.lead_col + g.cluster_cells.max(1));
+            }
             let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
             // Logical cell pixel width — retained for the tofu fallback box.
