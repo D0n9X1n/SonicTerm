@@ -31,6 +31,9 @@ description = "SonicTerm visual test cases. Single source of truth for mac.sh + 
 #                   dhash compares an 8x8 perceptual hash of the screenshot against reference="testing/reference/<case>.png"
 #                     with tolerance = max Hamming distance (default 8, range 0..64). Structural check that tolerates
 #                     window-placement variance where pixel-near coords drift outside the region of interest (#588 follow-up).
+#                   ocr-line-regex finds the OCR line bracketed by sentinel markers (marker="ZZQ1.*ZZQ2") and matches
+#                     it against regex (regex="ZZQ1\\|.+\\|ZZQ2"). SKIPs when OCR unavailable or sentinel line not
+#                     found. Sentinels must be unique tokens that won't collide with shell prompts/app names (#611).
 #   fail_on         free-text description of visible failure
 
 # ==========================================================================
@@ -1515,3 +1518,77 @@ expect = [
   # under testing/results/nerd-font-vs-wezterm/nerd-icon-crispness-*.png.
 ]
 fail_on = "Icons show staircase aliasing on edges — atlas tile still natural-size, Nearest sampler over-stretches it across the IconCellFit quad (#610 sym-1)."
+
+# ==========================================================================
+# §40 OCR-spacing sentinel cases (covers #611 → #610 sym-2/sym-3 width regressions)
+# ==========================================================================
+# These cases use a clear+printf payload bracketed by rare ZZQ1/ZZQ2 sentinel
+# tokens so the OCR scanner can locate the exact output line regardless of
+# prompt-style nondeterminism (#611 finding 2) and screen-size variance
+# (#611 finding 1). Sentinels are chosen as barcode-like tokens unlikely to
+# appear in any shell prompt, app name, or echoed command. `clear` first
+# wipes the prompt + command echo so only the printf result remains visible.
+#
+# Why these supersede prior approaches:
+#   - dHash "freeze-the-bug" reference PNGs (#603-style) locked the buggy
+#     visual state and would pass on regression as long as the bug shape
+#     was stable; switching to a sentinel-bracketed OCR regex gives a
+#     positive correctness assertion instead.
+#   - A bare END/MARKER token collides with shell prompt strings, app names,
+#     status bars, and the user's own command-echo "END" tokens; the rare
+#     ZZQ1/ZZQ2 pair has no such collision risk in the mac harness corpus.
+
+[[case]]
+id = "ocr-spacing-powerline-triangle"
+shell = "bash"
+section = 40
+title = "Powerline U+E0B0 spans 2 cells via sentinel-bracketed OCR (#611 Case B)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#611"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  { kind = "text", value = "printf 'ZZQ1|\\xee\\x82\\xb0|ZZQ2\\n'" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  # OCR must see at least one character between the two pipes. If the
+  # Powerline triangle renders at 1-cell instead of the expected 2 cells,
+  # the right pipe collapses onto the triangle silhouette and OCR reads
+  # 'ZZQ1||ZZQ2' (empty between the pipes) — failing the regex.
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il].?\\|.+\\|.?[Zz2]{2}Q[2zZ]", note = "Cell-2 of U+E0B0 must contain ink — proves 2-cell span (#610 sym-2). Marker/regex tolerate tesseract Z↔2↔z confusion; visual sentinel in printf payload is ZZQ1/ZZQ2." },
+]
+fail_on = "OCR sentinel line reads 'ZZQ1||ZZQ2' (no ink between pipes) → Powerline triangle collapsed to 1 cell."
+
+[[case]]
+id = "ocr-spacing-pua-icon-widths"
+shell = "bash"
+section = 40
+title = "Three PUA icons each render 2 cells via sentinel OCR (#611 Case C)"
+applies_to = ["mac"]
+covers_bugs = ["#610", "#611"]
+covers_landmines = []
+setup = ["wait:0.3"]
+keystrokes = [
+  { kind = "text", value = "clear" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 0.3 },
+  # U+F002 magnifier, U+F0FB folder-variant, U+F015 home — distinct PUA-A
+  # codepoints all expected 2-cell. Layout: <icon><|><icon><|><icon><|>.
+  { kind = "text", value = "printf 'ZZQ1\\xee\\x80\\x82|\\xee\\x83\\xbb|\\xee\\x80\\x95|ZZQ2\\n'" },
+  { kind = "key",  value = "enter" },
+  { kind = "wait", value = 1.0 },
+]
+expect = [
+  { kind = "screenshot", region = "body" },
+  # Each icon-then-pipe gap must contain at least 2 OCR-visible chars
+  # (the icon glyph + the pipe). If any icon collapses to 1 cell, the
+  # neighbouring pipe shifts and OCR reads a shorter run between pipes.
+  { kind = "ocr-line-regex", marker = "[Zz2]{2}Q[1Il].*[Zz2]{2}Q[2zZ]", regex = "[Zz2]{2}Q[1Il]..?\\|..?\\|..?\\|.?[Zz2]{2}Q[2zZ]", note = "Each PUA icon must occupy 2 cells (#610 sym-3 width classification). Marker/regex tolerate tesseract Z↔2↔z OCR confusion." },
+]
+fail_on = "OCR sentinel line is too short between pipes → at least one PUA icon mis-widthed (#610 sym-3)."
