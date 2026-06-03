@@ -535,6 +535,128 @@ impl GlyphAtlas {
         let off = (y * self.width + x) as usize * bpp;
         self.pixels[off + 3]
     }
+
+    /// Insert a pre-resampled tile under `key`, returning the resulting
+    /// [`GlyphInfo`]. #610 sym-1 (PR-B): this is the atlas-side hook
+    /// used by the IconCellFit path when the rasterizer (or a future
+    /// `core.rs` call-site) wants the bitmap PHYSICALLY scaled to the
+    /// cell box before insert, so the renderer can keep its Nearest
+    /// sampler invariant while sym-1 nerd-font icons render crisp.
+    ///
+    /// Distinction from [`get_or_insert`](Self::get_or_insert):
+    /// * `get_or_insert` invokes a [`Rasterizer`] (swash) and inserts
+    ///   the natural-size tile. The renderer then stretches the QUAD
+    ///   via `apply_symbol_fit(IconCellFit)` and the GPU's Nearest
+    ///   sampler over-stretches the small bitmap — the aliasing
+    ///   captured in issue #610.
+    /// * `insert_resampled` takes an already-rasterized tile + the
+    ///   target `(cell_w_px, cell_h_px)` for the cell, runs the
+    ///   bitmap through [`crate::resample::resample_tile`] (Lanczos3
+    ///   down / Mitchell up), and stores the result at the cell-box
+    ///   size. Caller is responsible for sizing the target box at the
+    ///   physical (device-pixel) cell — typically `cell_w * dpr`,
+    ///   `(ICON_FIT_TARGET * cell_h) * dpr` to mirror what
+    ///   `apply_symbol_fit(IconCellFit)` does for the quad.
+    ///
+    /// Returns `None` on the same conditions as `get_or_insert`:
+    /// allocator can't make room even after LRU eviction. Returns the
+    /// natural-size insert if `resample_tile` rejects (e.g. zero
+    /// target) — better to ship the un-resampled tile than fail the
+    /// glyph entirely.
+    ///
+    /// Tests: `crates/sonicterm-text/tests/atlas_resample.rs`.
+    pub fn insert_resampled(
+        &mut self,
+        key: GlyphKey,
+        tile: RasterTile,
+        target_w: u32,
+        target_h: u32,
+    ) -> Option<GlyphInfo> {
+        // Hit short-circuit (mirrors get_or_insert): if the key is
+        // already resident, treat it as a hit. The caller should not
+        // call insert_resampled for cached keys, but defensive — keeps
+        // hit/miss bookkeeping consistent.
+        if let Some(entry) = self.map.get_mut(&key) {
+            entry.last_used_frame = self.current_frame;
+            self.hits += 1;
+            return Some(entry.info);
+        }
+        self.misses += 1;
+        // Pass-through for empty tiles — same sentinel UV as
+        // get_or_insert. Resampling a 0-area tile is meaningless.
+        if tile.is_empty() {
+            let info = GlyphInfo {
+                uv: [0.0, 0.0, 0.0, 0.0],
+                px_size: [0, 0],
+                px_offset: [tile.offset_x, tile.offset_y],
+                advance: tile.advance,
+                is_color: tile.is_color,
+            };
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
+            return Some(info);
+        }
+        // Try the resample; fall back to the natural-size tile on
+        // failure so we never lose a glyph.
+        let resampled = crate::resample::resample_tile(&tile, target_w, target_h).unwrap_or(tile);
+        self.insert_tile_raw(key, resampled)
+    }
+
+    /// Allocate + blit a fully-prepared tile. Shared low-level helper
+    /// used by `insert_resampled` (and a refactor-target for
+    /// `get_or_insert` in a follow-up PR — kept inlined there for now
+    /// to minimize the #610 PR-B diff).
+    fn insert_tile_raw(&mut self, key: GlyphKey, tile: RasterTile) -> Option<GlyphInfo> {
+        let (x, y) = match self.alloc_rect(tile.width, tile.height) {
+            Some(xy) => xy,
+            None => {
+                self.evict_lru_quartile();
+                self.alloc_rect(tile.width, tile.height)?
+            }
+        };
+        let bpp = BYTES_PER_PIXEL as usize;
+        for row in 0..tile.height {
+            let dst_off = ((y + row) * self.width + x) as usize * bpp;
+            if tile.is_color {
+                let src_off = (row * tile.width) as usize * bpp;
+                let len = tile.width as usize * bpp;
+                self.pixels[dst_off..dst_off + len]
+                    .copy_from_slice(&tile.coverage[src_off..src_off + len]);
+            } else {
+                let src_off = (row * tile.width) as usize;
+                for col in 0..tile.width as usize {
+                    let a = tile.coverage[src_off + col];
+                    let p = dst_off + col * bpp;
+                    self.pixels[p] = a;
+                    self.pixels[p + 1] = a;
+                    self.pixels[p + 2] = a;
+                    self.pixels[p + 3] = a;
+                }
+            }
+        }
+        self.dirty.push(DirtyRect { x, y, w: tile.width, h: tile.height });
+        let info = GlyphInfo {
+            uv: [
+                x as f32 / self.width as f32,
+                y as f32 / self.height as f32,
+                (x + tile.width) as f32 / self.width as f32,
+                (y + tile.height) as f32 / self.height as f32,
+            ],
+            px_size: [tile.width, tile.height],
+            px_offset: [tile.offset_x, tile.offset_y],
+            advance: tile.advance,
+            is_color: tile.is_color,
+        };
+        self.map.insert(
+            key,
+            AtlasEntry {
+                info,
+                last_used_frame: self.current_frame,
+                rect: Some((x, y, tile.width, tile.height)),
+            },
+        );
+        Some(info)
+    }
 }
 
 /// Deterministic synthetic rasterizer used by tests and the bench. Each
