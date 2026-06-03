@@ -463,7 +463,10 @@ results = []  # (status, kind, reason) status in {'PASS','FAIL','SKIP'}
 def have(p):
     return os.path.exists(p) and os.path.getsize(p) > 0
 
-def pixel_near(shot, x, y, rgba, tol):
+def pixel_near(shot, x, y, rgba, tol, sample='1x1'):
+    # sample='3x3' averages a 3x3 window centered at (sx,sy); '1x1' is the
+    # original single-pixel behavior. #588: single-pixel checks were fragile
+    # under window-placement variance; 3x3 average tolerates ~1px drift.
     try:
         from PIL import Image
         im = Image.open(shot).convert('RGBA')
@@ -472,6 +475,23 @@ def pixel_near(shot, x, y, rgba, tol):
         sy = int(y * (im.height / 700.0))
         if not (0 <= sx < im.width and 0 <= sy < im.height):
             return False, f"coords oob ({sx},{sy}) in {im.size}"
+        if sample == '3x3':
+            ch = len(rgba)
+            acc = [0] * ch
+            n = 0
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    nx, ny = sx + dx, sy + dy
+                    if 0 <= nx < im.width and 0 <= ny < im.height:
+                        p = im.getpixel((nx, ny))
+                        for i in range(ch):
+                            acc[i] += int(p[i])
+                        n += 1
+            if n == 0:
+                return False, f"sample 3x3 empty at ({sx},{sy})"
+            avg = tuple(acc[i] // n for i in range(ch))
+            d = max(abs(avg[i] - int(rgba[i])) for i in range(ch))
+            return (d <= tol), f"pixel@({sx},{sy}) avg3x3={avg} target={rgba} delta={d} tol={tol}"
         px = im.getpixel((sx, sy))
         d = max(abs(int(a) - int(b)) for a, b in zip(px[:len(rgba)], rgba))
         return (d <= tol), f"pixel@({sx},{sy})={px} target={rgba} delta={d} tol={tol}"
@@ -507,7 +527,7 @@ for idx, e in enumerate(expectations):
     if kind == 'screenshot':
         ok = have(shot); reason = f"exists={ok} path={shot}"
     elif kind == 'pixel-near':
-        ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20))
+        ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20), e.get('sample', '1x1'))
     elif kind in ('text-in-region', 'ocr-text'):
         ok, reason = ocr_contains(shot, e['value'])
         if ok is None:

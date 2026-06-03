@@ -27,6 +27,7 @@ description = "SonicTerm visual test cases. Single source of truth for mac.sh + 
 #   setup           array of step strings: "open-3-tabs", "clear", "type:echo hi", "enter", "wait:0.3"
 #   keystrokes      array of {kind="key"|"text"|"wait", ...}
 #   expect          array of {kind="tab-count"|"pane-count"|"text-in-region"|"pixel-near"|"process-count"|"screenshot"|"exit-code", ...}
+#                   pixel-near supports optional sample="1x1" (default) or "3x3" (averages a 3x3 window — see #588)
 #   fail_on         free-text description of visible failure
 
 # ==========================================================================
@@ -51,7 +52,7 @@ expect = [
   { kind = "screenshot", region = "window" },
   { kind = "text-in-region", region = "body", value = "中文" },
   { kind = "text-in-region", region = "body", value = "RED-BG" },
-  { kind = "pixel-near", x = 100, y = 200, rgba = [220, 50, 47, 255], tolerance = 40, note = "RED-BG cell background" },
+  { kind = "pixel-near", x = 63, y = 46, rgba = [220, 50, 47, 255], tolerance = 50, sample = "3x3", note = "RED-BG cell background (#588: 3x3 avg for window-placement variance)" },
 ]
 fail_on = "Tofu boxes, missing cursor, RED-BG cells render with theme bg instead of red, theme bg gamma-washed"
 
@@ -515,7 +516,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "pixel-near", x = 100, y = 200, rgba = [220, 50, 47, 255], tolerance = 40, note = "RED-BG cell red, not theme bg" },
+  { kind = "pixel-near", x = 63, y = 46, rgba = [220, 50, 47, 255], tolerance = 50, sample = "3x3", note = "RED-BG cell red, not theme bg (#588: 3x3 avg)" },
 ]
 fail_on = "Bg silently dropped — cell rendered with theme background (#163)"
 
@@ -553,7 +554,7 @@ keystrokes = [
   { kind = "wait", value = 0.5 },
 ]
 expect = [
-  { kind = "pixel-near", x = 100, y = 200, rgba = [120, 200, 80, 255], tolerance = 30, note = "Truecolor bg" },
+  { kind = "pixel-near", x = 112, y = 98, rgba = [120, 200, 80, 255], tolerance = 50, sample = "3x3", note = "Truecolor bg (#588: 3x3 avg)" },
 ]
 fail_on = "Truecolor falls back to palette or wrong color"
 
