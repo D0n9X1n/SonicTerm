@@ -304,6 +304,26 @@ do_setup() {
 # ------------------------------------------------------------------
 # Keystroke helpers
 # ------------------------------------------------------------------
+# #589 Bug C: click body center (titlebar-offset) via cliclick + CG bounds.
+_click_body_center() {
+  ensure_front_or_skip
+  local cliclick="/opt/homebrew/bin/cliclick"
+  [[ -x "$cliclick" ]] || cliclick="$(command -v cliclick || true)"
+  if [[ -z "$cliclick" ]]; then
+    log "click-region body-center: SKIP — cliclick not installed"; return 0
+  fi
+  local bounds x y w h cx cy
+  bounds=$(testing/workflows/cg-window-id.swift --bounds "$SONIC_PID" 2>/dev/null || echo "")
+  if [[ -z "$bounds" ]]; then
+    log "click-region body-center: SKIP — no bounds for pid=$SONIC_PID"; return 0
+  fi
+  read -r x y w h <<<"$bounds"
+  cx=$(( x + w / 2 )); cy=$(( y + 28 + (h - 28) / 2 ))   # 28pt titlebar
+  log "click-region body-center: bounds=$x,$y,${w}x$h -> @ $cx,$cy"
+  "$cliclick" "c:${cx},${cy}" >>"$LOG" 2>&1 || true
+  sleep 0.15
+}
+
 # Map chord like "cmd+t" -> osascript keystroke
 send_chord() {
   ensure_front_or_skip
@@ -405,7 +425,12 @@ for k in c.get('keystrokes', []):
         # PtyHandle::Drop actually kills children on Cmd+Q.
         out.append('bash testing/workflows/check_orphans.sh snapshot "$SONIC_PID" "$CASE_OUT/sonic-shells.txt" 2>>"$LOG" || true')
     elif kind == 'click-region':
-        out.append("log " + shlex.quote(f"TODO click-region: {k.get('region')}"))
+        # #589 Bug C: body-center via cliclick; other regions still TODO.
+        region = k.get('region', '')
+        if region == 'body-center':
+            out.append('_click_body_center')
+        else:
+            out.append("log " + shlex.quote(f"TODO click-region: {region}"))
     elif kind == 'cmd-click-region':
         out.append("log " + shlex.quote(f"TODO cmd-click-region: {k.get('region')}"))
     elif kind == 'drag':
@@ -452,7 +477,16 @@ if ! screencapture -x -l "$WINDOW_ID" "$SHOT" 2>/dev/null || [[ ! -s "$SHOT" ]];
   echo SKIP > "$CASE_OUT/status"
   exit 77
 fi
-log "screenshot (window-only): $SHOT"
+# #589 Bug B: crop ~120px (titlebar + tab strip @ 2× Retina) for OCR; pixel-near keeps full image.
+SHOT_BODY="$CASE_OUT/screen-body.png"
+python3 - "$SHOT" "$SHOT_BODY" <<'PY' >>"$LOG" 2>&1 || true
+import sys
+from PIL import Image
+src, dst = sys.argv[1:3]
+im = Image.open(src); w, h = im.size
+im.crop((0, min(120, max(0, h - 1)), w, h)).save(dst)
+PY
+log "screenshot (window-only): $SHOT  body=$SHOT_BODY"
 
 # ------------------------------------------------------------------
 # Evaluate expectations (best-effort; reports per-check pass/fail)
@@ -460,9 +494,9 @@ log "screenshot (window-only): $SHOT"
 EXPECT_LOG="$CASE_OUT/expect.log"
 : > "$EXPECT_LOG"
 
-python3 - "$CASE_JSON" "$SHOT" "$EXPECT_LOG" "$CASE_OUT" <<'PY'
+python3 - "$CASE_JSON" "$SHOT" "$EXPECT_LOG" "$CASE_OUT" "$SHOT_BODY" <<'PY'
 import json, sys, os, subprocess
-case_path, shot, elog, case_out = sys.argv[1:5]
+case_path, shot, elog, case_out, shot_body = sys.argv[1:6]
 c = json.load(open(case_path))
 expectations = c.get('expect', [])
 ocr_available = (os.environ.get('SONICTERM_HARNESS_OCR_AVAILABLE', '1') == '1')
@@ -474,6 +508,7 @@ _CJK_RE = _re.compile(r'[぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿]')
 def has_cjk(s):
     return bool(_CJK_RE.search(s or ''))
 OCR_KINDS = ('text-in-region', 'ocr-text', 'not-text-in-region')
+OCR_SHOT = shot_body if (os.path.exists(shot_body) and os.path.getsize(shot_body) > 0) else shot
 results = []  # (status, kind, reason) status in {'PASS','FAIL','SKIP'}
 
 def have(p):
@@ -534,12 +569,12 @@ for idx, e in enumerate(expectations):
     elif kind == 'pixel-near':
         ok, reason = pixel_near(shot, e['x'], e['y'], e['rgba'], e.get('tolerance', 20))
     elif kind in ('text-in-region', 'ocr-text'):
-        ok, reason = ocr_contains(shot, e['value'])
+        ok, reason = ocr_contains(OCR_SHOT, e['value'])
         if ok is None:
             results.append(('SKIP', kind, f"{reason} case={c.get('id')} expect[{idx}]={kind}"))
             continue
     elif kind == 'not-text-in-region':
-        contains, sample = ocr_contains(shot, e['value'])
+        contains, sample = ocr_contains(OCR_SHOT, e['value'])
         if contains is None:
             results.append(('SKIP', kind, f"{sample} case={c.get('id')} expect[{idx}]={kind}"))
             continue
@@ -591,6 +626,18 @@ for idx, e in enumerate(expectations):
         n = proc_count('sonicterm-mac')
         ok = (n >= 1)
         reason = f"sonicterm-mac processes alive={n}"
+    elif kind == 'window-visible':
+        # #589 Bug A: count normal-level on-screen windows owned by SONIC_PID.
+        pid = os.environ.get('SONIC_PID', ''); need = int(e.get('min', 1)); n = -1
+        try:
+            r = subprocess.run(['testing/workflows/cg-window-id.swift', '--count', pid],
+                               capture_output=True, text=True, timeout=10)
+            n = int((r.stdout or '0').strip() or '0')
+        except Exception as ex:
+            reason = f"err {ex}"
+        else:
+            reason = f"window-count pid={pid} got={n} need>={need}"
+        ok = (n >= need)
     elif kind in ('tab-count', 'pane-count', 'window-count',
                   'tab-count-in-window', 'scrollback-min-lines',
                   'padding-min', 'process-spawned', 'process-not-spawned',
