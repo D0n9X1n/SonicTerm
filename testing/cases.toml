@@ -285,7 +285,7 @@ keystrokes = [
   { kind = "wait", value = 0.3 },
 ]
 expect = [
-  { kind = "pixel-near", x = 500, y = 300, rgba = [58, 58, 52, 255], tolerance = 24, note = "bg-shift seam between active/inactive pane (#287 design); logical 1000x700 coords" },
+  { kind = "pixel-near", x = 252, y = 651, rgba = [58, 58, 52, 255], tolerance = 40, note = "bg-shift seam between active/inactive pane (#287 design); logical 1000x700 coords. Coord re-measured to land squarely on the seam band (only ~2 px tall in physical image); tolerance widened from 24 -> 40 because #588 (3x3 sample mode) is not yet merged — once #588 lands, swap tolerance back to ~24 and add sample = \"3x3\" for robust placement-variance handling." },
   { kind = "screenshot", region = "window" },
 ]
 fail_on = "bg-shift seam missing or wrong color (post-#287 design regression)"
