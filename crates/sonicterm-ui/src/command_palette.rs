@@ -1,7 +1,7 @@
 //! Command palette (Cmd+Shift+P). Pure-data state holder.
 //!
-//! The palette is a fuzzy-searchable list of every bindable
-//! [`sonicterm_cfg::keymap::Action`]. The keyboard-event handler in
+//! The palette is a fuzzy-searchable list of runnable
+//! [`sonicterm_cfg::keymap::Action`] values. The keyboard-event handler in
 //! [`crate::app`] routes printable characters, arrow keys, Enter and Esc
 //! into this state instead of forwarding them to the active pty when
 //! [`CommandPalette::is_open`] returns `true`. On Enter the dispatcher
@@ -21,9 +21,9 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
 };
-use sonicterm_cfg::keymap::{Action, Direction, ScrollAction};
+use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 
-use crate::command_label::{search_haystack, ALL_VARIANT_KINDS};
+use crate::command_label::{keybinding_hint, search_haystack, ALL_VARIANT_KINDS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteMode {
@@ -39,6 +39,8 @@ pub struct CommandPalette {
     query: String,
     /// Full universe of actions, in canonical order.
     all: Vec<Action>,
+    /// First keybinding hint for each action in `all`, parallel order.
+    shortcut_hints: Vec<Option<String>>,
     /// Filtered view — indices into `all` matched by the current query,
     /// or all indices when the query is empty. Order is descending
     /// fuzzy-score, with canonical-order tiebreak.
@@ -63,13 +65,15 @@ impl Default for CommandPalette {
 
 impl CommandPalette {
     pub fn new() -> Self {
-        let all = all_actions();
+        let all = palette_actions();
+        let shortcut_hints = vec![None; all.len()];
         let items = (0..all.len()).collect();
         Self {
             open: false,
             mode: CommandPaletteMode::Commands,
             query: String::new(),
             all,
+            shortcut_hints,
             items,
             selected: 0,
             scroll_offset: 0,
@@ -100,6 +104,11 @@ impl CommandPalette {
             return Vec::new();
         }
         self.items.iter().filter_map(|&i| self.all.get(i)).collect()
+    }
+
+    pub fn shortcut_hint_for_visible_index(&self, visible_index: usize) -> Option<&str> {
+        let all_index = *self.items.get(visible_index)?;
+        self.shortcut_hints.get(all_index)?.as_deref()
     }
 
     pub fn len(&self) -> usize {
@@ -146,6 +155,21 @@ impl CommandPalette {
         if self.mode == CommandPaletteMode::Commands {
             self.refilter();
         }
+    }
+
+    pub fn set_keymap(&mut self, keymap: &Keymap) {
+        self.all = palette_actions();
+        for binding in &keymap.bindings {
+            let action = &binding.action.0;
+            if palette_accepts_keymap_action(action) && !self.all.contains(action) {
+                self.all.push(action.clone());
+            }
+        }
+        self.shortcut_hints =
+            self.all.iter().map(|action| keybinding_hint(keymap, action)).collect();
+        self.items = (0..self.all.len()).collect();
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.refilter();
     }
 
     pub fn input_char(&mut self, ch: char) {
@@ -260,7 +284,11 @@ impl CommandPalette {
                 .enumerate()
                 .filter_map(|(i, a)| {
                     scratch.clear();
-                    let label = search_haystack(a);
+                    let mut label = search_haystack(a);
+                    if let Some(Some(hint)) = self.shortcut_hints.get(i) {
+                        label.push(' ');
+                        label.push_str(hint);
+                    }
                     let haystack = Utf32Str::new(&label, &mut scratch);
                     pattern.score(haystack, &mut matcher).map(|s| (i, s))
                 })
@@ -355,12 +383,22 @@ fn scroll_name(s: ScrollAction) -> &'static str {
     }
 }
 
-/// Canonical list of every bindable action, in the order the palette
-/// should present them when no query is entered. Keep grouped by
-/// feature area for readability. **Every variant kind in
-/// [`sonicterm_cfg::keymap::Action`] must appear at least once**; the
-/// `palette_lists_every_action_variant` integration test asserts this.
+/// Canonical list of every bindable action variant. Parameterized actions use
+/// representative arguments here for label/coverage tests; the command palette
+/// uses [`palette_actions`] so it does not expose placeholder commands.
 pub fn all_actions() -> Vec<Action> {
+    let mut actions = palette_actions();
+    actions.push(Action::ApplyTheme("wezterm".into()));
+    actions.push(Action::OpenSshPane("alice@example.com".into()));
+    actions
+}
+
+/// Canonical list of directly runnable palette actions, in the order the
+/// palette should present them when no query is entered. Keep grouped by
+/// feature area for readability. Theme actions are added only when they come
+/// from the user's concrete keymap binding; SSH is hidden until its pane backend
+/// is wired.
+pub fn palette_actions() -> Vec<Action> {
     vec![
         // Tabs
         Action::NewTab,
@@ -369,7 +407,7 @@ pub fn all_actions() -> Vec<Action> {
         Action::NextTab,
         Action::PrevTab,
         Action::ActivateLastTab,
-        Action::ActivateTab(1),
+        Action::ActivateTab(0),
         // Splits
         Action::SplitRight,
         Action::SplitDown,
@@ -392,6 +430,7 @@ pub fn all_actions() -> Vec<Action> {
         // Clipboard
         Action::CopyToClipboard,
         Action::EnterCopyMode,
+        Action::EnterQuickSelect,
         Action::PasteFromClipboard,
         // Font
         Action::IncreaseFontSize,
@@ -420,16 +459,12 @@ pub fn all_actions() -> Vec<Action> {
         Action::ScrollToNextPrompt,
         // Config
         Action::ReloadConfig,
-        // Theme (one representative; full theme list lives elsewhere
-        // and is wired via menubar). Listing one entry keeps the
-        // variant kind present in the palette universe.
-        Action::ApplyTheme("default".into()),
         Action::RenameTab,
-        // SSH (one representative; the user fills in target via a
-        // future prompt). Variant kept so the palette is exhaustive
-        // even when ssh is disabled at build time.
-        Action::OpenSshPane("user@host".into()),
     ]
+}
+
+fn palette_accepts_keymap_action(action: &Action) -> bool {
+    !matches!(action, Action::OpenSshPane(_))
 }
 
 /// Coverage assertion: every variant kind from

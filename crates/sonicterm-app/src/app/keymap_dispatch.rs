@@ -395,8 +395,31 @@ impl App {
                 };
                 self.scroll_pane(pane_id, delta);
             }
-            Action::ToggleFullscreen | Action::ResizePane { .. } => {
-                tracing::info!("action {action:?} accepted but not yet wired up");
+            Action::ResizePane { dir, amount } => {
+                if *amount == 0 {
+                    return true;
+                }
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: split_dir(*dir),
+                    cells: *amount,
+                });
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    let mut routed = false;
+                    for _ in 0..*amount {
+                        routed = self.resize_active_split_in_child(id, *dir) || routed;
+                    }
+                    if routed {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                for _ in 0..*amount {
+                    self.resize_active_split(*dir);
+                }
+            }
+            Action::ToggleFullscreen => {
+                self.toggle_fullscreen_for(self.frontmost_kind());
             }
         }
         true
@@ -404,8 +427,8 @@ impl App {
 
     /// Issue #539 — source-aware action dispatch. Identical to
     /// [`Self::run_action`] for every action that does NOT depend on
-    /// the frontmost window, but for the ~16 routed arms (NewTab,
-    /// CloseTab, tab nav, Split*, ClosePane, FocusPane, resize/zoom,
+    /// the frontmost window, but for routed arms (NewTab, CloseTab,
+    /// tab nav, Split*, ClosePane, FocusPane, resize/zoom/fullscreen,
     /// CloseActivePaneOrTab) it classifies `source_window_id` rather
     /// than reading `self.frontmost_window`.
     ///
@@ -662,6 +685,26 @@ impl App {
                 }
                 self.resize_active_split(Direction::Down);
             }
+            Action::ResizePane { dir, amount } => {
+                if *amount == 0 {
+                    return true;
+                }
+                self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
+                    window: sonicterm_types::WindowKey::new(0),
+                    dir: split_dir(*dir),
+                    cells: *amount,
+                });
+                if let FrontmostKind::Child(id) = source_kind {
+                    for _ in 0..*amount {
+                        self.resize_active_split_in_child(id, *dir);
+                    }
+                } else {
+                    for _ in 0..*amount {
+                        self.resize_active_split(*dir);
+                    }
+                }
+            }
+            Action::ToggleFullscreen => self.toggle_fullscreen_for(source_kind),
             // Non-routed arms — delegate to the cached-frontmost
             // dispatcher. These either don't touch per-window state
             // (clipboard, theme, config) or have their own routing
@@ -688,5 +731,35 @@ impl App {
             return FrontmostKind::Child(id);
         }
         FrontmostKind::None
+    }
+
+    fn toggle_fullscreen_for(&mut self, kind: FrontmostKind) {
+        if let FrontmostKind::Child(id) = kind {
+            if let Some(window) = self.windows.get(&id).and_then(|child| child.window.as_ref()) {
+                toggle_window_fullscreen(window);
+                return;
+            }
+            self.frontmost_window = None;
+        }
+        if let Some(window) = self.main_window() {
+            toggle_window_fullscreen(window);
+        }
+    }
+}
+
+fn split_dir(dir: Direction) -> sonicterm_app_core::SplitDir {
+    match dir {
+        Direction::Left => sonicterm_app_core::SplitDir::Left,
+        Direction::Right => sonicterm_app_core::SplitDir::Right,
+        Direction::Up => sonicterm_app_core::SplitDir::Up,
+        Direction::Down => sonicterm_app_core::SplitDir::Down,
+    }
+}
+
+fn toggle_window_fullscreen(window: &Window) {
+    if window.fullscreen().is_some() {
+        window.set_fullscreen(None);
+    } else {
+        window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
     }
 }

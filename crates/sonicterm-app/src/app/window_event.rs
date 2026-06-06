@@ -305,26 +305,8 @@ impl App {
                     return;
                 }
 
-                // Inactive-pane cursor outlines come from the same guard set
-                // (no extra lock pass — PR #81's separate try_lock loop is
-                // subsumed by the global pass above).
-                let inactive_cursors: Vec<sonicterm_gpu::cursor::InactivePaneCursor> = guards
-                    .iter()
-                    .filter(|(id, _, _)| *id != active_id)
-                    .map(|(_, g, rect)| {
-                        let grid = g.grid();
-                        sonicterm_gpu::cursor::InactivePaneCursor {
-                            row: grid.cursor.row,
-                            col: grid.cursor.col,
-                            rect_x: rect.x,
-                            rect_y: rect.y,
-                            rect_w: rect.w,
-                            rect_h: rect.h,
-                        }
-                    })
-                    .collect();
                 if let Some(r) = self.main_renderer_mut() {
-                    r.set_inactive_pane_cursors(inactive_cursors);
+                    r.set_inactive_pane_cursors(Vec::new());
                 }
 
                 let cheatsheet_render = (self.cheatsheet_open
@@ -607,15 +589,12 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.ime.cancel();
                 }
-                // Propagate window focus to the renderer so the active
-                // pane's block cursor flips between filled (focused) and
-                // hollow (unfocused) — wezterm/iTerm2 parity. PR #81
-                // review.
+                // Propagate window focus to the renderer so the text cursor
+                // disappears when the window is inactive.
                 if let Some(r) = self.main_renderer_mut() {
                     r.set_window_focused(focused);
                 }
-                // Focus transition flips the cursor between filled and
-                // hollow — that's a presentation change only, so mark
+                // Focus transition changes cursor visibility only, so mark
                 // every pane dirty without bumping grid revision.
                 if let Some(panes) = self.main_panes() {
                     mark_all_panes_dirty(panes);

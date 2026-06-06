@@ -1172,6 +1172,8 @@ impl App {
         } else {
             Some(config.locale.as_str())
         });
+        let mut command_palette = CommandPalette::new();
+        command_palette.set_keymap(&keymap);
         Self {
             theme,
             config,
@@ -1182,7 +1184,7 @@ impl App {
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
             pending_exit: false,
-            command_palette: CommandPalette::new(),
+            command_palette,
             palette_attached_window: None,
             cheatsheet_open: false,
             cheatsheet: CheatsheetState::new(),
@@ -3268,6 +3270,7 @@ impl App {
                 km.meta.name,
                 km.bindings.len()
             );
+            self.command_palette.set_keymap(&km);
             self.keymap = km;
             self.input_dirty = true;
         }

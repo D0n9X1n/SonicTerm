@@ -359,6 +359,7 @@ impl App {
                         km.meta.name,
                         km.bindings.len()
                     );
+                    self.command_palette.set_keymap(&km);
                     self.keymap = km;
                 }
                 Err(e) => tracing::warn!("live-reload: keymap {:?} failed: {e:#}", km_path),

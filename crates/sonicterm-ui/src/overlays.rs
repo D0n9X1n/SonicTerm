@@ -141,6 +141,8 @@ pub struct PaletteLayout {
     pub query_placeholder: Option<String>,
     /// Display labels for each row in `rows`, parallel order.
     pub row_labels: Vec<String>,
+    /// Display shortcut hints for each row in `rows`, parallel order.
+    pub row_shortcuts: Vec<Option<String>>,
     /// When the filter produced zero matches, the layout still emits a
     /// modal + query row but `rows` is empty; the renderer should paint
     /// this centered placeholder string instead of the unfiltered list.
@@ -242,6 +244,7 @@ impl PaletteLayout {
 
         let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
         let mut row_labels = Vec::with_capacity(rows.capacity());
+        let mut row_shortcuts = Vec::with_capacity(rows.capacity());
         for (i, item_index) in (window_start..window_end).enumerate() {
             let r = Rect {
                 x: bg.x + panel_padding,
@@ -252,8 +255,11 @@ impl PaletteLayout {
             rows.push(PaletteRow { item_index, rect: r });
             if let Some(a) = visible.get(item_index) {
                 row_labels.push(action_label(a));
+                row_shortcuts
+                    .push(palette.shortcut_hint_for_visible_index(item_index).map(str::to_string));
             } else {
                 row_labels.push(String::new());
+                row_shortcuts.push(None);
             }
         }
         let selected_row = if total > 0 && selected >= window_start && selected < window_end {
@@ -277,7 +283,9 @@ impl PaletteLayout {
         query_label.push('▏');
         let query_placeholder = if palette.query().is_empty() {
             Some(match palette.mode() {
-                CommandPaletteMode::Commands => String::from("Search commands, settings, themes…"),
+                CommandPaletteMode::Commands => {
+                    String::from("Search commands, settings, shortcuts…")
+                }
                 CommandPaletteMode::RenameTab => String::from("New tab title…"),
             })
         } else {
@@ -292,7 +300,7 @@ impl PaletteLayout {
             None
         };
         let empty_hint = if empty_label.is_some() {
-            Some(String::from("Try theme, settings, split, font"))
+            Some(String::from("Try settings, split, font, shortcut"))
         } else {
             None
         };
@@ -318,6 +326,7 @@ impl PaletteLayout {
             query_label,
             query_placeholder,
             row_labels,
+            row_shortcuts,
             empty_label,
             empty_hint,
             footer,

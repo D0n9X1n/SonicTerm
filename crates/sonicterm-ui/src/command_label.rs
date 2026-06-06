@@ -12,13 +12,13 @@
 //! 1. Add a variant to [`sonicterm_cfg::keymap::Action`].
 //! 2. Add a match arm in [`label`] returning a `&'static str` or a
 //!    formatted `String`.
-//! 3. Add a discriminant entry in [`ALL_VARIANT_KINDS`] so the palette
-//!    universe enumeration stays exhaustive.
+//! 3. Add a discriminant entry in [`ALL_VARIANT_KINDS`] so label coverage
+//!    stays exhaustive.
 //! 4. Add a dispatch arm in `sonicterm_app::app::App::run_action`.
 //!
 //! The compile-time `match` in [`label`] guarantees we cannot forget
 //! step 2 — the build breaks until every variant has a label. Step 3
-//! is covered by the `palette_lists_every_action_variant` test.
+//! is covered by the action-label coverage test.
 
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 
@@ -49,6 +49,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ResizePane",
     "CopyToClipboard",
     "EnterCopyMode",
+    "EnterQuickSelect",
     "PasteFromClipboard",
     "IncreaseFontSize",
     "DecreaseFontSize",
@@ -130,7 +131,7 @@ pub fn label(a: &Action) -> String {
         Action::CloseActivePaneOrTab => "Close Pane or Tab".into(),
         Action::NextTab => "Next Tab".into(),
         Action::PrevTab => "Previous Tab".into(),
-        Action::ActivateTab(i) => format!("Activate Tab {i}"),
+        Action::ActivateTab(i) => format!("Activate Tab {}", i + 1),
         Action::ActivateLastTab => "Activate Last Tab".into(),
         Action::SplitRight => "Split Pane Right".into(),
         Action::SplitDown => "Split Pane Down".into(),
@@ -291,6 +292,18 @@ pub fn pretty_keys(raw: &str) -> String {
             "shift" => "⇧".to_string(),
             "ctrl" | "control" => "⌃".to_string(),
             "alt" | "option" | "opt" => "⌥".to_string(),
+            "left" => "←".to_string(),
+            "right" => "→".to_string(),
+            "up" => "↑".to_string(),
+            "down" => "↓".to_string(),
+            "enter" | "return" => "↵".to_string(),
+            "esc" | "escape" => "Esc".to_string(),
+            "space" => "Space".to_string(),
+            "tab" => "Tab".to_string(),
+            "pageup" => "PageUp".to_string(),
+            "pagedown" => "PageDown".to_string(),
+            "home" => "Home".to_string(),
+            "end" => "End".to_string(),
             other if other.len() == 1 => other.to_ascii_uppercase(),
             other => {
                 let mut c = other.chars();
