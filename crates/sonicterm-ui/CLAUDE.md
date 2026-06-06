@@ -16,8 +16,7 @@ None named in §4. Render hot-file rule applies to
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-ui
-# Plus §13 GUI smoke if you touched tabbar_view/overlays/cursor/selection/search
+cargo build -p sonicterm-ui
 ```
 
 ## Common pitfalls

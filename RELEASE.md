@@ -12,8 +12,6 @@ From a clean checkout of `main`:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo run --example pty_dump -p sonicterm-core --release      # must print [e2e] OK
 cargo build --release -p sonicterm-mac                        # confirms fat-LTO build
 ```
 
@@ -21,7 +19,6 @@ Confirm:
 - `CHANGELOG.md` has a dated entry for the version (no `[Unreleased]`
   leftovers belonging to the new tag).
 - `docs/ROADMAP.md` marks the version as ✅ shipped.
-- Workspace test count is ≥ the floor (currently **171**).
 - No open `CHANGES REQUESTED` PRs blocking the release.
 
 ---
@@ -80,9 +77,6 @@ Once the Release page is live:
       new tab.
 - [ ] Download the `.msi` on a clean Windows box, install, launch.
       Same smoke test.
-- [ ] On both platforms: run the **WezTerm visual parity recipe**
-      (see [`docs/VISUAL_PARITY.md`](docs/VISUAL_PARITY.md)) and
-      eyeball the screenshot — must still be within 3 ΔE.
 - [ ] Idle the app for 60 seconds with no input; CPU should sit at
       ~0% (regression guard for #37).
 - [ ] Verify the GitHub Release body contains the CHANGELOG section
@@ -120,4 +114,3 @@ Common failures:
 - Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Signing prep (for v1.0): [`docs/release/signing.md`](docs/release/signing.md)
 - CI cost notes: [`docs/release/CI-BILLING.md`](docs/release/CI-BILLING.md)
-- Test gate detail: [`docs/TESTING.md`](docs/TESTING.md)

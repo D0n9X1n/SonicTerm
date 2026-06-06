@@ -1434,20 +1434,6 @@ impl GpuRenderer {
         self.last_emit_origins.clone()
     }
 
-    /// Test-only snapshot of the renderer's text cache sizes. Used to
-    /// assert that a font-family live apply re-derives metrics and drops
-    /// shaped rows from the old face instead of reusing stale advances.
-    ///
-    /// T9 (wezterm-takeover G2/C): the first slot used to report the
-    /// per-style-run `ShapeCache` size; that cache was deleted with
-    /// the cosmic-text path in T8. The slot now always reports `0`
-    /// so the tuple shape (`(usize, usize)`) stays stable for the
-    /// font-live-apply regression test that already shipped.
-    #[doc(hidden)]
-    pub fn text_cache_sizes_for_test(&self) -> (usize, usize) {
-        (0, self.row_glyph_cache.len())
-    }
-
     /// Translate a scrollback-absolute row into the row index visible in the
     /// current viewport. Returns `None` when the row lies above or below the
     /// rendered viewport.

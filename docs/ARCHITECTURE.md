@@ -52,8 +52,8 @@ crate owns a given concern or where to put a new module.
 
 1. **Compile-time wins** — leaf crates rebuild independently. Touching
    `sonicterm-ui` no longer recompiles the VT parser.
-2. **Test isolation** — `cargo test -p sonicterm-vt` runs in seconds
-   instead of pulling in wgpu.
+2. **Build isolation** — leaf crates build independently instead of pulling
+   in wgpu unnecessarily.
 3. **Honest dependencies** — `sonicterm-render-model` codifies the
    renderer/UI boundary: UI code can produce a frame model without
    linking wgpu, which is what the headless snapshot harness exploits.

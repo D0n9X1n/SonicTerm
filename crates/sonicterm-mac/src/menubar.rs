@@ -349,8 +349,3 @@ pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
     names.sort();
     names
 }
-
-// NOTE (CLAUDE.md §5): Tests stay inline. They reach into private
-// `register`/`lookup`/`scan_themes`/`reset_registry_for_tests` and the
-// surface is small + macOS-only — adding pub-with-doc-hidden shims for
-// each is more disruptive than keeping the inline block.

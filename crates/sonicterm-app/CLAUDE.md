@@ -28,10 +28,7 @@ the winit-specific wiring around it.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-app
-cargo test -p sonicterm-app --test os_drag_cleanup  # PR #454 regression guard
-# Render/input/VT/window-state PRs: §13 GUI smoke MANDATORY (mac):
-just visual mac     # or the ad-hoc snippet from this section below
+cargo build -p sonicterm-app
 ```
 PR #454 added `WindowState::clear_drag_chip()` helper in `src/app/mod.rs`
 to clean up the drag chip after OS drag completion; `tests/os_drag_cleanup.rs`

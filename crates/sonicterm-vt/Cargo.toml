@@ -18,6 +18,3 @@ vte.workspace = true
 crossbeam-channel.workspace = true
 memchr = "2"
 tracing.workspace = true
-
-[dev-dependencies]
-crossbeam-channel.workspace = true

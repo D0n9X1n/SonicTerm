@@ -466,9 +466,6 @@ pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
 /// (covers the brief window during tab close where the layout list
 /// includes a pane that was just removed).
 ///
-/// `pub` + `#[doc(hidden)]` so integration tests can drive it without a
-/// live wgpu surface; no `__test_support` shim (CLAUDE.md §5).
-#[doc(hidden)]
 pub fn resize_panes_to_rects(
     panes: &HashMap<u64, PaneState>,
     rects: &[(u64, sonicterm_ui::pane::Rect)],
@@ -1342,45 +1339,15 @@ fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: 
     notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
 }
 
-static TEST_COMMAND_NOTIFICATIONS: std::sync::Mutex<Option<Vec<String>>> =
-    std::sync::Mutex::new(None);
-
-#[doc(hidden)]
-pub fn __test_capture_command_notifications() {
-    *TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned") = Some(Vec::new());
-}
-
-#[doc(hidden)]
-pub fn __test_drain_command_notifications() -> Vec<String> {
-    TEST_COMMAND_NOTIFICATIONS
-        .lock()
-        .expect("test notification lock poisoned")
-        .take()
-        .unwrap_or_default()
-}
-
-fn record_test_command_notification(body: &str) -> bool {
-    let mut notifications =
-        TEST_COMMAND_NOTIFICATIONS.lock().expect("test notification lock poisoned");
-    let Some(notifications) = notifications.as_mut() else { return false };
-    notifications.push(body.to_string());
-    true
-}
-
 #[cfg(target_os = "windows")]
 fn notify_command_done(body: String) {
-    if record_test_command_notification(&body) {
-        return;
-    }
     if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
         tracing::debug!(?err, "desktop notification failed");
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn notify_command_done(body: String) {
-    record_test_command_notification(&body);
-}
+fn notify_command_done(_body: String) {}
 
 impl App {
     /// Returns `true` when closing the last window should exit the
@@ -1402,92 +1369,6 @@ impl App {
             let _ = config;
             true
         }
-    }
-
-    /// Test-only accessor: returns `true` if a `RedrawRequested` arriving
-    /// right now would be coalesced (deferred to the next vsync boundary)
-    /// or `false` if it would render immediately. Mirrors the exact
-    /// predicate used in the `WindowEvent::RedrawRequested` arm.
-    #[doc(hidden)]
-    pub fn would_coalesce_redraw(&self) -> bool {
-        let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
-        !self.input_dirty
-            && self.pty_burst_gen.load(Ordering::Acquire) == self.last_seen_burst_gen
-            && last_render.elapsed() < self.frame_period
-    }
-
-    /// Test-only snapshot of the PTY-burst generation counter.
-    #[doc(hidden)]
-    pub fn pty_burst_gen_for_test(&self) -> u32 {
-        self.pty_burst_gen.load(Ordering::Acquire)
-    }
-
-    /// Test-only accessor for the last PTY-burst generation that render
-    /// marked as seen.
-    #[doc(hidden)]
-    pub fn last_seen_burst_gen_for_test(&self) -> u32 {
-        self.last_seen_burst_gen
-    }
-
-    /// Test-only marker for a PTY burst. Mirrors what the VT thread does
-    /// when it processes a non-empty byte chunk.
-    #[doc(hidden)]
-    pub fn mark_pty_burst_for_test(&self) {
-        let prev = self.pty_burst_gen.fetch_add(1, Ordering::Release);
-        crate::app::invariants::debug_assert_burst_gen_monotonic(prev, prev.wrapping_add(1));
-    }
-
-    /// Test-only marker for render completing after sampling a PTY-burst
-    /// generation at the start of `RedrawRequested`.
-    #[doc(hidden)]
-    pub fn mark_burst_gen_seen_for_test(&mut self, snapshot: u32) {
-        self.last_seen_burst_gen = snapshot;
-    }
-
-    /// Test-only setter for the input-dirty flag.
-    #[doc(hidden)]
-    pub fn mark_input_dirty_for_test(&mut self) {
-        self.input_dirty = true;
-    }
-
-    /// Test-only setter for `last_render` so tests can simulate "we
-    /// just rendered" without driving an actual frame.
-    #[doc(hidden)]
-    pub fn set_last_render_for_test(&mut self, t: Instant) {
-        self.__test_synthetic_main();
-        if let Some(ws) = self.main_mut() {
-            ws.last_render = t;
-        }
-    }
-
-    /// Test-only accessor: returns the current `pending_redraw` flag.
-    /// Used by the Issue #175 regression test to verify that a
-    /// lock-contention bail-out during `RedrawRequested` correctly
-    /// schedules a follow-up vsync-paced redraw rather than dropping
-    /// the request silently.
-    #[doc(hidden)]
-    pub fn pending_redraw_for_test(&self) -> bool {
-        self.pending_redraw
-    }
-
-    /// Test-only setter for `pending_redraw`.
-    #[doc(hidden)]
-    pub fn set_pending_redraw_for_test(&mut self, v: bool) {
-        self.pending_redraw = v;
-    }
-
-    /// Test-only accessor for the `input_dirty` flag.
-    #[doc(hidden)]
-    pub fn input_dirty_for_test(&self) -> bool {
-        self.input_dirty
-    }
-
-    /// Test-only setter that clears the `input_dirty` flag. Lets a
-    /// regression test (e.g. issue #167) establish a clean baseline
-    /// before driving an action that is expected to set it.
-    #[doc(hidden)]
-    pub fn clear_input_dirty_for_test(&mut self) {
-        self.input_dirty = false;
     }
 
     /// Called from the `RedrawRequested` handler when the active pane's
@@ -3405,36 +3286,6 @@ impl App {
     #[doc(hidden)]
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
-    }
-
-    /// Test-only accessor: current live font size.
-    #[doc(hidden)]
-    pub fn font_size_for_test(&self) -> f32 {
-        self.config.font.size
-    }
-
-    /// Test-only accessor: current live theme name.
-    #[doc(hidden)]
-    pub fn theme_name_for_test(&self) -> &str {
-        &self.theme.name
-    }
-
-    /// Test-only accessor: live theme.
-    #[doc(hidden)]
-    pub fn theme_for_test(&self) -> &sonicterm_cfg::theme::Theme {
-        &self.theme
-    }
-
-    /// Test-only accessor: snapshot of the live `Config`.
-    #[doc(hidden)]
-    pub fn config_for_test(&self) -> &sonicterm_cfg::config::Config {
-        &self.config
-    }
-
-    /// Test-only: install a [`ThemeLoader`].
-    #[doc(hidden)]
-    pub fn set_theme_loader_for_test(&mut self, loader: ThemeLoader) {
-        self.theme_loader = Some(loader);
     }
 
     /// Epic #289 Phase C — cancel an in-flight drag session. Wired

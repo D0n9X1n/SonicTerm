@@ -113,7 +113,7 @@ end tell
 EOF
 }
 
-# ----- Pre-keystroke focus gate (mirrors testing/workflows/run_case.sh) -----
+# ----- Pre-keystroke focus gate -----
 verify_front() {
   local front
   front=$(osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>/dev/null || echo "")

@@ -18,8 +18,7 @@ PRs are all welcome.
    cargo run -p sonicterm-windows    # Windows
    ```
 
-Crates live at the top level of the repo (`sonicterm-core/`, `sonicterm-shared/`,
-`sonicterm-mac/`, `sonicterm-windows/`) — there is **no** `crates/` directory.
+Crates live under `crates/`.
 
 ## Before opening a PR
 
@@ -29,16 +28,7 @@ locally first:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # currently 171 tests across the workspace
 cargo deny check                # optional locally; required in CI
-```
-
-Headless smoke examples (handy when GPU/window aren't available):
-
-```bash
-cargo run --example pty_dump        -p sonicterm-core   --release   # prints "[e2e] OK"
-cargo run --example altscreen_smoke -p sonicterm-core
-cargo run --example pane_smoke      -p sonicterm-shared
 ```
 
 ## Branches
@@ -68,9 +58,8 @@ Scope is the crate or component (`core`, `mac`, `windows`, `shared`, `ci`,
 - `rustfmt` settings live in `rustfmt.toml`.
 - `clippy` settings live in `clippy.toml`.
 - Public APIs should be documented.
-- **Tests live in each crate's `tests/` folder** (integration-style against
-  the public API), not inline `#[cfg(test)] mod tests` blocks. New tests
-  should follow that convention so the public surface stays exercised.
+- Keep code production-focused and small; the previous Rust test suite was
+  intentionally cleared and will be rebuilt incrementally.
 
 ## Releasing
 

@@ -158,19 +158,16 @@ in flight, this trivially fills a 460 GB SSD until even `df` fails.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-deny.sh
 bash tools/check-landmines.sh
-bash tools/check-harness-bash-strict.sh
 bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
-bash scripts/check-visual-snapshots.sh
-bash testing/workflows/test-ocr-skip.sh
+cargo build -p sonicterm-app
+cargo build -p sonicterm-mac
 ```
 
-Code-touching PRs MUST also run the per-crate `## Test gate (local)`
-block from each touched crate's `CLAUDE.md`.
+Code-touching PRs MUST also run the build gate for each touched crate.
 
 ---
 

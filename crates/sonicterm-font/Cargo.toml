@@ -49,6 +49,3 @@ cocoa = "=0.25.0"
 core-foundation = "=0.10.0"
 core-text = "=21.0.0"
 objc = "0.2"
-
-[dev-dependencies]
-env_logger = "0.11"

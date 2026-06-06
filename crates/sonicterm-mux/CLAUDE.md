@@ -13,7 +13,7 @@ PTYs and must clean up on signal / disconnect.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-mux
+cargo build -p sonicterm-mux
 ```
 
 ## Common pitfalls

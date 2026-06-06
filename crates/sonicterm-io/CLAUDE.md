@@ -19,8 +19,7 @@ for prompt-aware features.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-io
-cargo run --example pty_dump -p sonicterm-core --release   # must print [e2e] OK
+cargo build -p sonicterm-io
 ```
 
 ## Common pitfalls

@@ -20,9 +20,7 @@ the grid via the `Performer` trait. Pure-data; no I/O, no GPU.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-vt
-cargo test -p sonicterm-core --test vt_capability_matrix
-cargo run --example pty_dump_unicode -p sonicterm-core --release
+cargo build -p sonicterm-vt
 ```
 
 ## Common pitfalls

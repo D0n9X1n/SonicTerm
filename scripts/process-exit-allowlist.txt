@@ -15,7 +15,6 @@ crates/sonicterm-shared/examples/
 
 # Test-fixture child binary that intentionally exercises the raw
 # process::exit path to assert the documented bypass behaviour.
-crates/sonicterm-logging/examples/exit_test_child.rs
 
 # Integration tests (the grep gate is about shipped code only).
 crates/sonicterm-logging/tests/

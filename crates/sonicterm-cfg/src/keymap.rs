@@ -1,6 +1,6 @@
 //! Keymap: parsed binding table.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,8 +16,10 @@ pub use sonicterm_types::{Action, BroadcastScope, Direction, ScrollAction};
 pub const fn platform_default_keymap_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "sonicterm-windows"
+    } else if cfg!(target_os = "macos") {
+        "sonicterm-macos"
     } else {
-        "sonicterm"
+        "sonicterm-linux"
     }
 }
 
@@ -35,7 +37,7 @@ pub fn default_user_keymap_path() -> Option<std::path::PathBuf> {
     } else {
         std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config/sonicterm")
     };
-    Some(base.join("keymap.toml"))
+    Some(base.join("keymaps").join(format!("{}.toml", platform_default_keymap_name())))
 }
 
 /// Ensure the editable user keymap exists, seeding it from the bundled
@@ -47,11 +49,7 @@ pub fn ensure_user_keymap_file(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
     }
-    let default_text = if cfg!(target_os = "windows") {
-        include_str!("../../../assets/keymaps/sonicterm-windows.toml")
-    } else {
-        include_str!("../../../assets/keymaps/sonicterm.toml")
-    };
+    let default_text = Keymap::bundled_default_text();
     std::fs::write(path, default_text).with_context(|| format!("write {path:?}"))
 }
 
@@ -148,6 +146,36 @@ pub struct Meta {
 }
 
 impl Keymap {
+    /// Resolve a keymap name or path.
+    ///
+    /// Resolution order:
+    /// 1. direct path if `keymap` looks like a path,
+    /// 2. user config dir: `<config-dir>/keymaps/<keymap>.toml`,
+    /// 3. bundled assets: `<asset-dir>/keymaps/<keymap>.toml`.
+    pub fn resolve_path(keymap: &str, asset_dir: &Path) -> PathBuf {
+        let raw = Path::new(keymap);
+        if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
+            return raw.to_path_buf();
+        }
+        if let Some(user) = crate::config::default_config_dir()
+            .map(|dir| dir.join("keymaps").join(format!("{keymap}.toml")))
+            .filter(|path| path.exists())
+        {
+            return user;
+        }
+        asset_dir.join("keymaps").join(format!("{keymap}.toml"))
+    }
+
+    /// Strict load from a keymap name or path using [`Self::resolve_path`].
+    pub fn load_name_or_path(keymap: &str, asset_dir: &Path) -> Result<Self> {
+        Self::load_strict(&Self::resolve_path(keymap, asset_dir))
+    }
+
+    /// Infallible name/path loader. Falls back to bundled platform default.
+    pub fn load_name_or_default(keymap: &str, asset_dir: &Path) -> Self {
+        Self::load_or_default(&Self::resolve_path(keymap, asset_dir))
+    }
+
     /// Strict load of a keymap from a TOML file at `path`.
     pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
@@ -175,11 +203,17 @@ impl Keymap {
     /// [`Self::load_or_default`] as the infallible fallback. On Windows we
     /// embed the windows-specific defaults; everywhere else the unix map.
     pub fn bundled_default() -> Self {
-        #[cfg(target_os = "windows")]
-        const BUNDLED: &str = include_str!("../../../assets/keymaps/sonicterm-windows.toml");
-        #[cfg(not(target_os = "windows"))]
-        const BUNDLED: &str = include_str!("../../../assets/keymaps/sonicterm.toml");
-        toml::from_str(BUNDLED).expect("bundled keymap must parse")
+        toml::from_str(Self::bundled_default_text()).expect("bundled keymap must parse")
+    }
+
+    fn bundled_default_text() -> &'static str {
+        if cfg!(target_os = "windows") {
+            include_str!("../../../assets/keymaps/sonicterm-windows.toml")
+        } else if cfg!(target_os = "macos") {
+            include_str!("../../../assets/keymaps/sonicterm-macos.toml")
+        } else {
+            include_str!("../../../assets/keymaps/sonicterm-linux.toml")
+        }
     }
 
     /// Look up the first action bound to `keys` (case-insensitive). Returns

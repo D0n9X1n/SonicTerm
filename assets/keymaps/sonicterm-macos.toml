@@ -1,0 +1,246 @@
+# WezTerm-compatible default keymap for SonicTerm Terminal.
+# On macOS, `cmd` is used; on Windows, `ctrl` is the equivalent — `super`
+# matches both. Keys not listed fall through to the terminal.
+
+[meta]
+name = "sonicterm-macos-default"
+version = "1.0"
+
+# --- Tabs ---
+[[binding]]
+keys = "super+t"
+action = "new_tab"
+
+# WezTerm's Windows/Linux SpawnTab chord — also bound on macOS so the
+# same muscle memory works whichever OS the keyboard came from.
+[[binding]]
+keys = "super+shift+t"
+action = "new_tab"
+
+[[binding]]
+keys = "super+shift+?"
+action = "show_keymap_cheatsheet"
+
+[[binding]]
+keys = "super+w"
+action = "close_active_pane_or_tab"
+
+[[binding]]
+keys = "super+shift+]"
+action = "next_tab"
+
+[[binding]]
+keys = "super+shift+["
+action = "prev_tab"
+
+# Cmd+Left / Cmd+Right — common user override (matches the user's
+# personal wezterm.lua and macOS document-tab convention).
+[[binding]]
+keys = "super+left"
+action = "prev_tab"
+
+[[binding]]
+keys = "super+right"
+action = "next_tab"
+
+[[binding]]
+keys = "super+1"
+action = { activate_tab = 0 }
+
+[[binding]]
+keys = "super+2"
+action = { activate_tab = 1 }
+
+[[binding]]
+keys = "super+3"
+action = { activate_tab = 2 }
+
+[[binding]]
+keys = "super+4"
+action = { activate_tab = 3 }
+
+[[binding]]
+keys = "super+5"
+action = { activate_tab = 4 }
+
+[[binding]]
+keys = "super+6"
+action = { activate_tab = 5 }
+
+[[binding]]
+keys = "super+7"
+action = { activate_tab = 6 }
+
+[[binding]]
+keys = "super+8"
+action = { activate_tab = 7 }
+
+[[binding]]
+keys = "super+9"
+action = "activate_last_tab"
+
+# --- Splits ---
+[[binding]]
+keys = "super+d"
+action = "split_right"
+
+[[binding]]
+keys = "super+shift+d"
+action = "split_down"
+
+[[binding]]
+keys = "super+shift+w"
+action = "close_pane"
+
+[[binding]]
+keys = "super+shift+z"
+action = "toggle_pane_zoom"
+
+[[binding]]
+keys = "super+shift+b"
+action = { toggle_broadcast = { scope = "tab" } }
+
+[[binding]]
+keys = "super+ctrl+shift+b"
+action = { toggle_broadcast = { scope = "all_tabs" } }
+
+# --- Pane focus (vim-style) ---
+[[binding]]
+keys = "super+shift+h"
+action = { focus_pane = "left" }
+
+[[binding]]
+keys = "super+shift+j"
+action = { focus_pane = "down" }
+
+[[binding]]
+keys = "super+shift+k"
+action = { focus_pane = "up" }
+
+[[binding]]
+keys = "super+shift+l"
+action = { focus_pane = "right" }
+
+# Arrow-key split resize: nudge the active divider by 5%.
+[[binding]]
+keys = "super+shift+left"
+action = "resize_pane_left"
+
+[[binding]]
+keys = "super+shift+right"
+action = "resize_pane_right"
+
+[[binding]]
+keys = "super+shift+up"
+action = "resize_pane_up"
+
+[[binding]]
+keys = "super+shift+down"
+action = "resize_pane_down"
+
+# --- Clipboard ---
+[[binding]]
+keys = "super+["
+action = "enter_copy_mode"
+[[binding]]
+keys = "super+c"
+action = "copy_to_clipboard"
+
+[[binding]]
+keys = "super+v"
+action = "paste_from_clipboard"
+
+# --- Font size ---
+[[binding]]
+keys = "super+="
+action = "increase_font_size"
+
+# Some keyboards/layouts deliver `+` as the character on Shift+= — bind
+# both so font-zoom-in works regardless of which the OS surfaces.
+[[binding]]
+keys = "super+shift+="
+action = "increase_font_size"
+
+[[binding]]
+keys = "super++"
+action = "increase_font_size"
+
+[[binding]]
+keys = "super+-"
+action = "decrease_font_size"
+
+[[binding]]
+keys = "super+0"
+action = "reset_font_size"
+
+# --- Window ---
+[[binding]]
+keys = "super+n"
+action = "new_window"
+
+[[binding]]
+keys = "super+shift+f"
+action = "toggle_fullscreen"
+
+# WezTerm's macOS default for full-screen toggle (mirrors the system
+# View → Enter Full Screen shortcut).
+[[binding]]
+keys = "super+enter"
+action = "toggle_fullscreen"
+
+# --- Search / Palette ---
+[[binding]]
+keys = "super+f"
+action = "open_search"
+
+[[binding]]
+keys = "super+shift+p"
+action = "open_command_palette"
+
+# Quick select URL hints.
+[[binding]]
+keys = "super+shift+space"
+action = "enter_quick_select"
+
+# --- Scrolling ---
+[[binding]]
+keys = "super+up"
+action = { scroll = "line_up" }
+
+[[binding]]
+keys = "super+down"
+action = { scroll = "line_down" }
+
+[[binding]]
+keys = "super+pageup"
+action = { scroll = "page_up" }
+
+[[binding]]
+keys = "super+pagedown"
+action = { scroll = "page_down" }
+
+[[binding]]
+keys = "super+home"
+action = { scroll = "to_top" }
+
+[[binding]]
+keys = "super+end"
+action = { scroll = "to_bottom" }
+
+# --- Reload config ---
+[[binding]]
+keys = "super+shift+r"
+action = "reload_config"
+
+# Bare super+r is the spec'd WezTerm chord — added as an alias so users
+# coming from WezTerm don't need to remember the Shift modifier.
+[[binding]]
+keys = "super+r"
+action = "reload_config"
+
+# --- SSH client (example; uncomment + edit target to enable) ---
+# Requires building sonic with `--features sonicterm-core/ssh`.
+# [[binding]]
+# keys = "super+shift+s"
+# action = { open_ssh_pane = "alice@dev.example.com:22" }
+

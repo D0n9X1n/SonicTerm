@@ -48,12 +48,10 @@ fn main() -> Result<()> {
     let keymap = load_keymap(&config.keymap);
     // Initial load is infallible (#522 fallback); hot-reload loaders use
     // strict variants so user-visible errors are surfaced after startup.
-    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| {
-        Theme::load_strict(&asset_dir().join("themes").join(format!("{name}.toml")))
-    });
-    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| {
-        Keymap::load_strict(&asset_dir().join("keymaps").join(format!("{name}.toml")))
-    });
+    let theme_loader: sonicterm_app::ThemeLoader =
+        Box::new(|name: &str| Theme::load_name_or_path(name, &asset_dir()));
+    let keymap_loader: sonicterm_app::KeymapLoader =
+        Box::new(|name: &str| Keymap::load_name_or_path(name, &asset_dir()));
     #[cfg(target_os = "macos")]
     {
         // The native NSMenu MUST be installed AFTER winit has built
@@ -144,13 +142,11 @@ fn load_config(warnings: &mut Vec<String>) -> Config {
 }
 
 fn load_theme(name: &str) -> Theme {
-    let path = asset_dir().join("themes").join(format!("{name}.toml"));
-    Theme::load_or_default(&path)
+    Theme::load_name_or_default(name, &asset_dir())
 }
 
 fn load_keymap(name: &str) -> Keymap {
-    let path = asset_dir().join("keymaps").join(format!("{name}.toml"));
-    Keymap::load_or_default(&path)
+    Keymap::load_name_or_default(name, &asset_dir())
 }
 
 /// Bundled assets live next to the binary inside the `.app` bundle.

@@ -89,7 +89,7 @@ impl App {
 
         // Theme
         if new_cfg.theme != self.config.theme {
-            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
                     t.apply_accessibility(&new_cfg.accessibility);
@@ -124,7 +124,7 @@ impl App {
         if new_cfg.theme == self.config.theme
             && new_cfg.accessibility.high_contrast != self.config.accessibility.high_contrast
         {
-            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             let mut t = match Theme::load_strict(&theme_path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -308,7 +308,7 @@ impl App {
 
         // Keymap
         if new_cfg.keymap != self.config.keymap {
-            let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
+            let km_path = Keymap::resolve_path(&new_cfg.keymap, &assets);
             match self
                 .keymap_loader
                 .as_ref()

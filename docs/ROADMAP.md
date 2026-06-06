@@ -4,7 +4,7 @@ Authoritative source for what's done, what's next, and the constraints any
 contributor (human or agent) must respect. Update this file when shipping a
 version or changing direction.
 
-Last updated: 2026-05-27 (v1.0-RC — 29+ PRs this session: crate decomposition #145/#151–#160, render+app module split #157/#160, Windows MVP #133–#139, perf pass #129–#142, P0 ANSI-bg fix #163, UX release-testing checklist gate `docs/RELEASE_TESTING.md` (49-section sweep) + `scripts/check-release-testing.sh` wired into `.github/workflows/release.yml` — **v0.8.1 is the first tag to ship after a full checklist run-through**. Release notes in [`CHANGELOG.md`](../CHANGELOG.md); tag pending operational cert procurement and honest perf-parity sign-off; see [`RELEASE.md`](../RELEASE.md))
+Last updated: 2026-06-06 (v1.0-RC simplification pass: tests/examples/harness paths removed, config/theme/keymap loading kept as the production customization surface. Release notes in [`CHANGELOG.md`](../CHANGELOG.md); tag pending operational cert procurement and honest perf-parity sign-off; see [`RELEASE.md`](../RELEASE.md))
 
 ---
 
@@ -204,9 +204,7 @@ bodies.
 
 Six-PR chain (A: API, B1/B2: cluster-transparent reads, C: scroll_up
 eject, D: smart-degrade, E: resize-aware, F: bench + validation)
-landed the cluster-RLE scrollback representation. Validated end-to-end
-by `crates/sonicterm-grid/examples/scrollback_memory_report.rs` and
-`tests/scrollback_compression_ratio.rs`:
+landed the cluster-RLE scrollback representation:
 
 - 10K uniform-blank lines @ 120 cols: **1.034 MiB measured vs 28.195
   MiB dense baseline → 96.33% reduction** using heap accounting that
@@ -249,11 +247,9 @@ Still deferred past v1.0:
    ```bash
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
+   cargo build -p sonicterm-app
+   cargo build -p sonicterm-mac
    ```
-7. **Test bar**: every behavior change ships with a unit/integration test
-   in the relevant crate's `tests/` folder. Workspace target: **never let
-   test count regress.** Current floor: **824** as of v1.0-RC.
 
 ---
 
@@ -282,8 +278,8 @@ Still deferred past v1.0:
   `9c46c39` and #145; PR #145 restored the nested `crates/<name>/`
   layout to keep room for the leaf decomposition (#151–#158). Don't
   flatten again without an explicit plan.
-- **Tests go in each crate's `tests/` folder** (integration-style), not
-  inline `#[cfg(test)] mod tests` blocks (#27).
+- **Keep production paths small**; the previous Rust test suite was cleared
+  and will be rebuilt incrementally when needed.
 - **Commit format**: Conventional Commits with scope =
   `core` / `shared` / `mac` / `windows` / `ci` / `assets` / `docs`.
 

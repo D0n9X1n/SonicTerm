@@ -932,9 +932,7 @@ impl Grid {
     }
 
     /// #319 PR-F: debug introspection — count (Cluster, Flat) lines in
-    /// scrollback. Used by `tests/scrollback_compression_ratio.rs` and the
-    /// `examples/scrollback_memory_report.rs` validation example to prove
-    /// the ≥40% RAM reduction promise of the Epic #300 P5 LineStorage work.
+    /// scrollback.
     #[doc(hidden)]
     pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
         let mut cluster = 0usize;

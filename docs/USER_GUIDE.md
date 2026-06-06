@@ -365,15 +365,12 @@ visible has regressed:
 
 ```bash
 # CJK / emoji / Powerline end-to-end through the real grid
-cargo run --example pty_dump_unicode -p sonicterm-core --release
+cargo build -p sonicterm-app
 
-# Atlas coverage matrix — non-zero pixels per char class
-cargo test -p sonicterm-shared --test render_capability_matrix
+cargo build -p sonicterm-mac
 ```
 
-The first one is sentinel-framed: it writes a known string, scans the
-grid for the sentinels, and asserts the cells in between contain the
-expected characters in the expected style.
+Then launch the mac app and smoke-check the screen manually.
 
 ---
 

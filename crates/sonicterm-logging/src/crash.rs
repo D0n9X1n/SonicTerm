@@ -217,25 +217,6 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
 }
 
 #[doc(hidden)]
-/// Test bridge: clear the ring buffer. The ring is a process-global
-/// `static`, so concurrent integration tests in this crate share it;
-/// any test asserting ring contents must `__test_reset()` first while
-/// holding the `__test_serial()` guard, or it races with sibling
-/// tests pushing events. Fix for the pre-v0.8.1 flake in
-/// `dump_includes_ring_events_and_message`.
-pub fn __test_reset() {
-    ring().lock().clear();
-}
-
-#[doc(hidden)]
-/// Test bridge: process-wide serial guard so ring-content assertions
-/// stay deterministic across parallel `cargo test` workers.
-pub fn __test_serial() -> parking_lot::MutexGuard<'static, ()> {
-    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| Mutex::new(())).lock()
-}
-
-#[doc(hidden)]
 /// Test bridge: push a synthetic captured event into the ring without
 /// going through the tracing dispatcher. Used by integration tests so
 /// they can deterministically assert ring contents.

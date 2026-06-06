@@ -169,7 +169,3 @@ even an immediate hardware fault leaves the FATAL line on disk.
 ### Source
 
 The implementation lives in `crates/sonicterm-logging/src/exit_trace.rs`.
-The integration tests in `crates/sonicterm-logging/tests/exit_trace.rs`
-spawn a child binary (`crates/sonicterm-logging/examples/exit_test_child.rs`)
-under `SONIC_EXIT_TEST_MODE=<mode>` and assert on the resulting log
-files.
