@@ -54,6 +54,9 @@ pub struct PaneRender<'a> {
     /// by `sonicterm-vt` + `sonicterm-grid`; WezTerm behavior is converted
     /// into those crates instead of inserting an upstream terminal facade here.
     pub grid: &'a mut sonicterm_grid::grid::Grid,
+    /// Optional scrollback-absolute row at the top of this pane's viewport.
+    /// `None` means follow the live tail.
+    pub viewport_top_abs: Option<u64>,
     /// True for the pane that owns the focus ring, IME caret, selection
     /// overlay, search highlight ribbon, and hyperlink hover popup. Exactly
     /// one pane per frame should have this set.

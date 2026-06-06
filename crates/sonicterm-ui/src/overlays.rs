@@ -81,8 +81,9 @@ pub const PALETTE_ROW_ACCENT_W: f32 = 3.0;
 /// Footer height (count + nav hint strip at the bottom of the modal).
 pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
 
-/// Inset between the modal edge and the inner content (rows, query, footer).
-pub const PALETTE_INNER_PAD: f32 = 12.0;
+/// Default inset between the modal edge and the inner content (rows, query,
+/// footer). Users can override this via `appearance.panel_padding`.
+pub const PALETTE_INNER_PAD: f32 = 2.0;
 
 /// Corner radius for the modal panel (and its 1px border ring) in physical
 /// pixels. Quad pipeline draws this via an SDF-style rounded-rect path
@@ -177,10 +178,12 @@ impl PaletteLayout {
         palette: &mut CommandPalette,
         window_w: f32,
         window_h: f32,
+        panel_padding: f32,
     ) -> Option<PaletteLayout> {
         if !palette.is_open() {
             return None;
         }
+        let panel_padding = panel_padding.max(0.0);
         // Spec: width is `min(720, viewport_w - 48)`, ideal 680.
         // Height: `min(520, viewport_h - 96)`, ideal 460.
         let modal_w = PALETTE_WIDTH.min(PALETTE_MAX_WIDTH).min((window_w - 48.0).max(160.0));
@@ -197,9 +200,9 @@ impl PaletteLayout {
             h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
         };
         let query_row = Rect {
-            x: bg.x + PALETTE_INNER_PAD,
-            y: bg.y + PALETTE_INNER_PAD,
-            w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+            x: bg.x + panel_padding,
+            y: bg.y + panel_padding,
+            w: (bg.w - panel_padding * 2.0).max(0.0),
             h: PALETTE_QUERY_HEIGHT,
         };
         let query_icon = Rect {
@@ -216,8 +219,8 @@ impl PaletteLayout {
         };
 
         // Action list region (everything between the query row and the footer).
-        let list_top = query_row.y + query_row.h + PALETTE_INNER_PAD;
-        let list_bottom = footer.y - PALETTE_INNER_PAD;
+        let list_top = query_row.y + query_row.h + panel_padding;
+        let list_bottom = footer.y - panel_padding;
         let avail = (list_bottom - list_top).max(0.0);
         let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
         let max_rows = if row_stride > 0.0 {
@@ -241,9 +244,9 @@ impl PaletteLayout {
         let mut row_labels = Vec::with_capacity(rows.capacity());
         for (i, item_index) in (window_start..window_end).enumerate() {
             let r = Rect {
-                x: bg.x + PALETTE_INNER_PAD,
+                x: bg.x + panel_padding,
                 y: list_top + (i as f32) * row_stride,
-                w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+                w: (bg.w - panel_padding * 2.0).max(0.0),
                 h: PALETTE_ROW_HEIGHT,
             };
             rows.push(PaletteRow { item_index, rect: r });

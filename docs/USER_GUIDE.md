@@ -200,6 +200,7 @@ size = 13.0
 [appearance]
 theme = "tokyo-night"
 opacity = 0.96
+panel_padding = 2.0
 
 [keymap]
 preset = "wezterm"

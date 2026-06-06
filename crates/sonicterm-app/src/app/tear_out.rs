@@ -65,10 +65,17 @@ impl App {
         // cascade. The reducer emits Render(TabRemoved) on the
         // source window AND a WindowOpen for the destination, all
         // in one handle() call (see misc_intents::tear_out_tab_emits_*).
+        let pending_new_window_before_intent = self.pending_new_window;
         self.dispatch_intent(sonicterm_app_core::AppIntent::TearOutTab {
             src_window: sonicterm_types::WindowKey::new(0),
             src_tab: index,
         });
+        // The reducer emits a WindowOpen effect for observability, but
+        // this production path creates the torn-out window directly via
+        // `install_torn_out_window` below. Do not leave that effect in
+        // `pending_new_window`, or the next event-loop drain can spawn a
+        // second empty window after a successful tear-out.
+        self.pending_new_window = pending_new_window_before_intent;
         // Cross-window merge takes priority over the single-tab guard:
         // see [`Self::try_cross_window_merge`] for the gate.
         if self.try_cross_window_merge(index) {
@@ -177,6 +184,7 @@ impl App {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
+                    panel_padding: self.config.appearance.panel_padding,
                 },
             },
         ) {
@@ -544,6 +552,7 @@ impl App {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
+                    panel_padding: self.config.appearance.panel_padding,
                 },
             },
         ) {

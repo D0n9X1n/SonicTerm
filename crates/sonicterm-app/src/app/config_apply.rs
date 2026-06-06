@@ -80,6 +80,12 @@ pub fn renderer_scrollbar_mode_differs(old_cfg: &Config, new_cfg: &Config) -> bo
     old_cfg.appearance.scrollbar != new_cfg.appearance.scrollbar
 }
 
+/// True iff overlay panel padding changed and existing renderers need
+/// their cached overlay layout invalidated.
+pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> bool {
+    (old_cfg.appearance.panel_padding - new_cfg.appearance.panel_padding).abs() > f32::EPSILON
+}
+
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
@@ -293,6 +299,21 @@ impl App {
                 }
             }
             tracing::info!(?new_cfg.appearance.scrollbar, "live-reload: appearance scrollbar");
+        }
+
+        if renderer_panel_padding_differs(&self.config, &new_cfg) {
+            if let Some(r) = self.main_renderer_mut() {
+                r.set_panel_padding(new_cfg.appearance.panel_padding);
+            }
+            for child in self.windows.values_mut() {
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_panel_padding(new_cfg.appearance.panel_padding);
+                }
+            }
+            tracing::info!(
+                panel_padding = new_cfg.appearance.panel_padding,
+                "live-reload: appearance panel padding"
+            );
         }
 
         // Tab close-button override (wezterm `tab_close_button_color`).

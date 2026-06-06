@@ -231,6 +231,7 @@ impl App {
                     backdrop: self.config.appearance.backdrop,
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
+                    panel_padding: self.config.appearance.panel_padding,
                 },
             },
         )

@@ -358,6 +358,7 @@ impl App {
                     ws_copy_mode_ref,
                     ws_ime_ref,
                     ws_ime_throttle_ref,
+                    ws_viewport_tops,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonicterm_ui::tabs::TabBar>,
@@ -369,6 +370,7 @@ impl App {
                     Option<&CopyModeState>,
                     Option<&sonicterm_ui::ime::ImeState>,
                     Option<&mut sonicterm_ui::ime::ImeCursorThrottle>,
+                    std::collections::HashMap<u64, Option<u64>>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -387,6 +389,11 @@ impl App {
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
+                        let viewport_tops = ws
+                            .panes
+                            .iter()
+                            .map(|(id, pane)| (*id, pane.viewport_top_abs))
+                            .collect();
                         (
                             ws.renderer.as_mut(),
                             Some(&mut ws.tabs),
@@ -398,9 +405,22 @@ impl App {
                             cm_ref,
                             Some(&ws.ime),
                             Some(&mut ws.ime_cursor_throttle),
+                            viewport_tops,
                         )
                     }
-                    None => (None, None, None, None, true, None, None, None, None, None),
+                    None => (
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        std::collections::HashMap::new(),
+                    ),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
                     renderer_opt,
@@ -462,6 +482,7 @@ impl App {
                                     h: rect.h as u32,
                                 },
                                 grid: g.grid_mut(),
+                                viewport_top_abs: ws_viewport_tops.get(id).copied().flatten(),
                                 is_active: *id == active_id,
                                 cursor_style: sonicterm_render_model::CursorStyle::default(),
                                 is_broadcast_receiver: broadcast_receivers.contains(id),

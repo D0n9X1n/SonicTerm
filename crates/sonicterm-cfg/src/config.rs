@@ -176,11 +176,18 @@ pub struct AppearanceConfig {
     pub opacity: f32,
     /// Scrollbar visibility policy.
     pub scrollbar: ScrollbarMode,
+    /// Padding between overlay panel chrome and its inner content, in logical px.
+    pub panel_padding: f32,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
-        Self { backdrop: BackdropKind::Opaque, opacity: 1.0, scrollbar: ScrollbarMode::default() }
+        Self {
+            backdrop: BackdropKind::Opaque,
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::default(),
+            panel_padding: 2.0,
+        }
     }
 }
 
@@ -577,6 +584,7 @@ cursor_shape = "block"
 backdrop = "opaque"
 opacity = 1.0
 scrollbar = "auto"
+panel_padding = {panel_padding}
 
 [render]
 glyph_fit = "v2"
@@ -605,6 +613,7 @@ threshold_secs = 10
         padding_right = cfg.window.padding_right,
         padding_top = cfg.window.padding_top,
         padding_bottom = cfg.window.padding_bottom,
+        panel_padding = cfg.appearance.panel_padding,
         scrollback = cfg.terminal.scrollback,
     )
 }

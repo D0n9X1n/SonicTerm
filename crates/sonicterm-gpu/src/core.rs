@@ -28,9 +28,7 @@ use crate::color::{
 };
 use crate::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
 use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
-use sonicterm_ui::tab_spans::{
-    build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
-};
+use sonicterm_ui::tab_spans::tab_title_font_size;
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +43,8 @@ pub struct SurfaceAppearance {
     /// deferred to PR-D — until then `Auto` behaves like Always-when-
     /// scrollable.
     pub scrollbar: sonicterm_cfg::config::ScrollbarMode,
+    /// Padding between overlay panel chrome and inner content.
+    pub panel_padding: f32,
 }
 
 /// Renderer initialization settings derived from config.
@@ -196,7 +196,7 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 
 use crate::{
     atlas_upload::AtlasUpload,
-    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance},
+    quad::{premultiply, px_to_ndc, QuadInstance},
     wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_cfg::config::CursorShape;
@@ -225,8 +225,8 @@ use sonicterm_ui::{
     ime::ImeState,
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_INNER_PAD, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP,
-        PALETTE_ROW_HEIGHT, PALETTE_ROW_RADIUS,
+        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
+        PALETTE_ROW_RADIUS,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -239,24 +239,14 @@ use sonicterm_ui::{
 pub struct TabBarQuadParams {
     /// Number of tabs in the bar.
     pub tab_count: usize,
-    /// Active tab fill color.
-    pub active_bg: [f32; 4],
-    /// Hovered inactive tab fill color.
-    pub hover_bg: [f32; 4],
     /// Active tab accent color.
     pub accent: [f32; 4],
     /// Inactive tab separator color.
     pub separator: [f32; 4],
     /// Bar background and bottom border color.
     pub border: [f32; 4],
-    /// Default close glyph color.
-    pub close_color: [f32; 4],
-    /// Hovered close glyph color.
-    pub hover_close_color: [f32; 4],
     /// Hovered tab index, or `u32::MAX` when no tab is hovered.
     pub hover_tab_idx: u32,
-    /// Non-zero when the hover is over the close glyph.
-    pub hover_close_hit: u8,
     /// Surface dimensions in the same units as the layout rects.
     pub surface: (f32, f32),
 }
@@ -280,13 +270,7 @@ pub fn emit_tab_bar_quads(
     });
     for t in &layout.tabs {
         let is_active = layout.active == Some(t.idx);
-        let cursor_on_this_tab = params.hover_tab_idx == t.idx as u32;
         if is_active {
-            quads.push(QuadInstance {
-                rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
-                color: params.active_bg,
-                ..Default::default()
-            });
             if let Some(acc) = layout.active_accent_rect() {
                 quads.push(QuadInstance {
                     rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
@@ -294,54 +278,23 @@ pub fn emit_tab_bar_quads(
                     ..Default::default()
                 });
             }
-        } else if cursor_on_this_tab {
+        }
+        if t.idx + 1 < params.tab_count {
+            // Geometric scale = bar.h / default-logical-bar-h. Mirrors
+            // the per-bar-height scale `TabBarLayout::compute_at_y`
+            // uses to grow TAB_GAP / padding with bar height — keeps
+            // separators centered in each adjacent-tab gap.
+            let scale = (layout.bar.h / 40.0).max(0.1);
+            let sep_w = 1.0_f32 * scale;
+            let sep_h = (layout.bar.h - 16.0 * scale).max(1.0);
+            let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
+            let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP * scale - sep_w) * 0.5;
             quads.push(QuadInstance {
-                rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
-                color: params.hover_bg,
+                rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
+                color: params.separator,
                 ..Default::default()
             });
         }
-        if t.idx + 1 < params.tab_count {
-            let next_is_active = layout.active == Some(t.idx + 1);
-            if !is_active && !next_is_active {
-                // Geometric scale = bar.h / default-logical-bar-h. Mirrors
-                // the per-bar-height scale `TabBarLayout::compute_at_y`
-                // uses to grow CLOSE_BUTTON_SIZE / TAB_GAP / etc. with
-                // bar height — keeps separators, sep height inset, and
-                // the gap-mid math in the same coordinate system as
-                // `t.bg_rect.x + t.bg_rect.w`.
-                let scale = (layout.bar.h / 40.0).max(0.1);
-                let sep_w = 1.0_f32 * scale;
-                let sep_h = (layout.bar.h - 16.0 * scale).max(1.0);
-                let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
-                let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP * scale - sep_w) * 0.5;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
-                    color: params.separator,
-                    ..Default::default()
-                });
-            }
-        }
-        let close = if cursor_on_this_tab && params.hover_close_hit == 1 {
-            params.hover_close_color
-        } else {
-            params.close_color
-        };
-        let glyph = (t.close_x_rect.w * 0.62).max(9.0);
-        let inset = (t.close_x_rect.w - glyph) * 0.5;
-        let thick = (glyph * 0.18).max(1.5);
-        push_close_x_quads(
-            quads,
-            CloseXParams {
-                x: t.close_x_rect.x + inset,
-                y: t.close_x_rect.y + inset,
-                size: glyph,
-                thickness: thick,
-                color: close,
-                sw,
-                sh,
-            },
-        );
     }
 }
 
@@ -363,7 +316,9 @@ fn compute_cheatsheet_layout(
     bindings: &[(String, String)],
     window_w: f32,
     window_h: f32,
+    panel_padding: f32,
 ) -> CheatsheetLayout {
+    let panel_padding = panel_padding.max(0.0);
     let modal_w = 760.0_f32.min((window_w - 48.0).max(180.0));
     let modal_h = 520.0_f32.min((window_h - 96.0).max(140.0));
     let border = sonicterm_ui::tabbar_view::Rect {
@@ -379,9 +334,9 @@ fn compute_cheatsheet_layout(
         h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
     };
     let query_row = sonicterm_ui::tabbar_view::Rect {
-        x: bg.x + PALETTE_INNER_PAD,
-        y: bg.y + PALETTE_INNER_PAD,
-        w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+        x: bg.x + panel_padding,
+        y: bg.y + panel_padding,
+        w: (bg.w - panel_padding * 2.0).max(0.0),
         h: 44.0,
     };
     let footer = sonicterm_ui::tabbar_view::Rect {
@@ -390,8 +345,8 @@ fn compute_cheatsheet_layout(
         w: bg.w,
         h: 32.0,
     };
-    let list_top = query_row.y + query_row.h + PALETTE_INNER_PAD;
-    let list_bottom = footer.y - PALETTE_INNER_PAD;
+    let list_top = query_row.y + query_row.h + panel_padding;
+    let list_bottom = footer.y - panel_padding;
     let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
     let max_rows = (((list_bottom - list_top).max(0.0) + PALETTE_ROW_GAP) / row_stride)
         .floor()
@@ -408,9 +363,9 @@ fn compute_cheatsheet_layout(
     let mut rows_text = String::new();
     for (row_i, idx_pos) in (window_start..window_end).enumerate() {
         rows.push(sonicterm_ui::tabbar_view::Rect {
-            x: bg.x + PALETTE_INNER_PAD,
+            x: bg.x + panel_padding,
             y: list_top + (row_i as f32) * row_stride,
-            w: (bg.w - PALETTE_INNER_PAD * 2.0).max(0.0),
+            w: (bg.w - panel_padding * 2.0).max(0.0),
             h: PALETTE_ROW_HEIGHT,
         });
         if row_i > 0 {
@@ -506,6 +461,8 @@ pub struct GpuRenderer {
     /// Scrollbar visibility policy from config (PR-B of #386). Read on
     /// every frame in the per-pane scrollbar emit loop.
     scrollbar_mode: sonicterm_cfg::config::ScrollbarMode,
+    /// Padding between overlay panel chrome and inner content.
+    panel_padding: f32,
     fg_default: ChromeColor,
     cursor_color: [f32; 4],
     /// Theme background as straight RGBA. Used to recolor the glyph
@@ -542,16 +499,12 @@ pub struct GpuRenderer {
     tab_inactive_bg: [f32; 4],
     tab_active_fg: ChromeColor,
     tab_inactive_fg: ChromeColor,
-    tab_close_fg: [f32; 4],
-    /// Optional user override for the close-button color. When `Some`,
-    /// the × is always drawn at this color (matching WezTerm's
-    /// `tab_close_button_color`). When `None`, the close button follows
-    /// WezTerm fancy-mode parity: hidden until the cursor is over the
-    /// tab, dim by default, brightened to `tab_active_fg` when the
-    /// cursor is over the × glyph itself.
+    /// Deprecated user override for the removed tab close button. Kept
+    /// only so older configs round-trip without changing the renderer
+    /// settings surface.
     tab_close_override: Option<[f32; 4]>,
     /// Last reported cursor position in LOGICAL pixels, or `None` when
-    /// the cursor is outside the window. Drives tab-close hover state.
+    /// the cursor is outside the window. Drives tab hover state.
     hover_cursor: Option<(f32, f32)>,
     /// Color for the wezterm-style vertical bar drawn between adjacent
     /// inactive tabs. A dim variant of the inactive-fg works in every
@@ -682,7 +635,7 @@ struct FrameKey {
     /// so a write to an inactive pane (e.g. background `tail -f`) must
     /// invalidate the cached frame even though `grid_revision` (active pane)
     /// is unchanged.
-    pane_revs: Vec<(u64, u64)>,
+    pane_revs: Vec<(u64, u64, Option<u64>)>,
     selection: Option<Selection>,
     copy_mode: Option<CopyModeState>,
     quick_select_hint_count: u32,
@@ -715,16 +668,14 @@ struct FrameKey {
     /// adding/removing a split refreshes the cache.
     inactive_cursor_count: u32,
     /// Index of the tab the cursor is currently over, or `u32::MAX`
-    /// when the cursor is not over any tab. Drives the WezTerm-style
-    /// "× only visible on tab hover" behaviour — moving the cursor
-    /// between tabs must invalidate the cached frame.
+    /// when the cursor is not over any tab. Moving between tabs must
+    /// invalidate the cached frame for hover chrome.
     hover_tab: u32,
-    /// `1` when the cursor is over the close-button rect of the hovered
-    /// tab, `0` otherwise. Drives the dim → bright × transition.
+    /// Deprecated close-button hover bit. Always zero now that close
+    /// buttons are no longer drawn; kept to avoid reshaping FrameKey.
     hover_close: u8,
-    /// `1` when an always-on close-button color override is active.
-    /// Folded in so toggling the config option live invalidates the
-    /// frame cache.
+    /// Deprecated close-button override bit. Kept so older config reload
+    /// paths can still invalidate safely.
     close_override: u8,
     broadcast_receivers_hash: u64,
     inline_media_hash: u64,
@@ -1053,7 +1004,6 @@ impl GpuRenderer {
         let tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
         let tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
         let tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
-        let tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
         let tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         // Hyperlink visuals: theme-aware. Use the theme's cursor color as the
         // accent (every bundled theme designates it). Underline reads as
@@ -1100,6 +1050,7 @@ impl GpuRenderer {
             bg,
             bg_opacity: appearance.opacity.clamp(0.0, 1.0),
             scrollbar_mode: appearance.scrollbar,
+            panel_padding: appearance.panel_padding.max(0.0),
             fg_default,
             cursor_color,
             bg_rgba,
@@ -1114,7 +1065,6 @@ impl GpuRenderer {
             tab_inactive_bg,
             tab_active_fg,
             tab_inactive_fg,
-            tab_close_fg,
             tab_close_override: None,
             hover_cursor: None,
             tab_separator,
@@ -1272,6 +1222,17 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn scrollbar_mode(&self) -> sonicterm_cfg::config::ScrollbarMode {
         self.scrollbar_mode
+    }
+
+    /// Update overlay panel padding from live config reload.
+    pub fn set_panel_padding(&mut self, padding: f32) -> bool {
+        let padding = padding.max(0.0);
+        if (self.panel_padding - padding).abs() < f32::EPSILON {
+            return false;
+        }
+        self.panel_padding = padding;
+        self.last_frame_key = None;
+        true
     }
 
     /// Update the cursor shape. Invalidates the cached frame so the
@@ -1766,10 +1727,8 @@ impl GpuRenderer {
         in_bar(prev) || in_bar(next)
     }
 
-    /// Optional override for the close-button color. When `Some`, the ×
-    /// is drawn in this color and is always visible (matching WezTerm's
-    /// `tab_close_button_color` config). Accepts a `#rrggbb` string;
-    /// invalid strings are ignored.
+    /// Deprecated close-button color override. The button is no longer
+    /// drawn, but accepting the setting keeps older configs harmless.
     pub fn set_tab_close_override(&mut self, color: Option<&str>) -> bool {
         let parsed = color.map(|c| hex_to_rgba(c, 1.0));
         if self.tab_close_override != parsed {
@@ -1939,7 +1898,6 @@ impl GpuRenderer {
         self.tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
         self.tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
         self.tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
-        self.tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
         self.tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         self.splitter_color = splitter_color_from_theme(theme);
@@ -2227,6 +2185,7 @@ impl GpuRenderer {
             rect_w: f32,
             rect_h: f32,
             is_active: bool,
+            viewport_top_abs: Option<u64>,
             scrollbar_alpha: f32,
             inline_images: &'g [sonicterm_render_model::InlineImage],
         }
@@ -2240,13 +2199,16 @@ impl GpuRenderer {
                 rect_w: content_rect(p).2,
                 rect_h: content_rect(p).3,
                 is_active: p.is_active,
+                viewport_top_abs: p.viewport_top_abs,
                 scrollbar_alpha: p.scrollbar_alpha,
                 inline_images: &p.inline_images,
             })
             .collect();
         // Pre-compute pane revisions for FrameKey from the safe borrows.
-        let pane_revs_vec: Vec<(u64, u64)> =
-            pane_views.iter().map(|pv| (pv.pane_id, pv.grid.revision())).collect();
+        let pane_revs_vec: Vec<(u64, u64, Option<u64>)> = pane_views
+            .iter()
+            .map(|pv| (pv.pane_id, pv.grid.revision(), pv.viewport_top_abs))
+            .collect();
         let inline_media_hash = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -2397,10 +2359,9 @@ impl GpuRenderer {
         let _ = ui_cursor::phase_bucket(blink_elapsed, self.cursor_blink);
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
-        // moves between tabs / on and off the × glyph.
-        let (hover_tab_idx, hover_close_hit) = {
+        // moves between tabs.
+        let hover_tab_idx = {
             let mut idx: u32 = u32::MAX;
-            let mut on_close: u8 = 0;
             if self.tab_bar_visible {
                 if let Some((cx, cy)) = self.hover_cursor {
                     let sw_log = self.config.width as f32;
@@ -2417,16 +2378,12 @@ impl GpuRenderer {
                                 idx = t.idx as u32;
                                 break;
                             }
-                            sonicterm_ui::tabbar_view::TabHover::Close => {
-                                idx = t.idx as u32;
-                                on_close = 1;
-                                break;
-                            }
+                            sonicterm_ui::tabbar_view::TabHover::Close => {}
                         }
                     }
                 }
             }
-            (idx, on_close)
+            idx
         };
         let quick_select_hint_count = copy_mode
             .and_then(|state| state.quick_select.as_ref())
@@ -2464,7 +2421,7 @@ impl GpuRenderer {
             window_focused: self.window_focused,
             inactive_cursor_count: self.inactive_pane_cursors.len() as u32,
             hover_tab: hover_tab_idx,
-            hover_close: hover_close_hit,
+            hover_close: 0,
             close_override: u8::from(self.tab_close_override.is_some()),
             broadcast_receivers_hash,
             inline_media_hash,
@@ -2581,7 +2538,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+                let view_top_abs = Self::resolved_view_top_abs(grid, pv.viewport_top_abs);
                 self.row_glyph_cache.resize(grid.rows);
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
@@ -2884,7 +2841,7 @@ impl GpuRenderer {
             let pv_grid: &Grid = pv.grid;
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
-            let view_top_abs_bg = Self::resolved_view_top_abs(pv_grid, viewport_top_abs);
+            let view_top_abs_bg = Self::resolved_view_top_abs(pv_grid, pv.viewport_top_abs);
             // Mirror RowGlyphCache's dirty-row invalidation: drop entries
             // for every row the VT thread mutated since the last frame.
             for r in pv_grid.dirty_rows() {
@@ -2966,14 +2923,7 @@ impl GpuRenderer {
             let pv_grid: &Grid = pv.grid;
             let viewport_rows = pv_grid.rows;
             let total_rows = pv_grid.scrollback_len() as u64 + viewport_rows as u64;
-            // Only the active pane carries an explicit `viewport_top_abs`
-            // from copy mode / prompt-nav; inactive panes always render
-            // their live tail.
-            let view_top = if pv.is_active {
-                Self::resolved_view_top_abs(pv_grid, viewport_top_abs)
-            } else {
-                pv_grid.scrollback_len() as u64
-            };
+            let view_top = Self::resolved_view_top_abs(pv_grid, pv.viewport_top_abs);
             emit_pane_scrollbar(
                 &mut quads_overlay,
                 pane_rect,
@@ -3440,6 +3390,33 @@ impl GpuRenderer {
         }
 
         // -------- Pane splitters + broadcast safety chrome ------------------
+        // Per-pane activation strip: every pane gets a small yellow top
+        // bar; the focused pane is opaque, inactive panes are subtle.
+        let pane_accent = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
+        for pv in &pane_views {
+            let mut color = pane_accent;
+            if !pv.is_active {
+                color[0] *= 0.32;
+                color[1] *= 0.32;
+                color[2] *= 0.32;
+                color[3] = 0.32;
+            }
+            let inset = 4.0_f32;
+            let h = 2.0_f32;
+            quads_overlay.push(QuadInstance {
+                rect: px_to_ndc(
+                    pv.origin_x + inset,
+                    pv.origin_y,
+                    (pv.rect_w - inset * 2.0).max(0.0),
+                    h,
+                    sw,
+                    sh,
+                ),
+                color,
+                ..Default::default()
+            });
+        }
+
         // Splitters are 1px interior seams at the shared OUTER pane boundary.
         // They are not pane borders: no window perimeter is drawn, and the
         // seam sits outside the per-pane cell padding that is applied inside
@@ -3532,28 +3509,18 @@ impl GpuRenderer {
             // (`theme.background` shifted -8% lightness) so every
             // theme gets visible contrast automatically.
             let bar_bg = ui_palette.bg_base;
-            let active_bg = ui_palette.bg_elevated;
-            let hover_bg = ui_palette.bg_hover;
             // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
             let accent_blue = ui_palette.accent;
             let separator = ui_palette.border_subtle;
-            let muted = ui_palette.text_muted;
-            let primary = ui_palette.text_primary;
-            let close_color = self.tab_close_override.unwrap_or(muted);
             emit_tab_bar_quads(
                 &mut quads,
                 &layout,
                 &TabBarQuadParams {
                     tab_count: tabs.tabs().len(),
-                    active_bg,
-                    hover_bg,
                     accent: accent_blue,
                     separator,
                     border: bar_bg,
-                    close_color,
-                    hover_close_color: primary,
                     hover_tab_idx,
-                    hover_close_hit,
                     surface: (sw, sh),
                 },
             );
@@ -3564,7 +3531,7 @@ impl GpuRenderer {
                 // The quad is painted AFTER the tab body + close icon
                 // so it dims everything in the tab's footprint.
                 if source_tab_idx == Some(t.idx) {
-                    let dim = (1.0 - source_alpha.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                    let dim = ((1.0 - source_alpha.clamp(0.0, 1.0)) * 0.45).clamp(0.0, 1.0);
                     let mut overlay = bar_bg;
                     overlay[3] = dim;
                     quads.push(QuadInstance {
@@ -3575,71 +3542,11 @@ impl GpuRenderer {
                 }
             }
 
-            // Tab titles: render as a single rich-text line where each tab title
-            // is positioned by inserting padding spaces. This is approximate but
-            // readable; precise per-tab text layout is a v0.4 polish item.
-            //
-            // Wezterm fancy-mode parity: every tab except the first is
-            // prefixed with `│ ` (U+2502 BOX DRAWINGS LIGHT VERTICAL +
-            // padding) drawn in `tab_inactive_fg` so a thin divider
-            // appears between adjacent tab titles regardless of which
-            // tab is active.
-            // Tab font is `font_size + 1.0` (see ctor); scale the
-            // approximate glyph width accordingly so the
-            // column-arithmetic in `build_tab_title_spans` lines up
-            // with where the shaped tab text actually lands.
+            // Tab titles are laid out per-tab so each run can be centered
+            // by its measured glyph width instead of approximating with
+            // column-padding spaces across one long synthetic string.
             let tab_font_size = tab_title_font_size(self.font_size);
             let avg_glyph_w = (self.cell_w * (tab_font_size / self.font_size)).max(1.0);
-            let tab_family_name = self.font_family.clone();
-            let tab_inputs: Vec<TabSpanInput> = layout
-                .tabs
-                .iter()
-                .map(|t| TabSpanInput {
-                    index: t.idx,
-                    title: &tabs.tabs()[t.idx].title,
-                    title_x: t.title_rect.x,
-                    title_w: t.title_rect.w,
-                    is_active: layout.active == Some(t.idx),
-                    badge: tabs.tabs()[t.idx]
-                        .command
-                        .clone()
-                        .badge(now, layout.active == Some(t.idx)),
-                })
-                .collect();
-            let (title_text, mut tab_spans) = build_tab_title_spans(
-                &tab_inputs,
-                avg_glyph_w,
-                chrome_to_tab_span(self.tab_active_fg),
-                chrome_to_tab_span(self.tab_inactive_fg),
-            );
-            // Phase D D3 (Epic #289, Haiku follow-up): dim the source
-            // tab's TITLE TEXT at the same alpha as the source-tab
-            // body quad so the dragged tab visibly "lifts off"
-            // instead of leaving the title fully opaque on top of a
-            // 30 %-dimmed body. The dim quad lands on top of the
-            // text in z-order, so without this the title text was
-            // still readable at full opacity (Haiku reviewer finding
-            // on PR #298).
-            if let Some(src_idx) = source_tab_idx {
-                for (i, t) in tab_inputs.iter().enumerate() {
-                    if t.index == src_idx {
-                        if let Some(entry) = tab_spans.get_mut(i) {
-                            entry.1 = chrome_to_tab_span(scale_chrome_text_alpha(
-                                tab_span_to_chrome(entry.1),
-                                source_alpha,
-                            ));
-                        }
-                        break;
-                    }
-                }
-            }
-            let spans2 = build_tab_title_rich_text_spans(
-                &title_text,
-                &tab_spans,
-                tab_family_name.as_str(),
-                chrome_to_tab_span(self.tab_inactive_fg),
-            )
-            .spans;
             let bar_h = self.tab_bar_logical_height();
             let bar_y = self.tab_bar_y_offset();
             let tab_raster_px = self.raster_px(tab_font_size);
@@ -3650,46 +3557,70 @@ impl GpuRenderer {
             // bar lives at 2x.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
-            // T14: chrome-text path — tab titles flow through the same
-            // sonicterm-font + atlas + text_pipeline the grid uses.
-            let native_em = self
-                .font_stack
-                .as_ref()
-                .and_then(|s| s.cell_metrics_raster_px().ok().map(|m| m.cell_h as f32))
-                .unwrap_or(self.cell_h);
+            // Chrome text scales atlas-native tiles by
+            // `requested_raster_px / native_em`. The atlas tiles come from
+            // FontStack's point-size em (`font_size * scale_factor`), not
+            // from the terminal cell height (which also includes line-height
+            // / row-box padding). Using `cell_h` here made `font + 2` tab
+            // titles visually smaller than body text.
+            let native_em = self.raster_px(self.font_size);
             if let Some(stack) = self.font_stack.as_ref() {
                 let mut tab_rasterizer = stack.clone();
-                // T14: tab-title spans → chrome_text::layout spans.
-                // `spans2` carries `(text, TabSpanColor, TabSpanAttrs)`
-                // tuples (post-tab_spans rewrite, no the legacy chrome layer types).
-                // Convert each to `(text, ChromeColor, ChromeAttrs)`
-                // for `emit_tab_title_glyphs` — TabSpanColor and
-                // ChromeColor are byte-identical so the conversion is
-                // a field-by-field copy.
-                let chrome_spans: Vec<(&str, ChromeColor, ChromeAttrs)> = spans2
-                    .iter()
-                    .map(|(text, color, attrs)| {
-                        (
-                            *text,
-                            tab_span_to_chrome(*color),
-                            ChromeAttrs { bold: attrs.bold, italic: attrs.italic },
-                        )
-                    })
-                    .collect();
-                emit_tab_title_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    tab_raster_px,
-                    native_em,
-                    &mut tab_rasterizer,
-                    &chrome_spans,
-                    tab_baseline_y,
-                    avg_glyph_w,
-                    sw,
-                    sh,
-                    &mut glyph_instances,
-                    None,
-                );
+                for t in &layout.tabs {
+                    let Some(tab) = tabs.tabs().get(t.idx) else { continue };
+                    let active = layout.active == Some(t.idx);
+                    let hovered = hover_tab_idx == t.idx as u32;
+                    let mut title = tab.command.clone().badge(now, active).map_or_else(
+                        || tab.title.clone(),
+                        |badge| format!("{badge} {}", tab.title),
+                    );
+                    let max_chars = ((t.title_rect.w / avg_glyph_w).floor() as usize).max(1);
+                    let title_chars: Vec<char> = title.chars().collect();
+                    if title_chars.len() > max_chars {
+                        let keep = max_chars.saturating_sub(1);
+                        title = title_chars.iter().take(keep).collect();
+                        title.push('…');
+                    }
+                    let mut color =
+                        if active || hovered { self.tab_active_fg } else { self.tab_inactive_fg };
+                    if source_tab_idx == Some(t.idx) {
+                        color = scale_chrome_text_alpha(color, source_alpha);
+                    }
+                    let measure = chrome_text::layout(
+                        stack,
+                        &mut tab_rasterizer,
+                        &mut self.glyph_atlas,
+                        &title,
+                        color,
+                        ChromeAttrs::default(),
+                        tab_raster_px,
+                        native_em,
+                        (0.0, tab_baseline_y),
+                        (sw, sh),
+                        None,
+                    );
+                    let origin_x =
+                        t.title_rect.x + ((t.title_rect.w - measure.width_px) * 0.5).max(0.0);
+                    let final_layout = chrome_text::layout(
+                        stack,
+                        &mut tab_rasterizer,
+                        &mut self.glyph_atlas,
+                        &title,
+                        color,
+                        ChromeAttrs::default(),
+                        tab_raster_px,
+                        native_em,
+                        (origin_x, tab_baseline_y),
+                        (sw, sh),
+                        Some(ChromeClip {
+                            x: t.title_rect.x,
+                            y: t.title_rect.y,
+                            w: t.title_rect.w,
+                            h: t.title_rect.h,
+                        }),
+                    );
+                    glyph_instances.extend(final_layout.glyphs);
+                }
             }
         }
         // -------- Search highlights + status bar ---------------------------
@@ -3842,7 +3773,8 @@ impl GpuRenderer {
         }
 
         // -------- Command palette overlay ----------------------------------
-        let palette_layout = palette.and_then(|p| PaletteLayout::compute(p, sw, sh));
+        let palette_layout =
+            palette.and_then(|p| PaletteLayout::compute(p, sw, sh, self.panel_padding));
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -3947,18 +3879,14 @@ impl GpuRenderer {
             } else {
                 layout.query_label.clone()
             };
-            let palette_font_size = self.font_size * 1.25;
+            let palette_font_size = self.raster_px(self.font_size);
             // T14: chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
             // emission in an `if let Some(...)` so the palette path
             // degrades gracefully instead of panicking.
             if let Some(stack) = self.font_stack.as_ref() {
-                let palette_native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
+                let palette_native_em = self.raster_px(self.font_size);
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
                 let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
@@ -4014,11 +3942,9 @@ impl GpuRenderer {
                 // Empty-state placeholder + hint.
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
-                        + sonicterm_ui::overlays::PALETTE_INNER_PAD
+                        + self.panel_padding
                         + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                    let empty_y_top = layout.query_row.y
-                        + layout.query_row.h
-                        + sonicterm_ui::overlays::PALETTE_INNER_PAD;
+                    let empty_y_top = layout.query_row.y + layout.query_row.h + self.panel_padding;
                     let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
@@ -4059,8 +3985,8 @@ impl GpuRenderer {
                     }
                 }
 
-                // Footer hint — slightly smaller (0.85×).
-                let footer_font_size = self.font_size;
+                // Footer hint uses the same size as query and command rows.
+                let footer_font_size = palette_font_size;
                 let footer_origin_x = layout.footer.x + 12.0;
                 let footer_baseline_y =
                     layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
@@ -4084,9 +4010,9 @@ impl GpuRenderer {
         }
 
         // -------- Keyboard shortcuts cheat sheet overlay --------------------
-        let cheatsheet_layout = cheatsheet
-            .as_ref()
-            .map(|(state, bindings)| compute_cheatsheet_layout(state, bindings, sw, sh));
+        let cheatsheet_layout = cheatsheet.as_ref().map(|(state, bindings)| {
+            compute_cheatsheet_layout(state, bindings, sw, sh, self.panel_padding)
+        });
         if let Some(layout) = &cheatsheet_layout {
             let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
@@ -4187,8 +4113,8 @@ impl GpuRenderer {
                 );
                 // Rows
                 let rows_origin = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
-                    layout.bg.x + PALETTE_INNER_PAD,
-                    layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD,
+                    layout.bg.x + self.panel_padding,
+                    layout.query_row.y + layout.query_row.h + self.panel_padding,
                 ));
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
@@ -5701,23 +5627,6 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 // any caller that lingers on them will fail to compile (intentional —
 // it's the must-pass #4 grep gate's job to catch survivors).
 pub use crate::color::scale_chrome_text_alpha;
-
-/// T14: bridge between the sonicterm-ui `TabSpanColor` (no sonicterm-gpu
-/// dep) and the sonicterm-gpu `ChromeColor`. The two are byte-identical
-/// — `TabSpanColor` is the dep-free public face used by `tab_spans.rs`
-/// (which can't depend on sonicterm-gpu without creating a cycle), and
-/// `ChromeColor` is the chrome-text-internal form the renderer +
-/// `chrome_text::layout` consume. Helpers stay near the chrome-text
-/// re-exports above so future renames land in one place.
-#[inline]
-fn chrome_to_tab_span(c: ChromeColor) -> sonicterm_ui::tab_spans::TabSpanColor {
-    sonicterm_ui::tab_spans::TabSpanColor::rgba(c.r(), c.g(), c.b(), c.a())
-}
-
-#[inline]
-fn tab_span_to_chrome(c: sonicterm_ui::tab_spans::TabSpanColor) -> ChromeColor {
-    ChromeColor::rgba(c.r(), c.g(), c.b(), c.a())
-}
 
 // T13/T14: `terminal_font_attrs` re-export removed. It returned
 // `legacy chrome attrs` which carried per-span family/weight; the
