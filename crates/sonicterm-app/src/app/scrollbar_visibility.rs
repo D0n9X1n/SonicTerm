@@ -211,7 +211,7 @@ pub fn update_hover_states(
     changed
 }
 
-use super::{to_logical_pos, App};
+use super::App;
 
 impl App {
     fn request_scrollbar_redraw(&self) {
@@ -231,9 +231,8 @@ impl App {
         if pane_rects.is_empty() {
             return false;
         }
-        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
-        let (cx_phys, cy_phys) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let cursor = to_logical_pos(cx_phys, cy_phys, sf);
+        let (cx, cy) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+        let cursor = (cx as f32, cy as f32);
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
         let changed = self

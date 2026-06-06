@@ -8,19 +8,22 @@
 //! - CSI: `H`/`f` (CUP), `A`/`B`/`C`/`D` (cursor motion), `J` (ED), `K` (EL),
 //!   `m` (SGR — bold/italic/underline/inverse/reset + 30..37, 40..47, 90..97,
 //!   100..107, 38;5;n / 48;5;n, 38;2;r;g;b / 48;2;r;g;b)
-//! - OSC: `0`/`2` (window title), `8` (hyperlink), `52` (clipboard — stub)
+//! - OSC: `0`/`2` (window title), `8` (hyperlink), `52` (clipboard — stub),
+//!   `1337;File=...` (iTerm2 inline media metadata/payload event)
+//! - DCS/APC media capture: Sixel (`DCS ... q`) and Kitty graphics (`APC G...`)
 //!
-//! Out of scope: DEC private modes (most), Sixel, Kitty graphics, mouse
-//! tracking. These will be added in follow-up PRs.
+//! Out of scope: media texture decoding/rendering and most mouse tracking.
 
 use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
-use sonicterm_grid::grid::{CellFlags, Color, Grid, Pos};
+use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle};
 use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
+
+const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -48,8 +51,102 @@ pub enum VtEvent {
         /// Base64-encoded payload as received from the shell.
         data: String,
     },
+    /// Inline media protocol payload captured from the stream.
+    ///
+    /// SonicTerm surfaces this as typed data instead of silently discarding the
+    /// escape sequence. Decoding/uploading it into the renderer is handled by
+    /// higher layers.
+    Media(MediaEvent),
     /// DEC private mode ?25 — host should show/hide the cursor.
     CursorVisibility(bool),
+}
+
+#[derive(Debug, Clone)]
+struct MediaCapture {
+    protocol: MediaProtocol,
+    metadata: String,
+    data: Vec<u8>,
+    truncated: bool,
+    pending_esc: bool,
+}
+
+impl MediaCapture {
+    fn new(protocol: MediaProtocol, metadata: String) -> Self {
+        Self { protocol, metadata, data: Vec::new(), truncated: false, pending_esc: false }
+    }
+
+    fn append_byte(&mut self, byte: u8) {
+        if self.data.len() < MAX_MEDIA_PAYLOAD_BYTES {
+            self.data.push(byte);
+        } else {
+            self.truncated = true;
+        }
+    }
+
+    fn into_event(self, row: u16, col: u16) -> MediaEvent {
+        MediaEvent {
+            protocol: self.protocol,
+            row,
+            col,
+            metadata: self.metadata,
+            data: self.data,
+            truncated: self.truncated,
+        }
+    }
+
+    fn into_kitty_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
+        if self.pending_esc {
+            self.append_byte(0x1b);
+            self.pending_esc = false;
+        }
+        if self.data.first().copied() != Some(b'G') {
+            return None;
+        }
+        let payload = &self.data[1..];
+        let (metadata, data) = split_once_byte(payload, b';')
+            .map(|(m, d)| (String::from_utf8_lossy(m).into_owned(), d.to_vec()))
+            .unwrap_or_else(|| (String::new(), payload.to_vec()));
+        Some(MediaEvent {
+            protocol: MediaProtocol::Kitty,
+            row,
+            col,
+            metadata,
+            data,
+            truncated: self.truncated,
+        })
+    }
+}
+
+/// Inline-media escape protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaProtocol {
+    /// Sixel graphics payload from `DCS ... q`.
+    Sixel,
+    /// iTerm2 `OSC 1337 ; File=... : <base64>` inline file/image payload.
+    Iterm2File,
+    /// Kitty graphics payload from `APC G...`.
+    Kitty,
+}
+
+/// Captured media payload plus protocol metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaEvent {
+    /// Protocol that produced this payload.
+    pub protocol: MediaProtocol,
+    /// Cursor row when the media sequence completed.
+    pub row: u16,
+    /// Cursor column when the media sequence completed.
+    pub col: u16,
+    /// Protocol-specific metadata before the binary/base64 payload. For Kitty
+    /// this is the comma-separated control section; for iTerm2 this is the
+    /// `File=...` attribute section; for Sixel this is currently empty.
+    pub metadata: String,
+    /// Raw protocol payload bytes, capped at 16 MiB to keep untrusted PTY output
+    /// from growing memory without bound.
+    pub data: Vec<u8>,
+    /// True when `data` was capped by SonicTerm. The event is still surfaced so
+    /// callers can show a failed/truncated media placeholder.
+    pub truncated: bool,
 }
 
 /// Command lifecycle events surfaced from OSC 133 shell-integration markers.
@@ -68,19 +165,24 @@ pub enum CommandEvent {
 pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
+    apc_capture: Option<MediaCapture>,
 }
 
 impl Parser {
     /// Build a parser bound to `grid`, with no upstream reply channel — DSR /
     /// XTVERSION queries will be silently dropped.
     pub fn new(grid: Grid) -> Self {
-        Self { inner: vte::Parser::new(), performer: Performer::new(grid, None) }
+        Self { inner: vte::Parser::new(), performer: Performer::new(grid, None), apc_capture: None }
     }
 
     /// Construct a parser that can send replies (DSR, DA, XTVERSION, focus
     /// reporting) back to the pty via the given channel.
     pub fn new_with_reply(grid: Grid, reply_tx: Sender<Vec<u8>>) -> Self {
-        Self { inner: vte::Parser::new(), performer: Performer::new(grid, Some(reply_tx)) }
+        Self {
+            inner: vte::Parser::new(),
+            performer: Performer::new(grid, Some(reply_tx)),
+            apc_capture: None,
+        }
     }
 
     /// Tell the parser the theme default foreground colour. Used to answer
@@ -125,6 +227,17 @@ impl Parser {
         let mut i = 0;
         let len = bytes.len();
         while i < len {
+            if self.apc_capture.is_some() {
+                self.consume_apc_byte(bytes[i]);
+                i += 1;
+                continue;
+            }
+            if self.performer.ground && bytes[i..].starts_with(b"\x1b_") {
+                self.performer.ground = false;
+                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                i += 2;
+                continue;
+            }
             if self.performer.ground {
                 // memchr3 for ESC / BEL / LF — the three commonest break
                 // bytes — gives us a cheap upper bound on the run length.
@@ -143,12 +256,14 @@ impl Parser {
                     // SAFETY: every byte in [i..i+run_end] is in [0x20, 0x7E],
                     // i.e. valid 1-byte UTF-8 = the same code point as the byte.
                     for &b in &bytes[i..i + run_end] {
-                        self.performer.grid.put_char_linked(
+                        self.performer.grid.put_char_styled(
                             b as char,
                             self.performer.fg,
                             self.performer.bg,
                             self.performer.flags,
                             self.performer.current_hyperlink,
+                            self.performer.underline_style,
+                            self.performer.underline_color,
                         );
                     }
                     // REP (CSI b) needs the most-recent printable; the fast
@@ -185,6 +300,29 @@ impl Parser {
             }
         }
         std::mem::take(&mut self.performer.events)
+    }
+
+    fn consume_apc_byte(&mut self, byte: u8) {
+        let Some(capture) = self.apc_capture.as_mut() else { return };
+        if capture.pending_esc {
+            capture.pending_esc = false;
+            if byte == b'\\' {
+                let capture = self.apc_capture.take().expect("capture present");
+                let row = self.performer.grid.cursor.row;
+                let col = self.performer.grid.cursor.col;
+                if let Some(event) = capture.into_kitty_event(row, col) {
+                    self.performer.events.push(VtEvent::Media(event));
+                }
+                self.performer.ground = true;
+                return;
+            }
+            capture.append_byte(0x1b);
+        }
+        if byte == 0x1b {
+            capture.pending_esc = true;
+        } else {
+            capture.append_byte(byte);
+        }
     }
 
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
@@ -238,6 +376,8 @@ struct Performer {
     fg: Color,
     bg: Color,
     flags: CellFlags,
+    underline_style: UnderlineStyle,
+    underline_color: Option<Color>,
     events: Vec<VtEvent>,
     hyperlinks: HyperlinkRegistry,
     current_hyperlink: Option<HyperlinkId>,
@@ -285,6 +425,7 @@ struct Performer {
     /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
+    dcs_capture: Option<MediaCapture>,
 }
 
 impl Performer {
@@ -294,6 +435,8 @@ impl Performer {
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),
+            underline_style: UnderlineStyle::Single,
+            underline_color: None,
             events: Vec::new(),
             hyperlinks: HyperlinkRegistry::new(),
             current_hyperlink: None,
@@ -311,6 +454,7 @@ impl Performer {
             scroll_bottom: None,
             ground: true,
             last_printed_char: None,
+            dcs_capture: None,
         }
     }
 
@@ -335,10 +479,28 @@ impl Performer {
         self.last_printed_char = None;
     }
 
+    /// Blank cell with the current SGR rendition. This is the Sonic Grid
+    /// equivalent of WezTerm/xterm background-color erase (BCE): ED/EL/ECH,
+    /// inserted blanks, deleted-cell fill, and scroll-fill rows inherit the
+    /// app's active colors instead of falling back to the terminal theme.
+    fn erase_fill_cell(&self) -> Cell {
+        let mut flags = self.flags;
+        flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
+        let mut cell = Cell::plain(' ', self.fg, self.bg, flags);
+        cell.set_hyperlink(self.current_hyperlink);
+        if flags.contains(CellFlags::UNDERLINE) {
+            cell.set_underline_style(self.underline_style);
+            cell.set_underline_color(self.underline_color);
+        }
+        cell
+    }
+
     fn reset_attrs(&mut self) {
         self.fg = Color::Default;
         self.bg = Color::Default;
         self.flags = CellFlags::empty();
+        self.underline_style = UnderlineStyle::Single;
+        self.underline_color = None;
     }
 
     fn apply_sgr(&mut self, params: &Params) {
@@ -350,14 +512,53 @@ impl Performer {
                 1 => self.flags |= CellFlags::BOLD,
                 2 => self.flags |= CellFlags::DIM,
                 3 => self.flags |= CellFlags::ITALIC,
-                4 => self.flags |= CellFlags::UNDERLINE,
+                4 => {
+                    let style = slice.get(1).copied().unwrap_or(1);
+                    match style {
+                        0 => {
+                            self.flags.remove(CellFlags::UNDERLINE);
+                            self.underline_style = UnderlineStyle::Single;
+                        }
+                        1 => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Single;
+                        }
+                        2 => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Double;
+                        }
+                        3 => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Curly;
+                        }
+                        4 => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Dotted;
+                        }
+                        5 => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Dashed;
+                        }
+                        _ => {
+                            self.flags |= CellFlags::UNDERLINE;
+                            self.underline_style = UnderlineStyle::Single;
+                        }
+                    }
+                }
                 5 => self.flags |= CellFlags::BLINK,
                 7 => self.flags |= CellFlags::INVERSE,
                 8 => self.flags |= CellFlags::HIDDEN,
                 9 => self.flags |= CellFlags::STRIKETHROUGH,
+                21 => {
+                    self.flags |= CellFlags::UNDERLINE;
+                    self.underline_style = UnderlineStyle::Double;
+                }
                 22 => self.flags.remove(CellFlags::BOLD | CellFlags::DIM),
                 23 => self.flags.remove(CellFlags::ITALIC),
-                24 => self.flags.remove(CellFlags::UNDERLINE),
+                24 => {
+                    self.flags.remove(CellFlags::UNDERLINE);
+                    self.underline_style = UnderlineStyle::Single;
+                }
                 25 => self.flags.remove(CellFlags::BLINK),
                 27 => self.flags.remove(CellFlags::INVERSE),
                 28 => self.flags.remove(CellFlags::HIDDEN),
@@ -378,6 +579,10 @@ impl Performer {
                         self.bg = c;
                     }
                 }
+                58 => {
+                    self.underline_color = parse_ext_color(&mut iter);
+                }
+                59 => self.underline_color = None,
                 _ => {} // unknown — silently ignore for forward compat
             }
         }
@@ -532,9 +737,58 @@ fn parse_ext_color(iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
     }
 }
 
+fn join_osc_params(params: &[&[u8]]) -> String {
+    let mut out = Vec::new();
+    for (idx, param) in params.iter().enumerate() {
+        if idx > 0 {
+            out.push(b';');
+        }
+        out.extend_from_slice(param);
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Option<MediaEvent> {
+    if !payload.starts_with(b"File=") {
+        return None;
+    }
+    let (metadata, data) = split_once_byte(payload, b':')?;
+    let mut data_vec = Vec::with_capacity(data.len().min(MAX_MEDIA_PAYLOAD_BYTES));
+    let mut truncated = false;
+    for byte in data.iter().copied() {
+        if data_vec.len() < MAX_MEDIA_PAYLOAD_BYTES {
+            data_vec.push(byte);
+        } else {
+            truncated = true;
+            break;
+        }
+    }
+    Some(MediaEvent {
+        protocol: MediaProtocol::Iterm2File,
+        row,
+        col,
+        metadata: String::from_utf8_lossy(metadata).into_owned(),
+        data: data_vec,
+        truncated,
+    })
+}
+
+fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
+    let pos = bytes.iter().position(|b| *b == needle)?;
+    Some((&bytes[..pos], &bytes[pos + 1..]))
+}
+
 impl Perform for Performer {
     fn print(&mut self, c: char) {
-        self.grid.put_char_linked(c, self.fg, self.bg, self.flags, self.current_hyperlink);
+        self.grid.put_char_styled(
+            c,
+            self.fg,
+            self.bg,
+            self.flags,
+            self.current_hyperlink,
+            self.underline_style,
+            self.underline_color,
+        );
         self.last_printed_char = Some(c);
         self.ground = true;
     }
@@ -554,9 +808,9 @@ impl Perform for Performer {
                 if self.grid.cursor.row == bot
                     && (self.scroll_top.is_some() || self.scroll_bottom.is_some())
                 {
-                    self.grid.scroll_region_up(top, bot, 1);
+                    self.grid.scroll_region_up_with(top, bot, 1, self.erase_fill_cell());
                 } else {
-                    self.grid.linefeed();
+                    self.grid.linefeed_with(self.erase_fill_cell());
                 }
             }
             0x0D => self.grid.carriage_return(),
@@ -659,9 +913,9 @@ impl Perform for Performer {
                     "CSI {mode}J: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
                 );
                 match mode {
-                    0 => self.grid.erase_below(),
-                    1 => self.grid.erase_above(),
-                    2 | 3 => self.grid.erase_screen(),
+                    0 => self.grid.erase_below_with(self.erase_fill_cell()),
+                    1 => self.grid.erase_above_with(self.erase_fill_cell()),
+                    2 | 3 => self.grid.erase_screen_with(self.erase_fill_cell()),
                     _ => {}
                 }
             }
@@ -680,9 +934,9 @@ impl Perform for Performer {
                     "CSI {mode}K: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
                 );
                 match mode {
-                    0 => self.grid.erase_line_to_end(),
-                    1 => self.grid.erase_line_to_start(),
-                    2 => self.grid.erase_line(),
+                    0 => self.grid.erase_line_to_end_with(self.erase_fill_cell()),
+                    1 => self.grid.erase_line_to_start_with(self.erase_fill_cell()),
+                    2 => self.grid.erase_line_with(self.erase_fill_cell()),
                     _ => {}
                 }
             }
@@ -695,7 +949,7 @@ impl Perform for Performer {
                 let (top, bot) = self.effective_scroll_region();
                 let cur = self.grid.cursor.row;
                 if cur >= top && cur <= bot {
-                    self.grid.scroll_region_down(cur, bot, n);
+                    self.grid.scroll_region_down_with(cur, bot, n, self.erase_fill_cell());
                     self.grid.cursor.col = 0;
                 }
             }
@@ -706,7 +960,7 @@ impl Perform for Performer {
                 let (top, bot) = self.effective_scroll_region();
                 let cur = self.grid.cursor.row;
                 if cur >= top && cur <= bot {
-                    self.grid.scroll_region_up(cur, bot, n);
+                    self.grid.scroll_region_up_with(cur, bot, n, self.erase_fill_cell());
                     self.grid.cursor.col = 0;
                 }
             }
@@ -716,22 +970,22 @@ impl Perform for Performer {
                 // row, shifting trailing cells right and dropping overflow.
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.insert_cells(cur.row, cur.col, n);
+                self.grid.insert_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
             }
             'P' => {
                 // DCH — Delete n cells at the cursor, shifting trailing
                 // cells left and filling the right edge with blanks.
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.delete_cells(cur.row, cur.col, n);
+                self.grid.delete_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
             }
             'X' => {
                 // ECH — Erase n cells starting at the cursor with the
-                // default (blank) cell. Cursor is unchanged. neo-tree's
+                // current SGR blank cell. Cursor is unchanged. neo-tree's
                 // per-row tail-clear pattern depends on this (#359).
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.erase_cells(cur.row, cur.col, n);
+                self.grid.erase_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
             }
             'G' | '`' => {
                 // CHA (G) / HPA (`) — Cursor to column p0 (1-based) on the
@@ -751,12 +1005,14 @@ impl Perform for Performer {
                 let n = p0().max(1) as usize;
                 if let Some(ch) = self.last_printed_char {
                     for _ in 0..n {
-                        self.grid.put_char_linked(
+                        self.grid.put_char_styled(
                             ch,
                             self.fg,
                             self.bg,
                             self.flags,
                             self.current_hyperlink,
+                            self.underline_style,
+                            self.underline_color,
                         );
                     }
                 }
@@ -784,13 +1040,13 @@ impl Perform for Performer {
                 // #348 (stale LineQuadCache entries after region scroll).
                 let n = p0().max(1);
                 let (top, bot) = self.effective_scroll_region();
-                self.grid.scroll_region_up(top, bot, n);
+                self.grid.scroll_region_up_with(top, bot, n, self.erase_fill_cell());
             }
             'T' => {
                 // CSI Ps T — Scroll Down (SD).
                 let n = p0().max(1);
                 let (top, bot) = self.effective_scroll_region();
-                self.grid.scroll_region_down(top, bot, n);
+                self.grid.scroll_region_down_with(top, bot, n, self.erase_fill_cell());
             }
             'r' => {
                 // CSI Ps ; Ps r — DECSTBM Set Top and Bottom Margins.
@@ -916,6 +1172,14 @@ impl Perform for Performer {
                     .to_string();
                 self.events.push(VtEvent::Clipboard { selection: sel, data });
             }
+            Some(1337) => {
+                let payload = join_osc_params(params.get(1..).unwrap_or(&[]));
+                let row = self.grid.cursor.row;
+                let col = self.grid.cursor.col;
+                if let Some(event) = parse_iterm2_file_event(payload.as_bytes(), row, col) {
+                    self.events.push(VtEvent::Media(event));
+                }
+            }
             Some(133) => {
                 // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
                 // integration. Kinds:
@@ -948,15 +1212,25 @@ impl Perform for Performer {
         }
     }
 
-    fn hook(&mut self, _: &Params, _: &[u8], _: bool, _: char) {
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
         self.ground = false;
+        self.dcs_capture =
+            (action == 'q').then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
     }
-    fn put(&mut self, _byte: u8) {
+    fn put(&mut self, byte: u8) {
         self.ground = false;
+        if let Some(capture) = self.dcs_capture.as_mut() {
+            capture.append_byte(byte);
+        }
     }
     fn unhook(&mut self) {
         self.ground = false;
+        if let Some(capture) = self.dcs_capture.take() {
+            self.events.push(VtEvent::Media(
+                capture.into_event(self.grid.cursor.row, self.grid.cursor.col),
+            ));
+        }
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.ground = false;

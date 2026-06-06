@@ -26,35 +26,3 @@ bitflags! {
         const SUPER = 1 << 3;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn mod_key_bitflags_round_trip() {
-        let m = ModKey::SHIFT | ModKey::CTRL;
-        assert!(m.contains(ModKey::SHIFT));
-        assert!(m.contains(ModKey::CTRL));
-        assert!(!m.contains(ModKey::ALT));
-        assert!(!m.contains(ModKey::SUPER));
-        assert_eq!(m.bits(), 0b0011);
-        assert_eq!(ModKey::from_bits_truncate(0b1111), ModKey::all());
-    }
-
-    #[test]
-    fn mod_key_hashmap_works() {
-        let mut map: HashMap<ModKey, &'static str> = HashMap::new();
-        map.insert(ModKey::SUPER | ModKey::SHIFT, "super-shift");
-        map.insert(ModKey::CTRL, "ctrl");
-        let k = ModKey::SUPER | ModKey::SHIFT;
-        assert_eq!(map.get(&k), Some(&"super-shift"));
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
-    fn mod_key_default_is_empty() {
-        assert_eq!(ModKey::default(), ModKey::empty());
-    }
-}

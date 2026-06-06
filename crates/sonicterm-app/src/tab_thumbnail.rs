@@ -7,8 +7,8 @@
 //! placeholder) drag preview with no visual connection to the tab the
 //! user was actually moving.
 //!
-//! This module produces a small RGBA PNG (~200x40 px scaled to the
-//! current DPI) that the platform backends pass to the OS as the drag
+//! This module produces a small RGBA PNG (~200x40 raster px) that the
+//! platform backends pass to the OS as the drag
 //! image. We deliberately rasterize a stylized tab shape rather than
 //! attempting a full offscreen wgpu render — see the rationale below.
 //!
@@ -48,10 +48,10 @@
 
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 
-/// Logical (pre-DPI) width of the thumbnail in pixels.
-pub const THUMB_LOGICAL_WIDTH: u32 = 200;
-/// Logical (pre-DPI) height of the thumbnail in pixels.
-pub const THUMB_LOGICAL_HEIGHT: u32 = 40;
+/// Raster-px width of the thumbnail.
+pub const THUMB_RASTER_WIDTH: u32 = 200;
+/// Raster-px height of the thumbnail.
+pub const THUMB_RASTER_HEIGHT: u32 = 40;
 
 /// Inputs the renderer needs to draw a recognisable tab chip.
 ///
@@ -72,10 +72,6 @@ pub struct TabThumbnailInputs {
     pub accent: (u8, u8, u8, u8),
     /// Border color for a 1-px outline around the chip.
     pub border: (u8, u8, u8, u8),
-    /// HiDPI scale factor (1.0 on standard displays, 2.0 on Retina,
-    /// etc.). Pixel dimensions of the resulting PNG are
-    /// `THUMB_LOGICAL_* * scale_factor`, rounded.
-    pub scale_factor: f32,
 }
 
 impl Default for TabThumbnailInputs {
@@ -87,7 +83,6 @@ impl Default for TabThumbnailInputs {
             bg: (0x1a, 0x1b, 0x26, 0xff),
             accent: (0x7a, 0xa2, 0xf7, 0xff),
             border: (0x41, 0x48, 0x68, 0xff),
-            scale_factor: 1.0,
         }
     }
 }
@@ -95,12 +90,8 @@ impl Default for TabThumbnailInputs {
 /// Convenience: produce a [`TabThumbnailInputs`] from just a payload
 /// title using the default palette. Used by `tear_out.rs` until a
 /// future PR plumbs theme colors through.
-pub fn tab_thumbnail_inputs_from_payload(title: &str, scale_factor: f32) -> TabThumbnailInputs {
-    TabThumbnailInputs {
-        title: title.to_string(),
-        scale_factor: scale_factor.clamp(0.5, 8.0),
-        ..TabThumbnailInputs::default()
-    }
+pub fn tab_thumbnail_inputs_from_payload(title: &str) -> TabThumbnailInputs {
+    TabThumbnailInputs { title: title.to_string(), ..TabThumbnailInputs::default() }
 }
 
 /// Render the tab chip into a PNG byte vector.
@@ -113,13 +104,11 @@ pub fn tab_thumbnail_inputs_from_payload(title: &str, scale_factor: f32) -> TabT
 /// — the caller (`try_os_drag_handoff`) treats an empty buffer as
 /// "no preview, proceed without one," matching the pre-#296 behavior.
 pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
-    let width = (THUMB_LOGICAL_WIDTH as f32 * input.scale_factor).round().max(8.0) as u32;
-    let height = (THUMB_LOGICAL_HEIGHT as f32 * input.scale_factor).round().max(8.0) as u32;
+    let width = THUMB_RASTER_WIDTH.max(8);
+    let height = THUMB_RASTER_HEIGHT.max(8);
 
-    // Stripe height scales with DPI so the visual proportion stays
-    // constant.
-    let stripe_h = ((3.0 * input.scale_factor).round() as u32).max(1);
-    let border_w = ((1.0 * input.scale_factor).round() as u32).max(1);
+    let stripe_h = 3;
+    let border_w = 1;
 
     let mut buf: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {

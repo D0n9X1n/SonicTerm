@@ -12,19 +12,21 @@ workspace = true
 
 [dependencies]
 sonicterm-types.workspace = true
-cosmic-text.workspace = true
+# T10/T13/T14: cosmic-text is gone — sonicterm-text's surviving
+# modules (glyph_atlas, resample, row_glyph_cache, shape, shape_wt)
+# don't reference cosmic-text after the chrome migration.
 swash.workspace = true
 fontdb.workspace = true
 bytemuck.workspace = true
 lru = "0.16"
 tracing.workspace = true
-# #610 sym-1: SIMD-accelerated bitmap resampler used at atlas-insert time
-# for Nerd Font icon tiles. WezTerm uses the `resize` crate
-# (window/src/bitmaps/mod.rs:380-394) with Lanczos3 (downscale) +
-# Mitchell (upscale); fast_image_resize exposes the equivalent filter
-# set with portable SIMD (SSE4.1/AVX2/NEON) and a smaller dep graph.
-# License: MIT/Apache-2.0 (both allowed in deny.toml).
 fast_image_resize = { version = "5.1", default-features = false }
 
 [dev-dependencies]
 sonicterm-grid.workspace = true
+# T1 (wezterm-takeover G1): the parity test exercises the new
+# `FontStack::cell_metrics_raster_px()` accessor. Cargo permits this
+# reverse dev-dep on `sonicterm-engine` (which depends on
+# `sonicterm-text` in regular deps) because dev-deps don't
+# participate in the production dep graph.
+sonicterm-engine = { path = "../sonicterm-engine", version = "0.3.0" }

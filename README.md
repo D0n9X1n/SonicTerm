@@ -181,3 +181,39 @@ rendering / VT bugs, a screenshot.
 ## License
 
 SonicTerm is released under the [MIT License](LICENSE).
+
+## Acknowledgements
+
+SonicTerm stands on the shoulders of [WezTerm](https://github.com/wezterm/wezterm),
+the cross-platform GPU terminal Wez Furlong and contributors have
+built and maintained for years. SonicTerm absorbs WezTerm-proven
+semantics into Sonic-owned crates:
+
+- **Terminal state machine** — VT/ANSI parsing, grid model,
+  scrollback, alt-screen handling — via Sonic's `sonicterm-vt` and
+  `sonicterm-grid` crates, with WezTerm-compatible behavior where
+  adopted.
+- **Font system** — discovery, fallback, BIDI, harfbuzz shaping,
+  freetype rasterization — via the `sonicterm-font` crate (with
+  `vendor-jetbrains`, `vendor-noto-emoji`,
+  `vendor-nerd-font-symbols` features for built-in fallback
+  coverage).
+- **Custom-glyph geometry** — box drawing (U+2500..U+259F),
+  Powerline (U+E0A0..U+E0D7), Sextant, Octant, Braille — absorbed
+  from `wezterm-gui/src/customglyph.rs` into our local
+  `sonicterm-block-glyph` crate. The geometry math, alpha tables,
+  and PolyCommand DSL are WezTerm's; we kept them verbatim and
+  rewrote only the GUI-shell glue so they sit on top of our wgpu
+  atlas instead of WezTerm's `window` crate.
+
+WezTerm is MIT-licensed. The full upstream license travels with the
+vendored source at `crates/sonicterm-block-glyph/LICENSE-WEZTERM`.
+Where SonicTerm and WezTerm disagree on rendering behavior, WezTerm
+wins — its choices have years of cross-platform production exposure
+behind them and produce the visual baseline we target.
+
+SonicTerm adds its own GPU rendering pipeline, tab bar, drag-to-
+reorder tabs, tear-out-to-window, merge-into-tab, and the platform
+shells on macOS and Windows on top of that engine.
+
+Pinned WezTerm revision: [`577474d`](https://github.com/wezterm/wezterm/commit/577474d89ee61aef4a48145cdec82a638d874751).

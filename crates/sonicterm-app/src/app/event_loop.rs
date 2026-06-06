@@ -21,7 +21,7 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
-use super::{mark_all_panes_dirty, with_integrated_titlebar, App, UserEvent};
+use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, UserEvent};
 use crate::config_watch::ConfigWatcher;
 use winit::event_loop::ControlFlow;
 
@@ -190,7 +190,7 @@ impl App {
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
-        let scale_factor = window.scale_factor();
+        let dpi_scale = f64::from(window_dpi(&window));
 
         // Perf audit #9: gate redraws to the monitor's vsync cadence.
         // `refresh_rate_millihertz` returns e.g. 60_000 for 60Hz,
@@ -304,12 +304,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor,
+            dpi_scale,
             ime: sonicterm_ui::ime::ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
         };

@@ -1,7 +1,82 @@
 //! Tab title span builders extracted from `render.rs` (issue #143).
+//!
+//! T14 (wezterm-takeover G3): the legacy the legacy chrome layer `Attrs` / `Color`
+//! types are gone. Spans are now built around two local types:
+//!
+//! - [`TabSpanColor`] — sRGB-encoded `(r, g, b, a)` u8s, byte-identical
+//!   to the now-deleted `legacy chrome color` so renderer-side colour-LUT
+//!   conversions don't change.
+//! - [`TabSpanAttrs`] — `(bold, italic)` toggles. The renderer no
+//!   longer needs the cosmic-text `Family::Name(...)` attribute slot;
+//!   chrome shaping reaches the user's configured face via
+//!   `FontStack::default_font()` and per-span bold/italic is applied
+//!   at chrome_text::layout time.
+//!
+//! `build_tab_title_rich_text_spans` returns `(text, TabSpanColor,
+//! TabSpanAttrs)` tuples that the renderer feeds straight into
+//! `emit_tab_title_glyphs`.
 
-use glyphon::{Attrs, Color as GColor};
-use sonicterm_text::terminal_font_attrs;
+/// Per-span colour for tab titles. sRGB-encoded u8 channels, matching
+/// the byte layout of the deleted `legacy chrome color` so renderer-side
+/// sRGB→linear conversion (`chrome_color_to_linear_rgba`) is
+/// bit-identical to the legacy path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabSpanColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl TabSpanColor {
+    /// Construct an opaque colour.
+    #[inline]
+    #[must_use]
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    /// Construct a colour with explicit alpha.
+    #[inline]
+    #[must_use]
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Red channel accessor.
+    #[inline]
+    #[must_use]
+    pub const fn r(&self) -> u8 {
+        self.r
+    }
+    /// Green channel accessor.
+    #[inline]
+    #[must_use]
+    pub const fn g(&self) -> u8 {
+        self.g
+    }
+    /// Blue channel accessor.
+    #[inline]
+    #[must_use]
+    pub const fn b(&self) -> u8 {
+        self.b
+    }
+    /// Alpha channel accessor.
+    #[inline]
+    #[must_use]
+    pub const fn a(&self) -> u8 {
+        self.a
+    }
+}
+
+/// Per-span style for tab titles. Matches the chrome_text `ChromeAttrs`
+/// shape so renderer call sites can forward the value without
+/// translation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabSpanAttrs {
+    pub bold: bool,
+    pub italic: bool,
+}
 
 /// Input describing one tab for [`build_tab_title_spans`]: which slot it
 /// occupies, its formatted title, its layout rect's x/width in logical
@@ -35,42 +110,43 @@ pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size + 1.0
 }
 
+/// Output of [`build_tab_title_rich_text_spans`]: a vec of
+/// `(text, colour, attrs)` tuples plus a default-attribute fallback.
+/// The renderer collects this and feeds each tuple into
+/// `chrome_text::layout` (one call per span) so the entire title row
+/// shares the wezterm-driven atlas.
 #[doc(hidden)]
 pub struct TabTitleRichTextSpans<'a> {
-    pub spans: Vec<(&'a str, Attrs<'a>)>,
-    pub default_attrs: Attrs<'a>,
+    pub spans: Vec<(&'a str, TabSpanColor, TabSpanAttrs)>,
+    pub default_color: TabSpanColor,
+    pub default_attrs: TabSpanAttrs,
 }
 
 #[doc(hidden)]
 #[must_use]
 pub fn build_tab_title_rich_text_spans<'a>(
     title_text: &'a str,
-    tab_spans: &[(std::ops::Range<usize>, GColor)],
-    font_family: &'a str,
-    inactive_fg: GColor,
+    tab_spans: &[(std::ops::Range<usize>, TabSpanColor)],
+    _font_family: &'a str,
+    inactive_fg: TabSpanColor,
 ) -> TabTitleRichTextSpans<'a> {
-    let mut spans: Vec<(&str, Attrs<'_>)> = Vec::new();
+    let mut spans: Vec<(&str, TabSpanColor, TabSpanAttrs)> = Vec::new();
     let mut cursor = 0usize;
     for (range, color) in tab_spans {
         if range.start > cursor {
-            spans.push((
-                &title_text[cursor..range.start],
-                terminal_font_attrs(font_family).color(inactive_fg),
-            ));
+            spans.push((&title_text[cursor..range.start], inactive_fg, TabSpanAttrs::default()));
         }
-        spans.push((
-            &title_text[range.start..range.end],
-            terminal_font_attrs(font_family).color(*color),
-        ));
+        spans.push((&title_text[range.start..range.end], *color, TabSpanAttrs::default()));
         cursor = range.end;
     }
     if cursor < title_text.len() {
-        spans.push((&title_text[cursor..], terminal_font_attrs(font_family).color(inactive_fg)));
+        spans.push((&title_text[cursor..], inactive_fg, TabSpanAttrs::default()));
     }
 
     TabTitleRichTextSpans {
         spans,
-        default_attrs: terminal_font_attrs(font_family).color(inactive_fg),
+        default_color: inactive_fg,
+        default_attrs: TabSpanAttrs::default(),
     }
 }
 
@@ -78,11 +154,11 @@ pub fn build_tab_title_rich_text_spans<'a>(
 pub fn build_tab_title_spans(
     tabs: &[TabSpanInput<'_>],
     avg_glyph_w: f32,
-    active_fg: GColor,
-    inactive_fg: GColor,
-) -> (String, Vec<(std::ops::Range<usize>, GColor)>) {
+    active_fg: TabSpanColor,
+    inactive_fg: TabSpanColor,
+) -> (String, Vec<(std::ops::Range<usize>, TabSpanColor)>) {
     let mut title_text = String::new();
-    let mut spans: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+    let mut spans: Vec<(std::ops::Range<usize>, TabSpanColor)> = Vec::new();
     for (i, t) in tabs.iter().enumerate() {
         let color = if t.is_active { active_fg } else { inactive_fg };
         // Reserve TAB_TITLE_PADDING_PX on each side before clipping.

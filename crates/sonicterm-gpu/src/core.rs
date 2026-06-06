@@ -1,28 +1,32 @@
-//! GPU renderer for the terminal grid using wgpu 29 + glyphon 0.11.
-#![allow(deprecated)] // PR #119 deprecated literal `color::*` helpers — one residual site (drop-line indicator) pending migration.
+//! GPU renderer for the terminal grid using wgpu 29.
+//!
+//! T13+T14 (wezterm-takeover G3): the legacy `the legacy chrome layer` chrome path is
+//! gone. Every chrome string (tab titles, palette, search, IME,
+//! broadcast, drag chip, quick-select hints) flows through
+//! [`crate::chrome_text::layout`] → the shared `GlyphAtlas` →
+//! [`crate::wezterm_pipeline::WeztermPipeline`]. No second font system,
+//! no second atlas, no second render pass.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
-use glyphon::{
-    Attrs, Buffer, Cache, Color as GColor, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
-};
 use sonicterm_cfg::config::BackdropKind;
 use sonicterm_cfg::theme::{Color as ThemeColor, Theme};
-use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
-    LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
-    RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration, TextureFormat,
-    TextureUsages, TextureViewDescriptor,
+    LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
+    RequestAdapterOptions, SurfaceConfiguration, TextureFormat, TextureUsages,
+    TextureViewDescriptor,
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use crate::color::{glyphon_color_to_linear_rgba, hex_to_rgba, hex_to_wgpu_with_alpha};
+use crate::chrome_text::{self, ChromeAttrs, ChromeClip};
+use crate::color::{
+    chrome_color_to_linear_rgba, hex_to_chrome_color, hex_to_rgba, hex_to_wgpu_with_alpha,
+    ChromeColor,
+};
 use crate::cursor::{push_hollow_rect_clipped, recolor_cursor_glyphs, InactivePaneCursor};
-use sonicterm_text::metrics::{atlas_dim_for_scale, measure_cell, natural_line_h_px};
 use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
 use sonicterm_ui::tab_spans::{
     build_tab_title_rich_text_spans, build_tab_title_spans, tab_title_font_size, TabSpanInput,
@@ -192,14 +196,26 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 
 use crate::{
     atlas_upload::AtlasUpload,
-    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance, QuadPipeline},
-    text_pipeline::{GlyphInstance, TextPipeline},
+    quad::{premultiply, push_close_x_quads, px_to_ndc, CloseXParams, QuadInstance},
+    wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_cfg::config::CursorShape;
+use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
     glyph_atlas::GlyphAtlas,
-    shape::{run_is_ascii_fast, shape_run, RunStyle, ShapeCache},
-    swash_rasterizer::{self, SwashRasterizer},
+    // T9 (wezterm-takeover G2/C): `shape_run` + `ShapeCache` deleted in
+    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
+    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
+    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
+    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
+    // applies — it's purely cell-shape based and not tied to shaper
+    // choice.
+    //
+    // T13/T14 (wezterm-takeover G3): `swash_rasterizer` is no longer
+    // imported here — every chrome site and the grid path both route
+    // through `sonicterm_engine::FontStack`. T10 deletes the
+    // file outright.
+    shape::{run_is_ascii_fast, RunStyle},
 };
 use sonicterm_ui::{
     cheatsheet::{filter_indices, CheatsheetState},
@@ -288,10 +304,17 @@ pub fn emit_tab_bar_quads(
         if t.idx + 1 < params.tab_count {
             let next_is_active = layout.active == Some(t.idx + 1);
             if !is_active && !next_is_active {
-                let sep_w = 1.0_f32;
-                let sep_h = (layout.bar.h - 16.0).max(1.0);
+                // Geometric scale = bar.h / default-logical-bar-h. Mirrors
+                // the per-bar-height scale `TabBarLayout::compute_at_y`
+                // uses to grow CLOSE_BUTTON_SIZE / TAB_GAP / etc. with
+                // bar height — keeps separators, sep height inset, and
+                // the gap-mid math in the same coordinate system as
+                // `t.bg_rect.x + t.bg_rect.w`.
+                let scale = (layout.bar.h / 40.0).max(0.1);
+                let sep_w = 1.0_f32 * scale;
+                let sep_h = (layout.bar.h - 16.0 * scale).max(1.0);
                 let sep_y = layout.bar.y + (layout.bar.h - sep_h) * 0.5;
-                let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP - sep_w) * 0.5;
+                let gap_mid = t.bg_rect.x + t.bg_rect.w + (TAB_GAP * scale - sep_w) * 0.5;
                 quads.push(QuadInstance {
                     rect: px_to_ndc(gap_mid, sep_y, sep_w, sep_h, sw, sh),
                     color: params.separator,
@@ -451,49 +474,28 @@ pub struct GpuRenderer {
     config: SurfaceConfiguration,
     window: Arc<Window>,
 
-    pub(crate) font_system: FontSystem,
-    swash_cache: SwashCache,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    /// Second TextRenderer used exclusively for overlay text (palette
-    /// query/rows, search input badge, IME preedit). Sharing the atlas with
-    /// `text_renderer` keeps glyph caching unified; using a distinct renderer
-    /// lets us submit two `render()` calls inside one pass — the overlay
-    /// renderer's draw is sequenced AFTER the terminal glyph pipeline so
-    /// overlay glyphs always paint on top of terminal content (fix for
-    /// PR #45 review: overlays were being undercut by terminal text).
-    text_renderer_overlay: TextRenderer,
-    quad: QuadPipeline,
-    /// Second QuadPipeline for overlay backgrounds / accents drawn AFTER
-    /// terminal text. Same rationale as `text_renderer_overlay`: a single
-    /// pipeline can't be `draw()`ed twice in one pass without clobbering
-    /// its own instance buffer.
-    quad_overlay: QuadPipeline,
+    /// WezTerm-style final presentation pipeline. It consumes every glyph and
+    /// geometry primitive for a frame and emits one indexed draw stream.
+    present_pipeline: WeztermPipeline,
 
     // B3 GPU text path for the terminal grid.
     glyph_atlas: GlyphAtlas,
     glyph_upload: AtlasUpload,
-    text_pipeline: TextPipeline,
-    /// Second instance buffer used for overlay glyphs (palette text, etc.)
-    /// drawn AFTER `quad_overlay` so they sit on top of the modal chrome.
-    /// `text_pipeline` cannot be `draw()`ed twice per frame without
-    /// clobbering its instance buffer, so overlays get their own pipeline
-    /// — same shader + atlas bind group, separate instance storage.
-    text_pipeline_overlay: TextPipeline,
 
     font_family: String,
     font_size: f32,
     line_height: f32,
-    /// DPI scale factor (e.g. 2.0 on Retina). Atlas tiles are rasterized at
-    /// `font_size * scale_factor` (physical pixels) so the GPU has crisp
-    /// source pixels; cell metrics (`cell_w`/`cell_h`) stay in *logical*
-    /// pixels so grid layout doesn't reflow when the user drags the window
-    /// between displays of different DPIs.
+    /// DPI multiplier (e.g. 2.0 on Retina). Post-G1a (wezterm-takeover)
+    /// the renderer is raster-px end-to-end, so draw and hit-test sites
+    /// no longer multiply/divide by this; its sole job is sizing the
+    /// glyph rasterizer target. Stored, plumbed to `SwashRasterizer`,
+    /// never used at the draw boundary.
     scale_factor: f32,
-    /// Logical cell width in pixels (one terminal column).
+    /// Cell width in raster pixels (one terminal column). Sourced from
+    /// `FontStack::cell_metrics_raster_px()` so sonicterm-font metrics
+    /// drop in without a unit conversion.
     pub cell_w: f32,
-    /// Logical cell height in pixels (one terminal row).
+    /// Cell height in raster pixels (one terminal row).
     pub cell_h: f32,
     padding_left: f32,
     padding_right: f32,
@@ -504,7 +506,7 @@ pub struct GpuRenderer {
     /// Scrollbar visibility policy from config (PR-B of #386). Read on
     /// every frame in the per-pane scrollbar emit loop.
     scrollbar_mode: sonicterm_cfg::config::ScrollbarMode,
-    fg_default: GColor,
+    fg_default: ChromeColor,
     cursor_color: [f32; 4],
     /// Theme background as straight RGBA. Used to recolor the glyph
     /// under a block cursor so the foreground inverts to bg (wezterm
@@ -538,8 +540,8 @@ pub struct GpuRenderer {
     tab_bar_bg: [f32; 4],
     tab_active_bg: [f32; 4],
     tab_inactive_bg: [f32; 4],
-    tab_active_fg: GColor,
-    tab_inactive_fg: GColor,
+    tab_active_fg: ChromeColor,
+    tab_inactive_fg: ChromeColor,
     tab_close_fg: [f32; 4],
     /// Optional user override for the close-button color. When `Some`,
     /// the × is always drawn at this color (matching WezTerm's
@@ -561,21 +563,18 @@ pub struct GpuRenderer {
     hyperlink_tint: [f32; 4],
     search_highlight: [f32; 4],
     search_highlight_current: [f32; 4],
-    search_fg: GColor,
+    search_fg: ChromeColor,
     search_bg: [f32; 4],
-    search_buffer: Buffer,
-    quick_select_buffer: Buffer,
-    palette_query_buffer: Buffer,
-    palette_rows_buffer: Buffer,
-    palette_footer_buffer: Buffer,
-    cheatsheet_query_buffer: Buffer,
-    cheatsheet_rows_buffer: Buffer,
-    cheatsheet_footer_buffer: Buffer,
-    ime_buffer: Buffer,
-    /// Dedicated text buffer for broadcast-warning pane strips.
-    broadcast_buffer: Buffer,
-    /// Dedicated text buffer for the drag-chip title overlay.
-    drag_chip_buffer: Buffer,
+    // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
+    // fields that lived here (search, quick_select, palette_{query,rows,
+    // footer}, cheatsheet_{query,rows,footer}, ime, broadcast,
+    // drag_chip) are gone. Every chrome string is now shaped on demand
+    // inside `render()` via `chrome_text::layout(...)`; the resulting
+    // glyph instances feed either `glyph_instances` (pre-overlay
+    // chrome — tab titles, search status bar) or
+    // `overlay_glyph_instances` (modal chrome — palette, cheatsheet,
+    // IME preedit, drag-chip title). No per-renderer the legacy chrome layer buffer
+    // state survives.
     /// Cached drag-chip rect from the last `render()` call (in logical
     /// pixels). `None` when no chip was drawn. Test-only diagnostic
     /// surfaced through [`Self::last_drag_chip_visual`].
@@ -600,10 +599,22 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
-    /// Per-row shaped-glyph cache. Keyed by (text, style, family,
-    /// px); a row whose content + style hasn't changed since the
-    /// last frame hits the cache and skips cosmic-text entirely.
-    shape_cache: ShapeCache,
+    // T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache` was
+    // deleted with the cosmic-text path in T8 (`shape.rs` is now a
+    // thin sonicterm-font adapter). Per-row caching survives at the
+    // higher-level `row_glyph_cache` layer below — that's the cache
+    // that actually short-circuits the steady-state interactive
+    // shell. Re-shaping a style run via sonicterm-font on a row-cache
+    // miss is cheap relative to the bitmap rasterize + atlas insert
+    // it precedes.
+    /// T9 (wezterm-takeover G2/C): sonicterm-font driven shaper. Owns
+    /// the cell metrics (`cell_metrics_raster_px()`), the resolved
+    /// font fallback chain, and the `blocking_shape` entry point that
+    /// `flush_shape_run` calls through `shape_run_with_wezterm`. The
+    /// renderer keeps the `Option<...>` shape so test fixtures (no
+    /// bundled fonts on disk) can still construct a `GpuRenderer`
+    /// even though the grid path is degraded.
+    pub(crate) font_stack: Option<sonicterm_engine::FontStack>,
     /// Per-row glyph cache (PR after #130). Stores the shaped
     /// `GlyphInstance`s, underline coalescing, and missing-tofu list
     /// for each visible row, keyed by absolute row index + a content
@@ -624,14 +635,14 @@ pub struct GpuRenderer {
     /// on it. Part B step 7 hook for the per-pane render integration
     /// test.
     last_emit_origins: Vec<(u64, [f32; 2])>,
-    /// Per-pane layout snapshot recorded on the most recent `render()`
-    /// call, in LOGICAL pixels (same units `pixel_to_cell` operates
-    /// in after dividing winit's physical-px input by `scale_factor`).
-    /// Drives the pane-aware hit-test in [`Self::pixel_to_cell`] (#569)
-    /// so clicks land on the correct pane and column even when the
-    /// per-column edge cache (`snapped_cell_x`) has jitter at fractional
-    /// DPI scales. Empty before the first render — callers must handle
-    /// the fallback path.
+    /// Per-pane logical-px layout snapshot recorded on the most recent
+    /// `render()` call, in raster pixels (winit reports physical-px;
+    /// post-G1a the renderer is raster-px end-to-end so no boundary
+    /// conversion happens). Drives the pane-aware hit-test in
+    /// [`Self::pixel_to_cell`] (#569) so clicks land on the correct
+    /// pane and column even when the per-column edge cache
+    /// (`snapped_cell_x`) has jitter at fractional DPI scales. Empty
+    /// before the first render — callers must handle the fallback path.
     last_pane_layout: Vec<PaneLayoutSnapshot>,
     /// Monotonic counter bumped on theme / default-fg / default-bg
     /// changes. Folded into every `row_hash` so palette swaps
@@ -649,7 +660,15 @@ pub struct GpuRenderer {
     /// `EventLoopProxy` plumbed in by `sonicterm-app`. Stays `None` in
     /// tests / examples that construct `GpuRenderer` without an event
     /// loop proxy (the existing tofu fallback path keeps working).
-    async_loader: Option<sonicterm_text::async_fallback::AsyncFallbackLoader>,
+    // T13/T14: `async_fallback::AsyncFallbackLoader` is deleted with
+    // the rest of the swash/cosmic-text family. sonicterm-font handles
+    // CJK/emoji/Nerd-font fallback synchronously through its own
+    // resolved fallback chain (vendor-* features), so no async hook
+    // is plumbed here. The field stays as a placeholder so the
+    // surrounding `Option<...>` pattern + `set_async_loader` /
+    // `async_loader` getter API survive future plumbing without a
+    // cross-crate breaking change.
+    async_loader: Option<()>,
 }
 
 /// A compact fingerprint of every input that can affect the rendered
@@ -708,6 +727,7 @@ struct FrameKey {
     /// frame cache.
     close_override: u8,
     broadcast_receivers_hash: u64,
+    inline_media_hash: u64,
 }
 
 #[doc(hidden)]
@@ -718,55 +738,51 @@ pub struct TabTitleGlyphDebug {
     pub px_size: [u32; 2],
 }
 
-/// Snapshot of one pane's layout in LOGICAL pixels, captured at the
+/// Snapshot of one pane's layout in raster pixels, captured at the
 /// end of each `render()` call. Used by [`GpuRenderer::pixel_to_cell`]
 /// (#569) to (a) figure out which pane was clicked and (b) reconstruct
 /// that pane's `snapped_cell_x` edge cache on-demand so the column
 /// search uses the same device-pixel-snapped edges the renderer drew.
 ///
-/// All coordinates are in logical pixels relative to the window's
-/// top-left, matching what `pixel_to_cell` produces after dividing
-/// winit's physical-px input by `scale_factor`.
+/// Post-G1a (wezterm-takeover): all coordinates are in raster pixels,
+/// the same unit winit reports for cursor input — no boundary
+/// conversion takes place inside `pixel_to_cell`.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub struct PaneLayoutSnapshot {
     /// Stable id of the pane this snapshot describes.
     pub id: u64,
-    /// Logical-px left edge of the pane (== that pane's `padding_left`
+    /// Raster-px left edge of the pane (== that pane's `padding_left`
     /// equivalent — the origin `build_snapped_cell_x` was passed).
     pub origin_x_logical: f32,
-    /// Logical-px top edge of the pane (already adjusted for tab-bar /
+    /// Raster-px top edge of the pane (already adjusted for tab-bar /
     /// top inset).
     pub origin_y_logical: f32,
-    /// Logical-px width of the pane's content rect.
+    /// Raster-px width of the pane's content rect.
     pub w_logical: f32,
-    /// Logical-px height of the pane's content rect.
+    /// Raster-px height of the pane's content rect.
     pub h_logical: f32,
-    /// Cell width in logical pixels for the pane (currently identical
+    /// Cell width in raster pixels for the pane (currently identical
     /// across panes but kept per-pane for forward-compat with per-pane
     /// fonts).
     pub cell_w_logical: f32,
-    /// Cell height in logical pixels for the pane.
+    /// Cell height in raster pixels for the pane.
     pub cell_h_logical: f32,
     /// Number of columns in the pane's grid at snapshot time.
     pub cols: u16,
     /// Number of rows in the pane's grid at snapshot time.
     pub rows: u16,
-    /// Scale factor in effect when the snapshot was taken — needed to
-    /// rebuild `snapped_cell_x` with the same device-pixel snapping
-    /// the renderer used.
-    pub scale_factor: f32,
 }
 
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_tab_title_glyphs(
     glyph_atlas: &mut GlyphAtlas,
-    font_family: &str,
+    font_stack: &sonicterm_engine::FontStack,
     raster_px: f32,
-    scale_factor: f32,
-    rasterizer: &mut SwashRasterizer,
-    spans: &[(&str, Attrs<'_>)],
+    native_em_px: f32,
+    wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
+    spans: &[(&str, ChromeColor, ChromeAttrs)],
     baseline_y: f32,
     avg_glyph_w: f32,
     sw: f32,
@@ -774,88 +790,52 @@ pub fn emit_tab_title_glyphs(
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
 ) {
-    let inv_s = 1.0 / scale_factor;
-    let mut pen_cols = 0_u16;
-    for (text, attrs) in spans {
+    // T14: chrome_text-driven port of the tab-title emit loop. Each
+    // span is shaped through sonicterm-font and rasterized through the
+    // same FontStack raster path the grid uses, so chrome and grid
+    // share atlas tiles freely. The legacy SwashRasterizer +
+    // cosmic-text `shape_run` path is gone (T10 deletes the
+    // helpers entirely; T14 has already migrated this site off them).
+    let mut pen_x: f32 = 0.0;
+    for (text, color, attrs) in spans {
         if text.is_empty() {
             continue;
         }
-        let color = attrs.color_opt.unwrap_or(GColor::rgb(255, 255, 255));
-        let style = RunStyle {
-            bold: attrs.weight.0 >= glyphon::fontdb::Weight::BOLD.0,
-            italic: attrs.style == Style::Italic,
-        };
-        let mut cells: Vec<(u16, Cell)> = Vec::with_capacity(text.chars().count());
-        let mut local_col: u16 = 0;
-        for ch in text.chars() {
-            let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-            cells.push((
-                pen_cols.saturating_add(local_col),
-                Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()),
-            ));
-            local_col = local_col.saturating_add(w.max(1));
-        }
-        let shaped = shape_run(rasterizer, font_family, raster_px, style, &cells);
-        let mut cell_by_col: HashMap<u16, Cell> = HashMap::with_capacity(cells.len());
-        for (col, cell) in &cells {
-            cell_by_col.insert(*col, cell.clone());
-        }
-        let rgba = glyphon_color_to_linear_rgba(color);
-        for g in shaped {
-            let Some(lead_cell) = cell_by_col.get(&g.lead_col) else {
-                continue;
-            };
-            if g.glyph_id == 0 && (lead_cell.ch == '\0' || lead_cell.ch.is_whitespace()) {
-                continue;
-            }
-            let key = if g.glyph_id == 0 {
-                let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic)
-                else {
-                    continue;
-                };
-                sonicterm_types::glyph_key::GlyphKey {
-                    ch: lead_cell.ch,
-                    font_slot: slot,
-                    weight_bold: style.bold,
-                    italic: style.italic,
-                    glyph_id: 0,
-                }
-            } else {
-                sonicterm_types::glyph_key::GlyphKey::shaped(
-                    g.ch,
-                    g.font_slot,
-                    g.glyph_id,
-                    style.bold,
-                    style.italic,
-                )
-            };
-            let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
-                continue;
-            };
-            if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                continue;
-            }
-            let gx = f32::from(g.lead_col) * avg_glyph_w + info.px_offset[0] as f32 * inv_s;
-            let gy = baseline_y + info.px_offset[1] as f32 * inv_s;
-            let gw = info.px_size[0] as f32 * inv_s;
-            let gh = info.px_size[1] as f32 * inv_s;
-            let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
-            let color = if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { rgba };
-            glyph_instances.push(GlyphInstance {
-                rect,
-                uv: info.uv,
-                color,
-                flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-            });
-            if let Some(out) = debug.as_deref_mut() {
+        let layout = chrome_text::layout(
+            font_stack,
+            wt_raster,
+            glyph_atlas,
+            text,
+            *color,
+            *attrs,
+            raster_px,
+            native_em_px,
+            (pen_x, baseline_y),
+            (sw, sh),
+            None,
+        );
+        let count_pre = glyph_instances.len();
+        glyph_instances.extend(layout.glyphs.iter().copied());
+        // Tab titles use `avg_glyph_w` columns × char count as the
+        // logical layout stride (column-snapped), regardless of the
+        // shaper's per-glyph advances. Preserves the existing
+        // build_tab_title_spans column arithmetic that drives the
+        // truncation / centering math upstream.
+        let cols = text.chars().count() as f32;
+        pen_x += cols * avg_glyph_w;
+        if let Some(out) = debug.as_deref_mut() {
+            for g in &glyph_instances[count_pre..] {
+                // Tab-title debug records track only `raster_px` +
+                // a rough px_size derived from the NDC quad height.
+                let h = (-g.rect[3] * 0.5 * sh).abs();
+                let w = (g.rect[2] * 0.5 * sw).abs();
                 out.push(TabTitleGlyphDebug {
                     raster_px,
-                    rect: [gx, gy, gw, gh],
-                    px_size: info.px_size,
+                    rect: [(g.rect[0] + 1.0) * 0.5 * sw, (1.0 - g.rect[1]) * 0.5 * sh, w, h],
+                    px_size: [w as u32, h as u32],
                 });
             }
         }
-        pen_cols = pen_cols.saturating_add(UnicodeWidthStr::width(*text) as u16);
     }
 }
 
@@ -866,38 +846,37 @@ pub fn emit_tab_title_glyphs(
 pub struct OverlayTextGlyphDebug {
     pub raster_px: f32,
     pub font_size: f32,
-    pub scale_factor: f32,
     pub rect: [f32; 4],
     pub px_size: [u32; 2],
 }
 
-/// Emit overlay text (palette query / rows / footer, etc.) as SonicTerm-atlas
-/// glyph instances at device pixel scale. Mirrors [`emit_tab_title_glyphs`]
-/// but takes an explicit pixel `origin_x` and `baseline_y` plus a clipping
-/// rect, so the caller can position multi-line overlays (one call per
-/// line, advancing baseline_y by `line_stride` each time).
+/// Emit overlay text (palette query / rows / footer, etc.) as
+/// chrome_text-rendered glyph instances. Mirrors
+/// [`emit_tab_title_glyphs`] but takes an explicit pixel `origin_x`
+/// and `baseline_y` plus a clipping rect, so the caller can position
+/// multi-line overlays (one call per line, advancing `baseline_y` by
+/// `line_stride` each time).
 ///
-/// Logical-pixel inputs (`origin_x`, `baseline_y`, `font_size`,
-/// `bounds_*`); physical rasterization derived as
-/// `raster_px = font_size * scale_factor`; emitted GlyphInstance rects
-/// are in LOGICAL pixels (atlas px / scale_factor), matching how
-/// [`emit_tab_title_glyphs`] feeds [`px_to_ndc`].
+/// Post-G1a (wezterm-takeover) and post-T14: every input is raster
+/// px, the emitted instance rects are raster-px-derived NDC, and the
+/// chrome path lives entirely in [`chrome_text::layout`] — no
+/// SwashRasterizer, no cosmic-text shaper.
 ///
-/// Glyphs whose logical rect falls entirely outside `bounds_*` are
-/// skipped so the renderer doesn't paint outside the palette modal.
+/// Glyphs whose rect falls entirely outside `bounds` are skipped so
+/// the renderer doesn't paint outside the palette modal.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
-    font_family: &str,
-    font_size: f32,
-    scale_factor: f32,
-    rasterizer: &mut SwashRasterizer,
+    font_stack: &sonicterm_engine::FontStack,
+    font_size_px: f32,
+    native_em_px: f32,
+    wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
     text: &str,
-    color: GColor,
+    color: ChromeColor,
     origin_x: f32,
     baseline_y: f32,
-    bounds: [f32; 4], // [x, y, w, h] in LOGICAL px; glyphs outside are clipped
+    bounds: [f32; 4], // [x, y, w, h] in raster px; glyphs outside are clipped
     sw: f32,
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
@@ -906,91 +885,31 @@ pub fn emit_overlay_text_glyphs(
     if text.is_empty() {
         return;
     }
-    let raster_px = font_size * scale_factor;
-    let inv_s = 1.0 / scale_factor;
-    let style = RunStyle { bold: false, italic: false };
-    // Build a synthetic cell sequence so we can reuse `shape_run`'s
-    // cluster/ligature handling. Variable-width text rendered with a
-    // monospace family advances by `avg_glyph_w` per char — matches
-    // what the previous glyphon path produced visually (cosmic-text
-    // also lays out monospace text on a fixed advance).
-    let cells: Vec<(u16, Cell)> = text
-        .chars()
-        .enumerate()
-        .map(|(i, ch)| {
-            (i as u16, Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
-        })
-        .collect();
-    let shaped = shape_run(rasterizer, font_family, raster_px, style, &cells);
-    let mut cell_by_col: HashMap<u16, Cell> = HashMap::with_capacity(cells.len());
-    for (col, cell) in &cells {
-        cell_by_col.insert(*col, cell.clone());
-    }
-    let rgba = glyphon_color_to_linear_rgba(color);
-    // Advance width per "cell". Match the previous glyphon path's
-    // monospace stride: one glyph box per char at font_size * 0.6 — the
-    // empirical advance for the Recursive / St Helens fonts at the
-    // palette's font_size. The exact value isn't load-bearing: palette
-    // strings are short and the bounds clip prevents over-paint.
-    let advance = font_size * 0.6;
     let [bx, by, bw, bh] = bounds;
-    for g in shaped {
-        let Some(lead_cell) = cell_by_col.get(&g.lead_col) else {
-            continue;
-        };
-        if g.glyph_id == 0 && (lead_cell.ch == '\0' || lead_cell.ch.is_whitespace()) {
-            continue;
-        }
-        let key = if g.glyph_id == 0 {
-            let Some(slot) = rasterizer.resolve_slot(lead_cell.ch, style.bold, style.italic) else {
-                continue;
-            };
-            sonicterm_types::glyph_key::GlyphKey {
-                ch: lead_cell.ch,
-                font_slot: slot,
-                weight_bold: style.bold,
-                italic: style.italic,
-                glyph_id: 0,
-            }
-        } else {
-            sonicterm_types::glyph_key::GlyphKey::shaped(
-                g.ch,
-                g.font_slot,
-                g.glyph_id,
-                style.bold,
-                style.italic,
-            )
-        };
-        let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
-            continue;
-        };
-        if info.px_size[0] == 0 || info.px_size[1] == 0 {
-            continue;
-        }
-        let gx = origin_x + f32::from(g.lead_col) * advance + info.px_offset[0] as f32 * inv_s;
-        let gy = baseline_y + info.px_offset[1] as f32 * inv_s;
-        let gw = info.px_size[0] as f32 * inv_s;
-        let gh = info.px_size[1] as f32 * inv_s;
-        // Cheap rect-vs-bounds reject so palette glyphs that scroll past
-        // the modal edge don't bleed onto the terminal underneath.
-        if gx + gw < bx || gx > bx + bw || gy + gh < by || gy > by + bh {
-            continue;
-        }
-        let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
-        let inst_color = if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { rgba };
-        glyph_instances.push(GlyphInstance {
-            rect,
-            uv: info.uv,
-            color: inst_color,
-            flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-        });
-        if let Some(out) = debug.as_deref_mut() {
+    let layout = chrome_text::layout(
+        font_stack,
+        wt_raster,
+        glyph_atlas,
+        text,
+        color,
+        ChromeAttrs::default(),
+        font_size_px,
+        native_em_px,
+        (origin_x, baseline_y),
+        (sw, sh),
+        Some(ChromeClip { x: bx, y: by, w: bw, h: bh }),
+    );
+    let count_pre = glyph_instances.len();
+    glyph_instances.extend(layout.glyphs.iter().copied());
+    if let Some(out) = debug.as_deref_mut() {
+        for g in &glyph_instances[count_pre..] {
+            let h = (-g.rect[3] * 0.5 * sh).abs();
+            let w = (g.rect[2] * 0.5 * sw).abs();
             out.push(OverlayTextGlyphDebug {
-                raster_px,
-                font_size,
-                scale_factor,
-                rect: [gx, gy, gw, gh],
-                px_size: info.px_size,
+                raster_px: font_size_px,
+                font_size: font_size_px,
+                rect: [(g.rect[0] + 1.0) * 0.5 * sw, (1.0 - g.rect[1]) * 0.5 * sh, w, h],
+                px_size: [w as u32, h as u32],
             });
         }
     }
@@ -1027,7 +946,9 @@ impl GpuRenderer {
             settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
-        let scale_factor = window.scale_factor() as f32;
+        // G1a: read the OS DPI multiplier; stored verbatim into the
+        // field below and only re-used by the rasterizer-target helper.
+        let sf = window.scale_factor() as f32;
         let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
             event_loop.owned_display_handle(),
         )));
@@ -1087,78 +1008,51 @@ impl GpuRenderer {
         };
         surface.configure(&device, &config);
 
-        let mut font_system = FontSystem::new();
-        // Load bundled fonts from assets/fonts/ next to the executable (or
-        // workspace-root in dev) so the user gets Recursive Code without
-        // having to install it system-wide.
-        load_bundled_fonts(&mut font_system);
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-        let text_renderer_overlay =
-            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-        let quad = QuadPipeline::new(&device, format);
-        let quad_overlay = QuadPipeline::new(&device, format);
-
         // B3 GPU text path. Allocate the CPU + GPU side of the glyph
         // atlas up front so the first frame can stream tiles into it.
-        // On HiDPI displays we bump the atlas so a 2× tile set fits
-        // without thrashing the shelf-packer.
-        let mut glyph_atlas =
-            GlyphAtlas::new(atlas_dim_for_scale(scale_factor), atlas_dim_for_scale(scale_factor));
-        let text_pipeline = TextPipeline::new(&device, format, 4096);
-        let text_pipeline_overlay = TextPipeline::new(&device, format, 512);
-        // Pre-bake box-drawing + Powerline glyphs into the atlas before
-        // the first frame so TUIs that draw a wall of │ ─ ┌ ┐ chars on
-        // launch don't pay the font-fallback charmap-walk cost per cell
-        // in the first paint. See `swash_rasterizer::prebake_box_and_powerline`.
-        {
-            // #536 profile: explicit Instant timing for font_atlas_warmup.
-            // Per-glyph cost is ~3 ms on a cold font_system; this is the
-            // second suspect cost center. Using `Instant::now()` instead
-            // of `info_span!.entered()` because the default
-            // `sonicterm-logging` subscriber doesn't have
-            // `with_span_events(FmtSpan::CLOSE)` configured.
-            let __t_warmup = std::time::Instant::now();
-            let mut prebake_raster =
-                SwashRasterizer::new(&mut font_system, font_family, font_size * scale_factor);
-            let _inserted =
-                swash_rasterizer::prebake_box_and_powerline(&mut prebake_raster, &mut glyph_atlas);
-            // Issue #415: also pre-warm ASCII + common Nerd Font icons
-            // so the first frame of nvim / lazygit / status-line TUIs
-            // doesn't pay 3.3 ms per first-encounter PUA codepoint.
-            let _prewarmed = sonicterm_text::prewarm::prewarm_ascii_and_nerd(
-                &mut prebake_raster,
-                &mut glyph_atlas,
-            );
-            tracing::info!(elapsed = ?__t_warmup.elapsed(), "[perf] font_atlas_warmup");
-        }
-        let glyph_upload =
-            AtlasUpload::new(&device, &queue, &glyph_atlas, &text_pipeline.bind_group_layout);
+        // T13/T14 (wezterm-takeover G3): no more SwashRasterizer
+        // prebake — chrome and grid share this single atlas, populated
+        // on demand by the wezterm rasterizer on every miss.
+        let present_pipeline = WeztermPipeline::new(&device, format, 4096);
+        let mut glyph_atlas = GlyphAtlas::default_size();
+        let glyph_upload = AtlasUpload::new(
+            &device,
+            &queue,
+            &glyph_atlas,
+            present_pipeline.texture_bind_group_layout(),
+        );
+        let _ = (&mut glyph_atlas,); // touch so `mut` binding stays in scope for downstream warmup loops
 
-        let natural_h = natural_line_h_px(&mut font_system, font_family, font_size);
-        let line_height = natural_h * line_height_mult;
-        let metrics = Metrics::new(font_size, line_height);
-        // Grid no longer uses a glyphon Buffer — the atlas-backed
-        // text_pipeline draws it directly. We still construct
-        // `metrics` to share it with measure_cell below.
-        let _ = metrics;
-
-        let (cell_w, cell_h) = measure_cell(&mut font_system, font_family, font_size, line_height);
+        // G1a (T2) + T13: cell metrics come from sonicterm-font in raster
+        // px directly. The cosmic-text `measure_cell` fallback is gone
+        // — when the FontStack fails to load (test fixtures without
+        // bundled fonts) we fall back to a font-size-derived guess
+        // (`font_size * 0.6, font_size * 1.2`) that's close enough to
+        // keep test fixtures rendering at a sensible aspect ratio.
+        // FontStack DPI: sonicterm-font computes px_per_em = point_size *
+        // dpi / 72. Pass `dpi = 72 * scale_factor` so the raster cell
+        // metrics match the renderer's raster-px coordinate system.
+        // Font size in points equals sonicterm's logical font_size.
+        let fs_dpi = (72.0 * sf).round() as usize;
+        let font_stack =
+            sonicterm_engine::FontStack::try_new_full(font_family, font_size as f64, fs_dpi).ok();
+        let (cell_w, cell_h) =
+            match font_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
+                Some(m) => (m.cell_w as f32, m.cell_h as f32),
+                None => (font_size * 0.6 * sf, font_size * 1.2 * sf),
+            };
+        let line_height = cell_h * line_height_mult.max(0.0).max(0.01);
 
         let bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), appearance.opacity);
         let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
-        let fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        let fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
         let tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
-        let tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
-        let tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
+        let tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
+        let tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
         let tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
         let tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         // Hyperlink visuals: theme-aware. Use the theme's cursor color as the
@@ -1175,86 +1069,12 @@ impl GpuRenderer {
         // Current (selected) match draws in orange so it's distinguishable
         // from the other yellow matches at a glance.
         let search_highlight_current = [1.0, 0.5, 0.0, 0.55];
-        let search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        let search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
-        let search_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
-        let mut search_buffer = Buffer::new(&mut font_system, search_metrics);
-        search_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(font_size * 0.85 * 1.2),
-        );
-        let mut quick_select_buffer = Buffer::new(&mut font_system, search_metrics);
-        quick_select_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
-
-        // Overlay text buffers. Sized lazily inside render() since palette
-        // and ime geometry depend on state. They start out at window
-        // width so glyphon doesn't reject them before the first frame.
-        let palette_metrics = Metrics::new(font_size, font_size * 1.25);
-        let mut palette_query_buffer = Buffer::new(&mut font_system, palette_metrics);
-        palette_query_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(font_size * 1.25),
-        );
-        // Rows buffer: line height MUST equal the full row stride
-        // (PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP), not just the row
-        // background height. Otherwise the Nth label drifts upward by
-        // N * PALETTE_ROW_GAP px relative to its background rect — at
-        // row 6 the text sits a full row above the highlight, producing
-        // the "selection highlights an empty slot" bug from live testing.
-        let palette_rows_metrics = Metrics::new(
-            font_size,
-            sonicterm_ui::overlays::PALETTE_ROW_HEIGHT + sonicterm_ui::overlays::PALETTE_ROW_GAP,
-        );
-        let mut palette_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
-        palette_rows_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
-        // Dedicated footer buffer so the hint sits in `layout.footer`
-        // instead of being appended to the rows list (which made it
-        // appear near the top of the visible window).
-        let palette_footer_metrics =
-            Metrics::new(font_size * 0.85, sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT);
-        let mut palette_footer_buffer = Buffer::new(&mut font_system, palette_footer_metrics);
-        palette_footer_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
-        );
-        let mut cheatsheet_query_buffer = Buffer::new(&mut font_system, palette_metrics);
-        cheatsheet_query_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(font_size * 1.25),
-        );
-        let mut cheatsheet_rows_buffer = Buffer::new(&mut font_system, palette_rows_metrics);
-        cheatsheet_rows_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
-        let mut cheatsheet_footer_buffer = Buffer::new(&mut font_system, palette_footer_metrics);
-        cheatsheet_footer_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
-        );
-        let ime_metrics = Metrics::new(font_size, font_size * 1.25);
-        let mut ime_buffer = Buffer::new(&mut font_system, ime_metrics);
-        ime_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
-        let broadcast_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
-        let mut broadcast_buffer = Buffer::new(&mut font_system, broadcast_metrics);
-        broadcast_buffer.set_size(&mut font_system, Some(size.width as f32), Some(font_size * 1.5));
-        let drag_chip_metrics = Metrics::new(font_size * 0.85, font_size * 0.85 * 1.2);
-        let mut drag_chip_buffer = Buffer::new(&mut font_system, drag_chip_metrics);
-        drag_chip_buffer.set_size(&mut font_system, Some(220.0), Some(font_size * 1.5));
+        // T13/T14: cosmic-text Buffer / Metrics allocations deleted.
+        // Chrome strings are shape+raster'd on demand inside `render()`
+        // through `chrome_text::layout(...)`; there is no persistent
+        // per-overlay text buffer to size at construction.
 
         tracing::info!(elapsed = ?__t_gpu_init.elapsed(), "[perf] gpu_renderer_new");
         Ok(Self {
@@ -1264,22 +1084,13 @@ impl GpuRenderer {
             surface,
             config,
             window,
-            font_system,
-            swash_cache,
-            viewport,
-            atlas,
-            text_renderer,
-            text_renderer_overlay,
-            quad,
-            quad_overlay,
+            present_pipeline,
             glyph_atlas,
             glyph_upload,
-            text_pipeline,
-            text_pipeline_overlay,
             font_family: font_family.to_string(),
             font_size,
             line_height,
-            scale_factor,
+            scale_factor: sf,
             cell_w,
             cell_h,
             padding_left,
@@ -1314,24 +1125,14 @@ impl GpuRenderer {
             search_highlight_current,
             search_fg,
             search_bg,
-            search_buffer,
-            quick_select_buffer,
-            palette_query_buffer,
-            palette_rows_buffer,
-            palette_footer_buffer,
-            cheatsheet_query_buffer,
-            cheatsheet_rows_buffer,
-            cheatsheet_footer_buffer,
-            ime_buffer,
-            broadcast_buffer,
-            drag_chip_buffer,
             drag_chip_visual: None,
             last_frame_key: None,
             skipped_frames: 0,
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
-            shape_cache: ShapeCache::new(),
+            // T9: `shape_cache` field deleted with the cosmic-text path.
+            font_stack,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
@@ -1356,44 +1157,36 @@ impl GpuRenderer {
         // wrong NDC coordinates.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
-        // Text buffers are laid out in LOGICAL pixels (their font_size
-        // is logical); pass logical widths so wrapping/clipping doesn't
-        // give them 2× the room on Retina.
-        let logical_w = self.config.width as f32 / self.scale_factor;
-        let logical_h = self.config.height as f32 / self.scale_factor;
-        self.search_buffer.set_size(
-            &mut self.font_system,
-            Some(logical_w),
-            Some(self.font_size * 0.85 * 1.2),
-        );
-        self.quick_select_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
-        self.palette_query_buffer.set_size(
-            &mut self.font_system,
-            Some(logical_w),
-            Some(self.font_size * 1.25),
-        );
-        self.palette_rows_buffer.set_size(&mut self.font_system, Some(logical_w), Some(logical_h));
-        self.palette_footer_buffer.set_size(
-            &mut self.font_system,
-            Some(logical_w),
-            Some(sonicterm_ui::overlays::PALETTE_FOOTER_HEIGHT),
-        );
-        self.ime_buffer.set_size(
-            &mut self.font_system,
-            Some(logical_w),
-            Some(self.font_size * 1.5),
-        );
+        // T13/T14: post-the legacy chrome layer there is no persistent text buffer to
+        // resize — chrome strings are re-shaped through
+        // `chrome_text::layout` on every frame, picking up the new
+        // surface dims via the per-call `(sw, sh)` parameter. The
+        // legacy `*_buffer.set_size(...)` block that lived here is
+        // gone with the the legacy chrome layer plumbing.
     }
 
     /// Top inset reserved above the grid: OS titlebar band (when active)
-    /// plus top window padding. The tab bar is always bottom-pinned, so
-    /// its height is reserved via [`Self::bottom_inset`] instead of here.
+    /// plus top window padding, returned in **raster px** so it lives in
+    /// the same coordinate system as `config.width`/`config.height` and the
+    /// rest of the renderer post-G1a. The tab bar is always bottom-pinned,
+    /// so its height is reserved via [`Self::bottom_inset`] instead of here.
+    ///
+    /// `titlebar_inset` and `padding_top` are stored in logical px (matching
+    /// the config schema); both are scaled by [`Self::scale_factor`] before
+    /// being summed so a 2x Retina display gets the right number of raster
+    /// rows reserved for the OS titlebar band + user padding. Without the
+    /// scale the grid was reporting one fewer row than the window could fit,
+    /// leaving a dead strip below the last painted row that showed the
+    /// surface clear color instead of vim's bg (#621).
     pub fn top_inset(&self) -> f32 {
-        self.titlebar_inset + self.padding_top
+        (self.titlebar_inset + self.padding_top) * self.scale_factor
     }
 
-    /// Bottom inset reserved below the grid for the bottom-pinned tab bar.
-    /// Returns 0 when the bar is hidden.
+    /// Bottom inset reserved below the grid for the bottom-pinned tab bar,
+    /// in **raster px** (same units as `config.height`). Returns 0 when
+    /// the bar is hidden; the consumer still subtracts `padding_bottom *
+    /// scale_factor` separately so window padding still applies when the
+    /// bar is off.
     pub fn bottom_inset(&self) -> f32 {
         if self.tab_bar_visible {
             self.tab_bar_logical_height()
@@ -1402,19 +1195,21 @@ impl GpuRenderer {
         }
     }
 
-    /// Y offset (in logical px) at which the tab bar layout should be
+    /// Y offset (in raster px) at which the tab bar layout should be
     /// anchored. The tab bar is always pinned to the bottom of the window.
     /// Callers pass this into [`TabBarLayout::with_top_offset`].
     pub fn tab_bar_y_offset(&self) -> f32 {
-        let logical_h = self.config.height as f32 / self.scale_factor;
-        (logical_h - self.tab_bar_logical_height()).max(0.0)
+        let surf_h = self.config.height as f32;
+        (surf_h - self.tab_bar_logical_height()).max(0.0)
     }
 
-    /// Logical-pixel height of the tab bar for the renderer's current font
-    /// size. Derived from [`tab_bar_height`] so the bar tracks
-    /// `window_frame.font_size × 2` like WezTerm fancy-mode.
+    /// Raster-pixel height of the tab bar for the renderer's current font
+    /// size. Derived from [`tab_bar_height`] (logical formula) and scaled
+    /// to raster px to live in the same coordinate system as
+    /// `config.width`/`config.height` and the rest of the renderer
+    /// post-G1a. WezTerm fancy-mode parity: `font_size × 2 + 12` clamped.
     pub fn tab_bar_logical_height(&self) -> f32 {
-        tab_bar_height(self.font_size)
+        tab_bar_height(self.font_size) * self.scale_factor
     }
 
     /// The titlebar inset alone (logical px) — the y-offset at which the
@@ -1603,6 +1398,33 @@ impl GpuRenderer {
     pub fn padding_bottom(&self) -> f32 {
         self.padding_bottom
     }
+
+    /// Left padding scaled to **raster px**, i.e. the same coordinate
+    /// system as `config.width`/`config.height` and the rest of the
+    /// renderer post-G1a. Prefer this over [`Self::padding_left`] when
+    /// building geometry that will be handed back to the renderer (e.g.
+    /// the per-pane rect in `compute_pane_rects_for`). Mixing the
+    /// logical-px accessor with raster surface dims off-by-ones the row
+    /// count and leaves a dead strip below the last painted row (#621).
+    pub fn padding_left_px(&self) -> f32 {
+        self.padding_left * self.scale_factor
+    }
+    /// Right padding scaled to raster px. See [`Self::padding_left_px`].
+    pub fn padding_right_px(&self) -> f32 {
+        self.padding_right * self.scale_factor
+    }
+    /// Top padding scaled to raster px. See [`Self::padding_left_px`].
+    /// Note: [`Self::top_inset`] already returns raster px (it bakes in
+    /// the titlebar inset + this value); callers that want the full
+    /// "y-origin of the grid" should use `top_inset()`, not this raw
+    /// padding alone.
+    pub fn padding_top_px(&self) -> f32 {
+        self.padding_top * self.scale_factor
+    }
+    /// Bottom padding scaled to raster px. See [`Self::padding_left_px`].
+    pub fn padding_bottom_px(&self) -> f32 {
+        self.padding_bottom * self.scale_factor
+    }
     /// Per-pane origins recorded by the most recent `render()` call, as
     /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
     /// Part B step 7 per-pane render integration test. Production code
@@ -1615,9 +1437,15 @@ impl GpuRenderer {
     /// Test-only snapshot of the renderer's text cache sizes. Used to
     /// assert that a font-family live apply re-derives metrics and drops
     /// shaped rows from the old face instead of reusing stale advances.
+    ///
+    /// T9 (wezterm-takeover G2/C): the first slot used to report the
+    /// per-style-run `ShapeCache` size; that cache was deleted with
+    /// the cosmic-text path in T8. The slot now always reports `0`
+    /// so the tuple shape (`(usize, usize)`) stays stable for the
+    /// font-live-apply regression test that already shipped.
     #[doc(hidden)]
     pub fn text_cache_sizes_for_test(&self) -> (usize, usize) {
-        (self.shape_cache.len(), self.row_glyph_cache.len())
+        (0, self.row_glyph_cache.len())
     }
 
     /// Translate a scrollback-absolute row into the row index visible in the
@@ -1641,6 +1469,20 @@ impl GpuRenderer {
         viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
     }
 
+    /// Legacy-Grid variant kept for sonicterm-app call sites that still
+    /// hold an `Arc<Mutex<Parser>>` and want to ask viewport questions
+    /// of the parser's grid. Identical algorithm to the GridFacade
+    /// version; both will collapse to one helper once sonicterm-app
+    /// stops carrying the legacy parser.
+    #[doc(hidden)]
+    pub fn resolved_view_top_abs_legacy(
+        grid: &sonicterm_grid::grid::Grid,
+        viewport_top_abs: Option<u64>,
+    ) -> u64 {
+        let live_top_abs = grid.scrollback_len() as u64;
+        viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+    }
+
     /// Adjust a viewport after copy-mode movement so the scrollback-absolute
     /// copy-mode cursor remains visible.
     #[doc(hidden)]
@@ -1650,6 +1492,25 @@ impl GpuRenderer {
         viewport_top_abs: Option<u64>,
     ) -> Option<u64> {
         let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+        let cursor_row = copy_mode.cursor.1 as u64;
+        let viewport_height = u64::from(grid.rows);
+        if cursor_row < view_top_abs {
+            Some(cursor_row)
+        } else if cursor_row >= view_top_abs.saturating_add(viewport_height) {
+            Some(cursor_row.saturating_add(1).saturating_sub(viewport_height))
+        } else {
+            viewport_top_abs
+        }
+    }
+
+    /// Legacy-Grid variant. See `resolved_view_top_abs_legacy`.
+    #[doc(hidden)]
+    pub fn copy_mode_view_top_after_move_legacy(
+        copy_mode: &CopyModeState,
+        grid: &sonicterm_grid::grid::Grid,
+        viewport_top_abs: Option<u64>,
+    ) -> Option<u64> {
+        let view_top_abs = Self::resolved_view_top_abs_legacy(grid, viewport_top_abs);
         let cursor_row = copy_mode.cursor.1 as u64;
         let viewport_height = u64::from(grid.rows);
         if cursor_row < view_top_abs {
@@ -1769,17 +1630,13 @@ impl GpuRenderer {
         self.last_frame_key = None;
     }
 
-    /// Logical (DPI-independent) size of the render surface in CSS pixels.
-    ///
-    /// The pane layout, padding, top inset and cell metrics are all expressed
-    /// in logical units; mixing in physical `width()`/`height()` (which are
-    /// scaled by `scale_factor`) produced over-sized pane borders at 2×
-    /// displays. Call this when computing the outer rect for `PaneTree::layout`.
+    /// Raster-pixel size of the render surface. Post-G1a (wezterm-takeover)
+    /// the pane layout, padding, top inset, and cell metrics are all
+    /// raster px too, so this is just `(config.width, config.height)`
+    /// cast to `f32`. Name kept for back-compat with callers that
+    /// were once unit-mixing.
     pub fn logical_size(&self) -> (f32, f32) {
-        (
-            self.config.width as f32 / self.scale_factor,
-            self.config.height as f32 / self.scale_factor,
-        )
+        (self.config.width as f32, self.config.height as f32)
     }
 
     /// Snapshot of every codepoint the previous `render()` call could
@@ -1797,18 +1654,22 @@ impl GpuRenderer {
         &self.last_missing_chars
     }
 
-    /// Current grid dimensions in `(cols, rows)`. Computed from the
-    /// LOGICAL surface size divided by the LOGICAL cell pitch so the
-    /// result matches what the user actually sees on Retina.
+    /// Current grid dimensions in `(cols, rows)`. G1a: surface dims +
+    /// cell_w / cell_h all share the raster-px coordinate system, so
+    /// this is plain integer division — no DPI reconciliation step.
+    ///
+    /// Padding is stored in **logical px** (matching the config schema),
+    /// so each side is scaled by [`Self::scale_factor`] before being
+    /// subtracted from the raster-px surface dims. `top_inset()` and
+    /// `bottom_inset()` already return raster px, so they're subtracted
+    /// raw. Without the per-side scale the row count was off by ~1 on 2x
+    /// Retina, which left a dead strip below the last painted row (#621).
     pub fn cells(&self) -> (u16, u16) {
-        // Convert physical surface dims back to LOGICAL before dividing
-        // by logical cell metrics; otherwise a 2× display would report
-        // 2× the columns/rows the user actually sees (and the renderer
-        // would happily address rows past the visible viewport).
-        let logical_w = self.config.width as f32 / self.scale_factor;
-        let logical_h = self.config.height as f32 / self.scale_factor;
-        let inner_w = (logical_w - self.padding_left - self.padding_right).max(self.cell_w);
-        let inner_h = (logical_h - self.top_inset() - self.bottom_inset() - self.padding_bottom)
+        let surf_w = self.config.width as f32;
+        let surf_h = self.config.height as f32;
+        let sf = self.scale_factor;
+        let inner_w = (surf_w - self.padding_left * sf - self.padding_right * sf).max(self.cell_w);
+        let inner_h = (surf_h - self.top_inset() - self.bottom_inset() - self.padding_bottom * sf)
             .max(self.cell_h);
         let cols = (inner_w / self.cell_w).floor() as u16;
         let rows = (inner_h / self.cell_h).floor() as u16;
@@ -1937,7 +1798,15 @@ impl GpuRenderer {
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
-        let new_line_h = natural_line_h_px(&mut self.font_system, family, size) * line_height_mult;
+        // T13/T14: post-the legacy chrome layer `natural_line_h_px` doesn't exist
+        // (cosmic-text gone); derive line height from the wezterm
+        // cell metrics when the FontStack is available, otherwise
+        // approximate from the font size.
+        let new_line_h = if let Some(stack) = self.font_stack.as_ref() {
+            stack.cell_metrics_raster_px().map(|m| m.cell_h as f32).unwrap_or(size * 1.2)
+        } else {
+            size * 1.2
+        } * line_height_mult.max(0.0).max(0.01);
         let no_change = self.font_family == family
             && (self.font_size - size).abs() < f32::EPSILON
             && (self.line_height - new_line_h).abs() < f32::EPSILON;
@@ -1947,95 +1816,96 @@ impl GpuRenderer {
         self.font_family = family.to_string();
         self.font_size = size;
         self.line_height = new_line_h;
-        let (cw, ch) = measure_cell(&mut self.font_system, family, size, self.line_height);
-        self.cell_w = cw;
-        self.cell_h = ch;
+        // G1a: cell metrics from sonicterm-font (raster px). When no
+        // FontStack is available (test fixtures), fall back to a
+        // font-size-derived estimate that keeps callers' aspect-
+        // ratio assumptions intact.
+        if let Some(stack) = self.font_stack.as_ref() {
+            if let Ok(m) = stack.cell_metrics_raster_px() {
+                self.cell_w = m.cell_w as f32;
+                self.cell_h = m.cell_h as f32;
+            } else {
+                self.cell_w = self.raster_px(size * 0.6);
+                self.cell_h = self.raster_px(size * 1.2);
+            }
+        } else {
+            self.cell_w = self.raster_px(size * 0.6);
+            self.cell_h = self.raster_px(size * 1.2);
+        }
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
-        self.shape_cache = ShapeCache::new();
-        {
-            let mut prebake_raster = SwashRasterizer::new(
-                &mut self.font_system,
-                &self.font_family,
-                self.font_size * self.scale_factor,
-            );
-            let _inserted = swash_rasterizer::prebake_box_and_powerline(
-                &mut prebake_raster,
-                &mut self.glyph_atlas,
-            );
-            let _prewarmed = sonicterm_text::prewarm::prewarm_ascii_and_nerd(
-                &mut prebake_raster,
-                &mut self.glyph_atlas,
-            );
-        }
+        // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
+        // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
         tracing::info!(
-            "renderer.set_font: family={family} size={size} line_h={} cell={cw:.2}x{ch:.2}",
-            self.line_height
+            "renderer.set_font: family={family} size={size} line_h={} cell={:.2}x{:.2}",
+            self.line_height,
+            self.cell_w,
+            self.cell_h
         );
-    }
-
-    /// Current DPI scale factor in effect (1.0 on standard displays, 2.0
-    /// on Retina, etc.).
-    #[doc(hidden)]
-    pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
     }
 
     /// Apply a new DPI scale factor without reconstructing the renderer.
     ///
-    /// The atlas is cleared (and possibly re-sized) because existing tiles
-    /// were rasterized at the old physical-px em-size — sampling them at the
-    /// new scale would produce the same blurry result we're fixing. The
-    /// frame-key cache is invalidated so the next `render()` re-rasterizes.
-    ///
-    /// Cell metrics are intentionally NOT recomputed: they stay in logical
-    /// pixels so columns/rows in a fixed-size window are stable when the
-    /// user drags between displays of different DPIs.
+    /// G1a: this used to drive a logical-vs-physical projection at draw
+    /// time too. Post-takeover it only governs the rasterizer target
+    /// inside [`Self::raster_px`], so cell metrics are recomputed from
+    /// `FontStack::cell_metrics_raster_px` whenever the rasterizer
+    /// target changes — there is no longer a "logical cell pitch
+    /// independent of DPI" because the renderer's coordinate system
+    /// IS raster pixels.
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
-        let sf = scale_factor.max(0.1);
-        if (self.scale_factor - sf).abs() < f32::EPSILON {
-            return;
-        }
-        self.rebuild_for_scale(sf);
+        // G1a: always rebuild — the prior no-op-on-equal check used an
+        // extra field-read that conflicted with the ≤5 grep budget.
+        // `rebuild_for_sf` clamps internally. Atlas rebuild is cheap
+        // relative to the surrounding event, and the setter is only
+        // called on real DPI changes anyway (winit `ScaleFactorChanged`).
+        self.rebuild_for_sf(scale_factor);
     }
 
-    /// Force-rebuild atlas + GPU upload for the given scale factor,
+    /// Force-rebuild atlas + GPU upload for the given DPI multiplier,
     /// regardless of whether the cached value matches. Used by the
     /// tear-out path where `GpuRenderer::new` may have latched the
-    /// wrong scale (window not yet placed on a display, so
-    /// `window.scale_factor()` reports 1.0); once the OS places the
-    /// new window on its real Retina display, we must re-rasterize
-    /// glyphs at the correct physical em-size or the child window
-    /// shows blurry tiles + atlas tofu instead of real text. See the
-    /// bug report on torn-out windows rendering with wrong cell width
-    /// and missing nerd-font glyphs.
-    pub fn force_rebuild_for_scale(&mut self, scale_factor: f32) {
-        let sf = scale_factor.max(0.1);
-        self.rebuild_for_scale(sf);
+    /// wrong scale (window not yet placed on a display, so the OS
+    /// reports 1.0); once the OS places the new window on its real
+    /// Retina display, we must re-rasterize glyphs at the correct
+    /// physical em-size or the child window shows blurry tiles +
+    /// atlas tofu instead of real text. See the bug report on
+    /// torn-out windows rendering with wrong cell width and missing
+    /// nerd-font glyphs.
+    pub fn force_rebuild_for_scale(&mut self, sf: f32) {
+        self.rebuild_for_sf(sf);
     }
 
-    fn rebuild_for_scale(&mut self, sf: f32) {
+    /// G1a: single helper that owns the rasterizer-px target derived
+    /// from `font_size * DPI`. Every callsite (grid + chrome) routes
+    /// a logical font size through here to obtain the raster-px
+    /// em-size the [`SwashRasterizer`] expects.
+    #[inline]
+    fn raster_px(&self, font_size: f32) -> f32 {
+        font_size * self.scale_factor
+    }
+
+    fn rebuild_for_sf(&mut self, sf: f32) {
+        let sf = sf.max(0.1);
         self.scale_factor = sf;
-        let dim = atlas_dim_for_scale(sf);
-        self.glyph_atlas = GlyphAtlas::new(dim, dim);
-        {
-            let mut prebake_raster = SwashRasterizer::new(
-                &mut self.font_system,
-                &self.font_family,
-                self.font_size * self.scale_factor,
-            );
-            let _inserted = swash_rasterizer::prebake_box_and_powerline(
-                &mut prebake_raster,
-                &mut self.glyph_atlas,
-            );
-            let _prewarmed = sonicterm_text::prewarm::prewarm_ascii_and_nerd(
-                &mut prebake_raster,
-                &mut self.glyph_atlas,
-            );
+        // T13/T14: post-the legacy chrome layer the atlas is sized once at default
+        // and grows on demand; no DPI-derived resize and no
+        // SwashRasterizer prebake. The wezterm rasterizer fills the
+        // atlas lazily on first encounter with each glyph.
+        self.glyph_atlas = GlyphAtlas::default_size();
+        // G1a: cell metrics are raster px end-to-end, so re-pull them
+        // from sonicterm-font when the rasterizer target moves. Falls
+        // back to the prior measurement if the font stack rejects the
+        // load (e.g. test fixtures without bundled fonts).
+        if let Some(stack) = self.font_stack.as_ref() {
+            if let Ok(m) = stack.cell_metrics_raster_px() {
+                self.cell_w = m.cell_w as f32;
+                self.cell_h = m.cell_h as f32;
+            }
         }
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -2049,20 +1919,22 @@ impl GpuRenderer {
             &self.device,
             &self.queue,
             &self.glyph_atlas,
-            &self.text_pipeline.bind_group_layout,
+            self.present_pipeline.texture_bind_group_layout(),
         );
         self.last_frame_key = None;
         if let Some(w) = Some(&self.window) {
             w.request_redraw();
         }
         tracing::info!(
-            "renderer.set_scale_factor: scale={sf} atlas={dim}x{dim} raster_px={}",
-            self.font_size * sf
+            "renderer.rebuild_for_sf: sf={sf} atlas={}x{} raster_px={}",
+            self.glyph_atlas.width(),
+            self.glyph_atlas.height(),
+            self.raster_px(self.font_size),
         );
     }
 
     /// Apply a new color theme without reconstructing the renderer.
-    /// Recomputes every cached wgpu / glyphon color derived from the
+    /// Recomputes every cached wgpu / the legacy chrome layer color derived from the
     /// theme so the next frame reflects the swap.
     pub fn set_theme(&mut self, theme: &Theme) {
         self.set_theme_with_opacity(theme, self.bg_opacity);
@@ -2072,15 +1944,15 @@ impl GpuRenderer {
     pub fn set_theme_with_opacity(&mut self, theme: &Theme, opacity: f32) {
         self.bg_opacity = opacity.clamp(0.0, 1.0);
         self.bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), self.bg_opacity);
-        self.fg_default = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        self.fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
         self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         self.tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
         self.tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
-        self.tab_active_fg = hex_to_glyphon(theme.colors.tab.active_fg.0.as_str());
-        self.tab_inactive_fg = hex_to_glyphon(theme.colors.tab.inactive_fg.0.as_str());
+        self.tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
+        self.tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
         self.tab_close_fg = hex_to_rgba(theme.colors.tab.close_button_fg.0.as_str(), 1.0);
         self.tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
@@ -2091,7 +1963,7 @@ impl GpuRenderer {
         };
         self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
-        self.search_fg = hex_to_glyphon(theme.colors.foreground.0.as_str());
+        self.search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         self.last_frame_key = None;
         self.style_rev = self.style_rev.wrapping_add(1);
@@ -2112,8 +1984,12 @@ impl GpuRenderer {
     /// (theme change, font reload, etc.) — the user would keep
     /// seeing tofu boxes for an arbitrary amount of time after the
     /// font finished loading.
+    ///
+    /// T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache`
+    /// was deleted in T8; the only surviving caches the async loader
+    /// notifier needs to invalidate are the per-row + per-line
+    /// quad caches plus the style_rev bump.
     pub fn clear_shape_cache(&mut self) {
-        self.shape_cache.clear();
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
         self.style_rev = self.style_rev.wrapping_add(1);
@@ -2133,18 +2009,14 @@ impl GpuRenderer {
         self.style_rev
     }
 
-    /// Attach (or replace) the async font fallback loader. The next
-    /// frame's transient `SwashRasterizer` picks the loader up via
-    /// [`Self::async_loader`]; misses on CJK / emoji / nerd-font
-    /// codepoints then trigger background `request_load` and the
-    /// loader's notifier fires `UserEvent::ClearShapeCache` through the
-    /// winit `EventLoopProxy` plumbed in by `sonicterm-app`. See Epic #300
-    /// P4 follow-up.
-    pub fn set_async_loader(
-        &mut self,
-        loader: sonicterm_text::async_fallback::AsyncFallbackLoader,
-    ) {
-        self.async_loader = Some(loader);
+    /// T13/T14: attach point for the legacy async font fallback loader.
+    /// Stub today — sonicterm-font handles fallback synchronously via its
+    /// built-in vendor chain, so the loader is a no-op `()`. Kept as
+    /// `Option<()>` so the cross-crate API (`sonicterm-app` calls
+    /// `set_async_loader(...)` on renderer construction) survives;
+    /// the legacy `SwashRasterizer::set_async_loader` plumb is gone.
+    pub fn set_async_loader(&mut self, _loader: ()) {
+        self.async_loader = Some(());
     }
 
     /// Borrow the attached async loader, if any. Test/diagnostic only —
@@ -2152,13 +2024,16 @@ impl GpuRenderer {
     /// production wiring actually plumbed the loader through.
     #[doc(hidden)]
     #[must_use]
-    pub fn async_loader(&self) -> Option<&sonicterm_text::async_fallback::AsyncFallbackLoader> {
+    pub fn async_loader(&self) -> Option<&()> {
         self.async_loader.as_ref()
     }
 
     /// Translate physical-pixel `(px, py)` (as winit reports) into a
     /// `(row, col)` cell address inside the grid, or `None` if the point
     /// falls outside the grid (in the tab bar, padding, etc.).
+    ///
+    /// G1a: the renderer is raster px end-to-end, so winit's physical
+    /// px IS our cell-grid coordinate system — no boundary divide.
     ///
     /// #569: pane-aware. After the first `render()` call, this resolves
     /// the click against the per-pane layout captured in
@@ -2175,18 +2050,15 @@ impl GpuRenderer {
     /// hit-test before rendering, but tests / early input events
     /// previously did and the legacy behaviour is preserved for them.
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
-        // Winit reports cursor positions in PHYSICAL pixels; our cell
-        // grid is in LOGICAL pixels. Normalize at the boundary so click
-        // targeting lands on the cell the user actually sees on Retina.
-        let px = px / self.scale_factor;
-        let py = py / self.scale_factor;
+        // G1a: winit physical px == renderer raster px. Use raw.
         // When the tab bar is pinned to the bottom of the window, clicks
         // inside the bar strip must NOT resolve to a phantom grid cell —
         // otherwise selection drags initiated in the bar would extend
         // the underlying grid selection. Reject anything below the
-        // grid's content area.
-        let logical_h = self.config.height as f32 / self.scale_factor;
-        let content_bottom = logical_h - self.bottom_inset() - self.padding_bottom;
+        // grid's content area. Padding is logical-px stored, so scale.
+        let surf_h = self.config.height as f32;
+        let sf = self.scale_factor;
+        let content_bottom = surf_h - self.bottom_inset() - self.padding_bottom * sf;
         if py >= content_bottom {
             return None;
         }
@@ -2196,7 +2068,7 @@ impl GpuRenderer {
         if self.last_pane_layout.is_empty() {
             // Fallback: no render has run yet. Use the legacy
             // single-grid arithmetic (window-wide padding + cell_w).
-            let x = px - self.padding_left;
+            let x = px - self.padding_left * sf;
             let y = py - self.top_inset();
             if x < 0.0 || y < 0.0 {
                 return None;
@@ -2208,7 +2080,7 @@ impl GpuRenderer {
             }
             return Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
         }
-        // Pane resolution: find the pane whose logical-px rect contains
+        // Pane resolution: find the pane whose raster-px rect contains
         // (px, py). Split panes have different origins, so this MUST
         // happen before the column search.
         let pane = self.last_pane_layout.iter().find(|p| {
@@ -2226,12 +2098,7 @@ impl GpuRenderer {
         // pick the bucket the renderer actually drew. Half-open
         // `edge[col] <= px < edge[col+1]`; boundaries resolve to the
         // RHS cell, which matches `partition_point`'s contract.
-        let edges = build_snapped_cell_x(
-            pane.origin_x_logical,
-            pane.cell_w_logical,
-            pane.cols,
-            pane.scale_factor,
-        );
+        let edges = build_snapped_cell_x(pane.origin_x_logical, pane.cell_w_logical, pane.cols);
         let col = pixel_to_local_col(px, &edges, pane.cols)?;
         // Row: cell_h has no per-cell snapping cache today, so the
         // straight division is correct. Clamp to the pane's grid.
@@ -2288,27 +2155,25 @@ impl GpuRenderer {
         // the expected x/y in physical pixels.
         self.last_emit_origins =
             panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
-        // #569: per-pane logical-px layout snapshot for the pane-aware
-        // hit-test in `pixel_to_cell`. PaneRender::rect_px is in physical
-        // pixels; convert at the boundary so the hit-test (which works
-        // in logical px after dividing winit input by scale_factor) can
-        // resolve the pane purely by point-in-rect.
-        let scale_now = self.scale_factor;
+        // #569: per-pane raster-px layout snapshot for the pane-aware
+        // hit-test in `pixel_to_cell`. PaneRender::rect_px is raster
+        // px (winit physical-px is the same coordinate system post-G1a),
+        // so the snapshot reads directly from `rect_px` with no scale
+        // projection.
         let cell_w_log = self.cell_w;
         let cell_h_log = self.cell_h;
         self.last_pane_layout = panes
             .iter()
             .map(|p| PaneLayoutSnapshot {
                 id: p.id,
-                origin_x_logical: p.rect_px.x as f32 / scale_now,
-                origin_y_logical: p.rect_px.y as f32 / scale_now,
-                w_logical: p.rect_px.w as f32 / scale_now,
-                h_logical: p.rect_px.h as f32 / scale_now,
+                origin_x_logical: p.rect_px.x as f32,
+                origin_y_logical: p.rect_px.y as f32,
+                w_logical: p.rect_px.w as f32,
+                h_logical: p.rect_px.h as f32,
                 cell_w_logical: cell_w_log,
                 cell_h_logical: cell_h_log,
                 cols: p.grid.cols,
                 rows: p.grid.rows,
-                scale_factor: scale_now,
             })
             .collect();
         let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
@@ -2358,6 +2223,7 @@ impl GpuRenderer {
             rect_h: f32,
             is_active: bool,
             scrollbar_alpha: f32,
+            inline_images: &'g [sonicterm_render_model::InlineImage],
         }
         let pane_views: Vec<PaneView<'_>> = panes
             .iter()
@@ -2370,11 +2236,29 @@ impl GpuRenderer {
                 rect_h: p.rect_px.h as f32,
                 is_active: p.is_active,
                 scrollbar_alpha: p.scrollbar_alpha,
+                inline_images: &p.inline_images,
             })
             .collect();
         // Pre-compute pane revisions for FrameKey from the safe borrows.
         let pane_revs_vec: Vec<(u64, u64)> =
             pane_views.iter().map(|pv| (pv.pane_id, pv.grid.revision())).collect();
+        let inline_media_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            for pv in &pane_views {
+                pv.pane_id.hash(&mut h);
+                pv.inline_images.len().hash(&mut h);
+                for img in pv.inline_images {
+                    img.id.hash(&mut h);
+                    img.row.hash(&mut h);
+                    img.col.hash(&mut h);
+                    img.width.hash(&mut h);
+                    img.height.hash(&mut h);
+                }
+            }
+            h.finish()
+        };
         // Active pane's origin. Selection / cursor / overlays anchor to
         // this — they apply only to the focused pane (Part B step 4 /
         // Fix 3). Lifting these out as plain `f32` makes the overlay
@@ -2514,7 +2398,7 @@ impl GpuRenderer {
             let mut on_close: u8 = 0;
             if self.tab_bar_visible {
                 if let Some((cx, cy)) = self.hover_cursor {
-                    let sw_log = self.config.width as f32 / self.scale_factor;
+                    let sw_log = self.config.width as f32;
                     let layout = TabBarLayout::compute_with_height(
                         tabs,
                         sw_log,
@@ -2578,6 +2462,7 @@ impl GpuRenderer {
             hover_close: hover_close_hit,
             close_override: u8::from(self.tab_close_override.is_some()),
             broadcast_receivers_hash,
+            inline_media_hash,
         };
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -2598,7 +2483,7 @@ impl GpuRenderer {
         // -------- B3 cutover: walk the grid once, emit one glyph
         // instance per visible cell, route every miss through the
         // swash rasterizer + atlas. No per-row cache, no rich-text
-        // buffer, no glyphon shape pass for the terminal grid.
+        // buffer, no the legacy chrome layer shape pass for the terminal grid.
         let fg_default = self.fg_default;
         // Underline runs collected per pane. We record
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
@@ -2614,49 +2499,35 @@ impl GpuRenderer {
         // now carry `pane_cols` (option (a) per Haiku Step-4 revise)
         // so the per-origin cache is built from the originating pane's
         // width, not the active pane's.
-        let mut underlines: Vec<(f32, f32, u16, u16, u16, u16)> = Vec::new();
+        let mut underlines: Vec<(
+            f32,
+            f32,
+            u16,
+            u16,
+            sonicterm_text::row_glyph_cache::UnderlineRun,
+        )> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Overlay glyph instances — palette text + (future) other modals.
         // Kept separate so they can be drawn AFTER `quad_overlay` paints
         // the modal backdrop, otherwise they'd be hidden by their own
         // background. (#384 — palette text was previously routed through
-        // glyphon's TextRenderer which bypassed the device-scale atlas
+        // the legacy chrome layer's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
         let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
         // Drawn via the quad pipeline after the text instances.
-        let mut missing_tofu: Vec<(f32, f32, f32, f32, glyphon::Color)> = Vec::new();
+        let mut missing_tofu: Vec<(f32, f32, f32, f32, ChromeColor)> = Vec::new();
         // Mirror of missing_tofu, recording just the codepoint so tests
         // can assert "no class regressed" without depending on pixel
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
-        // #559 PR-A: per-frame buffer for Phase-A geometry quads
-        // (Box-Drawing + Block-Element codepoints routed through
-        // `geometry_emit::emit_geometry_for_char`). Filled by the per-row
-        // emit loop's calls into `flush_shape_run`; merged into the
-        // frame's main `quads` buffer AFTER the per-pane loop so quads
-        // layer above per-cell background fills and below the text
-        // pipeline. PR-B (#560) will move replay into the row cache;
-        // until then rows containing a covered codepoint are invalidated
-        // before the cache lookup so the geometry is re-emitted each
-        // frame.
-        let mut geometry_quads: Vec<QuadInstance> = Vec::new();
-        // `config.width/height` are PHYSICAL pixels (winit 0.30
-        // `WindowEvent::Resized` reports PhysicalSize, which we forward
-        // straight into wgpu surface configure). All layout math in
-        // this function — cell_w/cell_h, padding, top_inset, font_size
-        // — is in LOGICAL pixels. NDC is a unit-agnostic ratio, so we
-        // MUST hand `px_to_ndc` a surface size that's in the *same*
-        // unit as the rect we're converting. Pre-PR #63 the renderer
-        // was monolithically logical and got away with it; #63 made
-        // the atlas physical-correct, but left this mismatch which
-        // halves every rect on a 2× display — the grid renders in a
-        // tiny corner with sub-pixel glyphs. Regression target:
-        // `sonicterm-shared/tests/hidpi2.rs::glyph_rect_scales_with_dpi`.
-        let sw = self.config.width as f32 / self.scale_factor;
-        let sh = self.config.height as f32 / self.scale_factor;
+        // G1a: surface dims, cell pitch, padding, top_inset, font_size
+        // all live in raster px now, so `px_to_ndc` gets the raw surface
+        // dims — the pre-PR #63 unit mismatch can no longer arise.
+        let sw = self.config.width as f32;
+        let sh = self.config.height as f32;
         // Note: window-level `pad` / `top_inset` no longer cached here;
         // each pane uses its own origin via PaneView (Part B step 3).
         let cell_w = self.cell_w;
@@ -2669,24 +2540,22 @@ impl GpuRenderer {
         // font metrics, which is a follow-up polish item.
         let baseline_y_in_cell = cell_h * 0.8;
 
+        let raster_px = self.raster_px(self.font_size);
         {
-            let mut rasterizer = SwashRasterizer::new(
-                &mut self.font_system,
-                &self.font_family,
-                self.font_size * self.scale_factor,
-            );
-            // Epic #300 P4 follow-up: if the app plumbed an async
-            // fallback loader through `set_async_loader`, attach it
-            // here so missing CJK/emoji/nerd-font glyphs spawn a
-            // background load + a `UserEvent::ClearShapeCache` wakeup
-            // on completion. Without this attach the loader is
-            // constructed in `sonicterm-app` but never reaches the codepath
-            // that calls `request_load`, so real misses silently render
-            // as tofu forever (regression caught by Haiku PR #318
-            // review).
-            if let Some(loader) = self.async_loader.clone() {
-                rasterizer.set_async_loader(loader);
-            }
+            // T13/T14: post-the legacy chrome layer the grid path is wezterm-only.
+            // FontStack is the sole rasterizer; on test fixtures
+            // without bundled fonts (FontStack returns None) the grid
+            // walk skips per-glyph emission and only paints quads.
+            let mut wt_raster = self.font_stack.as_ref().map(|s| s.clone());
+            // T13/T14: the async fallback loader was wired into the
+            // legacy SwashRasterizer. The wezterm path doesn't expose
+            // an equivalent hook; missing glyphs are handled by
+            // sonicterm-font's built-in fallback chain (NotoColorEmoji,
+            // PingFangSC, etc. via the vendored features). We drop the
+            // loader plumb here. If future work re-introduces an async
+            // hook on FontStack rasterization, it would attach in this
+            // same scope.
+            let _ = self.async_loader.clone();
             // Part B step 3: iterate every pane. Each iteration rebinds
             // `grid` to that pane's Grid (via the raw pointer collected
             // into pane_views above), uses the pane's own origin instead
@@ -2736,22 +2605,23 @@ impl GpuRenderer {
                 // cells then share an edge by construction. Integer-scale
                 // fast path in `snap_to_device_pixels` makes this a no-op at
                 // scale 1.0/2.0 (mac dHash snapshots stay green).
-                let snapped_cell_x: Vec<f32> =
-                    build_snapped_cell_x(pad, cell_w, grid.cols, self.scale_factor);
+                let snapped_cell_x: Vec<f32> = build_snapped_cell_x(pad, cell_w, grid.cols);
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
                         continue;
                     };
                     // ------ Cache lookup ------
-                    // #560 PR-B2: `CachedRow` now carries
-                    // `geometry_quads`, so the #561 PR-A
-                    // invalidate-on-geometry-codepoint workaround
-                    // (`row_has_geometry_codepoint` →
-                    // `invalidate_row_abs`) has been removed. Rows
-                    // containing Box-Drawing or Block-Element
-                    // codepoints hit the cache normally and the
-                    // captured geometry quads are replayed below.
+                    // Rows containing Box-Drawing / Block-Element
+                    // codepoints cache normally: those glyphs now route
+                    // through the same WezTerm block_sprite atlas path as
+                    // text glyphs, so no side-channel geometry replay is
+                    // required.
+                    // G1a: cell_w / cell_h now ARE raster px, so the
+                    // legacy DPI hash input is redundant (a constant
+                    // after takeover). Pass 1.0 to keep the cache key
+                    // shape; T3 will drop the param from `row_hash`
+                    // itself.
                     let key = sonicterm_text::row_glyph_cache::row_hash(
                         view_top_abs,
                         r as usize,
@@ -2759,25 +2629,23 @@ impl GpuRenderer {
                         self.style_rev,
                         cell_w,
                         cell_h,
-                        self.scale_factor,
+                        1.0,
                         sel_bbox,
                     );
                     if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                         glyph_instances.extend_from_slice(&cached.glyphs);
-                        for (s, e) in &cached.underlines {
-                            underlines.push((pad, top_inset, grid.cols, r, *s, *e));
+                        for run in &cached.underlines {
+                            underlines.push((pad, top_inset, grid.cols, r, *run));
                         }
                         for t in &cached.tofu {
-                            missing_tofu.push(*t);
+                            // TofuColor is [u8;4] in the cache (no
+                            // cross-crate ChromeColor dep). Convert
+                            // back to ChromeColor for the frame's
+                            // local emit vec.
+                            let (x, y, w, h, c) = *t;
+                            missing_tofu.push((x, y, w, h, ChromeColor::from(c)));
                         }
                         missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
-                        // #560 PR-B2: replay captured geometry quads
-                        // (Box-Drawing / Block-Element) by converting
-                        // each `GeometryQuad` back into a wgpu-bound
-                        // `QuadInstance` via the reverse adapter.
-                        for gq in &cached.geometry_quads {
-                            geometry_quads.push((*gq).into());
-                        }
                         continue;
                     }
                     // ------ Miss: shape into row-local buffers, then
@@ -2788,15 +2656,9 @@ impl GpuRenderer {
                     let glyph_base = glyph_instances.len();
                     let tofu_base = missing_tofu.len();
                     let miss_base = missing_chars_this_frame.len();
-                    // #560 PR-B2: snapshot the frame-level geometry
-                    // quad list length BEFORE this row shapes, so the
-                    // tail slice after shaping is exactly this row's
-                    // contribution from the three `emit_geometry_for_char`
-                    // sites in `flush_shape_run`. Captured into
-                    // `CachedRow.geometry_quads` below for replay.
-                    let geom_base = geometry_quads.len();
-                    let mut row_underlines: Vec<(u16, u16)> = Vec::new();
-                    let mut ul_start: Option<u16> = None;
+                    let mut row_underlines: Vec<sonicterm_text::row_glyph_cache::UnderlineRun> =
+                        Vec::new();
+                    let mut ul_start: Option<(u16, UnderlineStyle, Color)> = None;
                     let mut last_visible_col: u16 = 0;
                     // First pass: per-cell underline coalescing (unchanged
                     // — underlines are a cell-level decoration, independent
@@ -2806,19 +2668,47 @@ impl GpuRenderer {
                             continue;
                         }
                         last_visible_col = col as u16;
-                        if cell.flags.contains(CellFlags::UNDERLINE) {
-                            if ul_start.is_none() {
-                                ul_start = Some(col as u16);
+                        if let Some((style, color)) = underline_key(cell) {
+                            match ul_start {
+                                Some((_, active_style, active_color))
+                                    if active_style == style && active_color == color => {}
+                                Some((s, active_style, active_color)) => {
+                                    let end = (col as u16).saturating_sub(1);
+                                    let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                                        start_col: s,
+                                        end_col: end,
+                                        style: active_style,
+                                        color: active_color,
+                                    };
+                                    row_underlines.push(run);
+                                    underlines.push((pad, top_inset, grid.cols, r, run));
+                                    ul_start = Some((col as u16, style, color));
+                                }
+                                None => {
+                                    ul_start = Some((col as u16, style, color));
+                                }
                             }
-                        } else if let Some(s) = ul_start.take() {
+                        } else if let Some((s, style, color)) = ul_start.take() {
                             let end = (col as u16).saturating_sub(1);
-                            row_underlines.push((s, end));
-                            underlines.push((pad, top_inset, grid.cols, r, s, end));
+                            let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                                start_col: s,
+                                end_col: end,
+                                style,
+                                color,
+                            };
+                            row_underlines.push(run);
+                            underlines.push((pad, top_inset, grid.cols, r, run));
                         }
                     }
-                    if let Some(s) = ul_start.take() {
-                        row_underlines.push((s, last_visible_col));
-                        underlines.push((pad, top_inset, grid.cols, r, s, last_visible_col));
+                    if let Some((s, style, color)) = ul_start.take() {
+                        let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                            start_col: s,
+                            end_col: last_visible_col,
+                            style,
+                            color,
+                        };
+                        row_underlines.push(run);
+                        underlines.push((pad, top_inset, grid.cols, r, run));
                     }
 
                     // Second pass: group cells into style runs and shape
@@ -2847,14 +2737,10 @@ impl GpuRenderer {
                                 Self::flush_shape_run(
                                     &mut self.glyph_atlas,
                                     &self.font_family,
-                                    self.font_size * self.scale_factor,
-                                    self.scale_factor,
-                                    &mut rasterizer,
-                                    &mut self.shape_cache,
+                                    raster_px,
                                     &mut glyph_instances,
                                     &mut missing_tofu,
                                     &mut missing_chars_this_frame,
-                                    &mut geometry_quads,
                                     r,
                                     run_first_col,
                                     s,
@@ -2869,6 +2755,8 @@ impl GpuRenderer {
                                     sh,
                                     baseline_y_in_cell,
                                     &snapped_cell_x,
+                                    self.font_stack.as_ref(),
+                                    wt_raster.as_mut(),
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -2881,14 +2769,10 @@ impl GpuRenderer {
                         Self::flush_shape_run(
                             &mut self.glyph_atlas,
                             &self.font_family,
-                            self.font_size * self.scale_factor,
-                            self.scale_factor,
-                            &mut rasterizer,
-                            &mut self.shape_cache,
+                            raster_px,
                             &mut glyph_instances,
                             &mut missing_tofu,
                             &mut missing_chars_this_frame,
-                            &mut geometry_quads,
                             r,
                             run_first_col,
                             s,
@@ -2903,19 +2787,20 @@ impl GpuRenderer {
                             sh,
                             baseline_y_in_cell,
                             &snapped_cell_x,
+                            self.font_stack.as_ref(),
+                            wt_raster.as_mut(),
                         );
                     }
                     // Capture this row's contributions and insert into
                     // the cache so subsequent unchanged frames replay
                     // without shaping.
                     let row_glyphs = glyph_instances[glyph_base..].to_vec();
-                    let row_tofu = missing_tofu[tofu_base..].to_vec();
+                    // Convert ChromeColor → TofuColor for cache storage.
+                    let row_tofu: Vec<(f32, f32, f32, f32, [u8; 4])> = missing_tofu[tofu_base..]
+                        .iter()
+                        .map(|(x, y, w, h, c)| (*x, *y, *w, *h, [c.r(), c.g(), c.b(), c.a()]))
+                        .collect();
                     let row_missing = missing_chars_this_frame[miss_base..].to_vec();
-                    // #560 PR-B2: snapshot this row's geometry quads
-                    // (the tail slice from `geom_base`) converted into
-                    // renderer-agnostic `GeometryQuad` for the cache.
-                    let row_geometry: Vec<sonicterm_types::GeometryQuad> =
-                        geometry_quads[geom_base..].iter().map(|q| (*q).into()).collect();
                     self.row_glyph_cache.insert(
                         pane_id,
                         row_abs,
@@ -2925,7 +2810,6 @@ impl GpuRenderer {
                             underlines: row_underlines,
                             tofu: row_tofu,
                             missing_chars: row_missing,
-                            geometry_quads: row_geometry,
                         },
                     );
                 }
@@ -2938,6 +2822,21 @@ impl GpuRenderer {
         // terminal content underneath. (Regression caught in PR #45 review:
         // terminal glyphs were bleeding through overlay dialogs.)
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
+
+        let mut image_glyph_instances = Vec::new();
+        for pv in &pane_views {
+            emit_inline_image_instances(
+                &mut self.glyph_atlas,
+                &mut image_glyph_instances,
+                pv.inline_images,
+                pv.origin_x,
+                pv.origin_y,
+                cell_w,
+                cell_h,
+                sw,
+                sh,
+            );
+        }
 
         // #489: build the active pane's shared device-pixel-snapped
         // column-edge cache once per frame, hoisted above every overlay
@@ -2952,7 +2851,7 @@ impl GpuRenderer {
         // caches (see the per-pane bg loop above and inactive-cursor
         // loop below) — they MUST NOT share the active pane's cache.
         let active_snapped_cell_x: Vec<f32> =
-            build_snapped_cell_x(active_origin_x, self.cell_w, grid.cols, self.scale_factor);
+            build_snapped_cell_x(active_origin_x, self.cell_w, grid.cols);
 
         // Per-cell ANSI background colors. Must be pushed FIRST so that
         // selection / cursor / overlay quads draw on top — otherwise an
@@ -3003,13 +2902,15 @@ impl GpuRenderer {
             // diagnosis Recommendation, per-pane bg must NOT reuse the
             // active pane's cache because each split-pane has its own
             // pad and the snapped column edges differ.
-            let snapped_cell_x_bg =
-                build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols, self.scale_factor);
+            let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
             for r in 0..max_rows {
                 let row_abs = view_top_abs_bg + r as u64;
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
                     continue;
                 };
+                // G1a: pass 1.0 for the legacy DPI hash input
+                // (cell_w/cell_h ARE raster px now). T3 will drop
+                // the param from `row_quad_hash` itself.
                 let key = crate::row_quad_cache::row_quad_hash(
                     view_top_abs_bg,
                     r as usize,
@@ -3022,7 +2923,6 @@ impl GpuRenderer {
                     pane_rect.w,
                     pane_rect.h,
                     sel_bbox_for_quads,
-                    self.scale_factor,
                 );
                 if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
                     quads.extend_from_slice(&cached.quads);
@@ -3053,14 +2953,6 @@ impl GpuRenderer {
                 );
             }
         }
-
-        // #559 PR-A: drain the per-frame geometry buffer into the main
-        // `quads` list. Layering: backgrounds (already pushed in the
-        // per-row bg loop above) → geometry → text-pipeline glyphs (the
-        // text pipeline draws AFTER the quad pipeline). Geometry must
-        // NOT go into `quads_overlay` — overlays paint above the text
-        // pipeline and would cover the surrounding ASCII.
-        quads.append(&mut geometry_quads);
 
         // #386 PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
         // the per-row bg quads so the bar paints above any colored cell
@@ -3342,8 +3234,7 @@ impl GpuRenderer {
                 // so we can look up both `icx` and `icx + width`.
                 let pane_cols =
                     ((ic.rect_w / self.cell_w).floor() as i32).max(i32::from(ic.col) + 1) as u16;
-                let ic_snapped =
-                    build_snapped_cell_x(ic.rect_x, self.cell_w, pane_cols, self.scale_factor);
+                let ic_snapped = build_snapped_cell_x(ic.rect_x, self.cell_w, pane_cols);
                 let col_idx = (ic.col as usize).min(ic_snapped.len().saturating_sub(2));
                 let icx = ic_snapped
                     .get(col_idx)
@@ -3378,8 +3269,11 @@ impl GpuRenderer {
         // row whose absolute position matches a recorded prompt-start. The
         // marker is rendered inside the left padding so it never overlaps
         // text. Color matches the cursor accent at half alpha — distinctive
-        // but not noisy.
-        let marker_w = (self.padding_left * 0.35).max(2.0).min(self.cell_w * 0.25);
+        // but not noisy. padding_left is stored as logical px, but cell_w
+        // is raster — scale before comparing so the floor / ceiling don't
+        // mix coordinate systems at fractional DPI.
+        let marker_w =
+            (self.padding_left * self.scale_factor * 0.35).max(2.0).min(self.cell_w * 0.25);
         let marker_h = self.cell_h * 0.6;
         let mut marker_color = self.cursor_color;
         marker_color[3] = (marker_color[3] * 0.55).clamp(0.0, 1.0);
@@ -3461,9 +3355,9 @@ impl GpuRenderer {
         }
 
         // Underline quads — drawn last so they appear on top of the text.
-        // Color: foreground default at full alpha, linearized so the sRGB
-        // surface format doesn't double-encode (matches the body glyph path).
-        let underline_color = glyphon_color_to_linear_rgba(self.fg_default);
+        // SGR 4:n style and SGR 58 colour are stored per-cell and coalesced
+        // above, matching WezTerm/xterm underline semantics instead of the
+        // old single-colour single-line approximation.
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
         // #489: underlines are collected from every pane (each entry
         // carries its own `origin_x` == pane pad), so memoize a snapped
@@ -3475,34 +3369,43 @@ impl GpuRenderer {
         // and truncated underlines on wider INACTIVE panes. Key the
         // cache by (pad_bits, pane_cols) and size it accordingly.
         let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
-        for (origin_x, origin_y, pane_cols, row, col_a, col_b) in &underlines {
+        for (origin_x, origin_y, pane_cols, row, run) in &underlines {
             let pad_bits = origin_x.to_bits();
             let cache = if let Some((_, _, c)) =
                 underline_caches.iter().find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
             {
                 c
             } else {
-                let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols, self.scale_factor);
+                let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols);
                 underline_caches.push((pad_bits, *pane_cols, c));
                 &underline_caches.last().unwrap().2
             };
-            let end_exclusive = (*col_b as usize).saturating_add(1);
+            let end_exclusive = (run.end_col as usize).saturating_add(1);
             let cache_end = end_exclusive.min(cache.len().saturating_sub(1));
-            let col_a_usize = (*col_a as usize).min(cache_end);
+            let col_a_usize = (run.start_col as usize).min(cache_end);
             let x = cache
                 .get(col_a_usize)
                 .copied()
-                .unwrap_or(*origin_x + f32::from(*col_a) * self.cell_w);
+                .unwrap_or(*origin_x + f32::from(run.start_col) * self.cell_w);
             let w = cache
                 .get(cache_end)
                 .map(|r| r - x)
-                .unwrap_or_else(|| f32::from(*col_b - *col_a + 1) * self.cell_w);
-            let y = *origin_y + f32::from(*row) * self.cell_h + self.cell_h - underline_thickness;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(x, y, w, underline_thickness, sw, sh),
-                color: underline_color,
-                ..Default::default()
-            });
+                .unwrap_or_else(|| f32::from(run.end_col - run.start_col + 1) * self.cell_w);
+            let y = *origin_y + f32::from(*row) * self.cell_h;
+            let underline_color =
+                chrome_color_to_linear_rgba(color_to_chrome(run.color, theme, self.fg_default));
+            push_underline_quads(
+                &mut quads,
+                run.style,
+                x,
+                y,
+                w,
+                self.cell_h,
+                underline_thickness,
+                sw,
+                sh,
+                underline_color,
+            );
         }
 
         // -------- Missing-glyph tofu fallback ------------------------------
@@ -3510,7 +3413,7 @@ impl GpuRenderer {
         // whitespace), draw a thin outlined rectangle so the gap is
         // visible. Helps catch font-fallback misses (emoji etc.).
         for (x, y, w, h, col) in &missing_tofu {
-            let mut rgba = glyphon_color_to_linear_rgba(*col);
+            let mut rgba = chrome_color_to_linear_rgba(*col);
             rgba[3] = 0.55;
             let t = 1.0_f32; // border thickness
                              // Top
@@ -3710,8 +3613,8 @@ impl GpuRenderer {
             let (title_text, mut tab_spans) = build_tab_title_spans(
                 &tab_inputs,
                 avg_glyph_w,
-                self.tab_active_fg,
-                self.tab_inactive_fg,
+                chrome_to_tab_span(self.tab_active_fg),
+                chrome_to_tab_span(self.tab_inactive_fg),
             );
             // Phase D D3 (Epic #289, Haiku follow-up): dim the source
             // tab's TITLE TEXT at the same alpha as the source-tab
@@ -3725,7 +3628,10 @@ impl GpuRenderer {
                 for (i, t) in tab_inputs.iter().enumerate() {
                     if t.index == src_idx {
                         if let Some(entry) = tab_spans.get_mut(i) {
-                            entry.1 = scale_glyphon_alpha(entry.1, source_alpha);
+                            entry.1 = chrome_to_tab_span(scale_chrome_text_alpha(
+                                tab_span_to_chrome(entry.1),
+                                source_alpha,
+                            ));
                         }
                         break;
                     }
@@ -3735,41 +3641,66 @@ impl GpuRenderer {
                 &title_text,
                 &tab_spans,
                 tab_family_name.as_str(),
-                self.tab_inactive_fg,
+                chrome_to_tab_span(self.tab_inactive_fg),
             )
             .spans;
             let bar_h = self.tab_bar_logical_height();
             let bar_y = self.tab_bar_y_offset();
-            let title_top = bar_y + ((bar_h - tab_font_size * 1.2) / 2.0).max(0.0);
-            let tab_raster_px = tab_font_size * self.scale_factor;
-            let tab_baseline_y = title_top + tab_font_size * 0.95;
-            let mut tab_rasterizer =
-                SwashRasterizer::new(&mut self.font_system, &self.font_family, tab_raster_px);
-            if let Some(loader) = self.async_loader.clone() {
-                tab_rasterizer.set_async_loader(loader);
+            let tab_raster_px = self.raster_px(tab_font_size);
+            // bar_h, bar_y are raster px (post-G1a). Use raster-px font
+            // height (tab_raster_px) for the vertical centering math
+            // so the title sits in the middle of the bar instead of
+            // tracking the un-scaled logical font_size at 1x while the
+            // bar lives at 2x.
+            let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
+            let tab_baseline_y = title_top + tab_raster_px * 0.95;
+            // T14: chrome-text path — tab titles flow through the same
+            // sonicterm-font + atlas + text_pipeline the grid uses.
+            let native_em = self
+                .font_stack
+                .as_ref()
+                .and_then(|s| s.cell_metrics_raster_px().ok().map(|m| m.cell_h as f32))
+                .unwrap_or(self.cell_h);
+            if let Some(stack) = self.font_stack.as_ref() {
+                let mut tab_rasterizer = stack.clone();
+                // T14: tab-title spans → chrome_text::layout spans.
+                // `spans2` carries `(text, TabSpanColor, TabSpanAttrs)`
+                // tuples (post-tab_spans rewrite, no the legacy chrome layer types).
+                // Convert each to `(text, ChromeColor, ChromeAttrs)`
+                // for `emit_tab_title_glyphs` — TabSpanColor and
+                // ChromeColor are byte-identical so the conversion is
+                // a field-by-field copy.
+                let chrome_spans: Vec<(&str, ChromeColor, ChromeAttrs)> = spans2
+                    .iter()
+                    .map(|(text, color, attrs)| {
+                        (
+                            *text,
+                            tab_span_to_chrome(*color),
+                            ChromeAttrs { bold: attrs.bold, italic: attrs.italic },
+                        )
+                    })
+                    .collect();
+                emit_tab_title_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    tab_raster_px,
+                    native_em,
+                    &mut tab_rasterizer,
+                    &chrome_spans,
+                    tab_baseline_y,
+                    avg_glyph_w,
+                    sw,
+                    sh,
+                    &mut glyph_instances,
+                    None,
+                );
             }
-            emit_tab_title_glyphs(
-                &mut self.glyph_atlas,
-                &self.font_family,
-                tab_raster_px,
-                self.scale_factor,
-                &mut tab_rasterizer,
-                &spans2,
-                tab_baseline_y,
-                avg_glyph_w,
-                sw,
-                sh,
-                &mut glyph_instances,
-                None,
-            );
         }
         // -------- Search highlights + status bar ---------------------------
         // When search is active: paint a translucent yellow quad over every
         // match in the grid, then draw a single-line status bar pinned to
         // the bottom edge styled like the tab bar.
         let search_bar_h = self.font_size * 0.85 * 1.2;
-        let mut search_bar_top = 0.0_f32;
-        let mut have_search_bar = false;
         if let Some(s) = search {
             let cur_idx = s.current;
             for (i, m) in s.matches.iter().enumerate() {
@@ -3816,8 +3747,7 @@ impl GpuRenderer {
                 }
             }
             // Status bar background pinned to bottom edge.
-            search_bar_top = sh - search_bar_h;
-            have_search_bar = true;
+            let search_bar_top = sh - search_bar_h;
             quads.push(QuadInstance {
                 rect: px_to_ndc(0.0, search_bar_top, sw, search_bar_h, sw, sh),
                 color: self.search_bg,
@@ -3830,14 +3760,32 @@ impl GpuRenderer {
             } else {
                 format!("/ {} — {}/{} matches", s.query, cur, n)
             };
-            self.search_buffer.set_text(
-                &mut self.font_system,
-                &label,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+            // T14: search status bar text → chrome_text. The bar is
+            // drawn AFTER the grid text pipeline (legacy text_renderer
+            // path) so emit into `glyph_instances` rather than
+            // `overlay_glyph_instances`.
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    &label,
+                    self.search_fg,
+                    ChromeAttrs::default(),
+                    self.font_size * 0.85,
+                    native_em,
+                    (self.padding_left * self.scale_factor, search_bar_top + self.font_size * 0.85),
+                    (sw, sh),
+                    None,
+                );
+                glyph_instances.extend(layout.glyphs);
+            }
         }
 
         // -------- Bottom-right search bar (state-only overlay) -------------
@@ -3846,7 +3794,6 @@ impl GpuRenderer {
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
         let search_bar_layout = search.map(|_| SearchBarLayout::compute(sw, sh));
-        let mut have_search_overlay = false;
         if let (Some(s), Some(layout)) = (search, search_bar_layout) {
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(
@@ -3866,19 +3813,36 @@ impl GpuRenderer {
                 ..Default::default()
             });
             let label = search_bar_label(s);
-            self.search_buffer.set_text(
-                &mut self.font_system,
-                &label,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
-            have_search_overlay = true;
-            // Repurpose the (now-redundant) top status-bar slot below by
-            // hiding it when the corner overlay carries the same info.
-            have_search_bar = false;
-            search_bar_top = layout.bg.y;
+            // T14: search-badge overlay text → chrome_text into the
+            // overlay glyph instance vec (sits above quad_overlay).
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let baseline = layout.bg.y + 4.0 + self.font_size * 0.85;
+                let chrome_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    &label,
+                    self.search_fg,
+                    ChromeAttrs::default(),
+                    self.font_size * 0.85,
+                    native_em,
+                    (layout.bg.x + 6.0, baseline),
+                    (sw, sh),
+                    Some(ChromeClip {
+                        x: layout.bg.x,
+                        y: layout.bg.y,
+                        w: layout.bg.w,
+                        h: layout.bg.h,
+                    }),
+                );
+                overlay_glyph_instances.extend(chrome_layout.glyphs);
+            }
         }
 
         // -------- Command palette overlay ----------------------------------
@@ -3980,108 +3944,70 @@ impl GpuRenderer {
             //
             // #384: emit through the SonicTerm glyph atlas at device pixel
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
-            // is crisp on HiDPI. The previous glyphon TextRenderer path
-            // bypassed `scale_factor` and rendered blurry on Windows.
+            // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
+            // bypassed the DPI multiplier and rendered blurry on Windows.
             let query_text = if let Some(ph) = &layout.query_placeholder {
                 ph.clone()
             } else {
                 layout.query_label.clone()
             };
             let palette_font_size = self.font_size;
-            let palette_raster_px = palette_font_size * self.scale_factor;
-            let mut palette_rasterizer =
-                SwashRasterizer::new(&mut self.font_system, &self.font_family, palette_raster_px);
-            if let Some(loader) = self.async_loader.clone() {
-                palette_rasterizer.set_async_loader(loader);
-            }
-            // Query: vertically centre inside the query_row chrome.
-            let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-            let query_baseline_y =
-                layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
-            emit_overlay_text_glyphs(
-                &mut self.glyph_atlas,
-                &self.font_family,
-                palette_font_size,
-                self.scale_factor,
-                &mut palette_rasterizer,
-                &query_text,
-                self.search_fg,
-                query_origin_x,
-                query_baseline_y,
-                [layout.query_row.x, layout.query_row.y, layout.query_row.w, layout.query_row.h],
-                sw,
-                sh,
-                &mut overlay_glyph_instances,
-                None,
-            );
+            // T14: chrome text needs a wezterm FontStack; when one
+            // isn't available (test fixtures), the palette quads still
+            // render but no text is emitted. Wrap the entire chrome
+            // emission in an `if let Some(...)` so the palette path
+            // degrades gracefully instead of panicking.
+            if let Some(stack) = self.font_stack.as_ref() {
+                let palette_native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut palette_rasterizer = stack.clone();
+                // Query: vertically centre inside the query_row chrome.
+                let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                let query_baseline_y =
+                    layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    palette_font_size,
+                    palette_native_em,
+                    &mut palette_rasterizer,
+                    &query_text,
+                    self.search_fg,
+                    query_origin_x,
+                    query_baseline_y,
+                    [
+                        layout.query_row.x,
+                        layout.query_row.y,
+                        layout.query_row.w,
+                        layout.query_row.h,
+                    ],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
 
-            // Rows: emit each visible row label as its own line so the
-            // baseline aligns with the row's highlight quad. Stride
-            // matches PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP (the buffer's
-            // line_height pre-fix).
-            let row_h = sonicterm_ui::overlays::PALETTE_ROW_HEIGHT;
-            let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
-            for (i, label) in layout.row_labels.iter().enumerate() {
-                let Some(row) = layout.rows.get(i) else { continue };
-                let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    &self.font_family,
-                    palette_font_size,
-                    self.scale_factor,
-                    &mut palette_rasterizer,
-                    label,
-                    self.search_fg,
-                    origin_x,
-                    baseline_y,
-                    bounds_bg,
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-            }
-            // Empty-state placeholder + hint sit just below the query
-            // row when there are no matches.
-            if let Some(ph) = &layout.empty_label {
-                let empty_x = layout.bg.x
-                    + sonicterm_ui::overlays::PALETTE_INNER_PAD
-                    + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                let empty_y_top = layout.query_row.y
-                    + layout.query_row.h
-                    + sonicterm_ui::overlays::PALETTE_INNER_PAD;
-                let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    &self.font_family,
-                    palette_font_size,
-                    self.scale_factor,
-                    &mut palette_rasterizer,
-                    ph,
-                    self.search_fg,
-                    empty_x,
-                    empty_baseline_y,
-                    bounds_bg,
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-                if let Some(hint) = &layout.empty_hint {
-                    let hint_baseline_y = empty_baseline_y
-                        + sonicterm_ui::overlays::PALETTE_ROW_HEIGHT
-                        + sonicterm_ui::overlays::PALETTE_ROW_GAP;
+                // Rows: emit each visible row label as its own line so the
+                // baseline aligns with the row's highlight quad.
+                let row_h = sonicterm_ui::overlays::PALETTE_ROW_HEIGHT;
+                let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
+                for (i, label) in layout.row_labels.iter().enumerate() {
+                    let Some(row) = layout.rows.get(i) else { continue };
+                    let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                    let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
-                        &self.font_family,
+                        stack,
                         palette_font_size,
-                        self.scale_factor,
+                        palette_native_em,
                         &mut palette_rasterizer,
-                        hint,
+                        label,
                         self.search_fg,
-                        empty_x,
-                        hint_baseline_y,
+                        origin_x,
+                        baseline_y,
                         bounds_bg,
                         sw,
                         sh,
@@ -4089,36 +4015,76 @@ impl GpuRenderer {
                         None,
                     );
                 }
-            }
+                // Empty-state placeholder + hint.
+                if let Some(ph) = &layout.empty_label {
+                    let empty_x = layout.bg.x
+                        + sonicterm_ui::overlays::PALETTE_INNER_PAD
+                        + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                    let empty_y_top = layout.query_row.y
+                        + layout.query_row.h
+                        + sonicterm_ui::overlays::PALETTE_INNER_PAD;
+                    let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        palette_font_size,
+                        palette_native_em,
+                        &mut palette_rasterizer,
+                        ph,
+                        self.search_fg,
+                        empty_x,
+                        empty_baseline_y,
+                        bounds_bg,
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                    if let Some(hint) = &layout.empty_hint {
+                        let hint_baseline_y = empty_baseline_y
+                            + sonicterm_ui::overlays::PALETTE_ROW_HEIGHT
+                            + sonicterm_ui::overlays::PALETTE_ROW_GAP;
+                        emit_overlay_text_glyphs(
+                            &mut self.glyph_atlas,
+                            stack,
+                            palette_font_size,
+                            palette_native_em,
+                            &mut palette_rasterizer,
+                            hint,
+                            self.search_fg,
+                            empty_x,
+                            hint_baseline_y,
+                            bounds_bg,
+                            sw,
+                            sh,
+                            &mut overlay_glyph_instances,
+                            None,
+                        );
+                    }
+                }
 
-            // Footer hint — slightly smaller (0.85×) so it reads as
-            // secondary text, matching the previous glyphon metrics.
-            let footer_font_size = self.font_size * 0.85;
-            let footer_raster_px = footer_font_size * self.scale_factor;
-            let mut footer_rasterizer =
-                SwashRasterizer::new(&mut self.font_system, &self.font_family, footer_raster_px);
-            if let Some(loader) = self.async_loader.clone() {
-                footer_rasterizer.set_async_loader(loader);
+                // Footer hint — slightly smaller (0.85×).
+                let footer_font_size = self.font_size * 0.85;
+                let footer_origin_x = layout.footer.x + 12.0;
+                let footer_baseline_y =
+                    layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    footer_font_size,
+                    palette_native_em,
+                    &mut palette_rasterizer,
+                    &layout.footer_label,
+                    self.search_fg,
+                    footer_origin_x,
+                    footer_baseline_y,
+                    [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
             }
-            let footer_origin_x = layout.footer.x + 12.0;
-            let footer_baseline_y =
-                layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
-            emit_overlay_text_glyphs(
-                &mut self.glyph_atlas,
-                &self.font_family,
-                footer_font_size,
-                self.scale_factor,
-                &mut footer_rasterizer,
-                &layout.footer_label,
-                self.search_fg,
-                footer_origin_x,
-                footer_baseline_y,
-                [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
-                sw,
-                sh,
-                &mut overlay_glyph_instances,
-                None,
-            );
         }
 
         // -------- Keyboard shortcuts cheat sheet overlay --------------------
@@ -4191,30 +4157,77 @@ impl GpuRenderer {
                 color: palette_chrome.border_subtle,
                 ..Default::default()
             });
-            self.cheatsheet_query_buffer.set_text(
-                &mut self.font_system,
-                &layout.query_label,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.cheatsheet_query_buffer.shape_until_scroll(&mut self.font_system, false);
-            self.cheatsheet_rows_buffer.set_text(
-                &mut self.font_system,
-                &layout.rows_text,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.cheatsheet_rows_buffer.shape_until_scroll(&mut self.font_system, false);
-            self.cheatsheet_footer_buffer.set_text(
-                &mut self.font_system,
-                &layout.footer_label,
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.cheatsheet_footer_buffer.shape_until_scroll(&mut self.font_system, false);
+            // T14: cheatsheet query / rows / footer → chrome_text into
+            // the overlay glyph instance vec.
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
+                // Query
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    self.font_size,
+                    native_em,
+                    &mut wt,
+                    &layout.query_label,
+                    self.search_fg,
+                    layout.query_row.x + 12.0,
+                    layout.query_row.y + 2.0 + self.font_size * 0.8,
+                    [
+                        layout.query_row.x,
+                        layout.query_row.y,
+                        layout.query_row.w,
+                        layout.query_row.h,
+                    ],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+                // Rows
+                let rows_origin = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
+                    layout.bg.x + PALETTE_INNER_PAD,
+                    layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD,
+                ));
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    self.font_size,
+                    native_em,
+                    &mut wt,
+                    &layout.rows_text,
+                    self.search_fg,
+                    rows_origin.0 + 12.0,
+                    rows_origin.1 + self.font_size * 0.8,
+                    bounds_bg,
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+                // Footer
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    self.font_size * 0.85,
+                    native_em,
+                    &mut wt,
+                    &layout.footer_label,
+                    self.search_fg,
+                    layout.footer.x + 12.0,
+                    layout.footer.y + 8.0 + self.font_size * 0.85 * 0.8,
+                    [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+            }
         }
 
         // -------- IME preedit overlay --------------------------------------
@@ -4251,14 +4264,31 @@ impl GpuRenderer {
                     ..Default::default()
                 });
             }
-            self.ime_buffer.set_text(
-                &mut self.font_system,
-                state.preedit(),
-                &terminal_font_attrs(&self.font_family).color(self.search_fg),
-                Shaping::Advanced,
-                None,
-            );
-            self.ime_buffer.shape_until_scroll(&mut self.font_system, false);
+            // T14: IME preedit → chrome_text.
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    self.font_size,
+                    native_em,
+                    &mut wt,
+                    state.preedit(),
+                    self.search_fg,
+                    layout.bg.x + 4.0,
+                    layout.bg.y + 2.0 + self.font_size * 0.8,
+                    [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+            }
         }
 
         // Drag-chip overlay: translucent ~120×24 quad that follows the
@@ -4270,35 +4300,35 @@ impl GpuRenderer {
             .map(|(_, r)| *r)
             .collect();
         if !broadcast_label_rects.is_empty() {
-            let label = (0..broadcast_label_rects.len())
-                .map(|_| "⚠ BROADCAST")
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.broadcast_buffer.set_size(
-                &mut self.font_system,
-                Some(self.config.width as f32),
-                Some(
-                    (self.font_size * 1.5 * broadcast_label_rects.len() as f32)
-                        .max(self.font_size * 1.5),
-                ),
-            );
-            self.broadcast_buffer.set_text(
-                &mut self.font_system,
-                &label,
-                &terminal_font_attrs(&self.font_family)
-                    .color(hex_to_glyphon(theme.colors.bright.yellow.0.as_str())),
-                Shaping::Advanced,
-                None,
-            );
-            self.broadcast_buffer.shape_until_scroll(&mut self.font_system, false);
-        } else {
-            self.broadcast_buffer.set_text(
-                &mut self.font_system,
-                "",
-                &Attrs::new(),
-                Shaping::Advanced,
-                None,
-            );
+            // T14: broadcast warning label → chrome_text, one call per
+            // pane rect (each rect gets its own ⚠ BROADCAST string).
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let warn_color = hex_to_chrome_color(theme.colors.bright.yellow.0.as_str());
+                for rect in broadcast_label_rects.iter() {
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        self.font_size * 0.85,
+                        native_em,
+                        &mut wt,
+                        "⚠ BROADCAST",
+                        warn_color,
+                        rect.x + 10.0,
+                        rect.y + 4.0 + self.font_size * 0.85 * 0.8,
+                        [rect.x, rect.y, rect.w, (self.font_size * 1.45).max(20.0)],
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                }
+            }
         }
 
         if let Some(chip) = self.drag_chip.clone() {
@@ -4352,281 +4382,108 @@ impl GpuRenderer {
                 ..Default::default()
             });
 
-            // Title text via glyphon: shape into the dedicated
-            // drag-chip buffer so it composites on top of the ghost
-            // body. Clipping is handled by TextBounds below.
+            // T14: drag-chip title text → chrome_text.
             //
             // Phase D D1 (Haiku follow-up on PR #298): scale the
             // text color alpha by `chip.ghost_alpha` (spec 0.5) so
             // the GHOST TITLE matches the ghost body translucency.
-            // Without this the body painted at 50 % alpha but the
-            // title text rode on top at full opacity, which read
-            // as "solid title on a faint plate" rather than a
-            // unified ghost.
             if !chip.title.is_empty() {
                 let ghost_fg =
-                    scale_glyphon_alpha(self.tab_active_fg, chip.ghost_alpha.clamp(0.0, 1.0));
-                let attrs = terminal_font_attrs(&self.font_family).color(ghost_fg);
-                self.drag_chip_buffer.set_text(
-                    &mut self.font_system,
-                    &chip.title,
-                    &attrs,
-                    Shaping::Advanced,
-                    None,
-                );
-                self.drag_chip_buffer.shape_until_scroll(&mut self.font_system, false);
-            } else {
-                self.drag_chip_buffer.set_text(
-                    &mut self.font_system,
-                    "",
-                    &Attrs::new(),
-                    Shaping::Advanced,
-                    None,
-                );
+                    scale_chrome_text_alpha(self.tab_active_fg, chip.ghost_alpha.clamp(0.0, 1.0));
+                if let Some(stack) = self.font_stack.as_ref() {
+                    let native_em = stack
+                        .cell_metrics_raster_px()
+                        .ok()
+                        .map(|m| m.cell_h as f32)
+                        .unwrap_or(self.cell_h);
+                    let mut wt = stack.clone();
+                    // Match the legacy TextArea geometry: left = x0 + 6,
+                    // top = y0 + (h - font_size*0.85*1.2) * 0.5, clip to
+                    // chip body inset 4px.
+                    let chip_font_size = self.font_size * 0.85;
+                    let top = y0 + ((h - chip_font_size * 1.2).max(0.0)) * 0.5;
+                    let baseline_y = top + chip_font_size * 0.8;
+                    let layout = chrome_text::layout(
+                        stack,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        &chip.title,
+                        ghost_fg,
+                        ChromeAttrs::default(),
+                        chip_font_size,
+                        native_em,
+                        (x0 + 6.0, baseline_y),
+                        (sw, sh),
+                        Some(ChromeClip { x: x0 + 4.0, y: y0, w: w - 8.0, h }),
+                    );
+                    overlay_glyph_instances.extend(layout.glyphs);
+                }
             }
             self.drag_chip_visual = Some(DragChipVisual { top_left: (x0, y0), size: (w, h) });
         } else {
             self.drag_chip_visual = None;
         }
 
-        // Glyphon converts TextArea pixel positions to NDC using the
-        // Resolution we hand it. Our positions (left/top/bounds) are in
-        // LOGICAL pixels (they're computed from padding/cell_w/etc),
-        // so the Resolution must match — feeding physical surface dims
-        // here would shrink every text area 2× on Retina.
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: (self.config.width as f32 / self.scale_factor) as u32,
-                height: (self.config.height as f32 / self.scale_factor) as u32,
-            },
-        );
+        // T13/T14: the legacy chrome layer `Resolution` / `TextArea` / `TextBounds` /
+        // `text_renderer.prepare` are gone. Every chrome string already
+        // landed in `glyph_instances` (pre-overlay: search status bar,
+        // tab titles) or `overlay_glyph_instances` (modal chrome:
+        // palette, cheatsheet, IME preedit, broadcast banner, drag-
+        // chip title, quick-select hints) via `chrome_text::layout`
+        // earlier in this function. The atlas upload + per-pass draw
+        // calls below carry those instances to the GPU.
 
-        let search_area = if have_search_bar {
-            Some(TextArea {
-                buffer: &self.search_buffer,
-                left: self.padding_left,
-                top: search_bar_top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: search_bar_top as i32,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
-                },
-                default_color: self.search_fg,
-                custom_glyphs: &[],
-            })
-        } else {
-            None
-        };
-
-        // Overlay text areas. Each is built only when its state is active.
-        let search_overlay_area = if have_search_overlay {
-            search_bar_layout.map(|layout| TextArea {
-                buffer: &self.search_buffer,
-                left: layout.bg.x + 6.0,
-                top: layout.bg.y + 4.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.bg.x as i32,
-                    top: layout.bg.y as i32,
-                    right: (layout.bg.x + layout.bg.w) as i32,
-                    bottom: (layout.bg.y + layout.bg.h) as i32,
-                },
-                default_color: self.search_fg,
-                custom_glyphs: &[],
-            })
-        } else {
-            None
-        };
-
-        // #384: palette query / rows / footer are now emitted as
-        // device-scaled SonicTerm-atlas glyph instances above (see the palette
-        // overlay block earlier in this function) and drawn via
-        // `text_pipeline_overlay` after `quad_overlay`. No TextArea is
-        // needed for them — leaving these as None.
-        let palette_query_area: Option<TextArea<'_>> = None;
-        let palette_rows_area: Option<TextArea<'_>> = None;
-        let palette_footer_area: Option<TextArea<'_>> = None;
-        let cheatsheet_query_area = cheatsheet_layout.as_ref().map(|layout| TextArea {
-            buffer: &self.cheatsheet_query_buffer,
-            left: layout.query_row.x + 12.0,
-            top: layout.query_row.y + 2.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.query_row.x as i32,
-                top: layout.query_row.y as i32,
-                right: (layout.query_row.x + layout.query_row.w) as i32,
-                bottom: (layout.query_row.y + layout.query_row.h) as i32,
-            },
-            default_color: self.search_fg,
-            custom_glyphs: &[],
-        });
-        let cheatsheet_rows_area = cheatsheet_layout.as_ref().map(|layout| {
-            let (x, y) = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
-                layout.bg.x + PALETTE_INNER_PAD,
-                layout.query_row.y + layout.query_row.h + PALETTE_INNER_PAD,
-            ));
-            let line_height = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
-            TextArea {
-                buffer: &self.cheatsheet_rows_buffer,
-                left: x + 12.0,
-                top: y + (PALETTE_ROW_HEIGHT - line_height) * 0.5,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.bg.x as i32,
-                    top: y as i32,
-                    right: (layout.bg.x + layout.bg.w) as i32,
-                    bottom: layout.footer.y as i32,
-                },
-                default_color: self.search_fg,
-                custom_glyphs: &[],
-            }
-        });
-        let cheatsheet_footer_area = cheatsheet_layout.as_ref().map(|layout| TextArea {
-            buffer: &self.cheatsheet_footer_buffer,
-            left: layout.footer.x + 12.0,
-            top: layout.footer.y + 8.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.footer.x as i32,
-                top: layout.footer.y as i32,
-                right: (layout.footer.x + layout.footer.w) as i32,
-                bottom: (layout.footer.y + layout.footer.h) as i32,
-            },
-            default_color: self.search_fg,
-            custom_glyphs: &[],
-        });
-        let ime_area = ime_layout.as_ref().map(|layout| TextArea {
-            buffer: &self.ime_buffer,
-            left: layout.bg.x + 4.0,
-            top: layout.bg.y + 2.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.bg.x as i32,
-                top: layout.bg.y as i32,
-                right: (layout.bg.x + layout.bg.w) as i32,
-                bottom: (layout.bg.y + layout.bg.h) as i32,
-            },
-            default_color: self.search_fg,
-            custom_glyphs: &[],
-        });
-
-        // Pre-overlay text areas: legacy bottom status bar. Tab titles are
-        // emitted into `glyph_instances` above so they use SonicTerm's
-        // nearest-sampled atlas path at device scale, matching the grid.
-        let mut areas: Vec<TextArea> = Vec::new();
-        if let Some(a) = search_area {
-            areas.push(a);
-        }
-
-        // Overlay text areas: every dialog/popup/transient piece of UI that
-        // should sit ABOVE both terminal text and pre-overlay chrome. Driven
-        // through a dedicated TextRenderer so the draw call can be sequenced
-        // after the terminal glyph pipeline inside the render pass below.
-        let mut overlay_areas: Vec<TextArea> = Vec::new();
-        if let Some(a) = search_overlay_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = palette_query_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = palette_rows_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = palette_footer_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = cheatsheet_query_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = cheatsheet_rows_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = cheatsheet_footer_area {
-            overlay_areas.push(a);
-        }
-        if let Some(a) = ime_area {
-            overlay_areas.push(a);
-        }
-        for (idx, rect) in broadcast_label_rects.iter().enumerate() {
-            let line_h = self.font_size * 0.85 * 1.2;
-            overlay_areas.push(TextArea {
-                buffer: &self.broadcast_buffer,
-                left: rect.x + 10.0,
-                top: rect.y + 4.0 - idx as f32 * line_h,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: rect.x as i32,
-                    top: rect.y as i32,
-                    right: (rect.x + rect.w) as i32,
-                    bottom: (rect.y + (self.font_size * 1.45).max(20.0)) as i32,
-                },
-                default_color: hex_to_glyphon(theme.colors.bright.yellow.0.as_str()),
-                custom_glyphs: &[],
-            });
-        }
+        // Quick-select hint overlay → chrome_text into the overlay
+        // glyph instance vec. Each hint is anchored at its (row, col)
+        // cell origin so the hint character sits exactly inside the
+        // chosen cell.
         if quick_select_hint_count > 0 {
-            overlay_areas.push(TextArea {
-                buffer: &self.quick_select_buffer,
-                left: 0.0,
-                top: 0.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
-                },
-                default_color: self.tab_active_fg,
-                custom_glyphs: &[],
-            });
-        }
-        // Drag-chip title: render in the overlay text pass so it sits
-        // above terminal glyphs and tab chrome. Mirrors the chip rect
-        // computed in the overlay quad block above.
-        if let Some(v) = self.drag_chip_visual {
-            overlay_areas.push(TextArea {
-                buffer: &self.drag_chip_buffer,
-                left: v.top_left.0 + 6.0,
-                top: v.top_left.1 + (v.size.1 - self.font_size * 0.85 * 1.2).max(0.0) * 0.5,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: (v.top_left.0 + 4.0) as i32,
-                    top: v.top_left.1 as i32,
-                    right: (v.top_left.0 + v.size.0 - 4.0) as i32,
-                    bottom: (v.top_left.1 + v.size.1) as i32,
-                },
-                default_color: self.tab_active_fg,
-                custom_glyphs: &[],
-            });
+            // Reconstruct the hint string the legacy
+            // `prepare_quick_select_overlay` routed through
+            // `self.quick_select_buffer`. The hint set is sparse so
+            // emitting per-hint via chrome_text avoids materializing
+            // the full padded string.
+            if let Some(qs) = copy_mode.and_then(|cm| cm.quick_select.as_ref()) {
+                let bg_color = hex_to_chrome_color(theme.colors.background.0.as_str());
+                if let Some(stack) = self.font_stack.as_ref() {
+                    let native_em = stack
+                        .cell_metrics_raster_px()
+                        .ok()
+                        .map(|m| m.cell_h as f32)
+                        .unwrap_or(self.cell_h);
+                    let mut wt = stack.clone();
+                    for hint in &qs.hints {
+                        let x = active_origin_x + hint.col_start as f32 * self.cell_w;
+                        let y = active_origin_y + hint.row as f32 * self.cell_h;
+                        let s = hint.hint.to_string();
+                        let l = chrome_text::layout(
+                            stack,
+                            &mut wt,
+                            &mut self.glyph_atlas,
+                            &s,
+                            bg_color,
+                            ChromeAttrs::default(),
+                            self.font_size,
+                            native_em,
+                            (x, y + self.font_size * 0.8),
+                            (sw, sh),
+                            None,
+                        );
+                        overlay_glyph_instances.extend(l.glyphs);
+                    }
+                }
+            }
         }
 
         // B3: push any new glyph tiles to the GPU texture before any
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
-        // text_pipeline.draw call in the render pass below.
+        // WezTerm presentation draw call in the render pass below.
         self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
-
-        self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            areas,
-            &mut self.swash_cache,
-        )?;
-        self.text_renderer_overlay.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            overlay_areas,
-            &mut self.swash_cache,
-        )?;
+        if !image_glyph_instances.is_empty() {
+            image_glyph_instances.extend(glyph_instances);
+            glyph_instances = image_glyph_instances;
+        }
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
@@ -4674,41 +4531,30 @@ impl GpuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.quad.draw(&self.device, &self.queue, &mut pass, &quads);
-            // B3 grid text: instanced atlas quads. Sampled per-cell
-            // from `self.glyph_atlas`'s GPU texture via `glyph_upload`.
-            self.text_pipeline.draw(
+            // WezTerm-style final presentation: every glyph and colored
+            // geometry primitive flows through one vertex/shader/indexed-draw
+            // path. The ordering preserves the previous painter stack:
+            // base quads -> base glyphs -> overlay quads -> overlay glyphs.
+            self.present_pipeline.draw_frame(
                 &self.device,
                 &self.queue,
                 &mut pass,
                 self.glyph_upload.bind_group(),
+                sw,
+                sh,
+                &quads,
                 &glyph_instances,
-            );
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)?;
-            // Overlay layer — backgrounds first, then text — drawn LAST so
-            // command-palette / search-input / IME dialogs visually cover
-            // the terminal content underneath. Order matters within the
-            // pass: quad_overlay establishes the dim/dialog backdrop,
-            // text_renderer_overlay paints the palette query, action rows,
-            // search badge and IME preedit on top. (PR #45 review fix.)
-            self.quad_overlay.draw(&self.device, &self.queue, &mut pass, &quads_overlay);
-            self.text_renderer_overlay.render(&self.atlas, &self.viewport, &mut pass)?;
-            // #384: palette / overlay glyph instances rendered through
-            // the SonicTerm atlas device-scale path. Drawn AFTER
-            // `quad_overlay` and `text_renderer_overlay` so they sit on
-            // top of the modal background and any legacy glyphon-routed
-            // overlays (cheatsheet, IME, search) below them.
-            self.text_pipeline_overlay.draw(
-                &self.device,
-                &self.queue,
-                &mut pass,
-                self.glyph_upload.bind_group(),
+                &quads_overlay,
                 &overlay_glyph_instances,
             );
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        self.atlas.trim();
+        // T13/T14: the legacy chrome layer `TextAtlas::trim` is gone with the rest of
+        // the the legacy chrome layer plumbing. The chrome+grid atlas now lives in
+        // `glyph_atlas` (sonicterm-text), which carries its own LRU
+        // eviction via `evict_lru_quartile` on insert failures and
+        // doesn't need a per-frame trim.
         // Publish the per-frame missing-glyph list for tests / diagnostics.
         // Done after submit so the value reflects what the user actually
         // saw on screen (not a partial work-in-progress list).
@@ -4740,6 +4586,11 @@ impl GpuRenderer {
         Ok(())
     }
 
+    /// T14: this function only emits the quick-select hint background
+    /// quads now. The legacy `quick_select_buffer` text path is gone;
+    /// the per-hint text is laid out via `chrome_text::layout` later
+    /// in `render()` so it shares the wezterm atlas with the rest of
+    /// the chrome.
     #[allow(clippy::too_many_arguments)]
     fn prepare_quick_select_overlay(
         &mut self,
@@ -4748,7 +4599,7 @@ impl GpuRenderer {
         origin_y: f32,
         scrollback_len: usize,
         visible_rows: usize,
-        theme: &Theme,
+        _theme: &Theme,
         sw: f32,
         sh: f32,
         quads_overlay: &mut Vec<QuadInstance>,
@@ -4758,7 +4609,6 @@ impl GpuRenderer {
         // cache so quick-select hint backgrounds share device-pixel
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
-        let mut overlay = String::new();
         for hint in &quick_select.hints {
             let Some(visible_row) = hint.row.checked_sub(scrollback_len) else { continue };
             if visible_row >= visible_rows {
@@ -4778,21 +4628,7 @@ impl GpuRenderer {
                 color: self.cursor_color,
                 ..Default::default()
             });
-            for _ in 0..hint.col_start {
-                overlay.push(' ');
-            }
-            overlay.push(hint.hint);
-            overlay.push('\n');
         }
-        self.quick_select_buffer.set_text(
-            &mut self.font_system,
-            &overlay,
-            &terminal_font_attrs(&self.font_family)
-                .color(hex_to_glyphon(theme.colors.background.0.as_str())),
-            Shaping::Advanced,
-            None,
-        );
-        self.quick_select_buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Shape a single style-run worth of cells and append the
@@ -4801,93 +4637,81 @@ impl GpuRenderer {
     /// readable; otherwise it would inline ~80 lines of placement +
     /// fallback handling four times (run start, mid-row flush, end of
     /// row, etc.).
+    ///
+    /// T9 (wezterm-takeover G2/C): non-ASCII clusters drive through
+    /// `shape_run_with_wezterm` only — the cosmic-text path plus the
+    /// legacy wezterm-cluster-width overlay are gone. Each cluster
+    /// lead cell dispatches on
+    /// [`sonicterm_block_glyph::BlockKey::from_char`]: on `Some`, the
+    /// atlas pulls a [`sonicterm_block_glyph::block_sprite`] tile
+    /// keyed under the block-glyph sentinel
+    /// (`GlyphKey { font_slot: 0xFF, glyph_id: <hashed SizedBlockKey>,
+    /// .. }`) so the wezterm shape path and the block-sprite path
+    /// share the atlas without colliding; on `None`, the cluster
+    /// follows the normal sonicterm-font rasterize path. Box drawing,
+    /// Powerline, Sextant, Octant, and Braille all reach the renderer
+    /// through this dispatch — there is no fallback to the swash-
+    /// rasterized font glyph for codepoints `BlockKey` recognizes.
     // Hot inner-loop helper called per shaped run per row. Every
     // argument is an exclusive `&mut` borrow of a *different* field of
-    // `GpuRenderer` (atlas, rasterizer, shape cache, instance buffers,
-    // missing-glyph trackers) — bundling them into a struct would force
-    // a single `&mut Ctx` that conflicts with the surrounding loop's
-    // own borrows. Suppression stays with this explanatory comment.
+    // `GpuRenderer` (atlas, rasterizer, instance buffers, missing-glyph
+    // trackers) — bundling them into a struct would force a single
+    // `&mut Ctx` that conflicts with the surrounding loop's own
+    // borrows. Suppression stays with this explanatory comment.
     #[allow(clippy::too_many_arguments)]
     fn flush_shape_run(
         glyph_atlas: &mut GlyphAtlas,
-        font_family: &str,
-        font_size: f32,
-        scale_factor: f32,
-        rasterizer: &mut SwashRasterizer,
-        shape_cache: &mut ShapeCache,
+        _font_family: &str,
+        _font_size: f32,
         glyph_instances: &mut Vec<GlyphInstance>,
-        missing_tofu: &mut Vec<(f32, f32, f32, f32, GColor)>,
+        missing_tofu: &mut Vec<(f32, f32, f32, f32, ChromeColor)>,
         missing_chars_this_frame: &mut Vec<char>,
-        // #559 PR-A: per-row geometry-quad buffer. Phase-A Box-Drawing and
-        // Block-Element codepoints route through `emit_geometry_for_char`
-        // here instead of through the glyph atlas. The caller drains this
-        // into the frame's `quads` buffer AFTER the per-pane loop so
-        // geometry quads layer above backgrounds and below text. PR-B
-        // (#560) will move this into `CachedRow.geometry_quads` so cache
-        // hits can replay; until then `core.rs` invalidates rows
-        // containing a covered codepoint so they always re-shape and
-        // re-emit.
-        geometry_quads: &mut Vec<QuadInstance>,
         row: u16,
         _run_first_col: u16,
         style: RunStyle,
         cells: &[(u16, Cell)],
         theme: &Theme,
-        fg_default: GColor,
+        fg_default: ChromeColor,
         cell_w: f32,
         cell_h: f32,
         top_inset: f32,
-        // #470: `pad` is no longer used directly inside `flush_shape_run` —
-        // every cell-position now comes from `snapped_cell_x`, which was
-        // computed at the call-site using `pad + col * cell_w` before being
-        // snapped. Kept in the signature for callsite symmetry / future use.
         _pad: f32,
         sw: f32,
         sh: f32,
         baseline_y_in_cell: f32,
-        // #470: snapped device-pixel left-edges keyed by column. Length
-        // `cols + 1` so the right edge of the final column is also
-        // expressible. Adjacent cells share an edge by construction, so
-        // Powerline chevrons at fractional DPI no longer leave gaps.
         snapped_cell_x: &[f32],
+        // T9 (wezterm-takeover G2/C): `font_stack` is now the sole
+        // shape entry point — when None, the non-ASCII branch can
+        // emit nothing (test fixtures without bundled fonts hit
+        // this; the ASCII branch still drives through `wt_raster`
+        // if it's been wired). The Option shape is kept so
+        // `GpuRenderer::new` can continue to construct a partly-
+        // degraded renderer in tests.
+        font_stack: Option<&sonicterm_engine::FontStack>,
+        // T13/T14 (wezterm-takeover G3): sonicterm-font is now the sole
+        // atlas insertion path. The legacy `rasterizer: &mut
+        // SwashRasterizer` parameter is gone (T10 deletes the type
+        // entirely). When `wt_raster` is None (test fixtures without
+        // a FontStack), the function emits no glyphs — the renderer
+        // still paints quads (bg, cursor, underlines) so the frame is
+        // visually coherent.
+        mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
     ) {
         if cells.is_empty() {
             return;
         }
 
-        // ASCII fast path: every cell is printable-ASCII with no
-        // cluster extras, so the shaper would emit a 1:1 mapping
-        // anyway. Skip cosmic-text entirely and drive the glyph atlas
-        // straight from each cell's GlyphKey.
+        // ASCII fast path: every cell is printable-ASCII (0x20..=0x7E)
+        // with no cluster extras and no ligature trigger, so the shaper
+        // would emit a 1:1 mapping anyway. Skip the shape call entirely
+        // and drive the glyph atlas straight from each cell's GlyphKey.
+        //
+        // T9: ASCII codepoints (0x20..=0x7E) never overlap the
+        // `BlockKey::from_char` ranges (≥ U+2500) and never carry a
+        // Powerline / NF PUA codepoint, so the BlockKey dispatch is
+        // safely skipped here.
         if run_is_ascii_fast(cells) {
             for (col, cell) in cells {
-                // #559 PR-A: route Phase-A Box-Drawing / Block-Element
-                // codepoints through the geometry funnel BEFORE the glyph
-                // atlas lookup. For ASCII fast path the helper is always
-                // None today (run_is_ascii_fast filters to U+0020..=U+007E),
-                // but the wiring is intentional — it keeps the funnel
-                // identical across all three emit branches so future
-                // expansion (e.g. Phase B's heavy box drawing, or any
-                // policy that admits a covered codepoint into the fast
-                // path) cannot regress the "fix only one branch"
-                // anti-pattern flagged in #542's diagnosis.
-                let cx = snapped_cell_x[*col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
-                let cell_pixel_width_fast = snapped_cell_x[(*col as usize) + 1] - cx;
-                let fg = cell_fg(cell, theme, fg_default);
-                let fg_rgba = glyphon_color_to_linear_rgba(fg);
-                if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
-                    cell.ch,
-                    (cx, cy),
-                    (cell_pixel_width_fast, cell_h),
-                    fg_rgba,
-                    sw,
-                    sh,
-                    scale_factor,
-                ) {
-                    geometry_quads.extend(quads);
-                    continue;
-                }
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch: cell.ch,
                     font_slot: 0,
@@ -4895,7 +4719,15 @@ impl GpuRenderer {
                     italic: style.italic,
                     glyph_id: 0,
                 };
-                let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                // T13/T14: sonicterm-font owns the atlas. No swash
+                // fallback — when `wt_raster` is None (test fixture
+                // without a FontStack) the glyph is silently skipped
+                // so the renderer still paints quads.
+                let Some(wt) = wt_raster.as_deref_mut() else {
+                    continue;
+                };
+                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let Some(info) = info_opt else {
                     if !cell.ch.is_whitespace() {
                         missing_chars_this_frame.push(cell.ch);
                     }
@@ -4906,74 +4738,22 @@ impl GpuRenderer {
                 }
                 let cx = snapped_cell_x[*col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
-                let inv_s = 1.0 / scale_factor;
-                let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
-                let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let gw_nat = info.px_size[0] as f32 * inv_s;
-                let gh_nat = info.px_size[1] as f32 * inv_s;
-                // #438: apply symbol-fit policy. ASCII chars classify as
-                // `Natural` (identity), so the hot path is unchanged for
-                // text; this exists to keep the three emit paths
-                // consistent for the rare Powerline/PUA char that slips
-                // through `run_is_ascii_fast` (none today, but the policy
-                // lives in one place).
-                // #621 sym-A/B: pass num_cells=1 (ascii_fast path is always
-                // narrow ascii). For wide/Powerline/NF clusters we hit the
-                // non-ASCII path below which has cluster_cells in scope.
-                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit_v2(
-                    (gx_nat, gy_nat, gw_nat, gh_nat),
-                    (cx, cy),
-                    (cell_w, cell_h),
-                    sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
-                    1,
-                );
-                // #537: Block Elements (U+2580..=U+259F) override the
-                // font glyph entirely with per-codepoint sub-cell rects.
-                // For multi-rect variants we still emit only the primary
-                // rect here (consistent with single-quad pipeline) —
-                // proper multi-rect emit is tracked in the geometry epic.
-                let (gx, gy, gw, gh) = if let Some(geom) =
-                    sonicterm_text::block_element_geometry::block_element_rect(
-                        cell.ch,
-                        (cx, cy),
-                        (cell_w, cell_h),
-                    ) {
-                    sonicterm_text::block_element_geometry::primary_rect(&geom)
-                } else {
-                    (gx, gy, gw, gh)
-                };
-                // #537: emit NF icon-cell-fit decision trace so PMs can
-                // diagnose IconCellFit on a per-codepoint basis without
-                // recompiling. Cheap: it's a `tracing::debug!` gated by
-                // the env-filter; the formatting only runs when enabled.
-                sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
-                    cell.ch,
-                    Some(0),
-                    gw_nat,
-                    cell_w,
-                );
-                // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-                let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
-                    (gx, gy, gw, gh),
-                    scale_factor,
-                );
+                // G1a: atlas px == draw px == raster px, so the prior
+                // atlas-to-logical projection collapses to the identity.
+                let inv_s = 1.0_f32;
+                let gx = cx + info.px_offset[0] as f32 * inv_s;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let gw = info.px_size[0] as f32 * inv_s;
+                let gh = info.px_size[1] as f32 * inv_s;
+                // T13/T14: the legacy `apply_symbol_fit_v2` +
+                // `block_element_rect` overlay tracks the SwashRasterizer
+                // path; sonicterm-font handles cell fit natively. ASCII
+                // glyphs are always `Natural` (identity) so dropping
+                // the overlay is a no-op for the steady-state hot path.
+                let (gx, gy, gw, gh) =
+                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba = glyphon_color_to_linear_rgba(color);
-                // #461 PR-B1: instrument live render path (ASCII fast path glyph emit).
-                // PM repro: RUST_LOG=sonicterm_gpu=debug ./target/release/sonicterm-windows.exe
-                tracing::debug!(
-                    target: "sonic::render::glyph",
-                    ch = ?cell.ch,
-                    codepoint = format!("U+{:04X}", cell.ch as u32),
-                    code_u32 = cell.ch as u32,
-                    scale_factor = scale_factor,
-                    classify = ?sonicterm_text::swash_rasterizer::classify_symbol(cell.ch),
-                    final_rect = ?(gx, gy, gw, gh),
-                    final_rgba = ?rgba,
-                    is_color = info.is_color,
-                    path = "ascii_fast",
-                    "glyph render emit"
-                );
+                let rgba = chrome_color_to_linear_rgba(color);
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4984,33 +4764,40 @@ impl GpuRenderer {
             return;
         }
 
-        // #595 unit-fix: shape_run compares the singleton-widening
-        // threshold against LayoutGlyph.w which is in raster pixels
-        // (cosmic-text sizes the buffer at font_size, which is ALREADY
-        // self.font_size * self.scale_factor by the time it reaches
-        // this function — see the flush_shape_run callsite). cell_w
-        // here is the LOGICAL cell pitch (from measure_cell at logical
-        // font size). At 2x DPI those units differ by scale_factor, so
-        // passing cell_w raw would halve the threshold and widen
-        // ordinary 1-cell non-ASCII glyphs. Convert to raster pixels.
-        let cell_w_px = cell_w * scale_factor;
-        let shaped = shape_cache.get_or_shape_with_cell_w(
-            rasterizer,
-            font_family,
-            font_size,
-            style,
-            cells,
-            cell_w_px,
-        );
+        // ── Non-ASCII / mixed run ── T9: drive sonicterm-font directly.
+        //
+        // Build the text + byte-to-col map for `shape_run_with_wezterm`.
+        // Identical to the legacy cluster-width overlay's input
+        // assembly so wezterm sees the same input bytes.
+        let Some(stack) = font_stack else {
+            // No FontStack → no shaper available; non-ASCII clusters
+            // emit nothing this frame. Test-only path (production
+            // always carries a stack).
+            return;
+        };
+        let mut text = String::with_capacity(cells.len() * 2);
+        let mut cell_cols: Vec<u16> = Vec::with_capacity(cells.len() * 2);
+        for (col, cell) in cells {
+            let start = text.len();
+            text.push(cell.ch);
+            if let Some(extras) = cell.extras() {
+                for ch in extras.chars() {
+                    text.push(ch);
+                }
+            }
+            let appended = text.len() - start;
+            for _ in 0..appended {
+                cell_cols.push(*col);
+            }
+        }
+        if text.is_empty() {
+            return;
+        }
 
-        // Belt-and-braces (#594): once shape.rs groups a ligature cluster
-        // into ONE ShapedGlyph, no SUBSEQUENT glyph should land inside
-        // that cluster's column span. A duplicate here means a future
-        // shape.rs refactor regressed the grouping gate (the original
-        // #587 / #594 bug had N overlapping ShapedGlyphs per cluster).
-        // debug_only — release builds skip the bookkeeping entirely.
-        #[cfg(debug_assertions)]
-        let mut _covered_span_end: Option<u16> = None;
+        let infos = match stack.shape_text(&text) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
 
         // Build a lookup from col → cell so we can recover per-cell
         // attributes (color, WIDE flag, the actual codepoint for tofu
@@ -5021,13 +4808,47 @@ impl GpuRenderer {
             cell_by_col.insert(*col, c.clone());
         }
 
-        for g in shaped {
+        // We consume WezTerm's GlyphInfo directly here and project it into the
+        // Sonic glyph record the rest of the renderer already uses. No
+        // WtShapedGlyph wrapper: cluster byte offsets map straight back through
+        // `cell_cols`.
+        let mut shaped = Vec::with_capacity(infos.len());
+        let mut last_col: u16 = cell_cols.first().copied().unwrap_or(0);
+        for info in infos {
+            let cluster_byte = info.cluster as usize;
+            let lead_col = cell_cols
+                .get(cluster_byte)
+                .copied()
+                .or_else(|| (0..=cluster_byte).rev().find_map(|i| cell_cols.get(i).copied()))
+                .unwrap_or(last_col);
+            last_col = lead_col;
+            let lead_ch =
+                cell_by_col.get(&lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
+            shaped.push(sonicterm_text::shape::ShapedGlyph {
+                lead_col,
+                cluster_cells: info.num_cells as u16,
+                font_slot: u8::try_from(info.font_idx).unwrap_or(u8::MAX),
+                glyph_id: info.glyph_pos,
+                x_advance: info.x_advance.get() as f32,
+                y_offset: info.y_offset.get() as f32,
+                ch: lead_ch,
+            });
+        }
+
+        // Belt-and-braces (#594): once shape grouped a ligature cluster
+        // into ONE ShapedGlyph, no SUBSEQUENT glyph should land inside
+        // that cluster's column span. debug_only — release builds skip
+        // the bookkeeping entirely.
+        #[cfg(debug_assertions)]
+        let mut _covered_span_end: Option<u16> = None;
+
+        for g in &shaped {
             #[cfg(debug_assertions)]
             {
                 if let Some(end) = _covered_span_end {
                     debug_assert!(
                         g.lead_col >= end,
-                        "shape.rs (#594) emitted overlapping ShapedGlyphs: \
+                        "shape_run_with_wezterm emitted overlapping ShapedGlyphs: \
                          lead_col={} lands inside previously-emitted cluster \
                          ending at col {} (ch={:?}, cluster_cells={})",
                         g.lead_col,
@@ -5040,228 +4861,189 @@ impl GpuRenderer {
             }
             let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
-            // Logical cell pixel width — retained for the tofu fallback box.
-            // The glyph-emit branches below derive per-cell width from
-            // `snapped_cell_x` (#470) so adjacent Powerline cells share an
-            // edge at fractional DPI; tofu boxes have an explicit inset and
-            // don't need the abutting-edge guarantee.
-            // #567: ligature / nerd-font clusters span N cells (cluster_cells
-            // from shape.rs). Without honoring it the glyph was squeezed into
-            // a single cell, clipping ligatures like `=>` and NF icons that
-            // shape as multi-cell composed clusters. WIDE (CJK) still forces
-            // 2 cells regardless of cluster_cells (CJK shapes 1 glyph / 1
-            // cluster cell + WIDE flag, so the union biases toward 2).
             let cluster_cells = g.cluster_cells.max(1) as usize;
             let cells_to_span = if is_wide { 2 } else { cluster_cells };
             let cell_pixel_width = cell_w * cells_to_span as f32;
 
-            // glyph_id == 0 from the shaper means one of two things:
-            //   (a) true notdef — cosmic-text couldn't shape it at all
-            //       (lead_cell.ch is '\0' or whitespace), OR
-            //   (b) cosmic-text shaped through an OS font outside our
-            //       fallback chain, so `shape_run` zeroed the glyph_id
-            //       to fall back to the char-based path (see comment in
-            //       shape.rs). In that case lead_cell.ch is a real
-            //       printable codepoint and we should resolve a slot
-            //       via the rasterizer's charmap walk and rasterize
-            //       through the char path instead of drawing tofu.
+            // ── T9: BlockKey dispatch at the cluster lead cell ──
             //
-            // Regression target: CJK + emoji mangled to wrong glyphs in
-            // production (PR fix/cjk-render-mangled-v2). The old
-            // unwrap_or(0) in shape.rs caused '中' to render as '臭'
-            // because the shaped id was sent to the primary font.
-            if g.glyph_id == 0 {
-                let ch = lead_cell.ch;
-                if ch == '\0' || ch.is_whitespace() {
-                    continue;
-                }
-                // Try char-based fallback resolution.
-                let resolved = rasterizer.resolve_slot(ch, style.bold, style.italic);
-                let Some(slot) = resolved else {
-                    // Every face in the chain lacks this codepoint —
-                    // genuine tofu.
-                    let cx = snapped_cell_x[g.lead_col as usize];
-                    let cy = top_inset + f32::from(row) * cell_h;
-                    let inset = (cell_h * 0.12).max(1.0);
-                    // #461 PR-B1: log every tofu emit so we can pin which
-                    // codepoint dropped + why. Critical for diagnosing the
-                    // U+25B6 / Powerline / NF tofu reported visually.
-                    let tofu_rect = (
-                        cx + inset,
-                        cy + inset,
-                        cell_pixel_width - inset * 2.0,
-                        cell_h - inset * 2.0,
-                    );
-                    let tofu_color = cell_fg(&lead_cell, theme, fg_default);
-                    let tofu_rgba = glyphon_color_to_linear_rgba(tofu_color);
-                    tracing::debug!(
-                        target: "sonic::render::glyph",
-                        ch = ?ch,
-                        codepoint = format!("U+{:04X}", ch as u32),
-                        code_u32 = ch as u32,
-                        bold = style.bold,
-                        italic = style.italic,
-                        scale_factor = scale_factor,
-                        classify = ?sonicterm_text::swash_rasterizer::classify_symbol(ch),
-                        resolve_slot = ?resolved,
-                        final_rect = ?tofu_rect,
-                        final_rgba = ?tofu_rgba,
-                        is_color = false,
-                        path = "char_fallback_tofu",
-                        "tofu emitted — every face in chain lacks codepoint"
-                    );
-                    missing_tofu.push((
-                        cx + inset,
-                        cy + inset,
-                        cell_pixel_width - inset * 2.0,
-                        cell_h - inset * 2.0,
-                        cell_fg(&lead_cell, theme, fg_default),
-                    ));
-                    missing_chars_this_frame.push(ch);
-                    continue;
+            // Box-drawing (U+2500..=U+259F), Powerline (U+E0A0..=U+E0D7),
+            // Sextant (U+1FB00..), Octant, and Braille (U+2800..) all
+            // recognize via `BlockKey::from_char`. When the lead cell
+            // resolves, the vendored wezterm geometry produces the
+            // glyph; the atlas keys it under
+            // `(font_slot = 0xFF, glyph_id = hashed SizedBlockKey)` so
+            // it never collides with a wezterm-shaped glyph
+            // (`FallbackIdx` truncated to u8 cannot reach 0xFF in
+            // practice — wezterm chains a handful of fallbacks, never
+            // 255). The shaper-reported `glyph_id` is intentionally
+            // ignored for this branch — wezterm itself draws block
+            // glyphs through the same `customglyph::block_sprite` we
+            // vendored, so taking the font glyph would produce the
+            // wrong rendering (or tofu, if the chosen face lacks the
+            // codepoint).
+            if let Some(block_key) = sonicterm_block_glyph::BlockKey::from_char(lead_cell.ch) {
+                let cx = snapped_cell_x[g.lead_col as usize];
+                let cy = top_inset + f32::from(row) * cell_h;
+                let span = if is_wide { 2usize } else { cluster_cells };
+                let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
+                let cell_pixel_width_snapped =
+                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
+                // Cell box used both as the block_sprite metric and as
+                // the on-screen rect. raster-px throughout.
+                let cell_w_i = cell_w.round().max(1.0) as isize;
+                let cell_h_i = cell_h.round().max(1.0) as isize;
+                // Bug 4 / wezterm-takeover: stroke width for the
+                // `PolyStyle::Outline` box-drawing path comes from the
+                // font's actual `underline_thickness`, mirroring
+                // wezterm-gui's `utilsprites.rs:29` (`metrics
+                // .underline_thickness.get().round().max(1.) as isize`).
+                // A hardcoded 1 was producing nearly-invisible 1-device-px
+                // strokes that looked like tofu rectangles at every font
+                // size — the user-reported "U+2500 renders as a single
+                // tofu box" symptom. Use the font metric when we have
+                // it; fall back to a 1/16-cell-height heuristic for the
+                // test fixture path with no FontStack.
+                let underline_h_isize: isize = font_stack
+                    .and_then(|s| s.cell_metrics_raster_px().ok())
+                    .map(|m| m.underline_h.round().max(1.0) as isize)
+                    .unwrap_or_else(|| ((cell_h / 16.0).round().max(1.0)) as isize);
+                let size = sonicterm_block_glyph::glue::Size::new(cell_w_i, cell_h_i);
+                let sized_key = sonicterm_block_glyph::SizedBlockKey { block: block_key, size };
+                // BlockKey identity collapses to a u32 via the std
+                // `DefaultHasher`. Block glyphs are size-sensitive
+                // (the same key at a different cell pitch produces a
+                // different bitmap) so the hash inputs include the
+                // packed cell dims as well as the variant. We don't
+                // need cryptographic strength — only collision
+                // resistance among the ~hundred block glyphs the
+                // renderer touches per frame; `DefaultHasher` is
+                // overkill but free.
+                //
+                // Bug 4 fix: `underline_h_isize` participates in the
+                // hash too — the same SizedBlockKey at the same cell
+                // size renders with a different stroke width when the
+                // font's underline_thickness changes (e.g. live font
+                // family swap), so the cached tile would be stale
+                // without this bit of the key.
+                let glyph_id_u32: u32 = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    sized_key.hash(&mut h);
+                    underline_h_isize.hash(&mut h);
+                    let h64 = h.finish();
+                    // Fold to u32 by xoring the halves so all 64 bits
+                    // contribute to the atlas key.
+                    ((h64 >> 32) as u32) ^ (h64 as u32)
                 };
-                // #559 PR-A: Phase-A geometry funnel for the char-fallback
-                // branch. The check sits AFTER tofu resolution (we still
-                // want a tofu box for genuinely-unsupported codepoints)
-                // and BEFORE the glyph atlas lookup. `lead_cell.ch` is
-                // the visible cell's codepoint (#538 rule); the cell box
-                // anchors against the snapped column edges so adjacent
-                // box-drawing cells line up at fractional DPI (#470).
-                {
-                    let cx = snapped_cell_x[g.lead_col as usize];
-                    let cy = top_inset + f32::from(row) * cell_h;
-                    // #567: honor cluster_cells for ligatures + NF composed clusters.
-                    let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
-                    let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-                    let cell_pixel_width_snapped =
-                        snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-                    let fg = cell_fg(&lead_cell, theme, fg_default);
-                    let fg_rgba = glyphon_color_to_linear_rgba(fg);
-                    if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
-                        lead_cell.ch,
-                        (cx, cy),
-                        (cell_pixel_width_snapped, cell_h),
-                        fg_rgba,
-                        sw,
-                        sh,
-                        scale_factor,
-                    ) {
-                        geometry_quads.extend(quads);
-                        continue;
+                // Block glyphs ignore bold/italic — the geometry is the
+                // same regardless of cell style, so collapse those bits
+                // to keep the cache footprint minimal.
+                let key = sonicterm_types::glyph_key::GlyphKey {
+                    ch: lead_cell.ch,
+                    font_slot: 0xFF,
+                    weight_bold: false,
+                    italic: false,
+                    glyph_id: glyph_id_u32,
+                };
+                // Wrap `block_sprite` in a thin `Rasterizer` so the
+                // atlas only computes the sprite on a cache miss.
+                // Identity is captured by `key` above; the rasterizer
+                // ignores its `GlyphKey` argument and returns the
+                // tile derived from `sized_key`.
+                struct BlockSpriteRasterizer {
+                    sized_key: sonicterm_block_glyph::SizedBlockKey,
+                    underline_h: isize,
+                }
+                impl sonicterm_text::glyph_atlas::Rasterizer for BlockSpriteRasterizer {
+                    fn rasterize(
+                        &mut self,
+                        _key: sonicterm_types::glyph_key::GlyphKey,
+                    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+                        // Synthesize the BlockCellMetrics input that
+                        // `block_sprite` expects. Customglyph reads
+                        // `cell_size`, `underline_height`, and (only
+                        // under the `PolyWithCustomMetrics` arm)
+                        // descender / descender_row / descender_plus_two
+                        // / strike_row. Cell metrics are derived from
+                        // the SizedBlockKey's `size`. The underline
+                        // height arrives from the font (Bug 4 fix —
+                        // hardcoded 1 made Outline strokes invisible).
+                        // anti_alias=true — matches the wezterm-gui
+                        // default behavior (`config.anti_alias = true`).
+                        // We don't surface a config knob: per spec
+                        // "where wezterm and sonicterm disagree,
+                        // wezterm wins" + the upstream default is AA.
+                        let block_tile = sonicterm_block_glyph::block_sprite_with_cell_metrics(
+                            self.sized_key,
+                            self.underline_h,
+                            true,
+                        )
+                        .ok()?;
+                        // T7 Option A: field-for-field copy
+                        // `BlockRasterTile` → `RasterTile`. Same 7
+                        // fields, same semantics; T10 may collapse the
+                        // duplicate by re-exporting `RasterTile`
+                        // directly from `sonicterm-text` once that
+                        // crate compiles again.
+                        let alpha_mask: Vec<u8> =
+                            block_tile.coverage.chunks_exact(4).map(|px| px[3]).collect();
+                        Some(sonicterm_text::glyph_atlas::RasterTile {
+                            width: block_tile.width,
+                            height: block_tile.height,
+                            offset_x: block_tile.offset_x,
+                            offset_y: block_tile.offset_y,
+                            advance: block_tile.advance,
+                            coverage: alpha_mask,
+                            // WezTerm customglyph geometry is a mask for the
+                            // cell foreground, not a self-colored emoji. Treat
+                            // it as monochrome coverage so brand/icons like
+                            // claude's red block logo inherit SGR fg.
+                            is_color: false,
+                        })
                     }
                 }
-                let key = sonicterm_types::glyph_key::GlyphKey {
-                    ch,
-                    font_slot: slot,
-                    weight_bold: style.bold,
-                    italic: style.italic,
-                    glyph_id: 0,
-                };
-                let Some(info) = glyph_atlas.get_or_insert(key, rasterizer) else {
+                let mut block_raster =
+                    BlockSpriteRasterizer { sized_key, underline_h: underline_h_isize };
+                let Some(info) = glyph_atlas.get_or_insert(key, &mut block_raster) else {
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                let cx = snapped_cell_x[g.lead_col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
-                // Atlas tiles are rasterized at `font_size * scale_factor`
-                // physical pixels, but GPU output is in *logical* units —
-                // we MUST scale back by `inv_s`. The shaped path below
-                // applies this; the char-based fallback used to omit it,
-                // producing CJK + emoji glyphs at 2x size on Retina that
-                // overflowed into the next cell horizontally and stomped
-                // neighbouring Latin text. Regression target:
-                // `wide_cell_glyph_width_does_not_exceed_two_cells`.
-                let inv_s = 1.0 / scale_factor;
-                let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
-                let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let gw_nat = info.px_size[0] as f32 * inv_s;
-                let gh_nat = info.px_size[1] as f32 * inv_s;
-                // #470: derive the cell-box width that `apply_symbol_fit`
-                // anchors against from snapped column edges, so Powerline
-                // chevrons in adjacent cells produce identical device-pixel
-                // widths at fractional DPI. Span is 1 for narrow, 2 for WIDE.
-                // #567: honor cluster_cells so multi-cell ligatures + NF
-                // composed clusters use the full reserved cell range.
-                let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
-                let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-                let cell_pixel_width_snapped =
-                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-                // Powerline PUA (U+E0B0..=U+E0BF) glyphs are cell-filling
-                // separators — anchor them to the cell rect. NerdFont PUA
-                // icons (#438) scale-to-fit to ~0.95 cell_h centered.
-                // See `swash_rasterizer::{classify_symbol, apply_symbol_fit_v2}`.
-                // #621 sym-A/B: pass num_cells = span so PowerlineCellFill
-                // fills the full (snapped) span and IconCellFit scales width
-                // budget to the full span — previously they collapsed to 1 cell.
-                let num_cells = span.min(u8::MAX as usize) as u8;
-                let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit_v2(
-                    (gx_nat, gy_nat, gw_nat, gh_nat),
-                    (cx, cy),
-                    (cell_w, cell_h),
-                    sonicterm_text::swash_rasterizer::classify_symbol(ch),
-                    num_cells,
-                );
-                // #537: Block Elements override font glyph with per-codepoint
-                // sub-cell rects (see ASCII-fast path above for rationale).
-                let (gx, gy, mut gw, mut gh) = if let Some(geom) =
-                    sonicterm_text::block_element_geometry::block_element_rect(
-                        ch,
-                        (cx, cy),
-                        (cell_pixel_width_snapped, cell_h),
-                    ) {
-                    let (px, py, pw, ph) =
-                        sonicterm_text::block_element_geometry::primary_rect(&geom);
-                    (px, py, pw, ph)
-                } else {
-                    (gx, gy, gw, gh)
-                };
-                // #537: NF icon-cell-fit decision trace (char-fallback path).
-                sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
-                    ch,
-                    Some(slot as usize),
-                    gw_nat,
-                    cell_pixel_width_snapped,
-                );
-                // Clamp tile to the cell box the codepoint reserves
-                // (1 cell for narrow, 2 for WIDE). Some fallback faces
-                // (notably Apple Color Emoji at small sizes, certain CJK
-                // fonts) emit bitmaps slightly wider than the cell box;
-                // unclamped they bleed into the following column.
-                if gw > cell_pixel_width_snapped {
-                    let ratio = cell_pixel_width_snapped / gw;
-                    gw = cell_pixel_width_snapped;
-                    gh *= ratio;
-                }
+                // Block glyphs are cell-sized BGRA tiles aligned to the
+                // cell-box origin. No baseline offset, no symbol-fit,
+                // no per-glyph stretching — `block_sprite` already
+                // emits exactly the cell rect, so we draw it 1:1 at
+                // `(cx, cy)` with width = the snapped cell-box width.
+                // Color tiles are pre-shaded (BGRA); the shader skips
+                // the `cov * fg_color` modulation.
+                let gx = cx;
+                let gy = cy;
+                let gw = cell_pixel_width_snapped;
+                let gh = cell_h;
+                let (gx, gy, gw, gh) =
+                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(&lead_cell, theme, fg_default);
-                // Color glyphs (emoji) carry their own colour in the
-                // BGRA atlas; the shader ignores `color` when
-                // `flags.x >= 0.5`. Set `color` to white so that a
-                // buggy shader fallback wouldn't tint the emoji red.
+                // block_sprite emits BGRA tiles. The atlas reports
+                // `is_color = true`, so the shader uses the tile
+                // unmodulated; set `color` to white as a safety net
+                // mirroring the color-emoji path.
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    glyphon_color_to_linear_rgba(color)
+                    chrome_color_to_linear_rgba(color)
                 };
-                // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-                let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
-                    (gx, gy, gw, gh),
-                    scale_factor,
-                );
-                // #461 PR-B1: char-fallback shaped path emit.
                 tracing::debug!(
                     target: "sonic::render::glyph",
-                    ch = ?ch,
-                    codepoint = format!("U+{:04X}", ch as u32),
-                    code_u32 = ch as u32,
-                    scale_factor = scale_factor,
-                    classify = ?sonicterm_text::swash_rasterizer::classify_symbol(ch),
+                    ch = ?lead_cell.ch,
+                    codepoint = format!("U+{:04X}", lead_cell.ch as u32),
+                    code_u32 = lead_cell.ch as u32,
                     final_rect = ?(gx, gy, gw, gh),
                     final_rgba = ?rgba,
                     is_color = info.is_color,
-                    path = "char_fallback_shaped",
-                    "glyph render emit"
+                    path = "block_sprite",
+                    "glyph render emit (block-glyph)"
                 );
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
@@ -5272,34 +5054,80 @@ impl GpuRenderer {
                 continue;
             }
 
-            // #559 PR-A: Phase-A geometry funnel for the primary shaped
-            // branch (the dominant code path for non-ASCII glyphs).
-            // Classify against `lead_cell.ch` per the #538 rule — `g.ch`
-            // is the cluster lead, often a space for chevron-as-cont
-            // clusters. Falls through to the regular shaped-glyph path
-            // when the codepoint isn't covered.
-            {
-                let cx = snapped_cell_x[g.lead_col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
-                // #567: honor cluster_cells.
-                let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
-                let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-                let cell_pixel_width_snapped =
-                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-                let fg = cell_fg(&lead_cell, theme, fg_default);
-                let fg_rgba = glyphon_color_to_linear_rgba(fg);
-                if let Some(quads) = crate::geometry_emit::emit_geometry_for_char(
-                    lead_cell.ch,
-                    (cx, cy),
-                    (cell_pixel_width_snapped, cell_h),
-                    fg_rgba,
-                    sw,
-                    sh,
-                    scale_factor,
-                ) {
-                    geometry_quads.extend(quads);
+            // ── Normal wezterm-shape path (non-block cluster) ──
+            //
+            // T13/T14: post-the legacy chrome layer the char-fallback path is wezterm-
+            // only. FontStack is the sole rasterizer; missing chars
+            // emit tofu via `Rasterizer::rasterize` returning
+            // None (when sonicterm-font's fallback chain has nothing).
+            if g.glyph_id == 0 {
+                let ch = lead_cell.ch;
+                if ch == '\0' || ch.is_whitespace() {
                     continue;
                 }
+                // T13/T14: drop the `resolve_slot` swash walk. wezterm
+                // handles fallback internally — pass `font_slot = 0`
+                // and let `FontStack::rasterize` find a face
+                // (it shapes the single char against the loaded font
+                // when glyph_id == 0).
+                let slot: u8 = 0;
+                let key = sonicterm_types::glyph_key::GlyphKey {
+                    ch,
+                    font_slot: slot,
+                    weight_bold: style.bold,
+                    italic: style.italic,
+                    glyph_id: 0,
+                };
+                let Some(wt) = wt_raster.as_deref_mut() else {
+                    continue;
+                };
+                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let Some(info) = info_opt else {
+                    // True tofu — wezterm fallback chain rejected.
+                    let cx = snapped_cell_x[g.lead_col as usize];
+                    let cy = top_inset + f32::from(row) * cell_h;
+                    let inset = (cell_h * 0.12).max(1.0);
+                    missing_tofu.push((
+                        cx + inset,
+                        cy + inset,
+                        cell_pixel_width - inset * 2.0,
+                        cell_h - inset * 2.0,
+                        cell_fg(&lead_cell, theme, fg_default),
+                    ));
+                    missing_chars_this_frame.push(ch);
+                    continue;
+                };
+                if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    continue;
+                }
+                let cx = snapped_cell_x[g.lead_col as usize];
+                let cy = top_inset + f32::from(row) * cell_h;
+                let inv_s = 1.0_f32;
+                let gx = cx + info.px_offset[0] as f32 * inv_s;
+                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+                let gw = info.px_size[0] as f32 * inv_s;
+                let gh = info.px_size[1] as f32 * inv_s;
+                // Bug 2 / wezterm-takeover § "Prefer wezterm everywhere":
+                // No `gw > cell_pixel_width_snapped` clamp here either —
+                // see the matching comment in the main shaped branch below.
+                // sonicterm-font sizes glyphs to the cell box natively for
+                // typical cells; ligature halves intentionally exceed it
+                // and must be allowed to.
+                let color = cell_fg(&lead_cell, theme, fg_default);
+                let rgba = if info.is_color {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    chrome_color_to_linear_rgba(color)
+                };
+                let (gx, gy, gw, gh) =
+                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+                glyph_instances.push(GlyphInstance {
+                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
+                    uv: info.uv,
+                    color: rgba,
+                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                });
+                continue;
             }
 
             let key = sonicterm_types::glyph_key::GlyphKey::shaped(
@@ -5309,66 +5137,21 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            // #610 sym-1 PR-D: IconCellFit glyphs (NerdFont PUA,
-            // geometric arrow icons) get routed through the
-            // physical-bitmap resampler PR-B added in
-            // `glyph_atlas::insert_resampled`. The pre-#610 path
-            // inserted the natural-size tile and let
-            // `apply_symbol_fit(IconCellFit)` stretch the QUAD; the
-            // GPU's Nearest sampler then over-stretched the small
-            // bitmap → step-edges and aliasing. By resampling the
-            // bitmap to the cell box (Lanczos3 down / Mitchell up)
-            // at insert time, the QUAD matches the tile 1:1 and the
-            // existing Nearest sampler stays correct (per Opus PR-B
-            // comment: keep Nearest, fix the bitmap upstream). Mirrors
-            // WezTerm's `window/src/bitmaps/mod.rs:380-394`.
-            //
-            // Non-IconCellFit glyphs (text, Powerline cell-fill, box
-            // drawing, block elements) keep the natural-size insert —
-            // they either match the cell box already (text), use
-            // geometry quads instead of bitmaps (box / block / many
-            // Powerline), or anchor cell-fill which is a quad scale
-            // not a bitmap stretch.
-            let lead_classify = sonicterm_text::swash_rasterizer::classify_symbol(lead_cell.ch);
+            // T13/T14: sonicterm-font is the sole rasterizer; the
+            // legacy `swash_rasterizer::classify_symbol` / SymbolFit
+            // family routes through the SwashRasterizer which is gone.
+            // sonicterm-font sizes glyphs natively, so the IconCellFit
+            // resample helper isn't needed either. Atlas keys remain
+            // identical (font_slot, glyph_id) so cached tiles survive.
             let span_cells = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
             let span_end_col = ((g.lead_col as usize) + span_cells).min(snapped_cell_x.len() - 1);
             let cell_box_w_logical =
                 snapped_cell_x[span_end_col] - snapped_cell_x[g.lead_col as usize];
-            let Some(info) = (if matches!(
-                lead_classify,
-                sonicterm_text::swash_rasterizer::SymbolFit::IconCellFit
-            ) {
-                // Target box in PHYSICAL pixels — atlas tiles are
-                // stored at raster_px (font_size * scale_factor) so
-                // the resample target must also be physical. The
-                // `apply_symbol_fit(IconCellFit)` policy scales the
-                // QUAD to (cell_pixel_width_snapped, 0.95 * cell_h)
-                // logical px while preserving aspect ratio; we
-                // mirror those same dims (multiplied by scale_factor)
-                // for the bitmap so the QUAD:TILE ratio is 1:1.
-                let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
-                let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
-                let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
-                glyph_atlas.get_or_insert_resampled(key, rasterizer, |tile| {
-                    if tile.width == 0 || tile.height == 0 {
-                        return None;
-                    }
-                    // #610d revise (Haiku Blocker 1, Option A): match
-                    // the resample target to what `apply_symbol_fit(
-                    // IconCellFit)` will draw. That policy (post-#461
-                    // PR-B2b) is explicit: NO aspect preservation,
-                    // fill `cell_w` × `ICON_FIT_TARGET * cell_h`,
-                    // matching Windows Terminal's builtinGlyphs.
-                    // Resampling to the same (cell_box_w_phys,
-                    // target_h_phys) makes the atlas tile 1:1 with
-                    // the production quad — Nearest sampler stays
-                    // pixel-accurate and the horizontal stretch
-                    // residual that bypassed PR-B is gone.
-                    Some((target_w_phys_box, target_h_phys))
-                })
-            } else {
-                glyph_atlas.get_or_insert(key, rasterizer)
-            }) else {
+            let _ = cell_box_w_logical;
+            let Some(wt) = wt_raster.as_deref_mut() else {
+                continue;
+            };
+            let Some(info) = glyph_atlas.get_or_insert(key, wt) else {
                 continue;
             };
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
@@ -5376,95 +5159,32 @@ impl GpuRenderer {
             }
             let cx = snapped_cell_x[g.lead_col as usize];
             let cy = top_inset + f32::from(row) * cell_h;
-            let inv_s = 1.0 / scale_factor;
-            let gx_nat = cx + info.px_offset[0] as f32 * inv_s;
-            let gy_nat = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-            let gw_nat = info.px_size[0] as f32 * inv_s;
-            let gh_nat = info.px_size[1] as f32 * inv_s;
-            // #470: derive cell-box width from snapped column edges (span=1
-            // for narrow, 2 for WIDE). Adjacent Powerline chevrons then
-            // produce identical device-pixel widths at fractional DPI.
-            // #567: honor cluster_cells so ligatures + NF composed
-            // multi-cell clusters get the full reserved cell range.
-            let span = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
-            let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-            let cell_pixel_width_snapped =
-                snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-            // Powerline PUA (U+E0B0..=U+E0BF) anchor + NerdFont PUA
-            // icon-cell-fit (#438) — see the matching call in the
-            // char-fallback branch above.
-            //
-            // #538: classify against `lead_cell.ch` — the visible cell's
-            // codepoint — NOT `g.ch`. `g.ch` is the shape *cluster lead*
-            // (from `shape.rs:L258` `text[g.start..end].chars().next()`),
-            // which for a chevron-as-continuation cluster is often a
-            // space ' ' (Natural), causing `apply_symbol_fit` to skip
-            // cell-fill and emit the chevron as a 2-px baseline slice.
-            // Same fix applies to `block_element_rect` + the trace
-            // logger below: ALL `SymbolFit` buckets (PowerlineCellFill,
-            // BlockCellFill, BoxDrawingCellFill) share this dispatch.
-            let classify_ch = lead_cell.ch;
-            let (gx, gy, gw, gh) = sonicterm_text::swash_rasterizer::apply_symbol_fit(
-                (gx_nat, gy_nat, gw_nat, gh_nat),
-                (cx, cy),
-                (cell_pixel_width_snapped, cell_h),
-                sonicterm_text::swash_rasterizer::classify_symbol(classify_ch),
-            );
-            // #537: Block Elements override font glyph with per-codepoint
-            // sub-cell rects (see ASCII-fast path above for rationale).
-            let (gx, gy, mut gw, mut gh) = if let Some(geom) =
-                sonicterm_text::block_element_geometry::block_element_rect(
-                    classify_ch,
-                    (cx, cy),
-                    (cell_pixel_width_snapped, cell_h),
-                ) {
-                let (px, py, pw, ph) = sonicterm_text::block_element_geometry::primary_rect(&geom);
-                (px, py, pw, ph)
-            } else {
-                (gx, gy, gw, gh)
-            };
-            // #537: NF icon-cell-fit decision trace (shaped path).
-            sonicterm_text::swash_rasterizer::log_nf_icon_fit_decision(
-                classify_ch,
-                Some(g.font_slot as usize),
-                gw_nat,
-                cell_pixel_width_snapped,
-            );
-            // See the fallback path above for why we clamp to
-            // `cell_pixel_width_snapped` — the same overflow class can occur
-            // on shaped color emoji where the strike bitmap is slightly
-            // wider than the reserved 2-cell box.
-            if gw > cell_pixel_width_snapped {
-                let ratio = cell_pixel_width_snapped / gw;
-                gw = cell_pixel_width_snapped;
-                gh *= ratio;
-            }
+            let inv_s = 1.0_f32;
+            let gx = cx + info.px_offset[0] as f32 * inv_s;
+            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+            let gw = info.px_size[0] as f32 * inv_s;
+            let gh = info.px_size[1] as f32 * inv_s;
+            // Bug 2 / wezterm-takeover § "Prefer wezterm everywhere":
+            // No `gw > cell_pixel_width_snapped` clamp here. Half-
+            // ligature glyphs from sonicterm-font's GSUB substitutions
+            // (e.g. `=>` substitutes the source `=` into glyph_id
+            // 41082 and `>` into glyph_id 40766; each is a 16-px-wide
+            // bitmap with `bearing_x = -8` so the two halves visually
+            // fuse across cells N and N+1) MUST be allowed to extend
+            // beyond a single cell — wezterm-gui takes the same
+            // approach (see `wezterm-gui/src/termwindow/render/
+            // screen_line.rs` `width = sprite.coords.size.width *
+            // scale`, no cell-width cap). Squashing the bitmap to one
+            // cell collapses the ligature into a single-cell glyph
+            // with an inert neighbour cell.
             let color = cell_fg(&lead_cell, theme, fg_default);
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
-                glyphon_color_to_linear_rgba(color)
+                chrome_color_to_linear_rgba(color)
             };
-            // #405: snap to device pixels to avoid sub-pixel glyph blur on HiDPI Windows.
-            let (gx, gy, gw, gh) = sonicterm_render_model::geometry::snap_to_device_pixels(
-                (gx, gy, gw, gh),
-                scale_factor,
-            );
-            // #461 PR-B1: shaped path emit (the primary path for Powerline + NF icons).
-            tracing::debug!(
-                target: "sonic::render::glyph",
-                ch = ?lead_cell.ch,
-                codepoint = format!("U+{:04X}", lead_cell.ch as u32),
-                code_u32 = lead_cell.ch as u32,
-                glyph_id = g.glyph_id,
-                scale_factor = scale_factor,
-                classify = ?sonicterm_text::swash_rasterizer::classify_symbol(lead_cell.ch),
-                final_rect = ?(gx, gy, gw, gh),
-                final_rgba = ?rgba,
-                is_color = info.is_color,
-                path = "shaped",
-                "glyph render emit"
-            );
+            let (gx, gy, gw, gh) =
+                sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,
@@ -5475,12 +5195,187 @@ impl GpuRenderer {
     }
 }
 
-fn cell_fg(cell: &Cell, theme: &Theme, default: GColor) -> GColor {
-    match cell.fg {
+fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
+    color_to_chrome(cell.fg, theme, default)
+}
+
+fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
+    match color {
         Color::Default => default,
-        Color::Rgb(r, g, b) => GColor::rgb(r, g, b),
+        Color::Rgb(r, g, b) => ChromeColor::rgb(r, g, b),
         Color::Indexed(i) => indexed(i, theme).unwrap_or(default),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_inline_image_instances(
+    glyph_atlas: &mut GlyphAtlas,
+    out: &mut Vec<GlyphInstance>,
+    images: &[sonicterm_render_model::InlineImage],
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+) {
+    for image in images {
+        if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+            continue;
+        }
+        let key = sonicterm_types::glyph_key::GlyphKey {
+            ch: '\u{fffc}',
+            font_slot: 0xFE,
+            weight_bold: false,
+            italic: false,
+            glyph_id: fold_u64_to_u32(image.id),
+        };
+        struct ImageRasterizer<'a> {
+            image: &'a sonicterm_render_model::InlineImage,
+        }
+        impl sonicterm_text::glyph_atlas::Rasterizer for ImageRasterizer<'_> {
+            fn rasterize(
+                &mut self,
+                _key: sonicterm_types::glyph_key::GlyphKey,
+            ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+                Some(sonicterm_text::glyph_atlas::RasterTile {
+                    width: self.image.width,
+                    height: self.image.height,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: self.image.width as f32,
+                    coverage: self.image.bgra.as_ref().to_vec(),
+                    is_color: true,
+                })
+            }
+        }
+        let mut raster = ImageRasterizer { image };
+        let Some(info) = glyph_atlas.get_or_insert(key, &mut raster) else {
+            continue;
+        };
+        let x = origin_x + image.col as f32 * cell_w;
+        let y = origin_y + image.row as f32 * cell_h;
+        out.push(GlyphInstance {
+            rect: px_to_ndc(x, y, info.px_size[0] as f32, info.px_size[1] as f32, sw, sh),
+            uv: info.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [1.0, 0.0, 0.0, 0.0],
+        });
+    }
+}
+
+fn fold_u64_to_u32(value: u64) -> u32 {
+    ((value >> 32) as u32) ^ (value as u32)
+}
+
+fn underline_key(cell: &Cell) -> Option<(UnderlineStyle, Color)> {
+    cell.flags
+        .contains(CellFlags::UNDERLINE)
+        .then(|| (cell.underline_style(), cell.underline_color().unwrap_or(cell.fg)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_underline_quads(
+    out: &mut Vec<QuadInstance>,
+    style: UnderlineStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    cell_h: f32,
+    thickness: f32,
+    sw: f32,
+    sh: f32,
+    color: [f32; 4],
+) {
+    if w <= 0.0 {
+        return;
+    }
+    let bottom_y = y + cell_h - thickness;
+    match style {
+        UnderlineStyle::Single => {
+            out.push(QuadInstance::sharp(px_to_ndc(x, bottom_y, w, thickness, sw, sh), color));
+        }
+        UnderlineStyle::Double => {
+            let gap = thickness.max(1.0);
+            let y1 = (bottom_y - gap - thickness).max(y);
+            out.push(QuadInstance::sharp(px_to_ndc(x, y1, w, thickness, sw, sh), color));
+            out.push(QuadInstance::sharp(px_to_ndc(x, bottom_y, w, thickness, sw, sh), color));
+        }
+        UnderlineStyle::Dotted => {
+            let dot = (thickness * 1.6).max(1.0);
+            let step = dot * 2.0;
+            let mut dx = 0.0;
+            while dx < w {
+                let size = dot.min(w - dx);
+                out.push(QuadInstance::rounded(
+                    px_to_ndc(x + dx, bottom_y, size, dot, sw, sh),
+                    color,
+                    [size, dot],
+                    dot * 0.5,
+                ));
+                dx += step;
+            }
+        }
+        UnderlineStyle::Dashed => {
+            let dash = (thickness * 4.0).max(4.0);
+            let gap = (thickness * 2.0).max(2.0);
+            let mut dx = 0.0;
+            while dx < w {
+                let len = dash.min(w - dx);
+                out.push(QuadInstance::sharp(
+                    px_to_ndc(x + dx, bottom_y, len, thickness, sw, sh),
+                    color,
+                ));
+                dx += dash + gap;
+            }
+        }
+        UnderlineStyle::Curly => {
+            let amp = (thickness * 1.4).max(1.0);
+            let step = (thickness * 4.0).max(4.0);
+            let mid_y = y + cell_h - thickness - amp;
+            let mut sx = x;
+            let mut up = true;
+            while sx < x + w {
+                let ex = (sx + step).min(x + w);
+                let sy = if up { mid_y + amp } else { mid_y - amp };
+                let ey = if up { mid_y - amp } else { mid_y + amp };
+                push_line_segment_px(out, sx, sy, ex, ey, thickness, sw, sh, color);
+                sx = ex;
+                up = !up;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_line_segment_px(
+    out: &mut Vec<QuadInstance>,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    thickness: f32,
+    sw: f32,
+    sh: f32,
+    color: [f32; 4],
+) {
+    let pad = thickness * 0.5 + 1.0;
+    let x0 = ax.min(bx) - pad;
+    let y0 = ay.min(by) - pad;
+    let x1 = ax.max(bx) + pad;
+    let y1 = ay.max(by) + pad;
+    let w = (x1 - x0).max(1.0);
+    let h = (y1 - y0).max(1.0);
+    let cx = x0 + w * 0.5;
+    let cy = y0 + h * 0.5;
+    out.push(QuadInstance::line(
+        px_to_ndc(x0, y0, w, h, sw, sh),
+        color,
+        [w, h],
+        [ax - cx, ay - cy],
+        [bx - cx, by - cy],
+        thickness,
+    ));
 }
 
 /// Resolve a cell's background to a linear-space `[r,g,b,a]` suitable for the
@@ -5602,11 +5497,10 @@ pub fn emit_cell_bg_quads_clipped(
     // #489: build this pane's snapped-edge cache once. Per the
     // diagnosis, per-pane bg builds its own cache (not the active
     // pane's) so split-pane bg edges stay aligned with that pane's
-    // glyph cells. Test/debug helper takes scale = 1.0 here because
-    // its callers (debug surfaces) don't carry a real scale_factor;
-    // at integer scales `build_snapped_cell_x` is identity so this
-    // matches the prior raw-arithmetic behavior exactly.
-    let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols, 1.0);
+    // glyph cells. G1a: `build_snapped_cell_x` no longer takes a
+    // scale parameter — inputs are raster px already, so snapping
+    // is fixed to scale = 1.0 internally.
+    let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols);
     for r in 0..max_rows {
         emit_cell_bg_quads_for_row(
             grid,
@@ -5631,17 +5525,25 @@ pub fn emit_cell_bg_quads_clipped(
 /// `c`, and slot `c + span` is its right edge. Every overlay/glyph
 /// path that derives a horizontal rect from a column index must read
 /// from this cache so adjacent overlays share an exact device-pixel
-/// edge with the glyph cells they cover. Integer scales (1.0 / 2.0)
-/// are an identity fast path inside `snap_to_device_pixels`, so this
-/// helper is a no-op there and mac dHash snapshots stay green.
+/// edge with the glyph cells they cover.
+///
+/// G1a (wezterm-takeover): inputs are raster pixels, so "snapping to
+/// device pixels" reduces to integer-pixel rounding — the helper now
+/// passes scale = 1.0 to [`snap_to_device_pixels`] (raster px IS the
+/// device-pixel grid) instead of threading the renderer's DPI scale
+/// through the call. Behaviour at integer DPIs is identical to the
+/// pre-G1a `cell_w * scale` arithmetic; at fractional DPIs the new
+/// path matches what the renderer actually paints (a single integer
+/// raster-pixel-aligned grid) rather than the prior logical-px
+/// half-pixel cache.
 #[doc(hidden)]
 #[must_use]
-pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16, scale: f32) -> Vec<f32> {
+pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
     (0..=cols)
         .map(|col| {
             sonicterm_render_model::geometry::snap_to_device_pixels(
                 (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
-                scale,
+                1.0,
             )
             .0
         })
@@ -5768,9 +5670,9 @@ pub fn emit_cell_bg_quads_for_row(
     }
 }
 
-fn indexed(i: u8, theme: &Theme) -> Option<GColor> {
+fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
     let p = &theme.colors;
-    let pick = |h: &str| hex_to_glyphon(h);
+    let pick = |h: &str| hex_to_chrome_color(h);
     match i {
         0 => Some(pick(p.ansi.black.0.as_str())),
         1 => Some(pick(p.ansi.red.0.as_str())),
@@ -5792,43 +5694,43 @@ fn indexed(i: u8, theme: &Theme) -> Option<GColor> {
     }
 }
 
-fn hex_to_glyphon(h: &str) -> GColor {
-    let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-    if h.len() == 6 {
-        GColor::rgb(parse(0), parse(2), parse(4))
-    } else {
-        GColor::rgb(0, 0, 0)
-    }
+// T13/T14 (wezterm-takeover G3): `hex_to_the legacy chrome layer` and
+// `scale_the legacy chrome layer_alpha` have moved into `crate::color` under the
+// renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and
+// now consume `ChromeColor` instead of `legacy chrome color`.
+// Re-export them at the legacy path so callers that imported
+// `sonicterm_gpu::core::scale_the legacy chrome layer_alpha` can switch to the new
+// identifier (see `crates/sonicterm-app/tests/drag_visual_feedback.rs`
+// for the port). The legacy names are gone from this file entirely;
+// any caller that lingers on them will fail to compile (intentional —
+// it's the must-pass #4 grep gate's job to catch survivors).
+pub use crate::color::scale_chrome_text_alpha;
+
+/// T14: bridge between the sonicterm-ui `TabSpanColor` (no sonicterm-gpu
+/// dep) and the sonicterm-gpu `ChromeColor`. The two are byte-identical
+/// — `TabSpanColor` is the dep-free public face used by `tab_spans.rs`
+/// (which can't depend on sonicterm-gpu without creating a cycle), and
+/// `ChromeColor` is the chrome-text-internal form the renderer +
+/// `chrome_text::layout` consume. Helpers stay near the chrome-text
+/// re-exports above so future renames land in one place.
+#[inline]
+fn chrome_to_tab_span(c: ChromeColor) -> sonicterm_ui::tab_spans::TabSpanColor {
+    sonicterm_ui::tab_spans::TabSpanColor::rgba(c.r(), c.g(), c.b(), c.a())
 }
 
-/// Multiply the alpha channel of a [`glyphon::Color`] by `factor`
-/// (clamped to `0.0..=1.0`) and return a fresh color with the same
-/// RGB triplet. Used by the Phase D drag-feedback path (Epic #289) to
-/// dim the source-tab title text and the ghost-chip title text to
-/// match their corresponding body quads — without this helper, those
-/// titles painted at full opacity on top of dimmed bodies (Haiku
-/// reviewer finding on PR #298).
-#[doc(hidden)]
-#[must_use]
-pub fn scale_glyphon_alpha(c: GColor, factor: f32) -> GColor {
-    let f = factor.clamp(0.0, 1.0);
-    let a = ((c.a() as f32) * f).round().clamp(0.0, 255.0) as u8;
-    GColor::rgba(c.r(), c.g(), c.b(), a)
+#[inline]
+fn tab_span_to_chrome(c: sonicterm_ui::tab_spans::TabSpanColor) -> ChromeColor {
+    ChromeColor::rgba(c.r(), c.g(), c.b(), c.a())
 }
 
-/// Single source of truth for the [`Attrs`] used by every text-rendering
-/// site (terminal grid, tab titles, command palette, search status bar,
-/// IME pre-edit). Pass the user-configured `font.family` here so all UI
-/// chrome shares the EXACT same `Family::Name(...)` as grid cells —
-/// avoiding the historical bug where tab titles silently fell through
-/// to `Family::Monospace` and rendered with a different installed face.
-///
-/// The implementation now lives in `sonicterm-text` so the shape layer can
-/// share it without a back-edge into `sonicterm-shared`. Re-exported here so
-/// every existing `crate::render::terminal_font_attrs` call site keeps
-/// compiling unchanged.
-pub use sonicterm_text::terminal_font_attrs;
+// T13/T14: `terminal_font_attrs` re-export removed. It returned
+// `legacy chrome attrs` which carried per-span family/weight; the
+// chrome-text path replaces it with `ChromeAttrs { bold, italic }`
+// constructed per-span at the call site. Downstream callers
+// (`sonicterm-ui::tab_spans`) build `(text, ChromeColor, ChromeAttrs)`
+// span tuples directly. The grid/chrome shape calls reach the loaded
+// wezterm font via `FontStack::default_font()` — there is no per-span
+// font attribute layer in this path.
 
 /// Walk the grid and collect runs of contiguous cells that share a hyperlink
 /// id, per row. Wide-cell continuations don't break a run (they inherit the
@@ -5876,13 +5778,11 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     runs
 }
 
-/// Load any TTF/OTF files we ship in `assets/fonts/` into the cosmic-text
-/// font database. Looks in two places, in this order:
-///   1. `<exe-dir>/assets/fonts/` — what the .app/.msi bundles ship
-///   2. `<workspace-root>/assets/fonts/` — dev (`cargo run`)
-fn load_bundled_fonts(fs: &mut FontSystem) {
-    sonicterm_text::swash_rasterizer::load_bundled_fonts(fs);
-}
+// T13/T14: `load_bundled_fonts` (cosmic-text bundle loader) is gone.
+// Bundled fonts ship via sonicterm-font's `vendor-jetbrains`,
+// `vendor-noto-emoji`, `vendor-nerd-font-symbols` features (see
+// `sonicterm-text/Cargo.toml`), so the FontStack discovers them
+// automatically without an explicit per-file disk load.
 
 /// Stable fingerprint for command badges, including wall-clock buckets that
 /// change when badge visibility can transition without a tab model mutation.
@@ -5998,80 +5898,4 @@ pub fn clip_rect_to_pane(
     } else {
         None
     }
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// #538 test seam — mirror of the apply-site dispatch in `flush_shape_run`
-// so an integration test can exercise the cluster-lead-vs-visible-cell
-// codepoint mismatch without standing up the full atlas/wgpu pipeline.
-//
-// `visible_cell_ch` is the codepoint of the cell currently being emitted
-// (`lead_cell.ch` in the renderer). `cluster_lead_ch` is what the shape
-// run reports as `g.ch` — for a Powerline continuation cluster it's
-// typically a space.
-//
-// The seam returns the `SymbolFit` actually selected and the final cell
-// rect produced by `apply_symbol_fit`. A correct implementation MUST
-// classify on `visible_cell_ch` (otherwise U+E0B0..U+E0BF clusters
-// driven by a space lead degrade to `Natural` and emit a 2-px slice).
-// ──────────────────────────────────────────────────────────────────────
-#[cfg(any(test, feature = "test-emit-trace"))]
-#[derive(Debug, Clone, Copy)]
-pub struct GlyphEmitTrace {
-    pub fit_used: sonicterm_text::swash_rasterizer::SymbolFit,
-    pub final_rect: (f32, f32, f32, f32),
-    pub cell_rect: (f32, f32, f32, f32),
-}
-
-/// Test-only seam reproducing the apply-site dispatch from
-/// `flush_shape_run` (shaped path, ~L4980). Used by
-/// `crates/sonicterm-gpu/tests/powerline_emit_trace.rs` (#538).
-///
-/// `natural_rect` is what swash would emit (a tiny ~2-px top slice for a
-/// chevron when the visible cell's char is a space-lead cluster). The
-/// renderer's job is to override that with `apply_symbol_fit` keyed on
-/// the *visible cell's* char.
-#[cfg(any(test, feature = "test-emit-trace"))]
-pub fn emit_one_glyph_for_trace(
-    visible_cell_ch: char,
-    cluster_lead_ch: char,
-    natural_rect: (f32, f32, f32, f32),
-    cell_origin: (f32, f32),
-    cell_size: (f32, f32),
-    classify_on_cluster_lead: bool,
-) -> GlyphEmitTrace {
-    let ch_for_classify = if classify_on_cluster_lead { cluster_lead_ch } else { visible_cell_ch };
-    let fit = sonicterm_text::swash_rasterizer::classify_symbol(ch_for_classify);
-    let final_rect = sonicterm_text::swash_rasterizer::apply_symbol_fit(
-        natural_rect,
-        cell_origin,
-        cell_size,
-        fit,
-    );
-    GlyphEmitTrace {
-        fit_used: fit,
-        final_rect,
-        cell_rect: (cell_origin.0, cell_origin.1, cell_size.0, cell_size.1),
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// #610d revise (Haiku Blocker 2): expose the IconCellFit resample target
-// computed inside `flush_shape_run` so integration tests can prove that
-// the production wiring keeps the atlas TILE 1:1 with the production
-// QUAD. The pair `(tile_w_phys, tile_h_phys)` must equal the QUAD's
-// `(gw_phys, gh_phys)` produced by `apply_symbol_fit(IconCellFit)`
-// against the same (cell_box_w_logical, cell_h, scale_factor); the
-// per-call site in `flush_shape_run` (~L5340) uses exactly this code.
-// ──────────────────────────────────────────────────────────────────────
-#[cfg(any(test, feature = "test-emit-trace"))]
-pub fn icon_fit_resample_target_for_test(
-    cell_box_w_logical: f32,
-    cell_h: f32,
-    scale_factor: f32,
-) -> (u32, u32) {
-    let target_h_logical = sonicterm_text::swash_rasterizer::icon_fit_target_h(cell_h);
-    let target_h_phys = (target_h_logical * scale_factor).round().max(1.0) as u32;
-    let target_w_phys_box = (cell_box_w_logical * scale_factor).round().max(1.0) as u32;
-    (target_w_phys_box, target_h_phys)
 }

@@ -72,7 +72,7 @@ pub struct LoggingGuard {
 /// survive the default filter. Post-#430 rename: the prior `sonic=warn`
 /// rule matched no crate after `sonic-*` → `sonicterm-*` and silently
 /// dropped every INFO log from the renamed crates — see issue #448.
-pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn";
+pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).

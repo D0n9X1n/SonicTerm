@@ -50,7 +50,7 @@ impl App {
                 return;
             }
             let live_top = grid.scrollback_len() as u64;
-            let current = GpuRenderer::resolved_view_top_abs(grid, pane.viewport_top_abs);
+            let current = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
             (live_top, current, false)
         };
         let _ = is_alt;

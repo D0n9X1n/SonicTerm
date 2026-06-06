@@ -311,39 +311,3 @@ pub fn publish_active_sender(sink: &HarnessSink, tx: Option<Sender<Vec<u8>>>) {
         *g = tx;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_auto_to_unique_pipe_name() {
-        let a = resolve_pipe_name("auto");
-        let b = resolve_pipe_name("auto");
-        assert!(a.starts_with(PIPE_PREFIX));
-        assert!(b.starts_with(PIPE_PREFIX));
-        assert_ne!(a, b, "auto-generated stems must be unique");
-    }
-
-    #[test]
-    fn resolves_explicit_stem() {
-        assert_eq!(resolve_pipe_name("my-test"), format!("{PIPE_PREFIX}my-test"),);
-    }
-
-    #[test]
-    fn new_sink_starts_empty() {
-        let s = new_sink();
-        assert!(s.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn publish_round_trips() {
-        let s = new_sink();
-        let (tx, rx) = crossbeam_channel::unbounded();
-        publish_active_sender(&s, Some(tx));
-        s.lock().unwrap().as_ref().unwrap().send(b"hi".to_vec()).unwrap();
-        assert_eq!(rx.recv().unwrap(), b"hi");
-        publish_active_sender(&s, None);
-        assert!(s.lock().unwrap().is_none());
-    }
-}

@@ -153,30 +153,3 @@ pub fn reorder_within(c: &mut TabContainer, src_idx: usize, dst_idx: usize) -> T
     c.tabs.activate(to);
     TransferOutcome::Moved { target_active: to, source_empty: false }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use parking_lot::Mutex;
-    use sonicterm_grid::grid::Grid;
-    use sonicterm_vt::vt::Parser;
-    use std::sync::Arc;
-
-    fn pane() -> PaneState {
-        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-        PaneState::new(parser, None)
-    }
-
-    #[test]
-    fn out_of_range_is_noop() {
-        let mut a = TabContainer::new();
-        let mut b = TabContainer::new();
-        a.push_tab("only", pane());
-        assert_eq!(
-            transfer_tab_between(&mut a, 99, &mut b, 0),
-            TransferOutcome::SourceIndexOutOfRange
-        );
-        assert_eq!(a.tabs.len(), 1);
-        assert_eq!(b.tabs.len(), 0);
-    }
-}

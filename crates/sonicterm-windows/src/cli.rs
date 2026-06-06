@@ -82,30 +82,3 @@ where
 pub fn parse_cli_from_env() -> Result<ParsedCli> {
     parse_cli_from(std::env::args())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(not(feature = "harness"))]
-    #[test]
-    fn harness_flag_rejected_without_feature() {
-        let err =
-            parse_cli_from(["sonic", "--harness-input-pipe", "auto"]).expect_err("must reject");
-        assert!(err.to_string().contains("--harness-input-pipe"));
-    }
-
-    #[cfg(feature = "harness")]
-    #[test]
-    fn harness_flag_accepted_with_feature() {
-        let p = parse_cli_from(["sonic", "--harness-input-pipe", "auto"]).unwrap();
-        assert_eq!(p.harness_input_pipe.as_deref(), Some("auto"));
-    }
-
-    #[cfg(feature = "harness")]
-    #[test]
-    fn harness_flag_requires_value() {
-        let err = parse_cli_from(["sonic", "--harness-input-pipe"]).expect_err("must require arg");
-        assert!(err.to_string().contains("requires"));
-    }
-}

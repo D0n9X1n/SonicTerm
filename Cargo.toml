@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging"]
+members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging", "crates/sonicterm-engine", "crates/sonicterm-block-glyph", "crates/sonicterm-font", "crates/sonicterm-font-config", "crates/sonicterm-freetype", "crates/sonicterm-harfbuzz", "crates/sonicterm-fontconfig"]
 default-members = ["crates/sonicterm-app"]
 
 [workspace.package]
@@ -27,6 +27,12 @@ sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "0.3.0" }
 sonicterm-app = { path = "crates/sonicterm-app", version = "0.3.0" }
 sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "0.3.0" }
 sonicterm-logging = { path = "crates/sonicterm-logging", version = "0.3.0" }
+sonicterm-block-glyph = { path = "crates/sonicterm-block-glyph", version = "0.3.0" }
+sonicterm-font = { path = "crates/sonicterm-font", version = "0.3.0" }
+sonicterm-font-config = { path = "crates/sonicterm-font-config", version = "0.3.0" }
+sonicterm-fontconfig = { path = "crates/sonicterm-fontconfig", version = "0.3.0" }
+sonicterm-freetype = { path = "crates/sonicterm-freetype", version = "0.3.0" }
+sonicterm-harfbuzz = { path = "crates/sonicterm-harfbuzz", version = "0.3.0" }
 
 # Core terminal
 vte = "0.15"
@@ -41,13 +47,22 @@ crossbeam-channel = "0.5"
 russh = "0.61"
 parking_lot = "0.12"
 
-# Rendering — these three move as a coherent triple
+# Rendering
+# T13/T14 (wezterm-takeover G3): glyphon + cosmic-text deleted. The
+# renderer now drives chrome text through `chrome_text::layout` →
+# `WeztermRasterizer` → shared `GlyphAtlas` → existing wgpu
+# `TextPipeline` (see `sonicterm-gpu/src/chrome_text.rs`). sonicterm-font
+# is the sole shaper + rasterizer.
 wgpu = "29"
-glyphon = "0.11"
-cosmic-text = "0.18"
 swash = "0.2"
 fontdb = "0.23"
 bytemuck = { version = "1.25", features = ["derive"] }
+# T5 (wezterm-takeover G2A): vendored customglyph.rs uses tiny-skia for
+# Powerline/triangle/Poly path rasterization. Version matches wezterm-gui
+# @ 577474d (`tiny-skia = "0.11"`). The crate itself is added to
+# sonicterm-block-glyph's [dependencies] by T7; T5 only pins the workspace
+# version.
+tiny-skia = "0.11"
 
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
@@ -65,6 +80,10 @@ winit = "0.30"
 raw-window-handle = "0.6"
 
 bitflags = { version = "2", features = ["serde"] }
+cc = { version = "1", features = ["parallel"] }
+fixed = "1.29"
+libc = "0.2"
+pkg-config = "0.3"
 serde_plain = "1"
 pollster = "0.4"
 arboard = "3"

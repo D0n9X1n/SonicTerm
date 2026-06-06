@@ -32,7 +32,7 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
+    window_dpi, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
 use crate::app::window_geom;
@@ -197,7 +197,7 @@ impl App {
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        let real_sf = window.scale_factor() as f32;
+        let real_sf = window_dpi(&window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
@@ -240,12 +240,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: 1.0,
+            dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
         };
@@ -305,8 +307,7 @@ impl App {
             Vec::new();
         if let Some(main) = self.main_window() {
             let geom = window_geom(main);
-            let width =
-                self.main_renderer().map(|r| r.width() as f32 / r.scale_factor()).unwrap_or(0.0);
+            let width = self.main_renderer().map(|r| r.width() as f32).unwrap_or(0.0);
             let inset = self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0);
             let bar_h = self
                 .main_renderer()
@@ -333,7 +334,7 @@ impl App {
                 continue;
             };
             let geom = window_geom(cw);
-            let bar_width = r.width() as f32 / r.scale_factor();
+            let bar_width = r.width() as f32;
             let layout =
                 TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
                     .with_top_offset(r.tab_bar_y_offset())
@@ -357,7 +358,7 @@ impl App {
             let r = c.renderer.as_ref()?;
             let cw = c.window.as_ref()?;
             let geom = window_geom(cw);
-            let bar_width = r.width() as f32 / r.scale_factor();
+            let bar_width = r.width() as f32;
             let layout =
                 TabBarLayout::compute_with_height(&c.tabs, bar_width, r.tab_bar_logical_height())
                     .with_top_offset(r.tab_bar_y_offset())
@@ -400,12 +401,8 @@ impl App {
                 // See `crates/sonicterm-app/src/tab_thumbnail.rs` for the
                 // rationale behind the CPU-side renderer (vs the
                 // originally-spec'd offscreen wgpu readback).
-                let scale_factor =
-                    self.main_window().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
-                let thumb_inputs = crate::tab_thumbnail::tab_thumbnail_inputs_from_payload(
-                    &payload.tab_title,
-                    scale_factor,
-                );
+                let thumb_inputs =
+                    crate::tab_thumbnail::tab_thumbnail_inputs_from_payload(&payload.tab_title);
                 let drag_image_png = crate::tab_thumbnail::render_tab_thumbnail_png(&thumb_inputs);
                 let started = self.begin_os_tab_drag(src_id, index, payload_json, drag_image_png);
                 if started && self.os_drag_backend_handles_full_gesture() {
@@ -564,7 +561,7 @@ impl App {
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        let real_sf = window.scale_factor() as f32;
+        let real_sf = window_dpi(&window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
@@ -603,12 +600,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: 1.0,
+            dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
         };

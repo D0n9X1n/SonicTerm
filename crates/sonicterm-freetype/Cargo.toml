@@ -1,0 +1,17 @@
+[package]
+authors.workspace = true
+name = "sonicterm-freetype"
+version.workspace = true
+edition = "2018"
+links = "freetype"
+build = "build.rs"
+publish = false
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal - FreeType native binding backend"
+
+[dependencies]
+fixed.workspace = true
+
+[build-dependencies]
+cc.workspace = true

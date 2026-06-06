@@ -26,7 +26,10 @@ pub struct GlyphKey {
     /// Pre-shaped glyph identifier inside the resolved font. `0` is
     /// reserved as the "no shaping was used" sentinel — the rasterizer
     /// falls back to the char-based charmap lookup in that case.
-    pub glyph_id: u16,
+    ///
+    /// Widened to u32 to hold sonicterm-font freetype glyph indices
+    /// (Phase 4) which can exceed u16 for large fonts (e.g. CJK).
+    pub glyph_id: u32,
 }
 
 impl GlyphKey {
@@ -66,7 +69,7 @@ impl GlyphKey {
     /// Constructor for a *shaped* glyph: identity comes from
     /// `(font_slot, glyph_id, weight_bold, italic)`, not the codepoint.
     #[inline]
-    pub fn shaped(ch: char, font_slot: u8, glyph_id: u16, weight_bold: bool, italic: bool) -> Self {
+    pub fn shaped(ch: char, font_slot: u8, glyph_id: u32, weight_bold: bool, italic: bool) -> Self {
         Self { ch, font_slot, weight_bold, italic, glyph_id }
     }
 

@@ -1,0 +1,20 @@
+[package]
+name = "sonicterm-font-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal — absorbed WezTerm font configuration model"
+
+[lib]
+name = "config"
+
+[features]
+distro-defaults = []
+
+[dependencies]
+bitflags = "1.3"
+lazy_static = "1.4"
+log = "0.4"
+ordered-float = { version = "4", features = ["serde"] }

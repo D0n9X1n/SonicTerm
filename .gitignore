@@ -28,3 +28,4 @@ Thumbs.db
 crash-reports/
 /rust_out
 gui-smoke.png
+.claude/worktrees/

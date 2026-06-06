@@ -31,8 +31,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_panes_to_rects,
-    shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState,
-    TabState, UserEvent, WindowState,
+    shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
+    WindowState,
 };
 
 fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {

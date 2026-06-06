@@ -31,6 +31,26 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+/// Terminal underline variant selected by SGR 4 / 4:n.
+///
+/// This mirrors the underline styles common to xterm and WezTerm:
+/// single, double, curly, dotted, and dashed. The default rendering style is
+/// [`UnderlineStyle::Single`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum UnderlineStyle {
+    /// A single straight underline.
+    #[default]
+    Single,
+    /// Two straight underline strokes.
+    Double,
+    /// A curly / wavy underline.
+    Curly,
+    /// A dotted underline.
+    Dotted,
+    /// A dashed underline.
+    Dashed,
+}
+
 bitflags::bitflags! {
     /// SGR-derived attribute flags carried per cell.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -77,6 +97,13 @@ pub struct FatAttributes {
     /// get appended here so the shaper sees the full cluster on a
     /// single shape pass.
     pub extras: Option<Box<str>>,
+    /// Optional non-default underline style. The default single underline
+    /// stays implicit so normal underlined cells do not allocate just for
+    /// style metadata.
+    pub underline_style: Option<UnderlineStyle>,
+    /// Optional underline colour from SGR 58. `None` means underline follows
+    /// the cell foreground, matching terminal defaults.
+    pub underline_color: Option<Color>,
 }
 
 impl FatAttributes {
@@ -85,7 +112,10 @@ impl FatAttributes {
     /// re-collapse to `None` when the last rare attribute clears.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.hyperlink.is_none() && self.extras.is_none()
+        self.hyperlink.is_none()
+            && self.extras.is_none()
+            && self.underline_style.is_none()
+            && self.underline_color.is_none()
     }
 }
 
@@ -136,6 +166,19 @@ impl Cell {
         self.fat.as_ref().and_then(|f| f.extras.as_deref())
     }
 
+    /// Read this cell's underline style. Cells without a fat style use the
+    /// terminal default: a single straight underline.
+    #[inline]
+    pub fn underline_style(&self) -> UnderlineStyle {
+        self.fat.as_ref().and_then(|f| f.underline_style).unwrap_or(UnderlineStyle::Single)
+    }
+
+    /// Read this cell's explicit underline colour, if SGR 58 set one.
+    #[inline]
+    pub fn underline_color(&self) -> Option<Color> {
+        self.fat.as_ref().and_then(|f| f.underline_color)
+    }
+
     /// Set the hyperlink id, allocating [`FatAttributes`] on first
     /// rare-attr write. Passing `None` clears the field and, if no
     /// other fat attribute remains, drops the box.
@@ -149,7 +192,12 @@ impl Cell {
                 }
             }
             (None, Some(id)) => {
-                self.fat = Some(Box::new(FatAttributes { hyperlink: Some(id), extras: None }));
+                self.fat = Some(Box::new(FatAttributes {
+                    hyperlink: Some(id),
+                    extras: None,
+                    underline_style: None,
+                    underline_color: None,
+                }));
             }
             (None, None) => {}
         }
@@ -167,7 +215,59 @@ impl Cell {
                 }
             }
             (None, Some(ex)) => {
-                self.fat = Some(Box::new(FatAttributes { hyperlink: None, extras: Some(ex) }));
+                self.fat = Some(Box::new(FatAttributes {
+                    hyperlink: None,
+                    extras: Some(ex),
+                    underline_style: None,
+                    underline_color: None,
+                }));
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Set this cell's underline style. Passing [`UnderlineStyle::Single`]
+    /// clears the explicit style because single is the default.
+    #[inline]
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        let style = (style != UnderlineStyle::Single).then_some(style);
+        match (&mut self.fat, style) {
+            (Some(fat), style) => {
+                fat.underline_style = style;
+                if fat.is_empty() {
+                    self.fat = None;
+                }
+            }
+            (None, Some(style)) => {
+                self.fat = Some(Box::new(FatAttributes {
+                    hyperlink: None,
+                    extras: None,
+                    underline_style: Some(style),
+                    underline_color: None,
+                }));
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Set this cell's explicit underline colour. Passing `None` clears it
+    /// and falls back to the cell foreground.
+    #[inline]
+    pub fn set_underline_color(&mut self, color: Option<Color>) {
+        match (&mut self.fat, color) {
+            (Some(fat), color) => {
+                fat.underline_color = color;
+                if fat.is_empty() {
+                    self.fat = None;
+                }
+            }
+            (None, Some(color)) => {
+                self.fat = Some(Box::new(FatAttributes {
+                    hyperlink: None,
+                    extras: None,
+                    underline_style: None,
+                    underline_color: Some(color),
+                }));
             }
             (None, None) => {}
         }
@@ -197,7 +297,7 @@ impl Cell {
 
 // Manual Serialize/Deserialize so on-disk format stays compatible with
 // the pre-compact Cell layout (named fields: ch, fg, bg, flags,
-// hyperlink, extras). External consumers and the existing
+// hyperlink, extras; newer underline fields are optional). External consumers and the existing
 // serde_roundtrip test see no change.
 mod cell_serde {
     use super::*;
@@ -207,13 +307,18 @@ mod cell_serde {
 
     impl Serialize for Cell {
         fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-            let mut s = ser.serialize_struct("Cell", 6)?;
+            let mut s = ser.serialize_struct("Cell", 8)?;
             s.serialize_field("ch", &self.ch)?;
             s.serialize_field("fg", &self.fg)?;
             s.serialize_field("bg", &self.bg)?;
             s.serialize_field("flags", &self.flags.bits())?;
             s.serialize_field("hyperlink", &self.hyperlink())?;
             s.serialize_field("extras", &self.extras())?;
+            s.serialize_field(
+                "underline_style",
+                &self.fat.as_ref().and_then(|f| f.underline_style),
+            )?;
+            s.serialize_field("underline_color", &self.underline_color())?;
             s.end()
         }
     }
@@ -229,6 +334,10 @@ mod cell_serde {
                 Flags,
                 Hyperlink,
                 Extras,
+                #[serde(rename = "underline_style")]
+                UnderlineStyle,
+                #[serde(rename = "underline_color")]
+                UnderlineColor,
             }
 
             struct CellVisitor;
@@ -244,6 +353,8 @@ mod cell_serde {
                     let mut flag_bits: Option<u16> = None;
                     let mut hyperlink: Option<Option<HyperlinkId>> = None;
                     let mut extras: Option<Option<String>> = None;
+                    let mut underline_style: Option<Option<UnderlineStyle>> = None;
+                    let mut underline_color: Option<Option<Color>> = None;
                     while let Some(k) = map.next_key()? {
                         match k {
                             Field::Ch => ch = Some(map.next_value()?),
@@ -252,6 +363,8 @@ mod cell_serde {
                             Field::Flags => flag_bits = Some(map.next_value()?),
                             Field::Hyperlink => hyperlink = Some(map.next_value()?),
                             Field::Extras => extras = Some(map.next_value()?),
+                            Field::UnderlineStyle => underline_style = Some(map.next_value()?),
+                            Field::UnderlineColor => underline_color = Some(map.next_value()?),
                         }
                     }
                     let mut cell = Cell::plain(
@@ -266,12 +379,27 @@ mod cell_serde {
                     if let Some(Some(ex)) = extras {
                         cell.set_extras(Some(ex.into_boxed_str()));
                     }
+                    if let Some(Some(style)) = underline_style {
+                        cell.set_underline_style(style);
+                    }
+                    if let Some(Some(color)) = underline_color {
+                        cell.set_underline_color(Some(color));
+                    }
                     Ok(cell)
                 }
             }
             de.deserialize_struct(
                 "Cell",
-                &["ch", "fg", "bg", "flags", "hyperlink", "extras"],
+                &[
+                    "ch",
+                    "fg",
+                    "bg",
+                    "flags",
+                    "hyperlink",
+                    "extras",
+                    "underline_style",
+                    "underline_color",
+                ],
                 CellVisitor,
             )
         }

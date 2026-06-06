@@ -10,7 +10,6 @@
 //! `size_px = [0, 0]` and the shader skips the SDF math.
 
 use bytemuck::{Pod, Zeroable};
-use sonicterm_types::GeometryQuad;
 
 /// One quad instance — what the vertex stage reads per draw — packing a
 /// rectangle, color, and optional rounded-rect / line-segment SDF parameters
@@ -459,100 +458,5 @@ pub fn push_mask_icon_quads(out: &mut Vec<QuadInstance>, params: MaskIconParams<
                 c,
             ));
         }
-    }
-}
-
-/// Lossless adapter: turn the renderer-agnostic [`GeometryQuad`] value type
-/// from `sonicterm-types` into the wgpu-bound [`QuadInstance`] used by this
-/// pipeline. The conversion is a 1:1 field copy — `GeometryQuad` has the
-/// same field set and `#[repr(C)]` layout, but deliberately omits the
-/// `bytemuck::Pod`/`Zeroable` derives (the types crate stays dep-free), so
-/// this `From` is the supported bridge.
-impl From<GeometryQuad> for QuadInstance {
-    fn from(g: GeometryQuad) -> Self {
-        Self {
-            rect: g.rect,
-            color: g.color,
-            size_px: g.size_px,
-            radius_px: g.radius_px,
-            line_thickness_px: g.line_thickness_px,
-            line_a: g.line_a,
-            line_b: g.line_b,
-        }
-    }
-}
-
-/// Reverse adapter (#560 PR-B2): turn a wgpu-bound [`QuadInstance`] back into
-/// the renderer-agnostic [`GeometryQuad`] value type. Used by the
-/// `CachedRow.geometry_quads` capture seam in `core.rs::render` — the
-/// per-emit-site `geometry_quads: Vec<QuadInstance>` produced by
-/// `geometry_emit::emit_geometry_for_char` is snapshotted into the row's
-/// cache as `Vec<GeometryQuad>` so the next cache hit can replay it without
-/// dragging a wgpu type into the `sonicterm-text` cache crate. Field set
-/// matches the forward adapter; layouts are `#[repr(C)]` on both sides
-/// (`sonicterm-types::geom`), so this is a 1:1 lossless copy.
-impl From<QuadInstance> for GeometryQuad {
-    fn from(q: QuadInstance) -> Self {
-        Self {
-            rect: q.rect,
-            color: q.color,
-            size_px: q.size_px,
-            radius_px: q.radius_px,
-            line_thickness_px: q.line_thickness_px,
-            line_a: q.line_a,
-            line_b: q.line_b,
-        }
-    }
-}
-
-#[cfg(test)]
-mod geometry_quad_adapter_tests {
-    use super::*;
-
-    /// Every field of a fully-populated `GeometryQuad` must survive the
-    /// `From` adapter into `QuadInstance` unchanged (lossless 1:1 copy).
-    /// Guards against a future field drift between the value type in
-    /// `sonicterm-types` and the GPU-side instance struct.
-    #[test]
-    fn geometry_quad_roundtrip_preserves_all_fields() {
-        let g = GeometryQuad {
-            rect: [0.1, 0.2, 0.3, 0.4],
-            color: [0.5, 0.6, 0.7, 0.8],
-            size_px: [12.0, 24.0],
-            radius_px: 3.5,
-            line_thickness_px: 1.25,
-            line_a: [-4.0, -6.0],
-            line_b: [4.0, 6.0],
-        };
-        let q: QuadInstance = g.into();
-        assert_eq!(q.rect, g.rect);
-        assert_eq!(q.color, g.color);
-        assert_eq!(q.size_px, g.size_px);
-        assert_eq!(q.radius_px, g.radius_px);
-        assert_eq!(q.line_thickness_px, g.line_thickness_px);
-        assert_eq!(q.line_a, g.line_a);
-        assert_eq!(q.line_b, g.line_b);
-    }
-
-    /// #560 PR-B2 reverse adapter: `QuadInstance` → `GeometryQuad`
-    /// must preserve every field too, so the cache capture seam
-    /// (frame-level `Vec<QuadInstance>` snapshot → `CachedRow.
-    /// geometry_quads: Vec<GeometryQuad>`) is lossless. Tested as a
-    /// full roundtrip `GeometryQuad → QuadInstance → GeometryQuad`
-    /// so the bidirectional adapter cannot drift.
-    #[test]
-    fn geometry_quad_bidirectional_roundtrip_preserves_all_fields() {
-        let g = GeometryQuad {
-            rect: [0.11, 0.22, 0.33, 0.44],
-            color: [0.55, 0.66, 0.77, 0.88],
-            size_px: [13.0, 26.0],
-            radius_px: 4.5,
-            line_thickness_px: 2.25,
-            line_a: [-5.0, -7.0],
-            line_b: [5.0, 7.0],
-        };
-        let q: QuadInstance = g.into();
-        let back: GeometryQuad = q.into();
-        assert_eq!(back, g);
     }
 }

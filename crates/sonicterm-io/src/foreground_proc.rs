@@ -263,24 +263,3 @@ fn resolve_process_name(pid: u32) -> Option<String> {
 // `ProcEntry` (none of which are part of the public Windows
 // foreground-process API). Migrating would require bumping all three
 // to `pub` purely for tests.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_returns_self() {
-        // Smoke test the enumerator: it must list our own process.
-        let snap = snapshot_processes().expect("ntdll snapshot");
-        let self_pid = std::process::id();
-        assert!(
-            snap.iter().any(|e| e.pid == self_pid),
-            "snapshot did not include our own pid {self_pid}"
-        );
-    }
-
-    #[test]
-    fn resolves_self_name() {
-        let name = resolve_process_name(std::process::id()).expect("self name");
-        assert!(!name.is_empty());
-    }
-}

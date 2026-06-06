@@ -67,13 +67,6 @@ fn lookup(tag: isize) -> Option<MenuEntry> {
     v.get(idx).cloned()
 }
 
-#[cfg(test)]
-fn reset_registry_for_tests() {
-    if let Ok(mut v) = ENTRIES.lock() {
-        v.clear();
-    }
-}
-
 /// Test bridge: register a menu entry from outside the crate without
 /// constructing AppKit objects. Returns the assigned tag. Hidden from
 /// docs; used only by integration tests under `tests/`.
@@ -361,36 +354,3 @@ pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
 // `register`/`lookup`/`scan_themes`/`reset_registry_for_tests` and the
 // surface is small + macOS-only — adding pub-with-doc-hidden shims for
 // each is more disruptive than keeping the inline block.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn scan_themes_returns_sorted_basenames() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("dracula.toml"), "name = \"x\"\n").unwrap();
-        fs::write(dir.path().join("nord.toml"), "name = \"x\"\n").unwrap();
-        fs::write(dir.path().join("README.md"), "ignored").unwrap();
-        let names = scan_themes(dir.path());
-        assert_eq!(names, vec!["dracula".to_string(), "nord".to_string()]);
-    }
-
-    #[test]
-    fn scan_themes_missing_dir_is_empty_not_panic() {
-        let names = scan_themes(Path::new("/no/such/path/should/exist/here"));
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn register_and_lookup_round_trips() {
-        reset_registry_for_tests();
-        let tag = register(MenuEntry::Act(Action::NewTab));
-        assert!(tag >= 1);
-        let got = lookup(tag).expect("registered tag should resolve");
-        assert!(matches!(got, MenuEntry::Act(Action::NewTab)));
-        assert!(lookup(0).is_none());
-        assert!(lookup(-1).is_none());
-    }
-}

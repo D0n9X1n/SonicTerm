@@ -1,0 +1,17 @@
+[package]
+authors.workspace = true
+name = "sonicterm-fontconfig"
+version.workspace = true
+edition = "2018"
+links = "fontconfig"
+build = "build.rs"
+publish = false
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal - Fontconfig native binding backend"
+
+[dependencies]
+libc.workspace = true
+
+[build-dependencies]
+pkg-config.workspace = true

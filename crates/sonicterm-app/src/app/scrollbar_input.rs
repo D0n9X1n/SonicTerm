@@ -155,7 +155,7 @@ impl App {
         let grid = parser.grid();
         let viewport_rows = grid.rows;
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
-        let view_top = GpuRenderer::resolved_view_top_abs(grid, pane.viewport_top_abs);
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         drop(parser);
         hit(
             pane_rect,
@@ -190,7 +190,7 @@ impl App {
             let grid = parser.grid();
             let vp = grid.rows;
             let total = grid.scrollback_len() as u64 + vp as u64;
-            let vt = GpuRenderer::resolved_view_top_abs(grid, pane.viewport_top_abs);
+            let vt = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
             (vp, total, vt)
         };
         let new_top = if forward {

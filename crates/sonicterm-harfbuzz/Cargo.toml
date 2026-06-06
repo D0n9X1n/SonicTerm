@@ -1,0 +1,17 @@
+[package]
+authors.workspace = true
+name = "sonicterm-harfbuzz"
+version.workspace = true
+edition = "2018"
+links = "harfbuzz"
+build = "build.rs"
+publish = false
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal - HarfBuzz native binding backend"
+
+[dependencies]
+freetype = { package = "sonicterm-freetype", path = "../sonicterm-freetype" }
+
+[build-dependencies]
+cc.workspace = true
