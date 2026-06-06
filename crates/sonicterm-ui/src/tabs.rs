@@ -44,6 +44,7 @@ impl CommandStatus {
 pub struct Tab {
     pub id: TabId,
     pub title: String,
+    pub custom_title: Option<String>,
     pub command: CommandStatus,
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
@@ -55,6 +56,7 @@ impl Tab {
         Self {
             id: TabId::next(),
             title: title.into(),
+            custom_title: None,
             command: CommandStatus::default(),
             icon_hint: None,
         }
@@ -104,6 +106,18 @@ impl TabBar {
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.title = title.into();
         }
+    }
+
+    pub fn active_title_body(&self) -> Option<String> {
+        let tab = self.tabs.get(self.active)?;
+        Some(tab.custom_title.clone().unwrap_or_else(|| title_body(&tab.title).to_string()))
+    }
+
+    pub fn set_active_custom_title(&mut self, body: impl Into<String>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let body = body.into();
+        tab.custom_title = Some(body.clone());
+        tab.title = title_with_replaced_body(&tab.title, &body);
     }
 
     pub fn set_command_status(&mut self, index: usize, status: CommandStatus) {
@@ -250,6 +264,51 @@ impl TabBar {
         }
         self.recompute_all_titles();
         Some(tab)
+    }
+}
+
+pub fn title_with_replaced_body(template: &str, body: &str) -> String {
+    let trimmed = template.trim();
+    let Some(rest) = trimmed.strip_prefix('#') else {
+        return body.to_string();
+    };
+    let Some(space) = rest.find(' ') else {
+        return body.to_string();
+    };
+    let index = &trimmed[..space + 1];
+    let after_index = trimmed[space + 1..].trim_start();
+    let mut parts = after_index.splitn(2, ' ');
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.next();
+    let keep_icon = rest.is_some()
+        && first.chars().count() <= 2
+        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+    if keep_icon {
+        format!("{index} {first} {body}")
+    } else {
+        format!("{index} {body}")
+    }
+}
+
+fn title_body(title: &str) -> &str {
+    let trimmed = title.trim();
+    let Some(rest) = trimmed.strip_prefix('#') else {
+        return trimmed;
+    };
+    let Some(space) = rest.find(' ') else {
+        return trimmed;
+    };
+    let after_index = trimmed[space + 1..].trim_start();
+    let mut parts = after_index.splitn(2, ' ');
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.next();
+    let has_icon = rest.is_some()
+        && first.chars().count() <= 2
+        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+    if has_icon {
+        rest.unwrap_or_default().trim_start()
+    } else {
+        after_index
     }
 }
 

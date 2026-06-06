@@ -356,6 +356,7 @@ impl App {
             Action::ResetFontSize => self.reset_font_size(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
+            Action::RenameTab => self.start_rename_active_tab(),
             Action::NewWindow => {
                 // Epic #289 Phase E (Haiku follow-up): set the pending
                 // flag; `drain_pending_window_creates` consumes it with

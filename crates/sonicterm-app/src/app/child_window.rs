@@ -138,16 +138,13 @@ impl App {
                     .and_then(|st| {
                         let r = child.renderer.as_ref()?;
                         let (w, h) = r.logical_size();
-                        let top = r.top_inset();
-                        let pl = r.padding_left_px();
-                        let pr = r.padding_right_px();
+                        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
                         let bottom = r.bottom_inset();
-                        let pb = r.padding_bottom_px();
                         let outer = sonicterm_ui::pane::Rect::new(
-                            pl,
+                            0.0,
                             top,
-                            (w - pl - pr).max(0.0),
-                            (h - top - bottom - pb).max(0.0),
+                            w.max(0.0),
+                            (h - top - bottom).max(0.0),
                         );
                         Some(st.tree.layout(outer))
                     })
@@ -1180,7 +1177,9 @@ fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
     let Some(r) = child.renderer.as_ref() else { return };
     let (cw, ch) = r.cell_size();
-    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch);
+    let inset =
+        [r.padding_left_px(), r.padding_right_px(), r.padding_top_px(), r.padding_bottom_px()];
+    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
 }
 fn child_enter_copy_mode(child: &mut WindowState) {
     let tab_idx = child.tabs.active_index();

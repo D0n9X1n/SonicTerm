@@ -171,11 +171,20 @@ impl App {
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
-                let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
-                let (cw, ch) = r.cell_size();
+                {
+                    let Some(r) = child.renderer.as_mut() else { continue };
+                    r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                }
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -235,11 +244,20 @@ impl App {
             }
             // PR-B2c (#365): the loop below covers main + every child.
             for child in self.windows.values_mut() {
-                let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_padding(pad);
-                let (cw, ch) = r.cell_size();
+                {
+                    let Some(r) = child.renderer.as_mut() else { continue };
+                    r.set_padding(pad);
+                }
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
             tracing::info!(
                 "live-reload: padding -> l={} r={} t={} b={}",
@@ -416,11 +434,20 @@ impl App {
         }
         // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
-            let Some(r) = child.renderer.as_mut() else { continue };
-            r.set_font(&family, size, line_h);
-            let (cw, ch) = r.cell_size();
+            {
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_font(&family, size, line_h);
+            }
+            let Some(r) = child.renderer.as_ref() else { continue };
             let rects = App::compute_pane_rects_for(child);
-            resize_panes_to_rects(&child.panes, &rects, cw, ch);
+            let (cw, ch) = r.cell_size();
+            let inset = [
+                r.padding_left_px(),
+                r.padding_right_px(),
+                r.padding_top_px(),
+                r.padding_bottom_px(),
+            ];
+            resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
         }
         if let Some(w) = self.main_window() {
             w.request_redraw();
@@ -440,11 +467,21 @@ impl App {
         tracing::info!("tab bar visible -> {visible}");
         // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
-            let Some(r) = child.renderer.as_mut() else { continue };
-            if r.set_tab_bar_visible(visible) {
-                let (cw, ch) = r.cell_size();
+            let changed = {
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_tab_bar_visible(visible)
+            };
+            if changed {
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
         }
         if let Some(w) = self.main_window() {

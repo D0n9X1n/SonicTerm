@@ -25,10 +25,17 @@ use sonicterm_cfg::keymap::{Action, Direction, ScrollAction};
 
 use crate::command_label::{search_haystack, ALL_VARIANT_KINDS};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandPaletteMode {
+    Commands,
+    RenameTab,
+}
+
 /// State for the command palette overlay. Owned by `App`.
 #[derive(Debug, Clone)]
 pub struct CommandPalette {
     open: bool,
+    mode: CommandPaletteMode,
     query: String,
     /// Full universe of actions, in canonical order.
     all: Vec<Action>,
@@ -60,6 +67,7 @@ impl CommandPalette {
         let items = (0..all.len()).collect();
         Self {
             open: false,
+            mode: CommandPaletteMode::Commands,
             query: String::new(),
             all,
             items,
@@ -77,6 +85,10 @@ impl CommandPalette {
         &self.query
     }
 
+    pub fn mode(&self) -> CommandPaletteMode {
+        self.mode
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -84,6 +96,9 @@ impl CommandPalette {
     /// Visible action list (filtered). Display order is what the renderer
     /// should show.
     pub fn visible(&self) -> Vec<&Action> {
+        if self.mode == CommandPaletteMode::RenameTab {
+            return Vec::new();
+        }
         self.items.iter().filter_map(|&i| self.all.get(i)).collect()
     }
 
@@ -98,6 +113,7 @@ impl CommandPalette {
     /// Open the palette and reset to a clean state.
     pub fn open(&mut self) {
         self.open = true;
+        self.mode = CommandPaletteMode::Commands;
         self.query.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -106,6 +122,7 @@ impl CommandPalette {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.mode = CommandPaletteMode::Commands;
         self.query.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -126,22 +143,37 @@ impl CommandPalette {
         self.query = q.into();
         self.selected = 0;
         self.scroll_offset = 0;
-        self.refilter();
+        if self.mode == CommandPaletteMode::Commands {
+            self.refilter();
+        }
     }
 
     pub fn input_char(&mut self, ch: char) {
         self.query.push(ch);
         self.selected = 0;
         self.scroll_offset = 0;
-        self.refilter();
+        if self.mode == CommandPaletteMode::Commands {
+            self.refilter();
+        }
     }
 
     pub fn backspace(&mut self) {
         if self.query.pop().is_some() {
             self.selected = 0;
             self.scroll_offset = 0;
-            self.refilter();
+            if self.mode == CommandPaletteMode::Commands {
+                self.refilter();
+            }
         }
+    }
+
+    pub fn start_rename_tab(&mut self, title_body: impl Into<String>) {
+        self.open = true;
+        self.mode = CommandPaletteMode::RenameTab;
+        self.query = title_body.into();
+        self.items.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     pub fn move_selection_down(&mut self) {
@@ -206,6 +238,9 @@ impl CommandPalette {
 
     /// The currently highlighted action, if any.
     pub fn current(&self) -> Option<&Action> {
+        if self.mode == CommandPaletteMode::RenameTab {
+            return None;
+        }
         self.items.get(self.selected).and_then(|&i| self.all.get(i))
     }
 
@@ -289,6 +324,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::OpenSshPane(t) => format!("OpenSshPane({t})"),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
+        Action::RenameTab => "RenameTab".into(),
     }
 }
 
@@ -388,6 +424,7 @@ pub fn all_actions() -> Vec<Action> {
         // and is wired via menubar). Listing one entry keeps the
         // variant kind present in the palette universe.
         Action::ApplyTheme("default".into()),
+        Action::RenameTab,
         // SSH (one representative; the user fills in target via a
         // future prompt). Variant kept so the palette is exhaustive
         // even when ssh is disabled at build time.

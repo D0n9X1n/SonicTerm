@@ -471,11 +471,15 @@ pub fn resize_panes_to_rects(
     rects: &[(u64, sonicterm_ui::pane::Rect)],
     cell_w: f32,
     cell_h: f32,
+    content_inset: [f32; 4],
 ) {
+    let [left, right, top, bottom] = content_inset;
     for (id, rect) in rects {
         let Some(pane) = panes.get(id) else { continue };
-        let cols = ((rect.w / cell_w).floor() as i32).max(1) as u16;
-        let rows = ((rect.h / cell_h).floor() as i32).max(1) as u16;
+        let content_w = (rect.w - left - right).max(cell_w);
+        let content_h = (rect.h - top - bottom).max(cell_h);
+        let cols = ((content_w / cell_w).floor() as i32).max(1) as u16;
+        let rows = ((content_h / cell_h).floor() as i32).max(1) as u16;
         pane.parser.lock().grid_mut().resize(cols, rows);
         if let Some(pty) = pane.pty.as_ref() {
             (pty.resize)(cols, rows);
@@ -534,6 +538,11 @@ pub fn refresh_active_tab_title(
         proc_name.as_deref(),
         raw_title.as_deref(),
     );
+    let pretty = tabs
+        .active()
+        .and_then(|tab| tab.custom_title.as_ref())
+        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&pretty, custom))
+        .unwrap_or(pretty);
     let cur = tabs.active().map(|t| t.title.clone());
     if cur.as_deref() == Some(pretty.as_str()) {
         return None;
@@ -1100,17 +1109,10 @@ impl App {
         }
         let Some(r) = self.main_renderer() else { return Vec::new() };
         let (w, h) = r.logical_size();
-        let top = r.top_inset();
-        let pl = r.padding_left_px();
-        let pr = r.padding_right_px();
+        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
         let bottom = r.bottom_inset();
-        let pb = r.padding_bottom_px();
-        let outer = sonicterm_ui::pane::Rect::new(
-            pl,
-            top,
-            (w - pl - pr).max(0.0),
-            (h - top - bottom - pb).max(0.0),
-        );
+        let outer =
+            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
         st.tree.layout(outer)
     }
 
@@ -1123,17 +1125,10 @@ impl App {
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
         let Some(r) = child.renderer.as_ref() else { return Vec::new() };
         let (w, h) = r.logical_size();
-        let top = r.top_inset();
-        let pl = r.padding_left_px();
-        let pr = r.padding_right_px();
+        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
         let bottom = r.bottom_inset();
-        let pb = r.padding_bottom_px();
-        let outer = sonicterm_ui::pane::Rect::new(
-            pl,
-            top,
-            (w - pl - pr).max(0.0),
-            (h - top - bottom - pb).max(0.0),
-        );
+        let outer =
+            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
         st.tree.layout(outer)
     }
 

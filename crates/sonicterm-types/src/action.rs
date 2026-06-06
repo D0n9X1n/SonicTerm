@@ -129,6 +129,8 @@ pub enum Action {
     // UI chrome
     /// Toggle visibility of the tab bar.
     ToggleTabBar,
+    /// Rename the active tab title body.
+    RenameTab,
 
     // Window
     /// Open a new top-level window.

@@ -169,6 +169,17 @@ fn aabb_intersects(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
     ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
 }
 
+#[inline]
+fn aabb_overlap_area(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let x0 = ax.max(bx);
+    let y0 = ay.max(by);
+    let x1 = (ax + aw).min(bx + bw);
+    let y1 = (ay + ah).min(by + bh);
+    ((x1 - x0).max(0.0)) * ((y1 - y0).max(0.0))
+}
+
 /// Recolor every glyph instance whose rectangle intersects the cursor
 /// cell to `bg_rgba`. Used to produce the wezterm-style "inverted"
 /// block cursor: the foreground glyph is painted in the theme
@@ -219,7 +230,13 @@ pub fn recolor_cursor_glyphs(
         let pw = gw * sw * 0.5;
         let py = (1.0 - gy - gh) * sh * 0.5;
         let ph = gh * sh * 0.5;
-        if aabb_intersects(cursor_rect, (px, py, pw, ph)) {
+        let glyph_rect = (px, py, pw, ph);
+        let overlap = aabb_overlap_area(cursor_rect, glyph_rect);
+        let glyph_area = (pw * ph).max(1.0);
+        // Recolor glyphs that are actually under the cursor. A tiny right-edge
+        // overhang from the previous glyph (common with italic/script fonts)
+        // should not recolor the whole glyph to background and make it vanish.
+        if aabb_intersects(cursor_rect, glyph_rect) && overlap >= glyph_area * 0.20 {
             g.color = bg_rgba;
         }
     }

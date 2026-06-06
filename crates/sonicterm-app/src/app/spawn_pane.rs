@@ -472,7 +472,18 @@ impl App {
             },
         };
         if let Some(panes) = self.main_panes() {
-            crate::app::resize_panes_to_rects(panes, &rects, cw, ch);
+            let inset = self
+                .main_renderer()
+                .map(|r| {
+                    [
+                        r.padding_left_px(),
+                        r.padding_right_px(),
+                        r.padding_top_px(),
+                        r.padding_bottom_px(),
+                    ]
+                })
+                .unwrap_or([0.0; 4]);
+            crate::app::resize_panes_to_rects(panes, &rects, cw, ch, inset);
         }
     }
 }

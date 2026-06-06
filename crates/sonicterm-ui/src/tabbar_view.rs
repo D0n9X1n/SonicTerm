@@ -33,7 +33,7 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
 }
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
-pub const TAB_MAX_WIDTH: f32 = 400.0;
+pub const TAB_MAX_WIDTH: f32 = 240.0;
 
 /// Preferred minimum width of a single tab. Acts as a soft floor: when the
 /// equal-share allocation per tab is ≥ this value, each tab is held at or
@@ -45,10 +45,10 @@ pub const TAB_MAX_WIDTH: f32 = 400.0;
 pub const TAB_MIN_WIDTH: f32 = 200.0;
 
 /// Size of the close `×` square inside each tab.
-pub const CLOSE_BUTTON_SIZE: f32 = 14.0;
+pub const CLOSE_BUTTON_SIZE: f32 = 16.0;
 
 /// Inset between tabs and from the right edge of the bar.
-pub const TAB_GAP: f32 = 6.0;
+pub const TAB_GAP: f32 = 4.0;
 
 /// Padding on the left edge of the bar before the first tab.
 /// 0 = first tab flush against the window edge (per user preference;
@@ -64,7 +64,7 @@ pub const TAB_INNER_PAD: f32 = 10.0;
 /// (and equivalently the bottom edge). The tab rect is `bar_h - 2 *
 /// TAB_VERT_INSET` tall — leaving 4px of bar chrome above and below the
 /// pill so the active tab's elevated BG visibly floats on the bar.
-pub const TAB_VERT_INSET: f32 = 4.0;
+pub const TAB_VERT_INSET: f32 = 2.0;
 
 /// Corner radius of the tab background pill, in logical pixels.
 pub const TAB_CORNER_RADIUS: f32 = 8.0;
@@ -74,7 +74,7 @@ pub const ACTIVE_TOP_ACCENT_H: f32 = 2.0;
 
 /// Horizontal inset (each side) of the active-tab top accent bar relative
 /// to the tab background rect — so the accent is `tab_w - 2 * inset` wide.
-pub const ACTIVE_TOP_ACCENT_INSET: f32 = 6.0;
+pub const ACTIVE_TOP_ACCENT_INSET: f32 = 10.0;
 
 /// Reserved drop zone at the right edge of the tab bar, in logical pixels.
 /// This region is subtracted from the per-tab allocation width so there is
@@ -384,11 +384,13 @@ impl TabBarLayout {
         // tab's post-layout width. Do not derive it from the whole strip or
         // shrink/grow it independently; wide two-tab Windows layouts exposed
         // that drift as an orange line overshooting into empty chrome.
+        let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
+        let inset = ACTIVE_TOP_ACCENT_INSET * scale;
         Some(Rect {
-            x: t.bg_rect.x,
-            y: t.bg_rect.y,
-            w: t.bg_rect.w.max(0.0),
-            h: ACTIVE_TOP_ACCENT_H,
+            x: t.bg_rect.x + inset,
+            y: t.bg_rect.y + 1.0 * scale,
+            w: (t.bg_rect.w - inset * 2.0).max(0.0),
+            h: ACTIVE_TOP_ACCENT_H * scale,
         })
     }
 

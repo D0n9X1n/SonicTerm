@@ -327,9 +327,9 @@ pub fn emit_tab_bar_quads(
         } else {
             params.close_color
         };
-        let inset = (t.close_x_rect.w - 8.0) * 0.5;
-        let glyph = (t.close_x_rect.w - inset * 2.0).max(1.0);
-        let thick = (glyph * 0.14).max(1.25);
+        let glyph = (t.close_x_rect.w * 0.62).max(9.0);
+        let inset = (t.close_x_rect.w - glyph) * 0.5;
+        let thick = (glyph * 0.18).max(1.5);
         push_close_x_quads(
             quads,
             CloseXParams {
@@ -2139,8 +2139,24 @@ impl GpuRenderer {
         // hook. Populated unconditionally on every render() call so the
         // test can assert that all panes' origins reach the renderer with
         // the expected x/y in physical pixels.
-        self.last_emit_origins =
-            panes.iter().map(|p| (p.id, [p.rect_px.x as f32, p.rect_px.y as f32])).collect();
+        let content_inset_l = self.padding_left_px();
+        let content_inset_r = self.padding_right_px();
+        let content_inset_t = self.padding_top_px();
+        let content_inset_b = self.padding_bottom_px();
+        let content_rect = |p: &sonicterm_render_model::PaneRender<'_>| {
+            let x = p.rect_px.x as f32 + content_inset_l;
+            let y = p.rect_px.y as f32 + content_inset_t;
+            let w = (p.rect_px.w as f32 - content_inset_l - content_inset_r).max(self.cell_w);
+            let h = (p.rect_px.h as f32 - content_inset_t - content_inset_b).max(self.cell_h);
+            (x, y, w, h)
+        };
+        self.last_emit_origins = panes
+            .iter()
+            .map(|p| {
+                let (x, y, _, _) = content_rect(p);
+                (p.id, [x, y])
+            })
+            .collect();
         // #569: per-pane raster-px layout snapshot for the pane-aware
         // hit-test in `pixel_to_cell`. PaneRender::rect_px is raster
         // px (winit physical-px is the same coordinate system post-G1a),
@@ -2150,16 +2166,19 @@ impl GpuRenderer {
         let cell_h_log = self.cell_h;
         self.last_pane_layout = panes
             .iter()
-            .map(|p| PaneLayoutSnapshot {
-                id: p.id,
-                origin_x_logical: p.rect_px.x as f32,
-                origin_y_logical: p.rect_px.y as f32,
-                w_logical: p.rect_px.w as f32,
-                h_logical: p.rect_px.h as f32,
-                cell_w_logical: cell_w_log,
-                cell_h_logical: cell_h_log,
-                cols: p.grid.cols,
-                rows: p.grid.rows,
+            .map(|p| {
+                let (x, y, w, h) = content_rect(p);
+                PaneLayoutSnapshot {
+                    id: p.id,
+                    origin_x_logical: x,
+                    origin_y_logical: y,
+                    w_logical: w,
+                    h_logical: h,
+                    cell_w_logical: cell_w_log,
+                    cell_h_logical: cell_h_log,
+                    cols: p.grid.cols,
+                    rows: p.grid.rows,
+                }
             })
             .collect();
         let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
@@ -2216,10 +2235,10 @@ impl GpuRenderer {
             .map(|p| PaneView {
                 grid: &*p.grid,
                 pane_id: p.id,
-                origin_x: p.rect_px.x as f32,
-                origin_y: p.rect_px.y as f32,
-                rect_w: p.rect_px.w as f32,
-                rect_h: p.rect_px.h as f32,
+                origin_x: content_rect(p).0,
+                origin_y: content_rect(p).1,
+                rect_w: content_rect(p).2,
+                rect_h: content_rect(p).3,
                 is_active: p.is_active,
                 scrollbar_alpha: p.scrollbar_alpha,
                 inline_images: &p.inline_images,
@@ -2864,11 +2883,7 @@ impl GpuRenderer {
         for pv in &pane_views {
             let pv_grid: &Grid = pv.grid;
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
-            let pane_rect = pane_rects
-                .iter()
-                .find(|(id, _)| *id == pv.pane_id)
-                .map(|(_, rect)| *rect)
-                .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
+            let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let view_top_abs_bg = Self::resolved_view_top_abs(pv_grid, viewport_top_abs);
             // Mirror RowGlyphCache's dirty-row invalidation: drop entries
             // for every row the VT thread mutated since the last frame.
@@ -2947,11 +2962,7 @@ impl GpuRenderer {
         // mode behaves like Always-when-scrollable here — hover-driven
         // auto-hide is PR-D.
         for pv in &pane_views {
-            let pane_rect = pane_rects
-                .iter()
-                .find(|(id, _)| *id == pv.pane_id)
-                .map(|(_, rect)| *rect)
-                .unwrap_or(PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h });
+            let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let pv_grid: &Grid = pv.grid;
             let viewport_rows = pv_grid.rows;
             let total_rows = pv_grid.scrollback_len() as u64 + viewport_rows as u64;
@@ -3510,7 +3521,6 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            use sonicterm_ui::ui_tokens::color as tok;
             let ui_palette = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
             // Issue #383: `tok::BG_BASE()` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
@@ -3522,13 +3532,13 @@ impl GpuRenderer {
             // (`theme.background` shifted -8% lightness) so every
             // theme gets visible contrast automatically.
             let bar_bg = ui_palette.bg_base;
-            let active_bg = tok::BG_ELEVATED();
-            let hover_bg = tok::BG_HOVER();
+            let active_bg = ui_palette.bg_elevated;
+            let hover_bg = ui_palette.bg_hover;
             // Theme-driven accent (was hardcoded ACCENT_BLUE — broke gruvbox/etc.).
             let accent_blue = ui_palette.accent;
-            let separator = tok::BORDER_SUBTLE();
-            let muted = tok::TEXT_MUTED();
-            let primary = tok::TEXT_PRIMARY();
+            let separator = ui_palette.border_subtle;
+            let muted = ui_palette.text_muted;
+            let primary = ui_palette.text_primary;
             let close_color = self.tab_close_override.unwrap_or(muted);
             emit_tab_bar_quads(
                 &mut quads,
@@ -3937,7 +3947,7 @@ impl GpuRenderer {
             } else {
                 layout.query_label.clone()
             };
-            let palette_font_size = self.font_size;
+            let palette_font_size = self.font_size * 1.25;
             // T14: chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
@@ -4050,7 +4060,7 @@ impl GpuRenderer {
                 }
 
                 // Footer hint — slightly smaller (0.85×).
-                let footer_font_size = self.font_size * 0.85;
+                let footer_font_size = self.font_size;
                 let footer_origin_x = layout.footer.x + 12.0;
                 let footer_baseline_y =
                     layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;

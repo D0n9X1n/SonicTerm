@@ -19,7 +19,7 @@
 //! [`crate::tabbar_view`] uses).
 
 use crate::command_label::label as action_label;
-use crate::command_palette::CommandPalette;
+use crate::command_palette::{CommandPalette, CommandPaletteMode};
 use crate::ime::ImeState;
 use crate::search::SearchState;
 use crate::tabbar_view::Rect;
@@ -273,12 +273,17 @@ impl PaletteLayout {
         query_label.push_str(palette.query());
         query_label.push('▏');
         let query_placeholder = if palette.query().is_empty() {
-            Some(String::from("Search commands, settings, themes…"))
+            Some(match palette.mode() {
+                CommandPaletteMode::Commands => String::from("Search commands, settings, themes…"),
+                CommandPaletteMode::RenameTab => String::from("New tab title…"),
+            })
         } else {
             None
         };
 
-        let empty_label = if total == 0 && !palette.query().is_empty() {
+        let empty_label = if palette.mode() == CommandPaletteMode::RenameTab {
+            None
+        } else if total == 0 && !palette.query().is_empty() {
             Some(NO_MATCHES.to_string())
         } else {
             None
@@ -289,11 +294,14 @@ impl PaletteLayout {
             None
         };
 
-        let footer_label = format!(
-            "{} command{} · ↑↓ navigate · ↵ run · esc close",
-            total,
-            if total == 1 { "" } else { "s" }
-        );
+        let footer_label = match palette.mode() {
+            CommandPaletteMode::Commands => format!(
+                "{} command{} · ↑↓ navigate · ↵ run · esc close",
+                total,
+                if total == 1 { "" } else { "s" }
+            ),
+            CommandPaletteMode::RenameTab => "↵ rename · esc cancel".to_string(),
+        };
 
         Some(PaletteLayout {
             scrim,
