@@ -21,7 +21,7 @@ pub struct Pos {
 /// for field so the adapter is a lossless 1:1 copy. `#[repr(C)]` keeps the
 /// memory layout stable for a future zero-copy path, but **no**
 /// `bytemuck::Pod` / `serde` derives live here — the types crate stays
-/// dependency-free (per `docs/CONTRACTS.md`). Consumers that need a Pod
+/// dependency-free. Consumers that need a Pod
 /// view should convert into the GPU crate's `QuadInstance`.
 ///
 /// Field semantics match `QuadInstance`:

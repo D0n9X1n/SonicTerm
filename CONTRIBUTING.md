@@ -8,8 +8,8 @@ PRs are all welcome.
 1. Install Rust (stable; `rust-toolchain.toml` will auto-select).
 2. Clone and build:
    ```bash
-   git clone git@github.com:D0n9X1n/sonic.git
-   cd sonic
+   git clone git@github.com:D0n9X1n/SonicTerm.git
+   cd SonicTerm
    cargo build
    ```
 3. Run on your platform:
@@ -22,13 +22,10 @@ Crates live under `crates/`.
 
 ## Before opening a PR
 
-The CI runs these exact commands on macOS-14 and windows-latest. Run them
-locally first:
+CI runs unit tests on macOS and Windows. Run them locally first:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check                # optional locally; required in CI
+cargo test --workspace --lib --bins
 ```
 
 ## Branches
@@ -65,10 +62,9 @@ Scope is the crate or component (`core`, `mac`, `windows`, `shared`, `ci`,
 
 Maintainers only:
 
-1. Bump versions in `Cargo.toml` (workspace `package.version`).
-2. Update `CHANGELOG.md`.
-3. Tag: `git tag v0.6.0 && git push origin v0.6.0`.
-4. `release.yml` builds `.dmg` + `.msi` and publishes a GitHub Release.
+1. Ensure `Cargo.toml` says `1.0.0`.
+2. Tag: `git tag v1.0.0 && git push origin v1.0.0`.
+3. `release.yml` builds `.dmg` + `.msi` and publishes a GitHub Release.
 
 Pre-release tags (e.g. `v0.7.0-alpha.1`) are auto-marked as pre-release.
 

@@ -32,7 +32,7 @@ St.Helens copies whose metadata we cannot fix, so a user with the font
 installed system-wide doesn't get the broken copy preferred over our
 patched bundled one.
 
-Context: https://github.com/D0n9X1n/sonic/issues/419
+Context: https://github.com/D0n9X1n/SonicTerm/issues/419
 
 ## Provisioning
 

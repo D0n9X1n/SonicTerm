@@ -47,46 +47,46 @@
                             Id='exe0'
                             Name='sonicterm-windows.exe'
                             DiskId='1'
-                            Source='..\target\x86_64-pc-windows-msvc\release\sonicterm-windows.exe'
+                            Source='..\..\target\x86_64-pc-windows-msvc\release\sonicterm-windows.exe'
                             KeyPath='yes'/>
                     </Component>
 
                     <Directory Id='AssetsDir' Name='assets'>
                         <Directory Id='AssetsThemesDir' Name='themes'>
                             <Component Id='asset_themes' Guid='C1A21A01-0000-0000-0000-000000000101' Win64='yes'>
-                                <File Id='theme_catppuccin' Name='catppuccin-mocha.toml' DiskId='1' Source='..\assets\themes\catppuccin-mocha.toml' KeyPath='yes'/>
-                                <File Id='theme_dracula'    Name='dracula.toml'          DiskId='1' Source='..\assets\themes\dracula.toml'/>
-                                <File Id='theme_gruvbox'    Name='gruvbox-dark-hard.toml' DiskId='1' Source='..\assets\themes\gruvbox-dark-hard.toml'/>
-                                <File Id='theme_monokai'    Name='monokai-pro.toml'      DiskId='1' Source='..\assets\themes\monokai-pro.toml'/>
-                                <File Id='theme_nord'       Name='nord.toml'             DiskId='1' Source='..\assets\themes\nord.toml'/>
-                                <File Id='theme_onedark'    Name='one-dark.toml'         DiskId='1' Source='..\assets\themes\one-dark.toml'/>
-                                <File Id='theme_solarized'  Name='solarized-dark.toml'   DiskId='1' Source='..\assets\themes\solarized-dark.toml'/>
-                                <File Id='theme_tokyo'      Name='tokyo-night.toml'      DiskId='1' Source='..\assets\themes\tokyo-night.toml'/>
-                                <File Id='theme_wezterm'    Name='wezterm.toml'          DiskId='1' Source='..\assets\themes\wezterm.toml'/>
+                                <File Id='theme_catppuccin' Name='catppuccin-mocha.toml' DiskId='1' Source='..\..\assets\themes\catppuccin-mocha.toml' KeyPath='yes'/>
+                                <File Id='theme_dracula'    Name='dracula.toml'          DiskId='1' Source='..\..\assets\themes\dracula.toml'/>
+                                <File Id='theme_gruvbox'    Name='gruvbox-dark-hard.toml' DiskId='1' Source='..\..\assets\themes\gruvbox-dark-hard.toml'/>
+                                <File Id='theme_monokai'    Name='monokai-pro.toml'      DiskId='1' Source='..\..\assets\themes\monokai-pro.toml'/>
+                                <File Id='theme_nord'       Name='nord.toml'             DiskId='1' Source='..\..\assets\themes\nord.toml'/>
+                                <File Id='theme_onedark'    Name='one-dark.toml'         DiskId='1' Source='..\..\assets\themes\one-dark.toml'/>
+                                <File Id='theme_solarized'  Name='solarized-dark.toml'   DiskId='1' Source='..\..\assets\themes\solarized-dark.toml'/>
+                                <File Id='theme_tokyo'      Name='tokyo-night.toml'      DiskId='1' Source='..\..\assets\themes\tokyo-night.toml'/>
+                                <File Id='theme_wezterm'    Name='wezterm.toml'          DiskId='1' Source='..\..\assets\themes\wezterm.toml'/>
                             </Component>
                         </Directory>
 
                         <Directory Id='AssetsKeymapsDir' Name='keymaps'>
                             <Component Id='asset_keymaps' Guid='C1A21A01-0000-0000-0000-000000000102' Win64='yes'>
-                                <File Id='keymap_sonicterm'         Name='sonicterm.toml'         DiskId='1' Source='..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
-                                <File Id='keymap_sonicterm_windows' Name='sonicterm-windows.toml' DiskId='1' Source='..\assets\keymaps\sonicterm-windows.toml'/>
+                                <File Id='keymap_sonicterm'         Name='sonicterm.toml'         DiskId='1' Source='..\..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
+                                <File Id='keymap_sonicterm_windows' Name='sonicterm-windows.toml' DiskId='1' Source='..\..\assets\keymaps\sonicterm-windows.toml'/>
                             </Component>
                         </Directory>
 
                         <Directory Id='AssetsFontsDir' Name='fonts'>
                             <Component Id='asset_fonts' Guid='C1A21A01-0000-0000-0000-000000000103' Win64='yes'>
-                                <File Id='font_regular'    Name='RecMonoSt.Helens-Regular.ttf'    DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Regular.ttf' KeyPath='yes'/>
-                                <File Id='font_bold'       Name='RecMonoSt.Helens-Bold.ttf'       DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Bold.ttf'/>
-                                <File Id='font_italic'     Name='RecMonoSt.Helens-Italic.ttf'     DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-Italic.ttf'/>
-                                <File Id='font_bolditalic' Name='RecMonoSt.Helens-BoldItalic.ttf' DiskId='1' Source='..\assets\fonts\RecMonoSt.Helens-BoldItalic.ttf'/>
+                                <File Id='font_regular'    Name='RecMonoSt.Helens-Regular.ttf'    DiskId='1' Source='..\..\assets\fonts\RecMonoSt.Helens-Regular.ttf' KeyPath='yes'/>
+                                <File Id='font_bold'       Name='RecMonoSt.Helens-Bold.ttf'       DiskId='1' Source='..\..\assets\fonts\RecMonoSt.Helens-Bold.ttf'/>
+                                <File Id='font_italic'     Name='RecMonoSt.Helens-Italic.ttf'     DiskId='1' Source='..\..\assets\fonts\RecMonoSt.Helens-Italic.ttf'/>
+                                <File Id='font_bolditalic' Name='RecMonoSt.Helens-BoldItalic.ttf' DiskId='1' Source='..\..\assets\fonts\RecMonoSt.Helens-BoldItalic.ttf'/>
                             </Component>
                         </Directory>
 
                         <Directory Id='AssetsIconsDir' Name='icons'>
                             <Directory Id='AssetsIconsExportsDir' Name='exports'>
                                 <Component Id='asset_icons' Guid='C1A21A01-0000-0000-0000-000000000104' Win64='yes'>
-                                    <File Id='icon_ico'  Name='sonic.ico'  DiskId='1' Source='..\assets\icons\exports\sonic.ico' KeyPath='yes'/>
-                                    <File Id='icon_icns' Name='sonic.icns' DiskId='1' Source='..\assets\icons\exports\sonic.icns'/>
+                                    <File Id='icon_ico'  Name='sonic.ico'  DiskId='1' Source='..\..\assets\icons\exports\sonic.ico' KeyPath='yes'/>
+                                    <File Id='icon_icns' Name='sonic.icns' DiskId='1' Source='..\..\assets\icons\exports\sonic.icns'/>
                                 </Component>
                             </Directory>
                         </Directory>
@@ -145,9 +145,9 @@
         <Property Id='INSTALLDESKTOPSHORTCUT' Value='1'/>
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
-        <Icon Id='ProductIcon' SourceFile='..\assets\icons\exports\sonic.ico'/>
+        <Icon Id='ProductIcon' SourceFile='..\..\assets\icons\exports\sonic.ico'/>
         <Property Id='ARPPRODUCTICON' Value='ProductIcon'/>
-        <Property Id='ARPHELPLINK' Value='https://github.com/D0n9X1n/sonic'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/D0n9X1n/SonicTerm'/>
 
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>

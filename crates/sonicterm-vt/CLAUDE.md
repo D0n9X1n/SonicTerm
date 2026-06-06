@@ -6,7 +6,7 @@ the grid via the `Performer` trait. Pure-data; no I/O, no GPU.
 
 ## Public surface
 - `vt::Parser`, `vt::Performer`
-- See `docs/CONTRACTS.md` for trait seams in `sonicterm-types`.
+- Trait seams live in `sonicterm-types`.
 
 ## Land-mines specific to this crate
 - **LM-005** CSI `J` (ED) and `K` (EL) MUST honor mode param.

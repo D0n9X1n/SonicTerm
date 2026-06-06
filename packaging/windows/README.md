@@ -7,12 +7,11 @@ On Windows, install once:
 cargo install cargo-wix --locked
 ```
 
-Then from the repo root (the `sonicterm-windows` crate lives at the top level —
-the legacy `crates/` directory has been removed):
+Then from the repo root:
 
 ```powershell
-cd sonicterm-windows
-cargo wix --output ../dist/
+cd crates/sonicterm-windows
+cargo wix --no-build --output ../../dist/
 ```
 
 The release workflow does this automatically when a `v*` tag is pushed.

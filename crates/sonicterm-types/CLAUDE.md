@@ -2,8 +2,8 @@
 
 ## Purpose
 The **contract crate**. Zero-dep value types + trait seams that every
-other crate depends on. Changing the public API is a contract change
-and goes through `docs/CONTRACTS.md` § deprecation protocol.
+other crate depends on. Public API changes affect the whole workspace and
+should be paired with tests and a snapshot update when applicable.
 
 ## Public surface
 - Value types: `Cell`, `Pos`, `Rect`, `Action`, `GlyphKey`, `HyperlinkId`, `FrameModel`
@@ -25,9 +25,9 @@ The crate ships three self-enforcing meta-tests:
 - per-trait `contract_<trait>.rs` files asserting shape + invariants
 
 ## Common pitfalls
-- Adding a pub trait without a `tests/contract_<name>.rs` file fails CI
-- Removing a deprecated item without going through 2-PR sequence fails CI
-- Adding `derive(Serialize)` is a contract-API change too — bump the snapshot
+- Adding a pub trait should include a focused contract/unit test.
+- Removing a public item is a breaking API change.
+- Adding `derive(Serialize)` is a contract-API change too — update snapshots when used.
 
 ## Owning PM(s)
 - Primary: either (cross-platform pure-data)

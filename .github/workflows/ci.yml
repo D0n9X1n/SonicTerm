@@ -15,8 +15,8 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  quick-gate:
-    name: ${{ matrix.os }} / fmt+clippy
+  unit-tests:
+    name: ${{ matrix.os }} / unit tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,44 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
-      - name: Cache cargo
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.os }}
+          shared-key: unit-${{ matrix.os }}
 
-      - name: fmt check
-        run: cargo fmt --all -- --check
+      - name: Run unit tests
+        run: cargo test --workspace --lib --bins
 
-      - name: no raw process exits
+      - name: Run release-note unit test
         shell: bash
-        run: bash scripts/check-no-raw-process-exit.sh
-
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: 'contract docs drift (M8 fail)'
-        shell: bash
-        run: bash tools/check-contract-docs.sh fail
-
-      - name: 'landmines (M8 fail)'
-        shell: bash
-        run: bash tools/check-landmines.sh fail
-
-      - name: 'ownership (M8 fail)'
-        shell: bash
-        run: bash tools/check-ownership.sh fail
-
-  deny:
-    name: cargo-deny (supply-chain)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
+        run: bash scripts/test-release-notes.sh

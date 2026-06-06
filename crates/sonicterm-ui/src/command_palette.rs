@@ -477,3 +477,44 @@ pub fn covers_every_variant_kind() -> bool {
     let universe = all_actions();
     ALL_VARIANT_KINDS.iter().all(|kind| universe.iter().any(|a| variant_kind(a) == *kind))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
+
+    #[test]
+    fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
+        let actions = palette_actions();
+        assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+        assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
+        assert!(covers_every_variant_kind());
+    }
+
+    #[test]
+    fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
+        let keymap = Keymap {
+            meta: Meta { name: "test".into(), version: "1.0".into() },
+            bindings: vec![
+                Binding {
+                    keys: "super+shift+y".into(),
+                    action: ActionWrapper(Action::ApplyTheme("wezterm".into())),
+                },
+                Binding {
+                    keys: "super+shift+s".into(),
+                    action: ActionWrapper(Action::OpenSshPane("alice@example.com".into())),
+                },
+            ],
+        };
+        let mut palette = CommandPalette::new();
+        palette.set_keymap(&keymap);
+        let visible = palette.visible();
+        let theme_idx = visible
+            .iter()
+            .position(|a| matches!(a, Action::ApplyTheme(name) if name == "wezterm"))
+            .expect("concrete keymap theme action should be visible");
+        assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some("⌘⇧Y"));
+        assert!(!visible.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+    }
+}

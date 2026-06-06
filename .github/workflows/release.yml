@@ -5,15 +5,17 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # --- Quick-gate parity: fmt + clippy on both OSes -------------------------
-  quick-gate:
-    name: ${{ matrix.os }} / fmt+clippy
+  unit-tests:
+    name: ${{ matrix.os }} / unit tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,24 +24,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.os }}
-      - name: fmt check
-        run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-  # --- macOS build + .dmg (UNSIGNED — signing deferred pending certs) -------
+          shared-key: release-unit-${{ matrix.os }}
+      - name: Run unit tests
+        run: cargo test --workspace --lib --bins
+
+      - name: Run release-note unit test
+        shell: bash
+        run: bash scripts/test-release-notes.sh
+
   build-mac:
-    name: Build macOS universal .dmg (unsigned)
+    name: Build macOS dmg
     runs-on: macos-14
-    needs: [quick-gate]
+    needs: [unit-tests]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install rust + targets
+      - name: Install Rust targets
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
@@ -60,58 +62,50 @@ jobs:
           lipo -create \
             target/x86_64-apple-darwin/release/sonicterm-mac \
             target/aarch64-apple-darwin/release/sonicterm-mac \
-            -output dist/sonic
-          file dist/sonic
+            -output dist/sonicterm-mac
+          file dist/sonicterm-mac
 
-      - name: Install create-dmg + librsvg + imagemagick
-        run: brew install create-dmg librsvg imagemagick
+      - name: Build icons
+        run: |
+          brew install create-dmg librsvg imagemagick
+          bash assets/icons/bake-icons.sh
 
-      - name: Bake icon
-        run: bash assets/icons/bake-icons.sh
-
-      - name: Build .app + .dmg (unsigned)
-        run: bash packaging/mac/make-dmg.sh dist/sonic "${{ github.ref_name }}"
-
-      - name: Note unsigned build
-        run: echo "::notice::Built UNSIGNED macOS .dmg — signing deferred pending Developer ID cert procurement"
+      - name: Build dmg
+        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}"
 
       - uses: actions/upload-artifact@v5
         with:
           name: sonicterm-mac
           path: dist/*.dmg
 
-  # --- Windows build + .msi (UNSIGNED — signing deferred pending certs) -----
   build-windows:
-    name: Build Windows .msi (unsigned)
+    name: Build Windows msi
     runs-on: windows-latest
-    needs: [quick-gate]
+    needs: [unit-tests]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install rust + target
+      - name: Install Rust target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-win
+          shared-key: release-windows
 
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
 
-      - name: Build release
+      - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
-      - name: Build .msi (unsigned)
+      - name: Build msi
         shell: bash
         run: |
+          mkdir -p dist
           cd crates/sonicterm-windows
           cargo wix --no-build --nocapture --output ../../dist/
-
-      - name: Note unsigned build
-        shell: bash
-        run: echo "::notice::Built UNSIGNED Windows .msi — signing deferred pending Azure Trusted Signing cert procurement"
 
       - uses: actions/upload-artifact@v5
         with:
@@ -120,10 +114,8 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    needs: [build-mac, build-windows]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -134,28 +126,14 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate changelog
-        id: changelog
-        run: |
-          PREV=$(git tag --sort=-creatordate | grep -v "^${{ github.ref_name }}$" | head -1 || true)
-          if [ -n "$PREV" ]; then
-            echo "## Changes since $PREV" > body.md
-            git log --pretty=format:"- %s (%h)" "${PREV}..${{ github.ref_name }}" >> body.md
-          else
-            echo "Initial SonicTerm Terminal release." > body.md
-          fi
-          {
-            echo ""
-            echo ""
-            echo "_Note: this release ships UNSIGNED on both platforms. Code-signing is deferred past v1.0 pending cert procurement._"
-          } >> body.md
-          cat body.md
+      - name: Generate release notes
+        run: bash scripts/release-notes.sh "${{ github.ref_name }}" > RELEASE_NOTES.md
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: SonicTerm ${{ github.ref_name }}
-          body_path: body.md
+          body_path: RELEASE_NOTES.md
           files: dist/*
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

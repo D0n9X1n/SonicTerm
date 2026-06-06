@@ -1,7 +1,7 @@
 //! Trait seams declared in the contract crate. Concrete implementations
 //! live in their respective feature crates (`sonicterm-io::pty`,
 //! `sonicterm-gpu`, `sonicterm-app`, etc.). Adding or modifying a trait
-//! here is a contract change — follow `docs/CONTRACTS.md`.
+//! here is a workspace-wide contract change.
 
 pub mod clipboard;
 pub mod painter;

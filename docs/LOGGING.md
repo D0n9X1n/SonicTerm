@@ -1,171 +1,31 @@
-# Logging in SonicTerm
+# Logging
 
-SonicTerm uses [`tracing`] for all in-process logging. The logging subsystem
-is initialised at the very top of `main()` so even early bootstrap
-errors (config parse, theme load, panic during init) end up on disk.
+SonicTerm writes rolling logs through `sonicterm-logging`.
 
-## Where logs live
+## Paths
 
-| Platform | Log directory                              |
-|----------|---------------------------------------------|
-| macOS    | `~/Library/Logs/SonicTerm/`                    |
-| Windows  | `%LOCALAPPDATA%\SonicTerm\Logs\`               |
-| Linux/dev| `$XDG_STATE_HOME/sonic/logs/` (fallback `~/.local/state/sonic/logs/`) |
+- macOS: `~/Library/Logs/SonicTerm/sonicterm.log`
+- Windows: `%LOCALAPPDATA%\SonicTerm\logs\sonicterm.log`
 
-Inside that directory you will find:
+Crash dumps and exit-path traces are written in the same directory when
+available.
 
-- `sonicterm.log.YYYY-MM-DD` — current day's events. `tracing-appender`
-  rotates daily; the freshest file is the one being actively written.
-- `sonicterm.log.YYYY-MM-DD` (older) — previous days, capped by retention.
-- `crashes/crash-<utc-iso8601>.log` — per-panic dump (see Crash dumps).
-
-The path can be overridden by setting the `SONIC_LOG_DIR` env var
-before launching SonicTerm — useful in CI and ops.
-
-## Retention
-
-All five knobs are exposed in `sonicterm.toml` under `[logging]`. Defaults:
+## Configuration
 
 ```toml
 [logging]
-max_file_size_mb    = 10   # soft cap per active log file
-max_rotated_files   = 5    # delete older rotated logs beyond this
-max_age_days        = 14   # delete rotated logs older than this (0 = off)
-max_crash_dumps     = 10   # delete oldest crash dumps beyond this
-max_crash_age_days  = 30   # delete crash dumps older than this (0 = off)
+level = "info"       # trace | debug | info | warn | error
+max_files = 8
+max_bytes = 1048576
 ```
 
-Total worst-case disk usage:
-`max_file_size_mb * (max_rotated_files + 1)` ≈ **~60 MB** for logs,
-plus the size of up to `max_crash_dumps` crash dumps (typically a few
-kilobytes each).
+Logging is initialized after `sonicterm.toml` is loaded so the configured level
+is honored from startup onward. Old log files are cleaned asynchronously.
 
-Cleanup runs in a background thread at startup so it can never stall
-the GUI; it is also re-runnable from **Help → Clear Old Logs**.
+## Bug report bundle
 
-## How to change the log level
+When reporting a bug, include:
 
-Two equivalent options (env var wins if both are set):
-
-1. `RUST_LOG=sonic=debug ./sonic` — standard `tracing_subscriber`
-   syntax. Multiple targets: `RUST_LOG=sonic=debug,wgpu=info`.
-2. In `sonicterm.toml`:
-
-   ```toml
-   [logging]
-   level = "sonic=debug,sonicterm_vt=info"
-   ```
-
-The default per-target filter is:
-
-```
-sonic=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn,cosmic_text=warn,glyphon=warn
-```
-
-The stderr sink is always pinned to `WARN+` no matter how verbose the
-file filter is, so `RUST_LOG=debug` won't drown the terminal you
-launched SonicTerm from.
-
-## Crash dumps
-
-A `tracing_subscriber::Layer` keeps a fixed-size ring of the most
-recent 50 events. On panic, SonicTerm's panic hook writes
-`crashes/crash-<utc-iso8601>.log` containing:
-
-- header (timestamp, version, **thread name + id**, panic location,
-  panic message);
-- a full `std::backtrace::Backtrace` (force-captured regardless of
-  `RUST_BACKTRACE`);
-- the 50-event ring snapshot.
-
-The hook is **process-wide and fires for panics on every thread** —
-including PTY-reader, render, winit, and any tokio worker — not just
-the main thread. This closes the "silent-exit / no `.ips` / no
-`crashes/` entry" forensic gap where a background-thread panic would
-abort the process with no on-disk trace. In addition to the file
-dump, a one-line `ERROR` breadcrumb is emitted to the rolling
-`sonicterm.log` under the `sonicterm_logging::panic` target, so even a
-crash-file write failure (read-only home, ENOSPC, etc.) leaves an
-index entry.
-
-Both `sonicterm-mac` and `sonicterm-windows` install the hook at the very top
-of `main()` — before config load — so panics during bootstrap (bad
-TOML, missing theme, GPU init failure) are captured the same way as
-steady-state ones.
-
-The hook then chains to the previously installed (default) panic
-hook, so normal abort/unwind behaviour is preserved and existing
-`catch_unwind` call-sites keep working. Set `SONIC_PANIC_ABORT=1` in
-the environment to instead `std::process::abort()` immediately after
-the dump is written (useful when a chained unwind would itself
-deadlock — e.g. a poisoned mutex in the render path).
-
-## Filing a bug report
-
-Please attach:
-
-1. The last 200 lines of the most recent log file. On macOS:
-   ```sh
-   tail -200 ~/Library/Logs/SonicTerm/sonicterm.log.* | pbcopy
-   ```
-   On Windows:
-   ```powershell
-   Get-Content "$env:LOCALAPPDATA\SonicTerm\Logs\sonicterm.log.*" -Tail 200 | Set-Clipboard
-   ```
-2. Any matching `crashes/crash-*.log` for the same timeframe.
-3. If you cleared logs already, mention the rough time the bug
-   occurred so we can correlate against your shell history.
-
-## Clearing logs
-
-- **Help → Show Logs in Finder/Explorer** opens the log directory in
-  the platform file browser.
-- **Help → Clear Old Logs** runs an aggressive cleanup pass that
-  removes every rotated log file (preserving only the active one) and
-  every crash dump. A native notification reports the count and bytes
-  freed.
-- Manual nuke: `rm -rf ~/Library/Logs/SonicTerm/*` (or the platform
-  equivalent) — SonicTerm recreates the directory on next launch.
-
-## Exit and crash coverage
-
-Every process-termination path leaves a marker in `sonicterm.log`, and
-every crash also writes a file under `crashes/`. The matrix:
-
-| Path                               | Caught? | Marker in sonicterm.log                                          | Crash file? |
-|------------------------------------|---------|--------------------------------------------------------------|-------------|
-| Rust panic, main thread            | Yes     | "sonic exiting: after panic"                                 | Yes         |
-| Rust panic, spawned thread         | Yes     | "sonic exiting: after panic"                                 | Yes         |
-| Stack overflow                     | Yes     | "FATAL: SIGSEGV - sonic terminating ..."                     | No (.ips only) |
-| SIGSEGV / SIGBUS / SIGILL / SIGFPE | Yes     | "FATAL: <SIGNAME> - sonic terminating ..."                   | No (.ips only) |
-| SIGABRT (incl. allocator failure)  | Yes     | "FATAL: SIGABRT - sonic terminating ..."                     | No (.ips only) |
-| `LoopExiting` (Cmd+Q / WM_CLOSE)   | Yes     | "sonic exiting: winit LoopExiting ..." + "clean after LoopExiting" | No |
-| Last window closed                 | Yes     | Same as LoopExiting (winit drives the path)                  | No          |
-| `main` returns normally            | Yes     | "sonic exiting: clean main return"                           | No          |
-| `sonicterm_logging::exit_with(code)`   | Yes     | "sonic exiting: explicit process::exit" with reason field    | No          |
-| Raw `std::process::exit`           | No*     | nothing (drop guards do NOT run)                             | No          |
-| PTY child killed                   | Yes     | logged by `sonicterm-io` PTY shutdown path                       | No          |
-| SIGKILL                            | No      | nothing — absence of an "exiting" line near death implies SIGKILL or unrecoverable crash | No |
-| Power off / kernel panic           | No      | same as SIGKILL                                              | No          |
-
-*Raw `std::process::exit` is forbidden in shipped code by the CI grep
-gate `scripts/check-no-raw-process-exit.sh`. Allowlisted exceptions
-(example/demo binaries) live in `scripts/process-exit-allowlist.txt`.
-Production paths funnel through `sonicterm_logging::exit_with(code, reason)`
-which logs the reason before exiting.
-
-### Reading the markers
-
-If you see a death without any "exiting" line in the tail, suspect:
-1. SIGKILL (admin force-quit, OOM-killer, `kill -9`),
-2. an unrecoverable abort that ran before the signal handler could
-   `write(2)` (very rare — would also leave no `.ips`),
-3. host power loss or kernel panic.
-
-The signal-handler writes go through `write(2)` on a pre-opened fd
-and call `fsync(2)` before re-raising, so under normal conditions
-even an immediate hardware fault leaves the FATAL line on disk.
-
-### Source
-
-The implementation lives in `crates/sonicterm-logging/src/exit_trace.rs`.
+1. SonicTerm version and OS version.
+2. The last 200 lines of `sonicterm.log`.
+3. A screenshot for rendering, font, VT, or pane-layout issues.

@@ -87,8 +87,7 @@ are procured.
 ### ⏳ Still required before the v1.0 tag
 
 - Honest perf-parity sign-off — vtebench within ~2× of WezTerm
-  (currently 6×–302× slower depending on the benchmark; see §14 of
-  `CLAUDE.md` and `docs/ROADMAP.md`).
+  (historical tracking now lives in release notes and `docs/ARCHITECTURE.md`).
 - Apple Developer ID cert procurement (#39 + #128 pipeline is ready).
 - Azure Trusted Signing cert procurement (#128 pipeline is ready).
 
@@ -261,11 +260,11 @@ finally pinned to ~0%.
 
 ### 📝 Docs
 
-- `#60` README + `docs/USER_GUIDE.md` overhaul.
-- `#67` `docs/TESTING.md` — local gate, e2e binaries, visual snapshot
+- `#60` README + wiki overhaul.
+- `#67` testing docs — local gate, e2e binaries, visual snapshot
   harness, headless GUI bench.
-- `#70` `docs/VISUAL_PARITY.md` recipe vs WezTerm.
-- `#73` `docs/release/CI-BILLING.md` notes.
+- `#70` visual parity recipe vs WezTerm.
+- `#73` release CI notes.
 - `#75` Visual parity report — 3 ΔE delta closed across the standard
   recipe.
 

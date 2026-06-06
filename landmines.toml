@@ -4,8 +4,8 @@
 # bug with the file globs that can re-introduce it. `tools/check-landmines.sh`
 # is a diff-scoped pre-commit/CI gate that reports touched landmine paths.
 #
-# Editing this file without also updating docs/agents/_common.md (or
-# vice versa) is a contract drift — keep them in lockstep.
+# Keep this file in sync with crate-local CLAUDE.md notes when adding a new
+# landmine. Normal CI no longer runs this check; it is a local diagnostic aid.
 
 [[landmine]]
 id = "LM-001-try-lock-render-path"

@@ -1,28 +1,35 @@
-# Releasing SonicTerm
+# Release
 
-Tagging `vX.Y.Z` triggers `.github/workflows/release.yml`, which builds a
-macOS universal `.dmg` and a Windows x64 `.msi` and publishes a GitHub
-Release.
+SonicTerm releases are tag-driven.
 
-> **Signing status: DEFERRED.** Per CLAUDE.md §9, code signing (macOS
-> Developer ID notarization, Windows Azure Trusted Signing) is wired in
-> spirit but the actual cert procurement is a deferred operational step.
-> The v1.0 release ships **unsigned** artifacts. Users may need to
-> right-click → Open on macOS or accept SmartScreen on Windows.
+## Version
 
-## Cut a release
+The workspace version is `1.0.0`. Release tags use `v<major>.<minor>.<patch>`,
+for example:
 
-```bash
-git tag v0.X.0 && git push origin v0.X.0
+```sh
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-Watch the workflow at
-`https://github.com/D0n9X1n/sonic/actions/workflows/release.yml`.
+## Automation
 
-## Historical signing notes
+`.github/workflows/release.yml` runs on every `v*` tag:
 
-Earlier revisions of this doc described the Apple Developer ID +
-notarization flow and Azure Trusted Signing setup for Windows. Those
-instructions have been removed from the active workflow until certs are
-actually procured. See `docs/release/signing.md` (marked DEFERRED) for
-the historical procedure if/when this work is revived.
+1. Unit tests on macOS and Windows.
+2. macOS universal release build and unsigned `.dmg`.
+3. Windows x64 release build and unsigned `.msi`.
+4. Release notes from `scripts/release-notes.sh`, summarizing commits since the
+   previous version tag.
+5. GitHub Release publication with both installers attached.
+
+## Local release checks
+
+```sh
+cargo test --workspace --lib --bins
+cargo build --release -p sonicterm-mac
+bash scripts/test-release-notes.sh
+```
+
+Windows packaging is produced with `cargo wix` from
+`crates/sonicterm-windows/wix/main.wxs`.
