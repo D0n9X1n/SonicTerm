@@ -1,4 +1,6 @@
-name = "WezTerm Default"
+# SonicTerm default: WezTerm's Gruvbox dark hard palette with a custom
+# near-black background tuned for SonicTerm chrome.
+name = "Modified Gruvbox Dark Hard"
 appearance = "dark"
 
 [colors]

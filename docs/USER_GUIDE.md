@@ -234,7 +234,8 @@ header first. Saved changes are picked up by the live-reload watcher.
 ## Themes
 
 Bundled themes (selectable from `sonicterm.toml`, for example `[appearance] theme = "…"`).
-The default is `wezterm` for out-of-box visual parity with WezTerm:
+The default is `wezterm`, a modified Gruvbox dark hard palette with SonicTerm's
+near-black background:
 
 - `wezterm` (default)
 - `tokyo-night`

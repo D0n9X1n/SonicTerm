@@ -75,9 +75,6 @@ pub const PALETTE_ROW_GAP: f32 = 4.0;
 /// Horizontal padding inside each row.
 pub const PALETTE_ROW_PAD_X: f32 = 12.0;
 
-/// Width of the colored left accent strip on the selected row.
-pub const PALETTE_ROW_ACCENT_W: f32 = 3.0;
-
 /// Footer height (count + nav hint strip at the bottom of the modal).
 pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
 
@@ -128,9 +125,6 @@ pub struct PaletteLayout {
     /// is only emitted when the selected index actually falls inside the
     /// visible window (see scroll clamping in [`PaletteLayout::compute`]).
     pub selected_row: Option<usize>,
-    /// Left-accent strip rectangle for the selected row (3px wide). Only
-    /// `Some` when `selected_row` is `Some`.
-    pub selected_accent: Option<Rect>,
     /// Query string the renderer should paint into `query_row`. The
     /// trailing block cursor is appended so the user can see the caret.
     /// No `> ` prefix any more — the search icon stands in for it.
@@ -267,15 +261,6 @@ impl PaletteLayout {
         } else {
             None
         };
-        let selected_accent = selected_row.and_then(|sel| {
-            rows.get(sel).map(|row| Rect {
-                x: row.rect.x,
-                y: row.rect.y + (row.rect.h - 20.0) * 0.5,
-                w: PALETTE_ROW_ACCENT_W,
-                h: 20.0,
-            })
-        });
-
         // Query label — no `> ` prefix any more; the search icon stands
         // in for it. Block cursor is still appended so the caret shows.
         let mut query_label = String::new();
@@ -322,7 +307,6 @@ impl PaletteLayout {
             query_icon,
             rows,
             selected_row,
-            selected_accent,
             query_label,
             query_placeholder,
             row_labels,

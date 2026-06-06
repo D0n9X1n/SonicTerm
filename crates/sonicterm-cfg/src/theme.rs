@@ -238,8 +238,9 @@ impl Theme {
 
     /// Infallible loader. On any error, logs a warning at
     /// `target = "sonicterm-cfg"` and returns the bundled `wezterm` theme
-    /// as a built-in default — see #522. The bundled theme is embedded at
-    /// compile time so the fallback cannot fail.
+    /// (a modified Gruvbox dark hard palette) as a built-in default — see
+    /// #522. The bundled theme is embedded at compile time so the fallback
+    /// cannot fail.
     pub fn load_or_default(path: &Path) -> Self {
         match Self::load_strict(path) {
             Ok(t) => t,
@@ -254,8 +255,9 @@ impl Theme {
         }
     }
 
-    /// Bundled default theme (`wezterm`), embedded at compile time and used
-    /// by [`Self::load_or_default`] as the infallible fallback.
+    /// Bundled default theme (`wezterm`, a modified Gruvbox dark hard palette),
+    /// embedded at compile time and used by [`Self::load_or_default`] as the
+    /// infallible fallback.
     pub fn bundled_default() -> Self {
         const BUNDLED: &str = include_str!("../../../assets/themes/wezterm.toml");
         toml::from_str(BUNDLED).expect("bundled wezterm.toml must parse")

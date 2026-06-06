@@ -7,7 +7,10 @@
 //! [`crate::wezterm_pipeline::WeztermPipeline`]. No second font system,
 //! no second atlas, no second render pass.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, Context, Result};
 use sonicterm_cfg::config::BackdropKind;
@@ -29,6 +32,9 @@ use crate::color::{
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
 use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
 use sonicterm_ui::tab_spans::tab_title_font_size;
+
+const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
+const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]
@@ -492,6 +498,10 @@ pub struct GpuRenderer {
     /// focus). Kept as a compatibility sink for the app-side plumbing;
     /// inactive pane cursors are no longer drawn.
     inactive_pane_cursors: Vec<InactivePaneCursor>,
+    /// Short-lived focus confirmation animation for the pane that just
+    /// became active. Cleared automatically after
+    /// [`PANE_FOCUS_FLASH_DURATION`].
+    pane_focus_flash: Option<(u64, Instant)>,
     selection_color: [f32; 4],
     tab_bar_bg: [f32; 4],
     tab_active_bg: [f32; 4],
@@ -663,6 +673,10 @@ struct FrameKey {
     /// Whether the window has keyboard focus — toggles active cursor
     /// visibility.
     window_focused: bool,
+    /// Quantized pane-focus flash phase. Folded into the key so the
+    /// bounded flash can animate without reviving the old infinite
+    /// heartbeat redraw loop.
+    pane_focus_flash_bucket: u8,
     /// Index of the tab the cursor is currently over, or `u32::MAX`
     /// when the cursor is not over any tab. Moving between tabs must
     /// invalidate the cached frame for hover chrome.
@@ -1055,6 +1069,7 @@ impl GpuRenderer {
             blink_epoch: Instant::now(),
             window_focused: true,
             inactive_pane_cursors: Vec::new(),
+            pane_focus_flash: None,
             selection_color,
             tab_bar_bg,
             tab_active_bg,
@@ -1311,6 +1326,12 @@ impl GpuRenderer {
         self.window_focused
     }
 
+    pub fn flash_pane_focus(&mut self, pane_id: u64) {
+        self.pane_focus_flash = Some((pane_id, Instant::now()));
+        self.last_frame_key = None;
+        self.window.request_redraw();
+    }
+
     /// Accept the historical per-frame inactive-pane cursor list.
     /// Inactive panes no longer draw cursors, so any previously cached
     /// cursor records are cleared and new records are ignored.
@@ -1319,6 +1340,29 @@ impl GpuRenderer {
             self.inactive_pane_cursors.clear();
             self.last_frame_key = None;
         }
+    }
+
+    fn pane_focus_flash_bucket(&mut self, now: Instant) -> u8 {
+        let Some((_, started_at)) = self.pane_focus_flash else {
+            return 0;
+        };
+        let elapsed = now.saturating_duration_since(started_at);
+        if elapsed >= PANE_FOCUS_FLASH_DURATION {
+            self.pane_focus_flash = None;
+            return 0;
+        }
+        ((elapsed.as_millis() / PANE_FOCUS_FLASH_BUCKET.as_millis()) + 1).min(u128::from(u8::MAX))
+            as u8
+    }
+
+    fn pane_focus_flash_alpha(&self, now: Instant) -> Option<(u64, f32)> {
+        let (pane_id, started_at) = self.pane_focus_flash?;
+        let elapsed = now.saturating_duration_since(started_at);
+        if elapsed >= PANE_FOCUS_FLASH_DURATION {
+            return None;
+        }
+        let t = elapsed.as_secs_f32() / PANE_FOCUS_FLASH_DURATION.as_secs_f32();
+        Some((pane_id, (1.0 - t).powi(2) * 0.22))
     }
 
     /// Current physical surface width in pixels.
@@ -2383,6 +2427,7 @@ impl GpuRenderer {
         let quick_select_hint_count = copy_mode
             .and_then(|state| state.quick_select.as_ref())
             .map_or(0, |quick| quick.hints.len() as u32);
+        let pane_focus_flash_bucket = self.pane_focus_flash_bucket(now);
         let key = FrameKey {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
@@ -2414,6 +2459,7 @@ impl GpuRenderer {
             // blinking one (regression: `scripts/bench_headless_gui.sh`).
             cursor_phase: 0,
             window_focused: self.window_focused,
+            pane_focus_flash_bucket,
             hover_tab: hover_tab_idx,
             hover_close: 0,
             close_override: u8::from(self.tab_close_override.is_some()),
@@ -2423,6 +2469,9 @@ impl GpuRenderer {
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
+            if pane_focus_flash_bucket != 0 {
+                self.window.request_redraw();
+            }
             // Blink redraws are now scheduled in the app event loop via
             // `next_blink_redraw_at()` + `ControlFlow::WaitUntil(..)`,
             // so we deliberately do NOT call `request_redraw()` here.
@@ -2803,9 +2852,8 @@ impl GpuRenderer {
         // at fractional DPI. Integer scales (1.0/2.0) are an identity
         // fast path inside `snap_to_device_pixels`, so mac dHash
         // baselines stay green by construction. Per #489 diagnosis,
-        // per-pane bg fill and inactive-pane cursors build their OWN
-        // caches (see the per-pane bg loop above and inactive-cursor
-        // loop below) — they MUST NOT share the active pane's cache.
+        // per-pane bg fill builds its OWN cache (see the per-pane bg
+        // loop below) — it MUST NOT share the active pane's cache.
         let active_snapped_cell_x: Vec<f32> =
             build_snapped_cell_x(active_origin_x, self.cell_w, grid.cols);
 
@@ -2903,6 +2951,22 @@ impl GpuRenderer {
                     key,
                     crate::row_quad_cache::CachedRowQuads { quads: row_quads },
                 );
+            }
+        }
+
+        if let Some((flash_pane_id, flash_alpha)) = self.pane_focus_flash_alpha(now) {
+            if let Some(pv) = pane_views.iter().find(|pv| pv.pane_id == flash_pane_id) {
+                let color = premultiply([
+                    self.cursor_color[0],
+                    self.cursor_color[1],
+                    self.cursor_color[2],
+                    flash_alpha,
+                ]);
+                quads.push(QuadInstance {
+                    rect: px_to_ndc(pv.origin_x, pv.origin_y, pv.rect_w, pv.rect_h, sw, sh),
+                    color,
+                    ..Default::default()
+                });
             }
         }
 
@@ -3127,43 +3191,6 @@ impl GpuRenderer {
             }
         }
 
-        // OSC 133 shell-integration: draw a small left-edge marker on every
-        // row whose absolute position matches a recorded prompt-start. The
-        // marker is rendered inside the left padding so it never overlaps
-        // text. Color matches the cursor accent at half alpha — distinctive
-        // but not noisy. padding_left is stored as logical px, but cell_w
-        // is raster — scale before comparing so the floor / ceiling don't
-        // mix coordinate systems at fractional DPI.
-        let marker_w =
-            (self.padding_left * self.scale_factor * 0.35).max(2.0).min(self.cell_w * 0.25);
-        let marker_h = self.cell_h * 0.6;
-        let mut marker_color = self.cursor_color;
-        marker_color[3] = (marker_color[3] * 0.55).clamp(0.0, 1.0);
-        let prompt_rows: Vec<u16> = {
-            let live_top = grid.scrollback_len() as u64;
-            let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
-            grid.prompts()
-                .filter_map(|p| {
-                    let rel = p.start_row.checked_sub(view_top)?;
-                    if rel < grid.rows as u64 {
-                        Some(rel as u16)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        for row in prompt_rows {
-            let mx = (active_origin_x - marker_w - 1.0).max(0.0);
-            let my =
-                active_origin_y + f32::from(row) * self.cell_h + (self.cell_h - marker_h) * 0.5;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(mx, my, marker_w, marker_h, sw, sh),
-                color: marker_color,
-                ..Default::default()
-            });
-        }
-
         // Hyperlink visuals: a translucent tint quad under the run plus an
         // underline quad on top. Coalesce contiguous hyperlinked cells per
         // row, mirroring the UNDERLINE pass below.
@@ -3305,33 +3332,6 @@ impl GpuRenderer {
         }
 
         // -------- Pane splitters + broadcast safety chrome ------------------
-        // Per-pane activation strip: every pane gets a small yellow top
-        // bar; the focused pane is opaque, inactive panes are subtle.
-        let pane_accent = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
-        for pv in &pane_views {
-            let mut color = pane_accent;
-            if !pv.is_active {
-                color[0] *= 0.32;
-                color[1] *= 0.32;
-                color[2] *= 0.32;
-                color[3] = 0.32;
-            }
-            let inset = 4.0_f32;
-            let h = 2.0_f32;
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    pv.origin_x + inset,
-                    pv.origin_y,
-                    (pv.rect_w - inset * 2.0).max(0.0),
-                    h,
-                    sw,
-                    sh,
-                ),
-                color,
-                ..Default::default()
-            });
-        }
-
         // Splitters are 1px interior seams at the shared OUTER pane boundary.
         // They are not pane borders: no window perimeter is drawn, and the
         // seam sits outside the per-pane cell padding that is applied inside
@@ -3762,17 +3762,6 @@ impl GpuRenderer {
                         ..Default::default()
                     });
                 }
-            }
-            // Selected row left accent strip — full-opacity theme accent.
-            // 3px wide, rounded with a 1.5px radius so it reads as a pill.
-            if let Some(accent) = &layout.selected_accent {
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(accent.x, accent.y, accent.w, accent.h, sw, sh),
-                    color: accent_rgba,
-                    size_px: [accent.w, accent.h],
-                    radius_px: accent.w * 0.5,
-                    ..Default::default()
-                });
             }
             // Footer top border — 1px line at the top edge of the footer
             // rect. Kept sharp; a 1px hairline doesn't benefit from
@@ -4435,6 +4424,9 @@ impl GpuRenderer {
         // before this point will not cache, so the next redraw will
         // re-attempt rendering.
         self.last_frame_key = Some(key);
+        if self.pane_focus_flash.is_some() {
+            self.window.request_redraw();
+        }
         // Blink redraws are scheduled by the app event loop via
         // `next_blink_redraw_at()` + `ControlFlow::WaitUntil(..)` —
         // see PR #81 review. Calling `request_redraw()` here used to

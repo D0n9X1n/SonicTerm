@@ -340,7 +340,7 @@ impl Default for Config {
             font: FontConfig::default(),
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
-            theme: "gruvbox-dark-hard".to_string(),
+            theme: "wezterm".to_string(),
             keymap: crate::keymap::platform_default_keymap_name().to_string(),
             logging: sonicterm_logging::LoggingConfig::default(),
             accessibility: AccessibilityConfig::default(),

@@ -1126,6 +1126,7 @@ impl App {
                         if pane_rects.len() > 1 {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = (cp.0 as f32, cp.1 as f32);
+                            let mut newly_focused = None;
                             for (id, rect) in &pane_rects {
                                 if lx >= rect.x
                                     && lx < rect.x + rect.w
@@ -1138,6 +1139,7 @@ impl App {
                                     {
                                         if st.active_pane != *id {
                                             st.active_pane = *id;
+                                            newly_focused = Some(*id);
                                             if let Some(panes) = self.main_panes() {
                                                 mark_all_panes_dirty(panes);
                                             }
@@ -1146,6 +1148,11 @@ impl App {
                                         }
                                     }
                                     break;
+                                }
+                            }
+                            if let Some(id) = newly_focused {
+                                if let Some(r) = self.main_renderer_mut() {
+                                    r.flash_pane_focus(id);
                                 }
                             }
                         }

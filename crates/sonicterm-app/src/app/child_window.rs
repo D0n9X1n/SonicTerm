@@ -1089,6 +1089,9 @@ impl App {
         st.active_pane = new_id;
         child.panes.insert(new_id, pane_state);
         resize_visible_panes_in_child(child);
+        if let Some(r) = child.renderer.as_mut() {
+            r.flash_pane_focus(new_id);
+        }
         child.request_redraw();
         true
     }
@@ -1113,6 +1116,9 @@ impl App {
             st.active_pane = new_focus;
             child.panes.remove(&focus);
             resize_visible_panes_in_child(child);
+            if let Some(r) = child.renderer.as_mut() {
+                r.flash_pane_focus(new_focus);
+            }
             child.request_redraw();
             return true;
         }
@@ -1126,7 +1132,13 @@ impl App {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else { return false };
         if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
+            if st.active_pane == next {
+                return true;
+            }
             st.active_pane = next;
+            if let Some(r) = child.renderer.as_mut() {
+                r.flash_pane_focus(next);
+            }
             child.request_redraw();
             true
         } else {

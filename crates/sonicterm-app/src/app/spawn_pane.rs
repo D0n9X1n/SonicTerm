@@ -352,6 +352,9 @@ impl App {
         };
         if did_split {
             self.resize_visible_panes();
+            if let Some(r) = self.main_renderer_mut() {
+                r.flash_pane_focus(new_id);
+            }
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
@@ -399,6 +402,11 @@ impl App {
                 // `close_sibling_pane_resizes_survivor_to_full_width` in
                 // `crates/sonicterm-app/tests/per_pane_resize.rs`.
                 self.resize_visible_panes();
+                if let Some(active_id) = self.active_pane_id() {
+                    if let Some(r) = self.main_renderer_mut() {
+                        r.flash_pane_focus(active_id);
+                    }
+                }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
@@ -409,11 +417,22 @@ impl App {
         }
     }
     pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
-        let Some(ws) = self.main_mut() else { return };
-        let i = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get_mut(i) else { return };
-        if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
+        let next = {
+            let Some(ws) = self.main_mut() else { return };
+            let i = ws.tabs.active_index();
+            let Some(st) = ws.tab_states.get_mut(i) else { return };
+            let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) else { return };
+            if st.active_pane == next {
+                return;
+            }
             st.active_pane = next;
+            next
+        };
+        if let Some(r) = self.main_renderer_mut() {
+            r.flash_pane_focus(next);
+        }
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
         }
         // #508: directional focus change updated active_pane; close-tab
         // path goes through `close_tab_at` which already republishes.
