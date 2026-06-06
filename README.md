@@ -23,13 +23,14 @@ Supported platforms for 1.0.0:
 - macOS 14+
 - Windows 10/11 x64
 
-Linux, code signing, auto-update, and session restore are not part of 1.0.0.
+Linux, auto-update, and session restore are not part of 1.0.0. Installers are
+currently unsigned and there is no signing plan yet.
 
 ## Install
 
 Every `v*` tag builds release artifacts automatically:
 
-- macOS: `SonicTerm-<tag>-mac-universal.dmg`
+- macOS: unsigned `SonicTerm-<tag>-mac-universal.dmg`
 - Windows: unsigned `.msi`
 
 Download from <https://github.com/D0n9X1n/SonicTerm/releases>.
