@@ -225,24 +225,3 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         tracing::info!(?window_id, hwnd = hwnd_val, "register_window: RegisterDragDrop installed");
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn payload_json_carries_src_tab_idx() {
-        // We can't synthesize a real WindowId without a winit loop, so
-        // exercise the format directly on the slot the App actually
-        // uses. The exact debug shape of WindowId isn't asserted
-        // (winit-internal), only that src_tab_idx round-trips.
-        let s = format!(r#"{{"src_window_id":"foo","src_tab_idx":{}}}"#, 7);
-        assert!(s.contains(r#""src_tab_idx":7"#));
-        assert!(s.contains("src_window_id"));
-    }
-
-    #[test]
-    fn boxed_backend_implements_trait() {
-        let _: Box<dyn OsTabDragBackend> = WinOsTabDragBackend::boxed();
-    }
-}

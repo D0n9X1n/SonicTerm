@@ -1,0 +1,59 @@
+[package]
+name = "sonicterm-block-glyph"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal — vendored wezterm customglyph.rs (block / box-drawing / powerline / sextant geometry). MIT, attribution in LICENSE-WEZTERM."
+
+[lints]
+workspace = true
+
+[dependencies]
+# T6 (wezterm-takeover G2A glue types): euclid + wezterm-input-types
+# back Point/Rect/Size as exact aliases of wezterm-gui's `window::{Point,
+# Rect, Size}` — same euclid::Length type, same PixelUnit phantom marker
+# — so the verbatim customglyph paste in T7 compiles unchanged. `log` is
+# used by `Bitmap::log_bits` (a debug helper customglyph calls).
+#
+# T7 adds the deps the 6036-LOC customglyph.rs vendor reaches:
+#   - tiny-skia: BlendMode, FillRule, Paint, Path, PathBuilder, PixmapMut,
+#     Stroke, Transform — the rasterizer the upstream code drives.
+#   - bitflags: the `bitflags::bitflags!` macro defines CellDiagonal,
+#     CellDiagonal2, Quadrant, Sextant, Octant flag sets.
+#   - anyhow: block_sprite's return type is anyhow::Result<RasterTile>.
+#
+# Note: `sonicterm-cfg::dimension::DimensionContext` was the planned
+# substitution for upstream's `config::DimensionContext`. That import
+# was only ever used by `cursor_sprite` (read `cursor_thickness`),
+# which T7 drops as out of G2/A scope. `block_sprite` itself never
+# reaches `DimensionContext`, so the dep is omitted to keep the crate
+# leaf-tight. T9 / a future cursor port can re-add it as a one-line
+# dep change.
+#
+# Note: `sonicterm-text` was the original plan target for the
+# `RasterTile` return type (T7 prompt §6), but that crate is mid-flight
+# on T10 (the cosmic-text / load_font_data_with_sonic_overrides /
+# terminal_font_attrs deletes are scheduled for T10). Pulling it in here
+# transitively breaks `cargo build -p sonicterm-block-glyph`. To keep
+# T7 unblocked and self-contained, the RasterTile return shape lives in
+# `crate::glue::BlockRasterTile` (structurally identical 7-field record
+# matching `sonicterm_text::glyph_atlas::RasterTile`). T9's
+# `flush_shape_run` rewire is the natural place to land the trivial
+# field-for-field copy `BlockRasterTile -> sonicterm_text::glyph_atlas
+# ::RasterTile` (or, if T10 lands first, swap this dep back in and
+# replace the alias).
+euclid = "0.22"
+tiny-skia.workspace = true
+# T7: pin bitflags 1.3 (NOT the workspace 2.x). Upstream wezterm-gui
+# uses the 1.3-style `bitflags::bitflags!` macro, which auto-derives
+# Debug/Hash/PartialEq/Eq/Clone/Copy on the generated struct. The 2.x
+# macro requires explicit `#[derive(...)]` annotations the verbatim
+# customglyph paste does NOT have — adding them would break the
+# "verbatim except imports + the 2 method-to-free-fn rewrites" rule.
+# wezterm-gui itself pins `bitflags = "1.3"` (see
+# wezterm@577474d/Cargo.toml), so this is parity with upstream.
+bitflags = "1.3"
+anyhow.workspace = true
+log = "0.4"

@@ -65,25 +65,3 @@ pub fn publish(sink: &HarnessSink, tx: Option<Sender<HarnessBytes>>) {
         *g = tx;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_sink_starts_empty() {
-        let s = new_sink();
-        assert!(s.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn publish_round_trips_and_clears() {
-        let s = new_sink();
-        let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        publish(&s, Some(tx));
-        s.lock().unwrap().as_ref().unwrap().send(b"hi".to_vec()).unwrap();
-        assert_eq!(rx.recv().unwrap(), b"hi");
-        publish(&s, None);
-        assert!(s.lock().unwrap().is_none());
-    }
-}

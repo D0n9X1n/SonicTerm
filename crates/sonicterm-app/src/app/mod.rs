@@ -96,6 +96,13 @@ pub enum WindowRole {
     Terminal,
 }
 
+#[derive(Debug, Clone)]
+pub struct SplitterDragState {
+    pub splitter: sonicterm_ui::pane::SplitterId,
+    pub axis: sonicterm_ui::pane::SplitAxis,
+    pub last_pos: (f32, f32),
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -139,11 +146,10 @@ pub struct WindowState {
     /// Pending cross-window drop target chosen during a drag in the
     /// child's bar; consumed on mouse-up.
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
-    /// Per-window HiDPI scale factor (PR #244 lesson — cursor routing
-    /// MUST use the *window's own* scale, not a global). Promoted onto
-    /// `WindowState` by Phase B2 PR-A; the legacy `App.scale_factor`
-    /// stays in lock-step until PR-B substitutes readers.
-    pub scale_factor: f64,
+    /// Per-window DPI multiplier retained for renderer rasterization
+    /// rebuilds when winit reports monitor changes. Cursor/layout math is
+    /// raster-px and must not read this field.
+    pub dpi_scale: f64,
     /// Per-window IME composition state. Phase B2 PR-A — promoted from
     /// `App.ime` (main-only) so torn-out windows can compose CJK input
     /// independently. The legacy `App.ime` continues to exist and is
@@ -172,6 +178,12 @@ pub struct WindowState {
     /// thumb mouse-down and the matching release; cursor moves while
     /// set route to the scrollbar instead of extending a selection.
     pub scrollbar_drag: Option<scrollbar_input::ScrollbarDragState>,
+    /// Active split-pane divider drag. While set, cursor moves resize the
+    /// captured split ratio instead of extending text selection.
+    pub splitter_drag: Option<SplitterDragState>,
+    /// Current split-divider hover axis, used to restore the OS cursor when
+    /// the pointer leaves the divider.
+    pub splitter_hover: Option<sonicterm_ui::pane::SplitAxis>,
     /// Per-pane scrollbar visibility/fade state (#386 PR-D). Inserted
     /// lazily on first interaction; entries for closed panes are
     /// pruned opportunistically on the next render.
@@ -351,25 +363,12 @@ pub enum FrontmostKind {
 pub(super) fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
     let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
     let size = w.inner_size();
-    crate::tab_drag::WindowGeom {
-        inner_origin: origin,
-        inner_size: (size.width, size.height),
-        scale_factor: w.scale_factor() as f32,
-    }
+    crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
 }
 
-/// Divide a `winit` `CursorMoved` position by the window's HiDPI
-/// scale factor to land in LOGICAL pixel coordinates. The whole
-/// tab-bar layout (`TabBarLayout`), drag-action thresholds
-/// (`TAB_BAR_HEIGHT`, `TEAR_OUT_THRESHOLD_PX`) and the drag-chip
-/// overlay are expressed in logical px, so every hit-test path must
-/// normalize the raw cursor position through this helper. (PR #76
-/// did the same for the cell grid via `pixel_to_cell`; this is the
-/// matching fix for the chrome layer the haiku reviewer flagged.)
 #[inline]
-pub(super) fn to_logical_pos(position_x: f64, position_y: f64, scale_factor: f32) -> (f32, f32) {
-    let sf = scale_factor.max(f32::EPSILON);
-    ((position_x as f32) / sf, (position_y as f32) / sf)
+pub(super) fn window_dpi(w: &Window) -> f32 {
+    w.scale_factor() as f32
 }
 
 #[doc(hidden)]
@@ -613,28 +612,24 @@ pub enum UserEvent {
 /// background font load completion bumps `style_rev` on every live
 /// window and triggers a redraw — the tofu cells flip to real
 /// glyphs without the user having to type anything.
+/// T13/T14: the legacy `AsyncFallbackLoader` (cosmic-text/swash
+/// driven background-load helper) is gone with the rest of the
+/// glyphon plumbing. sonicterm-font handles CJK/emoji/Nerd-font
+/// fallback synchronously via its built-in vendor chain
+/// (`vendor-jetbrains`, `vendor-noto-emoji`, `vendor-nerd-font-symbols`),
+/// so the per-window `set_async_loader(...)` plumbing is now a no-op
+/// `()`. Keeping the function shape and call site survives so the
+/// renderer's `Option<()>` slot stays populated and any future
+/// re-introduction of an async hook lands without breaking callers.
 #[must_use]
-pub fn build_async_fallback_loader_for_proxy(
-    proxy: EventLoopProxy<UserEvent>,
-) -> sonicterm_text::async_fallback::AsyncFallbackLoader {
-    use sonicterm_text::async_fallback::{
-        default_load_font_family, AsyncFallbackLoader, LoadFn, NotifyFn,
-    };
-    let load_fn: LoadFn = Arc::new(default_load_font_family);
-    let notify: NotifyFn = Arc::new(move || {
-        // Best-effort: the only reason `send_event` fails is the loop
-        // already exited, in which case the user has closed the app
-        // and there is nothing to redraw.
-        let _ = proxy.send_event(UserEvent::ClearShapeCache);
-    });
-    AsyncFallbackLoader::new(load_fn, notify)
+pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) -> () {
+    ()
 }
 
 mod child_window;
 pub use child_window::{
-    child_window_resized_handles_no_renderer,
-    child_window_scale_factor_changed_handles_no_renderer, resize_renderer_and_panes_if_present,
-    set_scale_factor_if_renderer_present,
+    apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
+    child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
 mod config_apply;
 mod event_loop;
@@ -642,6 +637,7 @@ pub mod hovered_url;
 pub mod invariants;
 mod key_encoding;
 mod keymap_dispatch;
+mod media;
 mod misc;
 pub mod os_drag;
 mod overlays;
@@ -707,6 +703,8 @@ pub struct PaneState {
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    /// Decoded inline media images captured from terminal protocols.
+    pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -727,6 +725,7 @@ impl PaneState {
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            inline_images: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -789,9 +788,9 @@ pub struct App {
     // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
     // direct field access through `self.main()?.copy_mode` etc.
     pub(super) clipboard: Option<Clipboard>,
-    // #404: `App.scale_factor` and `App.hovered_url` deleted — both
+    // #404: `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
-    // `self.main()?.scale_factor` / `self.main()?.hovered_url`
+    // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
     // (with safe-default fallbacks at call sites). The shadow-sync
     // path was deleted as the final Phase B2 leftover.
     /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
@@ -1105,10 +1104,10 @@ impl App {
         let Some(r) = self.main_renderer() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
-        let pl = r.padding_left();
-        let pr = r.padding_right();
+        let pl = r.padding_left_px();
+        let pr = r.padding_right_px();
         let bottom = r.bottom_inset();
-        let pb = r.padding_bottom();
+        let pb = r.padding_bottom_px();
         let outer = sonicterm_ui::pane::Rect::new(
             pl,
             top,
@@ -1128,10 +1127,10 @@ impl App {
         let Some(r) = child.renderer.as_ref() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = r.top_inset();
-        let pl = r.padding_left();
-        let pr = r.padding_right();
+        let pl = r.padding_left_px();
+        let pr = r.padding_right_px();
         let bottom = r.bottom_inset();
-        let pb = r.padding_bottom();
+        let pb = r.padding_bottom_px();
         let outer = sonicterm_ui::pane::Rect::new(
             pl,
             top,
@@ -2149,12 +2148,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: 1.0,
+            dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
         };
@@ -2804,7 +2805,7 @@ impl App {
         self.main_window_id
     }
 
-    // #404: ShadowMainSnapshot helpers deleted — scale_factor + hovered_url
+    // #404: ShadowMainSnapshot helpers deleted — dpi + hovered_url
     // now live exclusively on WindowState.
 
     /// tests exercise tab/pane bookkeeping without spawning shells.
@@ -2855,12 +2856,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: 1.0,
+            dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
         };
@@ -3109,23 +3112,17 @@ impl App {
             let s = w.inner_size();
             (s.width, s.height)
         };
-        let sf = w.scale_factor() as f32;
-        let logical_w = inner_size.0 as f32 / sf;
+        let raster_w = inner_size.0 as f32;
         let empty_tabs_pub = sonicterm_ui::tabs::TabBar::new();
         let layout = TabBarLayout::compute_with_height(
             self.main_tabs().unwrap_or(&empty_tabs_pub),
-            logical_w,
+            raster_w,
             r.tab_bar_logical_height(),
         )
         .with_top_offset(r.tab_bar_y_offset())
         .with_visible(r.tab_bar_visible());
-        let snap = os_drag::TabBarSnapshot::from_layout(
-            Some(w.id()),
-            inner_origin,
-            inner_size,
-            sf,
-            &layout,
-        );
+        let snap =
+            os_drag::TabBarSnapshot::from_layout(Some(w.id()), inner_origin, inner_size, &layout);
         self.publish_os_drag_bar_snapshot(snap);
     }
 
@@ -3147,15 +3144,14 @@ impl App {
             let s = win.inner_size();
             (s.width, s.height)
         };
-        let sf = win.scale_factor() as f32;
-        let logical_w = inner_size.0 as f32 / sf;
+        let raster_w = inner_size.0 as f32;
         let Some(r) = child.renderer.as_ref() else { return };
         let layout =
-            TabBarLayout::compute_with_height(&child.tabs, logical_w, r.tab_bar_logical_height())
+            TabBarLayout::compute_with_height(&child.tabs, raster_w, r.tab_bar_logical_height())
                 .with_top_offset(r.tab_bar_y_offset())
                 .with_visible(r.tab_bar_visible());
         let snap =
-            os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, sf, &layout);
+            os_drag::TabBarSnapshot::from_layout(Some(id), inner_origin, inner_size, &layout);
         self.publish_os_drag_bar_snapshot(snap);
     }
 

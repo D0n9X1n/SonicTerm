@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 // without depending on this crate. Re-exported here for source compatibility:
 // every existing `use sonicterm_grid::grid::{Cell, CellFlags, Color, Pos}` keeps
 // compiling unchanged.
-pub use sonicterm_types::{Cell, CellFlags, Color, Pos};
+pub use sonicterm_types::{Cell, CellFlags, Color, Pos, UnderlineStyle};
 
 use crate::hyperlink::HyperlinkId;
 use crate::line::Line;
@@ -363,6 +363,25 @@ impl Grid {
         flags: CellFlags,
         hyperlink: Option<HyperlinkId>,
     ) {
+        self.put_char_styled(ch, fg, bg, flags, hyperlink, UnderlineStyle::Single, None);
+    }
+
+    /// Put a character at cursor with hyperlink and underline metadata.
+    ///
+    /// The extra underline fields are stored in [`Cell`]'s rare-attribute box
+    /// only when they differ from terminal defaults, preserving the normal hot
+    /// path for plain cells.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_char_styled(
+        &mut self,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        hyperlink: Option<HyperlinkId>,
+        underline_style: UnderlineStyle,
+        underline_color: Option<Color>,
+    ) {
         // ASCII printable fast-path: every codepoint in 0x20..=0x7E has
         // unicode_width == 1 unconditionally. `UnicodeWidthChar::width`
         // performs a binary search through several MiB of tables — for
@@ -415,16 +434,28 @@ impl Grid {
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
         let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
         let mut lead = Cell::plain(ch, fg, bg, cell_flags);
-        lead.set_hyperlink(hyperlink);
+        Self::apply_rare_attrs(&mut lead, hyperlink, underline_style, underline_color);
         self.visible[r][c] = lead;
         if width == 2 && c + 1 < self.cols as usize {
             let mut cont = Cell::plain(' ', fg, bg, flags | CellFlags::WIDE_CONT);
-            cont.set_hyperlink(hyperlink);
+            Self::apply_rare_attrs(&mut cont, hyperlink, underline_style, underline_color);
             self.visible[r][c + 1] = cont;
         }
         self.cursor.col += width;
         self.mark_row(r as u16);
         self.bump();
+    }
+
+    #[inline]
+    fn apply_rare_attrs(
+        cell: &mut Cell,
+        hyperlink: Option<HyperlinkId>,
+        underline_style: UnderlineStyle,
+        underline_color: Option<Color>,
+    ) {
+        cell.set_hyperlink(hyperlink);
+        cell.set_underline_style(underline_style);
+        cell.set_underline_color(underline_color);
     }
 
     /// Move the cursor to column 0 of the current row.
@@ -437,10 +468,18 @@ impl Grid {
 
     /// Advance the cursor one row, scrolling the visible region if needed.
     pub fn linefeed(&mut self) {
+        self.linefeed_with(Cell::default());
+    }
+
+    /// Advance the cursor one row, using `fill` for any row newly exposed by
+    /// scrolling. This models terminals with background-color erase (BCE):
+    /// when a colored app scrolls, the blank line inherits the active SGR
+    /// rendition instead of reverting to the theme default.
+    pub fn linefeed_with(&mut self, fill: Cell) {
         let old = self.cursor.row;
         if self.cursor.row + 1 >= self.rows {
             // scroll_up already marks every row dirty.
-            self.scroll_up(1);
+            self.scroll_up_with(1, fill);
         } else {
             self.cursor.row += 1;
         }
@@ -479,6 +518,12 @@ impl Grid {
     /// row buffer is pushed onto the back of the deque, avoiding a
     /// per-scroll allocation for the new blank row.
     pub fn scroll_up(&mut self, n: u16) {
+        self.scroll_up_with(n, Cell::default());
+    }
+
+    /// Scroll the visible region up by `n` lines, filling newly exposed rows
+    /// with `fill`.
+    pub fn scroll_up_with(&mut self, n: u16, fill: Cell) {
         let cols = self.cols as usize;
         for _ in 0..n {
             let Some(mut row) = self.visible.pop_front() else {
@@ -488,9 +533,9 @@ impl Grid {
                 // Scrollback disabled — recycle the row straight back as
                 // the new blank line.
                 for cell in row.iter_mut() {
-                    *cell = Cell::default();
+                    *cell = fill.clone();
                 }
-                row.resize(cols, Cell::default());
+                row.resize(cols, fill.clone());
                 self.visible.push_back(row);
                 continue;
             }
@@ -511,14 +556,14 @@ impl Grid {
                 // ejected — force back to Flat before we mutate cells.
                 recycled.ensure_flat();
                 for cell in recycled.iter_mut() {
-                    *cell = Cell::default();
+                    *cell = fill.clone();
                 }
-                recycled.resize(cols, Cell::default());
+                recycled.resize(cols, fill.clone());
                 self.scrollback.push_back(row);
                 self.visible.push_back(recycled);
             } else {
                 self.scrollback.push_back(row);
-                self.visible.push_back(make_row(self.cols));
+                self.visible.push_back(Line::flat_filled(cols, fill.clone()));
             }
         }
         // Every row's content shifted up — the entire visible region
@@ -538,6 +583,12 @@ impl Grid {
     /// and is only meaningful for alt-screen / DECSTBM use). Marks
     /// every visible row dirty since rows shifted identity.
     pub fn scroll_down(&mut self, n: u16) {
+        self.scroll_down_with(n, Cell::default());
+    }
+
+    /// Scroll the visible region down by `n` lines, filling newly exposed rows
+    /// with `fill`.
+    pub fn scroll_down_with(&mut self, n: u16, fill: Cell) {
         let cols = self.cols as usize;
         let rows = self.rows as usize;
         if rows == 0 {
@@ -550,9 +601,9 @@ impl Grid {
                 break;
             };
             for cell in row.iter_mut() {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
-            row.resize(cols, Cell::default());
+            row.resize(cols, fill.clone());
             self.visible.push_front(row);
         }
         // Every row's identity shifted — dirty bitset is keyed on
@@ -580,6 +631,11 @@ impl Grid {
     /// dirty is the simple correct option and costs nothing at
     /// terminal row counts. Closes #348.
     pub fn scroll_region_up(&mut self, top: u16, bottom: u16, n: u16) {
+        self.scroll_region_up_with(top, bottom, n, Cell::default());
+    }
+
+    /// Scroll a sub-region up, filling newly exposed rows with `fill`.
+    pub fn scroll_region_up_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
         let rows = self.rows as usize;
         if rows == 0 {
             return;
@@ -601,7 +657,7 @@ impl Grid {
         // leaving stale text bleeding through behind their UI. Fixes
         // #425 (and the real cause behind #414).
         if top_i == 0 && bot_i == rows.saturating_sub(1) {
-            self.scroll_up(n);
+            self.scroll_up_with(n, fill);
             return;
         }
         let region_len = bot_i - top_i + 1;
@@ -617,7 +673,7 @@ impl Grid {
             } else {
                 // Clear rows that have no source.
                 for cell in self.visible[r].iter_mut() {
-                    *cell = Cell::default();
+                    *cell = fill.clone();
                 }
             }
         }
@@ -626,7 +682,7 @@ impl Grid {
         let blank_start = bot_i + 1 - n;
         for r in blank_start..=bot_i {
             for cell in self.visible[r].iter_mut() {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
         }
         self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
@@ -637,6 +693,11 @@ impl Grid {
     /// coordinates) DOWN by `n` lines. Mirror of [`scroll_region_up`];
     /// see that doc for the dirty-bit / cache-invalidation rationale.
     pub fn scroll_region_down(&mut self, top: u16, bottom: u16, n: u16) {
+        self.scroll_region_down_with(top, bottom, n, Cell::default());
+    }
+
+    /// Scroll a sub-region down, filling newly exposed rows with `fill`.
+    pub fn scroll_region_down_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
         let rows = self.rows as usize;
         if rows == 0 {
             return;
@@ -661,14 +722,14 @@ impl Grid {
                 self.visible.swap(r, src);
             } else {
                 for cell in self.visible[r].iter_mut() {
-                    *cell = Cell::default();
+                    *cell = fill.clone();
                 }
             }
         }
         // Clear the top `n` rows of the region.
         for r in top_i..(top_i + n).min(bot_i + 1) {
             for cell in self.visible[r].iter_mut() {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
         }
         self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
@@ -677,9 +738,14 @@ impl Grid {
 
     /// Erase from cursor to end of line (CSI 0 K).
     pub fn erase_line_to_end(&mut self) {
+        self.erase_line_to_end_with(Cell::default());
+    }
+
+    /// Erase from cursor to end of line using `fill`.
+    pub fn erase_line_to_end_with(&mut self, fill: Cell) {
         let r = self.cursor.row as usize;
         for c in self.cursor.col as usize..self.cols as usize {
-            self.visible[r][c] = Cell::default();
+            self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
         self.bump();
@@ -687,9 +753,14 @@ impl Grid {
 
     /// Erase from beginning of line to cursor inclusive (CSI 1 K).
     pub fn erase_line_to_start(&mut self) {
+        self.erase_line_to_start_with(Cell::default());
+    }
+
+    /// Erase from beginning of line to cursor inclusive using `fill`.
+    pub fn erase_line_to_start_with(&mut self, fill: Cell) {
         let r = self.cursor.row as usize;
         for c in 0..=(self.cursor.col as usize).min(self.cols as usize - 1) {
-            self.visible[r][c] = Cell::default();
+            self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
         self.bump();
@@ -697,9 +768,14 @@ impl Grid {
 
     /// Erase the entire current line (CSI 2 K).
     pub fn erase_line(&mut self) {
+        self.erase_line_with(Cell::default());
+    }
+
+    /// Erase the entire current line using `fill`.
+    pub fn erase_line_with(&mut self, fill: Cell) {
         let r = self.cursor.row as usize;
         for cell in &mut self.visible[r] {
-            *cell = Cell::default();
+            *cell = fill.clone();
         }
         self.mark_row(r as u16);
         self.bump();
@@ -709,10 +785,15 @@ impl Grid {
     /// use to redraw a prompt — they jump to a row, erase below, and
     /// reprint. It must NOT touch rows above the cursor.
     pub fn erase_below(&mut self) {
-        self.erase_line_to_end();
+        self.erase_below_with(Cell::default());
+    }
+
+    /// Erase from cursor to end of screen using `fill`.
+    pub fn erase_below_with(&mut self, fill: Cell) {
+        self.erase_line_to_end_with(fill.clone());
         for r in (self.cursor.row as usize + 1)..self.rows as usize {
             for cell in &mut self.visible[r] {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
         }
         // Mark cursor.row..rows
@@ -724,12 +805,17 @@ impl Grid {
 
     /// Erase from start of screen to cursor (CSI 1 J).
     pub fn erase_above(&mut self) {
+        self.erase_above_with(Cell::default());
+    }
+
+    /// Erase from start of screen to cursor using `fill`.
+    pub fn erase_above_with(&mut self, fill: Cell) {
         for r in 0..self.cursor.row as usize {
             for cell in &mut self.visible[r] {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
         }
-        self.erase_line_to_start();
+        self.erase_line_to_start_with(fill);
         // erase_line_to_start already marked cursor.row; mark 0..cursor.row too.
         let hi = self.cursor.row;
         self.mark_range(0, hi);
@@ -738,9 +824,14 @@ impl Grid {
 
     /// Erase the entire visible screen (CSI 2 J).
     pub fn erase_screen(&mut self) {
+        self.erase_screen_with(Cell::default());
+    }
+
+    /// Erase the entire visible screen using `fill`.
+    pub fn erase_screen_with(&mut self, fill: Cell) {
         for row in &mut self.visible {
             for cell in row.iter_mut() {
-                *cell = Cell::default();
+                *cell = fill.clone();
             }
         }
         self.mark_all();
@@ -750,9 +841,14 @@ impl Grid {
     /// Erase `n` cells starting at (`row`, `col`), overwriting with the
     /// default (blank) Cell. Cursor unchanged. Used by CSI `X` (ECH).
     /// ECMA-48 §8.3.38: erased cells become BLANK with the current SGR
-    /// rendition; we approximate by writing `Cell::default()` which keeps
-    /// behaviour aligned with the existing erase_line family.
+    /// rendition; callers that have the current rendition should use
+    /// [`Self::erase_cells_with`].
     pub fn erase_cells(&mut self, row: u16, col: u16, n: usize) {
+        self.erase_cells_with(row, col, n, Cell::default());
+    }
+
+    /// Erase `n` cells starting at (`row`, `col`) using `fill`.
+    pub fn erase_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -760,7 +856,7 @@ impl Grid {
         let start = col as usize;
         let end = (start + n).min(self.cols as usize);
         for c in start..end {
-            self.visible[r][c] = Cell::default();
+            self.visible[r][c] = fill.clone();
         }
         self.mark_row(row);
         self.bump();
@@ -770,6 +866,11 @@ impl Grid {
     /// the row right and drop the overflow at the right edge. Used by
     /// CSI `@` (ICH).
     pub fn insert_cells(&mut self, row: u16, col: u16, n: usize) {
+        self.insert_cells_with(row, col, n, Cell::default());
+    }
+
+    /// Insert `n` cells filled with `fill` at (`row`, `col`).
+    pub fn insert_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -782,7 +883,7 @@ impl Grid {
             self.visible[r][dst] = self.visible[r][dst - n].clone();
         }
         for c in start..start + n {
-            self.visible[r][c] = Cell::default();
+            self.visible[r][c] = fill.clone();
         }
         self.mark_row(row);
         self.bump();
@@ -791,6 +892,11 @@ impl Grid {
     /// Delete `n` cells at (`row`, `col`); shift trailing cells of the row
     /// left and fill the right edge with blanks. Used by CSI `P` (DCH).
     pub fn delete_cells(&mut self, row: u16, col: u16, n: usize) {
+        self.delete_cells_with(row, col, n, Cell::default());
+    }
+
+    /// Delete `n` cells and fill the right edge with `fill`.
+    pub fn delete_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -802,7 +908,7 @@ impl Grid {
             self.visible[r][c] = self.visible[r][c + n].clone();
         }
         for c in cols - n..cols {
-            self.visible[r][c] = Cell::default();
+            self.visible[r][c] = fill.clone();
         }
         self.mark_row(row);
         self.bump();

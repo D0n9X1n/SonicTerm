@@ -9,3 +9,4 @@ sonicterm-types = { workspace = true }
 sonicterm-text = { workspace = true }
 sonicterm-cfg = { workspace = true }
 sonicterm-grid = { workspace = true }
+sonicterm-engine = { path = "../sonicterm-engine", version = "0.3.0" }

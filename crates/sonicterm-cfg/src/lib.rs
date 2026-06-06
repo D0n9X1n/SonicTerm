@@ -7,6 +7,7 @@
 
 pub mod assets;
 pub mod config;
+pub mod dimension;
 pub mod keymap;
 pub mod theme;
 pub mod url_open;

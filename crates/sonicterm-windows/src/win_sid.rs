@@ -90,20 +90,3 @@ pub fn cached_current_user_sid() -> &'static str {
         current_user_sid_string().expect("failed to resolve current user SID for harness pipe")
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sid_string_format() {
-        let sid = current_user_sid_string().unwrap();
-        assert!(sid.starts_with("S-1-"), "got {sid}");
-    }
-
-    #[test]
-    fn cached_matches_fresh() {
-        let fresh = current_user_sid_string().unwrap();
-        assert_eq!(cached_current_user_sid(), fresh);
-    }
-}

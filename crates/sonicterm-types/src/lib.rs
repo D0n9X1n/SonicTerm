@@ -20,7 +20,7 @@ pub mod traits;
 pub mod window_key;
 
 pub use action::{Action, BroadcastScope, Direction, ScrollAction};
-pub use cell::{Cell, CellFlags, Color, FatAttributes};
+pub use cell::{Cell, CellFlags, Color, FatAttributes, UnderlineStyle};
 pub use geom::{GeometryQuad, Pos};
 pub use glyph_key::GlyphKey;
 pub use hyperlink_id::HyperlinkId;

@@ -536,74 +536,9 @@ impl GlyphAtlas {
         self.pixels[off + 3]
     }
 
-    /// Insert a pre-resampled tile under `key`, returning the resulting
-    /// [`GlyphInfo`]. #610 sym-1 (PR-B): this is the atlas-side hook
-    /// used by the IconCellFit path when the rasterizer (or a future
-    /// `core.rs` call-site) wants the bitmap PHYSICALLY scaled to the
-    /// cell box before insert, so the renderer can keep its Nearest
-    /// sampler invariant while sym-1 nerd-font icons render crisp.
-    ///
-    /// Distinction from [`get_or_insert`](Self::get_or_insert):
-    /// * `get_or_insert` invokes a [`Rasterizer`] (swash) and inserts
-    ///   the natural-size tile. The renderer then stretches the QUAD
-    ///   via `apply_symbol_fit(IconCellFit)` and the GPU's Nearest
-    ///   sampler over-stretches the small bitmap — the aliasing
-    ///   captured in issue #610.
-    /// * `insert_resampled` takes an already-rasterized tile + the
-    ///   target `(cell_w_px, cell_h_px)` for the cell, runs the
-    ///   bitmap through [`crate::resample::resample_tile`] (Lanczos3
-    ///   down / Mitchell up), and stores the result at the cell-box
-    ///   size. Caller is responsible for sizing the target box at the
-    ///   physical (device-pixel) cell — typically `cell_w * dpr`,
-    ///   `(ICON_FIT_TARGET * cell_h) * dpr` to mirror what
-    ///   `apply_symbol_fit(IconCellFit)` does for the quad.
-    ///
-    /// Returns `None` on the same conditions as `get_or_insert`:
-    /// allocator can't make room even after LRU eviction. Returns the
-    /// natural-size insert if `resample_tile` rejects (e.g. zero
-    /// target) — better to ship the un-resampled tile than fail the
-    /// glyph entirely.
-    ///
-    /// Tests: `crates/sonicterm-text/tests/atlas_resample.rs`.
-    pub fn insert_resampled(
-        &mut self,
-        key: GlyphKey,
-        tile: RasterTile,
-        target_w: u32,
-        target_h: u32,
-    ) -> Option<GlyphInfo> {
-        // Hit short-circuit (mirrors get_or_insert): if the key is
-        // already resident, treat it as a hit. The caller should not
-        // call insert_resampled for cached keys, but defensive — keeps
-        // hit/miss bookkeeping consistent.
-        if let Some(entry) = self.map.get_mut(&key) {
-            entry.last_used_frame = self.current_frame;
-            self.hits += 1;
-            return Some(entry.info);
-        }
-        self.misses += 1;
-        // Pass-through for empty tiles — same sentinel UV as
-        // get_or_insert. Resampling a 0-area tile is meaningless.
-        if tile.is_empty() {
-            let info = GlyphInfo {
-                uv: [0.0, 0.0, 0.0, 0.0],
-                px_size: [0, 0],
-                px_offset: [tile.offset_x, tile.offset_y],
-                advance: tile.advance,
-                is_color: tile.is_color,
-            };
-            self.map
-                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
-            return Some(info);
-        }
-        // Try the resample; fall back to the natural-size tile on
-        // failure so we never lose a glyph.
-        let resampled = crate::resample::resample_tile(&tile, target_w, target_h).unwrap_or(tile);
-        self.insert_tile_raw(key, resampled)
-    }
-
     /// Allocate + blit a fully-prepared tile. Shared low-level helper
-    /// used by `insert_resampled` (and a refactor-target for
+    /// Allocate + blit a fully-prepared tile. Shared low-level helper
+    /// used by `get_or_insert` (and a refactor-target for
     /// `get_or_insert` in a follow-up PR — kept inlined there for now
     /// to minimize the #610 PR-B diff).
     fn insert_tile_raw(&mut self, key: GlyphKey, tile: RasterTile) -> Option<GlyphInfo> {
@@ -656,81 +591,6 @@ impl GlyphAtlas {
             },
         );
         Some(info)
-    }
-
-    /// IconCellFit-aware miss path used by `core.rs::flush_shape_run`
-    /// for `SymbolFit::IconCellFit` glyphs (NerdFont PUA, geometric
-    /// arrow icons, etc.). #610 sym-1 PR-D: this is the production
-    /// call-site wiring that finally activates PR-B's resampler.
-    ///
-    /// On a hit: same behavior as [`Self::get_or_insert`] — bump LRU
-    /// `last_used_frame`, return the existing `GlyphInfo`. We DO NOT
-    /// re-resample on hit because the stored tile is already at the
-    /// target cell-box dimensions (atlas key includes the cell box
-    /// implicitly via the renderer's invariant: cell dims only change
-    /// on scale-factor change, and scale changes invalidate the whole
-    /// atlas via `force_rebuild_for_scale`).
-    ///
-    /// On a miss: invokes the rasterizer to produce a natural-size
-    /// tile, then `target_dims` to derive the cell-box physical pixel
-    /// dimensions (passed the natural tile so the caller can preserve
-    /// aspect ratio — see WezTerm's `window/src/bitmaps/mod.rs:380`),
-    /// then delegates to [`Self::insert_resampled`].
-    ///
-    /// `target_dims` returning `None` falls back to the natural-size
-    /// insert path (identical to `get_or_insert`) so caller can opt
-    /// out for degenerate cases (zero-area cell, NaN dpr, etc.) without
-    /// losing the glyph entirely.
-    pub fn get_or_insert_resampled<R: Rasterizer, F>(
-        &mut self,
-        key: GlyphKey,
-        rasterizer: &mut R,
-        target_dims: F,
-    ) -> Option<GlyphInfo>
-    where
-        F: FnOnce(&RasterTile) -> Option<(u32, u32)>,
-    {
-        if let Some(entry) = self.map.get_mut(&key) {
-            entry.last_used_frame = self.current_frame;
-            self.hits += 1;
-            return Some(entry.info);
-        }
-        // Count this as a miss BEFORE we hand control to
-        // `insert_resampled` so we don't double-count the miss (the
-        // hit-short-circuit inside `insert_resampled` would also count
-        // it if we'd already populated the entry). The natural-fallback
-        // branch below uses `insert_tile_raw` directly for the same
-        // reason.
-        self.misses += 1;
-        let Some(tile) = rasterizer.rasterize(key) else {
-            // Same null-sentinel as `get_or_insert` — caches the
-            // failure so we don't re-rasterize each frame.
-            let info = GlyphInfo {
-                uv: [0.0, 0.0, 0.0, 0.0],
-                px_size: [0, 0],
-                px_offset: [0, 0],
-                advance: 0.0,
-                is_color: false,
-            };
-            self.map
-                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
-            return Some(info);
-        };
-        // Caller declined to specify a target (e.g. degenerate cell
-        // dims) — degrade to natural-size insert. Better to ship the
-        // un-resampled glyph than fail it.
-        let Some((target_w, target_h)) = target_dims(&tile) else {
-            return self.insert_tile_raw(key, tile);
-        };
-        if target_w == 0 || target_h == 0 {
-            return self.insert_tile_raw(key, tile);
-        }
-        // `insert_resampled` would short-circuit and also call
-        // `misses += 1` if it saw a fresh key. We already accounted
-        // for the miss above, so undo its bookkeeping bump and let it
-        // run — it's the canonical resample + alloc path.
-        self.misses -= 1;
-        self.insert_resampled(key, tile, target_w, target_h)
     }
 }
 

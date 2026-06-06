@@ -2,12 +2,14 @@
 //!
 //! Consumes one [`GlyphInstance`] per visible cell and draws a single
 //! triangle-strip per instance, sampling the atlas alpha and modulating
-//! by the per-instance color. This is the half of B3 that replaces
-//! glyphon's per-frame text shape + atlas-rebuild on the terminal grid.
+//! by the per-instance color. This is the half of B3 that replaces the
+//! pre-T9 per-frame text shape + atlas-rebuild on the terminal grid.
 //!
-//! `render.rs` calls `draw()` once per frame, after the quad pass and
-//! before the glyphon `TextRenderer::render` pass that draws the tab
-//! bar + search bar.
+//! Post-T14 (wezterm-takeover G3): all chrome strings (tab titles,
+//! palette, search bar, IME, drag chip) also flow through this
+//! pipeline via [`crate::chrome_text::layout`] — the same instance
+//! shape, the same atlas, the same draw call. No second pipeline, no
+//! second pass, no the legacy chrome layer.
 
 use wgpu::{
     BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,

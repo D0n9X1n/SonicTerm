@@ -13,10 +13,28 @@
 //! only the active pane's content.
 
 use crate::geometry::PixelRect;
+use std::sync::Arc;
 
 /// Identifier for a pane within a tab. Matches `sonicterm_mux::proto::PaneId`
 /// (kept as `u64` locally to avoid a cross-crate dep).
 pub type PaneId = u64;
+
+/// Decoded inline image ready for the GPU atlas.
+#[derive(Clone, Debug)]
+pub struct InlineImage {
+    /// Stable image id used as the renderer cache key.
+    pub id: u64,
+    /// Grid row where the image's top-left corner anchors.
+    pub row: u16,
+    /// Grid column where the image's top-left corner anchors.
+    pub col: u16,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Premultiplied BGRA8 pixels, row-major.
+    pub bgra: Arc<[u8]>,
+}
 
 /// One pane's contribution to a frame. The renderer owns the iteration; the
 /// caller (the winit app loop) is responsible for collecting the per-pane
@@ -32,7 +50,9 @@ pub struct PaneRender<'a> {
     /// Pixel rect of this pane within the window content area, already
     /// adjusted for `top_inset()` / tab bar / titlebar.
     pub rect_px: PixelRect,
-    /// Mutable borrow of this pane's grid. The renderer mutates dirty flags.
+    /// Per-frame view of the pane's Sonic grid. Terminal state remains owned
+    /// by `sonicterm-vt` + `sonicterm-grid`; WezTerm behavior is converted
+    /// into those crates instead of inserting an upstream terminal facade here.
     pub grid: &'a mut sonicterm_grid::grid::Grid,
     /// True for the pane that owns the focus ring, IME caret, selection
     /// overlay, search highlight ribbon, and hyperlink hover popup. Exactly
@@ -48,6 +68,8 @@ pub struct PaneRender<'a> {
     /// `0.0` = hidden. The renderer multiplies the scrollbar tint
     /// alphas by this and skips the emit entirely below the floor.
     pub scrollbar_alpha: f32,
+    /// Decoded inline media images anchored to this pane's grid.
+    pub inline_images: Vec<InlineImage>,
 }
 
 /// Cursor presentation style. Mirrors the legacy enum in `sonicterm-ui::cursor`

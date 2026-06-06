@@ -51,7 +51,9 @@ pub const CLOSE_BUTTON_SIZE: f32 = 14.0;
 pub const TAB_GAP: f32 = 6.0;
 
 /// Padding on the left edge of the bar before the first tab.
-pub const BAR_LEFT_PAD: f32 = 12.0;
+/// 0 = first tab flush against the window edge (per user preference;
+/// matches WezTerm fancy-mode when `tab_bar_at_bottom + window_padding = 0`).
+pub const BAR_LEFT_PAD: f32 = 0.0;
 
 /// Internal horizontal padding inside each tab, between the edge of the tab
 /// rect and the start of the title / the close button. The modern browser-
@@ -281,6 +283,14 @@ impl TabBarLayout {
     /// Compute the tab bar layout anchored at an explicit `bar_y` position.
     /// The bottom-bar renderer passes `window_h - bar_h` so the strip, active
     /// indicator, and close buttons all share bottom coordinates.
+    ///
+    /// All sizes (`bar_height`, `bar_y`, `window_width`) live in the
+    /// **same coordinate system** the renderer uses (raster px post-G1a).
+    /// The logical-px constants (`CLOSE_BUTTON_SIZE`, `TAB_GAP`,
+    /// `BAR_LEFT_PAD`, `TAB_INNER_PAD`) are auto-scaled to that system
+    /// by treating `bar_height` as the reference: the default unscaled
+    /// `tab_bar_height(14.0)` is `40.0`, so `bar_height / 40.0` gives
+    /// the geometric scale factor regardless of DPR or font size.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
         let bar_h = bar_height.max(1.0);
         let bar_y = bar_y.max(0.0);
@@ -292,15 +302,27 @@ impl TabBarLayout {
             return Self { bar: bar_rect, tabs, active: None, visible: true };
         }
 
-        // Region available for tabs is from BAR_LEFT_PAD to the right edge
-        // of the bar, minus another BAR_LEFT_PAD of breathing room, and
-        // minus TAB_END_DROP_ZONE_PX so there is always an empty slice on
-        // the right that a dragged tab can be dropped into to mean
+        // Per-bar-height geometric scale factor. At the default
+        // `tab_bar_height(14.0) = 40.0` this is 1.0 and the constants
+        // act as their unscaled logical-px values. On 2x Retina with
+        // the same font size, bar_h is 80 and the scale is 2.0 so the
+        // chrome (close button, gaps, paddings) grows in lockstep with
+        // the bar itself. Same story for non-default font sizes.
+        let scale = bar_h / 40.0;
+        let close_size = CLOSE_BUTTON_SIZE * scale;
+        let tab_gap = TAB_GAP * scale;
+        let bar_left_pad = BAR_LEFT_PAD * scale;
+        let inner_pad = TAB_INNER_PAD * scale;
+        let end_drop = TAB_END_DROP_ZONE_PX * scale;
+
+        // Region available for tabs is from `bar_left_pad` to the right
+        // edge of the bar, minus another `bar_left_pad` of breathing
+        // room, and minus `end_drop` so there is always an empty slice
+        // on the right that a dragged tab can be dropped into to mean
         // "append at the end" (issue #541). The bar background itself
         // (`bar_rect.w`) still spans the full window width.
-        let tabs_region =
-            (window_width - BAR_LEFT_PAD - BAR_LEFT_PAD - TAB_END_DROP_ZONE_PX).max(0.0);
-        let total_gaps = TAB_GAP * (n as f32 - 1.0).max(0.0);
+        let tabs_region = (window_width - bar_left_pad - bar_left_pad - end_drop).max(0.0);
+        let total_gaps = tab_gap * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
         // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
         // clamp): tabs shrink to share the available space when the equal-
@@ -308,21 +330,21 @@ impl TabBarLayout {
         // right edge of the bar. When the strip has surplus, use the
         // available equal share up to TAB_MAX_WIDTH so maximized windows can
         // show long titles instead of staying pinned to the old narrow cap.
-        let per_tab = raw.min(TAB_MAX_WIDTH);
+        let per_tab = raw.min(TAB_MAX_WIDTH * scale);
 
-        let bg_y = bar_y + TAB_VERT_INSET;
-        let bg_h = (bar_h - 2.0 * TAB_VERT_INSET).max(1.0);
-        let mut x = BAR_LEFT_PAD;
+        let bg_y = bar_y + TAB_VERT_INSET * scale;
+        let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
+        let mut x = bar_left_pad;
         for index in 0..n {
             let bg = Rect { x, y: bg_y, w: per_tab, h: bg_h };
             let close = Rect {
-                x: bg.x + bg.w - TAB_INNER_PAD - CLOSE_BUTTON_SIZE,
-                y: bg.y + (bg.h - CLOSE_BUTTON_SIZE) / 2.0,
-                w: CLOSE_BUTTON_SIZE,
-                h: CLOSE_BUTTON_SIZE,
+                x: bg.x + bg.w - inner_pad - close_size,
+                y: bg.y + (bg.h - close_size) / 2.0,
+                w: close_size,
+                h: close_size,
             };
-            let title_x = bg.x + TAB_INNER_PAD;
-            let title_right = close.x - TAB_INNER_PAD / 2.0;
+            let title_x = bg.x + inner_pad;
+            let title_right = close.x - inner_pad / 2.0;
             let title = Rect { x: title_x, y: bg.y, w: (title_right - title_x).max(0.0), h: bg.h };
             let tab = &bar.tabs()[index];
             tabs.push(TabWidget {
@@ -337,7 +359,7 @@ impl TabBarLayout {
                 bg,
                 close,
             });
-            x += per_tab + TAB_GAP;
+            x += per_tab + tab_gap;
         }
 
         Self { bar: bar_rect, tabs, active: Some(bar.active_index()), visible: true }

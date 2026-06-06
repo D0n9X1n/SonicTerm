@@ -171,7 +171,6 @@ pub fn row_quad_hash(
     pane_w: f32,
     pane_h: f32,
     selection: Option<(u16, u16, u16, u16)>,
-    scale_factor: f32,
 ) -> u64 {
     let mut h = DefaultHasher::new();
     (view_top_abs + r as u64).hash(&mut h);
@@ -183,12 +182,6 @@ pub fn row_quad_hash(
     origin_y.to_bits().hash(&mut h);
     pane_w.to_bits().hash(&mut h);
     pane_h.to_bits().hash(&mut h);
-    // #489 belt-and-suspenders: bg quads now encode snapped positions,
-    // and `snap_to_device_pixels` depends on `scale_factor`. Including
-    // it in the hash makes a DPI flip invalidate the cache deterministically
-    // even if `line_quad_cache.invalidate_all()` is ever skipped on a
-    // `rebuild_for_scale()` path.
-    scale_factor.to_bits().hash(&mut h);
     if let Some((s_row, s_col, e_row, e_col)) = selection {
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))

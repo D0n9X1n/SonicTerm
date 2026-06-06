@@ -32,7 +32,7 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
+    window_dpi, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
 
@@ -428,7 +428,7 @@ impl App {
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        let real_sf = window.scale_factor() as f32;
+        let real_sf = window_dpi(&window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
@@ -460,12 +460,14 @@ impl App {
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
-            scale_factor: 1.0,
+            dpi_scale: 1.0,
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
             hidden: false,
             scrollbar_drag: None,
+            splitter_drag: None,
+            splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
         };

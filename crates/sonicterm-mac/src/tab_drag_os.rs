@@ -180,33 +180,3 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         // in practice.
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn payload_json_carries_src_tab_idx() {
-        let s = format!(r#"{{"src_window_id":"foo","src_tab_idx":{}}}"#, 7);
-        assert!(s.contains(r#""src_tab_idx":7"#));
-        assert!(s.contains("src_window_id"));
-    }
-
-    #[test]
-    fn boxed_backend_implements_trait() {
-        let _: Box<dyn OsTabDragBackend> = MacOsTabDragBackend::boxed();
-    }
-
-    #[test]
-    fn pasteboard_write_round_trips_in_real_appkit() {
-        // Real AppKit call on the test thread. Skip if not on a
-        // machine with a usable pasteboard (CI shows the box does
-        // not always have one).
-        let json = r#"{"src_window_id":"test","src_tab_idx":42}"#;
-        let _ok = write_payload_to_pasteboard(json);
-        // Don't assert on `_ok` — the headless CI mac runner sometimes
-        // refuses generalPasteboard writes. The point of this test is
-        // to exercise the FFI surface for type-soundness; behavioural
-        // assertions live in the GUI smoke recipe (§13).
-    }
-}

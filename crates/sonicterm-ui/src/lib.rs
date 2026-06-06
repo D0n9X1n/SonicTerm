@@ -2,7 +2,7 @@
 //!
 //! Extracted from `sonicterm-shared` in PR-5 of the workspace refactor
 //! (issue #121). This crate carries only *state* and *layout* — no
-//! winit, no wgpu, no glyphon. The render layer in `sonicterm-shared` /
+//! winit, no wgpu, no the legacy chrome layer. The render layer in `sonicterm-shared` /
 //! `sonicterm-gpu` consumes these types to produce draw commands.
 //!
 //! `sonicterm-shared` re-exports every module here, so existing imports

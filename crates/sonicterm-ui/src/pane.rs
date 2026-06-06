@@ -42,12 +42,25 @@ pub struct SplitterRect {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SplitterId(Vec<bool>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitterHit {
+    pub id: SplitterId,
+    pub axis: SplitAxis,
+    pub rect: Rect,
+}
+
 impl Rect {
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
     pub fn center(&self) -> (f32, f32) {
         (self.x + self.w * 0.5, self.y + self.h * 0.5)
+    }
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 
@@ -333,6 +346,165 @@ impl PaneTree {
         let mut out = Vec::new();
         self.splitter_rects_into(outer, thickness.max(0.0), &mut out);
         coalesce_splitter_rects(out)
+    }
+
+    pub fn hit_splitter(&self, outer: Rect, thickness: f32, x: f32, y: f32) -> Option<SplitterHit> {
+        if self.zoomed_pane_id().is_some_and(|id| self.contains_leaf(id)) {
+            return None;
+        }
+        let mut path = Vec::new();
+        self.hit_splitter_into(outer, thickness.max(0.0), x, y, &mut path)
+    }
+
+    fn hit_splitter_into(
+        &self,
+        outer: Rect,
+        thickness: f32,
+        x: f32,
+        y: f32,
+        path: &mut Vec<bool>,
+    ) -> Option<SplitterHit> {
+        match self {
+            PaneTree::Leaf { .. } => None,
+            PaneTree::Split { axis, ratio, first, second, .. } => match axis {
+                SplitAxis::Vertical => {
+                    let w1 = outer.w * *ratio;
+                    let r1 = Rect::new(outer.x, outer.y, w1, outer.h);
+                    let r2 = Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h);
+                    let seam =
+                        Rect::new(outer.x + w1 - thickness * 0.5, outer.y, thickness, outer.h);
+                    if seam.contains(x, y) {
+                        return Some(SplitterHit {
+                            id: SplitterId(path.clone()),
+                            axis: *axis,
+                            rect: seam,
+                        });
+                    }
+                    path.push(false);
+                    let hit = first.hit_splitter_into(r1, thickness, x, y, path);
+                    path.pop();
+                    if hit.is_some() {
+                        return hit;
+                    }
+                    path.push(true);
+                    let hit = second.hit_splitter_into(r2, thickness, x, y, path);
+                    path.pop();
+                    hit
+                }
+                SplitAxis::Horizontal => {
+                    let h1 = outer.h * *ratio;
+                    let r1 = Rect::new(outer.x, outer.y, outer.w, h1);
+                    let r2 = Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1);
+                    let seam =
+                        Rect::new(outer.x, outer.y + h1 - thickness * 0.5, outer.w, thickness);
+                    if seam.contains(x, y) {
+                        return Some(SplitterHit {
+                            id: SplitterId(path.clone()),
+                            axis: *axis,
+                            rect: seam,
+                        });
+                    }
+                    path.push(false);
+                    let hit = first.hit_splitter_into(r1, thickness, x, y, path);
+                    path.pop();
+                    if hit.is_some() {
+                        return hit;
+                    }
+                    path.push(true);
+                    let hit = second.hit_splitter_into(r2, thickness, x, y, path);
+                    path.pop();
+                    hit
+                }
+            },
+        }
+    }
+
+    pub fn resize_splitter_by_delta(
+        &mut self,
+        id: &SplitterId,
+        outer: Rect,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
+        self.resize_splitter_by_delta_inner(&id.0, outer, delta_x, delta_y)
+    }
+
+    fn resize_splitter_by_delta_inner(
+        &mut self,
+        path: &[bool],
+        outer: Rect,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
+        match self {
+            PaneTree::Leaf { .. } => false,
+            PaneTree::Split { axis, ratio, first, second, .. } => {
+                if path.is_empty() {
+                    let denom = match axis {
+                        SplitAxis::Vertical => outer.w,
+                        SplitAxis::Horizontal => outer.h,
+                    };
+                    if denom <= 0.0 {
+                        return false;
+                    }
+                    let delta = match axis {
+                        SplitAxis::Vertical => delta_x / denom,
+                        SplitAxis::Horizontal => delta_y / denom,
+                    };
+                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                    return true;
+                }
+
+                match axis {
+                    SplitAxis::Vertical => {
+                        let w1 = outer.w * *ratio;
+                        let child_outer = if !path[0] {
+                            Rect::new(outer.x, outer.y, w1, outer.h)
+                        } else {
+                            Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h)
+                        };
+                        if !path[0] {
+                            first.resize_splitter_by_delta_inner(
+                                &path[1..],
+                                child_outer,
+                                delta_x,
+                                delta_y,
+                            )
+                        } else {
+                            second.resize_splitter_by_delta_inner(
+                                &path[1..],
+                                child_outer,
+                                delta_x,
+                                delta_y,
+                            )
+                        }
+                    }
+                    SplitAxis::Horizontal => {
+                        let h1 = outer.h * *ratio;
+                        let child_outer = if !path[0] {
+                            Rect::new(outer.x, outer.y, outer.w, h1)
+                        } else {
+                            Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1)
+                        };
+                        if !path[0] {
+                            first.resize_splitter_by_delta_inner(
+                                &path[1..],
+                                child_outer,
+                                delta_x,
+                                delta_y,
+                            )
+                        } else {
+                            second.resize_splitter_by_delta_inner(
+                                &path[1..],
+                                child_outer,
+                                delta_x,
+                                delta_y,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn splitter_rects_into(&self, outer: Rect, thickness: f32, out: &mut Vec<SplitterRect>) {

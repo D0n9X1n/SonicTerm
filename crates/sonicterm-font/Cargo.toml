@@ -1,0 +1,54 @@
+[package]
+name = "sonicterm-font"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SonicTerm Terminal — absorbed WezTerm font stack, shaping, fallback, and rasterization"
+
+[lints]
+workspace = true
+
+[features]
+vendor-jetbrains = []
+vendor-roboto = []
+vendor-noto-emoji = []
+vendor-nerd-font-symbols = []
+
+[dependencies]
+anyhow.workspace = true
+cairo-rs = { version = "0.18", default-features = false }
+config = { package = "sonicterm-font-config", path = "../sonicterm-font-config" }
+encoding_rs = "0.8"
+enum-display-derive = "0.1"
+euclid = { version = "0.22", default-features = false }
+freetype = { package = "sonicterm-freetype", path = "../sonicterm-freetype" }
+harfbuzz = { package = "sonicterm-harfbuzz", path = "../sonicterm-harfbuzz" }
+image = "0.25"
+lazy_static = "1.4"
+log = "0.4"
+memmap2 = "0.9"
+metrics = "0.23"
+num = "0.4"
+ordered-float = { version = "4", features = ["std"] }
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+thiserror.workspace = true
+walkdir = "2.5"
+
+[target.'cfg(any(target_os = "android", all(unix, not(target_os = "macos"))))'.dependencies]
+fontconfig = { package = "sonicterm-fontconfig", path = "../sonicterm-fontconfig" }
+
+[target."cfg(windows)".dependencies]
+dwrote = "0.11"
+winapi = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "=0.25.0"
+core-foundation = "=0.10.0"
+core-text = "=21.0.0"
+objc = "0.2"
+
+[dev-dependencies]
+env_logger = "0.11"

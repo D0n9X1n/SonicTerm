@@ -52,8 +52,14 @@
 //! memory cost trivial.
 
 use crate::GlyphInstance;
-use cosmic_text::Color as GColor;
-use sonicterm_types::{Cell, GeometryQuad};
+// T13/T14: the tofu colour was previously `cosmic_text::Color` (an
+// opaque 4-byte struct). The renderer just feeds it into
+// `chrome_color_to_linear_rgba` at replay time; storing the same
+// four sRGB-encoded bytes here keeps the cache decoupled from any
+// specific chrome / shape crate. Conversion to `ChromeColor` happens
+// at the replay site in `sonicterm-gpu::core`.
+pub type TofuColor = [u8; 4];
+use sonicterm_types::{Cell, Color, UnderlineStyle};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -65,6 +71,20 @@ const CACHE_HEADROOM_FACTOR: usize = 4;
 /// render loop lands (#199) every pane will pass its own stable id.
 pub type PaneId = u64;
 
+/// Cell-decoration run for an underlined span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnderlineRun {
+    /// Inclusive start column.
+    pub start_col: u16,
+    /// Inclusive end column.
+    pub end_col: u16,
+    /// Underline stroke style.
+    pub style: UnderlineStyle,
+    /// Effective underline colour. This is either the explicit SGR 58 colour
+    /// or the cell foreground for default underline colour.
+    pub color: Color,
+}
+
 /// One cached row's render artefacts. Replayed verbatim into the
 /// frame's glyph_instances / underlines / missing_chars vectors when
 /// the cache hits.
@@ -72,25 +92,14 @@ pub type PaneId = u64;
 pub struct CachedRow {
     /// Glyph instances composing the row.
     pub glyphs: Vec<GlyphInstance>,
-    /// Underline runs for this row, stored as `(start_col, end_col)` —
-    /// the row index is implied by the key.
-    pub underlines: Vec<(u16, u16)>,
+    /// Underline runs for this row; the row index is implied by the key.
+    pub underlines: Vec<UnderlineRun>,
     /// Missing-glyph tofu quads for this row.
     /// Tuple: `(x, y, w, h, color)`.
-    pub tofu: Vec<(f32, f32, f32, f32, GColor)>,
+    pub tofu: Vec<(f32, f32, f32, f32, TofuColor)>,
     /// Codepoints that were missing this row — published into
     /// `last_missing_chars` so the unicode-e2e gate stays meaningful.
     pub missing_chars: Vec<char>,
-    /// Procedural geometry quads (Box-Drawing / Block-Element) emitted
-    /// by `geometry_emit::emit_geometry_for_char` for this row. #560
-    /// PR-B2: stored as the renderer-agnostic [`GeometryQuad`] value
-    /// type so this crate stays free of wgpu types; the GPU crate
-    /// converts each back into its `QuadInstance` via the
-    /// `From<GeometryQuad>` adapter at cache-hit replay. Before this
-    /// field landed, the renderer (`core.rs`) had to skip the cache
-    /// entirely for any row containing a covered codepoint (#561
-    /// PR-A workaround) — geometry rows can now hit cache safely.
-    pub geometry_quads: Vec<GeometryQuad>,
 }
 
 /// Per-row glyph cache. Keys are `(pane_id, abs_row, hash)` — a row's
@@ -251,66 +260,3 @@ pub fn row_hash(
 
 // Unit tests live in `tests/row_glyph_cache.rs` and
 // `tests/row_glyph_cache_pane_isolation.rs`.
-
-#[cfg(test)]
-mod cached_row_geometry_tests {
-    use super::*;
-
-    fn dummy_quad(x: f32) -> GeometryQuad {
-        GeometryQuad {
-            rect: [x, 0.0, 0.1, 0.1],
-            color: [1.0, 0.0, 0.0, 1.0],
-            size_px: [10.0, 10.0],
-            radius_px: 0.0,
-            line_thickness_px: 0.0,
-            line_a: [0.0, 0.0],
-            line_b: [0.0, 0.0],
-        }
-    }
-
-    /// #560 PR-B2 core regression: a row whose first frame emits
-    /// procedural geometry quads (Box-Drawing / Block-Element) must
-    /// keep those quads available on the *second* frame via the cache.
-    /// Before this change, `CachedRow` had no `geometry_quads` slot and
-    /// the renderer worked around it by skipping the cache for any row
-    /// containing a covered codepoint (#561 PR-A). The cache now stores
-    /// the quads alongside glyphs, so a cache hit replays geometry too.
-    #[test]
-    fn cache_hit_preserves_geometry_quads() {
-        let mut cache = RowGlyphCache::new();
-        cache.resize(24);
-        let geom = vec![dummy_quad(0.1), dummy_quad(0.2), dummy_quad(0.3)];
-        let row = CachedRow { geometry_quads: geom.clone(), ..Default::default() };
-        cache.insert(0, 7, 0xDEAD_BEEF, row);
-        let hit = cache.get(0, 7, 0xDEAD_BEEF).expect("cache hit");
-        assert_eq!(hit.geometry_quads.len(), 3);
-        assert_eq!(hit.geometry_quads, geom);
-    }
-
-    /// Inversion of the #561 PR-A invalidation tests: with PR-B2's
-    /// replayable geometry, the renderer no longer flushes a row's
-    /// cache entry just because it contains a Box-Drawing or
-    /// Block-Element codepoint. The cache itself never knew about
-    /// those codepoints — the policy lived in `core.rs` — so the
-    /// regression guard here is "an entry stored against a
-    /// geometry-bearing row's hash is still retrievable across
-    /// repeated `get` calls without any external invalidation hook."
-    #[test]
-    fn geometry_row_entry_is_not_self_invalidating() {
-        let mut cache = RowGlyphCache::new();
-        cache.resize(24);
-        let row = CachedRow {
-            geometry_quads: vec![dummy_quad(0.5)],
-            // Simulate a row that also produced glyphs (e.g. a label
-            // adjacent to a box-drawing border).
-            missing_chars: vec!['┌', '─', '┐'],
-            ..Default::default()
-        };
-        cache.insert(0, 0, 0xC0FFEE, row);
-        for _ in 0..3 {
-            let hit =
-                cache.get(0, 0, 0xC0FFEE).expect("geometry row must stay cached across frames");
-            assert_eq!(hit.geometry_quads.len(), 1);
-        }
-    }
-}

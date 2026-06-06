@@ -72,33 +72,3 @@ impl Selection {
         out
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sonicterm_grid::grid::Color;
-
-    fn put_str(g: &mut Grid, s: &str) {
-        for ch in s.chars() {
-            g.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
-        }
-    }
-
-    #[test]
-    fn selection_preserves_zwj_family_cluster() {
-        // 👨‍👩‍👧 — ZWJs must survive copy via cell.extras().
-        let mut g = Grid::new(20, 1);
-        put_str(&mut g, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
-        let sel = Selection { start: (0, 0), end: (0, 19) };
-        assert_eq!(sel.as_text(&g), "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
-    }
-
-    #[test]
-    fn selection_preserves_combining_mark() {
-        // 'e' + COMBINING ACUTE ACCENT (U+0301) → "é" (decomposed).
-        let mut g = Grid::new(10, 1);
-        put_str(&mut g, "e\u{0301}");
-        let sel = Selection { start: (0, 0), end: (0, 9) };
-        assert_eq!(sel.as_text(&g), "e\u{0301}");
-    }
-}

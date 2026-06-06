@@ -18,11 +18,13 @@ use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
-    window::WindowId,
+    window::{CursorIcon, WindowId},
 };
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
-use super::{mark_all_panes_dirty, to_logical_pos, App, TabState};
+use super::{mark_all_panes_dirty, App, TabState};
+
+const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 
 impl App {
     pub(super) fn do_window_event(
@@ -158,10 +160,10 @@ impl App {
                         if let Some(r) = self.main_renderer() {
                             let (w, h) = r.logical_size();
                             let top = r.top_inset();
-                            let pl = r.padding_left();
-                            let pr = r.padding_right();
+                            let pl = r.padding_left_px();
+                            let pr = r.padding_right_px();
                             let bottom = r.bottom_inset();
-                            let pb = r.padding_bottom();
+                            let pb = r.padding_bottom_px();
                             let outer = sonicterm_ui::pane::Rect::new(
                                 pl,
                                 top,
@@ -191,10 +193,8 @@ impl App {
                     let mode = self.config.appearance.scrollbar;
                     let drag_pane =
                         self.main().and_then(|ws| ws.scrollbar_drag.as_ref().map(|s| s.pane_id));
-                    let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
-                    let (cx_phys, cy_phys) =
-                        self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let cursor = to_logical_pos(cx_phys, cy_phys, sf);
+                    let (cx, cy) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                    let cursor = (cx as f32, cy as f32);
                     let rects: Vec<(u64, f32, f32, f32, f32)> =
                         pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
                     let now = Instant::now();
@@ -253,6 +253,17 @@ impl App {
                 // produce torn output. Order is pane_rects order;
                 // active position is recorded separately.
                 let main_panes_for_arcs = self.main_panes();
+                let inline_images_by_pane: std::collections::HashMap<
+                    u64,
+                    Vec<sonicterm_render_model::InlineImage>,
+                > = main_panes_for_arcs
+                    .map(|panes| {
+                        panes
+                            .iter()
+                            .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let parser_arcs: Vec<(
                     u64,
                     std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
@@ -461,6 +472,10 @@ impl App {
                                     .get(id)
                                     .copied()
                                     .unwrap_or(0.0),
+                                inline_images: inline_images_by_pane
+                                    .get(id)
+                                    .cloned()
+                                    .unwrap_or_default(),
                             })
                             .collect();
                         if let Err(e) = r.render(
@@ -512,7 +527,7 @@ impl App {
                     if let Some(w) = main_window_for_ime {
                         if let Some(throttle) = ws_ime_throttle_ref {
                             if throttle.should_update(cursor_rc.0, cursor_rc.1) {
-                                let x = r.padding() + f32::from(cursor_rc.1) * r.cell_w;
+                                let x = r.padding_left_px() + f32::from(cursor_rc.1) * r.cell_w;
                                 let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
                                 let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
                                 let size = winit::dpi::PhysicalSize::new(
@@ -670,12 +685,14 @@ impl App {
                 }
             }
 
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
                 if let Some(ws) = self.main_mut() {
-                    ws.scale_factor = scale_factor;
+                    ws.dpi_scale = dpi_scale;
                 }
-                if let Some(r) = self.main_renderer_mut() {
-                    r.set_scale_factor(scale_factor as f32);
+                if let Some(id) = self.main_window_id {
+                    if let Some(ws) = self.windows.get_mut(&id) {
+                        crate::app::apply_dpi_to_renderer_if_present(&mut ws.renderer, dpi_scale);
+                    }
                 }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -704,6 +721,12 @@ impl App {
                 if let Some(r) = self.main_renderer_mut() {
                     redraw = r.set_hover_cursor(None);
                 }
+                if let Some(ws) = self.main_mut() {
+                    ws.splitter_hover = None;
+                }
+                if let Some(w) = self.main_window() {
+                    w.set_cursor(CursorIcon::Default);
+                }
                 if self.main_mut().and_then(|ws| ws.hovered_url.take()).is_some() {
                     redraw = true;
                 }
@@ -717,8 +740,7 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.cursor_pos = (position.x, position.y);
                 }
-                let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
-                let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                let (lx, ly) = (position.x as f32, position.y as f32);
                 // M6a-expand-2c-mouse: notify the reducer so
                 // `last_mouse_pos` tracks the cursor; the reducer's
                 // identity check implicitly coalesces sub-pixel jitter
@@ -744,6 +766,9 @@ impl App {
                 // so request a frame exactly when the pointer crosses the
                 // right-edge proximity threshold.
                 let _ = self.refresh_scrollbar_hover_from_cursor();
+                if self.apply_splitter_drag(lx, ly) {
+                    return;
+                }
                 // Update the live drag session position so the chip
                 // can follow the cursor in the renderer overlay.
                 let drag_snapshot = self.main_mut().and_then(|ws| {
@@ -757,10 +782,8 @@ impl App {
                         .main_tabs()
                         .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
                         .unwrap_or_default();
-                    let window_width = self
-                        .main_window()
-                        .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
-                        .unwrap_or(0.0);
+                    let window_width =
+                        self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
                     let (bar_h, top_off, visible) = self
                         .main_renderer()
                         .map(|r| {
@@ -883,7 +906,9 @@ impl App {
                     // platform open-URL modifier (Cmd / Ctrl) per the
                     // v1.0 Cmd-held-hover affordance; OSC 8 keeps its
                     // unconditional pointer affordance.
-                    self.refresh_hovered_url();
+                    if !self.refresh_splitter_hover(lx, ly) {
+                        self.refresh_hovered_url();
+                    }
                 }
             }
 
@@ -892,11 +917,8 @@ impl App {
                 // Default 3 lines per LineDelta tick (matches stock GTK
                 // / Cocoa wheel feel). PixelDelta divides by the live
                 // cell height so trackpad scrolls match font size.
-                let (cursor_pos, sf) = self
-                    .main()
-                    .map(|ws| (ws.cursor_pos, ws.scale_factor as f32))
-                    .unwrap_or(((0.0, 0.0), 1.0));
-                let (lx, ly) = to_logical_pos(cursor_pos.0, cursor_pos.1, sf);
+                let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
                 let cell_h = self
                     .main_renderer()
                     .map(|r| r.cell_size().1)
@@ -929,9 +951,8 @@ impl App {
                     // M6a-expand-2c-mouse: notify reducer of the
                     // press/release transition (Render(Selection)).
                     {
-                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        let (lx, ly) = (cp.0 as f32, cp.1 as f32);
                         self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
                             window: sonicterm_types::WindowKey::new(0),
                             pressed: true,
@@ -947,16 +968,10 @@ impl App {
                     // handoff gate so the CursorMoved threshold check
                     // can fire once for the new gesture.
                     self.os_drag_handoff_started = false;
-                    let sf =
-                        self.main_window().map(|w| w.scale_factor() as f32).unwrap_or_else(|| {
-                            self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0)
-                        });
                     let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (px, py) = to_logical_pos(cursor_pos.0, cursor_pos.1, sf);
-                    let window_width = self
-                        .main_window()
-                        .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
-                        .unwrap_or(0.0);
+                    let (px, py) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+                    let window_width =
+                        self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
                     let empty_tabs2 = sonicterm_ui::tabs::TabBar::new();
                     let layout = TabBarLayout::compute_with_height(
                         self.main_tabs().unwrap_or(&empty_tabs2),
@@ -1016,6 +1031,21 @@ impl App {
                         }
                         return;
                     }
+                    if let Some(hit) = self.splitter_hit_at(px, py) {
+                        if let Some(ws) = self.main_mut() {
+                            ws.splitter_drag = Some(super::SplitterDragState {
+                                splitter: hit.id,
+                                axis: hit.axis,
+                                last_pos: (px, py),
+                            });
+                            ws.selection = None;
+                        }
+                        self.set_splitter_cursor(hit.axis);
+                        if let Some(w) = self.main_window() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     // B1b borrow-split: snapshot renderer geometry up front so the
                     // pane-rect compute can run alongside `self.tab_states.get_mut()`
                     // and the hyperlink path can re-borrow `self`.
@@ -1025,10 +1055,10 @@ impl App {
                             w,
                             h,
                             r.top_inset(),
-                            r.padding_left(),
-                            r.padding_right(),
+                            r.padding_left_px(),
+                            r.padding_right_px(),
                             r.bottom_inset(),
-                            r.padding_bottom(),
+                            r.padding_bottom_px(),
                         )
                     });
                     let pixel_to_cell = {
@@ -1044,9 +1074,8 @@ impl App {
                     // need a focus-switch click first — matches the
                     // behaviour of other terminals).
                     {
-                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        let (lx, ly) = (cp.0 as f32, cp.1 as f32);
                         match self.scrollbar_hit_at(lx, ly) {
                             crate::app::scrollbar_input::HitOutcome::Miss => {}
                             crate::app::scrollbar_input::HitOutcome::StartDrag(state) => {
@@ -1088,9 +1117,8 @@ impl App {
                             })
                             .unwrap_or_default();
                         if pane_rects.len() > 1 {
-                            let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                            let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                            let (lx, ly) = (cp.0 as f32, cp.1 as f32);
                             for (id, rect) in &pane_rects {
                                 if lx >= rect.x
                                     && lx < rect.x + rect.w
@@ -1157,9 +1185,8 @@ impl App {
                     // M6a-expand-2c-mouse: notify reducer of the
                     // release transition (Render(Selection)).
                     {
-                        let sf = self.main().map(|ws| ws.scale_factor as f32).unwrap_or(1.0);
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                        let (lx, ly) = to_logical_pos(cp.0, cp.1, sf);
+                        let (lx, ly) = (cp.0 as f32, cp.1 as f32);
                         self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
                             window: sonicterm_types::WindowKey::new(0),
                             pressed: false,
@@ -1173,6 +1200,8 @@ impl App {
                     // outside the bar still clears state.
                     if let Some(ws) = self.main_mut() {
                         ws.scrollbar_drag = None;
+                        ws.splitter_drag = None;
+                        ws.splitter_hover = None;
                     }
                     // Commit-on-release: read the live drag session and
                     // foreign drop target, decide what to do via the
@@ -1191,10 +1220,8 @@ impl App {
                         r.set_drag_chip(None);
                     }
                     if let (Some(s), Some(idx)) = (session, pressed) {
-                        let window_width = self
-                            .main_window()
-                            .map(|w| w.inner_size().to_logical::<f32>(w.scale_factor()).width)
-                            .unwrap_or(0.0);
+                        let window_width =
+                            self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
                         let empty_tabs3 = sonicterm_ui::tabs::TabBar::new();
                         let layout = TabBarLayout::compute_with_height(
                             self.main_tabs().unwrap_or(&empty_tabs3),
@@ -1256,6 +1283,10 @@ impl App {
                                 w.request_redraw();
                             }
                         }
+                    }
+                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                    if !self.refresh_splitter_hover(cp.0 as f32, cp.1 as f32) {
+                        self.refresh_hovered_url();
                     }
                 }
             },
@@ -1475,8 +1506,11 @@ impl App {
                 }
                 should_exit = true;
             } else {
-                let new_view_top =
-                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
+                let new_view_top = GpuRenderer::copy_mode_view_top_after_move_legacy(
+                    &state,
+                    grid,
+                    pane.viewport_top_abs,
+                );
                 drop(guard);
                 if let Some(id) = active_pane_id {
                     if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) {
@@ -1494,6 +1528,103 @@ impl App {
         if let Some(panes) = self.main_panes() {
             mark_all_panes_dirty(panes);
         }
+    }
+}
+
+impl App {
+    fn main_pane_outer_rect(&self) -> Option<sonicterm_ui::pane::Rect> {
+        let r = self.main_renderer()?;
+        let (w, h) = r.logical_size();
+        let top = r.top_inset();
+        let pl = r.padding_left_px();
+        let pr = r.padding_right_px();
+        let bottom = r.bottom_inset();
+        let pb = r.padding_bottom_px();
+        Some(sonicterm_ui::pane::Rect::new(
+            pl,
+            top,
+            (w - pl - pr).max(0.0),
+            (h - top - bottom - pb).max(0.0),
+        ))
+    }
+
+    fn splitter_hit_at(&self, x: f32, y: f32) -> Option<sonicterm_ui::pane::SplitterHit> {
+        let outer = self.main_pane_outer_rect()?;
+        let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+        self.main_tab_states()
+            .and_then(|states| states.get(tab_idx))
+            .and_then(|state| state.tree.hit_splitter(outer, SPLITTER_HIT_THICKNESS, x, y))
+    }
+
+    fn set_splitter_cursor(&self, axis: sonicterm_ui::pane::SplitAxis) {
+        if let Some(w) = self.main_window() {
+            let icon = match axis {
+                sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
+                sonicterm_ui::pane::SplitAxis::Horizontal => CursorIcon::RowResize,
+            };
+            w.set_cursor(icon);
+        }
+    }
+
+    fn refresh_splitter_hover(&mut self, x: f32, y: f32) -> bool {
+        if self.main().and_then(|ws| ws.splitter_drag.as_ref()).is_some() {
+            return true;
+        }
+        let Some(hit) = self.splitter_hit_at(x, y) else {
+            let was_splitter =
+                self.main_mut().map(|ws| ws.splitter_hover.take().is_some()).unwrap_or(false);
+            if was_splitter {
+                if let Some(w) = self.main_window() {
+                    w.set_cursor(CursorIcon::Default);
+                }
+            }
+            return false;
+        };
+        if let Some(ws) = self.main_mut() {
+            ws.hovered_url = None;
+            ws.hover_link = false;
+            ws.splitter_hover = Some(hit.axis);
+        }
+        self.set_splitter_cursor(hit.axis);
+        true
+    }
+
+    fn apply_splitter_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.main().and_then(|ws| ws.splitter_drag.clone()) else {
+            return false;
+        };
+        let Some(outer) = self.main_pane_outer_rect() else {
+            return false;
+        };
+        let dx = x - drag.last_pos.0;
+        let dy = y - drag.last_pos.1;
+        if dx == 0.0 && dy == 0.0 {
+            return true;
+        }
+
+        let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+        let changed = self
+            .main_tab_states_mut()
+            .and_then(|states| states.get_mut(tab_idx))
+            .map(|state| state.tree.resize_splitter_by_delta(&drag.splitter, outer, dx, dy))
+            .unwrap_or(false);
+
+        if let Some(ws) = self.main_mut() {
+            if let Some(active) = ws.splitter_drag.as_mut() {
+                active.last_pos = (x, y);
+            }
+            if changed {
+                mark_all_panes_dirty(&ws.panes);
+            }
+        }
+        self.set_splitter_cursor(drag.axis);
+        if changed {
+            self.refresh_harness_sink();
+            if let Some(w) = self.main_window() {
+                w.request_redraw();
+            }
+        }
+        true
     }
 }
 

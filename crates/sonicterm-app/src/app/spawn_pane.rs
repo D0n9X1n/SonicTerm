@@ -31,8 +31,7 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    to_logical_pos, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
-    WindowState,
+    with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent, WindowState,
 };
 
 impl App {
@@ -64,6 +63,8 @@ impl App {
             Arc::new(Mutex::new(self.main_window().cloned()));
         let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
+            Arc::new(Mutex::new(Vec::new()));
         // PR #400 fix: per-pane cursor_visible Arc lives outside the
         // pty-spawn match so we can store it on PaneState even if pty
         // spawn failed (and so a no-pty pane still has a valid Arc).
@@ -87,6 +88,7 @@ impl App {
                 let cursor_visible = cursor_visible_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
+                let inline_images_thread = inline_images.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -179,6 +181,7 @@ impl App {
                                     // section as a defence-in-depth rule.
                                     let mut new_title: Option<String> = None;
                                     let mut command_side_effects = Vec::new();
+                                    let mut inline_images = Vec::new();
                                     {
                                         let mut p = parser_clone.lock();
                                         for ev in p.advance(&bytes) {
@@ -230,8 +233,24 @@ impl App {
                                                         }
                                                     }
                                                 }
+                                                VtEvent::Media(media) => {
+                                                    if let Some(image) =
+                                                        super::media::decode_inline_image(&media)
+                                                    {
+                                                        inline_images.push(image);
+                                                    }
+                                                }
                                                 _ => {}
                                             }
+                                        }
+                                    }
+                                    if !inline_images.is_empty() {
+                                        let mut images = inline_images_thread.lock();
+                                        images.extend(inline_images);
+                                        const MAX_INLINE_IMAGES: usize = 128;
+                                        if images.len() > MAX_INLINE_IMAGES {
+                                            let drop = images.len() - MAX_INLINE_IMAGES;
+                                            images.drain(0..drop);
                                         }
                                     }
                                     if !command_side_effects.is_empty() {
@@ -304,6 +323,7 @@ impl App {
         state.redraw_target = redraw_target;
         state.command_events = command_events;
         state.cursor_visible = cursor_visible_pane;
+        state.inline_images = inline_images;
         state
     }
 }

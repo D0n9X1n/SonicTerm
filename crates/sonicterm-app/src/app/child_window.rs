@@ -32,8 +32,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
-    resize_all_panes, shell_quote_posix, to_logical_pos, with_integrated_titlebar, wrap_paste, App,
-    PaneState, TabState, UserEvent, WindowState,
+    resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState,
+    TabState, UserEvent, WindowState,
 };
 
 #[doc(hidden)]
@@ -56,12 +56,12 @@ pub fn resize_renderer_and_panes_if_present(
 }
 
 #[doc(hidden)]
-pub fn set_scale_factor_if_renderer_present(
+pub fn apply_dpi_to_renderer_if_present(
     renderer: &mut Option<GpuRenderer>,
-    scale_factor: f64,
+    dpi_scale: f64,
 ) -> bool {
     let Some(r) = renderer.as_mut() else { return false };
-    r.set_scale_factor(scale_factor as f32);
+    r.set_scale_factor(dpi_scale as f32);
     true
 }
 
@@ -73,11 +73,9 @@ pub fn child_window_resized_handles_no_renderer(child: &mut WindowState, width: 
 }
 
 #[doc(hidden)]
-pub fn child_window_scale_factor_changed_handles_no_renderer(
-    child: &mut WindowState,
-    scale_factor: f64,
-) {
-    if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) {
+pub fn child_window_dpi_changed_handles_no_renderer(child: &mut WindowState, dpi_scale: f64) {
+    child.dpi_scale = dpi_scale;
+    if apply_dpi_to_renderer_if_present(&mut child.renderer, dpi_scale) {
         child.request_redraw();
     }
 }
@@ -141,10 +139,10 @@ impl App {
                         let r = child.renderer.as_ref()?;
                         let (w, h) = r.logical_size();
                         let top = r.top_inset();
-                        let pl = r.padding_left();
-                        let pr = r.padding_right();
+                        let pl = r.padding_left_px();
+                        let pr = r.padding_right_px();
                         let bottom = r.bottom_inset();
-                        let pb = r.padding_bottom();
+                        let pb = r.padding_bottom_px();
                         let outer = sonicterm_ui::pane::Rect::new(
                             pl,
                             top,
@@ -196,6 +194,14 @@ impl App {
                     child.request_redraw();
                     return;
                 }
+                let inline_images_by_pane: std::collections::HashMap<
+                    u64,
+                    Vec<sonicterm_render_model::InlineImage>,
+                > = child
+                    .panes
+                    .iter()
+                    .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
+                    .collect();
                 if let Some(pane) = child.panes.get_mut(&active_id) {
                     let active_pos = guards
                         .iter()
@@ -238,6 +244,10 @@ impl App {
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
                             is_broadcast_receiver: false,
                             scrollbar_alpha: 0.0,
+                            inline_images: inline_images_by_pane
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_default(),
                         })
                         .collect();
                     // PR #400: cursor_visible is per-pane (lives on
@@ -280,12 +290,11 @@ impl App {
                             win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
                         let isz = win.inner_size();
                         let inner_size = (isz.width, isz.height);
-                        let sf = win.scale_factor() as f32;
-                        let logical_w = inner_size.0 as f32 / sf.max(1.0);
+                        let raster_w = inner_size.0 as f32;
                         let Some(r) = child.renderer.as_ref() else { return };
                         let layout = TabBarLayout::compute_with_height(
                             &child.tabs,
-                            logical_w,
+                            raster_w,
                             r.tab_bar_logical_height(),
                         )
                         .with_top_offset(r.tab_bar_y_offset())
@@ -294,7 +303,6 @@ impl App {
                             Some(win_id),
                             inner_origin,
                             inner_size,
-                            sf,
                             &layout,
                         );
                         self.os_drag_bars.publish(snap);
@@ -311,10 +319,11 @@ impl App {
             {
                 child.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. }
-                if set_scale_factor_if_renderer_present(&mut child.renderer, scale_factor) =>
-            {
-                child.request_redraw();
+            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
+                child.dpi_scale = dpi_scale;
+                if apply_dpi_to_renderer_if_present(&mut child.renderer, dpi_scale) {
+                    child.request_redraw();
+                }
             }
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();
@@ -351,8 +360,7 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 child.cursor_pos = (position.x, position.y);
                 let Some(r) = child.renderer.as_mut() else { return };
-                let sf = r.scale_factor();
-                let (lx, ly) = to_logical_pos(position.x, position.y, sf);
+                let (lx, ly) = (position.x as f32, position.y as f32);
                 // Child window also drives the close-button hover dance
                 // through its OWN renderer — without this push the dim
                 // × stays the wrong brightness when the cursor crosses
@@ -371,7 +379,7 @@ impl App {
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
                     let session_snapshot = *s;
-                    let bar_width = r.width() as f32 / r.scale_factor();
+                    let bar_width = r.width() as f32;
                     let layout = TabBarLayout::compute_with_height(
                         &child.tabs,
                         bar_width,
@@ -412,9 +420,8 @@ impl App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     let Some(r) = child.renderer.as_ref() else { return };
-                    let sf = r.scale_factor();
-                    let (px, py) = to_logical_pos(child.cursor_pos.0, child.cursor_pos.1, sf);
-                    let bar_width = r.width() as f32 / sf;
+                    let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                    let bar_width = r.width() as f32;
                     let layout = TabBarLayout::compute_with_height(
                         &child.tabs,
                         bar_width,
@@ -450,8 +457,7 @@ impl App {
                         return;
                     }
                     child.mouse_down = true;
-                    // `pixel_to_cell` still expects PHYSICAL px (it
-                    // divides by scale_factor internally — PR #76).
+                    // `pixel_to_cell` expects raster px.
                     if let Some((row, col)) =
                         r.pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
                     {
@@ -477,8 +483,7 @@ impl App {
                     }
                     if let (Some(s), Some(src_idx)) = (session, pressed) {
                         let Some(r) = child.renderer.as_ref() else { return };
-                        let sf = r.scale_factor();
-                        let bar_width = r.width() as f32 / sf;
+                        let bar_width = r.width() as f32;
                         let layout = TabBarLayout::compute_with_height(
                             &child.tabs,
                             bar_width,
@@ -1255,8 +1260,11 @@ fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
                 copied_text = child_copy_mode_selected_text(&state, grid);
                 should_exit = true;
             } else {
-                pane.viewport_top_abs =
-                    GpuRenderer::copy_mode_view_top_after_move(&state, grid, pane.viewport_top_abs);
+                pane.viewport_top_abs = GpuRenderer::copy_mode_view_top_after_move_legacy(
+                    &state,
+                    grid,
+                    pane.viewport_top_abs,
+                );
             }
         }
     }
