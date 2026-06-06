@@ -33,7 +33,7 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
 }
 
 /// Maximum width of a single tab (a long-title tab is clamped to this).
-pub const TAB_MAX_WIDTH: f32 = 400.0;
+pub const TAB_MAX_WIDTH: f32 = 240.0;
 
 /// Preferred minimum width of a single tab. Acts as a soft floor: when the
 /// equal-share allocation per tab is ≥ this value, each tab is held at or
@@ -44,11 +44,13 @@ pub const TAB_MAX_WIDTH: f32 = 400.0;
 /// available space evenly.
 pub const TAB_MIN_WIDTH: f32 = 200.0;
 
-/// Size of the close `×` square inside each tab.
-pub const CLOSE_BUTTON_SIZE: f32 = 14.0;
+/// Deprecated: tab close buttons are no longer shown. Kept so older tests /
+/// callers that read the constant still compile while close hit-testing
+/// returns only whole-tab activation.
+pub const CLOSE_BUTTON_SIZE: f32 = 16.0;
 
 /// Inset between tabs and from the right edge of the bar.
-pub const TAB_GAP: f32 = 6.0;
+pub const TAB_GAP: f32 = 4.0;
 
 /// Padding on the left edge of the bar before the first tab.
 /// 0 = first tab flush against the window edge (per user preference;
@@ -56,15 +58,14 @@ pub const TAB_GAP: f32 = 6.0;
 pub const BAR_LEFT_PAD: f32 = 0.0;
 
 /// Internal horizontal padding inside each tab, between the edge of the tab
-/// rect and the start of the title / the close button. The modern browser-
-/// style chrome wants more breathing room around the title block.
+/// rect and the centered title block.
 pub const TAB_INNER_PAD: f32 = 10.0;
 
 /// Vertical inset between the bar's top edge and the tab background rect
 /// (and equivalently the bottom edge). The tab rect is `bar_h - 2 *
 /// TAB_VERT_INSET` tall — leaving 4px of bar chrome above and below the
 /// pill so the active tab's elevated BG visibly floats on the bar.
-pub const TAB_VERT_INSET: f32 = 4.0;
+pub const TAB_VERT_INSET: f32 = 2.0;
 
 /// Corner radius of the tab background pill, in logical pixels.
 pub const TAB_CORNER_RADIUS: f32 = 8.0;
@@ -73,8 +74,8 @@ pub const TAB_CORNER_RADIUS: f32 = 8.0;
 pub const ACTIVE_TOP_ACCENT_H: f32 = 2.0;
 
 /// Horizontal inset (each side) of the active-tab top accent bar relative
-/// to the tab background rect — so the accent is `tab_w - 2 * inset` wide.
-pub const ACTIVE_TOP_ACCENT_INSET: f32 = 6.0;
+/// to the tab background rect — so the accent is nearly full-width.
+pub const ACTIVE_TOP_ACCENT_INSET: f32 = 2.0;
 
 /// Reserved drop zone at the right edge of the tab bar, in logical pixels.
 /// This region is subtracted from the per-tab allocation width so there is
@@ -114,18 +115,19 @@ pub enum TabHover {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabAction {
     Activate(usize),
+    /// Legacy variant kept for API compatibility; tab close buttons are no
+    /// longer emitted or hit-tested.
     Close(usize),
 }
 
 /// Layout and interaction model for a single tab. The tab owns one
-/// background rect for all interaction; the close `×` is only a sub-rect
-/// inside that widget.
+/// background rect for all interaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabWidget {
     pub idx: usize,
     pub bg_rect: Rect,
     pub close_x_rect: Rect,
-    /// Title rect (inside the tab, to the left of the close button).
+    /// Title rect (inside the tab, centered horizontally by the renderer).
     pub title_rect: Rect,
     pub title: String,
     pub active: bool,
@@ -134,23 +136,18 @@ pub struct TabWidget {
     pub index: usize,
     /// Back-compat public field alias for the tab background rect. Prefer `bg_rect`.
     pub bg: Rect,
-    /// Back-compat public field alias for the close sub-rect. Prefer `close_x_rect`.
+    /// Back-compat public field alias for the retired close sub-rect.
     pub close: Rect,
 }
 
 impl TabWidget {
     /// Hit-test this tab as one whole widget. Any point inside `bg_rect`
-    /// activates the tab except points inside the visual close sub-rect,
-    /// which close the tab.
+    /// activates the tab; close buttons are no longer part of the tab chrome.
     pub fn hit(&self, p: Point) -> Option<TabAction> {
         if !self.bg_rect.contains(p.x, p.y) {
             return None;
         }
-        if self.close_x_rect.contains(p.x, p.y) {
-            Some(TabAction::Close(self.idx))
-        } else {
-            Some(TabAction::Activate(self.idx))
-        }
+        Some(TabAction::Activate(self.idx))
     }
 
     #[must_use]
@@ -172,6 +169,8 @@ pub type TabRect = TabWidget;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabHit {
     Activate(usize),
+    /// Legacy variant kept for API compatibility; tab close buttons are no
+    /// longer emitted or hit-tested.
     Close(usize),
 }
 
@@ -282,7 +281,7 @@ impl TabBarLayout {
 
     /// Compute the tab bar layout anchored at an explicit `bar_y` position.
     /// The bottom-bar renderer passes `window_h - bar_h` so the strip, active
-    /// indicator, and close buttons all share bottom coordinates.
+    /// indicator, and title hit zones all share bottom coordinates.
     ///
     /// All sizes (`bar_height`, `bar_y`, `window_width`) live in the
     /// **same coordinate system** the renderer uses (raster px post-G1a).
@@ -306,10 +305,9 @@ impl TabBarLayout {
         // `tab_bar_height(14.0) = 40.0` this is 1.0 and the constants
         // act as their unscaled logical-px values. On 2x Retina with
         // the same font size, bar_h is 80 and the scale is 2.0 so the
-        // chrome (close button, gaps, paddings) grows in lockstep with
+        // chrome (gaps and paddings) grows in lockstep with
         // the bar itself. Same story for non-default font sizes.
         let scale = bar_h / 40.0;
-        let close_size = CLOSE_BUTTON_SIZE * scale;
         let tab_gap = TAB_GAP * scale;
         let bar_left_pad = BAR_LEFT_PAD * scale;
         let inner_pad = TAB_INNER_PAD * scale;
@@ -337,14 +335,9 @@ impl TabBarLayout {
         let mut x = bar_left_pad;
         for index in 0..n {
             let bg = Rect { x, y: bg_y, w: per_tab, h: bg_h };
-            let close = Rect {
-                x: bg.x + bg.w - inner_pad - close_size,
-                y: bg.y + (bg.h - close_size) / 2.0,
-                w: close_size,
-                h: close_size,
-            };
+            let close = Rect { x: bg.x + bg.w, y: bg.y + bg.h * 0.5, w: 0.0, h: 0.0 };
             let title_x = bg.x + inner_pad;
-            let title_right = close.x - inner_pad / 2.0;
+            let title_right = bg.x + bg.w - inner_pad;
             let title = Rect { x: title_x, y: bg.y, w: (title_right - title_x).max(0.0), h: bg.h };
             let tab = &bar.tabs()[index];
             tabs.push(TabWidget {
@@ -384,11 +377,13 @@ impl TabBarLayout {
         // tab's post-layout width. Do not derive it from the whole strip or
         // shrink/grow it independently; wide two-tab Windows layouts exposed
         // that drift as an orange line overshooting into empty chrome.
+        let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
+        let inset = ACTIVE_TOP_ACCENT_INSET * scale;
         Some(Rect {
-            x: t.bg_rect.x,
-            y: t.bg_rect.y,
-            w: t.bg_rect.w.max(0.0),
-            h: ACTIVE_TOP_ACCENT_H,
+            x: t.bg_rect.x + inset,
+            y: t.bg_rect.y + 1.0 * scale,
+            w: (t.bg_rect.w - inset * 2.0).max(0.0),
+            h: ACTIVE_TOP_ACCENT_H * scale,
         })
     }
 

@@ -29,17 +29,12 @@ impl Default for RgbaColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FontStyle {
+    #[default]
     Normal,
     Italic,
     Oblique,
-}
-
-impl Default for FontStyle {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl Display for FontStyle {
@@ -52,12 +47,13 @@ impl Display for FontStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FontStretch {
     UltraCondensed,
     ExtraCondensed,
     Condensed,
     SemiCondensed,
+    #[default]
     Normal,
     SemiExpanded,
     Expanded,
@@ -94,12 +90,6 @@ impl FontStretch {
             Self::ExtraExpanded => 8,
             Self::UltraExpanded => 9,
         }
-    }
-}
-
-impl Default for FontStretch {
-    fn default() -> Self {
-        Self::Normal
     }
 }
 
@@ -193,6 +183,7 @@ impl Display for FontWeight {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum DisplayPixelGeometry {
     #[default]
     RGB,
@@ -426,7 +417,7 @@ impl TextStyle {
         let mut font = self.font.clone();
         let mut default_font = FontAttributes::default();
 
-        if !font.iter().any(|attr| *attr == default_font) {
+        if !font.contains(&default_font) {
             default_font.is_fallback = true;
             font.push(default_font);
         }
@@ -442,17 +433,12 @@ pub struct StyleRule {
     pub font: TextStyle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AllowSquareGlyphOverflow {
     Never,
     Always,
+    #[default]
     WhenFollowedBySpace,
-}
-
-impl Default for AllowSquareGlyphOverflow {
-    fn default() -> Self {
-        Self::WhenFollowedBySpace
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,7 +519,7 @@ impl Config {
     pub fn default_config() -> Self {
         Self {
             font_size: 12.0,
-            line_height: 1.0,
+            line_height: 1.1,
             cell_width: 1.0,
             font_dirs: Vec::new(),
             font: TextStyle::default(),

@@ -116,42 +116,81 @@ impl App {
         if !self.command_palette.is_open() {
             return false;
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.command_palette.close();
-                self.palette_attached_window = None;
-                true
-            }
-            Key::Named(NamedKey::Enter) => {
-                let action = self.command_palette.current().cloned();
-                self.command_palette.close();
-                self.palette_attached_window = None;
-                if let Some(a) = action {
-                    self.run_action(&a);
+        if self.command_palette.mode()
+            == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
+        {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    true
                 }
-                true
-            }
-            Key::Named(NamedKey::ArrowDown) => {
-                self.command_palette.move_selection_down();
-                true
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                self.command_palette.move_selection_up();
-                true
-            }
-            Key::Named(NamedKey::Backspace) => {
-                self.command_palette.backspace();
-                true
-            }
-            Key::Character(s) => {
-                for ch in s.chars() {
-                    if !ch.is_control() {
-                        self.command_palette.input_char(ch);
+                Key::Named(NamedKey::Enter) => {
+                    let title = self.command_palette.query().trim().to_string();
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    if !title.is_empty() {
+                        self.rename_active_tab_body(title);
                     }
+                    true
                 }
-                true
+                Key::Named(NamedKey::Backspace) => {
+                    self.command_palette.backspace();
+                    true
+                }
+                Key::Character(s) => {
+                    for ch in s.chars() {
+                        if !ch.is_control() {
+                            self.command_palette.input_char(ch);
+                        }
+                    }
+                    true
+                }
+                _ => true,
             }
-            _ => true, // swallow other keys while palette is open
+        } else {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    true
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let action = self.command_palette.current().cloned();
+                    if matches!(action, Some(sonicterm_cfg::keymap::Action::RenameTab)) {
+                        let body = self.active_tab_title_body().unwrap_or_default();
+                        self.command_palette.start_rename_tab(body);
+                        return true;
+                    }
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    if let Some(a) = action {
+                        self.run_action(&a);
+                    }
+                    true
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.command_palette.move_selection_down();
+                    true
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.command_palette.move_selection_up();
+                    true
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    self.command_palette.backspace();
+                    true
+                }
+                Key::Character(s) => {
+                    for ch in s.chars() {
+                        if !ch.is_control() {
+                            self.command_palette.input_char(ch);
+                        }
+                    }
+                    true
+                }
+                _ => true, // swallow other keys while palette is open
+            }
         }
     }
     pub(super) fn toggle_command_palette(&mut self) {
@@ -188,6 +227,47 @@ impl App {
         // wakes the event loop. Targets the attached window when set
         // so child windows get a redraw too, not just main.
         self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
+    pub(super) fn start_rename_active_tab(&mut self) {
+        let body = self.active_tab_title_body().unwrap_or_default();
+        self.command_palette.start_rename_tab(body);
+        self.palette_attached_window = match self.frontmost_kind() {
+            FrontmostKind::Child(id) => Some(id),
+            _ => None,
+        };
+        self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
+    pub(super) fn active_tab_title_body(&self) -> Option<String> {
+        match self.frontmost_kind() {
+            FrontmostKind::Child(id) => {
+                self.windows.get(&id).and_then(|ws| ws.tabs.active_title_body())
+            }
+            _ => self.main_tabs().and_then(|tabs| tabs.active_title_body()),
+        }
+    }
+
+    pub(super) fn rename_active_tab_body(&mut self, body: String) {
+        match self.frontmost_kind() {
+            FrontmostKind::Child(id) => {
+                if let Some(ws) = self.windows.get_mut(&id) {
+                    ws.tabs.set_active_custom_title(body);
+                    if let Some(w) = ws.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
+            _ => {
+                if let Some(tabs) = self.main_tabs_mut() {
+                    tabs.set_active_custom_title(body);
+                }
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            }
+        }
+        self.refresh_harness_sink();
     }
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {

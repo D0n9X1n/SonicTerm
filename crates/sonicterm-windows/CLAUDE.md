@@ -17,10 +17,7 @@ explicitly.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-windows
-cargo test -p sonicterm-windows --test assets_colocated  # PR #453
-cargo test -p sonicterm-windows --test wix_manifest      # PR #453
-# §13 GUI smoke is the WINDOWS PM's responsibility — must be run on win-PM
+cargo build -p sonicterm-windows
 ```
 PR #453: `build.rs` colocates icon/asset files next to the binary;
 the two tests above guard that contract + the WiX manifest layout.

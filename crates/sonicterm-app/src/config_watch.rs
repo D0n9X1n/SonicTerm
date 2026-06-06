@@ -94,15 +94,6 @@ impl ConfigWatcher {
         }
         (config, keymap)
     }
-
-    /// Blocking receive for tests / instrumentation. Returns `None` on
-    /// timeout.
-    pub fn recv_timeout(&self, dur: Duration) -> Option<Config> {
-        match self.rx.recv_timeout(dur).ok()? {
-            ConfigWatchUpdate::Config(cfg) => Some(*cfg),
-            ConfigWatchUpdate::Keymap(_) => None,
-        }
-    }
 }
 
 fn spawn_inner(
@@ -138,7 +129,7 @@ fn spawn_inner(
             // shutting down — nothing to do.
             let _ = raw_tx.send(res);
         })?;
-    watcher.watch(&parent, RecursiveMode::NonRecursive)?;
+    watcher.watch(&parent, RecursiveMode::Recursive)?;
 
     std::thread::Builder::new().name("sonic-config-watch".into()).spawn(move || {
         // Coalesce bursts: editors often emit Remove + Create +

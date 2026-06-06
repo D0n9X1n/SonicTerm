@@ -100,12 +100,10 @@ fn main() -> Result<()> {
     let keymap = load_keymap(&config.keymap);
     // Initial load is infallible (#522 fallback); hot-reload loaders use
     // strict variants so user-visible errors are surfaced after startup.
-    let theme_loader: sonicterm_app::ThemeLoader = Box::new(|name: &str| {
-        Theme::load_strict(&asset_dir().join("themes").join(format!("{name}.toml")))
-    });
-    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(|name: &str| {
-        Keymap::load_strict(&asset_dir().join("keymaps").join(format!("{name}.toml")))
-    });
+    let theme_loader: sonicterm_app::ThemeLoader =
+        Box::new(|name: &str| Theme::load_name_or_path(name, &asset_dir()));
+    let keymap_loader: sonicterm_app::KeymapLoader =
+        Box::new(|name: &str| Keymap::load_name_or_path(name, &asset_dir()));
     #[cfg(target_os = "windows")]
     {
         use sonicterm_app::menu::{PlatformMenu, Sender};
@@ -205,7 +203,7 @@ pub fn windows_default_config() -> Config {
 }
 
 fn load_theme(name: &str) -> Theme {
-    Theme::load_or_default(&asset_dir().join("themes").join(format!("{name}.toml")))
+    Theme::load_name_or_default(name, &asset_dir())
 }
 
 fn load_keymap(name: &str) -> Keymap {
@@ -216,7 +214,7 @@ fn load_keymap(name: &str) -> Keymap {
             }
         }
     }
-    Keymap::load_or_default(&asset_dir().join("keymaps").join(format!("{name}.toml")))
+    Keymap::load_name_or_default(name, &asset_dir())
 }
 
 /// Installer copies assets next to the .exe; in dev, fall back to workspace.

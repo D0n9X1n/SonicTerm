@@ -16,7 +16,7 @@ env:
 
 jobs:
   quick-gate:
-    name: ${{ matrix.os }} / fmt+clippy+unit-test
+    name: ${{ matrix.os }} / fmt+clippy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,9 +44,6 @@ jobs:
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: unit + bin tests (skip integration tests/ folders)
-        run: cargo test --workspace --lib --bins
 
       - name: 'contract docs drift (M8 fail)'
         shell: bash

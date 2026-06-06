@@ -5,6 +5,8 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::non_canonical_clone_impl)]
 mod fixed_point;
 mod types;
 pub use fixed_point::*;

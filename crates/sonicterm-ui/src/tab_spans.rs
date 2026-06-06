@@ -100,11 +100,9 @@ pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 /// Tab-title font size given the body terminal font size, in logical px.
 /// Tab titles render exactly 1.0 pt larger than the body — see PR
 /// "feat(tabbar): centered title with config font, larger size".
-/// Picked the additive `+ 1.0` form over `* 1.0625` because it scales
+/// Picked the additive `+ 1.0` form over a ratio because it scales
 /// consistently across user font-size choices (a hard-coded ratio
-/// quickly drifts at extreme sizes: a 10pt body would gain ~0.6pt,
-/// a 24pt body ~1.5pt, neither matching the user's intent of "one
-/// step up").
+/// quickly drifts at extreme sizes).
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size + 1.0

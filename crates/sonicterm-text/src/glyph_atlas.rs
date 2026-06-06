@@ -535,63 +535,6 @@ impl GlyphAtlas {
         let off = (y * self.width + x) as usize * bpp;
         self.pixels[off + 3]
     }
-
-    /// Allocate + blit a fully-prepared tile. Shared low-level helper
-    /// Allocate + blit a fully-prepared tile. Shared low-level helper
-    /// used by `get_or_insert` (and a refactor-target for
-    /// `get_or_insert` in a follow-up PR — kept inlined there for now
-    /// to minimize the #610 PR-B diff).
-    fn insert_tile_raw(&mut self, key: GlyphKey, tile: RasterTile) -> Option<GlyphInfo> {
-        let (x, y) = match self.alloc_rect(tile.width, tile.height) {
-            Some(xy) => xy,
-            None => {
-                self.evict_lru_quartile();
-                self.alloc_rect(tile.width, tile.height)?
-            }
-        };
-        let bpp = BYTES_PER_PIXEL as usize;
-        for row in 0..tile.height {
-            let dst_off = ((y + row) * self.width + x) as usize * bpp;
-            if tile.is_color {
-                let src_off = (row * tile.width) as usize * bpp;
-                let len = tile.width as usize * bpp;
-                self.pixels[dst_off..dst_off + len]
-                    .copy_from_slice(&tile.coverage[src_off..src_off + len]);
-            } else {
-                let src_off = (row * tile.width) as usize;
-                for col in 0..tile.width as usize {
-                    let a = tile.coverage[src_off + col];
-                    let p = dst_off + col * bpp;
-                    self.pixels[p] = a;
-                    self.pixels[p + 1] = a;
-                    self.pixels[p + 2] = a;
-                    self.pixels[p + 3] = a;
-                }
-            }
-        }
-        self.dirty.push(DirtyRect { x, y, w: tile.width, h: tile.height });
-        let info = GlyphInfo {
-            uv: [
-                x as f32 / self.width as f32,
-                y as f32 / self.height as f32,
-                (x + tile.width) as f32 / self.width as f32,
-                (y + tile.height) as f32 / self.height as f32,
-            ],
-            px_size: [tile.width, tile.height],
-            px_offset: [tile.offset_x, tile.offset_y],
-            advance: tile.advance,
-            is_color: tile.is_color,
-        };
-        self.map.insert(
-            key,
-            AtlasEntry {
-                info,
-                last_used_frame: self.current_frame,
-                rect: Some((x, y, tile.width, tile.height)),
-            },
-        );
-        Some(info)
-    }
 }
 
 /// Deterministic synthetic rasterizer used by tests and the bench. Each

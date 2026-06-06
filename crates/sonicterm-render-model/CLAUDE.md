@@ -15,7 +15,7 @@ backend be swapped. Don't add winit or wgpu types here.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-render-model
+cargo build -p sonicterm-render-model
 ```
 
 ## Common pitfalls

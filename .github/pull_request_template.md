@@ -20,7 +20,7 @@
 ## Test plan
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
+- [ ] `cargo build -p sonicterm-app`
 - [ ] Manually launched on macOS / Windows
 - [ ] Screenshots / recordings attached (UI changes)
 

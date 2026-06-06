@@ -16,9 +16,13 @@ pub struct Config {
     pub window: WindowConfig,
     /// Terminal-engine knobs (shell, scrollback, cursor).
     pub terminal: TerminalConfig,
-    /// Name of the active theme (looked up in `assets/themes/`).
+    /// Active theme. Accepts a bundled/user theme name or a direct `.toml`
+    /// path. Named themes resolve from `<config-dir>/themes/<name>.toml`
+    /// first, then bundled `assets/themes/<name>.toml`.
     pub theme: String,
-    /// Name of the active keymap (looked up in `assets/keymaps/`).
+    /// Active keymap. Accepts a bundled keymap name or a direct `.toml`
+    /// path. Named keymaps resolve from `<config-dir>/keymaps/<name>.toml`
+    /// first, then bundled `assets/keymaps/<name>.toml`.
     pub keymap: String,
     /// Logging subsystem retention + level knobs (see
     /// [`sonicterm_logging::LoggingConfig`]).
@@ -172,11 +176,18 @@ pub struct AppearanceConfig {
     pub opacity: f32,
     /// Scrollbar visibility policy.
     pub scrollbar: ScrollbarMode,
+    /// Padding between overlay panel chrome and its inner content, in logical px.
+    pub panel_padding: f32,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
-        Self { backdrop: BackdropKind::Opaque, opacity: 1.0, scrollbar: ScrollbarMode::default() }
+        Self {
+            backdrop: BackdropKind::Opaque,
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::default(),
+            panel_padding: 2.0,
+        }
     }
 }
 
@@ -330,7 +341,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
             theme: "gruvbox-dark-hard".to_string(),
-            keymap: "sonicterm".to_string(),
+            keymap: crate::keymap::platform_default_keymap_name().to_string(),
             logging: sonicterm_logging::LoggingConfig::default(),
             accessibility: AccessibilityConfig::default(),
             locale: String::new(),
@@ -414,11 +425,13 @@ impl Config {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+                std::fs::create_dir_all(parent.join("themes"))
+                    .with_context(|| format!("create {:?}", parent.join("themes")))?;
+                std::fs::create_dir_all(parent.join("keymaps"))
+                    .with_context(|| format!("create {:?}", parent.join("keymaps")))?;
             }
         }
-        const HEADER: &str =
-            "# SonicTerm config — see https://github.com/D0n9X1n/sonic for configuration examples.\n";
-        std::fs::write(path, HEADER).with_context(|| format!("write {path:?}"))
+        std::fs::write(path, default_config_template()).with_context(|| format!("write {path:?}"))
     }
 
     /// Ensure and open the platform user config file.
@@ -526,4 +539,81 @@ pub fn default_config_dir() -> Option<PathBuf> {
     }
 }
 
-// Unit tests live in `tests/config.rs`.
+/// Starter config written when the user config file does not exist.
+pub fn default_config_template() -> String {
+    let cfg = Config::default();
+    format!(
+        r#"# SonicTerm configuration.
+# Edit this file and use Reload Config from the app/keymap to apply changes.
+#
+# Custom themes:
+#   - Put named themes in "{config_dir}/themes/<name>.toml" and set theme = "<name>"
+#   - Or set theme = "/absolute/path/to/theme.toml"
+#
+# Custom keymaps:
+#   - Put named keymaps in "{config_dir}/keymaps/<name>.toml" and set keymap = "<name>"
+#   - Or set keymap = "/absolute/path/to/keymap.toml"
+
+theme = "{theme}"
+keymap = "{keymap}"
+locale = ""
+quit_on_last_window_close = true
+
+[font]
+family = "{font_family}"
+size = {font_size}
+line_height = {line_height}
+
+[window]
+cols = {cols}
+rows = {rows}
+padding_left = {padding_left}
+padding_right = {padding_right}
+padding_top = {padding_top}
+padding_bottom = {padding_bottom}
+decorations = true
+opacity = 1.0
+blur = false
+
+[terminal]
+scrollback = {scrollback}
+cursor_blink = true
+cursor_shape = "block"
+
+[appearance]
+backdrop = "opaque"
+opacity = 1.0
+scrollbar = "auto"
+panel_padding = {panel_padding}
+
+[render]
+glyph_fit = "v2"
+alt_screen_bg_fill = "v2"
+
+[accessibility]
+high_contrast = false
+reduced_motion = false
+strong_focus = false
+
+[notifications]
+long_command = false
+threshold_secs = 10
+"#,
+        config_dir = default_config_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<config-dir>".to_string()),
+        theme = cfg.theme,
+        keymap = cfg.keymap,
+        font_family = cfg.font.family,
+        font_size = cfg.font.size,
+        line_height = cfg.font.line_height,
+        cols = cfg.window.cols,
+        rows = cfg.window.rows,
+        padding_left = cfg.window.padding_left,
+        padding_right = cfg.window.padding_right,
+        padding_top = cfg.window.padding_top,
+        padding_bottom = cfg.window.padding_bottom,
+        panel_padding = cfg.appearance.panel_padding,
+        scrollback = cfg.terminal.scrollback,
+    )
+}

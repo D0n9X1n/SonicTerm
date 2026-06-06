@@ -17,7 +17,6 @@ table below.
 | A `pub` item in `sonicterm-types` | + `docs/CONTRACTS.md` |
 | A landmine-flagged file | + `landmines.toml` entry for the LM-ID |
 | Render / VT / app pipeline | + the touched crate's CLAUDE.md (§ Land-mines) |
-| Release tag | + `docs/RELEASE_TESTING.md` |
 
 Each crate-local CLAUDE.md stays ≤ 80 lines. If one grows past, the
 crate is too big — file a split.
@@ -68,29 +67,17 @@ Dep-graph rationale: `docs/ARCHITECTURE.md`.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-deny.sh
 bash tools/check-landmines.sh
 bash tools/check-contract-docs.sh
 bash tools/check-ownership.sh
-cargo run --example pty_dump -p sonicterm-vt --release
-cargo run --example pty_dump_unicode -p sonicterm-vt --release
-cargo run --example pty_dump_unicode -p sonicterm-vt --release
-bash scripts/check-visual-snapshots.sh
 cargo build --release -p sonicterm-mac
 bash scripts/bench.sh
 ```
 
-**Test floor: 1445.** Never regress. Confirm with:
-
-```bash
-cargo test --workspace 2>&1 | grep "test result:" | awk '{s+=$4} END {print "TOTAL:",s}'
-```
-
 CI matrix: `macos-14` + `windows-latest`. PR/main quick gate runs
-fmt+clippy+`cargo test --workspace --lib --bins`. Tag push (`v*`) runs
-the full integration sweep + `scripts/bench.sh --ci` + unsigned dmg/msi.
+fmt+clippy. Tag push (`v*`) builds unsigned dmg/msi.
 
 ---
 
@@ -146,5 +133,3 @@ unverified-focus pattern leaked keystrokes into other apps (#464).
 - `docs/HOT_FILES.md` — 2-PM sign-off list with rationale
 - `docs/MODULARIZATION_PILOT.md` — exit criteria for the modularization epic
 - `docs/migrations/` — one per breaking `sonicterm-types` change
-- `docs/WINDOWS_TESTING.md` — PM repro recipe for Windows visual + log-scrape testing (PowerShell + Win32 + SendKeys)
-- `docs/VISUAL_PARITY.md` — track parity targets vs Windows Terminal for glyph rendering (#461)

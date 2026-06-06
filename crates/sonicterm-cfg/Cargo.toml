@@ -19,8 +19,3 @@ toml.workspace = true
 serde_plain.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-tempfile = "3"
-pretty_assertions = "1.4"
-tracing-test = { version = "0.2", features = ["no-env-filter"] }

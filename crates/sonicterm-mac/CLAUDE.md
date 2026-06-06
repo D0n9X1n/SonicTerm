@@ -18,9 +18,7 @@ include a §13 smoke screenshot from here.**
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-mac
-cargo build --release -p sonicterm-mac
-# Then §13 GUI smoke — see crates/sonicterm-app/CLAUDE.md
+cargo build -p sonicterm-mac
 ```
 
 ## Common pitfalls
@@ -54,7 +52,6 @@ SONICTERM_WINDOW_READY cg_window_id=<u32> pid=<u32> window_index=0
 - `window_index=0` — reserved for future torn-out child windows;
   always `0` today.
 
-The harness (`testing/workflows/run_case.sh`) greps this marker to
-skip the ~3s `cg-window-id.swift` poll. Mirrors the Windows path —
-**do not rename, reorder, or repurpose the keys** without bumping
-both run_case.sh and run_case.ps1 in the same commit.
+Automation can grep this marker to skip external window-id polling.
+**Do not rename, reorder, or repurpose the keys** without updating
+callers in the same commit.

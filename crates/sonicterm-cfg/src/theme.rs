@@ -1,6 +1,6 @@
 //! Color theme loader.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,37 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Resolve a theme name or path.
+    ///
+    /// Resolution order:
+    /// 1. direct path if `theme` looks like a path (`/x/y.toml`, `./x.toml`,
+    ///    `themes/x.toml`, etc.),
+    /// 2. user config dir: `<config-dir>/themes/<theme>.toml`,
+    /// 3. bundled assets: `<asset-dir>/themes/<theme>.toml`.
+    pub fn resolve_path(theme: &str, asset_dir: &Path) -> PathBuf {
+        let raw = Path::new(theme);
+        if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
+            return raw.to_path_buf();
+        }
+        if let Some(user) = crate::config::default_config_dir()
+            .map(|dir| dir.join("themes").join(format!("{theme}.toml")))
+            .filter(|path| path.exists())
+        {
+            return user;
+        }
+        asset_dir.join("themes").join(format!("{theme}.toml"))
+    }
+
+    /// Strict load from a theme name or path using [`Self::resolve_path`].
+    pub fn load_name_or_path(theme: &str, asset_dir: &Path) -> Result<Self> {
+        Self::load_strict(&Self::resolve_path(theme, asset_dir))
+    }
+
+    /// Infallible name/path loader. Falls back to bundled default on error.
+    pub fn load_name_or_default(theme: &str, asset_dir: &Path) -> Self {
+        Self::load_or_default(&Self::resolve_path(theme, asset_dir))
+    }
+
     /// Apply config-only accessibility presentation overrides after theme
     /// resolution and before renderers derive their cached colors.
     pub fn apply_accessibility(&mut self, a: &AccessibilityConfig) {

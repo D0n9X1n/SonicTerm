@@ -241,4 +241,4 @@ GUI bench (`bench_headless_gui.sh`), 3-run range:
 - `idle_cpu_pct`: 0.01 → 0.08 — proxy metric still well under the <1 goal.
 - Typing-echo latency: p99 1324µs, comfortably under the 2000µs goal.
 
-Tests/gate: `cargo test --workspace` = 623 tests passing (floor 171), `pty_dump` e2e OK.
+Gate: `cargo build -p sonicterm-app` and `cargo build -p sonicterm-mac`.

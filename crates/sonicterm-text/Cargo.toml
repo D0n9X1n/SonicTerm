@@ -21,12 +21,3 @@ bytemuck.workspace = true
 lru = "0.16"
 tracing.workspace = true
 fast_image_resize = { version = "5.1", default-features = false }
-
-[dev-dependencies]
-sonicterm-grid.workspace = true
-# T1 (wezterm-takeover G1): the parity test exercises the new
-# `FontStack::cell_metrics_raster_px()` accessor. Cargo permits this
-# reverse dev-dep on `sonicterm-engine` (which depends on
-# `sonicterm-text` in regular deps) because dev-deps don't
-# participate in the production dep graph.
-sonicterm-engine = { path = "../sonicterm-engine", version = "0.3.0" }

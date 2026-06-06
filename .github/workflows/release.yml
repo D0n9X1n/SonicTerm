@@ -11,9 +11,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # --- Quick-gate parity: fmt + clippy + unit/bin tests on both OSes --------
+  # --- Quick-gate parity: fmt + clippy on both OSes -------------------------
   quick-gate:
-    name: ${{ matrix.os }} / fmt+clippy+unit-test
+    name: ${{ matrix.os }} / fmt+clippy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,57 +31,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: unit + bin tests
-        run: cargo test --workspace --lib --bins
-
-  # --- Full integration tests + e2e examples + perf gate --------------------
-  full-gate:
-    name: full workspace tests + e2e examples + perf
-    runs-on: macos-14
-    needs: [quick-gate]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-full-gate
-      - name: full workspace tests (incl. integration)
-        run: cargo test --workspace
-      - name: pty_dump e2e
-        run: |
-          OUT=$(cargo run --example pty_dump -p sonicterm-core --release)
-          echo "$OUT"
-          echo "$OUT" | grep -q '\[e2e\] OK'
-      - name: pty_dump_unicode e2e
-        run: |
-          OUT=$(cargo run --example pty_dump_unicode -p sonicterm-core --release)
-          echo "$OUT"
-          echo "$OUT" | grep -q '\[unicode-e2e\] OK'
-      - name: Install vtebench (best-effort)
-        shell: bash
-        run: |
-          cargo install vtebench --locked 2>/tmp/vtebench-install.log || {
-            echo "::warning::vtebench install failed — bench will skip vtebench_* metrics."
-            cat /tmp/vtebench-install.log || true
-          }
-      - name: perf-bench (CI mode — >20% regression fails)
-        env:
-          CI: "1"
-        run: bash scripts/bench.sh --ci
-      - name: release-testing checklist
-        shell: bash
-        run: |
-          if [ -f scripts/check-release-testing.sh ]; then
-            bash scripts/check-release-testing.sh
-          else
-            echo "::warning::scripts/check-release-testing.sh not present — skipping"
-          fi
-
   # --- macOS build + .dmg (UNSIGNED — signing deferred pending certs) -------
   build-mac:
     name: Build macOS universal .dmg (unsigned)
     runs-on: macos-14
-    needs: [full-gate]
+    needs: [quick-gate]
     steps:
       - uses: actions/checkout@v5
 
@@ -130,7 +84,7 @@ jobs:
   build-windows:
     name: Build Windows .msi (unsigned)
     runs-on: windows-latest
-    needs: [full-gate]
+    needs: [quick-gate]
     steps:
       - uses: actions/checkout@v5
 

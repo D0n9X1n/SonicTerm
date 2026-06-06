@@ -47,10 +47,7 @@ fn harfbuzz() {
         cfg.include(inc);
     }
 
-    println!(
-        "cargo:rustc-link-search={}",
-        std::env::var("DEP_FREETYPE_LIB").unwrap()
-    );
+    println!("cargo:rustc-link-search={}", std::env::var("DEP_FREETYPE_LIB").unwrap());
     println!("cargo:rustc-link-lib=freetype");
     println!("cargo:rustc-link-lib=png");
     println!("cargo:rustc-link-lib=z");
@@ -59,9 +56,7 @@ fn harfbuzz() {
 }
 
 fn git_submodule_update() {
-    let _ = std::process::Command::new("git")
-        .args(&["submodule", "update", "--init"])
-        .status();
+    let _ = std::process::Command::new("git").args(["submodule", "update", "--init"]).status();
 }
 
 fn main() {

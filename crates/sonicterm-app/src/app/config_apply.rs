@@ -80,6 +80,12 @@ pub fn renderer_scrollbar_mode_differs(old_cfg: &Config, new_cfg: &Config) -> bo
     old_cfg.appearance.scrollbar != new_cfg.appearance.scrollbar
 }
 
+/// True iff overlay panel padding changed and existing renderers need
+/// their cached overlay layout invalidated.
+pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> bool {
+    (old_cfg.appearance.panel_padding - new_cfg.appearance.panel_padding).abs() > f32::EPSILON
+}
+
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
@@ -89,7 +95,7 @@ impl App {
 
         // Theme
         if new_cfg.theme != self.config.theme {
-            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
                     t.apply_accessibility(&new_cfg.accessibility);
@@ -124,7 +130,7 @@ impl App {
         if new_cfg.theme == self.config.theme
             && new_cfg.accessibility.high_contrast != self.config.accessibility.high_contrast
         {
-            let theme_path = assets.join("themes").join(format!("{}.toml", new_cfg.theme));
+            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             let mut t = match Theme::load_strict(&theme_path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -171,11 +177,20 @@ impl App {
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
-                let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
-                let (cw, ch) = r.cell_size();
+                {
+                    let Some(r) = child.renderer.as_mut() else { continue };
+                    r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                }
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -235,11 +250,20 @@ impl App {
             }
             // PR-B2c (#365): the loop below covers main + every child.
             for child in self.windows.values_mut() {
-                let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_padding(pad);
-                let (cw, ch) = r.cell_size();
+                {
+                    let Some(r) = child.renderer.as_mut() else { continue };
+                    r.set_padding(pad);
+                }
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
             tracing::info!(
                 "live-reload: padding -> l={} r={} t={} b={}",
@@ -277,6 +301,21 @@ impl App {
             tracing::info!(?new_cfg.appearance.scrollbar, "live-reload: appearance scrollbar");
         }
 
+        if renderer_panel_padding_differs(&self.config, &new_cfg) {
+            if let Some(r) = self.main_renderer_mut() {
+                r.set_panel_padding(new_cfg.appearance.panel_padding);
+            }
+            for child in self.windows.values_mut() {
+                if let Some(r) = child.renderer.as_mut() {
+                    r.set_panel_padding(new_cfg.appearance.panel_padding);
+                }
+            }
+            tracing::info!(
+                panel_padding = new_cfg.appearance.panel_padding,
+                "live-reload: appearance panel padding"
+            );
+        }
+
         // Tab close-button override (wezterm `tab_close_button_color`).
         // Diff against the live config so an edit that adds, changes,
         // or clears the value propagates to the main + every child
@@ -308,7 +347,7 @@ impl App {
 
         // Keymap
         if new_cfg.keymap != self.config.keymap {
-            let km_path = assets.join("keymaps").join(format!("{}.toml", new_cfg.keymap));
+            let km_path = Keymap::resolve_path(&new_cfg.keymap, &assets);
             match self
                 .keymap_loader
                 .as_ref()
@@ -416,11 +455,20 @@ impl App {
         }
         // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
-            let Some(r) = child.renderer.as_mut() else { continue };
-            r.set_font(&family, size, line_h);
-            let (cw, ch) = r.cell_size();
+            {
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_font(&family, size, line_h);
+            }
+            let Some(r) = child.renderer.as_ref() else { continue };
             let rects = App::compute_pane_rects_for(child);
-            resize_panes_to_rects(&child.panes, &rects, cw, ch);
+            let (cw, ch) = r.cell_size();
+            let inset = [
+                r.padding_left_px(),
+                r.padding_right_px(),
+                r.padding_top_px(),
+                r.padding_bottom_px(),
+            ];
+            resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
         }
         if let Some(w) = self.main_window() {
             w.request_redraw();
@@ -440,11 +488,21 @@ impl App {
         tracing::info!("tab bar visible -> {visible}");
         // PR-B2c (#365): the loop below covers main + every child.
         for child in self.windows.values_mut() {
-            let Some(r) = child.renderer.as_mut() else { continue };
-            if r.set_tab_bar_visible(visible) {
-                let (cw, ch) = r.cell_size();
+            let changed = {
+                let Some(r) = child.renderer.as_mut() else { continue };
+                r.set_tab_bar_visible(visible)
+            };
+            if changed {
+                let Some(r) = child.renderer.as_ref() else { continue };
                 let rects = App::compute_pane_rects_for(child);
-                resize_panes_to_rects(&child.panes, &rects, cw, ch);
+                let (cw, ch) = r.cell_size();
+                let inset = [
+                    r.padding_left_px(),
+                    r.padding_right_px(),
+                    r.padding_top_px(),
+                    r.padding_bottom_px(),
+                ];
+                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
         }
         if let Some(w) = self.main_window() {

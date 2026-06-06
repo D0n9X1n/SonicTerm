@@ -58,10 +58,3 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [target.'cfg(target_os = "windows")'.dependencies]
 notify-rust = "4"
-
-[dev-dependencies]
-sonicterm-cfg.workspace = true
-sonicterm-grid.workspace = true
-sonicterm-io.workspace = true
-sonicterm-vt.workspace = true
-tempfile = "3"

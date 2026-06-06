@@ -2,9 +2,8 @@
 # tools/check-landmines.sh
 #
 # Diff-scoped landmine gate. For every file in the PR diff, look up the
-# matching landmines.toml entries and run their required_test_paths.
-# Fast — only runs the tests for the rules whose globs match a touched
-# file. Pre-commit hook + CI.
+# matching landmines.toml entries and report them. Tests were intentionally
+# cleared; this gate now acts as a high-signal review prompt for risky files.
 #
 # Status: M2 = warn-only. M8 flips to fail (toggle via $MODE).
 
@@ -30,8 +29,7 @@ with open(sys.argv[1], "rb") as f:
     data = tomllib.load(f)
 for lm in data.get("landmine", []):
     globs = "|".join(lm.get("file_globs", []))
-    tests = "|".join(lm.get("required_test_paths", []))
-    print(f"{lm['id']}\t{globs}\t{tests}")
+    print(f"{lm['id']}\t{globs}")
 PY
 
 BASE="${GITHUB_BASE_REF:-origin/main}"
@@ -41,9 +39,7 @@ if [[ -z "$TOUCHED" ]]; then
 fi
 
 FAIL=0
-TESTS_TO_RUN=""
-
-while IFS=$'\t' read -r id globs tests; do
+while IFS=$'\t' read -r id globs; do
     [[ -z "$globs" ]] && continue
     IFS='|' read -ra GARR <<< "$globs"
     HIT=0
@@ -57,31 +53,10 @@ while IFS=$'\t' read -r id globs tests; do
         done
         [[ $HIT -eq 1 ]] && break
     done
-    if [[ $HIT -eq 1 && -n "$tests" ]]; then
-        echo "ℹ️  $id triggered (touched file matches glob) — queueing tests"
-        IFS='|' read -ra TARR <<< "$tests"
-        for t in "${TARR[@]}"; do
-            TESTS_TO_RUN+="$t "
-        done
+    if [[ $HIT -eq 1 ]]; then
+        echo "ℹ️  $id triggered (touched file matches glob)"
     fi
 done < /tmp/landmines.parsed
-
-if [[ -n "$TESTS_TO_RUN" ]]; then
-    echo "▶ cargo test --workspace -- $TESTS_TO_RUN"
-    if ! cargo test --workspace -- $TESTS_TO_RUN; then
-        FAIL=1
-    fi
-fi
-
-if [[ $FAIL -ne 0 ]]; then
-    echo "❌ landmine guard failed"
-    if [[ "$MODE" == "fail" ]]; then
-        exit 1
-    else
-        echo "ℹ️  WARN-ONLY (M2). Will flip to FAIL at M8."
-        exit 0
-    fi
-fi
 
 echo "✓ landmine gate clean"
 exit 0

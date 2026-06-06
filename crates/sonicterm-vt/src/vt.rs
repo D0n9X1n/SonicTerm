@@ -503,6 +503,24 @@ impl Performer {
         self.underline_color = None;
     }
 
+    fn reset_terminal(&mut self) {
+        self.reset_attrs();
+        self.saved_cursor = None;
+        self.bracketed_paste = false;
+        self.mouse_sgr = false;
+        self.focus_reporting = false;
+        self.current_hyperlink = None;
+        self.scroll_top = None;
+        self.scroll_bottom = None;
+        self.last_printed_char = None;
+        self.dcs_capture = None;
+        if self.grid.is_alt() {
+            self.grid.leave_alt_screen();
+        }
+        self.grid.erase_screen_with(Cell::default());
+        self.grid.goto(0, 0);
+    }
+
     fn apply_sgr(&mut self, params: &Params) {
         let mut iter = params.iter();
         while let Some(slice) = iter.next() {
@@ -1236,6 +1254,27 @@ impl Perform for Performer {
         self.ground = false;
         self.reset_last_printed_char();
         match byte {
+            b'7' => {
+                // DECSC — save cursor. Claude Code uses ESC 7 / ESC 8
+                // around DECSTBM reset at startup; without this, CSI r
+                // leaves the cursor at home and the trust prompt paints
+                // over old scrollback instead of starting below the shell
+                // prompt.
+                self.saved_cursor = Some(self.grid.cursor);
+            }
+            b'8' => {
+                // DECRC — restore cursor saved by DECSC / ?1048.
+                if let Some(c) = self.saved_cursor {
+                    self.grid.goto(c.row, c.col);
+                }
+            }
+            b'c' => {
+                // RIS — Reset to Initial State. TUI launchers such as
+                // Claude Code may use this as their first "clean slate"
+                // before painting. Ignoring it leaves shell scrollback
+                // visually interleaved with the app's first frame.
+                self.reset_terminal();
+            }
             b'D' => {
                 // IND — Index. Move cursor down one line; if at the
                 // bottom margin of the scroll region, scroll the
@@ -1274,5 +1313,66 @@ impl Perform for Performer {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Parser;
+    use sonicterm_grid::grid::Grid;
+
+    fn row_text(parser: &Parser, row: u16) -> String {
+        parser.grid().row(row).iter().map(|cell| cell.ch).collect()
+    }
+
+    #[test]
+    fn ris_resets_and_clears_screen() {
+        let mut parser = Parser::new(Grid::new(8, 3));
+        parser.advance(b"old text\nmore");
+
+        parser.advance(b"\x1bc");
+
+        assert_eq!(parser.grid().cursor.row, 0);
+        assert_eq!(parser.grid().cursor.col, 0);
+        assert_eq!(row_text(&parser, 0), "        ");
+        assert_eq!(row_text(&parser, 1), "        ");
+        assert_eq!(row_text(&parser, 2), "        ");
+    }
+
+    #[test]
+    fn ris_leaves_alt_screen_on_primary_blank() {
+        let mut parser = Parser::new(Grid::new(8, 3));
+        parser.advance(b"primary");
+        parser.advance(b"\x1b[?1049h");
+        parser.advance(b"alt");
+
+        parser.advance(b"\x1bc");
+
+        assert!(!parser.grid().is_alt());
+        assert_eq!(parser.grid().cursor.row, 0);
+        assert_eq!(parser.grid().cursor.col, 0);
+        assert_eq!(row_text(&parser, 0), "        ");
+    }
+
+    #[test]
+    fn csi_g_moves_to_absolute_column() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+
+        parser.advance(b"\x1b[5GZ");
+
+        assert_eq!(parser.grid().cursor.row, 0);
+        assert_eq!(parser.grid().cursor.col, 5);
+        assert_eq!(row_text(&parser, 0), "    Z   ");
+    }
+
+    #[test]
+    fn dec_save_restore_survives_scroll_region_reset() {
+        let mut parser = Parser::new(Grid::new(12, 4));
+        parser.advance(b"\x1b[4;7H");
+
+        parser.advance(b"\x1b7\x1b[r\x1b8");
+
+        assert_eq!(parser.grid().cursor.row, 3);
+        assert_eq!(parser.grid().cursor.col, 6);
     }
 }

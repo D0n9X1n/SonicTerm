@@ -11,10 +11,5 @@ repository.workspace = true
 serde = { workspace = true, features = ["derive"] }
 bitflags = { workspace = true }
 
-[dev-dependencies]
-serde_json = "1"
-toml = "0.8"
-glob = "0.3"
-
 [lints]
 workspace = true

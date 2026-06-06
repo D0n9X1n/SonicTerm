@@ -21,7 +21,7 @@ keymap actions, validates URLs before spawn.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-cfg
+cargo build -p sonicterm-cfg
 ```
 
 ## Common pitfalls

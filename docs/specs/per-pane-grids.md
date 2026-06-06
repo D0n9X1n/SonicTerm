@@ -131,9 +131,8 @@ per-rect resize without a wgpu surface or a real shell.
 - `sonicterm_app::app::resize_all_panes` — line 250, `#[doc(hidden)]`
 - `sonicterm_ui::pane::Rect::new(x, y, w, h)` — `crates/sonicterm-ui/src/pane.rs:34`
 
-Add `resize_panes_to_rects` (Part A) with the same `#[doc(hidden)] pub`
-treatment so the new regression test can call it directly. No
-`__test_support` shim (CLAUDE.md §5 — that pattern is banned).
+Add `resize_panes_to_rects` (Part A) as a production helper shared by
+window resize, font reload, and split-divider drag.
 
 ---
 

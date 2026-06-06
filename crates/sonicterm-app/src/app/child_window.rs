@@ -138,16 +138,13 @@ impl App {
                     .and_then(|st| {
                         let r = child.renderer.as_ref()?;
                         let (w, h) = r.logical_size();
-                        let top = r.top_inset();
-                        let pl = r.padding_left_px();
-                        let pr = r.padding_right_px();
+                        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
                         let bottom = r.bottom_inset();
-                        let pb = r.padding_bottom_px();
                         let outer = sonicterm_ui::pane::Rect::new(
-                            pl,
+                            0.0,
                             top,
-                            (w - pl - pr).max(0.0),
-                            (h - top - bottom - pb).max(0.0),
+                            w.max(0.0),
+                            (h - top - bottom).max(0.0),
                         );
                         Some(st.tree.layout(outer))
                     })
@@ -202,6 +199,8 @@ impl App {
                     .iter()
                     .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
                     .collect();
+                let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
+                    child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
                 if let Some(pane) = child.panes.get_mut(&active_id) {
                     let active_pos = guards
                         .iter()
@@ -240,6 +239,7 @@ impl App {
                                 h: rect.h as u32,
                             },
                             grid: g.grid_mut(),
+                            viewport_top_abs: viewport_tops.get(id).copied().flatten(),
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
                             is_broadcast_receiver: false,
@@ -361,10 +361,8 @@ impl App {
                 child.cursor_pos = (position.x, position.y);
                 let Some(r) = child.renderer.as_mut() else { return };
                 let (lx, ly) = (position.x as f32, position.y as f32);
-                // Child window also drives the close-button hover dance
-                // through its OWN renderer — without this push the dim
-                // × stays the wrong brightness when the cursor crosses
-                // the glyph in a torn-out window.
+                // Child window also drives tab hover through its OWN
+                // renderer so each torn-out window repaints independently.
                 if r.set_hover_cursor(Some((lx, ly))) {
                     if let Some(w) = child.window.as_ref() {
                         w.request_redraw();
@@ -527,6 +525,7 @@ impl App {
                 }
             },
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.frontmost_window = Some(win_id);
                 if child.copy_mode.is_some() {
                     child_copy_mode_handle_key(child, &event);
                     child.request_redraw();
@@ -1180,7 +1179,9 @@ fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
     let Some(r) = child.renderer.as_ref() else { return };
     let (cw, ch) = r.cell_size();
-    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch);
+    let inset =
+        [r.padding_left_px(), r.padding_right_px(), r.padding_top_px(), r.padding_bottom_px()];
+    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
 }
 fn child_enter_copy_mode(child: &mut WindowState) {
     let tab_idx = child.tabs.active_index();

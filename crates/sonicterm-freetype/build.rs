@@ -143,10 +143,7 @@ fn freetype() {
                 "/* #define FT_CONFIG_OPTION_SYSTEM_ZLIB */",
                 "#define FT_CONFIG_OPTION_SYSTEM_ZLIB",
             )
-            .replace(
-                "/* #define FT_CONFIG_OPTION_USE_PNG */",
-                "#define FT_CONFIG_OPTION_USE_PNG",
-            )
+            .replace("/* #define FT_CONFIG_OPTION_USE_PNG */", "#define FT_CONFIG_OPTION_USE_PNG")
             .replace(
                 "#define TT_CONFIG_OPTION_SUBPIXEL_HINTING  2",
                 "#define TT_CONFIG_OPTION_SUBPIXEL_HINTING  3",
@@ -232,9 +229,7 @@ fn freetype() {
 }
 
 fn git_submodule_update() {
-    let _ = std::process::Command::new("git")
-        .args(&["submodule", "update", "--init"])
-        .status();
+    let _ = std::process::Command::new("git").args(["submodule", "update", "--init"]).status();
 }
 
 fn main() {

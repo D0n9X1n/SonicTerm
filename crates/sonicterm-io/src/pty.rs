@@ -46,8 +46,6 @@ pub struct PtyHandle {
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Resolved shell program path (the command we actually spawned).
-    /// Used by the e2e gates to pick the right `ShellDialect`. For
-    /// `for_test`, this is a sentinel `"<sonicterm-pty-test-sentinel>"`.
     shell_program_path: String,
 }
 
@@ -69,12 +67,6 @@ pub struct ShellSpawnOpts {
     pub clean_e2e: bool,
 }
 
-/// Sentinel value `PtyHandle::shell_program_path` returns for the test-only
-/// constructor `for_test`. `dialect_for_shell` (in `sonicterm_io::test_support::shell_dialect`,
-/// follow-up PR) explicitly rejects it so test fixtures fail loud if
-/// misused as a real shell.
-pub const TEST_SENTINEL_SHELL_PATH: &str = "<sonicterm-pty-test-sentinel>";
-
 impl PtyHandle {
     /// Explicitly terminate the child shell. Idempotent — second call is a
     /// no-op because the underlying handle will report it's already gone.
@@ -94,11 +86,6 @@ impl PtyHandle {
     }
 
     /// Resolved shell program path (the command we actually spawned).
-    /// For `for_test`, returns the sentinel `<sonicterm-pty-test-sentinel>`.
-    ///
-    /// Added per #457 so the e2e gates (`pty_dump`, `pty_dump_unicode`)
-    /// can pick the right `ShellDialect` for the shell that was actually
-    /// resolved (pwsh, powershell, bash, zsh, etc.).
     pub fn shell_program_path(&self) -> &str {
         &self.shell_program_path
     }
@@ -241,64 +228,6 @@ impl PtyHandle {
             child: Arc::new(Mutex::new(child)),
             shell_program_path: cmd.to_string(),
         })
-    }
-
-    /// Test-only constructor. Builds a `PtyHandle` whose `resize` invokes
-    /// the caller-supplied closure (so tests can spy on resize calls) and
-    /// whose underlying `Child` is a no-op stub (no real process spawned).
-    ///
-    /// `pub` + `#[doc(hidden)]` so integration tests in other crates can
-    /// construct a `PtyHandle` without forking a real shell — needed by
-    /// `sonicterm-app`'s per-pane-resize tests to assert `resize` is called
-    /// on the survivor after `App::close_active_pane`. CLAUDE.md §5 bans
-    /// `__test_support` shim modules, hence the doc-hidden public fn.
-    #[doc(hidden)]
-    pub fn for_test<F>(resize: F) -> Self
-    where
-        F: Fn(u16, u16) + Send + Sync + 'static,
-    {
-        let (_, out_rx) = crossbeam_channel::unbounded::<Incoming>();
-        let (in_tx, _) = crossbeam_channel::unbounded::<Outgoing>();
-        Self {
-            out_rx,
-            in_tx,
-            resize: Box::new(resize),
-            child: Arc::new(Mutex::new(Box::new(NoopChild) as Box<dyn Child + Send + Sync>)),
-            shell_program_path: TEST_SENTINEL_SHELL_PATH.to_string(),
-        }
-    }
-}
-
-/// Test-only `Child` stub: implements the trait surface portable-pty needs
-/// for `PtyHandle`'s `Drop` + `kill` paths to be no-ops. Exists only so
-/// `PtyHandle::for_test` can construct a handle without spawning a real
-/// process. Not exposed: lives behind `for_test`.
-#[doc(hidden)]
-#[derive(Debug)]
-struct NoopChild;
-
-impl portable_pty::ChildKiller for NoopChild {
-    fn kill(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
-        Box::new(NoopChild)
-    }
-}
-
-impl portable_pty::Child for NoopChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
-        Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
-    }
-    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
-        Ok(portable_pty::ExitStatus::with_exit_code(0))
-    }
-    fn process_id(&self) -> Option<u32> {
-        None
-    }
-    #[cfg(windows)]
-    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
-        None
     }
 }
 

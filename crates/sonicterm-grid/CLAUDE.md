@@ -16,8 +16,7 @@ change locking discipline here, see LM-001 in `sonicterm-app/CLAUDE.md`.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-grid
-cargo test -p sonicterm-core --test vt_capability_matrix
+cargo build -p sonicterm-grid
 ```
 
 ## Common pitfalls

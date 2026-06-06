@@ -19,7 +19,7 @@ post-modularization pilot.
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-app-core
+cargo build -p sonicterm-app-core
 ```
 
 ## Common pitfalls

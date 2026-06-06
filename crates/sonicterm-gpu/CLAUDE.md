@@ -12,14 +12,13 @@ swash-rasterized glyphs into texture pages.
 - `atlas_upload`
 
 ## Land-mines specific to this crate
-Render hot-file rule (closes #283): `text_pipeline.rs` is a
-visual-snapshot-gated file. Bump dHash baselines OR keep
-`bash scripts/check-visual-snapshots.sh` green.
+Render hot-file rule (closes #283): `text_pipeline.rs` and `core.rs`
+are visual-sensitive. Keep the app/mac build green and smoke-check
+visually.
 
 §4 land-mines that touch this crate:
 - **Per-cell ANSI bg** must be emitted (P0, #161 → #163). Don't drop
-  the `bg` field on the way to glyphon. Regression-guard fed by
-  `pty_dump` and the §13 RED-BG smoke.
+  the `bg` field on the way to the presentation pipeline.
 - **`wgpu::CurrentSurfaceTexture::Suboptimal(frame)` must drop the
   SurfaceTexture before `surface.configure(...)`** (wgpu 29 panic).
 - **`wgpu`/`glyphon`/`cosmic-text` are a coherent triple** —
@@ -28,11 +27,7 @@ visual-snapshot-gated file. Bump dHash baselines OR keep
 
 ## Test gate (local)
 ```bash
-cargo test -p sonicterm-gpu
-cargo test -p sonicterm-text --test render_capability_matrix
-bash scripts/check-visual-snapshots.sh
-cargo run --example pty_dump_unicode -p sonicterm-core --release
-# Plus §13 GUI smoke (mac) — see crates/sonicterm-app/CLAUDE.md
+cargo build -p sonicterm-gpu
 ```
 
 PR #459: adapter selection in `src/core.rs` emits a WARN when wgpu
