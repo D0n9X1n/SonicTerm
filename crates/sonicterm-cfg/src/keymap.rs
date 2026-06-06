@@ -23,20 +23,9 @@ pub const fn platform_default_keymap_name() -> &'static str {
     }
 }
 
-/// Platform-specific default user keymap path.
-///
-/// Windows uses `%APPDATA%\SonicTerm\keymap.toml`; macOS uses
-/// `~/Library/Application Support/SonicTerm/keymap.toml`. Other platforms follow
-/// SonicTerm's config-dir fallback so tests and non-shipping builds stay usable.
+/// Default user keymap path under `~/.sonicterm/keymaps/`.
 pub fn default_user_keymap_path() -> Option<std::path::PathBuf> {
-    let base = if cfg!(target_os = "macos") {
-        std::path::PathBuf::from(std::env::var_os("HOME")?)
-            .join("Library/Application Support/SonicTerm")
-    } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(std::path::PathBuf::from)?.join("SonicTerm")
-    } else {
-        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config/sonicterm")
-    };
+    let base = crate::config::default_config_dir()?;
     Some(base.join("keymaps").join(format!("{}.toml", platform_default_keymap_name())))
 }
 
@@ -227,5 +216,22 @@ impl Keymap {
 impl Default for Keymap {
     fn default() -> Self {
         Self::bundled_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_keymap_path_lives_under_dot_sonicterm() {
+        let path = default_user_keymap_path().expect("home dir should exist in tests");
+        assert!(path.starts_with(crate::config::default_config_dir().unwrap()));
+        let expected_name = format!("{}.toml", platform_default_keymap_name());
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some(expected_name.as_str()));
+        assert_eq!(
+            path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+            Some("keymaps")
+        );
     }
 }

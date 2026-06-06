@@ -21,15 +21,12 @@
 //!
 //! ## Log location
 //!
-//! - macOS: `~/Library/Logs/SonicTerm/sonicterm.log`
-//! - Windows: `%LOCALAPPDATA%\SonicTerm\Logs\sonicterm.log`
-//! - other (dev/Linux): `$XDG_STATE_HOME/sonicterm/logs/sonicterm.log` or
-//!   `~/.local/state/sonicterm/logs/sonicterm.log`
+//! - `~/.sonicterm/logs/sonicterm.log`
 //!
 //! ## Retention
 //!
-//! See [`LoggingConfig`] for the five knobs that bound disk usage.
-//! Defaults cap total disk usage at roughly 40 MB plus crash dumps.
+//! See [`LoggingConfig`] for the knobs that bound disk usage. Defaults clean
+//! logs and crash dumps older than 2 days.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -72,7 +69,8 @@ pub struct LoggingGuard {
 /// survive the default filter. Post-#430 rename: the prior `sonic=warn`
 /// rule matched no crate after `sonic-*` → `sonicterm-*` and silently
 /// dropped every INFO log from the renamed crates — see issue #448.
-pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
+pub const DEFAULT_FILTER: &str =
+    "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).

@@ -16,10 +16,7 @@ pub const fn log_file_name() -> &'static str {
 ///
 /// Resolution order:
 /// 1. `SONICTERM_LOG_DIR` env var (used by tests and ops overrides);
-/// 2. macOS: `~/Library/Logs/SonicTerm`;
-/// 3. Windows: `%LOCALAPPDATA%\SonicTerm\Logs`;
-/// 4. otherwise: `$XDG_STATE_HOME/sonicterm/logs` (or
-///    `~/.local/state/sonicterm/logs`).
+/// 2. `~/.sonicterm/logs`.
 ///
 /// On the first call, the result is memoised — subsequent calls are
 /// O(1) and return the same path even if env vars change later. This
@@ -41,23 +38,10 @@ fn resolve_log_dir() -> PathBuf {
     {
         return PathBuf::from(p);
     }
-    if cfg!(target_os = "macos") {
-        if let Some(home) = home_dir() {
-            return home.join("Library/Logs/SonicTerm");
-        }
-    } else if cfg!(target_os = "windows") {
-        if let Some(la) = std::env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(la).join("SonicTerm").join("Logs");
-        }
-        if let Some(home) = home_dir() {
-            return home.join("AppData/Local/SonicTerm/Logs");
-        }
+    if let Some(home) = home_dir() {
+        return home.join(".sonicterm").join("logs");
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home_dir().map(|h| h.join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    state.join("sonicterm/logs")
+    PathBuf::from(".sonicterm/logs")
 }
 
 fn home_dir() -> Option<PathBuf> {

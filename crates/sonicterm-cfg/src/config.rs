@@ -405,12 +405,10 @@ impl Default for TerminalConfig {
 }
 
 impl Config {
-    /// Where the user's config lives, by platform convention.
+    /// Where the user's config lives.
     ///
-    /// On-disk layout: `SonicTerm/sonicterm.toml` under the platform
-    /// config dir. The pre-R3 `Sonic/sonic.toml` layout is no longer
-    /// auto-migrated; see `docs/migrations/0.9.0.md` for the manual
-    /// rename instructions.
+    /// SonicTerm 1.0 uses a single cross-platform directory:
+    /// `~/.sonicterm/sonicterm.toml`.
     pub fn default_path() -> Option<PathBuf> {
         let base = default_config_dir()?;
         Some(base.join("sonicterm.toml"))
@@ -528,15 +526,9 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Post–R3 config directory (the on-disk layout).
+/// SonicTerm 1.0 config directory (the on-disk layout).
 pub fn default_config_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        Some(dirs_home()?.join("Library/Application Support/SonicTerm"))
-    } else if cfg!(target_os = "windows") {
-        Some(std::env::var_os("APPDATA").map(PathBuf::from)?.join("SonicTerm"))
-    } else {
-        Some(dirs_home()?.join(".config/sonicterm"))
-    }
+    Some(dirs_home()?.join(".sonicterm"))
 }
 
 /// Starter config written when the user config file does not exist.
@@ -544,7 +536,8 @@ pub fn default_config_template() -> String {
     let cfg = Config::default();
     format!(
         r#"# SonicTerm configuration.
-# Edit this file and use Reload Config from the app/keymap to apply changes.
+# Path: {config_dir}/sonicterm.toml
+# Edit this file and use Reload Config from the command palette to apply changes.
 #
 # Custom themes:
 #   - Put named themes in "{config_dir}/themes/<name>.toml" and set theme = "<name>"
@@ -554,48 +547,120 @@ pub fn default_config_template() -> String {
 #   - Put named keymaps in "{config_dir}/keymaps/<name>.toml" and set keymap = "<name>"
 #   - Or set keymap = "/absolute/path/to/keymap.toml"
 
+# Active color theme. Bundled themes live in assets/themes/.
 theme = "{theme}"
+
+# Active keymap. The default is platform-specific:
+#   macOS   -> sonicterm-macos
+#   Windows -> sonicterm-windows
+#   Linux   -> sonicterm-linux
 keymap = "{keymap}"
+
+# UI language. Empty string means auto-detect from the OS.
 locale = ""
+
+# If true, closing the last tab exits the app. If false, SonicTerm keeps the app
+# alive so a new window can be opened from the dock/taskbar/menu.
 quit_on_last_window_close = true
 
 [font]
+# Font family and metrics. SonicTerm ships "Rec Mono St.Helens" by default.
 family = "{font_family}"
+# Font size in logical pixels.
 size = {font_size}
+# Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.
 line_height = {line_height}
 
 [window]
+# Default terminal grid size for NEW windows. These are character cells, not px.
+# The first window is roughly:
+#   width  = cols * cell_width  + padding_left + padding_right
+#   height = rows * cell_height + padding_top  + padding_bottom + tab/title UI
+#
+# Window layout (terminal content):
+#
+#   +--------------------------------------------------+
+#   | tab/title UI                                     |
+#   +--------------------------------------------------+
+#   | padding_top                                      |
+#   |  +--------------------------------------------+  |
+#   |  | terminal grid: cols x rows                 |  |
+#   |  |                                            |  |
+#   |  +--------------------------------------------+  |
+#   | padding_bottom                                   |
+#   +--------------------------------------------------+
+#      ^ padding_left                 padding_right ^
 cols = {cols}
 rows = {rows}
+
+# Padding around the terminal text area, in physical pixels. This affects the
+# distance between terminal content and the window/pane edge.
 padding_left = {padding_left}
 padding_right = {padding_right}
 padding_top = {padding_top}
 padding_bottom = {padding_bottom}
+
+# Native OS window decorations. Changing this usually requires restart.
 decorations = true
+
+# Legacy window opacity knob. Prefer [appearance].opacity for new config; this
+# remains for compatibility with older config files.
 opacity = 1.0
+
+# Legacy macOS blur knob. Prefer [appearance].backdrop for new config.
 blur = false
 
 [terminal]
+# Scrollback line limit per pane.
 scrollback = {scrollback}
+
+# Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = true
 cursor_shape = "block"
 
+[logging]
+# Logs are written to {config_dir}/logs/sonicterm.log.
+# SonicTerm automatically removes logs and crash dumps older than 2 days.
+level = "info"
+max_file_size_mb = 10
+max_rotated_files = 3
+max_age_days = 2
+max_crash_dumps = 10
+max_crash_age_days = 2
+
 [appearance]
+# Window/backdrop/compositor appearance. This is separate from [window] padding:
+# - [window].padding_* controls terminal text margins.
+# - panel_padding controls the inside padding of pop-up panels (command palette,
+#   cheatsheet, etc.).
+#
+# Panel layout (for command palette / cheatsheet):
+#
+#   +---------------- floating panel ----------------+
+#   | panel_padding                                  |
+#   |  +------------------------------------------+  |
+#   |  | panel content: search box, rows, hints   |  |
+#   |  +------------------------------------------+  |
+#   | panel_padding                                  |
+#   +------------------------------------------------+
 backdrop = "opaque"
 opacity = 1.0
 scrollbar = "auto"
 panel_padding = {panel_padding}
 
 [render]
+# Renderer behavior switches. Keep "v2" unless bisecting a rendering regression.
 glyph_fit = "v2"
 alt_screen_bg_fill = "v2"
 
 [accessibility]
+# Presentation preferences.
 high_contrast = false
 reduced_motion = false
 strong_focus = false
 
 [notifications]
+# Desktop notification for long-running commands.
 long_command = false
 threshold_secs = 10
 "#,
@@ -616,4 +681,16 @@ threshold_secs = 10
         panel_padding = cfg.appearance.panel_padding,
         scrollback = cfg.terminal.scrollback,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_paths_live_under_dot_sonicterm() {
+        let dir = default_config_dir().expect("home dir should exist in tests");
+        assert!(dir.ends_with(".sonicterm"));
+        assert_eq!(Config::default_path().unwrap(), dir.join("sonicterm.toml"));
+    }
 }

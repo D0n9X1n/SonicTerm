@@ -4,8 +4,8 @@ SonicTerm writes rolling logs through `sonicterm-logging`.
 
 ## Paths
 
-- macOS: `~/Library/Logs/SonicTerm/sonicterm.log`
-- Windows: `%LOCALAPPDATA%\SonicTerm\logs\sonicterm.log`
+- Logs: `~/.sonicterm/logs/sonicterm.log`
+- Crash dumps: `~/.sonicterm/logs/crashes/`
 
 Crash dumps and exit-path traces are written in the same directory when
 available.
@@ -14,13 +14,17 @@ available.
 
 ```toml
 [logging]
-level = "info"       # trace | debug | info | warn | error
-max_files = 8
-max_bytes = 1048576
+level = "info"          # trace | debug | info | warn | error
+max_file_size_mb = 10
+max_rotated_files = 3
+max_age_days = 2
+max_crash_dumps = 10
+max_crash_age_days = 2
 ```
 
 Logging is initialized after `sonicterm.toml` is loaded so the configured level
-is honored from startup onward. Old log files are cleaned asynchronously.
+is honored from startup onward. Log files and crash dumps older than 2 days are
+cleaned asynchronously by default.
 
 ## Bug report bundle
 

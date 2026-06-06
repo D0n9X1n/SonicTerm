@@ -82,7 +82,7 @@ are procured.
 - `#148` Default font switched to **St Helens** (system-installed,
   not bundled). `Rec Mono Casual` remains in `assets/fonts/` as
   guaranteed-present fallback. Override via `[font] family = "..."`
-  in `sonic.toml` or the prefs Font tab.
+  in `sonicterm.toml` or the prefs Font tab.
 
 ### ⏳ Still required before the v1.0 tag
 

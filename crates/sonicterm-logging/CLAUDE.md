@@ -3,10 +3,10 @@
 ## Purpose
 Panic hook + rolling-file logger. Initialized at the very top of every
 binary's `main()` so even bootstrap errors land in:
-- macOS: `~/Library/Logs/SonicTerm/sonicterm.log.*`
-- Windows: `%LOCALAPPDATA%\SonicTerm\Logs\sonicterm.log.*`
+- `~/.sonicterm/logs/sonicterm.log.*`
 
-Retention: ~60 MB rolling + 10 crash dumps. Full spec: `docs/LOGGING.md`.
+Retention: logs/crash dumps older than 2 days are cleaned automatically.
+Full spec: `docs/LOGGING.md`.
 
 ## Public surface
 - `init()` — call before anything else in `main`

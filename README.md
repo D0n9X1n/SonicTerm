@@ -61,10 +61,9 @@ be dragged out into their own window and dragged back to merge.
 
 ## Configuration
 
-Config paths:
+Config path: `~/.sonicterm/sonicterm.toml`
 
-- macOS: `~/Library/Application Support/SonicTerm/sonicterm.toml`
-- Windows: `%APPDATA%\SonicTerm\sonicterm.toml`
+Logs: `~/.sonicterm/logs/sonicterm.log`
 
 Default theme: `wezterm`, a modified Gruvbox dark hard palette with SonicTerm's
 near-black background and yellow cursor.
@@ -75,12 +74,42 @@ Minimal config:
 
 ```toml
 theme = "wezterm"
+# Platform default:
+#   macOS   -> sonicterm-macos
+#   Windows -> sonicterm-windows
+#   Linux   -> sonicterm-linux
 keymap = "sonicterm-macos"
 
 [font]
 family = "Rec Mono St.Helens"
 size = 14
 line_height = 1.1
+
+[window]
+# Terminal content margins:
+# +---------------- window ----------------+
+# | padding_top                            |
+# |  terminal grid (cols x rows)           |
+# | padding_bottom                         |
+# +----------------------------------------+
+#   ^ padding_left        padding_right ^
+cols = 100
+rows = 30
+padding_left = 12
+padding_right = 12
+padding_top = 4
+padding_bottom = 4
+
+[appearance]
+# Floating panel inner padding:
+# +------------- panel -------------+
+# | panel_padding                   |
+# |  command palette / cheatsheet   |
+# | panel_padding                   |
+# +---------------------------------+
+opacity = 1.0
+panel_padding = 2.0
+scrollbar = "auto"
 
 [terminal]
 cursor_blink = true

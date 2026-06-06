@@ -69,7 +69,9 @@
                         <Directory Id='AssetsKeymapsDir' Name='keymaps'>
                             <Component Id='asset_keymaps' Guid='C1A21A01-0000-0000-0000-000000000102' Win64='yes'>
                                 <File Id='keymap_sonicterm'         Name='sonicterm.toml'         DiskId='1' Source='..\..\assets\keymaps\sonicterm.toml' KeyPath='yes'/>
+                                <File Id='keymap_sonicterm_macos'   Name='sonicterm-macos.toml'   DiskId='1' Source='..\..\assets\keymaps\sonicterm-macos.toml'/>
                                 <File Id='keymap_sonicterm_windows' Name='sonicterm-windows.toml' DiskId='1' Source='..\..\assets\keymaps\sonicterm-windows.toml'/>
+                                <File Id='keymap_sonicterm_linux'   Name='sonicterm-linux.toml'   DiskId='1' Source='..\..\assets\keymaps\sonicterm-linux.toml'/>
                             </Component>
                         </Directory>
 

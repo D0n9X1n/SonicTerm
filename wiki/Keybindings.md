@@ -8,7 +8,7 @@ Default keymaps live in `assets/keymaps/`:
 - `sonicterm-windows.toml`
 - `sonicterm-linux.toml`
 
-User keymaps are copied into the config directory. A binding looks like:
+User keymaps are copied into `~/.sonicterm/keymaps/`. A binding looks like:
 
 ```toml
 [[binding]]
@@ -34,7 +34,7 @@ action = { focus_pane = "left" }
 
 ## 中文
 
-默认快捷键在 `assets/keymaps/`。用户快捷键会复制到配置目录。格式与上面的
+默认快捷键在 `assets/keymaps/`。用户快捷键会复制到 `~/.sonicterm/keymaps/`。格式与上面的
 TOML 示例相同。
 
 常见修饰键：

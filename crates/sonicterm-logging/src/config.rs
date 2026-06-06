@@ -22,13 +22,13 @@ pub struct LoggingConfig {
     /// cleanup. Default: 3.
     pub max_rotated_files: usize,
     /// Delete rotated log files whose mtime is older than this many
-    /// days. Set to `0` to disable age-based eviction. Default: 14.
+    /// days. Set to `0` to disable age-based eviction. Default: 2.
     pub max_age_days: u32,
     /// Maximum number of crash dumps retained under `crashes/`.
     /// Default: 10.
     pub max_crash_dumps: usize,
     /// Delete crash dumps older than this many days. Set to `0` to
-    /// disable age-based eviction. Default: 30.
+    /// disable age-based eviction. Default: 2.
     pub max_crash_age_days: u32,
     /// Optional explicit filter directives string in
     /// [`tracing_subscriber::EnvFilter`] syntax (e.g. `"sonic=debug"`).
@@ -43,10 +43,22 @@ impl Default for LoggingConfig {
         Self {
             max_file_size_mb: 10,
             max_rotated_files: 3,
-            max_age_days: 14,
+            max_age_days: 2,
             max_crash_dumps: 10,
-            max_crash_age_days: 30,
+            max_crash_age_days: 2,
             level: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_retention_cleans_after_two_days() {
+        let cfg = LoggingConfig::default();
+        assert_eq!(cfg.max_age_days, 2);
+        assert_eq!(cfg.max_crash_age_days, 2);
     }
 }
