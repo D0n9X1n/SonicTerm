@@ -3,7 +3,7 @@
 ## Purpose
 Panic hook + rolling-file logger. Initialized at the very top of every
 binary's `main()` so even bootstrap errors land in:
-- `~/.sonicterm/logs/sonicterm.log.*`
+- `~/.snoicterm/logs/sonicterm.log.*`
 
 Retention: logs/crash dumps older than 2 days are cleaned automatically.
 Full spec: `docs/LOGGING.md`.

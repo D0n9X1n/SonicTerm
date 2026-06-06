@@ -51,7 +51,7 @@ hover_fg = "#d5c4a1"
 close_button_fg = "#ff5555"
 ```
 
-Place custom themes under `~/.sonicterm/themes/<name>.toml` and set
+Place custom themes under `~/.snoicterm/themes/<name>.toml` and set
 `theme = "<name>"` in `sonicterm.toml`.
 
 ## 中文
@@ -59,5 +59,5 @@ Place custom themes under `~/.sonicterm/themes/<name>.toml` and set
 内置主题位于 `assets/themes/`。默认 `wezterm` 主题是修改过背景色的 Gruvbox
 dark hard：背景是 SonicTerm 的 near-black，cursor 是黄色。
 
-自定义主题放在 `~/.sonicterm/themes/<name>.toml`，然后在 `sonicterm.toml`
+自定义主题放在 `~/.snoicterm/themes/<name>.toml`，然后在 `sonicterm.toml`
 里设置 `theme = "<name>"`。主题字段结构见上方示例。

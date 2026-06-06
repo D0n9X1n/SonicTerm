@@ -5,12 +5,12 @@ description: Read, edit, validate, and hot-reload the user's SonicTerm config (s
 
 # sonic-prefs — edit your SonicTerm config
 
-Use this skill to read or edit `~/.sonicterm/sonicterm.toml` safely.
+Use this skill to read or edit `~/.snoicterm/sonicterm.toml` safely.
 
 ## Config file location
 
-- All platforms: `~/.sonicterm/sonicterm.toml`
-- Logs: `~/.sonicterm/logs/sonicterm.log`
+- All platforms: `~/.snoicterm/sonicterm.toml`
+- Logs: `~/.snoicterm/logs/sonicterm.log`
 
 SonicTerm's `config_watch` (in `crates/sonicterm-app/src/config_watch.rs`) re-reads the file on save, so changes take effect within ~200ms with no restart — **except** for window size/decorations/backdrop and already-spawned shell changes.
 
@@ -37,7 +37,7 @@ For experienced users who know the field. No confirmation, just a diff + write +
 1. Read current `sonicterm.toml` and show a summary of the common knobs.
 2. Ask the user what to change (use AskUserQuestion with the **Common fields** below).
 3. Show a unified diff of the proposed change.
-4. On confirm, write atomically (`tmp + rename`) and confirm hot-reload by tailing `~/.sonicterm/logs/sonicterm.log*` for the `config_watch: reloaded` line.
+4. On confirm, write atomically (`tmp + rename`) and confirm hot-reload by tailing `~/.snoicterm/logs/sonicterm.log*` for the `config_watch: reloaded` line.
 5. Offer "advanced — open raw toml" as an escape hatch.
 
 ## Common fields (the curated set)
@@ -77,7 +77,7 @@ The full Config struct lives at `crates/sonicterm-cfg/src/config.rs` — anythin
 ## Validation before write
 
 1. **Schema check** — parse the proposed new file with `toml::from_str::<Config>` semantics.
-2. **Theme exists** — if `theme` changed, confirm `assets/themes/<value>.toml` (or `~/.sonicterm/themes/<value>.toml`) is on disk.
+2. **Theme exists** — if `theme` changed, confirm `assets/themes/<value>.toml` (or `~/.snoicterm/themes/<value>.toml`) is on disk.
 3. **Keymap exists** — same for `assets/keymaps/<value>.toml`.
 4. **Font exists** — `fc-list | grep -i "<family>"` on mac/linux, `(New-Object System.Drawing.Text.InstalledFontCollection).Families` on Windows. Warn (don't block) if missing — the renderer will fall back.
 5. **Range checks** — opacity ∈ [0,1], size > 0, cols/rows ≥ 20×5.
@@ -87,7 +87,7 @@ Refuse on schema error. Warn on missing-asset. Always show a diff before writing
 ## Write protocol (atomic)
 
 ```bash
-TARGET="$HOME/.sonicterm/sonicterm.toml"
+TARGET="$HOME/.snoicterm/sonicterm.toml"
 TMP="${TARGET}.tmp.$$"
 cp "$TARGET" "${TARGET}.bak"                 # one rolling backup
 # write new content to $TMP via the same writer (not echo — preserve comments where possible)
@@ -101,7 +101,7 @@ Preserve unknown / future keys by parsing into `Config` + the `extra: toml::Tabl
 After write, tail the log for 2 seconds:
 
 ```bash
-tail -n 0 -F "$HOME/.sonicterm/logs/"sonicterm.log* &
+tail -n 0 -F "$HOME/.snoicterm/logs/"sonicterm.log* &
 TAIL=$!
 sleep 2
 kill $TAIL 2>/dev/null
@@ -143,7 +143,7 @@ User: 我要直接编辑
 
 ## What this skill does NOT do
 
-- **Theme authoring.** To create a new theme, copy `assets/themes/dracula.toml` to `~/.sonicterm/themes/my-theme.toml` and edit. Then `/sonic-prefs set theme my-theme`.
+- **Theme authoring.** To create a new theme, copy `assets/themes/dracula.toml` to `~/.snoicterm/themes/my-theme.toml` and edit. Then `/sonic-prefs set theme my-theme`.
 - **Keymap authoring.** Same pattern under `keymaps/`.
 - **Restart Sonic.** Tell the user; don't `pkill` their session.
 - **Touch git.** This is user-local state.

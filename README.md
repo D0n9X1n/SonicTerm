@@ -61,14 +61,17 @@ be dragged out into their own window and dragged back to merge.
 
 ## Configuration
 
-Config path: `~/.sonicterm/sonicterm.toml`
+Config path on macOS and Windows: `~/.snoicterm/sonicterm.toml`
 
-Logs: `~/.sonicterm/logs/sonicterm.log`
+Logs on macOS and Windows: `~/.snoicterm/logs/sonicterm.log`
 
 Default theme: `wezterm`, a modified Gruvbox dark hard palette with SonicTerm's
 near-black background and yellow cursor.
 
-Default font: `Rec Mono St.Helens`, bundled and Nerd-Font-patched.
+Default font: `Rec Mono St.Helens`, bundled and Nerd-Font-patched. The macOS
+`.app` includes it in both `Contents/Resources/assets/fonts` and
+`Contents/Resources/Fonts`; the Windows `.msi` installs it under
+`assets/fonts` next to the executable.
 
 Minimal config:
 

@@ -30,6 +30,12 @@ cp -R "$ROOT/assets/keymaps" "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/icons"   "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/i18n"    "$APP/Contents/Resources/assets/"
 
+# Also expose bundled app fonts via the standard macOS app-font path.
+# SonicTerm loads assets/fonts itself, but ATSApplicationFontsPath lets
+# CoreText/AppKit resolve Rec Mono St.Helens from the app bundle too.
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp "$ROOT/assets/fonts"/*.ttf "$APP/Contents/Resources/Fonts/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,11 +50,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key>         <string>sonic</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
+    <key>ATSApplicationFontsPath</key>  <string>Fonts</string>
     <key>NSHighResolutionCapable</key>  <true/>
     <key>NSPrincipalClass</key>         <string>NSApplication</string>
 </dict>
 </plist>
 PLIST
+
+for font in Regular Italic Bold BoldItalic; do
+    test -f "$APP/Contents/Resources/assets/fonts/RecMonoSt.Helens-${font}.ttf"
+    test -f "$APP/Contents/Resources/Fonts/RecMonoSt.Helens-${font}.ttf"
+done
 
 echo "Note: building UNSIGNED .dmg — see CLAUDE.md §9"
 

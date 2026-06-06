@@ -2,7 +2,7 @@
 
 ## English
 
-Config file path: `~/.sonicterm/sonicterm.toml`
+Config file path on macOS and Windows: `~/.snoicterm/sonicterm.toml`
 
 Minimal example:
 
@@ -56,7 +56,7 @@ and **Reload Config** to edit and reload settings.
 
 ## 中文
 
-配置文件路径：`~/.sonicterm/sonicterm.toml`
+macOS 和 Windows 的配置文件路径：`~/.snoicterm/sonicterm.toml`
 
 最小示例同上。可以通过命令面板里的 **Edit sonicterm.toml**、
 **Edit keymap.toml** 和 **Reload Config** 编辑并热加载配置。

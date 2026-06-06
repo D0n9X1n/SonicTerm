@@ -40,6 +40,11 @@ Runtime assets live under `assets/` and are packaged beside the binaries:
 - `assets/icons/*`
 - `assets/i18n/*`
 
+macOS also exposes bundled fonts through `Contents/Resources/Fonts` and
+`ATSApplicationFontsPath` so AppKit/CoreText can resolve `Rec Mono St.Helens`.
+Windows MSI installs the same `assets/fonts/RecMonoSt.Helens-*.ttf` files next
+to the executable.
+
 The default theme is `wezterm`, a modified Gruvbox dark hard palette with
 SonicTerm's near-black background. The default keymap is platform-specific and
 WezTerm-compatible.

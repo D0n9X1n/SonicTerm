@@ -14,9 +14,7 @@ pub const fn log_file_name() -> &'static str {
 
 /// Absolute path of the directory holding `sonicterm.log` and `crashes/`.
 ///
-/// Resolution order:
-/// 1. `SONICTERM_LOG_DIR` env var (used by tests and ops overrides);
-/// 2. `~/.sonicterm/logs`.
+/// Resolution: `~/.snoicterm/logs`.
 ///
 /// On the first call, the result is memoised — subsequent calls are
 /// O(1) and return the same path even if env vars change later. This
@@ -33,17 +31,27 @@ pub fn crash_dir() -> PathBuf {
 }
 
 fn resolve_log_dir() -> PathBuf {
-    if let Some(p) =
-        std::env::var_os("SONICTERM_LOG_DIR").or_else(|| std::env::var_os("SONIC_LOG_DIR"))
-    {
-        return PathBuf::from(p);
-    }
     if let Some(home) = home_dir() {
-        return home.join(".sonicterm").join("logs");
+        return home.join(".snoicterm").join("logs");
     }
-    PathBuf::from(".sonicterm/logs")
+    PathBuf::from(".snoicterm/logs")
 }
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_log_dir_lives_under_dot_snoicterm() {
+        let dir = resolve_log_dir();
+        assert_eq!(dir.file_name().and_then(|s| s.to_str()), Some("logs"));
+        assert_eq!(
+            dir.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+            Some(".snoicterm")
+        );
+    }
 }

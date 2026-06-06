@@ -21,7 +21,7 @@
 //!
 //! ## Log location
 //!
-//! - `~/.sonicterm/logs/sonicterm.log`
+//! - `~/.snoicterm/logs/sonicterm.log`
 //!
 //! ## Retention
 //!
