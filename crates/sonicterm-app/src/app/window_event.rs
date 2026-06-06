@@ -1609,6 +1609,19 @@ impl App {
             .map(|state| state.tree.resize_splitter_by_delta(&drag.splitter, outer, dx, dy))
             .unwrap_or(false);
 
+        if changed {
+            if let Some((cell_w, cell_h)) = self.main_renderer().map(|r| r.cell_size()) {
+                let rects = self
+                    .main_tab_states()
+                    .and_then(|states| states.get(tab_idx))
+                    .map(|state| state.tree.layout(outer))
+                    .unwrap_or_default();
+                if let Some(panes) = self.main_panes() {
+                    crate::app::resize_panes_to_rects(panes, &rects, cell_w, cell_h);
+                }
+            }
+        }
+
         if let Some(ws) = self.main_mut() {
             if let Some(active) = ws.splitter_drag.as_mut() {
                 active.last_pos = (x, y);
