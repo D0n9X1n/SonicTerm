@@ -4,7 +4,7 @@ appearance = "dark"
 [colors]
 background    = "#1d2021"
 foreground    = "#ebdbb2"
-cursor        = "#ebdbb2"
+cursor        = "#fabd2f"
 cursor_text   = "#1d2021"
 selection_bg  = "#3c3836"
 selection_fg  = "#ebdbb2"

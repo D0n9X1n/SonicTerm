@@ -835,6 +835,7 @@ pub fn emit_overlay_text_glyphs(
     wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
     text: &str,
     color: ChromeColor,
+    attrs: ChromeAttrs,
     origin_x: f32,
     baseline_y: f32,
     bounds: [f32; 4], // [x, y, w, h] in raster px; glyphs outside are clipped
@@ -853,7 +854,7 @@ pub fn emit_overlay_text_glyphs(
         glyph_atlas,
         text,
         color,
-        ChromeAttrs::default(),
+        attrs,
         font_size_px,
         native_em_px,
         (origin_x, baseline_y),
@@ -2956,12 +2957,12 @@ impl GpuRenderer {
 
         if let Some((flash_pane_id, flash_alpha)) = self.pane_focus_flash_alpha(now) {
             if let Some(pv) = pane_views.iter().find(|pv| pv.pane_id == flash_pane_id) {
-                let color = premultiply([
-                    self.cursor_color[0],
-                    self.cursor_color[1],
-                    self.cursor_color[2],
-                    flash_alpha,
-                ]);
+                let flash_rgb = [
+                    (self.bg_rgba[0] + 0.18).min(1.0),
+                    (self.bg_rgba[1] + 0.18).min(1.0),
+                    (self.bg_rgba[2] + 0.18).min(1.0),
+                ];
+                let color = premultiply([flash_rgb[0], flash_rgb[1], flash_rgb[2], flash_alpha]);
                 quads.push(QuadInstance {
                     rect: px_to_ndc(pv.origin_x, pv.origin_y, pv.rect_w, pv.rect_h, sw, sh),
                     color,
@@ -3783,14 +3784,14 @@ impl GpuRenderer {
             } else {
                 layout.query_label.clone()
             };
-            let palette_font_size = self.raster_px(self.font_size);
+            let palette_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
             // T14: chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
             // emission in an `if let Some(...)` so the palette path
             // degrades gracefully instead of panicking.
             if let Some(stack) = self.font_stack.as_ref() {
-                let palette_native_em = self.raster_px(self.font_size);
+                let palette_native_em = palette_font_size;
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
                 let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
@@ -3804,6 +3805,7 @@ impl GpuRenderer {
                     &mut palette_rasterizer,
                     &query_text,
                     self.search_fg,
+                    ChromeAttrs::default(),
                     query_origin_x,
                     query_baseline_y,
                     [
@@ -3825,16 +3827,17 @@ impl GpuRenderer {
                 for (i, label) in layout.row_labels.iter().enumerate() {
                     let Some(row) = layout.rows.get(i) else { continue };
                     let shortcut = layout.row_shortcuts.get(i).and_then(|hint| hint.as_deref());
-                    let shortcut_font_size = palette_font_size * 0.85;
+                    let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
                     let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
                     let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
-                        Some(w) => {
-                            (row.rect.w - w - sonicterm_ui::overlays::PALETTE_ROW_PAD_X * 3.0)
-                                .max(0.0)
-                        }
+                        Some(w) => (row.rect.w
+                            - w
+                            - sonicterm_ui::overlays::PALETTE_ROW_PAD_X * 2.0
+                            - sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP)
+                            .max(0.0),
                         None => row.rect.w,
                     };
                     emit_overlay_text_glyphs(
@@ -3845,6 +3848,7 @@ impl GpuRenderer {
                         &mut palette_rasterizer,
                         label,
                         self.search_fg,
+                        ChromeAttrs::default(),
                         origin_x,
                         baseline_y,
                         [row.rect.x, row.rect.y, label_bounds_w, row.rect.h],
@@ -3867,6 +3871,7 @@ impl GpuRenderer {
                             &mut palette_rasterizer,
                             hint,
                             hint_color,
+                            ChromeAttrs { bold: false, italic: true },
                             hint_origin_x,
                             baseline_y,
                             [row.rect.x, row.rect.y, row.rect.w, row.rect.h],
@@ -3892,6 +3897,7 @@ impl GpuRenderer {
                         &mut palette_rasterizer,
                         ph,
                         self.search_fg,
+                        ChromeAttrs::default(),
                         empty_x,
                         empty_baseline_y,
                         bounds_bg,
@@ -3912,6 +3918,7 @@ impl GpuRenderer {
                             &mut palette_rasterizer,
                             hint,
                             self.search_fg,
+                            ChromeAttrs::default(),
                             empty_x,
                             hint_baseline_y,
                             bounds_bg,
@@ -3936,6 +3943,7 @@ impl GpuRenderer {
                     &mut palette_rasterizer,
                     &layout.footer_label,
                     self.search_fg,
+                    ChromeAttrs::default(),
                     footer_origin_x,
                     footer_baseline_y,
                     [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
@@ -4036,6 +4044,7 @@ impl GpuRenderer {
                     &mut wt,
                     &layout.query_label,
                     self.search_fg,
+                    ChromeAttrs::default(),
                     layout.query_row.x + 12.0,
                     layout.query_row.y + 2.0 + self.font_size * 0.8,
                     [
@@ -4062,6 +4071,7 @@ impl GpuRenderer {
                     &mut wt,
                     &layout.rows_text,
                     self.search_fg,
+                    ChromeAttrs::default(),
                     rows_origin.0 + 12.0,
                     rows_origin.1 + self.font_size * 0.8,
                     bounds_bg,
@@ -4079,6 +4089,7 @@ impl GpuRenderer {
                     &mut wt,
                     &layout.footer_label,
                     self.search_fg,
+                    ChromeAttrs::default(),
                     layout.footer.x + 12.0,
                     layout.footer.y + 8.0 + self.font_size * 0.85 * 0.8,
                     [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
@@ -4140,6 +4151,7 @@ impl GpuRenderer {
                     &mut wt,
                     state.preedit(),
                     self.search_fg,
+                    ChromeAttrs::default(),
                     layout.bg.x + 4.0,
                     layout.bg.y + 2.0 + self.font_size * 0.8,
                     [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h],
@@ -4179,6 +4191,7 @@ impl GpuRenderer {
                         &mut wt,
                         "⚠ BROADCAST",
                         warn_color,
+                        ChromeAttrs::default(),
                         rect.x + 10.0,
                         rect.y + 4.0 + self.font_size * 0.85 * 0.8,
                         [rect.x, rect.y, rect.w, (self.font_size * 1.45).max(20.0)],

@@ -6,7 +6,7 @@ appearance = "dark"
 [colors]
 background    = "#141617"
 foreground    = "#cfbc97"
-cursor        = "#52ad70"
+cursor        = "#fabd2f"
 cursor_text   = "#141617"
 # Selection: gruvbox bg2 (#3c3836) — matches WezTerm's subtle grey-brown
 # overlay for the Gruvbox dark hard scheme. The renderer paints this as a

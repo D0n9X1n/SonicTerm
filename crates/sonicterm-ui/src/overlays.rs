@@ -73,7 +73,10 @@ pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
 pub const PALETTE_ROW_GAP: f32 = 4.0;
 
 /// Horizontal padding inside each row.
-pub const PALETTE_ROW_PAD_X: f32 = 12.0;
+pub const PALETTE_ROW_PAD_X: f32 = 18.0;
+
+/// Minimum gap between the command label and shortcut hint columns.
+pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;
 
 /// Footer height (count + nav hint strip at the bottom of the modal).
 pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
