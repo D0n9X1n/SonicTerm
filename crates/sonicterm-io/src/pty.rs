@@ -194,6 +194,7 @@ impl PtyHandle {
         }
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
+        apply_terminal_locale_env(&mut builder);
 
         let child = pair.slave.spawn_command(builder)?;
         drop(pair.slave);
@@ -310,6 +311,9 @@ fn default_shell() -> String {
     default_shell_program()
 }
 
+const DEFAULT_LANG_UTF8_LOCALE: &str = "en_US.UTF-8";
+const DEFAULT_LC_CTYPE_UTF8_LOCALE: &str = "UTF-8";
+
 /// Return startup arguments for the selected shell.
 ///
 /// Production macOS shells are login shells so `/etc/zprofile` can run
@@ -322,6 +326,55 @@ pub fn shell_startup_args(shell_path: &str, opts: ShellSpawnOpts) -> Vec<String>
     } else {
         interactive_shell_args(shell_path)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_terminal_locale_env(builder: &mut CommandBuilder) {
+    let lc_all = builder.get_env("LC_ALL").and_then(|v| v.to_str());
+    let lc_ctype = builder.get_env("LC_CTYPE").and_then(|v| v.to_str());
+    let lang = builder.get_env("LANG").and_then(|v| v.to_str());
+
+    if should_apply_utf8_locale_fallback(lc_all, lc_ctype, lang) {
+        if is_empty_env(lang) {
+            builder.env("LANG", DEFAULT_LANG_UTF8_LOCALE);
+        }
+        builder.env("LC_CTYPE", DEFAULT_LC_CTYPE_UTF8_LOCALE);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_terminal_locale_env(_builder: &mut CommandBuilder) {}
+
+#[doc(hidden)]
+pub fn should_apply_utf8_locale_fallback(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> bool {
+    if !is_empty_env(lc_all) {
+        return false;
+    }
+    !is_utf8_locale(lc_ctype) && !is_utf8_locale(lang)
+}
+
+#[doc(hidden)]
+pub const fn default_lang_utf8_locale() -> &'static str {
+    DEFAULT_LANG_UTF8_LOCALE
+}
+
+#[doc(hidden)]
+pub const fn default_lc_ctype_utf8_locale() -> &'static str {
+    DEFAULT_LC_CTYPE_UTF8_LOCALE
+}
+
+fn is_empty_env(value: Option<&str>) -> bool {
+    value.map(str::trim).unwrap_or_default().is_empty()
+}
+
+fn is_utf8_locale(value: Option<&str>) -> bool {
+    let Some(value) = value else { return false };
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    normalized.contains("utf-8") || normalized.contains("utf8")
 }
 
 #[cfg(target_os = "macos")]
