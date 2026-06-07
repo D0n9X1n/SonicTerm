@@ -58,10 +58,7 @@ long-running output without accidentally typing into the active shell.
 
 ### Drag tabs between windows
 
-<video src="assets/screenshots/tab-drag-demo.mp4" controls muted playsinline width="100%"></video>
-
-If your Markdown renderer does not show video inline, open
-[`assets/screenshots/tab-drag-demo.mp4`](assets/screenshots/tab-drag-demo.mp4).
+![SonicTerm tab drag demo](assets/screenshots/tab-drag-demo.gif)
 
 ## Why try it?
 
