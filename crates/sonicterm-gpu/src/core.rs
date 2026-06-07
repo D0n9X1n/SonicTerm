@@ -36,12 +36,12 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_ICON: &str = "";
-const READ_ONLY_BADGE_LABEL: &str = "READONLY ";
+const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_W: f32 = 180.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
-const READ_ONLY_BADGE_PAD_RIGHT: f32 = 10.0;
+const READ_ONLY_BADGE_PAD_RIGHT: f32 = 20.0;
 const READ_ONLY_BADGE_BASELINE_NUDGE_Y: f32 = -2.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
