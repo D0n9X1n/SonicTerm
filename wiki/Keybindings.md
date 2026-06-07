@@ -150,6 +150,16 @@ action = { focus_pane = "right" }
 If a keymap file fails to parse, SonicTerm logs the error and falls back to the
 bundled platform default.
 
+### READONLY mode shortcut policy
+
+`enter_copy_mode` opens READONLY mode. In this mode SonicTerm blocks terminal
+input and only allows shortcut actions for tab switching, pane focus, and search:
+`next_tab`, `prev_tab`, `{ activate_tab = N }`, `activate_last_tab`,
+`{ focus_pane = "left|right|up|down" }`, and `open_search`.
+
+All other shortcuts are ignored by READONLY mode and are not forwarded to the
+terminal. Search remains editable inside READONLY mode.
+
 ## 中文
 
 SonicTerm 的快捷键是 TOML 文件。内置默认文件在 `assets/keymaps/`，首次启动后会
@@ -296,3 +306,12 @@ action = { focus_pane = "right" }
 ```
 
 如果 keymap 文件解析失败，SonicTerm 会写日志，并回退到当前平台的内置默认 keymap。
+
+### READONLY 模式快捷键策略
+
+`enter_copy_mode` 会进入 READONLY 模式。在这个模式下，SonicTerm 会阻止输入进入终端，
+只允许三个类别的快捷键：切换 Tab、切换 Pane 焦点、搜索。对应 action 是
+`next_tab`、`prev_tab`、`{ activate_tab = N }`、`activate_last_tab`、
+`{ focus_pane = "left|right|up|down" }` 和 `open_search`。
+
+其它快捷键会被 READONLY 模式忽略，也不会转发给终端。READONLY 中打开搜索框后，搜索框仍然可以编辑。

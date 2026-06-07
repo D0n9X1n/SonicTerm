@@ -36,22 +36,14 @@ fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
 }
 
 fn read_only_allows_action(action: &Action) -> bool {
-    !matches!(
+    matches!(
         action,
-        Action::NewTab
-            | Action::CloseTab
-            | Action::SplitRight
-            | Action::SplitDown
-            | Action::ClosePane
-            | Action::CloseActivePaneOrTab
-            | Action::TogglePaneZoom
-            | Action::ResizePaneLeft
-            | Action::ResizePaneRight
-            | Action::ResizePaneUp
-            | Action::ResizePaneDown
-            | Action::ResizePane { .. }
-            | Action::NewWindow
-            | Action::OpenSshPane(_)
+        Action::NextTab
+            | Action::PrevTab
+            | Action::ActivateTab(_)
+            | Action::ActivateLastTab
+            | Action::FocusPane(_)
+            | Action::OpenSearch
     )
 }
 
