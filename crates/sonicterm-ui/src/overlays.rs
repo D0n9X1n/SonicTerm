@@ -101,13 +101,19 @@ pub const PALETTE_ROW_RADIUS: f32 = 6.0;
 pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 
 /// Maximum width of the small top-right search bar.
-pub const SEARCH_BAR_WIDTH: f32 = 500.0;
+pub const SEARCH_BAR_WIDTH: f32 = 600.0;
 
 /// Minimum width of the search bar before query text expands it.
 pub const SEARCH_BAR_MIN_WIDTH: f32 = 300.0;
 
-/// Horizontal padding inside the search bar, on each side.
-pub const SEARCH_BAR_PAD_X: f32 = 16.0;
+/// Left padding inside the search/read-only badges.
+pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;
+
+/// Right padding inside the search/read-only badges.
+pub const SEARCH_BAR_PAD_RIGHT: f32 = 10.0;
+
+/// Gap between the fixed leading Nerd Font icon and text.
+pub const SEARCH_BAR_ICON_GAP: f32 = 10.0;
 
 /// Height of the small top-right search bar.
 pub const SEARCH_BAR_HEIGHT: f32 = 44.0;
@@ -357,7 +363,7 @@ impl SearchBarLayout {
         row: u8,
     ) -> SearchBarLayout {
         let row = row.min(1);
-        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_X * 2.0)
+        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT)
             .clamp(SEARCH_BAR_MIN_WIDTH, SEARCH_BAR_WIDTH);
         let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
         let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
@@ -384,7 +390,7 @@ impl SearchBarLayout {
 pub fn search_bar_label(search: &SearchState) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|i| i + 1).unwrap_or(0);
-    format!("/ {} — {}/{}", search.query, cur, total)
+    format!("/ {}▏ — {}/{}", search.query, cur, total)
 }
 
 #[cfg(test)]
@@ -392,7 +398,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_bar_uses_300_to_500_width_window() {
+    fn search_bar_uses_300_to_600_width_window() {
         let small = SearchBarLayout::compute(1000.0, 800.0, 10.0);
         assert_eq!(small.border.w, SEARCH_BAR_MIN_WIDTH);
 

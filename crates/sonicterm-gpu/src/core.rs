@@ -35,11 +35,12 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
-const READ_ONLY_BADGE_LABEL: &str = "READ ONLY";
+const READ_ONLY_BADGE_ICON: &str = "";
+const READ_ONLY_BADGE_LABEL: &str = "READONLY";
+const SEARCH_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_W: f32 = 180.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
-const READ_ONLY_BADGE_GAP: f32 = 8.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
 /// Renderer compositor settings that affect surface configuration.
@@ -250,7 +251,8 @@ use sonicterm_ui::{
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
-        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_PAD_X,
+        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
+        SEARCH_BAR_PAD_RIGHT,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -3621,7 +3623,9 @@ impl GpuRenderer {
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         let search_label = search.map(search_bar_label);
         let search_bar_layout = search_label.as_ref().map(|label| {
-            let content_w = estimate_badge_text_width(label, search_font_size);
+            let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
+                + SEARCH_BAR_ICON_GAP
+                + estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1)
             } else {
@@ -3648,10 +3652,33 @@ impl GpuRenderer {
             // overlay glyph instance vec (sits above quad_overlay).
             if let Some(stack) = self.font_stack.as_ref() {
                 let mut wt = stack.clone();
-                let visible_w = (layout.border.w - SEARCH_BAR_PAD_X * 2.0).max(0.0);
+                let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
+                let icon_x = layout.border.x + SEARCH_BAR_PAD_LEFT;
+                let text_x = icon_x + icon_w + SEARCH_BAR_ICON_GAP;
+                let visible_w =
+                    (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
                 let scroll_x = (text_w - visible_w).max(0.0);
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
+                let icon_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    SEARCH_BADGE_ICON,
+                    search_badge_fg,
+                    ChromeAttrs::default(),
+                    search_font_size,
+                    search_font_size,
+                    (icon_x, baseline),
+                    (sw, sh),
+                    Some(ChromeClip {
+                        x: layout.border.x,
+                        y: layout.border.y,
+                        w: layout.border.w,
+                        h: layout.border.h,
+                    }),
+                );
+                overlay_glyph_instances.extend(icon_layout.glyphs);
                 let chrome_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3661,12 +3688,12 @@ impl GpuRenderer {
                     ChromeAttrs::default(),
                     search_font_size,
                     search_font_size,
-                    (layout.border.x + SEARCH_BAR_PAD_X - scroll_x, baseline),
+                    (text_x - scroll_x, baseline),
                     (sw, sh),
                     Some(ChromeClip {
-                        x: layout.border.x,
+                        x: text_x,
                         y: layout.border.y,
-                        w: layout.border.w,
+                        w: visible_w,
                         h: layout.border.h,
                     }),
                 );
@@ -3689,10 +3716,40 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
+                let font_size =
+                    self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
-                let label_w = estimate_badge_text_width(READ_ONLY_BADGE_LABEL, font_size);
+                let icon_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    READ_ONLY_BADGE_ICON,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    font_size,
+                    native_em,
+                    (badge_x + SEARCH_BAR_PAD_LEFT, baseline),
+                    (sw, sh),
+                    Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
+                );
+                overlay_glyph_instances.extend(icon_layout.glyphs);
+                let text_area_x =
+                    badge_x + SEARCH_BAR_PAD_LEFT + icon_layout.width_px + SEARCH_BAR_ICON_GAP;
+                let text_area_w = (badge_x + badge_w - SEARCH_BAR_PAD_RIGHT - text_area_x).max(0.0);
+                let label_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    font_size,
+                    native_em,
+                    (0.0, baseline),
+                    (sw, sh),
+                    Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
+                );
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -3702,7 +3759,7 @@ impl GpuRenderer {
                     READ_ONLY_BADGE_LABEL,
                     text_color,
                     ChromeAttrs { bold: true, italic: false },
-                    badge_x + ((badge_w - label_w) * 0.5).max(8.0),
+                    text_area_x + ((text_area_w - label_layout.width_px) * 0.5).max(0.0),
                     baseline,
                     [badge_x, badge_y, badge_w, badge_h],
                     sw,
