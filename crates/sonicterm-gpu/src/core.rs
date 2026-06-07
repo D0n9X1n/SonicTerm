@@ -3767,6 +3767,23 @@ impl GpuRenderer {
                     &mut overlay_glyph_instances,
                     None,
                 );
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    text_area_x + ((text_area_w - label_layout.width_px) * 0.5).max(0.0) + 1.0,
+                    baseline,
+                    [badge_x, badge_y, badge_w, badge_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
             }
         }
 

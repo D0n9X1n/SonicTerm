@@ -1375,7 +1375,11 @@ impl App {
                     String::new()
                 };
                 if !committed.is_empty() {
-                    if self.search_active() {
+                    if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
+                        // Read-only/copy mode is navigation-only. IME commit
+                        // events can arrive without a KeyboardInput path, so
+                        // drop them explicitly instead of forwarding to PTY.
+                    } else if self.search_active() {
                         self.search_handle_ime_commit(&committed);
                     } else {
                         self.write_to_pty(committed.into_bytes());
