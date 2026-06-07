@@ -48,11 +48,7 @@ while IFS=$'\t' read -r package has_lib has_bin; do
   if [[ "$has_bin" == "1" ]]; then
     args+=(--bins)
   fi
-
-  if [[ ${#args[@]} -eq 2 ]]; then
-    echo "[crate-gate] skip $package: no lib/bin targets"
-    continue
-  fi
+  args+=(--tests)
 
   echo "[crate-gate] cargo test ${args[*]}"
   cargo test "${args[@]}"
