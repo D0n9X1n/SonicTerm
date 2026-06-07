@@ -1364,7 +1364,7 @@ impl GpuRenderer {
             return None;
         }
         let t = elapsed.as_secs_f32() / PANE_FOCUS_FLASH_DURATION.as_secs_f32();
-        Some((pane_id, (1.0 - t).powi(2) * 0.22))
+        Some((pane_id, (1.0 - t).powi(2) * 0.12))
     }
 
     /// Current physical surface width in pixels.
@@ -2816,11 +2816,6 @@ impl GpuRenderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
-        quads.push(QuadInstance {
-            rect: px_to_ndc(0.0, 0.0, sw, 3.0, sw, sh),
-            color: self.tab_bar_bg,
-            ..Default::default()
-        });
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
         // terminal content underneath. (Regression caught in PR #45 review:
@@ -2956,9 +2951,9 @@ impl GpuRenderer {
         if let Some((flash_pane_id, flash_alpha)) = self.pane_focus_flash_alpha(now) {
             if let Some(pv) = pane_views.iter().find(|pv| pv.pane_id == flash_pane_id) {
                 let flash_rgb = [
-                    (self.bg_rgba[0] + 0.18).min(1.0),
-                    (self.bg_rgba[1] + 0.18).min(1.0),
-                    (self.bg_rgba[2] + 0.18).min(1.0),
+                    (self.bg_rgba[0] + 0.07).min(1.0),
+                    (self.bg_rgba[1] + 0.07).min(1.0),
+                    (self.bg_rgba[2] + 0.07).min(1.0),
                 ];
                 let color = premultiply([flash_rgb[0], flash_rgb[1], flash_rgb[2], flash_alpha]);
                 quads.push(QuadInstance {

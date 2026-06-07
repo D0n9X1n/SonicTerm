@@ -371,8 +371,7 @@ pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
     fn default() -> Self {
-        // line_height 1.1 matches WezTerm's default (visual-parity target).
-        Self { family: DEFAULT_FONT_FAMILY.to_string(), size: 14.0, line_height: 1.1 }
+        Self { family: DEFAULT_FONT_FAMILY.to_string(), size: 13.0, line_height: 1.3 }
     }
 }
 
@@ -384,7 +383,7 @@ impl Default for WindowConfig {
             padding: None,
             padding_left: 12.0,
             padding_right: 12.0,
-            padding_top: 4.0,
+            padding_top: 8.0,
             padding_bottom: 4.0,
             decorations: true,
             opacity: 1.0,
