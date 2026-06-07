@@ -3697,7 +3697,7 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let font_size = self.raster_px((self.font_size - 1.0).max(1.0));
+                let font_size = self.raster_px(self.font_size.max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
                 let label_w = READ_ONLY_BADGE_LABEL.chars().count() as f32 * font_size * 0.58;
