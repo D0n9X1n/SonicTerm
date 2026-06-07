@@ -132,7 +132,7 @@ impl SearchState {
                 Some(preceding.unwrap_or(0))
             }
         } else {
-            Some(0)
+            None
         };
         self.update_scroll_request();
         true
@@ -153,8 +153,8 @@ impl SearchState {
                 }
             },
         };
-        self.current = if self.matches.is_empty() { None } else { Some(0) };
-        self.update_scroll_request();
+        self.current = None;
+        self.requested_scroll_row = None;
     }
 
     pub fn next(&mut self) {
@@ -180,6 +180,51 @@ impl SearchState {
             Some(0) | None => self.matches.len() - 1,
             Some(i) => i - 1,
         });
+        self.update_scroll_request();
+    }
+
+    pub fn select_nearest(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current = self
+            .matches
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, m)| {
+                let row_dist = m.row.abs_diff(row);
+                let col_dist =
+                    if row_dist == 0 { nearest_col_in_match(*m, col).abs_diff(col) } else { 0 };
+                (row_dist, col_dist)
+            })
+            .map(|(i, _)| i);
+        self.update_scroll_request();
+    }
+
+    pub fn next_from(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current =
+            self.matches.iter().position(|m| (m.row, m.col_start) > (row, col)).or(Some(0));
+        self.update_scroll_request();
+    }
+
+    pub fn prev_from(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current = self
+            .matches
+            .iter()
+            .rposition(|m| (m.row, m.col_start) < (row, col))
+            .or_else(|| self.matches.len().checked_sub(1));
         self.update_scroll_request();
     }
 
@@ -215,14 +260,12 @@ impl SearchState {
     }
 
     fn update_scroll_request(&mut self) {
-        self.requested_scroll_row = self.current_match().and_then(|m| {
-            if self.is_in_scrollback(&m) {
-                Some(m.row)
-            } else {
-                None
-            }
-        });
+        self.requested_scroll_row = self.current_match().map(|m| m.row);
     }
+}
+
+fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
+    col.clamp(m.col_start, m.col_end.saturating_sub(1))
 }
 
 /// Search both scrollback and visible rows of `grid` for literal `query`.
@@ -366,5 +409,40 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
         let extra = if visible[end_cell].is_wide { 1 } else { 0 };
         let col_end = last_visible_col + 1 + extra;
         out.push(MatchRange { row: abs_row, col_start, col_end });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_matches() -> SearchState {
+        SearchState {
+            matches: vec![
+                MatchRange { row: 10, col_start: 2, col_end: 5 },
+                MatchRange { row: 20, col_start: 8, col_end: 9 },
+                MatchRange { row: 30, col_start: 1, col_end: 3 },
+            ],
+            ..SearchState::new()
+        }
+    }
+
+    #[test]
+    fn first_enter_selects_nearest_match_to_cursor() {
+        let mut s = state_with_matches();
+        s.select_nearest(19, 0);
+        assert_eq!(s.current, Some(1));
+        assert_eq!(s.requested_scroll_row, Some(20));
+    }
+
+    #[test]
+    fn arrow_direction_selects_relative_to_cursor_when_unselected() {
+        let mut down = state_with_matches();
+        down.next_from(20, 8);
+        assert_eq!(down.current, Some(2));
+
+        let mut up = state_with_matches();
+        up.prev_from(20, 8);
+        assert_eq!(up.current, Some(0));
     }
 }

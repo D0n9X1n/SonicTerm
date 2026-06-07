@@ -70,14 +70,34 @@ impl App {
         };
         let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
+        let anchor_row = (grid.scrollback_len() as u32).saturating_add(u32::from(grid.cursor.row));
+        let anchor_col = grid.cursor.col;
 
         let (handled, keep_search) = match &event.logical_key {
             Key::Named(NamedKey::Escape) => (true, false),
             Key::Named(NamedKey::Enter) => {
-                if mods.shift_key() {
+                if search.current.is_none() {
+                    search.select_nearest(anchor_row, anchor_col);
+                } else if mods.shift_key() {
                     search.prev();
                 } else {
                     search.next();
+                }
+                (true, true)
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if search.current.is_none() {
+                    search.next_from(anchor_row, anchor_col);
+                } else {
+                    search.next();
+                }
+                (true, true)
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if search.current.is_none() {
+                    search.prev_from(anchor_row, anchor_col);
+                } else {
+                    search.prev();
                 }
                 (true, true)
             }
@@ -102,7 +122,9 @@ impl App {
                             consumed = true;
                         }
                         "g" | "G" => {
-                            if mods.shift_key() {
+                            if search.current.is_none() {
+                                search.select_nearest(anchor_row, anchor_col);
+                            } else if mods.shift_key() {
                                 search.prev();
                             } else {
                                 search.next();
@@ -121,7 +143,20 @@ impl App {
             }
             _ => (false, true),
         };
+        let requested_view_top = if handled && keep_search {
+            search.requested_scroll_row.map(|row| centered_search_view_top(grid, row))
+        } else {
+            None
+        };
         drop(grid_guard);
+        if let Some(view_top) = requested_view_top {
+            if let Some(ws) = self.main_mut() {
+                if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                    pane.viewport_top_abs = view_top;
+                }
+                mark_all_panes_dirty(&ws.panes);
+            }
+        }
         if keep_search {
             if let Some(ws) = self.main_mut() {
                 if let Some(st) = ws.tab_states.get_mut(i) {
@@ -131,4 +166,11 @@ impl App {
         }
         handled
     }
+}
+
+fn centered_search_view_top(grid: &Grid, row: u32) -> Option<u64> {
+    let live_top = grid.scrollback_len() as u64;
+    let half = u64::from(grid.rows) / 2;
+    let desired = u64::from(row).saturating_sub(half).min(live_top);
+    (desired < live_top).then_some(desired)
 }

@@ -3533,17 +3533,20 @@ impl GpuRenderer {
                 }
             }
         }
-        // -------- Search highlights + status bar ---------------------------
-        // When search is active: paint a translucent yellow quad over every
-        // match in the grid, then draw a single-line status bar pinned to
-        // the bottom edge styled like the tab bar.
-        let search_bar_h = self.font_size * 0.85 * 1.2;
+        // -------- Search highlights + badge --------------------------------
         if let Some(s) = search {
             let cur_idx = s.current;
+            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            let match_bg = hex_to_rgba("#000000", 1.0);
+            let match_fg = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 1.0);
+            let current_bg = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 1.0);
+            let current_fg = hex_to_rgba("#000000", 1.0);
             for (i, m) in s.matches.iter().enumerate() {
-                // Skip matches that aren't on screen (scrollback / off-viewport).
-                let Some(visible_row) = s.match_visible_row(m) else { continue };
-                if visible_row >= grid.rows || m.col_end <= m.col_start {
+                if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
+                    continue;
+                }
+                let visible_row = u64::from(m.row) - view_top_abs;
+                if visible_row >= u64::from(grid.rows) {
                     continue;
                 }
                 // #489: derive x/w from the active-pane snapped-edge
@@ -3556,15 +3559,15 @@ impl GpuRenderer {
                     .get(cs)
                     .copied()
                     .unwrap_or(active_origin_x + f32::from(m.col_start) * self.cell_w);
-                let y = active_origin_y + f32::from(visible_row) * self.cell_h;
+                let y = active_origin_y + (visible_row as f32) * self.cell_h;
                 let w = active_snapped_cell_x
                     .get(cache_end)
                     .map(|r| r - x)
                     .unwrap_or_else(|| f32::from(m.col_end - m.col_start) * self.cell_w);
-                let color = if Some(i) == cur_idx {
-                    self.search_highlight_current
+                let (bg_color, fg_color) = if Some(i) == cur_idx {
+                    (current_bg, current_fg)
                 } else {
-                    self.search_highlight
+                    (match_bg, match_fg)
                 };
                 // Clip the match highlight to the active pane (PR #270
                 // follow-up) — a long match that runs past the pane's
@@ -3578,50 +3581,11 @@ impl GpuRenderer {
                 ) {
                     quads.push(QuadInstance {
                         rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                        color,
+                        color: bg_color,
                         ..Default::default()
                     });
+                    recolor_cursor_glyphs(&mut glyph_instances, qx, qy, qw, qh, sw, sh, fg_color);
                 }
-            }
-            // Status bar background pinned to bottom edge.
-            let search_bar_top = sh - search_bar_h;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(0.0, search_bar_top, sw, search_bar_h, sw, sh),
-                color: self.search_bg,
-                ..Default::default()
-            });
-            let n = s.matches.len();
-            let cur = s.current.map(|i| i + 1).unwrap_or(0);
-            let label = if n == 0 {
-                format!("/ {} — no matches", s.query)
-            } else {
-                format!("/ {} — {}/{} matches", s.query, cur, n)
-            };
-            // T14: search status bar text → chrome_text. The bar is
-            // drawn AFTER the grid text pipeline (legacy text_renderer
-            // path) so emit into `glyph_instances` rather than
-            // `overlay_glyph_instances`.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                let layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    &label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    self.font_size * 0.85,
-                    native_em,
-                    (self.padding_left * self.scale_factor, search_bar_top + self.font_size * 0.85),
-                    (sw, sh),
-                    None,
-                );
-                glyph_instances.extend(layout.glyphs);
             }
         }
 
