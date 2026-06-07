@@ -1,36 +1,32 @@
 # sonicterm-app-core
 
 ## Purpose
-Winit-agnostic application state machine. Pure-data — no winit, wgpu,
-arboard, or any backend. The platform layer (`sonicterm-app`) drives
-this crate and translates `AppIntent`s into winit/wgpu/arboard calls.
+Backend-free application state machine. This crate owns pure state,
+reducers, effects, and intents; `sonicterm-app` translates those intents
+into winit, GPU, clipboard, and PTY operations.
 
-Introduced as ADDITIVE at M6a; consumers migrate over M6b..d.
+Keep this crate free of `winit`, `wgpu`, platform handles, and blocking IO.
 
-## Public surface
-- `AppState`, `AppStateBuilder` — the (currently minimal) state holder
-- `AppIntent` — what the app-core asks the platform layer to do
-- `RedrawReason` — coalescing hint for LM-002
+## Key files
+- `app_state.rs` - durable state owned by the reducer.
+- `state_machine.rs` - mutation boundary driven by platform shells.
+- `reducer.rs` - state transitions.
+- `effect.rs` / `intent.rs` - commands emitted to the outer app layer.
+- `supporting.rs` - small helper types shared by the reducer.
 
-## Land-mines specific to this crate
-None yet — the platform-side landmines (LM-001, LM-002, LM-003, LM-004)
-remain in `sonicterm-app` until the state extraction completes
-post-modularization pilot.
-
-## Test gate (local)
+## Local gate
 ```bash
 cargo build -p sonicterm-app-core
 ```
 
-## Common pitfalls
-- Adding a `winit::*` or `wgpu::*` type breaks the swappability promise
-- Don't store backend handles here — those belong in `sonicterm-app`
-
-## Owning PM(s)
-- Primary: either (cross-platform pure-data)
-- Hot-file: no (additive, M6a scope)
+## Guardrails
+- Add new behavior through reducer/effect boundaries instead of reaching
+  back into `sonicterm-app`.
+- Keep public types serializable/testable where practical; this is the
+  easiest crate to unit-test without a window.
+- If a public item is exposed through `sonicterm-types`, update
+  `docs/CONTRACTS.md` in the same PR.
 
 ## Cross-references
-- Consumes: `sonicterm-types`
-- Consumed by: `sonicterm-app` (M6b+), `sonicterm-mac` (M6b),
-  `sonicterm-windows` (M6c)
+- Consumes: `sonicterm-types`.
+- Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`.

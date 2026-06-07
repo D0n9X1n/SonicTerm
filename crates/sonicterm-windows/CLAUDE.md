@@ -1,36 +1,33 @@
 # sonicterm-windows
 
 ## Purpose
-Windows binary + Windows-only platform glue: ConPTY, `muda` menu, Mica
-backdrop, OLE drag-drop. `main.rs` is ~30 lines: loads config, builds
-`sonicterm_app_core::AppStateMachine`, then runs
-`sonicterm_app::shell::WindowsShell`.
+Windows binary and Win32-only glue: ConPTY process host, `muda` menu,
+DWM/Mica backdrop, OLE drag/drop, CLI handling, and WiX packaging assets.
+It loads config/theme/keymap, installs logging, then runs
+`sonicterm_app::WindowsShell`.
 
-## Public surface
-- `main` — bin entry point
-- `os_drag_win` — OLE drag-drop (§5 exception: bin-only, no `tests/`)
+## Key files
+- `main.rs` - startup and shell construction.
+- `cli.rs` - Windows CLI entry handling.
+- `chrome.rs`, `backdrop.rs` - window chrome and DWM backdrop.
+- `menubar.rs` - native menu integration.
+- `os_drag_win.rs`, `tab_drag_os.rs` - OLE drag/drop and tab transfer.
+- `harness_pipe.rs`, `win_sid.rs` - smoke/test support and user identity.
 
-## Land-mines specific to this crate
-None named in §4. ConPTY corollary of LM-007 (`PtyHandle::Drop`) lives
-in `sonicterm-io` — orphan conhost.exe processes if not killed
-explicitly.
-
-## Test gate (local)
+## Local gate
 ```bash
 cargo build -p sonicterm-windows
 ```
-PR #453: `build.rs` colocates icon/asset files next to the binary;
-the two tests above guard that contract + the WiX manifest layout.
 
-## Common pitfalls
-- `ResizePseudoConsole` returns an HRESULT — don't ignore
-- Mica backdrop must be applied AFTER the window is shown
-- OLE drop targets need `OleInitialize` on the same thread as the window
+Release MSI builds require the Windows Cairo setup script and WiX.
 
-## Owning PM(s)
-- Primary: **win-PM** (only this PM can §13 on Windows)
-- Hot-file: yes — bin entry plus Windows-only paths
+## Guardrails
+- ConPTY resize returns an HRESULT; surface failures instead of ignoring.
+- Mica/backdrop changes must run after the HWND exists and is shown.
+- OLE drag/drop initialization must stay on the window thread.
+- Keep packaging paths in sync with `wix/main.wxs` and release workflow.
 
 ## Cross-references
-- Consumes: `sonicterm-app` (post-M6: `sonicterm-app-core` + `sonicterm-app`)
-- Consumed by: nothing (bin)
+- Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
+  `sonicterm-io`, `sonicterm-logging`.
+- Consumed by: Windows release packaging and smoke automation.

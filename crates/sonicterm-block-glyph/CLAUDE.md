@@ -1,20 +1,29 @@
 # sonicterm-block-glyph
 
 ## Purpose
-Block/box/Powerline/Braille/sextant/octant custom glyph geometry. This crate
-contains WezTerm-derived geometry adapted to SonicTerm's renderer.
+Rasterizes terminal block/box drawing glyphs with SonicTerm cell metrics.
+This is the Sonic-owned boundary for the custom glyph code imported from
+WezTerm; callers should use this crate instead of reaching into vendor
+paths.
 
-## Public surface
-- Custom glyph classification and geometry generation helpers.
+## Key files
+- `customglyph.rs` - block glyph rasterization logic.
+- `glue.rs` - SonicTerm bitmap, color, point, rect, and metric adapters.
+- `lib.rs` - public `block_sprite_with_cell_metrics` wrapper.
+- `LICENSE-WEZTERM` - attribution for imported custom glyph code.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-block-glyph --lib
+cargo build -p sonicterm-block-glyph
 ```
 
-## Common pitfalls
-- Preserve `LICENSE-WEZTERM` when touching absorbed WezTerm code.
-- Geometry changes are visual changes; smoke-check CJK/emoji/Powerline output.
+## Guardrails
+- Keep pixel-unit conversions in `glue.rs` or `lib.rs`; do not leak them
+  into the renderer.
+- Preserve attribution headers when touching imported code.
+- Block glyph output is visual-sensitive; smoke-check box drawing after
+  behavior changes.
 
 ## Cross-references
-- Consumed by: `sonicterm-font`, `sonicterm-gpu`.
+- Consumes: `sonicterm-engine`, `sonicterm-cfg`.
+- Consumed by: font/text/rendering code that needs block glyph sprites.

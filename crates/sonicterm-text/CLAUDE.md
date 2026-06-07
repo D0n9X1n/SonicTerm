@@ -1,34 +1,29 @@
 # sonicterm-text
 
 ## Purpose
-Shaping + atlas. LRU shape cache, swash rasterizer, glyph atlas, per-row
-glyph cache. Hot path for every frame.
+Text shaping and glyph cache support for rendering. It owns shape caching,
+row glyph caching, and glyph atlas data consumed by the GPU renderer.
 
-## Public surface
-- `shape` (LRU shape cache)
-- `swash_rasterizer`
-- `glyph_atlas`
-- `row_glyph_cache`
+## Key files
+- `shape.rs` - shape cache and shaping entry points.
+- `glyph_atlas.rs` - atlas pages and glyph placement.
+- `row_glyph_cache.rs` - row-level glyph cache.
+- `lib.rs` - public exports.
 
-## Land-mines specific to this crate
-Render hot-file rule (closes #283): changes to `glyph_atlas.rs` or
-`swash_rasterizer.rs` must keep the app/mac build green and should be
-smoke-checked visually.
-
-## Test gate (local)
+## Local gate
 ```bash
 cargo build -p sonicterm-text
 ```
 
-## Common pitfalls
-- "Primary family only, no fallback" path — see PR #42 postmortem
-- Atlas page eviction races: cache key must include weight + style
-- HiDPI blur if `set_metrics` isn't fed the device pixel ratio
+Render-touching changes should be visually smoke-checked.
 
-## Owning PM(s)
-- Primary: either; §13 smoke required from BOTH PMs
-- Hot-file: yes (render-touching)
+## Guardrails
+- Cache keys must account for font identity, size, weight, style, DPI, and
+  glyph variants that change output.
+- Avoid atlas allocation or eviction surprises on the hottest draw path.
+- Keep shaping/raster behavior aligned with `sonicterm-font`; do not add
+  vendor font dependencies.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types::Painter`
-- Consumed by: `sonicterm-gpu` directly; legacy `sonicterm-shared::render` shim re-exports for back-compat.
+- Consumes: `sonicterm-font`, `sonicterm-types`.
+- Consumed by: `sonicterm-gpu`.

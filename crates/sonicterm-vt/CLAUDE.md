@@ -1,36 +1,27 @@
 # sonicterm-vt
 
 ## Purpose
-VT/ANSI parser. Wraps `vte::Parser` + a SWAR ASCII fast-path. Drives
-the grid via the `Performer` trait. Pure-data; no I/O, no GPU.
+VT/ANSI parser and terminal-state mutation layer. It decodes PTY bytes,
+handles escape/control sequences, applies modes/styles, and mutates the
+grid through the terminal model.
 
-## Public surface
-- `vt::Parser`, `vt::Performer`
-- Trait seams live in `sonicterm-types`.
+## Key files
+- `vt.rs` - parser, control sequence handling, terminal state mutation.
+- `lib.rs` - public exports.
 
-## Land-mines specific to this crate
-- **LM-005** CSI `J` (ED) and `K` (EL) MUST honor mode param.
-  J0=below, J1=above, J2=all.
-  required test: `shell_prompt_redraw_preserves_above_cursor`
-  ref: CLAUDE.md §4 / landmines.toml
-- **LM-006** CSI `?1049h` MUST be a no-op when already in alt screen
-  (vim/fzf re-entry clobbers `saved_cursor` otherwise).
-  required test: `dec_1049h_repeated_does_not_clobber_saved_cursor`
-  ref: CLAUDE.md §4 / landmines.toml
-
-## Test gate (local)
+## Local gate
 ```bash
-cargo build -p sonicterm-vt
+cargo test -p sonicterm-vt
 ```
 
-## Common pitfalls
-- Forgetting the SWAR fast-path's ASCII boundary check on emoji ZWJ joiners
-- Adding a CSI handler without a matching test in `tests/vt.rs` or `tests/alt_screen.rs`
-
-## Owning PM(s)
-- Primary: either (cross-platform pure-data)
-- Hot-file: yes (vt.rs)
+## Guardrails
+- Preserve SWAR/ASCII fast paths when changing parser hot loops.
+- Do not flatten styled rows in ways that lose per-cell foreground,
+  background, inverse, underline, or hyperlink data.
+- Parser changes affect rendering and input semantics; add targeted tests
+  for escape-sequence regressions.
+- Keep PTY writes outside parser/grid locks.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types`
-- Consumed by: `sonicterm-grid`, `sonicterm-app`
+- Consumes: `sonicterm-grid`, `sonicterm-types`.
+- Consumed by: `sonicterm-app`, `sonicterm-mux`.

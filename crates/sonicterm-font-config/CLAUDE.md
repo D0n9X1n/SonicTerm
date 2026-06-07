@@ -1,20 +1,22 @@
 # sonicterm-font-config
 
 ## Purpose
-Pure font configuration values and parsing helpers shared by font discovery and
-rendering code.
+Low-level Fontconfig constants and C type definitions used by the Sonic
+font locator. This crate is intentionally thin and exists so higher-level
+font code does not hand-roll FFI constants.
 
-## Public surface
-- Font family/style/weight/stretch configuration types.
+## Key files
+- `src/lib.rs` - Fontconfig constants, enums, and structs.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-font-config --lib
+cargo build -p sonicterm-font-config
 ```
 
-## Common pitfalls
-- Keep this crate pure-data; no platform APIs here.
-- TOML-facing names are user-visible and need migration care.
+## Guardrails
+- Treat this as binding/support code; avoid broad rewrites for style only.
+- Keep numeric constants aligned with Fontconfig.
+- Higher-level matching logic belongs in `sonicterm-font`, not here.
 
 ## Cross-references
 - Consumed by: `sonicterm-font`.

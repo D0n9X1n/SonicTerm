@@ -1,57 +1,47 @@
 # sonicterm-mac
 
 ## Purpose
-macOS binary + macOS-only platform glue (NSMenu via objc, libproc-based
-foreground process detection, OS-drag). `main.rs` is ~30 lines: loads
-config, builds `sonicterm_app_core::AppStateMachine`, then runs
-`sonicterm_app::shell::MacShell`.
+macOS binary and AppKit-only glue. It loads config/theme/keymap, installs
+logging, configures the native menu, disables AppKit's native tab strip for
+this process, wires OS tab drag/drop, then runs `sonicterm_app::MacShell`.
 
-## Public surface
-- `main` — bin entry point
-- `menubar` — NSMenu integration (private items per §5 exception)
-- `os_drag` — OS-drag glue
+## Key files
+- `main.rs` - startup, asset lookup, menu hooks, window-ready marker.
+- `menubar.rs` - NSMenu construction and selector bridge.
+- `os_drag_mac.rs` - NSPasteboard/drag payload handoff.
+- `tab_drag_os.rs` - macOS tab tear-out/drop backend.
+- `lib.rs` - macOS module exports.
 
-## Land-mines specific to this crate
-None named in §4 — but this crate is the only place §13 GUI smoke can
-be run from the mac PM. **Every render/input/VT/window-state PR must
-include a §13 smoke screenshot from here.**
-
-## Test gate (local)
+## Local gate
 ```bash
 cargo build -p sonicterm-mac
 ```
 
-## Common pitfalls
-- objc autorelease pool not held across NSMenu calls → segfault
-- `register`/`lookup`/`scan_themes` in `menubar.rs` are private and
-  tested via the `main` path; do not extract to a `tests/` folder
-  (§5 exception — small macOS-only surface)
+Render/input/VT/window changes need a macOS GUI smoke. Prefer
+`just visual mac`; verify SonicTerm is frontmost before keystrokes and use
+window-local `screencapture -l`.
 
-## Owning PM(s)
-- Primary: **mac-PM** (only this PM can §13)
-- Hot-file: yes — bin entry plus mac-only paths
+## Guardrails
+- Keep AppKit automatic tabbing disabled with
+  `NSWindow.setAllowsAutomaticWindowTabbing(false)` plus per-window
+  `setTabbingMode: 2`; SonicTerm draws its own tab bar.
+- Install the native menu after winit creates the AppKit event loop.
+- Keep Objective-C calls on the main thread and inside the expected
+  autorelease lifetime.
+- Bundled assets load from `Contents/Resources/assets`; dev runs fall back
+  to workspace `assets/`.
 
-## Cross-references
-- Consumes: `sonicterm-app` (post-M6: `sonicterm-app-core` + `sonicterm-app`)
-- Consumed by: nothing (bin)
+## Stable contract
+`main.rs` prints this stdout marker when winit hands over the AppKit window:
 
-## Stable contract: `SONICTERM_WINDOW_READY` stdout marker (#554)
-The bin prints one line to **stdout** (NOT tracing — the harness greps
-raw stdout) the instant winit hands AppKit the window, from the
-`with_on_window_ready` hook in `main.rs`:
-
-```
+```text
 SONICTERM_WINDOW_READY cg_window_id=<u32> pid=<u32> window_index=0
 ```
 
-- `cg_window_id` — CoreGraphics window number from `[NSWindow windowNumber]`.
-  Directly feedable to `screencapture -l <id>`. `-1` means the NSView
-  had no attached NSWindow (should not happen post-`create_window`;
-  harness must treat as missing and fall back).
-- `pid` — `std::process::id()` of the mac bin, for cross-checking.
-- `window_index=0` — reserved for future torn-out child windows;
-  always `0` today.
+Automation feeds `cg_window_id` to `screencapture -l`. Do not rename,
+reorder, or repurpose the keys without updating callers in the same commit.
 
-Automation can grep this marker to skip external window-id polling.
-**Do not rename, reorder, or repurpose the keys** without updating
-callers in the same commit.
+## Cross-references
+- Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
+  `sonicterm-logging`.
+- Consumed by: release packaging and macOS smoke automation.

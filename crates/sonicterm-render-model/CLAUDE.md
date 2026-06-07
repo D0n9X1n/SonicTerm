@@ -1,31 +1,29 @@
 # sonicterm-render-model
 
 ## Purpose
-Renderer-agnostic frame model. Describes *what* to draw — geometry,
-inputs, painter trait — not *how*. Sits between `sonicterm-grid` /
-`sonicterm-ui` and `sonicterm-gpu`. Pure data.
+Renderer-agnostic frame model. This crate describes panes, geometry,
+input/render data, and painter commands without depending on wgpu or
+winit.
 
-## Public surface
-- `geometry`, `inputs`
-- `painter` traits — re-export point for `sonicterm-types::Painter`
+## Key files
+- `pane_render.rs` - pane frame/model assembly.
+- `geometry.rs` - rectangles, sizes, and layout helpers.
+- `inputs.rs` - render input structs from app/grid/UI state.
+- `painter.rs` - painter command bridge.
+- `lib.rs` - public exports.
 
-## Land-mines specific to this crate
-None named in §4; but this crate is the dividing line that lets the GPU
-backend be swapped. Don't add winit or wgpu types here.
-
-## Test gate (local)
+## Local gate
 ```bash
 cargo build -p sonicterm-render-model
 ```
 
-## Common pitfalls
-- Importing `winit` or `wgpu` — kills the swappability promise
-- Storing GPU resource handles in the model — they belong in `sonicterm-gpu`
-
-## Owning PM(s)
-- Primary: either (pure-data)
-- Hot-file: no (additive surface mostly)
+## Guardrails
+- Keep renderer-specific GPU choices out of this crate.
+- Preserve enough per-cell style data for colors, inverse, underline,
+  hyperlinks, cursor, and search highlights.
+- Geometry changes affect hit testing and visual output; smoke-check UI
+  layout changes.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types`
-- Consumed by: `sonicterm-gpu`, `sonicterm-app`
+- Consumes: `sonicterm-types`, `sonicterm-grid`, `sonicterm-ui`.
+- Consumed by: `sonicterm-gpu`, `sonicterm-app`.
