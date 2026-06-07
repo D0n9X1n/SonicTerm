@@ -97,14 +97,14 @@ pub const PALETTE_QUERY_RADIUS: f32 = 8.0;
 /// Corner radius for the selected-row highlight quad.
 pub const PALETTE_ROW_RADIUS: f32 = 6.0;
 
-/// Margin between the search bar and the right/bottom window edge.
-pub const SEARCH_BAR_MARGIN: f32 = 8.0;
+/// Margin between the search bar and the right/top window edge.
+pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 
-/// Width of the small bottom-right search bar.
-pub const SEARCH_BAR_WIDTH: f32 = 260.0;
+/// Width of the small top-right search bar.
+pub const SEARCH_BAR_WIDTH: f32 = 360.0;
 
-/// Height of the small bottom-right search bar.
-pub const SEARCH_BAR_HEIGHT: f32 = 26.0;
+/// Height of the small top-right search bar.
+pub const SEARCH_BAR_HEIGHT: f32 = 36.0;
 
 /// Layout of the command-palette modal.
 #[derive(Debug, Clone)]
@@ -335,7 +335,7 @@ pub struct SearchBarLayout {
 }
 
 impl SearchBarLayout {
-    /// Place the bar in the bottom-right corner. The renderer is
+    /// Place the bar in the top-right corner. The renderer is
     /// responsible for picking colors and drawing the label produced by
     /// [`search_bar_label`].
     #[must_use]
@@ -343,7 +343,7 @@ impl SearchBarLayout {
         let w = SEARCH_BAR_WIDTH.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
         let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
         let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
-        let y = (window_h - h - SEARCH_BAR_MARGIN).max(0.0);
+        let y = SEARCH_BAR_MARGIN.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
             x: border.x + 1.0,

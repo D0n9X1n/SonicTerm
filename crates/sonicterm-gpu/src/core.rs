@@ -312,7 +312,7 @@ struct CheatsheetLayout {
     rows: Vec<sonicterm_ui::tabbar_view::Rect>,
     selected_row: Option<usize>,
     query_label: String,
-    rows_text: String,
+    row_labels: Vec<String>,
     footer: sonicterm_ui::tabbar_view::Rect,
     footer_label: String,
 }
@@ -366,7 +366,7 @@ fn compute_cheatsheet_layout(
     let selected_row = (total > 0).then_some(selected - window_start);
 
     let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
-    let mut rows_text = String::new();
+    let mut row_labels = Vec::new();
     for (row_i, idx_pos) in (window_start..window_end).enumerate() {
         rows.push(sonicterm_ui::tabbar_view::Rect {
             x: bg.x + panel_padding,
@@ -374,17 +374,18 @@ fn compute_cheatsheet_layout(
             w: (bg.w - panel_padding * 2.0).max(0.0),
             h: PALETTE_ROW_HEIGHT,
         });
-        if row_i > 0 {
-            rows_text.push('\n');
-        }
         if let Some((keys, action)) = idxs.get(idx_pos).and_then(|idx| bindings.get(*idx)) {
-            rows_text.push_str(keys);
-            rows_text.push_str("    ");
-            rows_text.push_str(action);
+            row_labels.push(format!("{keys}    {action}"));
         }
     }
     if total == 0 {
-        rows_text.push_str("No shortcuts found");
+        rows.push(sonicterm_ui::tabbar_view::Rect {
+            x: bg.x + panel_padding,
+            y: list_top,
+            w: (bg.w - panel_padding * 2.0).max(0.0),
+            h: PALETTE_ROW_HEIGHT,
+        });
+        row_labels.push("No shortcuts found".to_string());
     }
 
     let query_label = if state.query.is_empty() {
@@ -406,7 +407,7 @@ fn compute_cheatsheet_layout(
         rows,
         selected_row,
         query_label,
-        rows_text,
+        row_labels,
         footer,
         footer_label,
     }
@@ -3658,7 +3659,8 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let baseline = layout.bg.y + 4.0 + self.font_size * 0.85;
+                let search_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
+                let baseline = layout.bg.y + (layout.bg.h + search_font_size * 0.8) * 0.5;
                 let chrome_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3666,9 +3668,9 @@ impl GpuRenderer {
                     &label,
                     self.search_fg,
                     ChromeAttrs::default(),
-                    self.font_size * 0.85,
-                    native_em,
-                    (layout.bg.x + 6.0, baseline),
+                    search_font_size,
+                    search_font_size,
+                    (layout.bg.x + 10.0, baseline),
                     (sw, sh),
                     Some(ChromeClip {
                         x: layout.bg.x,
@@ -4052,27 +4054,25 @@ impl GpuRenderer {
                     None,
                 );
                 // Rows
-                let rows_origin = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
-                    layout.bg.x + self.panel_padding,
-                    layout.query_row.y + layout.query_row.h + self.panel_padding,
-                ));
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    &layout.rows_text,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    rows_origin.0 + 12.0,
-                    rows_origin.1 + self.font_size * 0.8,
-                    bounds_bg,
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                for (row, label) in layout.rows.iter().zip(layout.row_labels.iter()) {
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        self.font_size,
+                        native_em,
+                        &mut wt,
+                        label,
+                        self.search_fg,
+                        ChromeAttrs::default(),
+                        row.x + 12.0,
+                        row.y + (row.h + self.font_size * 0.8) * 0.5,
+                        bounds_bg,
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                }
                 // Footer
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,

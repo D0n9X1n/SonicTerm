@@ -1204,7 +1204,7 @@ fn child_enter_copy_mode(child: &mut WindowState) {
         let grid = guard.grid();
         (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
     };
-    child.copy_mode = Some(sonicterm_ui::copy_mode::CopyModeState::new_at(cursor));
+    child.copy_mode = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
     mark_all_panes_dirty(&child.panes);
 }
 
@@ -1250,7 +1250,7 @@ fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
         } else {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
                 Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
                 Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
                 Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
@@ -1259,8 +1259,8 @@ fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
                 Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" => state.start_select(),
-                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
+                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
                 Key::Character(s) if s == "w" => state.move_word_fwd(grid),
                 Key::Character(s) if s == "b" => state.move_word_back(grid),
                 Key::Character(s) if s == "0" => state.move_line_start(grid),

@@ -191,7 +191,7 @@ impl App {
             let grid = guard.grid();
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
-        self.copy_mode_set(Some(sonicterm_ui::copy_mode::CopyModeState::new_at(cursor)));
+        self.copy_mode_set(Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor)));
         if let Some(panes) = self.main_panes() {
             mark_all_panes_dirty(panes);
         }

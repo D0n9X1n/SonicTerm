@@ -1493,7 +1493,7 @@ impl App {
             }
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
                 Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
                 Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
                 Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
@@ -1502,8 +1502,8 @@ impl App {
                 Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" => state.start_select(),
-                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
+                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
                 Key::Character(s) if s == "w" => state.move_word_fwd(grid),
                 Key::Character(s) if s == "b" => state.move_word_back(grid),
                 Key::Character(s) if s == "0" => state.move_line_start(grid),

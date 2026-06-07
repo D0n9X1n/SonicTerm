@@ -149,7 +149,7 @@ pub fn label(a: &Action) -> String {
             format!("Resize Pane {} by {amount}", dir_human(*dir))
         }
         Action::CopyToClipboard => "Copy to Clipboard".into(),
-        Action::EnterCopyMode => "Enter Copy Mode".into(),
+        Action::EnterCopyMode => "Enter Read Only Mode".into(),
         Action::EnterQuickSelect => "Enter Quick Select".into(),
         Action::PasteFromClipboard => "Paste from Clipboard".into(),
         Action::IncreaseFontSize => "Increase Font Size".into(),
@@ -206,7 +206,7 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         | Action::ResizePaneDown
         | Action::ResizePane { .. } => &["grow", "shrink", "nudge", "divider"],
         Action::CopyToClipboard => &["yank"],
-        Action::EnterCopyMode => &["keyboard", "selection", "yank", "vim"],
+        Action::EnterCopyMode => &["keyboard", "selection", "yank", "vim", "readonly", "read only"],
         Action::EnterQuickSelect => &["url", "hint", "keyboard", "yank"],
         Action::PasteFromClipboard => &["yank"],
         Action::IncreaseFontSize => &["bigger", "zoom in", "larger"],

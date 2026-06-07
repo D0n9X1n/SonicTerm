@@ -118,7 +118,9 @@ jobs:
       - name: Build msi
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cargo wix --package sonicterm-windows --no-build --nocapture --output dist\
+          Push-Location crates\sonicterm-windows
+          cargo wix --no-build --nocapture --output ..\..\dist\
+          Pop-Location
 
       - uses: actions/upload-artifact@v5
         with:

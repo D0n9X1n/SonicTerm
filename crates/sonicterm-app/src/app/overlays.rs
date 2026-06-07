@@ -37,6 +37,21 @@ use super::{
 };
 
 impl App {
+    fn command_palette_tab_count(&self) -> usize {
+        match self.frontmost_kind() {
+            FrontmostKind::Child(id) => {
+                self.windows.get(&id).map(|child| child.tabs.len()).unwrap_or(1)
+            }
+            _ => self.main_tabs().map(|tabs| tabs.len()).unwrap_or(1),
+        }
+        .max(1)
+    }
+
+    fn refresh_command_palette_context(&mut self) {
+        let tab_count = self.command_palette_tab_count();
+        self.command_palette.set_tab_count(tab_count);
+    }
+
     pub(super) fn cheatsheet_bindings(&self) -> Vec<(String, String)> {
         self.keymap
             .bindings
@@ -116,6 +131,7 @@ impl App {
         if !self.command_palette.is_open() {
             return false;
         }
+        self.refresh_command_palette_context();
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
@@ -194,6 +210,7 @@ impl App {
         }
     }
     pub(super) fn toggle_command_palette(&mut self) {
+        self.refresh_command_palette_context();
         let now_open = self.command_palette.toggle();
         // M6a-expand-2c-misc: notify reducer of the toggle. The
         // reducer flips `palette_open` and emits Render(Overlay) on
