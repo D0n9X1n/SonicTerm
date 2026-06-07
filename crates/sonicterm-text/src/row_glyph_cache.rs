@@ -52,6 +52,7 @@
 //! memory cost trivial.
 
 use crate::GlyphInstance;
+use std::borrow::Borrow;
 // T13/T14: the tofu colour was previously `cosmic_text::Color` (an
 // opaque 4-byte struct). The renderer just feeds it into
 // `chrome_color_to_linear_rgba` at replay time; storing the same
@@ -228,9 +229,38 @@ pub fn row_hash(
     scale_factor: f32,
     selection: Option<(u16, u16, u16, u16)>,
 ) -> u64 {
+    row_hash_cells(
+        view_top_abs,
+        r,
+        row_cells.iter(),
+        style_rev,
+        cell_w,
+        cell_h,
+        scale_factor,
+        selection,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn row_hash_cells<I, C>(
+    view_top_abs: u64,
+    r: usize,
+    row_cells: I,
+    style_rev: u64,
+    cell_w: f32,
+    cell_h: f32,
+    scale_factor: f32,
+    selection: Option<(u16, u16, u16, u16)>,
+) -> u64
+where
+    I: IntoIterator<Item = C>,
+    C: Borrow<Cell>,
+{
     let mut h = DefaultHasher::new();
     (view_top_abs + r as u64).hash(&mut h);
-    row_cells.hash(&mut h);
+    for cell in row_cells {
+        cell.borrow().hash(&mut h);
+    }
     style_rev.hash(&mut h);
     cell_w.to_bits().hash(&mut h);
     cell_h.to_bits().hash(&mut h);
@@ -260,3 +290,17 @@ pub fn row_hash(
 
 // Unit tests live in `tests/row_glyph_cache.rs` and
 // `tests/row_glyph_cache_pane_isolation.rs`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn row_hash_cells_accepts_owned_cells() {
+        let cells = vec![
+            Cell::plain('a', Color::Default, Color::Default, Default::default()),
+            Cell::plain('b', Color::Default, Color::Default, Default::default()),
+        ];
+        let hash = row_hash_cells(0, 0, cells, 1, 10.0, 20.0, 1.0, None);
+        assert_ne!(hash, 0);
+    }
+}

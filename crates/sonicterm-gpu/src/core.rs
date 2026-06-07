@@ -2621,10 +2621,10 @@ impl GpuRenderer {
                     // after takeover). Pass 1.0 to keep the cache key
                     // shape; T3 will drop the param from `row_hash`
                     // itself.
-                    let key = sonicterm_text::row_glyph_cache::row_hash(
+                    let key = sonicterm_text::row_glyph_cache::row_hash_cells(
                         view_top_abs,
                         r as usize,
-                        row.as_flat_slice(),
+                        row.iter(),
                         self.style_rev,
                         cell_w,
                         cell_h,
@@ -2910,10 +2910,10 @@ impl GpuRenderer {
                 // G1a: pass 1.0 for the legacy DPI hash input
                 // (cell_w/cell_h ARE raster px now). T3 will drop
                 // the param from `row_quad_hash` itself.
-                let key = crate::row_quad_cache::row_quad_hash(
+                let key = crate::row_quad_cache::row_quad_hash_cells(
                     view_top_abs_bg,
                     r as usize,
-                    row_cells.as_flat_slice(),
+                    row_cells.iter(),
                     self.style_rev,
                     cell_w,
                     cell_h,
