@@ -409,6 +409,7 @@ fn scroll_name(s: ScrollAction) -> &'static str {
 /// uses [`palette_actions`] so it does not expose placeholder commands.
 pub fn all_actions() -> Vec<Action> {
     let mut actions = palette_actions();
+    actions.push(Action::ShowKeymapCheatsheet);
     actions.push(Action::ApplyTheme("wezterm".into()));
     actions.push(Action::OpenSshPane("alice@example.com".into()));
     actions
@@ -465,7 +466,6 @@ pub fn palette_actions() -> Vec<Action> {
         // Search / palette / editable config files
         Action::OpenSearch,
         Action::OpenCommandPalette,
-        Action::ShowKeymapCheatsheet,
         Action::EditConfigFile,
         Action::OpenKeymapFile,
         // Scroll
@@ -485,7 +485,7 @@ pub fn palette_actions() -> Vec<Action> {
 }
 
 fn palette_accepts_keymap_action(action: &Action) -> bool {
-    !matches!(action, Action::OpenSshPane(_))
+    !matches!(action, Action::OpenSshPane(_) | Action::ShowKeymapCheatsheet)
 }
 
 /// Coverage assertion: every variant kind from
@@ -509,6 +509,7 @@ mod tests {
         let actions = palette_actions();
         assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
         assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::ShowKeymapCheatsheet)));
         assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
         assert!(actions
             .iter()
@@ -529,6 +530,10 @@ mod tests {
                     keys: "super+shift+s".into(),
                     action: ActionWrapper(Action::OpenSshPane("alice@example.com".into())),
                 },
+                Binding {
+                    keys: "super+shift+?".into(),
+                    action: ActionWrapper(Action::ShowKeymapCheatsheet),
+                },
             ],
         };
         let mut palette = CommandPalette::new();
@@ -540,6 +545,7 @@ mod tests {
             .expect("concrete keymap theme action should be visible");
         assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some("⌘⇧Y"));
         assert!(!visible.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+        assert!(!visible.iter().any(|a| matches!(a, Action::ShowKeymapCheatsheet)));
     }
 
     #[test]
