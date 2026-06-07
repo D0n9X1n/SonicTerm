@@ -35,6 +35,26 @@ fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
+fn read_only_allows_action(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::NewTab
+            | Action::CloseTab
+            | Action::SplitRight
+            | Action::SplitDown
+            | Action::ClosePane
+            | Action::CloseActivePaneOrTab
+            | Action::TogglePaneZoom
+            | Action::ResizePaneLeft
+            | Action::ResizePaneRight
+            | Action::ResizePaneUp
+            | Action::ResizePaneDown
+            | Action::ResizePane { .. }
+            | Action::NewWindow
+            | Action::OpenSshPane(_)
+    )
+}
+
 impl App {
     pub(super) fn do_window_event(
         &mut self,
@@ -1471,6 +1491,19 @@ impl App {
                     return;
                 }
                 if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
+                    for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if read_only_allows_action(&action)
+                                && self.run_action_for_window(&action, win_id)
+                            {
+                                self.drain_pending_window_creates(el);
+                                if let Some(w) = self.main_window() {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
                     self.copy_mode_handle_key(&event);
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
