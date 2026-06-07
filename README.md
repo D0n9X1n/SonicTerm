@@ -58,6 +58,10 @@ long-running output without accidentally typing into the active shell.
 
 ### Drag tabs between windows
 
+This is SonicTerm's most important workflow feature: tabs are not trapped in one
+window. Drag a busy terminal out into its own window, work there, then drag it
+back when the context belongs with the original session again.
+
 ![SonicTerm tab drag demo](assets/screenshots/tab-drag-demo.gif)
 
 ## Why try it?
