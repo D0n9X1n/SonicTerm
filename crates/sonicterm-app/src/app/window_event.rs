@@ -35,18 +35,6 @@ fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
-fn read_only_allows_action(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::NextTab
-            | Action::PrevTab
-            | Action::ActivateTab(_)
-            | Action::ActivateLastTab
-            | Action::FocusPane(_)
-            | Action::OpenSearch
-    )
-}
-
 impl App {
     pub(super) fn do_window_event(
         &mut self,
@@ -1485,7 +1473,7 @@ impl App {
                 if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
                     for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if read_only_allows_action(&action)
+                            if super::keymap_dispatch::read_only_allows_action(&action)
                                 && self.run_action_for_window(&action, win_id)
                             {
                                 self.drain_pending_window_creates(el);

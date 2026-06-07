@@ -527,8 +527,29 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.frontmost_window = Some(win_id);
                 if child.copy_mode.is_some() {
-                    child_copy_mode_handle_key(child, &event);
-                    child.request_redraw();
+                    if child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()) {
+                        let child_mods = child.modifiers;
+                        let _ = child;
+                        for key_str in key_to_strings(&event.logical_key, child_mods) {
+                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                                if super::keymap_dispatch::read_only_allows_action(&action)
+                                    && self.run_action_for_window(&action, win_id)
+                                {
+                                    self.drain_pending_window_creates(el);
+                                    if let Some(c) = self.windows.get(&win_id) {
+                                        c.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        let Some(child) = self.windows.get_mut(&win_id) else { return };
+                        child_copy_mode_handle_key(child, &event);
+                        child.request_redraw();
+                    } else {
+                        child_copy_mode_handle_key(child, &event);
+                        child.request_redraw();
+                    }
                     return;
                 }
                 // Epic #289 follow-up: when the cheat sheet / command

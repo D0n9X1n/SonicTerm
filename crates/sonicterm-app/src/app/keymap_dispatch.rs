@@ -35,7 +35,34 @@ use super::{
     WindowState,
 };
 
+pub(super) fn read_only_allows_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::NextTab
+            | Action::PrevTab
+            | Action::ActivateTab(_)
+            | Action::ActivateLastTab
+            | Action::FocusPane(_)
+            | Action::OpenSearch
+    )
+}
+
 impl App {
+    fn read_only_active_for_kind(&self, kind: FrontmostKind) -> bool {
+        match kind {
+            FrontmostKind::Main => self
+                .main()
+                .and_then(|ws| ws.copy_mode.as_ref())
+                .is_some_and(|mode| mode.is_read_only()),
+            FrontmostKind::Child(id) => self
+                .windows
+                .get(&id)
+                .and_then(|ws| ws.copy_mode.as_ref())
+                .is_some_and(|mode| mode.is_read_only()),
+            FrontmostKind::None | FrontmostKind::Other => false,
+        }
+    }
+
     pub fn run_action(&mut self, action: &Action) -> bool {
         // Epic #289 Phase A — if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
@@ -43,6 +70,10 @@ impl App {
         // AND the next action doesn't retry the dead window. This single
         // up-front check covers every routed arm.
         let _ = self.clear_stale_frontmost();
+        if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)
+        {
+            return true;
+        }
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::EnterCopyMode => self.enter_copy_mode(),
@@ -449,6 +480,9 @@ impl App {
     pub fn run_action_for_window(&mut self, action: &Action, source_window_id: WindowId) -> bool {
         let _ = self.clear_stale_frontmost();
         let source_kind = self.kind_for(source_window_id);
+        if self.read_only_active_for_kind(source_kind) && !read_only_allows_action(action) {
+            return true;
+        }
         match action {
             Action::CopyToClipboard => self.copy_selection(),
             Action::EnterCopyMode => self.enter_copy_mode(),

@@ -38,7 +38,7 @@ const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
-const READ_ONLY_BADGE_W: f32 = 180.0;
+const READ_ONLY_BADGE_W: f32 = 240.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
 const READ_ONLY_BADGE_PAD_RIGHT: f32 = 32.0;
@@ -3737,10 +3737,6 @@ impl GpuRenderer {
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
-                let text_area_x =
-                    badge_x + SEARCH_BAR_PAD_LEFT + icon_layout.width_px + SEARCH_BAR_ICON_GAP;
-                let text_area_w =
-                    (badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - text_area_x).max(0.0);
                 let label_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3754,9 +3750,7 @@ impl GpuRenderer {
                     (sw, sh),
                     Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
                 );
-                let label_x =
-                    (badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px)
-                        .max(text_area_x);
+                let label_x = badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
