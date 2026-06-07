@@ -76,19 +76,17 @@ impl App {
         let (handled, keep_search) = match &event.logical_key {
             Key::Named(NamedKey::Escape) => (true, false),
             Key::Named(NamedKey::Enter) => {
-                if mods.shift_key() {
-                    search.input_char('\n', grid);
-                } else if search.current.is_none() {
+                if search.current.is_none() {
                     search.select_nearest(anchor_row, anchor_col);
+                } else if mods.shift_key() {
+                    search.prev();
                 } else {
                     search.next();
                 }
                 (true, true)
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if mods.shift_key() {
-                    search.scroll_view_down();
-                } else if search.current.is_none() {
+                if search.current.is_none() {
                     search.next_from(anchor_row, anchor_col);
                 } else {
                     search.next();
@@ -96,9 +94,7 @@ impl App {
                 (true, true)
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if mods.shift_key() {
-                    search.scroll_view_up();
-                } else if search.current.is_none() {
+                if search.current.is_none() {
                     search.prev_from(anchor_row, anchor_col);
                 } else {
                     search.prev();

@@ -63,33 +63,6 @@ fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
-fn badge_label_lines(label: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let bytes = label.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                lines.push(&label[start..i]);
-                i += 1;
-                start = i;
-            }
-            b'\r' => {
-                lines.push(&label[start..i]);
-                i += 1;
-                if i < bytes.len() && bytes[i] == b'\n' {
-                    i += 1;
-                }
-                start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    lines.push(&label[start..]);
-    lines
-}
-
 /// Renderer initialization settings derived from config.
 #[derive(Debug, Clone, Copy)]
 pub struct RendererSettings<'a> {
@@ -277,8 +250,7 @@ use sonicterm_ui::{
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
-        PALETTE_ROW_RADIUS, SEARCH_BAR_EXTRA_LINE_HEIGHT, SEARCH_BAR_HEIGHT, SEARCH_BAR_MAX_HEIGHT,
-        SEARCH_BAR_PAD_X,
+        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_PAD_X,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -3646,29 +3618,17 @@ impl GpuRenderer {
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
         let read_only_badge = read_only_mode.then(|| read_only_badge_rect(sw, sh));
-        let search_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
+        let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         let search_label = search.map(search_bar_label);
         let search_bar_layout = search_label.as_ref().map(|label| {
-            let lines = badge_label_lines(label);
-            let content_w = lines
-                .iter()
-                .map(|line| estimate_badge_text_width(line, search_font_size))
-                .fold(0.0, f32::max);
-            let max_visible_lines = ((SEARCH_BAR_MAX_HEIGHT - SEARCH_BAR_HEIGHT)
-                / SEARCH_BAR_EXTRA_LINE_HEIGHT)
-                .floor()
-                .max(0.0) as usize
-                + 1;
-            let visible_line_count = lines.len().min(max_visible_lines);
+            let content_w = estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
-                SearchBarLayout::compute_at_row_with_lines(sw, sh, content_w, 1, visible_line_count)
+                SearchBarLayout::compute_at_row(sw, sh, content_w, 1)
             } else {
-                SearchBarLayout::compute_at_row_with_lines(sw, sh, content_w, 0, visible_line_count)
+                SearchBarLayout::compute(sw, sh, content_w)
             }
         });
-        if let (Some(s), Some(label), Some(layout)) =
-            (search, search_label.as_ref(), search_bar_layout)
-        {
+        if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
             let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
             quads_overlay.push(QuadInstance::rounded(
@@ -3687,49 +3647,30 @@ impl GpuRenderer {
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let lines = badge_label_lines(label);
-                let line_stride = SEARCH_BAR_EXTRA_LINE_HEIGHT.min(layout.border.h.max(1.0));
                 let visible_w = (layout.border.w - SEARCH_BAR_PAD_X * 2.0).max(0.0);
-                let visible_capacity =
-                    ((layout.border.h - SEARCH_BAR_HEIGHT) / line_stride).floor().max(0.0) as usize
-                        + 1;
-                let start = s.view_row_offset.min(lines.len().saturating_sub(1));
-                let end = (start + visible_capacity).min(lines.len());
-                let visible_lines = &lines[start..end];
-                let total_text_h = line_stride * visible_lines.len() as f32;
-                let first_baseline = layout.border.y
-                    + ((layout.border.h - total_text_h) * 0.5).max(0.0)
-                    + search_font_size * 0.8;
-                for (line_idx, line) in visible_lines.iter().enumerate() {
-                    let text_w = estimate_badge_text_width(line, search_font_size);
-                    let scroll_x = (text_w - visible_w).max(0.0);
-                    let baseline = first_baseline + line_idx as f32 * line_stride;
-                    let chrome_layout = chrome_text::layout(
-                        stack,
-                        &mut wt,
-                        &mut self.glyph_atlas,
-                        line,
-                        search_badge_fg,
-                        ChromeAttrs::default(),
-                        search_font_size,
-                        search_font_size,
-                        (layout.border.x + SEARCH_BAR_PAD_X - scroll_x, baseline),
-                        (sw, sh),
-                        Some(ChromeClip {
-                            x: layout.border.x,
-                            y: layout.border.y,
-                            w: layout.border.w,
-                            h: layout.border.h,
-                        }),
-                    );
-                    overlay_glyph_instances.extend(chrome_layout.glyphs);
-                }
+                let text_w = estimate_badge_text_width(label, search_font_size);
+                let scroll_x = (text_w - visible_w).max(0.0);
+                let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
+                let chrome_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    label,
+                    search_badge_fg,
+                    ChromeAttrs::default(),
+                    search_font_size,
+                    search_font_size,
+                    (layout.border.x + SEARCH_BAR_PAD_X - scroll_x, baseline),
+                    (sw, sh),
+                    Some(ChromeClip {
+                        x: layout.border.x,
+                        y: layout.border.y,
+                        w: layout.border.w,
+                        h: layout.border.h,
+                    }),
+                );
+                overlay_glyph_instances.extend(chrome_layout.glyphs);
             }
         }
 
@@ -3748,7 +3689,7 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let font_size = self.raster_px(self.font_size.max(1.0));
+                let font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
                 let label_w = estimate_badge_text_width(READ_ONLY_BADGE_LABEL, font_size);

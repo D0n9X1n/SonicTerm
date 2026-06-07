@@ -59,9 +59,6 @@ pub struct SearchState {
     pub requested_scroll_row: Option<u32>,
     /// Last regex compile error, if any (so the UI can show it).
     pub regex_error: Option<String>,
-    /// First query line shown in the search-bar viewport when the query spans
-    /// more lines than the badge can display.
-    pub view_row_offset: usize,
 }
 
 impl SearchState {
@@ -70,35 +67,16 @@ impl SearchState {
     }
 
     pub fn input_char(&mut self, ch: char, grid: &Grid) {
+        if matches!(ch, '\r' | '\n') {
+            return;
+        }
         self.query.push(ch);
-        self.scroll_to_bottom();
         self.refresh(grid);
     }
 
     pub fn backspace(&mut self, grid: &Grid) {
         self.query.pop();
-        self.clamp_view_row_offset();
         self.refresh(grid);
-    }
-
-    pub fn scroll_view_up(&mut self) {
-        self.view_row_offset = self.view_row_offset.saturating_sub(1);
-    }
-
-    pub fn scroll_view_down(&mut self) {
-        self.view_row_offset = (self.view_row_offset + 1).min(self.max_view_row_offset());
-    }
-
-    fn scroll_to_bottom(&mut self) {
-        self.view_row_offset = self.max_view_row_offset();
-    }
-
-    fn clamp_view_row_offset(&mut self) {
-        self.view_row_offset = self.view_row_offset.min(self.max_view_row_offset());
-    }
-
-    fn max_view_row_offset(&self) -> usize {
-        normalized_newlines(&self.query).split('\n').count().saturating_sub(1)
     }
 
     /// Toggle case sensitivity (Cmd+I) and recompute.
@@ -299,11 +277,7 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
     if query.is_empty() {
         return Vec::new();
     }
-    let normalized = normalized_newlines(query);
-    if normalized.contains('\n') {
-        return find_multiline_in_grid(grid, &normalized, case_sensitive);
-    }
-    let needle: Vec<char> = query_chars(&normalized, case_sensitive);
+    let needle: Vec<char> = query_chars(query, case_sensitive);
     if needle.is_empty() {
         return Vec::new();
     }
@@ -320,138 +294,12 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
     out
 }
 
-fn normalized_newlines(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                out.push('\n');
-            }
-            '\n' => out.push('\n'),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 fn query_chars(input: &str, case_sensitive: bool) -> Vec<char> {
     if case_sensitive {
         input.chars().collect()
     } else {
         input.chars().flat_map(char::to_lowercase).collect()
     }
-}
-
-struct SearchRow<'a> {
-    abs_row: u32,
-    visible: Vec<Visible<'a>>,
-    flat: Vec<char>,
-    owner: Vec<usize>,
-}
-
-fn search_row(row: &Row, abs_row: u32, case_sensitive: bool) -> SearchRow<'_> {
-    let visible = visible_cells(row, case_sensitive);
-    let mut flat: Vec<char> = Vec::with_capacity(visible.len());
-    let mut owner: Vec<usize> = Vec::with_capacity(visible.len());
-    for (vi, v) in visible.iter().enumerate() {
-        for ch in &v.chars {
-            flat.push(*ch);
-            owner.push(vi);
-        }
-    }
-    while flat.last() == Some(&' ') {
-        flat.pop();
-        owner.pop();
-    }
-    SearchRow { abs_row, visible, flat, owner }
-}
-
-fn find_multiline_in_grid(
-    grid: &Grid,
-    normalized_query: &str,
-    case_sensitive: bool,
-) -> Vec<MatchRange> {
-    let needle_lines: Vec<Vec<char>> =
-        normalized_query.split('\n').map(|line| query_chars(line, case_sensitive)).collect();
-    if needle_lines.is_empty() {
-        return Vec::new();
-    }
-
-    let scrollback_len = grid.scrollback_len();
-    let mut rows = Vec::new();
-    rows.extend(
-        grid.scrollback_iter()
-            .enumerate()
-            .map(|(r, row)| search_row(row, r as u32, case_sensitive)),
-    );
-    rows.extend(grid.rows_iter().enumerate().map(|(r, row)| {
-        let abs = (scrollback_len + r) as u32;
-        search_row(row, abs, case_sensitive)
-    }));
-
-    let mut out = Vec::new();
-    for start_row in 0..rows.len() {
-        let first = &needle_lines[0];
-        let start_cols: Box<dyn Iterator<Item = usize>> = if first.is_empty() {
-            Box::new(std::iter::once(rows[start_row].flat.len()))
-        } else {
-            Box::new(0..=rows[start_row].flat.len().saturating_sub(first.len()))
-        };
-        for start_col in start_cols {
-            if !multi_line_match_at(&rows, &needle_lines, start_row, start_col, &mut out) {
-                continue;
-            }
-        }
-    }
-    out
-}
-
-fn multi_line_match_at(
-    rows: &[SearchRow<'_>],
-    needle_lines: &[Vec<char>],
-    start_row: usize,
-    start_col: usize,
-    out: &mut Vec<MatchRange>,
-) -> bool {
-    let mut ranges = Vec::new();
-    for (line_idx, needle) in needle_lines.iter().enumerate() {
-        let Some(row) = rows.get(start_row + line_idx) else {
-            return false;
-        };
-        let offset = if line_idx == 0 { start_col } else { 0 };
-        if offset + needle.len() > row.flat.len() {
-            return false;
-        }
-        if row.flat[offset..offset + needle.len()] != needle[..] {
-            return false;
-        }
-        let is_last = line_idx + 1 == needle_lines.len();
-        let end = offset + needle.len();
-        if !is_last && end != row.flat.len() {
-            return false;
-        }
-        if let Some(range) = flat_range_to_match(row, offset, end) {
-            ranges.push(range);
-        }
-    }
-    out.extend(ranges);
-    true
-}
-
-fn flat_range_to_match(row: &SearchRow<'_>, start: usize, end: usize) -> Option<MatchRange> {
-    if end <= start {
-        return None;
-    }
-    let start_cell = row.owner.get(start).copied()?;
-    let end_cell = row.owner.get(end - 1).copied()?;
-    let col_start = row.visible[start_cell].col;
-    let last = &row.visible[end_cell];
-    let extra = if last.is_wide { 1 } else { 0 };
-    Some(MatchRange { row: row.abs_row, col_start, col_end: last.col + 1 + extra })
 }
 
 /// Regex variant. Returns `Err(msg)` with the compile error if `pattern`
@@ -575,7 +423,6 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sonicterm_grid::grid::Color;
 
     fn state_with_matches() -> SearchState {
         SearchState {
@@ -608,65 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn search_query_view_scrolls_between_lines() {
+    fn search_ignores_newline_input() {
+        let grid = Grid::new(10, 2);
         let mut s = SearchState::new();
-        s.query = "one\ntwo\nthree".into();
-        s.scroll_to_bottom();
-        assert_eq!(s.view_row_offset, 2);
-        s.scroll_view_up();
-        assert_eq!(s.view_row_offset, 1);
-        s.scroll_view_down();
-        assert_eq!(s.view_row_offset, 2);
-    }
-
-    fn grid_with_lines(lines: &[&str]) -> Grid {
-        let rows = lines.len().max(1) as u16;
-        let mut grid = Grid::new(16, rows);
-        for (idx, line) in lines.iter().enumerate() {
-            if idx > 0 {
-                grid.linefeed();
-                grid.carriage_return();
-            }
-            for ch in line.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
-            }
-        }
-        grid
-    }
-
-    #[test]
-    fn multiline_search_matches_across_rows_with_lf() {
-        let grid = grid_with_lines(&["foo", "bar"]);
-        assert_eq!(
-            find_in_grid(&grid, "foo\nbar", true),
-            vec![
-                MatchRange { row: 0, col_start: 0, col_end: 3 },
-                MatchRange { row: 1, col_start: 0, col_end: 3 },
-            ]
-        );
-    }
-
-    #[test]
-    fn multiline_search_matches_windows_crlf_query() {
-        let grid = grid_with_lines(&["foo", "bar"]);
-        assert_eq!(
-            find_in_grid(&grid, "foo\r\nbar", true),
-            vec![
-                MatchRange { row: 0, col_start: 0, col_end: 3 },
-                MatchRange { row: 1, col_start: 0, col_end: 3 },
-            ]
-        );
-    }
-
-    #[test]
-    fn multiline_search_matches_classic_mac_cr_query() {
-        let grid = grid_with_lines(&["foo", "bar"]);
-        assert_eq!(
-            find_in_grid(&grid, "foo\rbar", true),
-            vec![
-                MatchRange { row: 0, col_start: 0, col_end: 3 },
-                MatchRange { row: 1, col_start: 0, col_end: 3 },
-            ]
-        );
+        s.input_char('a', &grid);
+        s.input_char('\n', &grid);
+        s.input_char('\r', &grid);
+        s.input_char('b', &grid);
+        assert_eq!(s.query, "ab");
     }
 }
