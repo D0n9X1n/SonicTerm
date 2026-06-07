@@ -101,7 +101,7 @@ cols = 100
 rows = 30
 padding_left = 12
 padding_right = 12
-padding_top = 10
+padding_top = 8
 padding_bottom = 4
 
 [appearance]

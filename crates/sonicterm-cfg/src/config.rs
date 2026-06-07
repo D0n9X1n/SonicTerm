@@ -383,7 +383,7 @@ impl Default for WindowConfig {
             padding: None,
             padding_left: 12.0,
             padding_right: 12.0,
-            padding_top: 10.0,
+            padding_top: 8.0,
             padding_bottom: 4.0,
             decorations: true,
             opacity: 1.0,
