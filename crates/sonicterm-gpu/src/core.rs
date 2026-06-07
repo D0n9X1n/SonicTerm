@@ -41,6 +41,8 @@ const SEARCH_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_W: f32 = 180.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
+const READ_ONLY_BADGE_PAD_RIGHT: f32 = 18.0;
+const READ_ONLY_BADGE_BASELINE_NUDGE_Y: f32 = -2.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
 /// Renderer compositor settings that affect surface configuration.
@@ -3719,7 +3721,8 @@ impl GpuRenderer {
                 let font_size =
                     self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
-                let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
+                let baseline =
+                    badge_y + (badge_h + font_size * 0.8) * 0.5 + READ_ONLY_BADGE_BASELINE_NUDGE_Y;
                 let icon_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3736,7 +3739,8 @@ impl GpuRenderer {
                 overlay_glyph_instances.extend(icon_layout.glyphs);
                 let text_area_x =
                     badge_x + SEARCH_BAR_PAD_LEFT + icon_layout.width_px + SEARCH_BAR_ICON_GAP;
-                let text_area_w = (badge_x + badge_w - SEARCH_BAR_PAD_RIGHT - text_area_x).max(0.0);
+                let text_area_w =
+                    (badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - text_area_x).max(0.0);
                 let label_layout = chrome_text::layout(
                     stack,
                     &mut wt,
