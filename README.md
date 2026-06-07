@@ -1,153 +1,96 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm" width="160" height="160"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm" width="150" height="150"/>
 
 # SonicTerm
 
-**SonicTerm 1.0.0 — a GPU-accelerated terminal for macOS and Windows.**
+**A fast, native, GPU-accelerated terminal for people who live in the shell.**
 
 [![CI](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/ci.yml)
 [![Release](https://github.com/D0n9X1n/SonicTerm/actions/workflows/release.yml/badge.svg)](https://github.com/D0n9X1n/SonicTerm/actions/workflows/release.yml)
+[![Version](https://img.shields.io/github/v/tag/D0n9X1n/SonicTerm?sort=semver&label=version)](https://github.com/D0n9X1n/SonicTerm/tags)
+[![Downloads](https://img.shields.io/github/downloads/D0n9X1n/SonicTerm/total?label=downloads)](https://github.com/D0n9X1n/SonicTerm/releases)
+[![Stars](https://img.shields.io/github/stars/D0n9X1n/SonicTerm?style=flat&label=stars)](https://github.com/D0n9X1n/SonicTerm/stargazers)
+[![Issues](https://img.shields.io/github/issues/D0n9X1n/SonicTerm?label=issues)](https://github.com/D0n9X1n/SonicTerm/issues)
+[![Pull Requests](https://img.shields.io/github/issues-pr/D0n9X1n/SonicTerm?label=prs)](https://github.com/D0n9X1n/SonicTerm/pulls)
+[![Last Commit](https://img.shields.io/github/last-commit/D0n9X1n/SonicTerm?label=last%20commit)](https://github.com/D0n9X1n/SonicTerm/commits/main)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
-## What it is
+SonicTerm is a native macOS + Windows terminal with the quality-of-life features
+you expect from a modern editor: searchable commands, split panes, draggable
+tabs, editable TOML config, bundled Nerd-Font-patched typography, and a renderer
+that is designed around GPU quads instead of CPU blits.
 
-SonicTerm is a native terminal with tabs, split panes, command palette, search,
-copy mode, IME, OSC 8 hyperlinks, OSC 133 shell markers, drag-out tabs, and
-GPU rendering through `wgpu`.
+It aims to feel small, sharp, and quiet: no Electron shell, no heavyweight
+runtime, no required GUI preferences pane, and no global dotfile sprawl. User
+state lives under one directory: `~/.snoicterm`.
 
-Supported platforms for 1.0.0:
+Need installation, configuration, keybindings, or theme authoring docs? Read the
+full bilingual docs in [`wiki/`](wiki/). The README is only the product overview:
+why SonicTerm exists, what it feels like, and why you might want to use it.
 
-- macOS 14+
-- Windows 10/11 x64
+## Screenshots
 
-Linux, auto-update, and session restore are not part of 1.0.0. Installers are
-currently unsigned and there is no signing plan yet.
+### Command palette + editable config
 
-## Install
+The command palette is the center of the UI: search commands, see the active
+keymap shortcut, open config/keymaps, rename tabs, split panes, toggle chrome,
+and reload settings without leaving the terminal.
 
-Every `v*` tag builds release artifacts automatically:
+![SonicTerm command palette editing config](assets/screenshots/command-palette-config.png)
 
-- macOS: unsigned `SonicTerm-<tag>-mac-universal.dmg`
-- Windows: unsigned `.msi`
+### Split panes built for AI CLIs and real terminal apps
 
-Download from <https://github.com/D0n9X1n/SonicTerm/releases>.
+SonicTerm supports multiple panes, per-pane PTYs, tab titles, Nerd Font icons,
+Powerline glyphs, emoji, CJK, and terminal apps that draw their own UI.
 
-From source:
+![SonicTerm split panes running AI CLIs](assets/screenshots/split-panes-ai-cli.png)
 
-```sh
-git clone https://github.com/D0n9X1n/SonicTerm.git
-cd SonicTerm
+### Drag tabs between windows
 
-cargo build --release -p sonicterm-mac       # macOS
-cargo build --release -p sonicterm-windows   # Windows
-```
+<video src="assets/screenshots/tab-drag-demo.mp4" controls muted playsinline width="100%"></video>
 
-## Quick start
+If your Markdown renderer does not show video inline, open
+[`assets/screenshots/tab-drag-demo.mp4`](assets/screenshots/tab-drag-demo.mp4).
 
-| Action | macOS | Windows |
-| --- | --- | --- |
-| New tab | `Cmd+T` | `Ctrl+T` |
-| Close pane/tab | `Cmd+W` | `Ctrl+Shift+W` |
-| Split right | `Cmd+D` | `Ctrl+Shift+D` |
-| Split down | `Cmd+Shift+D` | `Ctrl+Alt+Shift+D` |
-| Command palette | `Cmd+Shift+P` | `Ctrl+Shift+P` |
-| Search | `Cmd+F` | `Ctrl+Shift+F` |
-| Copy mode | `Cmd+[` | `Ctrl+Shift+[` |
+## Why try it?
 
-The command palette shows the active keymap shortcut for each command. Tabs can
-be dragged out into their own window and dragged back to merge.
+- **Native macOS + Windows app** — small binaries, no Electron, no web runtime.
+- **GPU renderer** — wgpu on Metal / D3D12, with atlas-backed text and batched
+  quads for cells, chrome, selection, cursor, search, and overlays.
+- **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
+  pane focus, copy/read-only mode, quick-select URL hints, and search.
+- **Command palette first** — commands are searchable and display shortcuts from
+  your current keymap config.
+- **Config is just files** — `~/.snoicterm/sonicterm.toml`, plus editable
+  `themes/` and `keymaps/` examples seeded on first launch.
+- **Bundled typography** — `Rec Mono St.Helens` ships with the app and is
+  Nerd-Font-patched, so icons and prompt glyphs work out of the box.
+- **WezTerm-inspired behavior** — terminal, font, keymap, and rendering details
+  follow WezTerm-proven semantics where SonicTerm has absorbed them.
 
-## Configuration
+## Documentation lives in the wiki
 
-Config path on macOS and Windows: `~/.snoicterm/sonicterm.toml`
+The README intentionally avoids operational details. If you want to install it,
+change preferences, edit keybindings, author a theme, inspect logs, or build from
+source, use the bilingual wiki:
 
-Logs on macOS and Windows: `~/.snoicterm/logs/sonicterm.log`
+| Topic | Wiki page |
+| --- | --- |
+| Usage and installation | [`wiki/Usage.md`](wiki/Usage.md) |
+| Preferences and `sonicterm.toml` | [`wiki/Configuration.md`](wiki/Configuration.md) |
+| Keymap editing | [`wiki/Keybindings.md`](wiki/Keybindings.md) |
+| Theme authoring | [`wiki/Themes.md`](wiki/Themes.md) |
+| Logs and diagnostics | [`wiki/Logging.md`](wiki/Logging.md) |
 
-Default theme: `wezterm`, a modified Gruvbox dark hard palette with SonicTerm's
-near-black background and yellow cursor.
+## Thanks, WezTerm
 
-Default font: `Rec Mono St.Helens`, bundled and Nerd-Font-patched. The macOS
-`.app` includes it in both `Contents/Resources/assets/fonts` and
-`Contents/Resources/Fonts`; the Windows `.msi` installs it under
-`assets/fonts` next to the executable.
-
-Minimal config:
-
-```toml
-theme = "wezterm"
-# Platform default:
-#   macOS   -> sonicterm-macos
-#   Windows -> sonicterm-windows
-#   Linux   -> sonicterm-linux
-keymap = "sonicterm-macos"
-
-[font]
-family = "Rec Mono St.Helens"
-size = 13
-line_height = 1.3
-
-[window]
-# Terminal content margins:
-# +---------------- window ----------------+
-# | padding_top                            |
-# |  terminal grid (cols x rows)           |
-# | padding_bottom                         |
-# +----------------------------------------+
-#   ^ padding_left        padding_right ^
-cols = 100
-rows = 30
-padding_left = 12
-padding_right = 12
-padding_top = 8
-padding_bottom = 4
-
-[appearance]
-# Floating panel inner padding:
-# +------------- panel -------------+
-# | panel_padding                   |
-# |  command palette / cheatsheet   |
-# | panel_padding                   |
-# +---------------------------------+
-opacity = 1.0
-panel_padding = 2.0
-scrollbar = "auto"
-
-[terminal]
-cursor_blink = true
-cursor_shape = "block"
-```
-
-Full bilingual usage/config/keybinding/logging/theme docs live in `wiki/`.
-
-## Developer docs
-
-- `docs/ARCHITECTURE.md` — architecture and data flow.
-- `docs/MODULES.md` — crate map.
-- `docs/LOGGING.md` — log paths and diagnostics.
-- `docs/RELEASE.md` — 1.0.0 release process.
-
-Each crate has a local `CLAUDE.md` with its purpose, public surface, pitfalls,
-and test gate.
-
-## Tests
-
-Normal PR and `main` CI run unit tests only:
-
-```sh
-cargo test --workspace --lib --bins
-```
-
-Release tags run the same unit tests and then build macOS/Windows installers.
-
-## WezTerm acknowledgement
-
-SonicTerm owes a lot to [WezTerm](https://github.com/wezterm/wezterm). We use
-WezTerm as the reference for terminal semantics, font behavior, keymap
-conventions, and many rendering edge cases. Several proven ideas were absorbed
-into Sonic-owned crates rather than kept as a vendor dependency:
+SonicTerm owes a lot to [WezTerm](https://github.com/wezterm/wezterm). WezTerm
+is the reference for terminal semantics, font behavior, keymap conventions, and
+many rendering edge cases. SonicTerm has absorbed WezTerm-proven ideas into
+Sonic-owned crates:
 
 - VT/grid behavior in `sonicterm-vt` and `sonicterm-grid`.
 - Font fallback, shaping, and rasterization in `sonicterm-font`.
