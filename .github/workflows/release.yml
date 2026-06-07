@@ -123,7 +123,7 @@ jobs:
 
       - name: Build icons
         run: |
-          brew install create-dmg librsvg imagemagick
+          brew install create-dmg imagemagick
           bash assets/icons/bake-icons.sh
 
       - name: Build dmg

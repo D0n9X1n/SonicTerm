@@ -1,46 +1,27 @@
 #!/usr/bin/env bash
-# Bake all icon assets from the source masters.
+# Bake all icon assets from the source master.
 #
-# Inputs (assets/icons/source/):
+# Input (assets/icons/source/):
 #   sonic.png        — full-color app icon (squircle)
-#   sonic-mono.svg   — monochrome glyph (uses currentColor)
-#   sonic-glyph.svg  — color glyph without background
 #
 # Outputs (assets/icons/exports/):
 #   png/sonic-{16,32,48,64,128,256,512,1024}.png  (full-color)
-#   png/sonic-{16,32,48,64,128,256,512,1024}@2x.png (retina pairs)
-#   png/sonic-mono-{16,24,32,48,64}.png
+#   png/sonic-{16,32,64,128,256,512}@2x.png (retina pairs)
 #   sonic.icns      — macOS bundle (built via iconutil; mac only)
 #   sonic.ico       — Windows multi-resolution (built via ImageMagick)
 #
-# Dependencies (any one of these for SVG → PNG):
-#   rsvg-convert (librsvg)   — preferred, fastest
-#   inkscape
-#   magick (ImageMagick)
-#
-# On macOS, `iconutil` is part of the OS (always present).
-# For .ico, ImageMagick `magick` is required.
+# Dependencies:
+#   magick (ImageMagick) or sips for PNG resizing
+#   iconutil for .icns (macOS, part of the OS)
+#   magick for .ico
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/assets/icons/source"
 OUT="$ROOT/assets/icons/exports"
 PNG="$OUT/png"
+rm -rf "$OUT"
 mkdir -p "$PNG"
-
-render() {
-    local svg="$1" size="$2" out="$3"
-    if command -v rsvg-convert >/dev/null 2>&1; then
-        rsvg-convert -w "$size" -h "$size" "$svg" -o "$out"
-    elif command -v inkscape >/dev/null 2>&1; then
-        inkscape -w "$size" -h "$size" "$svg" -o "$out" >/dev/null 2>&1
-    elif command -v magick >/dev/null 2>&1; then
-        magick -background none -density 1200 -resize "${size}x${size}" "$svg" "$out"
-    else
-        echo "Need rsvg-convert, inkscape, or magick" >&2
-        exit 1
-    fi
-}
 
 render_png() {
     local png="$1" size="$2" out="$3"
@@ -61,11 +42,6 @@ done
 echo "==> Retina @2x PNGs"
 for s in 16 32 64 128 256 512; do
     render_png "$SRC/sonic.png" "$((s * 2))" "$PNG/sonic-${s}@2x.png"
-done
-
-echo "==> Mono PNGs (for menu bar / docs)"
-for s in 16 24 32 48 64; do
-    render "$SRC/sonic-mono.svg" "$s" "$PNG/sonic-mono-${s}.png"
 done
 
 # ---- macOS .icns ----
