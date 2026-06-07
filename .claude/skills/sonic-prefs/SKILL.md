@@ -49,8 +49,8 @@ These cover ~95% of user requests. Field path uses TOML dot notation.
 | `theme` | string | `"dracula"` | Must be a name from `list themes`. |
 | `keymap` | string | `"sonicterm-macos"` | From `list keymaps`. |
 | `font.family` | string | `"Rec Mono St.Helens"` | Bundled default. |
-| `font.size` | float | `14.0` | Logical px. |
-| `font.line_height` | float | `1.2` | |
+| `font.size` | float | `13.0` | Logical px. |
+| `font.line_height` | float | `1.3` | |
 | `window.cols` | u16 | `120` | Restart required. |
 | `window.rows` | u16 | `36` | Restart required. |
 | `window.opacity` | float | `1.0` | 0.0–1.0. |

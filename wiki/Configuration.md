@@ -17,8 +17,8 @@ locale = ""
 
 [font]
 family = "Rec Mono St.Helens"
-size = 14
-line_height = 1.1
+size = 13
+line_height = 1.3
 
 [window]
 # Terminal content margins:
@@ -32,7 +32,7 @@ cols = 100
 rows = 30
 padding_left = 12
 padding_right = 12
-padding_top = 4
+padding_top = 10
 padding_bottom = 4
 
 [terminal]
