@@ -728,10 +728,12 @@ mod tests {
 
     #[test]
     fn seeding_user_examples_writes_theme_and_platform_keymaps() {
+        let nonce =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir().join(format!(
             "sonicterm-config-seed-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            nonce
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
