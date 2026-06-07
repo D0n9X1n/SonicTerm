@@ -5192,6 +5192,7 @@ dependencies = [
  "anyhow",
  "log",
  "sonicterm-font",
+ "sonicterm-font-config",
  "sonicterm-grid",
  "sonicterm-text",
  "sonicterm-types",

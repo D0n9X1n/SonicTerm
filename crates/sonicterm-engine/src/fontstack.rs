@@ -95,7 +95,10 @@ impl FontStack {
     /// match `sonicterm-cfg::FontConfig::default()`.
     pub fn try_new_full(primary_family: &str, font_size_pt: f64, dpi: usize) -> Result<Self> {
         install_default_config(primary_family, font_size_pt);
-        let fc = FontConfiguration::new(None, dpi)?;
+        let fc = FontConfiguration::new(
+            Some(build_config(primary_family, font_size_pt, FALLBACK_FAMILIES)),
+            dpi,
+        )?;
         Ok(Self { fc: Rc::new(fc) })
     }
 
@@ -189,4 +192,33 @@ fn install_default_config(primary_family: &str, font_size_pt: f64) {
             FALLBACK_FAMILIES,
         );
     });
+}
+
+fn build_config(
+    primary_family: &str,
+    font_size_pt: f64,
+    fallback_families: &[&str],
+) -> config::ConfigHandle {
+    let mut cfg = config::Config::default_config();
+    let mut font_attrs = Vec::with_capacity(1 + fallback_families.len());
+    font_attrs.push(config::FontAttributes::new(primary_family));
+    for fam in fallback_families {
+        font_attrs.push(config::FontAttributes::new_fallback(fam));
+    }
+    cfg.font = config::TextStyle { font: font_attrs, foreground: None };
+    cfg.font_size = font_size_pt;
+    config::ConfigHandle::new(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_config_records_requested_font_size() {
+        let cfg = build_config("Rec Mono St.Helens", 17.0, &["Symbols Nerd Font Mono"]);
+        assert_eq!(cfg.font_size, 17.0);
+        assert_eq!(cfg.font.font[0].family, "Rec Mono St.Helens");
+        assert_eq!(cfg.font.font[1].family, "Symbols Nerd Font Mono");
+    }
 }

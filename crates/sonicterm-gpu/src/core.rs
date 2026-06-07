@@ -998,12 +998,13 @@ impl GpuRenderer {
         let fs_dpi = (72.0 * sf).round() as usize;
         let font_stack =
             sonicterm_engine::FontStack::try_new_full(font_family, font_size as f64, fs_dpi).ok();
-        let (cell_w, cell_h) =
+        let (cell_w, natural_cell_h) =
             match font_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
                 None => (font_size * 0.6 * sf, font_size * 1.2 * sf),
             };
-        let line_height = cell_h * line_height_mult.max(0.0).max(0.01);
+        let line_height = natural_cell_h * line_height_mult.max(0.0).max(0.01);
+        let cell_h = line_height;
 
         let bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), appearance.opacity);
         let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
@@ -1783,40 +1784,29 @@ impl GpuRenderer {
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
-        // T13/T14: post-the legacy chrome layer `natural_line_h_px` doesn't exist
-        // (cosmic-text gone); derive line height from the wezterm
-        // cell metrics when the FontStack is available, otherwise
-        // approximate from the font size.
-        let new_line_h = if let Some(stack) = self.font_stack.as_ref() {
-            stack.cell_metrics_raster_px().map(|m| m.cell_h as f32).unwrap_or(size * 1.2)
-        } else {
-            size * 1.2
-        } * line_height_mult.max(0.0).max(0.01);
+        let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
+        let new_stack =
+            sonicterm_engine::FontStack::try_new_full(family, f64::from(size), dpi).ok();
+        let (new_cell_w, natural_cell_h) =
+            match new_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
+                Some(m) => (m.cell_w as f32, m.cell_h as f32),
+                None => (self.raster_px(size * 0.6), self.raster_px(size * 1.2)),
+            };
+        let new_line_h = natural_cell_h * line_height_mult.max(0.0).max(0.01);
         let no_change = self.font_family == family
             && (self.font_size - size).abs() < f32::EPSILON
-            && (self.line_height - new_line_h).abs() < f32::EPSILON;
+            && (self.line_height - new_line_h).abs() < f32::EPSILON
+            && (self.cell_w - new_cell_w).abs() < f32::EPSILON
+            && (self.cell_h - new_line_h).abs() < f32::EPSILON;
         if no_change {
             return;
         }
         self.font_family = family.to_string();
         self.font_size = size;
         self.line_height = new_line_h;
-        // G1a: cell metrics from sonicterm-font (raster px). When no
-        // FontStack is available (test fixtures), fall back to a
-        // font-size-derived estimate that keeps callers' aspect-
-        // ratio assumptions intact.
-        if let Some(stack) = self.font_stack.as_ref() {
-            if let Ok(m) = stack.cell_metrics_raster_px() {
-                self.cell_w = m.cell_w as f32;
-                self.cell_h = m.cell_h as f32;
-            } else {
-                self.cell_w = self.raster_px(size * 0.6);
-                self.cell_h = self.raster_px(size * 1.2);
-            }
-        } else {
-            self.cell_w = self.raster_px(size * 0.6);
-            self.cell_h = self.raster_px(size * 1.2);
-        }
+        self.font_stack = new_stack;
+        self.cell_w = new_cell_w;
+        self.cell_h = new_line_h;
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
@@ -1889,7 +1879,10 @@ impl GpuRenderer {
         if let Some(stack) = self.font_stack.as_ref() {
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
-                self.cell_h = m.cell_h as f32;
+                let natural = m.cell_h as f32;
+                let multiplier = if natural > 0.0 { self.line_height / natural } else { 1.0 };
+                self.cell_h = natural * multiplier.max(0.01);
+                self.line_height = self.cell_h;
             }
         }
         self.row_glyph_cache.invalidate_all();

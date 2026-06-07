@@ -12,3 +12,4 @@ sonicterm-types.workspace = true
 sonicterm-grid.workspace = true
 sonicterm-text.workspace = true
 sonicterm-font.workspace = true
+config = { package = "sonicterm-font-config", path = "../sonicterm-font-config" }
