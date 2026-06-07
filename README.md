@@ -48,6 +48,14 @@ Powerline glyphs, emoji, CJK, and terminal apps that draw their own UI.
 
 ![SonicTerm split panes running AI CLIs](assets/screenshots/split-panes-ai-cli.png)
 
+### READONLY mode for safe navigation
+
+READONLY mode blocks terminal input while keeping search, tab switching, and
+pane focus available. It is built for safely inspecting scrollback, config, or
+long-running output without accidentally typing into the active shell.
+
+![SonicTerm READONLY mode with search](assets/screenshots/read-only-search.png)
+
 ### Drag tabs between windows
 
 <video src="assets/screenshots/tab-drag-demo.mp4" controls muted playsinline width="100%"></video>
