@@ -40,34 +40,71 @@ jobs:
         shell: bash
         run: bash scripts/test-release-notes.sh
 
-  build-mac:
-    name: Build macOS dmg
+  build-mac-x86_64:
+    name: Build macOS x86_64 binary
+    runs-on: macos-13
+    needs: [unit-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-mac-x86_64
+
+      - name: Build x86_64
+        run: cargo build --release -p sonicterm-mac
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-mac-x86_64
+          path: target/release/sonicterm-mac
+
+  build-mac-aarch64:
+    name: Build macOS aarch64 binary
     runs-on: macos-14
     needs: [unit-tests]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-mac
-
-      - name: Build x86_64
-        run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
+          shared-key: release-mac-aarch64
 
       - name: Build aarch64
-        run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
+        run: cargo build --release -p sonicterm-mac
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-mac-aarch64
+          path: target/release/sonicterm-mac
+
+  package-mac:
+    name: Package macOS dmg
+    runs-on: macos-14
+    needs: [build-mac-x86_64, build-mac-aarch64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: sonicterm-mac-x86_64
+          path: dist/x86_64
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: sonicterm-mac-aarch64
+          path: dist/aarch64
 
       - name: Make universal binary
         run: |
-          mkdir -p dist
+          chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
           lipo -create \
-            target/x86_64-apple-darwin/release/sonicterm-mac \
-            target/aarch64-apple-darwin/release/sonicterm-mac \
+            dist/x86_64/sonicterm-mac \
+            dist/aarch64/sonicterm-mac \
             -output dist/sonicterm-mac
           file dist/sonicterm-mac
 
@@ -119,7 +156,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Push-Location crates\sonicterm-windows
-          cargo wix --no-build --nocapture --output ..\..\dist\
+          cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist\
           Pop-Location
 
       - uses: actions/upload-artifact@v5
@@ -130,7 +167,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-mac, build-windows]
+    needs: [package-mac, build-windows]
     steps:
       - uses: actions/checkout@v5
         with:
