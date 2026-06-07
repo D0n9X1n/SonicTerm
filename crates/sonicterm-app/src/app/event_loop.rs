@@ -45,10 +45,8 @@ impl App {
         // bucket boundary; fall back to `Wait` when blinking is off,
         // the window is unfocused, or no renderer exists. Explicitly
         // resetting to `Wait` (rather than leaving the previous
-        // `WaitUntil` in place) is what keeps idle headless CPU at
-        // ~0% — otherwise an unfocused window would keep waking at
-        // 26Hz forever (regression: `scripts/bench_headless_gui.sh`
-        // reported 17% idle CPU before this gate).
+        // `WaitUntil` in place) is what keeps idle CPU near zero —
+        // otherwise an unfocused window would keep waking at 26Hz.
         let mut next: Option<std::time::Instant> = None;
         // Perf audit #9: if a redraw was deferred for vsync pacing,
         // schedule the next wake at the upcoming frame boundary. This
@@ -243,9 +241,8 @@ impl App {
         // loader so frame-time misses on CJK / emoji / nerd-font
         // codepoints trigger a background `request_load` and a
         // `UserEvent::ClearShapeCache` wake-up on completion. Skipped
-        // when the App was constructed without a proxy (test harness
-        // path); the existing tofu fallback keeps working in that
-        // case.
+        // when tests construct the App without a proxy; the existing
+        // tofu fallback keeps working in that case.
         if let Some(proxy) = self.event_loop_proxy.clone() {
             renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
         }
@@ -321,9 +318,6 @@ impl App {
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
         self.drain_pending_os_drag_payloads();
-        // #508: publish the freshly-spawned active pane into the harness
-        // sink (no-op without `--features harness`).
-        self.refresh_harness_sink();
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(
@@ -349,7 +343,7 @@ impl App {
                         let _ = p.send_event(UserEvent::ConfigChanged);
                     })
                 } else {
-                    // No proxy (test harness) — fall back to the
+                    // No proxy in this App instance — fall back to the
                     // poll-only behavior; the watcher still delivers,
                     // it just won't wake an idle loop.
                     ConfigWatcher::spawn(path.clone())

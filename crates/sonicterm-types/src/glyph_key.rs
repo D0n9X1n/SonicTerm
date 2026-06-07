@@ -54,7 +54,7 @@ impl GlyphKey {
         })
     }
 
-    /// Convenience constructor for tests and the bench harness.
+    /// Convenience constructor for tests.
     #[inline]
     pub fn new(ch: char, weight_bold: bool, italic: bool) -> Self {
         Self { ch, font_slot: 0, weight_bold, italic, glyph_id: 0 }

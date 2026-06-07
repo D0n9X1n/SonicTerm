@@ -284,7 +284,6 @@ impl App {
                 }
             }
         }
-        self.refresh_harness_sink();
     }
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {

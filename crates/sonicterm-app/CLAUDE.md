@@ -21,10 +21,6 @@ drag/tear-out, and the platform shell abstractions.
 cargo build -p sonicterm-app
 ```
 
-For render, input, VT, or window-state changes, run a GUI smoke on the
-originating platform. On macOS prefer `just visual mac`; it verifies
-frontmost focus and captures the SonicTerm window by id.
-
 ## Guardrails
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.

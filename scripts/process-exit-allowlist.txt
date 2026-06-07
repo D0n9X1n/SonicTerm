@@ -4,18 +4,13 @@
 # `crates/...`). Files matching ANY prefix are permitted to call
 # `std::process::exit` directly.
 #
-# Rule of thumb: examples, benchmarks, and test-only binaries are
-# fine. Anything that ships in the user binary MUST go through
+# Rule of thumb: test-only binaries are fine. Anything that ships in the
+# user binary MUST go through
 # `sonicterm_logging::exit_with(code, reason)` so the exit reason lands
 # in sonic.log.
-
-# Demo / E2E binaries — not shipped in the user-facing app.
-crates/sonicterm-core/examples/
-crates/sonicterm-shared/examples/
 
 # Test-fixture child binary that intentionally exercises the raw
 # process::exit path to assert the documented bypass behaviour.
 
 # Integration tests (the grep gate is about shipped code only).
 crates/sonicterm-logging/tests/
-crates/sonicterm-grid/examples/

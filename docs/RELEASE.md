@@ -28,6 +28,7 @@ git push origin v0.9.1
 
 ```sh
 cargo test --workspace --lib --bins
+bash scripts/check-workspace-crates.sh
 cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 bash scripts/test-release-notes.sh

@@ -10,19 +10,6 @@ description = "SonicTerm Terminal — Windows app"
 [lints]
 workspace = true
 
-[features]
-# Test/automation-only feature that enables the named-pipe input
-# harness (`--harness-input-pipe`). Off by default — release builds
-# MUST NOT carry the symbol (`scripts/check-no-harness-in-release.ps1`
-# enforces). See issue #506.
-#
-# #508: also enables the same-named feature on `sonicterm-app` so the
-# App-side `harness` module (sink type alias + per-pane-change publish
-# helper) is compiled in lockstep. Without this propagation the bin
-# can't see `sonicterm_app::harness::*` or
-# `WindowsShell::with_harness_sink`.
-harness = ["sonicterm-app/harness"]
-
 [dependencies]
 sonicterm-app.workspace = true
 sonicterm-app-core.workspace = true
@@ -30,7 +17,6 @@ sonicterm-cfg.workspace = true
 sonicterm-logging.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-crossbeam-channel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

@@ -60,9 +60,8 @@ pub struct MacShell {
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
     /// #554: one-shot hook fired the instant `create_window` returns
     /// with the raw AppKit window handle. The mac bin uses this slot
-    /// to emit the `SONICTERM_WINDOW_READY` stdout marker carrying
-    /// the CGWindowID so the harness can skip the ~3s Swift-helper
-    /// poll loop. Mirrors [`WindowsShell::with_on_window_ready`].
+    /// to apply AppKit-only per-window setup. Mirrors
+    /// [`WindowsShell::with_on_window_ready`].
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
 }
 
@@ -135,9 +134,7 @@ impl MacShell {
     /// with the raw AppKit window handle. Mirrors
     /// [`WindowsShell::with_on_window_ready`] — same signature, same
     /// plumbing into the cross-platform firing site in
-    /// `app/event_loop.rs`. The mac bin uses this slot to print the
-    /// `SONICTERM_WINDOW_READY` stdout marker carrying the CGWindowID
-    /// so the harness can grep it instead of polling CoreGraphics.
+    /// `app/event_loop.rs`.
     #[must_use]
     pub fn with_on_window_ready(
         mut self,
@@ -217,12 +214,6 @@ pub struct WindowsShell {
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
     pending: Option<TabPayload>,
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// #508: test-automation harness sink. Windows + `--features harness`
-    /// only. Wired in by `sonicterm-windows::main` after the named-pipe
-    /// server is constructed; the App publishes the active main pane's
-    /// `PtyHandle::in_tx` into this slot on every pane-change.
-    #[cfg(feature = "harness")]
-    harness_sink: Option<crate::harness::HarnessSink>,
 }
 
 impl WindowsShell {
@@ -243,8 +234,6 @@ impl WindowsShell {
             os_drag_backend: None,
             pending: None,
             on_window_ready: None,
-            #[cfg(feature = "harness")]
-            harness_sink: None,
         }
     }
 
@@ -295,17 +284,6 @@ impl WindowsShell {
         self
     }
 
-    /// #508: install the test-automation harness sink. Builder method
-    /// matched by `sonicterm-windows::main` when `--features harness`
-    /// is enabled. Without the feature, the method does not exist and
-    /// the bin can't accidentally wire a sink in release builds.
-    #[cfg(feature = "harness")]
-    #[must_use]
-    pub fn with_harness_sink(mut self, sink: crate::harness::HarnessSink) -> Self {
-        self.harness_sink = Some(sink);
-        self
-    }
-
     /// Consume the shell, build the winit event loop, install the
     /// OS-drag + window-ready bridges, and run until the loop exits.
     pub fn run(self) -> Result<()> {
@@ -320,8 +298,6 @@ impl WindowsShell {
             os_drag_backend,
             pending,
             on_window_ready,
-            #[cfg(feature = "harness")]
-            harness_sink,
         } = self;
 
         crate::app::init_tracing_public();
@@ -347,10 +323,6 @@ impl WindowsShell {
         }
         if let Some(hook) = on_window_ready {
             app.set_on_window_ready(hook);
-        }
-        #[cfg(feature = "harness")]
-        if let Some(sink) = harness_sink {
-            app.set_harness_sink(sink);
         }
         if let Some(p) = pending {
             let _ = app.new_tab_from_payload(&p);

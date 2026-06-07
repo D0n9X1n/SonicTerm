@@ -77,34 +77,23 @@ fn main() -> Result<()> {
         let on_resumed: Box<dyn FnOnce() + Send> = Box::new(move || {
             menubar::install(&themes);
         });
-        // #554: emit a stdout marker carrying the CGWindowID the
-        // instant winit hands us the AppKit window. The test harness
-        // greps this line to skip the ~3s `cg-window-id.swift` poll
-        // (saves ~3min over a 67-case sweep). Mirrors the Windows
-        // `on_window_ready` install in `crates/sonicterm-windows/src/main.rs`.
-        // Contract is documented in `crates/sonicterm-mac/CLAUDE.md`.
+        // Apply AppKit-only per-window setup as soon as winit creates
+        // the NSWindow.
         let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
             Box::new(|raw| {
                 if let raw_window_handle::RawWindowHandle::AppKit(h) = raw {
                     // h.ns_view is `NonNull<c_void>` pointing at an NSView*.
                     // SAFETY: winit hands us a live NSView on the main
                     // thread before the event loop starts; we only invoke
-                    // zero-arg accessors (`window`, `windowNumber`).
+                    // the zero-arg `window` accessor and set a process-local
+                    // NSWindow property.
                     let view: *mut objc2::runtime::AnyObject = h.ns_view.as_ptr().cast();
-                    let id: isize = unsafe {
+                    unsafe {
                         let window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
-                        if window.is_null() {
-                            -1
-                        } else {
+                        if !window.is_null() {
                             let _: () = objc2::msg_send![window, setTabbingMode: 2isize];
-                            objc2::msg_send![window, windowNumber]
                         }
-                    };
-                    println!(
-                        "SONICTERM_WINDOW_READY cg_window_id={} pid={} window_index=0",
-                        id,
-                        std::process::id()
-                    );
+                    }
                 } else {
                     tracing::warn!("on_window_ready: not an AppKit handle: {raw:?}");
                 }

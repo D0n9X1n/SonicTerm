@@ -13,13 +13,6 @@ workspace = true
 [features]
 default = []
 ssh = ["sonicterm-io/ssh"]
-# Windows-only test-automation harness. Off by default; enabled by
-# `sonicterm-windows --features harness`. Adds an App-level shared
-# slot (`harness::HarnessSink`) that publishes the active pane's
-# PtyHandle::in_tx Sender whenever the active pane changes, so the
-# named-pipe harness server in sonicterm-windows can inject bytes
-# into the currently-focused PTY. See #508.
-harness = []
 
 [dependencies]
 sonicterm-app-core.workspace = true

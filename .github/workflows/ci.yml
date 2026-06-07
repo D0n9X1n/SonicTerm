@@ -41,6 +41,10 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
 
+      - name: Run per-crate unit/build gate
+        shell: bash
+        run: bash scripts/check-workspace-crates.sh
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh

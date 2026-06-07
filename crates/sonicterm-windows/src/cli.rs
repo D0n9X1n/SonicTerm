@@ -9,14 +9,6 @@ use sonicterm_app::os_drag::TabPayload;
 #[derive(Default, Debug)]
 pub struct ParsedCli {
     pub tearout: Option<TabPayload>,
-    /// Pipe-name request from `--harness-input-pipe <name>`. `"auto"`
-    /// asks the harness module to pick a UUID-like suffix; any other
-    /// value is taken as the literal stem appended after
-    /// `\\.\pipe\sonicterm-harness-`. Only ever `Some` when the
-    /// `harness` cargo feature is enabled — without it, the flag is
-    /// rejected as unknown.
-    #[cfg(feature = "harness")]
-    pub harness_input_pipe: Option<String>,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -34,8 +26,7 @@ pub fn parse_tearout_payload_from_env() -> Result<Option<TabPayload>> {
 }
 
 /// Full CLI parse. Hand-rolled (same style as the existing tearout
-/// parser) so we don't pull clap into a binary that's already on the
-/// slow-link bench.
+/// parser) so we don't pull clap into a startup-sensitive binary.
 pub fn parse_cli_from<I, S>(args: I) -> Result<ParsedCli>
 where
     I: IntoIterator<Item = S>,
@@ -54,24 +45,9 @@ where
                     TabPayload::from_json(&json).context("decode --tear-out-payload JSON")?;
                 out.tearout = Some(parsed);
             }
-            "--harness-input-pipe" => {
-                #[cfg(feature = "harness")]
-                {
-                    let Some(name) = args.next() else {
-                        bail!("--harness-input-pipe requires a name argument (\"auto\" or stem)")
-                    };
-                    out.harness_input_pipe = Some(name);
-                }
-                #[cfg(not(feature = "harness"))]
-                {
-                    bail!("unknown flag: --harness-input-pipe (rebuild with `--features harness`)");
-                }
-            }
             _ => {
                 // Mirror the previous lax behaviour for unrelated args
-                // (some launch shims pass extras). We only hard-reject
-                // `--harness-input-pipe` without the feature so a
-                // stripped release exits noisily.
+                // (some launch shims pass extras).
             }
         }
     }

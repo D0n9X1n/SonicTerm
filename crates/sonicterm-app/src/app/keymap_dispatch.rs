@@ -140,8 +140,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.next();
                 }
-                // #508: keyboard tab switch → republish.
-                self.refresh_harness_sink();
             }
             Action::PrevTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
@@ -156,8 +154,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.prev();
                 }
-                // #508: keyboard tab switch → republish.
-                self.refresh_harness_sink();
             }
             Action::ActivateTab(i) => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
@@ -173,8 +169,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.activate(*i);
                 }
-                // #508: keyboard tab switch → republish.
-                self.refresh_harness_sink();
             }
             Action::ActivateLastTab => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -187,8 +181,6 @@ impl App {
                     let last = t.len().saturating_sub(1);
                     t.activate(last);
                 }
-                // #508: keyboard tab switch → republish.
-                self.refresh_harness_sink();
             }
             Action::SplitRight => {
                 // Epic #289 Phase A — route to frontmost window so Cmd+D
@@ -529,7 +521,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.next();
                 }
-                self.refresh_harness_sink();
             }
             Action::PrevTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
@@ -543,7 +534,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.prev();
                 }
-                self.refresh_harness_sink();
             }
             Action::ActivateTab(i) => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
@@ -558,7 +548,6 @@ impl App {
                 if let Some(t) = self.main_tabs_mut() {
                     t.activate(*i);
                 }
-                self.refresh_harness_sink();
             }
             Action::ActivateLastTab => {
                 if let FrontmostKind::Child(id) = source_kind {
@@ -570,7 +559,6 @@ impl App {
                     let last = t.len().saturating_sub(1);
                     t.activate(last);
                 }
-                self.refresh_harness_sink();
             }
             Action::SplitRight => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {

@@ -188,9 +188,8 @@ impl ShelfPacker {
 /// the key→info map. A separate type, `AtlasUpload`, wraps this with a
 /// wgpu `Texture` + `BindGroup` for the actual GPU path.
 ///
-/// This split lets the bench harness, integration tests, and the
-/// production renderer share the same packing + lookup logic without
-/// pulling a GPU dependency into the bench.
+/// This split lets integration tests and the production renderer share
+/// the same packing + lookup logic without pulling in a GPU dependency.
 /// Per-glyph entry: the public `GlyphInfo` plus the bookkeeping the
 /// atlas needs for LRU eviction.
 ///

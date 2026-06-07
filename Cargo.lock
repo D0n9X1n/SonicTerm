@@ -5428,7 +5428,6 @@ name = "sonicterm-windows"
 version = "0.9.1"
 dependencies = [
  "anyhow",
- "crossbeam-channel",
  "muda",
  "raw-window-handle",
  "serde_json",

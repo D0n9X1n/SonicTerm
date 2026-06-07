@@ -37,10 +37,11 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 
 ## Local gate
 
-Normal PR/main CI runs unit tests only:
+Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
 cargo test --workspace --lib --bins
+bash scripts/check-workspace-crates.sh
 ```
 
 For release prep also run:

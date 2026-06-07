@@ -1,5 +1,5 @@
 //! Per-row quad cache for background / underline / hyperlink tint
-//! quads — Phase P2 of Epic #300 (wezterm-parity perf).
+//! quads — Phase P2 of Epic #300.
 //!
 //! Mirrors the shape of `sonicterm_text::row_glyph_cache::RowGlyphCache`
 //! (PR #140) but caches the `QuadInstance` slice each row emits for
@@ -15,9 +15,8 @@
 //! On a cache hit the renderer can `extend_from_slice` the cached
 //! `Vec<QuadInstance>` directly into the frame's quad vector and skip
 //! the per-cell run-length-encode + `cell_bg_rgba` lookup loop in
-//! `emit_cell_bg_quads_clipped`. For an 80×24 grid that scrapes one of
-//! the worst hot paths in the vtebench `dense_cells` micro — see the
-//! 300× wezterm gap noted in CLAUDE.md §14.
+//! `emit_cell_bg_quads_clipped`. For an 80×24 grid that removes one of
+//! the worst hot paths in dense-cell workloads.
 //!
 //! Per-pane keying: a `pane_id` is folded into the cache key so split
 //! panes never read each other's slot when they happen to have the

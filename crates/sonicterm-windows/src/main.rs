@@ -31,26 +31,14 @@ fn set_process_dpi_awareness() {}
 #[cfg(target_os = "windows")]
 mod backdrop;
 mod cli;
-#[cfg(all(target_os = "windows", feature = "harness"))]
-mod harness_pipe;
 #[cfg(target_os = "windows")]
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
-#[cfg(all(target_os = "windows", feature = "harness"))]
-mod win_sid;
 
 fn main() -> Result<()> {
-    // #536 profile: explicit Instant timing for tear_out_child_init.
-    // We CANNOT use `tracing::info_span!(...).entered()` here because
-    // the span is created BEFORE `sonicterm_logging::init` runs ~20
-    // lines below, so the global subscriber is not yet attached and
-    // the span's CLOSE event would never reach the log. Explicit
-    // `Instant::now()` + a deferred `tracing::info!` emitted AFTER
-    // logging init avoids the subscriber-coupling entirely.
-    let __t_tear_out_child_init = std::time::Instant::now();
     set_process_dpi_awareness();
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
@@ -83,19 +71,6 @@ fn main() -> Result<()> {
     let parsed_cli = cli::parse_cli_from_env()?;
     #[cfg(target_os = "windows")]
     let tearout_payload = parsed_cli.tearout;
-    #[cfg(target_os = "windows")]
-    tracing::info!(
-        tear_out_child = tearout_payload.is_some(),
-        elapsed = ?__t_tear_out_child_init.elapsed(),
-        "[perf] tear_out_child_init"
-    );
-    #[cfg(not(target_os = "windows"))]
-    tracing::info!(
-        elapsed = ?__t_tear_out_child_init.elapsed(),
-        "[perf] tear_out_child_init"
-    );
-    #[cfg(all(target_os = "windows", feature = "harness"))]
-    let harness_request = parsed_cli.harness_input_pipe;
     let theme = load_theme(&config.theme);
     let keymap = load_keymap(&config.keymap);
     // Initial load is infallible (#522 fallback); hot-reload loaders use
@@ -133,23 +108,6 @@ fn main() -> Result<()> {
                     tracing::warn!("on_window_ready: not a Win32 handle: {raw:?}");
                 }
             });
-        #[cfg(feature = "harness")]
-        let harness_sink_for_app = if let Some(req) = harness_request.as_deref() {
-            // #508: construct the shared slot via the App-side helper so
-            // both halves agree on the type alias. The Arc is cloned —
-            // one clone stays with the pipe-reader thread, the other is
-            // installed on the App via `WindowsShell::with_harness_sink`
-            // so every active-pane-change publishes the current
-            // `PtyHandle::in_tx` into the slot.
-            let sink = sonicterm_app::harness::new_sink();
-            match harness_pipe::spawn(req, sink.clone()) {
-                Ok(name) => tracing::info!(pipe = %name, "harness pipe thread spawned"),
-                Err(e) => tracing::error!(error = ?e, "failed to spawn harness pipe"),
-            }
-            Some(sink)
-        } else {
-            None
-        };
         let result = {
             // M6c: construct the AppStateMachine in the bin and hand
             // it to the platform shell. State mutation routes through
@@ -162,10 +120,6 @@ fn main() -> Result<()> {
                 .with_os_drag_sink(os_drag_win::WinOsDragSink::arc())
                 .with_os_drag_backend(tab_drag_os::WinOsTabDragBackend::boxed())
                 .with_on_window_ready(on_window_ready);
-            #[cfg(feature = "harness")]
-            if let Some(sink) = harness_sink_for_app {
-                shell = shell.with_harness_sink(sink);
-            }
             if let Some(p) = tearout_payload.or_else(os_drag_win::take_pending_payload) {
                 shell = shell.with_pending_payload(p);
             }
