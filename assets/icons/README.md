@@ -1,16 +1,13 @@
 # Icons
 
-Live masters + baked exports for the SonicTerm Terminal icon.
+Live master + baked exports for the SonicTerm Terminal icon.
 
 ## Layout
 
 ```
 assets/icons/
-├── source/                   ← edit these (SVG, hand-authored)
-│   ├── sonic.png             full-color squircle app icon
-│   ├── sonic.svg             legacy vector icon
-│   ├── sonic-mono.svg        monochrome glyph (currentColor)
-│   └── sonic-glyph.svg       color glyph without squircle
+├── source/                   ← edit this master asset
+│   └── sonic.png             full-color squircle app icon
 ├── exports/                  ← generated, do not edit
 │   ├── png/                  multi-size PNGs (1× and @2x)
 │   ├── sonic.icns            macOS bundle
@@ -21,7 +18,7 @@ assets/icons/
 ## Regenerating
 
 ```bash
-brew install librsvg imagemagick     # one-time
+brew install imagemagick     # one-time, for .ico and preferred resizing
 bash assets/icons/bake-icons.sh
 ```
 
