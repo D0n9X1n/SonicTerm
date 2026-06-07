@@ -1187,7 +1187,7 @@ impl App {
 /// current pane tree layout. Mirrors `App::resize_visible_panes` for the
 /// child case so split/close/zoom on a torn-out window propagate to the
 /// PTY winsize the same way.
-fn resize_visible_panes_in_child(child: &mut WindowState) {
+pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
     let Some(r) = child.renderer.as_ref() else { return };
     let (cw, ch) = r.cell_size();
