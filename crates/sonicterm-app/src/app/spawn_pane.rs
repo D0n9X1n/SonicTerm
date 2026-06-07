@@ -358,8 +358,6 @@ impl App {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
-            // #508: split changed the active pane → republish.
-            self.refresh_harness_sink();
         }
     }
     pub(super) fn close_active_pane(&mut self) {
@@ -410,8 +408,6 @@ impl App {
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
-                // #508: close shifted active pane to surviving sibling.
-                self.refresh_harness_sink();
             }
             _ => {}
         }
@@ -434,9 +430,6 @@ impl App {
         if let Some(w) = self.main_window() {
             w.request_redraw();
         }
-        // #508: directional focus change updated active_pane; close-tab
-        // path goes through `close_tab_at` which already republishes.
-        self.refresh_harness_sink();
     }
 
     pub(super) fn toggle_active_pane_zoom(&mut self) {

@@ -13,17 +13,13 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/tab_transfer.rs`, `tear_out.rs`, `child_window.rs` - tab movement.
-- `src/config_watch.rs` - hot reload of `~/.snoicterm/sonicterm.toml`.
+- `src/config_watch.rs` - hot reload of `~/.sonicterm/sonicterm.toml`.
 - `src/shell.rs` - `MacShell` and `WindowsShell` builders.
 
 ## Local gate
 ```bash
 cargo build -p sonicterm-app
 ```
-
-For render, input, VT, or window-state changes, run a GUI smoke on the
-originating platform. On macOS prefer `just visual mac`; it verifies
-frontmost focus and captures the SonicTerm window by id.
 
 ## Guardrails
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks

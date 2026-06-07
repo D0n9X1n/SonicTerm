@@ -14,10 +14,10 @@
 /crates/sonicterm-types/api-snapshot.txt @D0n9X1n
 /landmines.toml                         @D0n9X1n
 
-# macOS-only paths — mac-PM owns; only mac-PM can §13 smoke
+# macOS-only paths — mac-PM owns
 /crates/sonicterm-mac/                  @D0n9X1n-dev-mac
 
-# Windows-only paths — win-PM owns; only win-PM can §13 smoke
+# Windows-only paths — win-PM owns
 /crates/sonicterm-windows/              @D0n9X1n-dev-windows
 
 # Hot files — both PMs review (cross-platform regressions hide here)
@@ -39,5 +39,4 @@
 /.github/                               @D0n9X1n
 /scripts/                               @D0n9X1n
 /tools/                                 @D0n9X1n
-/baseline.json                          @D0n9X1n
 /deny.toml                              @D0n9X1n

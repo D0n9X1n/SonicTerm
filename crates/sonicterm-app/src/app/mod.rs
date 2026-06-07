@@ -694,9 +694,8 @@ pub struct PaneState {
     /// probed. The probe walks the whole macOS process table (~600 procs)
     /// so we MUST NOT re-run it on every render — when the cursor blinks,
     /// the render path fires ~26Ã—/sec and an uncached probe burned ~17%
-    /// CPU on an idle window (regression caught by
-    /// `scripts/bench_headless_gui.sh`). TTL is short enough that
-    /// `nvim foo` still flips the tab title quickly.
+    /// CPU on an idle window. TTL is short enough that `nvim foo` still
+    /// flips the tab title quickly.
     pub fg_proc_cache: Option<(std::time::Instant, Option<String>)>,
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
@@ -1074,13 +1073,6 @@ pub struct App {
     /// (tab/pane/window lifecycle) continue to take the legacy direct
     /// route until M6a-expand-2c lifts those into the reducer.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
-    /// Optional harness sink (#508). Windows + `--features harness`
-    /// only. The App publishes the active main-window pane's
-    /// `PtyHandle::in_tx` sender into this slot on every pane-change,
-    /// so the named-pipe server in `sonicterm-windows` can inject
-    /// bytes into whichever pane currently has focus.
-    #[cfg(all(target_os = "windows", feature = "harness"))]
-    pub(crate) harness_sink: Option<crate::harness::HarnessSink>,
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
@@ -1219,8 +1211,6 @@ impl App {
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
             machine,
-            #[cfg(all(target_os = "windows", feature = "harness"))]
-            harness_sink: None,
         }
     }
 
@@ -1480,9 +1470,7 @@ impl App {
     }
 
     /// Test-only: drive the production `hide_main_window` path from
-    /// integration tests (the helper itself is `pub(super)`). #509
-    /// REVISE 3: lets the harness-sink test fixture install a real PTY
-    /// pane, hide main, and assert the sink was republished as `None`.
+    /// integration tests (the helper itself is `pub(super)`).
     #[doc(hidden)]
     pub fn __test_hide_main_window(&mut self) {
         self.hide_main_window();
@@ -1543,55 +1531,6 @@ impl App {
         let id = self.active_pane_id()?;
         self.main()?.panes.get(&id)
     }
-
-    /// #508: Windows-only test-automation harness wiring. Install the
-    /// shared sink so subsequent active-pane-change publishes can
-    /// reach the named-pipe server in `sonicterm-windows`.
-    #[cfg(all(target_os = "windows", feature = "harness"))]
-    #[doc(hidden)]
-    pub fn set_harness_sink(&mut self, sink: crate::harness::HarnessSink) {
-        self.harness_sink = Some(sink);
-        // Publish whatever pane is currently active (likely None at
-        // construction time — `do_resumed` will republish once the
-        // first pane spawns).
-        self.refresh_harness_sink();
-    }
-
-    /// #508: Re-resolve the active main-window pane's
-    /// `PtyHandle::in_tx` and publish it into the harness sink.
-    /// No-op when the sink is not installed (default / non-Windows /
-    /// no `--features harness`). Call this from every site that can
-    /// mutate the active pane: focus click, keyboard tab switch,
-    /// pane spawn / close, tab transfer, tear-out, main-window
-    /// hide / drain.
-    ///
-    /// When the main window is gone / hidden / has no active pane,
-    /// or when the active pane has no PTY (e.g. test seeders that
-    /// build a synthetic pane without a real shell), the sink is
-    /// published as `None` so the pipe reader drops chunks rather
-    /// than sending to a stale handle.
-    #[cfg(all(target_os = "windows", feature = "harness"))]
-    pub(crate) fn refresh_harness_sink(&self) {
-        let Some(sink) = self.harness_sink.as_ref() else { return };
-        // #509 REVISE 1: when the main window is hidden, the active pane
-        // may still resolve to a real PTY sender (the panes are kept
-        // alive for un-hide). Publishing that stale `Some(sender)` would
-        // let the pipe reader inject bytes into a window the user can't
-        // see. Force `None` so chunks are dropped.
-        let tx = if self.main_is_hidden() {
-            None
-        } else {
-            self.active_pane().and_then(|p| p.pty.as_ref()).map(|pty| pty.in_tx.clone())
-        };
-        crate::harness::publish(sink, tx);
-    }
-
-    /// No-op shim so non-Windows / no-harness builds compile without
-    /// littering call sites with `#[cfg]` guards. The compiler trims
-    /// the call entirely under `--release` thanks to `#[inline]`.
-    #[cfg(not(all(target_os = "windows", feature = "harness")))]
-    #[inline]
-    pub(crate) fn refresh_harness_sink(&self) {}
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
         let Some(active_id) = self.active_pane_id() else { return };
@@ -1939,7 +1878,6 @@ impl App {
         let mut closed = false;
         let mut resize_main = false;
         let mut redraw_main = false;
-        let mut refresh_sink = false;
 
         if let Some(ws) = self.main_mut() {
             let active_tab = ws.tabs.active_index();
@@ -1956,7 +1894,6 @@ impl App {
                     if tab_idx == active_tab {
                         resize_main = true;
                         redraw_main = true;
-                        refresh_sink = true;
                     }
                 }
                 break;
@@ -1971,9 +1908,6 @@ impl App {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
-        }
-        if refresh_sink {
-            self.refresh_harness_sink();
         }
         if closed {
             return true;
@@ -2930,7 +2864,6 @@ impl App {
     pub fn __test_set_active_pane(&mut self, tab_idx: usize, pane_id: u64) -> bool {
         if let Some(st) = self.main_tab_states_mut().and_then(|ts| ts.get_mut(tab_idx)) {
             st.active_pane = pane_id;
-            self.refresh_harness_sink();
             true
         } else {
             false
@@ -3019,11 +2952,9 @@ impl App {
     /// [`os_drag::OsTabDragBackend::begin_session`] so the backend can
     /// post `DragMoved` / `DragEnded` events back to the main loop.
     ///
-    /// Returns `None` when no event-loop proxy has been wired (test
-    /// harnesses that construct `App` via plain `new` without a
-    /// proxy). In that case the OS drag is not startable, which the
-    /// caller treats as "fall back to the existing within-process
-    /// tear_out path".
+    /// Returns `None` when no event-loop proxy has been wired. In that
+    /// case the OS drag is not startable, which the caller treats as
+    /// "fall back to the existing within-process tear_out path".
     pub fn os_drag_app_handle(&self) -> Option<os_drag::AppHandle> {
         self.event_loop_proxy.clone().map(|p| {
             os_drag::AppHandle::with_pending_and_bars(
@@ -3547,12 +3478,6 @@ impl App {
                 // hiding the main window when its tabs vec empties).
             }
         }
-        // #509 REVISE 2: tab_transfer moves a tab (and its active pane)
-        // between windows. Either side may have a different active pane
-        // afterwards; republish the sink so the pipe reader targets the
-        // window the user is now focused on (or `None` if main was
-        // drained + hidden by the source-empty branch above).
-        self.refresh_harness_sink();
         Ok(())
     }
 }

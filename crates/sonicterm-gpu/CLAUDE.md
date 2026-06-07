@@ -18,8 +18,6 @@ terminal/UI glyphs.
 cargo build -p sonicterm-gpu
 ```
 
-Render-touching PRs also need GUI smoke on the originating platform.
-
 ## Guardrails
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - Preserve per-cell foreground/background, inverse, underline, and 256-color

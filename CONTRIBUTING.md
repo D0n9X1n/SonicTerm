@@ -22,10 +22,12 @@ Crates live under `crates/`.
 
 ## Before opening a PR
 
-CI runs unit tests on macOS and Windows. Run them locally first:
+CI runs workspace unit tests and a per-crate unit/build gate on macOS and
+Windows. Run them locally first:
 
 ```bash
 cargo test --workspace --lib --bins
+bash scripts/check-workspace-crates.sh
 ```
 
 ## Branches

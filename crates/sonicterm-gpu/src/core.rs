@@ -919,14 +919,6 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
-        // #536 profile: explicit Instant timing for gpu_renderer_new.
-        // One of the two suspect cost centers motivating the
-        // tear-out-spawn investigation. Using `Instant::now()` instead
-        // of `info_span!.entered()` because the default
-        // `sonicterm-logging` subscriber doesn't have
-        // `with_span_events(FmtSpan::CLOSE)` configured, so span
-        // timing would never be emitted.
-        let __t_gpu_init = std::time::Instant::now();
         let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
             settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -1061,7 +1053,6 @@ impl GpuRenderer {
         // through `chrome_text::layout(...)`; there is no persistent
         // per-overlay text buffer to size at construction.
 
-        tracing::info!(elapsed = ?__t_gpu_init.elapsed(), "[perf] gpu_renderer_new");
         Ok(Self {
             instance,
             device,
@@ -2473,12 +2464,12 @@ impl GpuRenderer {
             // NOTE: `cursor_phase` is deliberately NOT folded into the
             // FrameKey. Including it cracked the cache on every blink
             // bucket boundary, forcing a full grid re-shape ~26×/sec
-            // and wedging the headless bench at 17% idle CPU. The
+            // and wedging idle CPU. The
             // cursor still re-evaluates its alpha on every real
             // render; between real renders the cursor sits at
             // whatever alpha it last drew at — a frozen but
             // always-visible cursor is better than a CPU-melting
-            // blinking one (regression: `scripts/bench_headless_gui.sh`).
+            // blinking one.
             cursor_phase: 0,
             window_focused: self.window_focused,
             pane_focus_flash_bucket,
@@ -2889,9 +2880,9 @@ impl GpuRenderer {
         // Part B step 3: emit bg quads for EVERY pane using each pane's
         // own origin, not just the active pane.
         //
-        // Epic #300 P2: per-row LineQuadCache. Background quads are the
-        // hottest QuadInstance source in dense_cells (vtebench gap, see
-        // CLAUDE.md §14). Each row's emission is keyed on (pane_id,
+        // Epic #300 P2: per-row LineQuadCache. Background quads are a
+        // hot QuadInstance source in dense-cell workloads. Each row's
+        // emission is keyed on (pane_id,
         // abs_row, content+geom+style+selection hash); on a hit we
         // `extend_from_slice` the cached slice and skip the per-cell
         // run-length-encode walk in `emit_cell_bg_quads_for_row`.

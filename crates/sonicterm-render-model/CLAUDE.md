@@ -21,8 +21,6 @@ cargo build -p sonicterm-render-model
 - Keep renderer-specific GPU choices out of this crate.
 - Preserve enough per-cell style data for colors, inverse, underline,
   hyperlinks, cursor, and search highlights.
-- Geometry changes affect hit testing and visual output; smoke-check UI
-  layout changes.
 
 ## Cross-references
 - Consumes: `sonicterm-types`, `sonicterm-grid`, `sonicterm-ui`.

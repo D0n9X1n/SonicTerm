@@ -2,9 +2,9 @@
 
 ## English
 
-Log path on macOS and Windows: `~/.snoicterm/logs/sonicterm.log`
+Log path on macOS and Windows: `~/.sonicterm/logs/sonicterm.log`
 
-Crash dumps: `~/.snoicterm/logs/crashes/`
+Crash dumps: `~/.sonicterm/logs/crashes/`
 
 Config:
 
@@ -25,9 +25,9 @@ rendering or input bugs.
 
 ## 中文
 
-macOS 和 Windows 的日志路径：`~/.snoicterm/logs/sonicterm.log`
+macOS 和 Windows 的日志路径：`~/.sonicterm/logs/sonicterm.log`
 
-Crash dumps / 崩溃日志：`~/.snoicterm/logs/crashes/`
+Crash dumps / 崩溃日志：`~/.sonicterm/logs/crashes/`
 
 默认会自动清理 2 天以上的日志和崩溃日志。日志配置见上方 TOML 示例。提交 bug
 时请附上最新日志最后 200 行；渲染或输入问题请附截图。

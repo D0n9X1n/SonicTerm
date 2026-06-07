@@ -6,13 +6,13 @@ SonicTerm keymaps are TOML files. Bundled defaults live in `assets/keymaps/`,
 and editable user copies live in:
 
 ```text
-~/.snoicterm/keymaps/
+~/.sonicterm/keymaps/
 ├── sonicterm-macos.toml
 ├── sonicterm-windows.toml
 └── sonicterm-linux.toml
 ```
 
-The active keymap is selected from `~/.snoicterm/sonicterm.toml`:
+The active keymap is selected from `~/.sonicterm/sonicterm.toml`:
 
 ```toml
 keymap = "sonicterm-macos"
@@ -24,7 +24,7 @@ You can also point `keymap` at any TOML file path.
 
 1. Open the command palette.
 2. Run **Edit keymap.toml**.
-3. Change `~/.snoicterm/keymaps/<name>.toml`.
+3. Change `~/.sonicterm/keymaps/<name>.toml`.
 4. Run **Reload Config** from the command palette.
 
 The command palette and keymap cheatsheet read the active keymap, so shortcut
@@ -166,13 +166,13 @@ SonicTerm 的快捷键是 TOML 文件。内置默认文件在 `assets/keymaps/`�
 复制一份可编辑版本到：
 
 ```text
-~/.snoicterm/keymaps/
+~/.sonicterm/keymaps/
 ├── sonicterm-macos.toml
 ├── sonicterm-windows.toml
 └── sonicterm-linux.toml
 ```
 
-当前使用哪个 keymap，由 `~/.snoicterm/sonicterm.toml` 决定：
+当前使用哪个 keymap，由 `~/.sonicterm/sonicterm.toml` 决定：
 
 ```toml
 keymap = "sonicterm-macos"
@@ -184,7 +184,7 @@ keymap = "sonicterm-macos"
 
 1. 打开命令面板。
 2. 执行 **Edit keymap.toml**。
-3. 修改 `~/.snoicterm/keymaps/<name>.toml`。
+3. 修改 `~/.sonicterm/keymaps/<name>.toml`。
 4. 回到命令面板执行 **Reload Config**。
 
 命令面板和快捷键 cheatsheet 都会读取当前 keymap，所以 reload 之后快捷键提示也会更新。

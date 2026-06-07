@@ -25,7 +25,7 @@ that is designed around GPU quads instead of CPU blits.
 
 It aims to feel small, sharp, and quiet: no Electron shell, no heavyweight
 runtime, no required GUI preferences pane, and no global dotfile sprawl. User
-state lives under one directory: `~/.snoicterm`.
+state lives under one directory: `~/.sonicterm`.
 
 Need installation, configuration, keybindings, or theme authoring docs? Read the
 full bilingual docs in [`wiki/`](wiki/). The README is only the product overview:
@@ -74,7 +74,7 @@ back when the context belongs with the original session again.
   hints, and search.
 - **Command palette first** — commands are searchable and display shortcuts from
   your current keymap config.
-- **Config is just files** — `~/.snoicterm/sonicterm.toml`, plus editable
+- **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable
   `themes/` and `keymaps/` examples seeded on first launch.
 - **Bundled typography** — `Rec Mono St.Helens` ships with the app and is
   Nerd-Font-patched, so icons and prompt glyphs work out of the box.

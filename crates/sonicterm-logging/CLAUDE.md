@@ -11,7 +11,7 @@ work so config-load failures and panics are visible.
 - `crash.rs` - panic hook and crash dump writing.
 - `cleanup.rs` - retention cleanup.
 - `exit_trace.rs` - signal/drop-guard exit markers.
-- `path.rs` - `~/.snoicterm/logs` path helpers.
+- `path.rs` - `~/.sonicterm/logs` path helpers.
 
 ## Local gate
 ```bash

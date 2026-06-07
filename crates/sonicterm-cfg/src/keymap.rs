@@ -23,7 +23,7 @@ pub const fn platform_default_keymap_name() -> &'static str {
     }
 }
 
-/// Default user keymap path under `~/.snoicterm/keymaps/`.
+/// Default user keymap path under `~/.sonicterm/keymaps/`.
 pub fn default_user_keymap_path() -> Option<std::path::PathBuf> {
     let base = crate::config::default_config_dir()?;
     Some(base.join("keymaps").join(format!("{}.toml", platform_default_keymap_name())))

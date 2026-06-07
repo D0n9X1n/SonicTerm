@@ -11,6 +11,10 @@ small, typed, and cross-platform unless the crate is explicitly platform-only.
 - `docs/RELEASE.md` — tag-driven release process.
 - `wiki/` — bilingual user-facing usage/config/keybinding/log/theme docs.
 
+When auditing docs for release blockers, typos, renamed paths, or user-facing
+terminology, include `wiki/` alongside README and `docs/`; the wiki is part of
+the monitored documentation surface.
+
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
 ## Crates
@@ -37,10 +41,11 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 
 ## Local gate
 
-Normal PR/main CI runs unit tests only:
+Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
 cargo test --workspace --lib --bins
+bash scripts/check-workspace-crates.sh
 ```
 
 For release prep also run:

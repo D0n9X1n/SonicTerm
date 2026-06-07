@@ -6,10 +6,10 @@ SonicTerm themes are TOML files. Bundled themes live in `assets/themes/`, and
 editable user themes live in:
 
 ```text
-~/.snoicterm/themes/
+~/.sonicterm/themes/
 ```
 
-The active theme is selected from `~/.snoicterm/sonicterm.toml`:
+The active theme is selected from `~/.sonicterm/sonicterm.toml`:
 
 ```toml
 theme = "wezterm"
@@ -22,11 +22,11 @@ You can also point `theme` at any TOML file path.
 1. Copy the seeded default theme:
 
    ```sh
-   cp ~/.snoicterm/themes/wezterm.toml ~/.snoicterm/themes/my-theme.toml
+   cp ~/.sonicterm/themes/wezterm.toml ~/.sonicterm/themes/my-theme.toml
    ```
 
-2. Edit `~/.snoicterm/themes/my-theme.toml`.
-3. Set the theme name in `~/.snoicterm/sonicterm.toml`:
+2. Edit `~/.sonicterm/themes/my-theme.toml`.
+3. Set the theme name in `~/.sonicterm/sonicterm.toml`:
 
    ```toml
    theme = "my-theme"
@@ -115,10 +115,10 @@ bundled `wezterm` theme.
 SonicTerm 的主题是 TOML 文件。内置主题在 `assets/themes/`，用户可编辑主题在：
 
 ```text
-~/.snoicterm/themes/
+~/.sonicterm/themes/
 ```
 
-当前主题由 `~/.snoicterm/sonicterm.toml` 决定：
+当前主题由 `~/.sonicterm/sonicterm.toml` 决定：
 
 ```toml
 theme = "wezterm"
@@ -131,11 +131,11 @@ theme = "wezterm"
 1. 复制首次启动时生成的默认主题：
 
    ```sh
-   cp ~/.snoicterm/themes/wezterm.toml ~/.snoicterm/themes/my-theme.toml
+   cp ~/.sonicterm/themes/wezterm.toml ~/.sonicterm/themes/my-theme.toml
    ```
 
-2. 编辑 `~/.snoicterm/themes/my-theme.toml`。
-3. 在 `~/.snoicterm/sonicterm.toml` 里启用它：
+2. 编辑 `~/.sonicterm/themes/my-theme.toml`。
+3. 在 `~/.sonicterm/sonicterm.toml` 里启用它：
 
    ```toml
    theme = "my-theme"

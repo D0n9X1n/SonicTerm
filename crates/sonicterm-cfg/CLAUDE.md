@@ -23,7 +23,7 @@ cargo test -p sonicterm-cfg
   errors clearly instead of silently accepting bad config.
 - Preserve unknown/future TOML keys when possible.
 - Theme/keymap loading must check both bundled assets and user override
-  directories under `~/.snoicterm/`.
+  directories under `~/.sonicterm/`.
 - URL handling is security-sensitive; keep allow/deny policy explicit.
 
 ## Cross-references

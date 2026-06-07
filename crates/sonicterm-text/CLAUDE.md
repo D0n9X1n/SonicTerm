@@ -15,8 +15,6 @@ row glyph caching, and glyph atlas data consumed by the GPU renderer.
 cargo build -p sonicterm-text
 ```
 
-Render-touching changes should be visually smoke-checked.
-
 ## Guardrails
 - Cache keys must account for font identity, size, weight, style, DPI, and
   glyph variants that change output.

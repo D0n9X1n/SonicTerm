@@ -21,8 +21,6 @@ cargo build -p sonicterm-block-glyph
 - Keep pixel-unit conversions in `glue.rs` or `lib.rs`; do not leak them
   into the renderer.
 - Preserve attribution headers when touching imported code.
-- Block glyph output is visual-sensitive; smoke-check box drawing after
-  behavior changes.
 
 ## Cross-references
 - Consumes: `sonicterm-engine`, `sonicterm-cfg`.

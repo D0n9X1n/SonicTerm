@@ -12,7 +12,6 @@ It loads config/theme/keymap, installs logging, then runs
 - `chrome.rs`, `backdrop.rs` - window chrome and DWM backdrop.
 - `menubar.rs` - native menu integration.
 - `os_drag_win.rs`, `tab_drag_os.rs` - OLE drag/drop and tab transfer.
-- `harness_pipe.rs`, `win_sid.rs` - smoke/test support and user identity.
 
 ## Local gate
 ```bash
@@ -30,4 +29,4 @@ Release MSI builds require the Windows Cairo setup script and WiX.
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
   `sonicterm-io`, `sonicterm-logging`.
-- Consumed by: Windows release packaging and smoke automation.
+- Consumed by: Windows release packaging.
