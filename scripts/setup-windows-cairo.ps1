@@ -34,16 +34,28 @@ if ($LASTEXITCODE -ne 0) {
 
 $targetRoot = Join-Path -Path $vcpkgRoot -ChildPath "installed\$Triplet"
 $hostRoot = Join-Path -Path $vcpkgRoot -ChildPath "installed\$HostTriplet"
-$pkgConfig = Join-Path -Path $hostRoot -ChildPath "tools\pkgconf\pkg-config.exe"
-if (-not (Test-Path -LiteralPath $pkgConfig)) {
-    $pkgConfig = Join-Path -Path $targetRoot -ChildPath "tools\pkgconf\pkg-config.exe"
+$pkgConfigCandidates = @(
+    (Join-Path -Path $hostRoot -ChildPath "tools\pkgconf\pkg-config.exe"),
+    (Join-Path -Path $hostRoot -ChildPath "tools\pkgconf\pkgconf.exe"),
+    (Join-Path -Path $targetRoot -ChildPath "tools\pkgconf\pkg-config.exe"),
+    (Join-Path -Path $targetRoot -ChildPath "tools\pkgconf\pkgconf.exe")
+)
+$pkgConfig = $pkgConfigCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $pkgConfig) {
+    $searchRoots = @(
+        $hostRoot,
+        $targetRoot,
+        (Join-Path -Path $vcpkgRoot -ChildPath "downloads\tools")
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+    $pkgConfig = Get-ChildItem -LiteralPath $searchRoots -Recurse -File -Include "pkg-config.exe", "pkgconf.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
 }
 
 $pkgConfigPath = Join-Path -Path $targetRoot -ChildPath "lib\pkgconfig"
 $cairoPc = Join-Path -Path $pkgConfigPath -ChildPath "cairo.pc"
 
 if (-not (Test-Path -LiteralPath $pkgConfig)) {
-    throw "Could not find pkg-config.exe after vcpkg install."
+    throw "Could not find pkg-config.exe or pkgconf.exe after vcpkg install."
 }
 if (-not (Test-Path -LiteralPath $cairoPc)) {
     throw "Could not find cairo.pc at $cairoPc."
