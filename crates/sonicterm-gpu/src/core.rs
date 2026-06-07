@@ -3539,7 +3539,7 @@ impl GpuRenderer {
             let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
             let match_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let match_fg = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
-            let current_bg = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 1.0);
+            let current_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             let current_fg = match_fg;
             for (i, m) in s.matches.iter().enumerate() {
                 if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
