@@ -41,7 +41,7 @@ const SEARCH_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_W: f32 = 180.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
-const READ_ONLY_BADGE_PAD_RIGHT: f32 = 18.0;
+const READ_ONLY_BADGE_PAD_RIGHT: f32 = 10.0;
 const READ_ONLY_BADGE_BASELINE_NUDGE_Y: f32 = -2.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
@@ -3754,6 +3754,9 @@ impl GpuRenderer {
                     (sw, sh),
                     Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
                 );
+                let label_x =
+                    (badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px)
+                        .max(text_area_x);
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -3763,7 +3766,7 @@ impl GpuRenderer {
                     READ_ONLY_BADGE_LABEL,
                     text_color,
                     ChromeAttrs { bold: true, italic: false },
-                    text_area_x + ((text_area_w - label_layout.width_px) * 0.5).max(0.0),
+                    label_x,
                     baseline,
                     [badge_x, badge_y, badge_w, badge_h],
                     sw,
@@ -3780,7 +3783,7 @@ impl GpuRenderer {
                     READ_ONLY_BADGE_LABEL,
                     text_color,
                     ChromeAttrs { bold: true, italic: false },
-                    text_area_x + ((text_area_w - label_layout.width_px) * 0.5).max(0.0) + 1.0,
+                    label_x + 1.0,
                     baseline,
                     [badge_x, badge_y, badge_w, badge_h],
                     sw,

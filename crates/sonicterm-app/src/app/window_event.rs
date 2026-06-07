@@ -1452,13 +1452,6 @@ impl App {
                     }
                     return;
                 }
-                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
-                    self.copy_mode_handle_key(&event);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
                 if self.search_active() {
                     if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
@@ -1472,6 +1465,13 @@ impl App {
                         }
                     }
                     self.search_handle_key(&event, self.main_modifiers());
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
+                    self.copy_mode_handle_key(&event);
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
