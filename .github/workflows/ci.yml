@@ -28,6 +28,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Cairo for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:

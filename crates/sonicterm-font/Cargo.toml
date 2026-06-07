@@ -42,7 +42,7 @@ fontconfig = { package = "sonicterm-fontconfig", path = "../sonicterm-fontconfig
 
 [target."cfg(windows)".dependencies]
 dwrote = "0.11"
-winapi = "0.3"
+winapi = { version = "0.3", features = ["winbase"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "=0.25.0"
