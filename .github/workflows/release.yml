@@ -40,6 +40,32 @@ jobs:
         shell: bash
         run: bash scripts/test-release-notes.sh
 
+  build-mac-x86_64:
+    name: Build macOS x86_64 binary
+    runs-on: macos-15-intel
+    needs: [unit-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Install native dependencies
+        run: brew install cairo pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-mac-x86_64
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-mac-x86_64
+          path: target/x86_64-apple-darwin/release/sonicterm-mac
+
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
@@ -48,36 +74,50 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install native dependencies
+        run: brew install cairo pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-mac-aarch64
 
       - name: Build aarch64
-        run: cargo build --release -p sonicterm-mac
+        run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 
       - uses: actions/upload-artifact@v5
         with:
           name: sonicterm-mac-aarch64
-          path: target/release/sonicterm-mac
+          path: target/aarch64-apple-darwin/release/sonicterm-mac
 
   package-mac:
     name: Package macOS dmg
     runs-on: macos-14
-    needs: [build-mac-aarch64]
+    needs: [build-mac-x86_64, build-mac-aarch64]
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: sonicterm-mac-x86_64
+          path: dist/x86_64
 
       - uses: actions/download-artifact@v5
         with:
           name: sonicterm-mac-aarch64
           path: dist/aarch64
 
-      - name: Prepare release binary
+      - name: Make universal binary
         run: |
-          cp dist/aarch64/sonicterm-mac dist/sonicterm-mac
-          chmod +x dist/sonicterm-mac
+          chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
+          lipo -create \
+            dist/x86_64/sonicterm-mac \
+            dist/aarch64/sonicterm-mac \
+            -output dist/sonicterm-mac
           file dist/sonicterm-mac
+          lipo -verify_arch x86_64 arm64 dist/sonicterm-mac
 
       - name: Build icons
         run: |
@@ -85,7 +125,7 @@ jobs:
           bash assets/icons/bake-icons.sh
 
       - name: Build dmg
-        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
+        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}" mac-universal
 
       - uses: actions/upload-artifact@v5
         with:

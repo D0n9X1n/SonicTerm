@@ -17,7 +17,7 @@ echo "# SonicTerm ${TAG}"
 echo
 echo "## Installers"
 echo
-echo "- macOS Apple Silicon: download \`SonicTerm-${TAG}-mac-aarch64.dmg\`."
+echo "- macOS: download \`SonicTerm-${TAG}-mac-universal.dmg\` (universal2: Apple Silicon + Intel)."
 echo "- Windows: download the \`.msi\` artifact."
 echo "- Downloadable files are attached to this GitHub Release, including \`SHA256SUMS.txt\`."
 echo "- Both installers are unsigned for ${TAG}; macOS may require right-click → Open."
