@@ -141,6 +141,20 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Prepare downloadable release assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          dmg=(dist/*.dmg)
+          msi=(dist/*.msi)
+          if ((${#dmg[@]} == 0 || ${#msi[@]} == 0)); then
+            echo "Expected both macOS .dmg and Windows .msi release assets in dist/" >&2
+            find dist -maxdepth 2 -type f -print >&2
+            exit 1
+          fi
+          (cd dist && shasum -a 256 *.dmg *.msi > SHA256SUMS.txt)
+          ls -lh dist
+
       - name: Generate release notes
         run: bash scripts/release-notes.sh "${{ github.ref_name }}" > RELEASE_NOTES.md
 
@@ -149,6 +163,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: SonicTerm ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
-          files: dist/*
+          files: |
+            dist/*.dmg
+            dist/*.msi
+            dist/SHA256SUMS.txt
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
