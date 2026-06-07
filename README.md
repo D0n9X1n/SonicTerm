@@ -61,7 +61,8 @@ If your Markdown renderer does not show video inline, open
 - **GPU renderer** — wgpu on Metal / D3D12, with atlas-backed text and batched
   quads for cells, chrome, selection, cursor, search, and overlays.
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
-  pane focus, copy/read-only mode, quick-select URL hints, and search.
+  pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
+  hints, and search.
 - **Command palette first** — commands are searchable and display shortcuts from
   your current keymap config.
 - **Config is just files** — `~/.snoicterm/sonicterm.toml`, plus editable

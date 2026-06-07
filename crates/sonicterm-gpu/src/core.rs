@@ -36,8 +36,8 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_LABEL: &str = "READ ONLY";
-const READ_ONLY_BADGE_W: f32 = 118.0;
-const READ_ONLY_BADGE_H: f32 = 28.0;
+const READ_ONLY_BADGE_W: f32 = SEARCH_BAR_WIDTH;
+const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
 const READ_ONLY_BADGE_GAP: f32 = 8.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
@@ -260,7 +260,7 @@ use sonicterm_ui::{
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
-        PALETTE_ROW_RADIUS,
+        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_WIDTH,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -3697,7 +3697,7 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let font_size = self.raster_px((self.font_size - 2.0).max(1.0));
+                let font_size = self.raster_px((self.font_size - 1.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
                 let label_w = READ_ONLY_BADGE_LABEL.chars().count() as f32 * font_size * 0.58;
