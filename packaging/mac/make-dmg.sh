@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build a macOS .app bundle and wrap it in a .dmg.
-# Usage: make-dmg.sh <path-to-universal-binary> <version>
+# Usage: make-dmg.sh <path-to-binary> <version> [artifact-suffix]
 set -euo pipefail
 
 BIN="${1:?binary path required}"
 VERSION="${2:?version required}"
+ARTIFACT_SUFFIX="${3:-mac-universal}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/SonicTerm.app"
@@ -65,7 +66,7 @@ done
 echo "Note: building UNSIGNED .dmg — see CLAUDE.md §9"
 
 echo "==> Creating .dmg"
-DMG="$DIST/SonicTerm-${VERSION}-mac-universal.dmg"
+DMG="$DIST/SonicTerm-${VERSION}-${ARTIFACT_SUFFIX}.dmg"
 rm -f "$DMG"
 create-dmg \
     --volname "SonicTerm ${VERSION}" \

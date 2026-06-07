@@ -17,7 +17,7 @@ git push origin v0.9.0
 `.github/workflows/release.yml` runs on every `v*` tag:
 
 1. Unit tests on macOS and Windows.
-2. macOS universal release build and unsigned `.dmg`.
+2. macOS Apple Silicon release build and unsigned `.dmg`.
 3. Windows x64 release build and unsigned `.msi`.
 4. Release notes from `scripts/release-notes.sh`, summarizing commits since the
    previous version tag.

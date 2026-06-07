@@ -40,27 +40,6 @@ jobs:
         shell: bash
         run: bash scripts/test-release-notes.sh
 
-  build-mac-x86_64:
-    name: Build macOS x86_64 binary
-    runs-on: macos-13
-    needs: [unit-tests]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-mac-x86_64
-
-      - name: Build x86_64
-        run: cargo build --release -p sonicterm-mac
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: sonicterm-mac-x86_64
-          path: target/release/sonicterm-mac
-
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
@@ -85,27 +64,19 @@ jobs:
   package-mac:
     name: Package macOS dmg
     runs-on: macos-14
-    needs: [build-mac-x86_64, build-mac-aarch64]
+    needs: [build-mac-aarch64]
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v5
-        with:
-          name: sonicterm-mac-x86_64
-          path: dist/x86_64
 
       - uses: actions/download-artifact@v5
         with:
           name: sonicterm-mac-aarch64
           path: dist/aarch64
 
-      - name: Make universal binary
+      - name: Prepare release binary
         run: |
-          chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
-          lipo -create \
-            dist/x86_64/sonicterm-mac \
-            dist/aarch64/sonicterm-mac \
-            -output dist/sonicterm-mac
+          cp dist/aarch64/sonicterm-mac dist/sonicterm-mac
+          chmod +x dist/sonicterm-mac
           file dist/sonicterm-mac
 
       - name: Build icons
@@ -114,7 +85,7 @@ jobs:
           bash assets/icons/bake-icons.sh
 
       - name: Build dmg
-        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}"
+        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
 
       - uses: actions/upload-artifact@v5
         with:
