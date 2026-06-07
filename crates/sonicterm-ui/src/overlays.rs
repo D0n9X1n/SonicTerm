@@ -100,11 +100,23 @@ pub const PALETTE_ROW_RADIUS: f32 = 6.0;
 /// Margin between the search bar and the right/top window edge.
 pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 
-/// Width of the small top-right search bar.
-pub const SEARCH_BAR_WIDTH: f32 = 360.0;
+/// Maximum width of the small top-right search bar.
+pub const SEARCH_BAR_WIDTH: f32 = 500.0;
+
+/// Minimum width of the search bar before query text expands it.
+pub const SEARCH_BAR_MIN_WIDTH: f32 = 300.0;
+
+/// Horizontal padding inside the search bar, on each side.
+pub const SEARCH_BAR_PAD_X: f32 = 10.0;
 
 /// Height of the small top-right search bar.
 pub const SEARCH_BAR_HEIGHT: f32 = 36.0;
+
+/// Extra height per additional search-bar line.
+pub const SEARCH_BAR_EXTRA_LINE_HEIGHT: f32 = 24.0;
+
+/// Maximum height of the search bar before content scrolls vertically.
+pub const SEARCH_BAR_MAX_HEIGHT: f32 = 500.0;
 
 /// Layout of the command-palette modal.
 #[derive(Debug, Clone)]
@@ -339,11 +351,38 @@ impl SearchBarLayout {
     /// responsible for picking colors and drawing the label produced by
     /// [`search_bar_label`].
     #[must_use]
-    pub fn compute(window_w: f32, window_h: f32) -> SearchBarLayout {
-        let w = SEARCH_BAR_WIDTH.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
-        let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
+    pub fn compute(window_w: f32, window_h: f32, content_w: f32) -> SearchBarLayout {
+        Self::compute_at_row(window_w, window_h, content_w, 0)
+    }
+
+    #[must_use]
+    pub fn compute_at_row(
+        window_w: f32,
+        window_h: f32,
+        content_w: f32,
+        row: u8,
+    ) -> SearchBarLayout {
+        Self::compute_at_row_with_lines(window_w, window_h, content_w, row, 1)
+    }
+
+    #[must_use]
+    pub fn compute_at_row_with_lines(
+        window_w: f32,
+        window_h: f32,
+        content_w: f32,
+        row: u8,
+        line_count: usize,
+    ) -> SearchBarLayout {
+        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_X * 2.0)
+            .clamp(SEARCH_BAR_MIN_WIDTH, SEARCH_BAR_WIDTH);
+        let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
+        let desired_h = SEARCH_BAR_HEIGHT
+            + (line_count.saturating_sub(1) as f32) * SEARCH_BAR_EXTRA_LINE_HEIGHT;
+        let h = desired_h.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
+        let h = h.min(SEARCH_BAR_MAX_HEIGHT);
         let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
-        let y = SEARCH_BAR_MARGIN.min((window_h - h).max(0.0));
+        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN);
+        let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
             x: border.x + 1.0,
@@ -365,6 +404,44 @@ pub fn search_bar_label(search: &SearchState) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|i| i + 1).unwrap_or(0);
     format!("/ {} — {}/{}", search.query, cur, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_bar_uses_300_to_500_width_window() {
+        let small = SearchBarLayout::compute(1000.0, 800.0, 10.0);
+        assert_eq!(small.border.w, SEARCH_BAR_MIN_WIDTH);
+
+        let medium = SearchBarLayout::compute(1000.0, 800.0, 360.0);
+        assert!(medium.border.w > SEARCH_BAR_MIN_WIDTH);
+        assert!(medium.border.w < SEARCH_BAR_WIDTH);
+
+        let large = SearchBarLayout::compute(1000.0, 800.0, 1000.0);
+        assert_eq!(large.border.w, SEARCH_BAR_WIDTH);
+    }
+
+    #[test]
+    fn search_bar_second_row_sits_below_first_row() {
+        let first = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 0);
+        let second = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 1);
+        assert!(second.border.y > first.border.y);
+    }
+
+    #[test]
+    fn search_bar_grows_taller_for_multiline_input() {
+        let one = SearchBarLayout::compute_at_row_with_lines(1000.0, 800.0, 10.0, 0, 1);
+        let three = SearchBarLayout::compute_at_row_with_lines(1000.0, 800.0, 10.0, 0, 3);
+        assert!(three.border.h > one.border.h);
+    }
+
+    #[test]
+    fn search_bar_height_caps_at_500_px() {
+        let tall = SearchBarLayout::compute_at_row_with_lines(1000.0, 1000.0, 10.0, 0, 100);
+        assert_eq!(tall.border.h, SEARCH_BAR_MAX_HEIGHT);
+    }
 }
 
 /// Layout of the IME preedit popover, placed just below the text cursor.

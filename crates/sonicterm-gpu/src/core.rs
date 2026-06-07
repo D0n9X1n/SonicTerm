@@ -36,7 +36,7 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_LABEL: &str = "READ ONLY";
-const READ_ONLY_BADGE_W: f32 = SEARCH_BAR_WIDTH;
+const READ_ONLY_BADGE_W: f32 = 180.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
 const READ_ONLY_BADGE_GAP: f32 = 8.0;
@@ -57,6 +57,37 @@ pub struct SurfaceAppearance {
     pub scrollbar: sonicterm_cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     pub panel_padding: f32,
+}
+
+fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
+
+fn badge_label_lines(label: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = label.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                lines.push(&label[start..i]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                lines.push(&label[start..i]);
+                i += 1;
+                if i < bytes.len() && bytes[i] == b'\n' {
+                    i += 1;
+                }
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    lines.push(&label[start..]);
+    lines
 }
 
 /// Renderer initialization settings derived from config.
@@ -89,25 +120,11 @@ fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
 }
 
-fn read_only_badge_rect(
-    sw: f32,
-    sh: f32,
-    search_bar: Option<SearchBarLayout>,
-) -> (f32, f32, f32, f32) {
+fn read_only_badge_rect(sw: f32, sh: f32) -> (f32, f32, f32, f32) {
     let w = READ_ONLY_BADGE_W.min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
     let h = READ_ONLY_BADGE_H.min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
-    let mut x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
-    let mut y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
-
-    if let Some(search) = search_bar {
-        if search.border.x >= w + READ_ONLY_BADGE_MARGIN + READ_ONLY_BADGE_GAP {
-            x = search.border.x - READ_ONLY_BADGE_GAP - w;
-            y = search.border.y;
-        } else {
-            y = (search.border.y + search.border.h + READ_ONLY_BADGE_GAP).min((sh - h).max(0.0));
-        }
-    }
-
+    let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
+    let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
     (x, y, w, h)
 }
 
@@ -260,7 +277,8 @@ use sonicterm_ui::{
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
-        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_WIDTH,
+        PALETTE_ROW_RADIUS, SEARCH_BAR_EXTRA_LINE_HEIGHT, SEARCH_BAR_HEIGHT, SEARCH_BAR_MAX_HEIGHT,
+        SEARCH_BAR_PAD_X,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -3627,10 +3645,34 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
-        let search_bar_layout = search.map(|_| SearchBarLayout::compute(sw, sh));
-        if let (Some(s), Some(layout)) = (search, search_bar_layout) {
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
+        let read_only_badge = read_only_mode.then(|| read_only_badge_rect(sw, sh));
+        let search_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
+        let search_label = search.map(search_bar_label);
+        let search_bar_layout = search_label.as_ref().map(|label| {
+            let lines = badge_label_lines(label);
+            let content_w = lines
+                .iter()
+                .map(|line| estimate_badge_text_width(line, search_font_size))
+                .fold(0.0, f32::max);
+            let max_visible_lines = ((SEARCH_BAR_MAX_HEIGHT - SEARCH_BAR_HEIGHT)
+                / SEARCH_BAR_EXTRA_LINE_HEIGHT)
+                .floor()
+                .max(0.0) as usize
+                + 1;
+            let visible_line_count = lines.len().min(max_visible_lines);
+            if read_only_badge.is_some() {
+                SearchBarLayout::compute_at_row_with_lines(sw, sh, content_w, 1, visible_line_count)
+            } else {
+                SearchBarLayout::compute_at_row_with_lines(sw, sh, content_w, 0, visible_line_count)
+            }
+        });
+        if let (Some(s), Some(label), Some(layout)) =
+            (search, search_label.as_ref(), search_bar_layout)
+        {
+            let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
+            let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
+            quads_overlay.push(QuadInstance::rounded(
+                px_to_ndc(
                     layout.border.x,
                     layout.border.y,
                     layout.border.w,
@@ -3638,15 +3680,10 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: self.hyperlink_underline,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: self.search_bg,
-                ..Default::default()
-            });
-            let label = search_bar_label(s);
+                search_badge_bg,
+                [layout.border.w, layout.border.h],
+                READ_ONLY_BADGE_RADIUS,
+            ));
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let Some(stack) = self.font_stack.as_ref() {
@@ -3656,33 +3693,47 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let search_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
-                let baseline = layout.bg.y + (layout.bg.h + search_font_size * 0.8) * 0.5;
-                let chrome_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    &label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
-                    (layout.bg.x + 10.0, baseline),
-                    (sw, sh),
-                    Some(ChromeClip {
-                        x: layout.bg.x,
-                        y: layout.bg.y,
-                        w: layout.bg.w,
-                        h: layout.bg.h,
-                    }),
-                );
-                overlay_glyph_instances.extend(chrome_layout.glyphs);
+                let lines = badge_label_lines(label);
+                let line_stride = SEARCH_BAR_EXTRA_LINE_HEIGHT.min(layout.border.h.max(1.0));
+                let visible_w = (layout.border.w - SEARCH_BAR_PAD_X * 2.0).max(0.0);
+                let visible_capacity =
+                    ((layout.border.h - SEARCH_BAR_HEIGHT) / line_stride).floor().max(0.0) as usize
+                        + 1;
+                let start = s.view_row_offset.min(lines.len().saturating_sub(1));
+                let end = (start + visible_capacity).min(lines.len());
+                let visible_lines = &lines[start..end];
+                let total_text_h = line_stride * visible_lines.len() as f32;
+                let first_baseline = layout.border.y
+                    + ((layout.border.h - total_text_h) * 0.5).max(0.0)
+                    + search_font_size * 0.8;
+                for (line_idx, line) in visible_lines.iter().enumerate() {
+                    let text_w = estimate_badge_text_width(line, search_font_size);
+                    let scroll_x = (text_w - visible_w).max(0.0);
+                    let baseline = first_baseline + line_idx as f32 * line_stride;
+                    let chrome_layout = chrome_text::layout(
+                        stack,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        line,
+                        search_badge_fg,
+                        ChromeAttrs::default(),
+                        search_font_size,
+                        search_font_size,
+                        (layout.border.x + SEARCH_BAR_PAD_X - scroll_x, baseline),
+                        (sw, sh),
+                        Some(ChromeClip {
+                            x: layout.border.x,
+                            y: layout.border.y,
+                            w: layout.border.w,
+                            h: layout.border.h,
+                        }),
+                    );
+                    overlay_glyph_instances.extend(chrome_layout.glyphs);
+                }
             }
         }
 
-        if read_only_mode {
-            let (badge_x, badge_y, badge_w, badge_h) =
-                read_only_badge_rect(sw, sh, search_bar_layout);
+        if let Some((badge_x, badge_y, badge_w, badge_h)) = read_only_badge {
             let badge_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             quads_overlay.push(QuadInstance::rounded(
                 px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
@@ -3700,7 +3751,7 @@ impl GpuRenderer {
                 let font_size = self.raster_px(self.font_size.max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
-                let label_w = READ_ONLY_BADGE_LABEL.chars().count() as f32 * font_size * 0.58;
+                let label_w = estimate_badge_text_width(READ_ONLY_BADGE_LABEL, font_size);
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -5102,7 +5153,12 @@ impl GpuRenderer {
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
-    color_to_chrome(cell.fg, theme, default)
+    if cell.flags.contains(CellFlags::INVERSE) {
+        let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
+        color_to_chrome(cell.bg, theme, default_bg)
+    } else {
+        color_to_chrome(cell.fg, theme, default)
+    }
 }
 
 fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
@@ -5301,30 +5357,17 @@ fn push_line_segment_px(
 /// rendered through the LoadOp clear path.
 #[doc(hidden)]
 pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
-    let (r, g, b) = match cell.bg {
-        Color::Default => return None,
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(i) => match i {
-            0..=15 => {
-                let gc = indexed(i, theme)?;
-                (gc.r(), gc.g(), gc.b())
-            }
-            16..=231 => {
-                let v = i - 16;
-                let r = v / 36;
-                let g = (v / 6) % 6;
-                let b = v % 6;
-                let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
-                (to8bit(r), to8bit(g), to8bit(b))
-            }
-            232..=255 => {
-                let g = (i - 232) * 10 + 8;
-                (g, g, g)
-            }
-        },
+    let color = if cell.flags.contains(CellFlags::INVERSE) {
+        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
+        color_to_chrome(cell.fg, theme, default_fg)
+    } else {
+        match cell.bg {
+            Color::Default => return None,
+            bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
+        }
     };
     let lut = super::color::srgb_u8_to_linear_lut();
-    Some([lut[r as usize], lut[g as usize], lut[b as usize], 1.0])
+    Some([lut[color.r() as usize], lut[color.g() as usize], lut[color.b() as usize], 1.0])
 }
 
 /// Walk the visible rows of `grid`, emit one `QuadInstance` per maximal run
@@ -5596,7 +5639,43 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
         13 => Some(pick(p.bright.magenta.0.as_str())),
         14 => Some(pick(p.bright.cyan.0.as_str())),
         15 => Some(pick(p.bright.white.0.as_str())),
-        _ => None,
+        16..=231 => {
+            let v = i - 16;
+            let r = v / 36;
+            let g = (v / 6) % 6;
+            let b = v % 6;
+            let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
+            Some(ChromeColor::rgb(to8bit(r), to8bit(g), to8bit(b)))
+        }
+        232..=255 => {
+            let g = (i - 232) * 10 + 8;
+            Some(ChromeColor::rgb(g, g, g))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_color_supports_full_xterm_256_palette() {
+        let theme = Theme::default();
+        assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
+        assert_eq!(indexed(231, &theme), Some(ChromeColor::rgb(255, 255, 255)));
+        assert_eq!(indexed(232, &theme), Some(ChromeColor::rgb(8, 8, 8)));
+        assert_eq!(indexed(255, &theme), Some(ChromeColor::rgb(238, 238, 238)));
+    }
+
+    #[test]
+    fn inverse_swaps_foreground_and_background_for_rendering() {
+        let theme = Theme::default();
+        let cell = Cell::plain('x', Color::Indexed(1), Color::Indexed(2), CellFlags::INVERSE);
+        assert_eq!(cell_fg(&cell, &theme, ChromeColor::WHITE), indexed(2, &theme).unwrap());
+        assert_eq!(
+            cell_bg_rgba(&cell, &theme),
+            Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
+        );
     }
 }
 
