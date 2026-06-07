@@ -163,7 +163,7 @@ impl PtyHandle {
     /// interactive behavior.
     pub fn spawn_default_shell(cols: u16, rows: u16, opts: ShellSpawnOpts) -> Result<Self> {
         let shell = default_shell();
-        let args = if opts.clean_e2e { clean_e2e_args(&shell) } else { Vec::new() };
+        let args = shell_startup_args(&shell, opts);
         Self::spawn_with_args(&shell, &args, cols, rows)
     }
 
@@ -310,6 +310,35 @@ fn default_shell() -> String {
     default_shell_program()
 }
 
+/// Return startup arguments for the selected shell.
+///
+/// Production macOS shells are login shells so `/etc/zprofile` can run
+/// `path_helper`, matching Terminal.app/iTerm2/WezTerm PATH behavior. Clean
+/// E2E mode intentionally bypasses profiles for deterministic fixtures.
+#[doc(hidden)]
+pub fn shell_startup_args(shell_path: &str, opts: ShellSpawnOpts) -> Vec<String> {
+    if opts.clean_e2e {
+        clean_e2e_args(shell_path)
+    } else {
+        interactive_shell_args(shell_path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn interactive_shell_args(shell_path: &str) -> Vec<String> {
+    let name = shell_file_name(shell_path);
+    match name.as_str() {
+        "zsh" | "zsh.exe" | "tcsh" | "csh" => vec!["-l".to_string()],
+        "bash" | "bash.exe" | "fish" | "fish.exe" => vec!["--login".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn interactive_shell_args(_shell_path: &str) -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(target_os = "windows")]
 fn default_shell_program() -> String {
     path_lookup("pwsh.exe")
@@ -363,11 +392,7 @@ fn path_lookup(name: &str) -> Option<String> {
 ///
 /// Used only when `ShellSpawnOpts::clean_e2e = true`.
 pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
-    let name = Path::new(shell_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
+    let name = shell_file_name(shell_path);
     match name.as_str() {
         "pwsh.exe" | "powershell.exe" | "pwsh" | "powershell" => {
             vec!["-NoLogo".to_string(), "-NoProfile".to_string()]
@@ -380,4 +405,12 @@ pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+fn shell_file_name(shell_path: &str) -> String {
+    Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default()
 }
