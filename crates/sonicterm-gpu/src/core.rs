@@ -35,6 +35,12 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
+const READ_ONLY_BADGE_LABEL: &str = "READ ONLY";
+const READ_ONLY_BADGE_W: f32 = 118.0;
+const READ_ONLY_BADGE_H: f32 = 28.0;
+const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
+const READ_ONLY_BADGE_GAP: f32 = 8.0;
+const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +87,28 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
 /// the caller premultiplies before stuffing into a [`QuadInstance`].
 fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
+}
+
+fn read_only_badge_rect(
+    sw: f32,
+    sh: f32,
+    search_bar: Option<SearchBarLayout>,
+) -> (f32, f32, f32, f32) {
+    let w = READ_ONLY_BADGE_W.min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
+    let h = READ_ONLY_BADGE_H.min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
+    let mut x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
+    let mut y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
+
+    if let Some(search) = search_bar {
+        if search.border.x >= w + READ_ONLY_BADGE_MARGIN + READ_ONLY_BADGE_GAP {
+            x = search.border.x - READ_ONLY_BADGE_GAP - w;
+            y = search.border.y;
+        } else {
+            y = (search.border.y + search.border.h + READ_ONLY_BADGE_GAP).min((sh - h).max(0.0));
+        }
+    }
+
+    (x, y, w, h)
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
@@ -1572,6 +1600,10 @@ impl GpuRenderer {
             }
         }
 
+        if copy_mode.is_read_only() {
+            return None;
+        }
+
         let visible_row = Self::viewport_relative_row(copy_mode.cursor.1, view_top_abs, grid.rows)?;
         let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
         let (cx, cw) = if raw_fallback {
@@ -2422,6 +2454,7 @@ impl GpuRenderer {
         let quick_select_hint_count = copy_mode
             .and_then(|state| state.quick_select.as_ref())
             .map_or(0, |quick| quick.hints.len() as u32);
+        let read_only_mode = copy_mode.is_some_and(CopyModeState::is_read_only);
         let pane_focus_flash_bucket = self.pane_focus_flash_bucket(now);
         let key = FrameKey {
             grid_revision: grid.revision(),
@@ -3075,7 +3108,7 @@ impl GpuRenderer {
                 );
             }
         }
-        if cursor_visible && self.window_focused {
+        if cursor_visible && self.window_focused && !read_only_mode {
             // Hide the cursor when the viewport is scrolled away from the
             // live region — its absolute row is `scrollback_len + cursor.row`,
             // which sits below the bottom of a scrolled-back view.
@@ -3644,6 +3677,47 @@ impl GpuRenderer {
                     }),
                 );
                 overlay_glyph_instances.extend(chrome_layout.glyphs);
+            }
+        }
+
+        if read_only_mode {
+            let (badge_x, badge_y, badge_w, badge_h) =
+                read_only_badge_rect(sw, sh, search_bar_layout);
+            let badge_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
+            quads_overlay.push(QuadInstance::rounded(
+                px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
+                badge_bg,
+                [badge_w, badge_h],
+                READ_ONLY_BADGE_RADIUS,
+            ));
+            if let Some(stack) = self.font_stack.as_ref() {
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let font_size = self.raster_px((self.font_size - 2.0).max(1.0));
+                let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
+                let baseline = badge_y + (badge_h + font_size * 0.8) * 0.5;
+                let label_w = READ_ONLY_BADGE_LABEL.chars().count() as f32 * font_size * 0.58;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    badge_x + ((badge_w - label_w) * 0.5).max(8.0),
+                    baseline,
+                    [badge_x, badge_y, badge_w, badge_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
             }
         }
 
