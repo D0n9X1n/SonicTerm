@@ -14,7 +14,7 @@ pub const fn log_file_name() -> &'static str {
 
 /// Absolute path of the directory holding `sonicterm.log` and `crashes/`.
 ///
-/// Resolution: `~/.snoicterm/logs`.
+/// Resolution: `~/.sonicterm/logs`.
 ///
 /// On the first call, the result is memoised — subsequent calls are
 /// O(1) and return the same path even if env vars change later. This
@@ -32,9 +32,9 @@ pub fn crash_dir() -> PathBuf {
 
 fn resolve_log_dir() -> PathBuf {
     if let Some(home) = home_dir() {
-        return home.join(".snoicterm").join("logs");
+        return home.join(".sonicterm").join("logs");
     }
-    PathBuf::from(".snoicterm/logs")
+    PathBuf::from(".sonicterm/logs")
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -46,12 +46,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_log_dir_lives_under_dot_snoicterm() {
+    fn fallback_log_dir_lives_under_dot_sonicterm() {
         let dir = resolve_log_dir();
         assert_eq!(dir.file_name().and_then(|s| s.to_str()), Some("logs"));
         assert_eq!(
             dir.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
-            Some(".snoicterm")
+            Some(".sonicterm")
         );
     }
 }

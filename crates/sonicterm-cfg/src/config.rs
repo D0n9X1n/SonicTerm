@@ -407,7 +407,7 @@ impl Config {
     /// Where the user's config lives.
     ///
     /// SonicTerm 1.0 uses a single cross-platform directory:
-    /// `~/.snoicterm/sonicterm.toml`.
+    /// `~/.sonicterm/sonicterm.toml`.
     pub fn default_path() -> Option<PathBuf> {
         let base = default_config_dir()?;
         Some(base.join("sonicterm.toml"))
@@ -528,7 +528,7 @@ fn dirs_home() -> Option<PathBuf> {
 
 /// SonicTerm 1.0 config directory (the on-disk layout).
 pub fn default_config_dir() -> Option<PathBuf> {
-    Some(dirs_home()?.join(".snoicterm"))
+    Some(dirs_home()?.join(".sonicterm"))
 }
 
 fn seed_user_examples(config_dir: &Path) -> Result<()> {
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn default_config_paths_live_under_dot_sonicterm() {
         let dir = default_config_dir().expect("home dir should exist in tests");
-        assert!(dir.ends_with(".snoicterm"));
+        assert!(dir.ends_with(".sonicterm"));
         assert_eq!(Config::default_path().unwrap(), dir.join("sonicterm.toml"));
     }
 

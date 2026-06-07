@@ -4,8 +4,8 @@ SonicTerm writes rolling logs through `sonicterm-logging`.
 
 ## Paths
 
-- Logs on macOS and Windows: `~/.snoicterm/logs/sonicterm.log`
-- Crash dumps on macOS and Windows: `~/.snoicterm/logs/crashes/`
+- Logs on macOS and Windows: `~/.sonicterm/logs/sonicterm.log`
+- Crash dumps on macOS and Windows: `~/.sonicterm/logs/crashes/`
 
 Crash dumps and exit-path traces are written in the same directory when
 available.
