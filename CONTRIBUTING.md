@@ -62,8 +62,8 @@ Scope is the crate or component (`core`, `mac`, `windows`, `shared`, `ci`,
 
 Maintainers only:
 
-1. Ensure `Cargo.toml` says `1.0.0`.
-2. Tag: `git tag v1.0.0 && git push origin v1.0.0`.
+1. Ensure `Cargo.toml` says `0.9.0`.
+2. Tag: `git tag v0.9.0 && git push origin v0.9.0`.
 3. `release.yml` builds `.dmg` + `.msi` and publishes a GitHub Release.
 
 Pre-release tags (e.g. `v0.7.0-alpha.1`) are auto-marked as pre-release.

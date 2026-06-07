@@ -4,12 +4,12 @@ SonicTerm releases are tag-driven.
 
 ## Version
 
-The workspace version is `1.0.0`. Release tags use `v<major>.<minor>.<patch>`,
+The workspace version is `0.9.0`. Release tags use `v<major>.<minor>.<patch>`,
 for example:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
 ## Automation
@@ -21,7 +21,8 @@ git push origin v1.0.0
 3. Windows x64 release build and unsigned `.msi`.
 4. Release notes from `scripts/release-notes.sh`, summarizing commits since the
    previous version tag.
-5. GitHub Release publication with both installers attached.
+5. GitHub Release publication with both installers and `SHA256SUMS.txt`
+   attached as downloadable files.
 
 ## Local release checks
 

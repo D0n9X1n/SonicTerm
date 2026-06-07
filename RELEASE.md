@@ -1,6 +1,6 @@
-# SonicTerm 1.0.0 Release Checklist
+# SonicTerm 0.9.0 Release Checklist
 
-1. Ensure `Cargo.toml` workspace version is `1.0.0`.
+1. Ensure `Cargo.toml` workspace version is `0.9.0`.
 2. Run local checks:
 
    ```sh
@@ -12,8 +12,8 @@
 3. Create and push a version tag:
 
    ```sh
-   git tag v1.0.0
-   git push origin v1.0.0
+   git tag v0.9.0
+   git push origin v0.9.0
    ```
 
 4. Watch the release workflow:
@@ -26,6 +26,7 @@
 5. Confirm the GitHub Release contains:
    - macOS universal `.dmg`
    - Windows `.msi`
+   - `SHA256SUMS.txt`
    - generated release notes summarizing commits since the previous tag
 
-Installers are unsigned for 1.0.0.
+Installers are unsigned for 0.9.0.

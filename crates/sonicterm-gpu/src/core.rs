@@ -35,6 +35,15 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
+const READ_ONLY_BADGE_ICON: &str = "";
+const READ_ONLY_BADGE_LABEL: &str = "READONLY";
+const SEARCH_BADGE_ICON: &str = "";
+const READ_ONLY_BADGE_W: f32 = 240.0;
+const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
+const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
+const READ_ONLY_BADGE_PAD_RIGHT: f32 = 32.0;
+const READ_ONLY_BADGE_BASELINE_NUDGE_Y: f32 = -2.0;
+const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +60,10 @@ pub struct SurfaceAppearance {
     pub scrollbar: sonicterm_cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     pub panel_padding: f32,
+}
+
+fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
 /// Renderer initialization settings derived from config.
@@ -81,6 +94,14 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
 /// the caller premultiplies before stuffing into a [`QuadInstance`].
 fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
+}
+
+fn read_only_badge_rect(sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+    let w = READ_ONLY_BADGE_W.min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
+    let h = READ_ONLY_BADGE_H.min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
+    let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
+    let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
+    (x, y, w, h)
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
@@ -232,7 +253,8 @@ use sonicterm_ui::{
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
-        PALETTE_ROW_RADIUS,
+        PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
+        SEARCH_BAR_PAD_RIGHT,
     },
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
@@ -312,7 +334,7 @@ struct CheatsheetLayout {
     rows: Vec<sonicterm_ui::tabbar_view::Rect>,
     selected_row: Option<usize>,
     query_label: String,
-    rows_text: String,
+    row_labels: Vec<String>,
     footer: sonicterm_ui::tabbar_view::Rect,
     footer_label: String,
 }
@@ -366,7 +388,7 @@ fn compute_cheatsheet_layout(
     let selected_row = (total > 0).then_some(selected - window_start);
 
     let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
-    let mut rows_text = String::new();
+    let mut row_labels = Vec::new();
     for (row_i, idx_pos) in (window_start..window_end).enumerate() {
         rows.push(sonicterm_ui::tabbar_view::Rect {
             x: bg.x + panel_padding,
@@ -374,17 +396,18 @@ fn compute_cheatsheet_layout(
             w: (bg.w - panel_padding * 2.0).max(0.0),
             h: PALETTE_ROW_HEIGHT,
         });
-        if row_i > 0 {
-            rows_text.push('\n');
-        }
         if let Some((keys, action)) = idxs.get(idx_pos).and_then(|idx| bindings.get(*idx)) {
-            rows_text.push_str(keys);
-            rows_text.push_str("    ");
-            rows_text.push_str(action);
+            row_labels.push(format!("{keys}    {action}"));
         }
     }
     if total == 0 {
-        rows_text.push_str("No shortcuts found");
+        rows.push(sonicterm_ui::tabbar_view::Rect {
+            x: bg.x + panel_padding,
+            y: list_top,
+            w: (bg.w - panel_padding * 2.0).max(0.0),
+            h: PALETTE_ROW_HEIGHT,
+        });
+        row_labels.push("No shortcuts found".to_string());
     }
 
     let query_label = if state.query.is_empty() {
@@ -406,7 +429,7 @@ fn compute_cheatsheet_layout(
         rows,
         selected_row,
         query_label,
-        rows_text,
+        row_labels,
         footer,
         footer_label,
     }
@@ -1571,6 +1594,10 @@ impl GpuRenderer {
             }
         }
 
+        if copy_mode.is_read_only() {
+            return None;
+        }
+
         let visible_row = Self::viewport_relative_row(copy_mode.cursor.1, view_top_abs, grid.rows)?;
         let copy_col = copy_mode.cursor.0.min(grid.cols.saturating_sub(1) as usize);
         let (cx, cw) = if raw_fallback {
@@ -2421,6 +2448,7 @@ impl GpuRenderer {
         let quick_select_hint_count = copy_mode
             .and_then(|state| state.quick_select.as_ref())
             .map_or(0, |quick| quick.hints.len() as u32);
+        let read_only_mode = copy_mode.is_some_and(CopyModeState::is_read_only);
         let pane_focus_flash_bucket = self.pane_focus_flash_bucket(now);
         let key = FrameKey {
             grid_revision: grid.revision(),
@@ -3074,7 +3102,7 @@ impl GpuRenderer {
                 );
             }
         }
-        if cursor_visible && self.window_focused {
+        if cursor_visible && self.window_focused && !read_only_mode {
             // Hide the cursor when the viewport is scrolled away from the
             // live region — its absolute row is `scrollback_len + cursor.row`,
             // which sits below the bottom of a scrolled-back view.
@@ -3532,17 +3560,20 @@ impl GpuRenderer {
                 }
             }
         }
-        // -------- Search highlights + status bar ---------------------------
-        // When search is active: paint a translucent yellow quad over every
-        // match in the grid, then draw a single-line status bar pinned to
-        // the bottom edge styled like the tab bar.
-        let search_bar_h = self.font_size * 0.85 * 1.2;
+        // -------- Search highlights + badge --------------------------------
         if let Some(s) = search {
             let cur_idx = s.current;
+            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            let match_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
+            let match_fg = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
+            let current_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
+            let current_fg = match_fg;
             for (i, m) in s.matches.iter().enumerate() {
-                // Skip matches that aren't on screen (scrollback / off-viewport).
-                let Some(visible_row) = s.match_visible_row(m) else { continue };
-                if visible_row >= grid.rows || m.col_end <= m.col_start {
+                if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
+                    continue;
+                }
+                let visible_row = u64::from(m.row) - view_top_abs;
+                if visible_row >= u64::from(grid.rows) {
                     continue;
                 }
                 // #489: derive x/w from the active-pane snapped-edge
@@ -3555,15 +3586,15 @@ impl GpuRenderer {
                     .get(cs)
                     .copied()
                     .unwrap_or(active_origin_x + f32::from(m.col_start) * self.cell_w);
-                let y = active_origin_y + f32::from(visible_row) * self.cell_h;
+                let y = active_origin_y + (visible_row as f32) * self.cell_h;
                 let w = active_snapped_cell_x
                     .get(cache_end)
                     .map(|r| r - x)
                     .unwrap_or_else(|| f32::from(m.col_end - m.col_start) * self.cell_w);
-                let color = if Some(i) == cur_idx {
-                    self.search_highlight_current
+                let (bg_color, fg_color) = if Some(i) == cur_idx {
+                    (current_bg, current_fg)
                 } else {
-                    self.search_highlight
+                    (match_bg, match_fg)
                 };
                 // Clip the match highlight to the active pane (PR #270
                 // follow-up) — a long match that runs past the pane's
@@ -3577,50 +3608,11 @@ impl GpuRenderer {
                 ) {
                     quads.push(QuadInstance {
                         rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                        color,
+                        color: bg_color,
                         ..Default::default()
                     });
+                    recolor_cursor_glyphs(&mut glyph_instances, qx, qy, qw, qh, sw, sh, fg_color);
                 }
-            }
-            // Status bar background pinned to bottom edge.
-            let search_bar_top = sh - search_bar_h;
-            quads.push(QuadInstance {
-                rect: px_to_ndc(0.0, search_bar_top, sw, search_bar_h, sw, sh),
-                color: self.search_bg,
-                ..Default::default()
-            });
-            let n = s.matches.len();
-            let cur = s.current.map(|i| i + 1).unwrap_or(0);
-            let label = if n == 0 {
-                format!("/ {} — no matches", s.query)
-            } else {
-                format!("/ {} — {}/{} matches", s.query, cur, n)
-            };
-            // T14: search status bar text → chrome_text. The bar is
-            // drawn AFTER the grid text pipeline (legacy text_renderer
-            // path) so emit into `glyph_instances` rather than
-            // `overlay_glyph_instances`.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                let layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    &label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    self.font_size * 0.85,
-                    native_em,
-                    (self.padding_left * self.scale_factor, search_bar_top + self.font_size * 0.85),
-                    (sw, sh),
-                    None,
-                );
-                glyph_instances.extend(layout.glyphs);
             }
         }
 
@@ -3629,10 +3621,24 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
-        let search_bar_layout = search.map(|_| SearchBarLayout::compute(sw, sh));
-        if let (Some(s), Some(layout)) = (search, search_bar_layout) {
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
+        let read_only_badge = read_only_mode.then(|| read_only_badge_rect(sw, sh));
+        let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
+        let search_label = search.map(search_bar_label);
+        let search_bar_layout = search_label.as_ref().map(|label| {
+            let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
+                + SEARCH_BAR_ICON_GAP
+                + estimate_badge_text_width(label, search_font_size);
+            if read_only_badge.is_some() {
+                SearchBarLayout::compute_at_row(sw, sh, content_w, 1)
+            } else {
+                SearchBarLayout::compute(sw, sh, content_w)
+            }
+        });
+        if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
+            let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
+            let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
+            quads_overlay.push(QuadInstance::rounded(
+                px_to_ndc(
                     layout.border.x,
                     layout.border.y,
                     layout.border.w,
@@ -3640,17 +3646,71 @@ impl GpuRenderer {
                     sw,
                     sh,
                 ),
-                color: self.hyperlink_underline,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: self.search_bg,
-                ..Default::default()
-            });
-            let label = search_bar_label(s);
+                search_badge_bg,
+                [layout.border.w, layout.border.h],
+                READ_ONLY_BADGE_RADIUS,
+            ));
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
+            if let Some(stack) = self.font_stack.as_ref() {
+                let mut wt = stack.clone();
+                let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
+                let icon_x = layout.border.x + SEARCH_BAR_PAD_LEFT;
+                let text_x = icon_x + icon_w + SEARCH_BAR_ICON_GAP;
+                let visible_w =
+                    (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
+                let text_w = estimate_badge_text_width(label, search_font_size);
+                let scroll_x = (text_w - visible_w).max(0.0);
+                let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
+                let icon_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    SEARCH_BADGE_ICON,
+                    search_badge_fg,
+                    ChromeAttrs::default(),
+                    search_font_size,
+                    search_font_size,
+                    (icon_x, baseline),
+                    (sw, sh),
+                    Some(ChromeClip {
+                        x: layout.border.x,
+                        y: layout.border.y,
+                        w: layout.border.w,
+                        h: layout.border.h,
+                    }),
+                );
+                overlay_glyph_instances.extend(icon_layout.glyphs);
+                let chrome_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    label,
+                    search_badge_fg,
+                    ChromeAttrs::default(),
+                    search_font_size,
+                    search_font_size,
+                    (text_x - scroll_x, baseline),
+                    (sw, sh),
+                    Some(ChromeClip {
+                        x: text_x,
+                        y: layout.border.y,
+                        w: visible_w,
+                        h: layout.border.h,
+                    }),
+                );
+                overlay_glyph_instances.extend(chrome_layout.glyphs);
+            }
+        }
+
+        if let Some((badge_x, badge_y, badge_w, badge_h)) = read_only_badge {
+            let badge_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
+            quads_overlay.push(QuadInstance::rounded(
+                px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
+                badge_bg,
+                [badge_w, badge_h],
+                READ_ONLY_BADGE_RADIUS,
+            ));
             if let Some(stack) = self.font_stack.as_ref() {
                 let native_em = stack
                     .cell_metrics_raster_px()
@@ -3658,26 +3718,73 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let baseline = layout.bg.y + 4.0 + self.font_size * 0.85;
-                let chrome_layout = chrome_text::layout(
+                let font_size =
+                    self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
+                let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
+                let baseline =
+                    badge_y + (badge_h + font_size * 0.8) * 0.5 + READ_ONLY_BADGE_BASELINE_NUDGE_Y;
+                let icon_layout = chrome_text::layout(
                     stack,
                     &mut wt,
                     &mut self.glyph_atlas,
-                    &label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    self.font_size * 0.85,
+                    READ_ONLY_BADGE_ICON,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    font_size,
                     native_em,
-                    (layout.bg.x + 6.0, baseline),
+                    (badge_x + SEARCH_BAR_PAD_LEFT, baseline),
                     (sw, sh),
-                    Some(ChromeClip {
-                        x: layout.bg.x,
-                        y: layout.bg.y,
-                        w: layout.bg.w,
-                        h: layout.bg.h,
-                    }),
+                    Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
-                overlay_glyph_instances.extend(chrome_layout.glyphs);
+                overlay_glyph_instances.extend(icon_layout.glyphs);
+                let label_layout = chrome_text::layout(
+                    stack,
+                    &mut wt,
+                    &mut self.glyph_atlas,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    font_size,
+                    native_em,
+                    (0.0, baseline),
+                    (sw, sh),
+                    Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
+                );
+                let label_x = badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    label_x,
+                    baseline,
+                    [badge_x, badge_y, badge_w, badge_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    READ_ONLY_BADGE_LABEL,
+                    text_color,
+                    ChromeAttrs { bold: true, italic: false },
+                    label_x + 1.0,
+                    baseline,
+                    [badge_x, badge_y, badge_w, badge_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
             }
         }
 
@@ -3923,8 +4030,7 @@ impl GpuRenderer {
                     }
                 }
 
-                // Footer hint uses the same size as query and command rows.
-                let footer_font_size = palette_font_size;
+                let footer_font_size = (palette_font_size - 1.0).max(1.0);
                 let footer_origin_x = layout.footer.x + 12.0;
                 let footer_baseline_y =
                     layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
@@ -4052,27 +4158,25 @@ impl GpuRenderer {
                     None,
                 );
                 // Rows
-                let rows_origin = layout.rows.first().map(|row| (row.x, row.y)).unwrap_or((
-                    layout.bg.x + self.panel_padding,
-                    layout.query_row.y + layout.query_row.h + self.panel_padding,
-                ));
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    &layout.rows_text,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    rows_origin.0 + 12.0,
-                    rows_origin.1 + self.font_size * 0.8,
-                    bounds_bg,
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                for (row, label) in layout.rows.iter().zip(layout.row_labels.iter()) {
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        self.font_size,
+                        native_em,
+                        &mut wt,
+                        label,
+                        self.search_fg,
+                        ChromeAttrs::default(),
+                        row.x + 12.0,
+                        row.y + (row.h + self.font_size * 0.8) * 0.5,
+                        bounds_bg,
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                }
                 // Footer
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
@@ -5065,7 +5169,12 @@ impl GpuRenderer {
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
-    color_to_chrome(cell.fg, theme, default)
+    if cell.flags.contains(CellFlags::INVERSE) {
+        let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
+        color_to_chrome(cell.bg, theme, default_bg)
+    } else {
+        color_to_chrome(cell.fg, theme, default)
+    }
 }
 
 fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
@@ -5264,30 +5373,17 @@ fn push_line_segment_px(
 /// rendered through the LoadOp clear path.
 #[doc(hidden)]
 pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
-    let (r, g, b) = match cell.bg {
-        Color::Default => return None,
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(i) => match i {
-            0..=15 => {
-                let gc = indexed(i, theme)?;
-                (gc.r(), gc.g(), gc.b())
-            }
-            16..=231 => {
-                let v = i - 16;
-                let r = v / 36;
-                let g = (v / 6) % 6;
-                let b = v % 6;
-                let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
-                (to8bit(r), to8bit(g), to8bit(b))
-            }
-            232..=255 => {
-                let g = (i - 232) * 10 + 8;
-                (g, g, g)
-            }
-        },
+    let color = if cell.flags.contains(CellFlags::INVERSE) {
+        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
+        color_to_chrome(cell.fg, theme, default_fg)
+    } else {
+        match cell.bg {
+            Color::Default => return None,
+            bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
+        }
     };
     let lut = super::color::srgb_u8_to_linear_lut();
-    Some([lut[r as usize], lut[g as usize], lut[b as usize], 1.0])
+    Some([lut[color.r() as usize], lut[color.g() as usize], lut[color.b() as usize], 1.0])
 }
 
 /// Walk the visible rows of `grid`, emit one `QuadInstance` per maximal run
@@ -5559,7 +5655,43 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
         13 => Some(pick(p.bright.magenta.0.as_str())),
         14 => Some(pick(p.bright.cyan.0.as_str())),
         15 => Some(pick(p.bright.white.0.as_str())),
-        _ => None,
+        16..=231 => {
+            let v = i - 16;
+            let r = v / 36;
+            let g = (v / 6) % 6;
+            let b = v % 6;
+            let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
+            Some(ChromeColor::rgb(to8bit(r), to8bit(g), to8bit(b)))
+        }
+        232..=255 => {
+            let g = (i - 232) * 10 + 8;
+            Some(ChromeColor::rgb(g, g, g))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_color_supports_full_xterm_256_palette() {
+        let theme = Theme::default();
+        assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
+        assert_eq!(indexed(231, &theme), Some(ChromeColor::rgb(255, 255, 255)));
+        assert_eq!(indexed(232, &theme), Some(ChromeColor::rgb(8, 8, 8)));
+        assert_eq!(indexed(255, &theme), Some(ChromeColor::rgb(238, 238, 238)));
+    }
+
+    #[test]
+    fn inverse_swaps_foreground_and_background_for_rendering() {
+        let theme = Theme::default();
+        let cell = Cell::plain('x', Color::Indexed(1), Color::Indexed(2), CellFlags::INVERSE);
+        assert_eq!(cell_fg(&cell, &theme, ChromeColor::WHITE), indexed(2, &theme).unwrap());
+        assert_eq!(
+            cell_bg_rgba(&cell, &theme),
+            Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
+        );
     }
 }
 

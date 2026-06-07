@@ -1319,7 +1319,7 @@ impl Perform for Performer {
 #[cfg(test)]
 mod tests {
     use super::Parser;
-    use sonicterm_grid::grid::Grid;
+    use sonicterm_grid::grid::{CellFlags, Grid};
 
     fn row_text(parser: &Parser, row: u16) -> String {
         parser.grid().row(row).iter().map(|cell| cell.ch).collect()
@@ -1363,6 +1363,21 @@ mod tests {
         assert_eq!(parser.grid().cursor.row, 0);
         assert_eq!(parser.grid().cursor.col, 5);
         assert_eq!(row_text(&parser, 0), "    Z   ");
+    }
+
+    #[test]
+    fn bs_space_after_wide_char_clears_both_cells() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+
+        parser.advance("中".as_bytes());
+        parser.advance(b"\x08 ");
+
+        let row = parser.grid().row(0);
+        assert_eq!(row[0].ch, ' ');
+        assert!(!row[0].flags.contains(CellFlags::WIDE));
+        assert_eq!(row[1].ch, ' ');
+        assert!(!row[1].flags.contains(CellFlags::WIDE_CONT));
+        assert_eq!(parser.grid().cursor.col, 2);
     }
 
     #[test]

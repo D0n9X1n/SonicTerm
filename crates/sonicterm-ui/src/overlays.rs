@@ -1,7 +1,7 @@
 //! Pure layout helpers for the three state-only overlays drawn over the
 //! terminal grid:
 //!
-//! 1. Command palette — centered modal (~680×460) with a query input row
+//! 1. Command palette — centered modal (~1360×460) with a query input row
 //!    and a filtered action list. State lives in
 //!    [`crate::command_palette::CommandPalette`].
 //! 2. Search bar — bottom-right single-line status with `N/M` match
@@ -30,7 +30,7 @@ use crate::tabbar_view::Rect;
 // stay self-documenting.
 
 /// Ideal modal width in physical pixels (Raycast-style redesign).
-pub const PALETTE_WIDTH: f32 = 680.0;
+pub const PALETTE_WIDTH: f32 = 1360.0;
 
 /// Ideal modal height in physical pixels.
 pub const PALETTE_HEIGHT: f32 = 460.0;
@@ -38,7 +38,7 @@ pub const PALETTE_HEIGHT: f32 = 460.0;
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
 /// `viewport_w - 48`, whichever is smaller (see [`PaletteLayout::compute`]).
-pub const PALETTE_MAX_WIDTH: f32 = 720.0;
+pub const PALETTE_MAX_WIDTH: f32 = 1440.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
@@ -79,7 +79,7 @@ pub const PALETTE_ROW_PAD_X: f32 = 18.0;
 pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;
 
 /// Footer height (count + nav hint strip at the bottom of the modal).
-pub const PALETTE_FOOTER_HEIGHT: f32 = 32.0;
+pub const PALETTE_FOOTER_HEIGHT: f32 = 40.0;
 
 /// Default inset between the modal edge and the inner content (rows, query,
 /// footer). Users can override this via `appearance.panel_padding`.
@@ -97,14 +97,26 @@ pub const PALETTE_QUERY_RADIUS: f32 = 8.0;
 /// Corner radius for the selected-row highlight quad.
 pub const PALETTE_ROW_RADIUS: f32 = 6.0;
 
-/// Margin between the search bar and the right/bottom window edge.
-pub const SEARCH_BAR_MARGIN: f32 = 8.0;
+/// Margin between the search bar and the right/top window edge.
+pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 
-/// Width of the small bottom-right search bar.
-pub const SEARCH_BAR_WIDTH: f32 = 260.0;
+/// Maximum width of the small top-right search bar.
+pub const SEARCH_BAR_WIDTH: f32 = 600.0;
 
-/// Height of the small bottom-right search bar.
-pub const SEARCH_BAR_HEIGHT: f32 = 26.0;
+/// Minimum width of the search bar before query text expands it.
+pub const SEARCH_BAR_MIN_WIDTH: f32 = 300.0;
+
+/// Left padding inside the search/read-only badges.
+pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;
+
+/// Right padding inside the search/read-only badges.
+pub const SEARCH_BAR_PAD_RIGHT: f32 = 10.0;
+
+/// Gap between the fixed leading Nerd Font icon and text.
+pub const SEARCH_BAR_ICON_GAP: f32 = 10.0;
+
+/// Height of the small top-right search bar.
+pub const SEARCH_BAR_HEIGHT: f32 = 44.0;
 
 /// Layout of the command-palette modal.
 #[derive(Debug, Clone)]
@@ -183,7 +195,7 @@ impl PaletteLayout {
             return None;
         }
         let panel_padding = panel_padding.max(0.0);
-        // Spec: width is `min(720, viewport_w - 48)`, ideal 680.
+        // Spec: width is `min(1440, viewport_w - 48)`, ideal 1360.
         // Height: `min(520, viewport_h - 96)`, ideal 460.
         let modal_w = PALETTE_WIDTH.min(PALETTE_MAX_WIDTH).min((window_w - 48.0).max(160.0));
         let modal_h = PALETTE_HEIGHT.min(PALETTE_MAX_HEIGHT).min((window_h - 96.0).max(120.0));
@@ -335,15 +347,29 @@ pub struct SearchBarLayout {
 }
 
 impl SearchBarLayout {
-    /// Place the bar in the bottom-right corner. The renderer is
+    /// Place the bar in the top-right corner. The renderer is
     /// responsible for picking colors and drawing the label produced by
     /// [`search_bar_label`].
     #[must_use]
-    pub fn compute(window_w: f32, window_h: f32) -> SearchBarLayout {
-        let w = SEARCH_BAR_WIDTH.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
+    pub fn compute(window_w: f32, window_h: f32, content_w: f32) -> SearchBarLayout {
+        Self::compute_at_row(window_w, window_h, content_w, 0)
+    }
+
+    #[must_use]
+    pub fn compute_at_row(
+        window_w: f32,
+        window_h: f32,
+        content_w: f32,
+        row: u8,
+    ) -> SearchBarLayout {
+        let row = row.min(1);
+        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT)
+            .clamp(SEARCH_BAR_MIN_WIDTH, SEARCH_BAR_WIDTH);
+        let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
         let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
         let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
-        let y = (window_h - h - SEARCH_BAR_MARGIN).max(0.0);
+        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN);
+        let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
             x: border.x + 1.0,
@@ -364,7 +390,32 @@ impl SearchBarLayout {
 pub fn search_bar_label(search: &SearchState) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|i| i + 1).unwrap_or(0);
-    format!("/ {} — {}/{}", search.query, cur, total)
+    format!("/ {}▏ — {}/{}", search.query, cur, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_bar_uses_300_to_600_width_window() {
+        let small = SearchBarLayout::compute(1000.0, 800.0, 10.0);
+        assert_eq!(small.border.w, SEARCH_BAR_MIN_WIDTH);
+
+        let medium = SearchBarLayout::compute(1000.0, 800.0, 360.0);
+        assert!(medium.border.w > SEARCH_BAR_MIN_WIDTH);
+        assert!(medium.border.w < SEARCH_BAR_WIDTH);
+
+        let large = SearchBarLayout::compute(1000.0, 800.0, 1000.0);
+        assert_eq!(large.border.w, SEARCH_BAR_WIDTH);
+    }
+
+    #[test]
+    fn search_bar_second_row_sits_below_first_row() {
+        let first = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 0);
+        let second = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 1);
+        assert!(second.border.y > first.border.y);
+    }
 }
 
 /// Layout of the IME preedit popover, placed just below the text cursor.

@@ -51,11 +51,32 @@ pub struct CopyModeState {
     pub anchor: Option<(usize, usize)>,
     pub mode: CopyMode,
     pub quick_select: Option<QuickSelectState>,
+    pub read_only: bool,
 }
 
 impl CopyModeState {
     pub fn new_at(pos: (usize, usize)) -> Self {
-        Self { cursor: pos, anchor: None, mode: CopyMode::Cursor, quick_select: None }
+        Self {
+            cursor: pos,
+            anchor: None,
+            mode: CopyMode::Cursor,
+            quick_select: None,
+            read_only: false,
+        }
+    }
+
+    pub fn read_only_at(pos: (usize, usize)) -> Self {
+        Self {
+            cursor: pos,
+            anchor: None,
+            mode: CopyMode::Cursor,
+            quick_select: None,
+            read_only: true,
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn move_left(&mut self, grid: &Grid) {
@@ -154,6 +175,9 @@ impl CopyModeState {
     }
 
     pub fn start_select(&mut self) {
+        if self.read_only {
+            return;
+        }
         if self.anchor.is_none() {
             self.anchor = Some(self.cursor);
         }
@@ -161,6 +185,9 @@ impl CopyModeState {
     }
 
     pub fn selected_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        if self.read_only {
+            return None;
+        }
         let anchor = self.anchor?;
         let mut start = anchor;
         let mut end = self.cursor;
@@ -251,4 +278,17 @@ fn nth_hint(idx: usize) -> Option<char> {
 
 fn byte_to_char_col(text: &str, byte: usize) -> usize {
     text[..byte.min(text.len())].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_copy_mode_does_not_select() {
+        let mut state = CopyModeState::read_only_at((1, 1));
+        assert!(state.is_read_only());
+        state.start_select();
+        assert_eq!(state.selected_range(), None);
+    }
 }

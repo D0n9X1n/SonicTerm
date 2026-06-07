@@ -12,6 +12,10 @@ use sonicterm_cfg::keymap::Action;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::copy_mode::CopyModeState;
+use sonicterm_ui::overlays::{
+    search_bar_label, SearchBarLayout, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
+    SEARCH_BAR_PAD_RIGHT,
+};
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
@@ -25,6 +29,11 @@ use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
 use super::{mark_all_panes_dirty, App, TabState};
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
+const SEARCH_BADGE_ICON: &str = "";
+
+fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
 
 impl App {
     pub(super) fn do_window_event(
@@ -318,6 +327,10 @@ impl App {
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
+                let search_ime_label = self.main().and_then(|ws| {
+                    let i = ws.tabs.active_index();
+                    ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(search_bar_label)
+                });
                 // PR-B1b borrow-split: pull the renderer out via direct
                 // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
                 // which would borrow all of `self`). That keeps
@@ -525,7 +538,39 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
-                        if let Some(throttle) = ws_ime_throttle_ref {
+                        if let Some(search_label) = search_ime_label.as_ref() {
+                            let window_size = w.inner_size();
+                            let font_size =
+                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size());
+                            let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                            let content_w = icon_w
+                                + SEARCH_BAR_ICON_GAP
+                                + estimate_overlay_text_width(search_label, font_size);
+                            let row =
+                                u8::from(ws_copy_mode_ref.is_some_and(|cm| cm.is_read_only()));
+                            let layout = SearchBarLayout::compute_at_row(
+                                window_size.width as f32,
+                                window_size.height as f32,
+                                content_w,
+                                row,
+                            );
+                            let text_x = layout.border.x
+                                + SEARCH_BAR_PAD_LEFT
+                                + icon_w
+                                + SEARCH_BAR_ICON_GAP;
+                            let caret_x = (layout.border.x + layout.border.w
+                                - SEARCH_BAR_PAD_RIGHT)
+                                .max(text_x);
+                            let pos = winit::dpi::PhysicalPosition::new(
+                                caret_x as i32,
+                                layout.border.y as i32,
+                            );
+                            let size = winit::dpi::PhysicalSize::new(
+                                r.cell_w.ceil() as u32,
+                                layout.border.h.ceil() as u32,
+                            );
+                            w.set_ime_cursor_area(pos, size);
+                        } else if let Some(throttle) = ws_ime_throttle_ref {
                             if throttle.should_update(cursor_rc.0, cursor_rc.1) {
                                 let x = r.padding_left_px() + f32::from(cursor_rc.1) * r.cell_w;
                                 let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
@@ -1330,7 +1375,15 @@ impl App {
                     String::new()
                 };
                 if !committed.is_empty() {
-                    self.write_to_pty(committed.into_bytes());
+                    if self.search_active() {
+                        self.search_handle_ime_commit(&committed);
+                    } else if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
+                        // Read-only/copy mode is navigation-only. IME commit
+                        // events can arrive without a KeyboardInput path, so
+                        // drop them explicitly instead of forwarding to PTY.
+                    } else {
+                        self.write_to_pty(committed.into_bytes());
+                    }
                 }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -1399,13 +1452,6 @@ impl App {
                     }
                     return;
                 }
-                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
-                    self.copy_mode_handle_key(&event);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
                 if self.search_active() {
                     if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
@@ -1419,6 +1465,26 @@ impl App {
                         }
                     }
                     self.search_handle_key(&event, self.main_modifiers());
+                    if let Some(w) = self.main_window() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
+                    for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if super::keymap_dispatch::read_only_allows_action(&action)
+                                && self.run_action_for_window(&action, win_id)
+                            {
+                                self.drain_pending_window_creates(el);
+                                if let Some(w) = self.main_window() {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.copy_mode_handle_key(&event);
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
@@ -1493,7 +1559,7 @@ impl App {
             }
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
                 Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
                 Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
                 Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
@@ -1502,8 +1568,8 @@ impl App {
                 Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" => state.start_select(),
-                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
+                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
                 Key::Character(s) if s == "w" => state.move_word_fwd(grid),
                 Key::Character(s) if s == "b" => state.move_word_back(grid),
                 Key::Character(s) if s == "0" => state.move_line_start(grid),

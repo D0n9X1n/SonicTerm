@@ -46,6 +46,7 @@ pub struct CommandPalette {
     /// fuzzy-score, with canonical-order tiebreak.
     items: Vec<usize>,
     selected: usize,
+    tab_count: usize,
     /// First visible item index in the rendered viewport. Maintained by
     /// [`Self::ensure_selected_in_view`] so that arrow-key navigation
     /// keeps the highlighted row inside the modal even when the
@@ -76,6 +77,7 @@ impl CommandPalette {
             shortcut_hints,
             items,
             selected: 0,
+            tab_count: usize::MAX,
             scroll_offset: 0,
             visible_rows: 0,
         }
@@ -170,6 +172,19 @@ impl CommandPalette {
         self.items = (0..self.all.len()).collect();
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
         self.refilter();
+    }
+
+    pub fn set_tab_count(&mut self, tab_count: usize) {
+        let tab_count = tab_count.max(1);
+        if self.tab_count == tab_count {
+            return;
+        }
+        self.tab_count = tab_count;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        if self.mode == CommandPaletteMode::Commands {
+            self.refilter();
+        }
     }
 
     pub fn input_char(&mut self, ch: char) {
@@ -273,7 +288,8 @@ impl CommandPalette {
     /// order tiebreak. Empty query is canonical order, full universe.
     fn refilter(&mut self) {
         if self.query.is_empty() {
-            self.items = (0..self.all.len()).collect();
+            self.items =
+                (0..self.all.len()).filter(|&i| self.action_available(&self.all[i])).collect();
         } else {
             let mut matcher = Matcher::new(Config::DEFAULT);
             let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
@@ -282,6 +298,7 @@ impl CommandPalette {
                 .all
                 .iter()
                 .enumerate()
+                .filter(|(_, a)| self.action_available(a))
                 .filter_map(|(i, a)| {
                     scratch.clear();
                     let mut label = search_haystack(a);
@@ -300,6 +317,10 @@ impl CommandPalette {
             self.selected = 0;
         }
         self.ensure_selected_in_view();
+    }
+
+    fn action_available(&self, action: &Action) -> bool {
+        !matches!(action, Action::ActivateTab(i) if *i >= self.tab_count)
     }
 }
 
@@ -388,6 +409,7 @@ fn scroll_name(s: ScrollAction) -> &'static str {
 /// uses [`palette_actions`] so it does not expose placeholder commands.
 pub fn all_actions() -> Vec<Action> {
     let mut actions = palette_actions();
+    actions.push(Action::ShowKeymapCheatsheet);
     actions.push(Action::ApplyTheme("wezterm".into()));
     actions.push(Action::OpenSshPane("alice@example.com".into()));
     actions
@@ -423,10 +445,10 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ResizePaneRight,
         Action::ResizePaneUp,
         Action::ResizePaneDown,
-        Action::ResizePane { dir: Direction::Left, amount: 1 },
-        Action::ResizePane { dir: Direction::Right, amount: 1 },
-        Action::ResizePane { dir: Direction::Up, amount: 1 },
-        Action::ResizePane { dir: Direction::Down, amount: 1 },
+        Action::ResizePane { dir: Direction::Left, amount: 5 },
+        Action::ResizePane { dir: Direction::Right, amount: 5 },
+        Action::ResizePane { dir: Direction::Up, amount: 5 },
+        Action::ResizePane { dir: Direction::Down, amount: 5 },
         // Clipboard
         Action::CopyToClipboard,
         Action::EnterCopyMode,
@@ -444,7 +466,6 @@ pub fn palette_actions() -> Vec<Action> {
         // Search / palette / editable config files
         Action::OpenSearch,
         Action::OpenCommandPalette,
-        Action::ShowKeymapCheatsheet,
         Action::EditConfigFile,
         Action::OpenKeymapFile,
         // Scroll
@@ -464,7 +485,7 @@ pub fn palette_actions() -> Vec<Action> {
 }
 
 fn palette_accepts_keymap_action(action: &Action) -> bool {
-    !matches!(action, Action::OpenSshPane(_))
+    !matches!(action, Action::OpenSshPane(_) | Action::ShowKeymapCheatsheet)
 }
 
 /// Coverage assertion: every variant kind from
@@ -488,7 +509,11 @@ mod tests {
         let actions = palette_actions();
         assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
         assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::ShowKeymapCheatsheet)));
         assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
+        assert!(actions
+            .iter()
+            .any(|a| { matches!(a, Action::ResizePane { dir: Direction::Left, amount: 5 }) }));
         assert!(covers_every_variant_kind());
     }
 
@@ -505,6 +530,10 @@ mod tests {
                     keys: "super+shift+s".into(),
                     action: ActionWrapper(Action::OpenSshPane("alice@example.com".into())),
                 },
+                Binding {
+                    keys: "super+shift+?".into(),
+                    action: ActionWrapper(Action::ShowKeymapCheatsheet),
+                },
             ],
         };
         let mut palette = CommandPalette::new();
@@ -516,5 +545,25 @@ mod tests {
             .expect("concrete keymap theme action should be visible");
         assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some("⌘⇧Y"));
         assert!(!visible.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+        assert!(!visible.iter().any(|a| matches!(a, Action::ShowKeymapCheatsheet)));
+    }
+
+    #[test]
+    fn palette_hides_activate_tab_entries_beyond_current_tab_count() {
+        let keymap = Keymap {
+            meta: Meta { name: "test".into(), version: "1.0".into() },
+            bindings: vec![
+                Binding { keys: "super+1".into(), action: ActionWrapper(Action::ActivateTab(0)) },
+                Binding { keys: "super+2".into(), action: ActionWrapper(Action::ActivateTab(1)) },
+                Binding { keys: "super+3".into(), action: ActionWrapper(Action::ActivateTab(2)) },
+            ],
+        };
+        let mut palette = CommandPalette::new();
+        palette.set_keymap(&keymap);
+        palette.set_tab_count(2);
+        let visible = palette.visible();
+        assert!(visible.iter().any(|a| matches!(a, Action::ActivateTab(0))));
+        assert!(visible.iter().any(|a| matches!(a, Action::ActivateTab(1))));
+        assert!(!visible.iter().any(|a| matches!(a, Action::ActivateTab(2))));
     }
 }

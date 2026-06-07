@@ -477,7 +477,7 @@ impl App {
         }
     }
 
-    fn resize_visible_panes(&mut self) {
+    pub(super) fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
         let (cw, ch) = match self.test_viewport_override {
             // Test-only viewport override (PR #393 follow-up for #387) —

@@ -1730,20 +1730,7 @@ impl App {
                 // first; if not found, scan child windows.
                 AppEffect::PtyClose { pane } => {
                     let pane_id = pane.0;
-                    let mut closed = false;
-                    if let Some(ws) = self.main_mut() {
-                        if ws.panes.remove(&pane_id).is_some() {
-                            closed = true;
-                        }
-                    }
-                    if !closed {
-                        for ws in self.windows.values_mut() {
-                            if ws.panes.remove(&pane_id).is_some() {
-                                closed = true;
-                                break;
-                            }
-                        }
-                    }
+                    let closed = self.close_pty_pane(pane_id);
                     tracing::debug!(target: "state_machine", pane = pane_id, closed, "dispatch_effects: PtyClose");
                 }
                 // ChildExitPropagate: observability — the renderer's
@@ -1946,6 +1933,85 @@ impl App {
                 }
             }
         }
+    }
+
+    fn close_pty_pane(&mut self, pane_id: u64) -> bool {
+        let mut closed = false;
+        let mut resize_main = false;
+        let mut redraw_main = false;
+        let mut refresh_sink = false;
+
+        if let Some(ws) = self.main_mut() {
+            let active_tab = ws.tabs.active_index();
+            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
+                let leaves = st.tree.leaves();
+                if !leaves.contains(&pane_id) {
+                    continue;
+                }
+                if leaves.len() > 1 && st.tree.close(pane_id) {
+                    if st.active_pane == pane_id {
+                        st.active_pane =
+                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                    }
+                    if tab_idx == active_tab {
+                        resize_main = true;
+                        redraw_main = true;
+                        refresh_sink = true;
+                    }
+                }
+                break;
+            }
+            closed = ws.panes.remove(&pane_id).is_some();
+        }
+
+        if resize_main {
+            self.resize_visible_panes();
+        }
+        if redraw_main {
+            if let Some(w) = self.main_window() {
+                w.request_redraw();
+            }
+        }
+        if refresh_sink {
+            self.refresh_harness_sink();
+        }
+        if closed {
+            return true;
+        }
+
+        for ws in self.windows.values_mut() {
+            let mut resize_child = false;
+            let mut redraw_child = false;
+            let active_tab = ws.tabs.active_index();
+            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
+                let leaves = st.tree.leaves();
+                if !leaves.contains(&pane_id) {
+                    continue;
+                }
+                if leaves.len() > 1 && st.tree.close(pane_id) {
+                    if st.active_pane == pane_id {
+                        st.active_pane =
+                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                    }
+                    if tab_idx == active_tab {
+                        resize_child = true;
+                        redraw_child = true;
+                    }
+                }
+                break;
+            }
+            if ws.panes.remove(&pane_id).is_some() {
+                if resize_child {
+                    child_window::resize_visible_panes_in_child(ws);
+                }
+                if redraw_child {
+                    ws.request_redraw();
+                }
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Drive a single [`AppIntent`] through the state machine and
@@ -2836,6 +2902,15 @@ impl App {
     pub fn __test_pane_viewport_rows(&self, pane_id: u64) -> Option<u16> {
         let pane = self.main()?.panes.get(&pane_id)?;
         Some(pane.parser.lock().grid().rows)
+    }
+
+    /// Test-only: current grid size for a pane.
+    #[doc(hidden)]
+    pub fn __test_pane_grid_size(&self, pane_id: u64) -> Option<(u16, u16)> {
+        let pane = self.main()?.panes.get(&pane_id)?;
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        Some((grid.cols, grid.rows))
     }
 
     /// Test-only: id of the active pane in a given tab. Returns `None`

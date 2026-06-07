@@ -17,12 +17,13 @@ trap 'rm -rf "$TMP"' EXIT
   git tag v0.9.2
   echo two >> file.txt
   git commit -am "fix: polish palette" -q
-  git tag v1.0.0
-  "$ROOT/scripts/release-notes.sh" v1.0.0 > notes.md
-  grep -q "SonicTerm v1.0.0" notes.md
+  git tag v0.9.0
+  "$ROOT/scripts/release-notes.sh" v0.9.0 > notes.md
+  grep -q "SonicTerm v0.9.0" notes.md
   grep -q "Changes since v0.9.2" notes.md
   grep -q "fix: polish palette" notes.md
-  grep -q "SonicTerm-v1.0.0-mac-universal.dmg" notes.md
+  grep -q "SonicTerm-v0.9.0-mac-universal.dmg" notes.md
+  grep -q "SHA256SUMS.txt" notes.md
 )
 
 echo "release-notes.sh test passed"

@@ -15,9 +15,14 @@ Common actions:
 | Split down | `Cmd+Shift+D` | `Ctrl+Alt+Shift+D` |
 | Command palette | `Cmd+Shift+P` | `Ctrl+Shift+P` |
 | Search | `Cmd+F` | `Ctrl+Shift+F` |
-| Copy mode | `Cmd+[` | `Ctrl+Shift+[` |
+| READONLY mode | `Cmd+[` | `Ctrl+Shift+[` |
 
 Tabs can be dragged out into separate windows and dragged back to merge.
+
+READONLY mode is for safe scrollback/navigation. It blocks terminal input and
+only keeps a small shortcut whitelist active: tab switching, pane focus, and
+search. If search is open while READONLY is active, typing edits the search box
+only and is not sent to the terminal.
 
 ## 中文
 
@@ -34,6 +39,9 @@ SonicTerm 会自动创建配置目录。
 | 向下分屏 | `Cmd+Shift+D` | `Ctrl+Alt+Shift+D` |
 | 命令面板 | `Cmd+Shift+P` | `Ctrl+Shift+P` |
 | 搜索 | `Cmd+F` | `Ctrl+Shift+F` |
-| Copy Mode | `Cmd+[` | `Ctrl+Shift+[` |
+| READONLY 模式 | `Cmd+[` | `Ctrl+Shift+[` |
 
 Tab 可以拖出成为独立窗口，也可以拖回合并。
+
+READONLY 模式用于安全查看 scrollback / 导航。它会阻止输入进入终端，只保留一个很小的
+快捷键白名单：切换 Tab、切换 Pane 焦点、搜索。如果 READONLY 中打开了搜索框，键盘输入只会修改搜索框，不会发送到终端。

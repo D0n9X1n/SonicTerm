@@ -432,18 +432,46 @@ impl Grid {
             self.cursor.col = 0;
         }
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
-        let cell_flags = if width == 2 { flags | CellFlags::WIDE } else { flags };
+        let mut clean_flags = flags;
+        clean_flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
+        let mut fill = Cell::plain(' ', fg, bg, clean_flags);
+        Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
+        self.clear_wide_intersections(r, c, width as usize, fill);
+
+        let cell_flags = if width == 2 { clean_flags | CellFlags::WIDE } else { clean_flags };
         let mut lead = Cell::plain(ch, fg, bg, cell_flags);
         Self::apply_rare_attrs(&mut lead, hyperlink, underline_style, underline_color);
         self.visible[r][c] = lead;
         if width == 2 && c + 1 < self.cols as usize {
-            let mut cont = Cell::plain(' ', fg, bg, flags | CellFlags::WIDE_CONT);
+            let mut cont = Cell::plain(' ', fg, bg, clean_flags | CellFlags::WIDE_CONT);
             Self::apply_rare_attrs(&mut cont, hyperlink, underline_style, underline_color);
             self.visible[r][c + 1] = cont;
         }
         self.cursor.col += width;
         self.mark_row(r as u16);
         self.bump();
+    }
+
+    fn clear_wide_intersections(&mut self, row: usize, start: usize, width: usize, fill: Cell) {
+        let cols = self.cols as usize;
+        let end = (start + width).min(cols);
+        let mut leads = Vec::with_capacity(width);
+        for c in start..end {
+            let cell = &self.visible[row][c];
+            if cell.flags.contains(CellFlags::WIDE) {
+                leads.push(c);
+            } else if cell.flags.contains(CellFlags::WIDE_CONT) && c > 0 {
+                leads.push(c - 1);
+            }
+        }
+        leads.sort_unstable();
+        leads.dedup();
+        for lead in leads {
+            self.visible[row][lead] = fill.clone();
+            if lead + 1 < cols {
+                self.visible[row][lead + 1] = fill.clone();
+            }
+        }
     }
 
     #[inline]
@@ -1053,4 +1081,37 @@ impl Grid {
 
 fn make_row(cols: u16) -> Line {
     Line::flat_filled(cols as usize, Cell::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overwriting_wide_lead_clears_continuation() {
+        let mut grid = Grid::new(10, 1);
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.goto(0, 0);
+        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+
+        assert_eq!(grid.row(0)[0].ch, 'a');
+        assert!(!grid.row(0)[0].flags.contains(CellFlags::WIDE));
+        assert_eq!(grid.row(0)[1].ch, ' ');
+        assert!(!grid.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
+    }
+
+    #[test]
+    fn overwriting_wide_continuation_clears_lead() {
+        let mut grid = Grid::new(10, 1);
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.backspace();
+        grid.put_char(' ', Color::Default, Color::Default, CellFlags::empty());
+
+        assert_eq!(grid.row(0)[0].ch, ' ');
+        assert!(!grid.row(0)[0].flags.contains(CellFlags::WIDE));
+        assert_eq!(grid.row(0)[1].ch, ' ');
+        assert!(!grid.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
+    }
 }

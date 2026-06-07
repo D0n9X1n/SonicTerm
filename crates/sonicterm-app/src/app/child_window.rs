@@ -527,8 +527,29 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.frontmost_window = Some(win_id);
                 if child.copy_mode.is_some() {
-                    child_copy_mode_handle_key(child, &event);
-                    child.request_redraw();
+                    if child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()) {
+                        let child_mods = child.modifiers;
+                        let _ = child;
+                        for key_str in key_to_strings(&event.logical_key, child_mods) {
+                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                                if super::keymap_dispatch::read_only_allows_action(&action)
+                                    && self.run_action_for_window(&action, win_id)
+                                {
+                                    self.drain_pending_window_creates(el);
+                                    if let Some(c) = self.windows.get(&win_id) {
+                                        c.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        let Some(child) = self.windows.get_mut(&win_id) else { return };
+                        child_copy_mode_handle_key(child, &event);
+                        child.request_redraw();
+                    } else {
+                        child_copy_mode_handle_key(child, &event);
+                        child.request_redraw();
+                    }
                     return;
                 }
                 // Epic #289 follow-up: when the cheat sheet / command
@@ -1187,7 +1208,7 @@ impl App {
 /// current pane tree layout. Mirrors `App::resize_visible_panes` for the
 /// child case so split/close/zoom on a torn-out window propagate to the
 /// PTY winsize the same way.
-fn resize_visible_panes_in_child(child: &mut WindowState) {
+pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
     let Some(r) = child.renderer.as_ref() else { return };
     let (cw, ch) = r.cell_size();
@@ -1204,7 +1225,7 @@ fn child_enter_copy_mode(child: &mut WindowState) {
         let grid = guard.grid();
         (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
     };
-    child.copy_mode = Some(sonicterm_ui::copy_mode::CopyModeState::new_at(cursor));
+    child.copy_mode = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
     mark_all_panes_dirty(&child.panes);
 }
 
@@ -1250,7 +1271,7 @@ fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
         } else {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Named(NamedKey::Enter) => should_copy = true,
+                Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
                 Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
                 Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
                 Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
@@ -1259,8 +1280,8 @@ fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
                 Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
                 Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" => state.start_select(),
-                Key::Character(s) if s == "y" => should_copy = true,
+                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
+                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
                 Key::Character(s) if s == "w" => state.move_word_fwd(grid),
                 Key::Character(s) if s == "b" => state.move_word_back(grid),
                 Key::Character(s) if s == "0" => state.move_line_start(grid),

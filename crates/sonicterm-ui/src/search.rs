@@ -67,8 +67,19 @@ impl SearchState {
     }
 
     pub fn input_char(&mut self, ch: char, grid: &Grid) {
+        if matches!(ch, '\r' | '\n') {
+            return;
+        }
         self.query.push(ch);
         self.refresh(grid);
+    }
+
+    pub fn input_str(&mut self, text: &str, grid: &Grid) {
+        let old_len = self.query.len();
+        self.query.extend(text.chars().filter(|ch| !matches!(ch, '\r' | '\n')));
+        if self.query.len() != old_len {
+            self.refresh(grid);
+        }
     }
 
     pub fn backspace(&mut self, grid: &Grid) {
@@ -132,7 +143,7 @@ impl SearchState {
                 Some(preceding.unwrap_or(0))
             }
         } else {
-            Some(0)
+            None
         };
         self.update_scroll_request();
         true
@@ -153,8 +164,8 @@ impl SearchState {
                 }
             },
         };
-        self.current = if self.matches.is_empty() { None } else { Some(0) };
-        self.update_scroll_request();
+        self.current = None;
+        self.requested_scroll_row = None;
     }
 
     pub fn next(&mut self) {
@@ -180,6 +191,51 @@ impl SearchState {
             Some(0) | None => self.matches.len() - 1,
             Some(i) => i - 1,
         });
+        self.update_scroll_request();
+    }
+
+    pub fn select_nearest(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current = self
+            .matches
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, m)| {
+                let row_dist = m.row.abs_diff(row);
+                let col_dist =
+                    if row_dist == 0 { nearest_col_in_match(*m, col).abs_diff(col) } else { 0 };
+                (row_dist, col_dist)
+            })
+            .map(|(i, _)| i);
+        self.update_scroll_request();
+    }
+
+    pub fn next_from(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current =
+            self.matches.iter().position(|m| (m.row, m.col_start) > (row, col)).or(Some(0));
+        self.update_scroll_request();
+    }
+
+    pub fn prev_from(&mut self, row: u32, col: u16) {
+        if self.matches.is_empty() {
+            self.current = None;
+            self.requested_scroll_row = None;
+            return;
+        }
+        self.current = self
+            .matches
+            .iter()
+            .rposition(|m| (m.row, m.col_start) < (row, col))
+            .or_else(|| self.matches.len().checked_sub(1));
         self.update_scroll_request();
     }
 
@@ -215,14 +271,12 @@ impl SearchState {
     }
 
     fn update_scroll_request(&mut self) {
-        self.requested_scroll_row = self.current_match().and_then(|m| {
-            if self.is_in_scrollback(&m) {
-                Some(m.row)
-            } else {
-                None
-            }
-        });
+        self.requested_scroll_row = self.current_match().map(|m| m.row);
     }
+}
+
+fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
+    col.clamp(m.col_start, m.col_end.saturating_sub(1))
 }
 
 /// Search both scrollback and visible rows of `grid` for literal `query`.
@@ -231,14 +285,11 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
     if query.is_empty() {
         return Vec::new();
     }
-    let needle: Vec<char> = if case_sensitive {
-        query.chars().collect()
-    } else {
-        query.chars().flat_map(|c| c.to_lowercase()).collect()
-    };
+    let needle: Vec<char> = query_chars(query, case_sensitive);
     if needle.is_empty() {
         return Vec::new();
     }
+
     let mut out = Vec::new();
     let scrollback_len = grid.scrollback_len();
     for (r, row) in grid.scrollback_iter().enumerate() {
@@ -249,6 +300,14 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
         scan_row_substring(row, abs, &needle, case_sensitive, &mut out);
     }
     out
+}
+
+fn query_chars(input: &str, case_sensitive: bool) -> Vec<char> {
+    if case_sensitive {
+        input.chars().collect()
+    } else {
+        input.chars().flat_map(char::to_lowercase).collect()
+    }
 }
 
 /// Regex variant. Returns `Err(msg)` with the compile error if `pattern`
@@ -366,5 +425,59 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
         let extra = if visible[end_cell].is_wide { 1 } else { 0 };
         let col_end = last_visible_col + 1 + extra;
         out.push(MatchRange { row: abs_row, col_start, col_end });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_matches() -> SearchState {
+        SearchState {
+            matches: vec![
+                MatchRange { row: 10, col_start: 2, col_end: 5 },
+                MatchRange { row: 20, col_start: 8, col_end: 9 },
+                MatchRange { row: 30, col_start: 1, col_end: 3 },
+            ],
+            ..SearchState::new()
+        }
+    }
+
+    #[test]
+    fn first_enter_selects_nearest_match_to_cursor() {
+        let mut s = state_with_matches();
+        s.select_nearest(19, 0);
+        assert_eq!(s.current, Some(1));
+        assert_eq!(s.requested_scroll_row, Some(20));
+    }
+
+    #[test]
+    fn arrow_direction_selects_relative_to_cursor_when_unselected() {
+        let mut down = state_with_matches();
+        down.next_from(20, 8);
+        assert_eq!(down.current, Some(2));
+
+        let mut up = state_with_matches();
+        up.prev_from(20, 8);
+        assert_eq!(up.current, Some(0));
+    }
+
+    #[test]
+    fn search_ignores_newline_input() {
+        let grid = Grid::new(10, 2);
+        let mut s = SearchState::new();
+        s.input_char('a', &grid);
+        s.input_char('\n', &grid);
+        s.input_char('\r', &grid);
+        s.input_char('b', &grid);
+        assert_eq!(s.query, "ab");
+    }
+
+    #[test]
+    fn search_accepts_ime_commit_text_as_single_line() {
+        let grid = Grid::new(10, 2);
+        let mut s = SearchState::new();
+        s.input_str("你\r\n好\n世界", &grid);
+        assert_eq!(s.query, "你好世界");
     }
 }

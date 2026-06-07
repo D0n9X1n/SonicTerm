@@ -10,7 +10,7 @@ fi
 
 PREVIOUS_TAG="${PREVIOUS_TAG:-}"
 if [[ -z "$PREVIOUS_TAG" ]]; then
-  PREVIOUS_TAG="$(git tag --merged "$TAG" --sort=-v:refname | grep -E '^v[0-9]+' | grep -v "^${TAG}$" | head -1 || true)"
+  PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
 fi
 
 echo "# SonicTerm ${TAG}"
@@ -19,7 +19,8 @@ echo "## Installers"
 echo
 echo "- macOS: download \`SonicTerm-${TAG}-mac-universal.dmg\`."
 echo "- Windows: download the \`.msi\` artifact."
-echo "- Both installers are unsigned for v1.0.0; macOS may require right-click → Open."
+echo "- Downloadable files are attached to this GitHub Release, including \`SHA256SUMS.txt\`."
+echo "- Both installers are unsigned for ${TAG}; macOS may require right-click → Open."
 echo
 
 if [[ -n "$PREVIOUS_TAG" ]]; then
