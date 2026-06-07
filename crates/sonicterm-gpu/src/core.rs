@@ -35,7 +35,6 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
-const TOP_CHROME_BAND_PX: f32 = 5.0;
 
 /// Renderer compositor settings that affect surface configuration.
 #[derive(Debug, Clone, Copy)]
@@ -1129,9 +1128,8 @@ impl GpuRenderer {
         // gone with the the legacy chrome layer plumbing.
     }
 
-    /// Top inset reserved above the grid: OS titlebar band (when active),
-    /// SonicTerm's 5px top chrome band, plus top window padding.
-    /// Returned in **raster px** so it lives in
+    /// Top inset reserved above the grid: OS titlebar band (when active)
+    /// plus top window padding, returned in **raster px** so it lives in
     /// the same coordinate system as `config.width`/`config.height` and the
     /// rest of the renderer post-G1a. The tab bar is always bottom-pinned,
     /// so its height is reserved via [`Self::bottom_inset`] instead of here.
@@ -1144,7 +1142,7 @@ impl GpuRenderer {
     /// leaving a dead strip below the last painted row that showed the
     /// surface clear color instead of vim's bg (#621).
     pub fn top_inset(&self) -> f32 {
-        (self.titlebar_inset + self.padding_top) * self.scale_factor + TOP_CHROME_BAND_PX
+        (self.titlebar_inset + self.padding_top) * self.scale_factor
     }
 
     /// Bottom inset reserved below the grid for the bottom-pinned tab bar,
@@ -2818,6 +2816,11 @@ impl GpuRenderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        quads.push(QuadInstance {
+            rect: px_to_ndc(0.0, 0.0, sw, 3.0, sw, sh),
+            color: self.tab_bar_bg,
+            ..Default::default()
+        });
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
         // terminal content underneath. (Regression caught in PR #45 review:
@@ -3682,19 +3685,6 @@ impl GpuRenderer {
                 overlay_glyph_instances.extend(chrome_layout.glyphs);
             }
         }
-        let top_band = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).bg_base;
-        quads_overlay.push(QuadInstance {
-            rect: px_to_ndc(
-                0.0,
-                self.titlebar_inset * self.scale_factor,
-                sw,
-                TOP_CHROME_BAND_PX,
-                sw,
-                sh,
-            ),
-            color: top_band,
-            ..Default::default()
-        });
 
         // -------- Command palette overlay ----------------------------------
         let palette_layout =
