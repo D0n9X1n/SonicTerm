@@ -1,5 +1,9 @@
 # SonicTerm Wiki / SonicTerm 百科
 
+<div align="center">
+  <img src="../assets/icons/exports/png/sonic-256.png" alt="SonicTerm" width="150" height="150"/>
+</div>
+
 ## English
 
 SonicTerm is a GPU-accelerated terminal for macOS and Windows. This wiki covers

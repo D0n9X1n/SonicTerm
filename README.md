@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm" width="150" height="150"/>
+<img src="assets/icons/exports/png/sonic-256.png" alt="SonicTerm logo" width="150" height="150"/>
 
 # SonicTerm
 

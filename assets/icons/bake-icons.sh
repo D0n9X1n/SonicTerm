@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Bake all icon assets from the SVG masters.
+# Bake all icon assets from the source masters.
 #
 # Inputs (assets/icons/source/):
-#   sonic.svg        — full-color app icon (squircle)
+#   sonic.png        — full-color app icon (squircle)
 #   sonic-mono.svg   — monochrome glyph (uses currentColor)
 #   sonic-glyph.svg  — color glyph without background
 #
@@ -42,13 +42,25 @@ render() {
     fi
 }
 
+render_png() {
+    local png="$1" size="$2" out="$3"
+    if command -v magick >/dev/null 2>&1; then
+        magick "$png" -resize "${size}x${size}" "$out"
+    elif command -v sips >/dev/null 2>&1; then
+        sips -z "$size" "$size" "$png" --out "$out" >/dev/null
+    else
+        echo "Need magick or sips for PNG resizing" >&2
+        exit 1
+    fi
+}
+
 echo "==> Full-color PNGs"
 for s in 16 32 48 64 128 256 512 1024; do
-    render "$SRC/sonic.svg" "$s" "$PNG/sonic-${s}.png"
+    render_png "$SRC/sonic.png" "$s" "$PNG/sonic-${s}.png"
 done
 echo "==> Retina @2x PNGs"
 for s in 16 32 64 128 256 512; do
-    render "$SRC/sonic.svg" "$((s * 2))" "$PNG/sonic-${s}@2x.png"
+    render_png "$SRC/sonic.png" "$((s * 2))" "$PNG/sonic-${s}@2x.png"
 done
 
 echo "==> Mono PNGs (for menu bar / docs)"
