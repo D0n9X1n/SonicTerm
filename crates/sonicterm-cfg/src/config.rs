@@ -417,9 +417,6 @@ impl Config {
     /// Ensure the editable user config exists, creating a small commented
     /// starter file if necessary.
     pub fn ensure_user_config_file(path: &Path) -> Result<()> {
-        if path.exists() {
-            return Ok(());
-        }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
@@ -427,7 +424,11 @@ impl Config {
                     .with_context(|| format!("create {:?}", parent.join("themes")))?;
                 std::fs::create_dir_all(parent.join("keymaps"))
                     .with_context(|| format!("create {:?}", parent.join("keymaps")))?;
+                seed_user_examples(parent)?;
             }
+        }
+        if path.exists() {
+            return Ok(());
         }
         std::fs::write(path, default_config_template()).with_context(|| format!("write {path:?}"))
     }
@@ -529,6 +530,38 @@ fn dirs_home() -> Option<PathBuf> {
 /// SonicTerm 1.0 config directory (the on-disk layout).
 pub fn default_config_dir() -> Option<PathBuf> {
     Some(dirs_home()?.join(".snoicterm"))
+}
+
+fn seed_user_examples(config_dir: &Path) -> Result<()> {
+    let theme_dir = config_dir.join("themes");
+    let keymap_dir = config_dir.join("keymaps");
+    write_if_missing(
+        &theme_dir.join("wezterm.toml"),
+        include_str!("../../../assets/themes/wezterm.toml"),
+    )?;
+    write_if_missing(
+        &keymap_dir.join("sonicterm-macos.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-macos.toml"),
+    )?;
+    write_if_missing(
+        &keymap_dir.join("sonicterm-windows.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-windows.toml"),
+    )?;
+    write_if_missing(
+        &keymap_dir.join("sonicterm-linux.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-linux.toml"),
+    )?;
+    Ok(())
+}
+
+fn write_if_missing(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
+    }
+    std::fs::write(path, content).with_context(|| format!("write {path:?}"))
 }
 
 /// Starter config written when the user config file does not exist.
@@ -692,5 +725,22 @@ mod tests {
         let dir = default_config_dir().expect("home dir should exist in tests");
         assert!(dir.ends_with(".snoicterm"));
         assert_eq!(Config::default_path().unwrap(), dir.join("sonicterm.toml"));
+    }
+
+    #[test]
+    fn seeding_user_examples_writes_theme_and_platform_keymaps() {
+        let dir = std::env::temp_dir().join(format!(
+            "sonicterm-config-seed-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_user_examples(&dir).unwrap();
+        assert!(dir.join("themes/wezterm.toml").exists());
+        assert!(dir.join("keymaps/sonicterm-macos.toml").exists());
+        assert!(dir.join("keymaps/sonicterm-windows.toml").exists());
+        assert!(dir.join("keymaps/sonicterm-linux.toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

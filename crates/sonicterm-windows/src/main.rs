@@ -188,11 +188,13 @@ fn main() -> Result<()> {
 fn load_config(warnings: &mut Vec<String>) -> Config {
     match Config::default_path() {
         Some(path) => {
-            if path.exists() {
-                Config::load_or_default_collecting(&path, warnings)
-            } else {
-                windows_default_config()
+            if let Err(e) = Config::ensure_user_config_file(&path) {
+                warnings.push(format!(
+                    "create default config/examples at {} failed: {e}",
+                    path.display()
+                ));
             }
+            Config::load_or_default_collecting(&path, warnings)
         }
         None => windows_default_config(),
     }

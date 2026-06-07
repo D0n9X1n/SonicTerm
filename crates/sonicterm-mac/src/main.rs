@@ -136,7 +136,15 @@ fn main() -> Result<()> {
 
 fn load_config(warnings: &mut Vec<String>) -> Config {
     match Config::default_path() {
-        Some(path) => Config::load_or_default_collecting(&path, warnings),
+        Some(path) => {
+            if let Err(e) = Config::ensure_user_config_file(&path) {
+                warnings.push(format!(
+                    "create default config/examples at {} failed: {e}",
+                    path.display()
+                ));
+            }
+            Config::load_or_default_collecting(&path, warnings)
+        }
         None => Config::default(),
     }
 }

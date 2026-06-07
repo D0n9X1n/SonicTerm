@@ -2816,6 +2816,11 @@ impl GpuRenderer {
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
+        quads.push(QuadInstance {
+            rect: px_to_ndc(0.0, 0.0, sw, 3.0, sw, sh),
+            color: self.tab_bar_bg,
+            ..Default::default()
+        });
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
         // terminal content underneath. (Regression caught in PR #45 review:
