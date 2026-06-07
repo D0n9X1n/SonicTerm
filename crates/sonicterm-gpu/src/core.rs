@@ -3889,8 +3889,7 @@ impl GpuRenderer {
                     }
                 }
 
-                // Footer hint uses the same size as query and command rows.
-                let footer_font_size = palette_font_size;
+                let footer_font_size = (palette_font_size - 1.0).max(1.0);
                 let footer_origin_x = layout.footer.x + 12.0;
                 let footer_baseline_y =
                     layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
