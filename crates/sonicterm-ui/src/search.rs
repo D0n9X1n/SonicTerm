@@ -74,6 +74,14 @@ impl SearchState {
         self.refresh(grid);
     }
 
+    pub fn input_str(&mut self, text: &str, grid: &Grid) {
+        let old_len = self.query.len();
+        self.query.extend(text.chars().filter(|ch| !matches!(ch, '\r' | '\n')));
+        if self.query.len() != old_len {
+            self.refresh(grid);
+        }
+    }
+
     pub fn backspace(&mut self, grid: &Grid) {
         self.query.pop();
         self.refresh(grid);
@@ -463,5 +471,13 @@ mod tests {
         s.input_char('\r', &grid);
         s.input_char('b', &grid);
         assert_eq!(s.query, "ab");
+    }
+
+    #[test]
+    fn search_accepts_ime_commit_text_as_single_line() {
+        let grid = Grid::new(10, 2);
+        let mut s = SearchState::new();
+        s.input_str("你\r\n好\n世界", &grid);
+        assert_eq!(s.query, "你好世界");
     }
 }

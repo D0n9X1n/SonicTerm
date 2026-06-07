@@ -35,6 +35,46 @@ use super::{
 };
 
 impl App {
+    pub(super) fn search_handle_ime_commit(&mut self, text: &str) -> bool {
+        let (i, pane_id) = {
+            let Some(ws) = self.main() else { return false };
+            let i = ws.tabs.active_index();
+            let Some(t) = ws.tab_states.get(i) else { return false };
+            if t.search.is_none() {
+                return false;
+            }
+            (i, t.active_pane)
+        };
+        let mut search = {
+            let Some(ws) = self.main_mut() else { return false };
+            let Some(st) = ws.tab_states.get_mut(i) else { return false };
+            match st.search.take() {
+                Some(s) => s,
+                None => return false,
+            }
+        };
+        let parser_arc = match self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+            Some(p) => p.parser.clone(),
+            None => {
+                if let Some(ws) = self.main_mut() {
+                    if let Some(st) = ws.tab_states.get_mut(i) {
+                        st.search = Some(search);
+                    }
+                }
+                return false;
+            }
+        };
+        let grid_guard = parser_arc.lock();
+        search.input_str(text, grid_guard.grid());
+        drop(grid_guard);
+        if let Some(ws) = self.main_mut() {
+            if let Some(st) = ws.tab_states.get_mut(i) {
+                st.search = Some(search);
+            }
+        }
+        true
+    }
+
     pub(super) fn search_handle_key(&mut self, event: &KeyEvent, mods: ModifiersState) -> bool {
         let (i, pane_id) = {
             let Some(ws) = self.main() else { return false };

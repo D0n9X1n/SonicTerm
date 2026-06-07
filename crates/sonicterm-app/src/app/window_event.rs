@@ -1330,7 +1330,11 @@ impl App {
                     String::new()
                 };
                 if !committed.is_empty() {
-                    self.write_to_pty(committed.into_bytes());
+                    if self.search_active() {
+                        self.search_handle_ime_commit(&committed);
+                    } else {
+                        self.write_to_pty(committed.into_bytes());
+                    }
                 }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
