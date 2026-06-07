@@ -1,19 +1,23 @@
 # sonicterm-harfbuzz
 
 ## Purpose
-Harfbuzz binding crate used for shaping and color glyph paint data.
+Generated HarfBuzz FFI bindings. This crate is raw ABI surface for
+shaping; safe buffer/font wrappers and shaping policy live in
+`sonicterm-font`.
 
-## Public surface
-- Low-level Harfbuzz APIs required by `sonicterm-font`.
+## Key files
+- `src/lib.rs` - bindgen output for HarfBuzz.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-harfbuzz --lib
+cargo build -p sonicterm-harfbuzz
 ```
 
-## Common pitfalls
-- Keep unsafe FFI boundaries explicit.
-- Shaping changes can affect ASCII, ligatures, CJK, emoji, and fallback.
+## Guardrails
+- Avoid manual edits to generated bindings except targeted compatibility
+  fixes.
+- Safe lifetime management belongs in `sonicterm-font::hbwrap`.
+- Keep allow attributes local to this crate.
 
 ## Cross-references
 - Consumed by: `sonicterm-font`.

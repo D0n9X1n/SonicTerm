@@ -1,22 +1,27 @@
 # sonicterm-engine
 
 ## Purpose
-Font-engine adapter surface used by the renderer after the WezTerm font behavior
-absorption. Owns the stable interface between high-level rendering and
-`sonicterm-font`.
+Small engine seam for font-facing data that is not terminal state.
+Today it exposes `FontStack` and `CellMetricsPx` while the font pipeline
+continues moving into Sonic-owned crates.
 
-## Public surface
-- Font stack/types re-exported to consumers that should not depend on lower font
-  implementation details.
+Terminal parsing and grid state live in `sonicterm-vt` and
+`sonicterm-grid`, not here.
 
-## Test gate
+## Key files
+- `fontstack.rs` - font stack selection and cell metrics.
+- `lib.rs` - public re-exports.
+
+## Local gate
 ```bash
-cargo test -p sonicterm-engine --lib
+cargo build -p sonicterm-engine
 ```
 
-## Common pitfalls
-- Do not add winit/wgpu dependencies here.
-- Keep the API small; broad font behavior belongs in `sonicterm-font`.
+## Guardrails
+- Do not grow this into a second app core; keep it focused on engine seams.
+- Prefer moving stable contracts into `sonicterm-types` when multiple
+  crates need them.
+- Do not depend on vendor font modules; use Sonic-owned font crates.
 
 ## Cross-references
-- Consumed by: `sonicterm-render-model`, `sonicterm-gpu`.
+- Consumed by: `sonicterm-block-glyph` and font/rendering code.

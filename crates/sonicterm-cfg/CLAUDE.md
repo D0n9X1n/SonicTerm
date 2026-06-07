@@ -1,38 +1,31 @@
 # sonicterm-cfg
 
 ## Purpose
-Config / theme / keymap / URL safety. Pure-data — loads TOML, validates
-keymap actions, validates URLs before spawn.
+Configuration, themes, keymaps, bundled/user asset lookup, dimensions,
+and URL safety. This crate is the only place that should parse
+`sonicterm.toml`, theme TOML, keymap TOML, and clickable URLs.
 
-## Public surface
-- `config::Config`, `theme::Theme`
-- `keymap::{Action, Keymap}` — `Action` is the public bindable-action
-  enum; adding a variant requires a matching arm in
-  `sonicterm-app::app::keymap_dispatch`.
-- `url_open::validate(url) -> Result<(), Error>`
+## Key files
+- `config.rs` - user config schema, defaults, load/fallback behavior.
+- `theme.rs` - theme schema and named/path loading.
+- `keymap.rs` - keymap schema and action binding resolution.
+- `assets.rs` - bundled and user asset directory lookup.
+- `url_scan.rs` / `url_open.rs` - URL detection and safe open policy.
+- `dimension.rs` - size/unit helpers shared with font and UI code.
 
-## Land-mines specific to this crate
-- **LM-008** `url_open::validate()` is mandatory before spawning
-  anything. OSC 8 URIs come from untrusted PTY output; on Windows
-  `cmd /C start` re-tokenizes. Allow-list: `http`, `https`, `mailto`,
-  `file`. Deny control chars + `& | ^ < > " ' \` CR LF NUL`. Length
-  capped at 4096.
-  ref: `crates/sonicterm-cfg/src/url_open.rs`
-
-## Test gate (local)
+## Local gate
 ```bash
-cargo build -p sonicterm-cfg
+cargo test -p sonicterm-cfg
 ```
 
-## Common pitfalls
-- Adding a bindable action without the `keymap_dispatch.rs` arm — runtime no-op
-- Loosening the URL allow-list — security regression class
-- TOML key rename without a migration shim
-
-## Owning PM(s)
-- Primary: either
-- Hot-file: keymap.rs is a hot file (parallelism risk)
+## Guardrails
+- Startup may fall back to defaults, but hot reload should surface parse
+  errors clearly instead of silently accepting bad config.
+- Preserve unknown/future TOML keys when possible.
+- Theme/keymap loading must check both bundled assets and user override
+  directories under `~/.snoicterm/`.
+- URL handling is security-sensitive; keep allow/deny policy explicit.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types`
-- Consumed by: `sonicterm-app`, `sonicterm-ui`, both platform shells
+- Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,
+  `sonicterm-ui`, `sonicterm-gpu`, `sonicterm-block-glyph`.

@@ -1,39 +1,29 @@
 # sonicterm-logging
 
 ## Purpose
-Panic hook + rolling-file logger. Initialized at the very top of every
-binary's `main()` so even bootstrap errors land in:
-- `~/.snoicterm/logs/sonicterm.log.*`
+Panic hook, crash dumps, rolling log sinks, retention cleanup, log paths,
+and exit tracing. Platform binaries initialize this before most startup
+work so config-load failures and panics are visible.
 
-Retention: logs/crash dumps older than 2 days are cleaned automatically.
-Full spec: `docs/LOGGING.md`.
+## Key files
+- `config.rs` - logging config schema/defaults.
+- `sinks.rs` - tracing subscriber/log sink setup.
+- `crash.rs` - panic hook and crash dump writing.
+- `cleanup.rs` - retention cleanup.
+- `exit_trace.rs` - signal/drop-guard exit markers.
+- `path.rs` - `~/.snoicterm/logs` path helpers.
 
-## Public surface
-- `init()` — call before anything else in `main`
-- `panic_hook` — installed by `init`
-
-## Land-mines specific to this crate
-- **No raw `process::exit` in shipped code** (enforced by
-  `scripts/check-no-raw-process-exit.sh`). All exits route through
-  the logger so the last frame is captured.
-
-## Test gate (local)
+## Local gate
 ```bash
-cargo build -p sonicterm-logging
+cargo test -p sonicterm-logging
 ```
-PR #455 renamed the `DEFAULT_FILTER` const in `src/lib.rs`; the
-`sonic_exit` target MUST stay in the filter so exit-routing remains
-observable. `tests/default_filter.rs` guards that invariant.
 
-## Common pitfalls
-- Initializing logging AFTER config load — bootstrap errors lost
-- Logging a `Debug` value of a struct holding secrets — sanitize first
-- Holding the log lock across PTY writes — same lock-ordering hazard as
-  LM-001 but for the writer thread
-
-## Owning PM(s)
-- Primary: either
-- Hot-file: no (additive)
+## Guardrails
+- Do not log secrets, tokens, environment dumps, or full command payloads
+  without sanitization.
+- Avoid holding logging locks across PTY or renderer operations.
+- Init can happen only once; preserve the current bootstrap-then-user-config
+  behavior in macOS and Windows binaries.
 
 ## Cross-references
-- Consumed by: every bin (`sonicterm-mac`, `sonicterm-windows`, `sonicterm-mux`)
+- Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-app`.

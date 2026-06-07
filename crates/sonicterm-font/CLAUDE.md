@@ -1,24 +1,32 @@
 # sonicterm-font
 
 ## Purpose
-WezTerm-compatible font discovery, fallback, shaping, and rasterization.
-SonicTerm should depend on this crate instead of vendor font paths.
+Sonic-owned font stack: font database, platform locators, parsing,
+HarfBuzz shaping, FreeType rasterization, color glyph handling, and cache
+keys. New font behavior should land here instead of depending on
+`vendor/` or WezTerm font paths.
 
-## Public surface
-- Font stack construction.
-- Shaping/rasterization helpers consumed by the GPU and text crates.
+## Key files
+- `db.rs` - font database and family/style lookup.
+- `locator/` - CoreText, GDI, and Fontconfig locators.
+- `shaper/harfbuzz.rs` - shaping boundary.
+- `rasterizer/` - FreeType, HarfBuzz, and COLR raster support.
+- `parser.rs`, `rangeset.rs`, `units.rs`, `color.rs` - shared font helpers.
+- `fcwrap.rs`, `ftwrap.rs`, `hbwrap.rs` - FFI-safe wrappers.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-font --lib
+cargo build -p sonicterm-font
 ```
 
-## Common pitfalls
-- Font fallback order affects every visible glyph.
-- Keep CJK, emoji, Nerd Font PUA, box drawing, and Powerline behavior intact.
-- Avoid broad `as any`-style type erasure; model font attributes precisely.
+## Guardrails
+- Cache keys must include family, size, weight, style, stretch, and glyph
+  variation data that affects output.
+- Keep platform discovery behind `locator/`; callers should not branch on
+  CoreText/GDI/Fontconfig details.
+- Do not introduce direct dependencies on vendor font modules.
 
 ## Cross-references
-- Consumes: `sonicterm-freetype`, `sonicterm-harfbuzz`,
-  `sonicterm-block-glyph`.
-- Consumed by: `sonicterm-text`, `sonicterm-gpu`.
+- Consumes: `sonicterm-font-config`, `sonicterm-fontconfig`,
+  `sonicterm-freetype`, `sonicterm-harfbuzz`.
+- Consumed by: `sonicterm-text`, renderer/font integration code.

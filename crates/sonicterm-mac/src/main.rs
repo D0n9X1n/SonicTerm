@@ -54,6 +54,13 @@ fn main() -> Result<()> {
         Box::new(|name: &str| Keymap::load_name_or_path(name, &asset_dir()));
     #[cfg(target_os = "macos")]
     {
+        // Disable AppKit's native window tab strip for SonicTerm only.
+        // This is a process-local NSWindow class setting, not a system
+        // preference change; SonicTerm draws its own tab bar.
+        unsafe {
+            let ns_window = objc2::class!(NSWindow);
+            let _: () = objc2::msg_send![ns_window, setAllowsAutomaticWindowTabbing: false];
+        }
         // The native NSMenu MUST be installed AFTER winit has built
         // the AppKit event loop — installing it before
         // `event_loop.run_app` leaves AppKit with only the default
@@ -89,6 +96,7 @@ fn main() -> Result<()> {
                         if window.is_null() {
                             -1
                         } else {
+                            let _: () = objc2::msg_send![window, setTabbingMode: 2isize];
                             objc2::msg_send![window, windowNumber]
                         }
                     };

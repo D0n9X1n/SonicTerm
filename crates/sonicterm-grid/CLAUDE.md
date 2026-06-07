@@ -1,33 +1,28 @@
 # sonicterm-grid
 
 ## Purpose
-Terminal grid + scrollback. Owns the cell buffer, wide-char layout,
-alt-screen toggle, dirty bitset, and hyperlink registry. The shared
-mutable state between the parser and the renderer.
+Terminal cell storage: visible grid, scrollback, line metadata, dirty
+tracking, wide-character handling, and hyperlink references.
 
-## Public surface
-- `grid::Grid` (cells, scrollback, wide chars, alt screen)
-- `hyperlink::HyperlinkRegistry`
+## Key files
+- `grid.rs` - grid mutation, scrollback, resize, dirty tracking.
+- `line.rs` - row storage and cell/span helpers.
+- `hyperlink.rs` - hyperlink metadata.
+- `lib.rs` - public exports.
 
-## Land-mines specific to this crate
-None named in §4, but the grid is the AB-BA partner in LM-001:
-the renderer takes the parser lock, the parser writes the grid. If you
-change locking discipline here, see LM-001 in `sonicterm-app/CLAUDE.md`.
-
-## Test gate (local)
+## Local gate
 ```bash
-cargo build -p sonicterm-grid
+cargo test -p sonicterm-grid
 ```
 
-## Common pitfalls
-- Dirty-bitset off-by-one when the cursor crosses the alt-screen boundary
-- Wide-char placement: second half-cell is `Cell::continuation`, not blank
-- Scrollback bottom != cursor row when alt-screen is active
-
-## Owning PM(s)
-- Primary: either (cross-platform pure-data)
-- Hot-file: yes (grid.rs)
+## Guardrails
+- Wide and zero-width characters must keep cells visually and logically
+  aligned after resize/scroll.
+- Dirty tracking should be precise; do not mark the whole grid dirty for
+  narrow updates unless unavoidable.
+- Preserve scrollback invariants when changing erase, scroll, or resize.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types`
-- Consumed by: `sonicterm-vt` (Performer), `sonicterm-app`, `sonicterm-render-model`
+- Consumes: `sonicterm-types`.
+- Consumed by: `sonicterm-vt`, `sonicterm-app`, `sonicterm-mux`,
+  `sonicterm-render-model`.

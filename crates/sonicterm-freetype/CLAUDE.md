@@ -1,19 +1,25 @@
 # sonicterm-freetype
 
 ## Purpose
-Freetype/libpng/zlib binding crate used by the SonicTerm font rasterizer.
+Generated FreeType FFI bindings plus fixed-point helpers. This crate is
+raw ABI surface for glyph loading/rasterization; safe ownership and error
+handling live in `sonicterm-font`.
 
-## Public surface
-- Low-level generated/bound Freetype APIs.
+## Key files
+- `src/lib.rs` - FreeType bindgen output.
+- `src/types.rs` - supplemental FreeType type definitions.
+- `src/fixed_point.rs` - fixed-point conversion helpers.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-freetype --lib
+cargo build -p sonicterm-freetype
 ```
 
-## Common pitfalls
-- Treat generated bindings as low-level unsafe surface.
-- Keep bundled C dependency build flags portable across macOS and Windows.
+## Guardrails
+- Do not hide unsafe lifetime or ownership rules here; wrap them in
+  `sonicterm-font::ftwrap`.
+- Avoid style-only churn in generated bindings.
+- Keep constants and type widths aligned with the vendored FreeType ABI.
 
 ## Cross-references
 - Consumed by: `sonicterm-font`.

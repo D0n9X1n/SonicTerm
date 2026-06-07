@@ -1,19 +1,23 @@
 # sonicterm-fontconfig
 
 ## Purpose
-Unix fontconfig build/link shim used by SonicTerm's font stack where available.
+Generated Fontconfig FFI bindings. This crate is the raw syscall/ABI
+surface; ergonomic matching and fallback policy belong in
+`sonicterm-font`.
 
-## Public surface
-- Build-time linkage detection and minimal wrapper surface.
+## Key files
+- `src/lib.rs` - bindgen output for Fontconfig.
 
-## Test gate
+## Local gate
 ```bash
-cargo test -p sonicterm-fontconfig --lib
+cargo build -p sonicterm-fontconfig
 ```
 
-## Common pitfalls
-- Keep macOS/Windows builds working when fontconfig is absent.
-- Do not make runtime fontconfig mandatory for bundled-font paths.
+## Guardrails
+- Do not edit generated bindings by hand unless the change is a targeted
+  compatibility patch.
+- Keep allow attributes local to this binding crate.
+- Safe wrappers belong in `sonicterm-font::fcwrap`.
 
 ## Cross-references
 - Consumed by: `sonicterm-font`.

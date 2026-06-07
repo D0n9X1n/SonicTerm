@@ -1,37 +1,33 @@
 # sonicterm-ui
 
 ## Purpose
-UI widgets and overlays: tabs, tab-bar, pane splits, selection, search,
-command palette, IME, cursor, i18n.
+Pure UI state and layout helpers: tabs, tab bar spans, drag chips, command
+palette, search overlay, copy/READONLY affordances, selection, IME,
+scrollbar, broadcast UI, and shared UI tokens.
 
-## Public surface
-- `tabs`, `tabbar_view`, `pane`
-- `selection`, `search`
-- `command_palette`, `ime`, `cursor`, `i18n`
+## Key files
+- `tabs.rs`, `tabbar_view.rs`, `tab_spans.rs`, `tab_title.rs` - tab UI.
+- `command_palette.rs`, `command_label.rs`, `cheatsheet.rs` - command UI.
+- `search.rs`, `overlays.rs` - search state and overlay layout.
+- `selection.rs`, `copy_mode.rs`, `cursor.rs`, `pane.rs` - terminal UI state.
+- `ime.rs`, `drag_chip.rs`, `scrollbar.rs`, `broadcast.rs` - interaction UI.
+- `i18n.rs`, `ui_tokens.rs` - localized labels and shared constants.
 
-## Land-mines specific to this crate
-None named in §4. Render hot-file rule applies to
-`tabbar_view`, `overlays`, `cursor`, `selection`, `search`. Changes need
-§13 GUI smoke.
-
-## Test gate (local)
+## Local gate
 ```bash
-cargo build -p sonicterm-ui
+cargo test -p sonicterm-ui
 ```
 
-## Common pitfalls
-- IME composition state lost on focus change — `commit_preedit` is
-  load-bearing
-- Tab-bar drag chip is owned by `sonicterm-ui::drag_chip` (the
-  `sonicterm-shared::render::drag_chip` path is a back-compat re-export
-  of this module) — coordinate model + view crate edits together
-- Search overlay z-order: must paint above selection, below command
-  palette
-
-## Owning PM(s)
-- Primary: either
-- Hot-file: yes for tabbar_view + overlays + cursor + selection + search
+## Guardrails
+- Keep this crate renderer-agnostic; it should compute state/layout, not
+  issue GPU commands.
+- Search remains single-line; IME commit text is accepted, newline input is
+  ignored.
+- READONLY UI must align with app-level behavior: terminal input blocked,
+  search and safe navigation shortcuts allowed.
+- Keep localized labels and command labels in sync when adding actions.
 
 ## Cross-references
-- Consumes traits from: `sonicterm-types`, `sonicterm-render-model`
-- Consumed by: `sonicterm-shared`, `sonicterm-app`
+- Consumes: `sonicterm-types`, `sonicterm-cfg`.
+- Consumed by: `sonicterm-app`, `sonicterm-render-model`,
+  `sonicterm-gpu`.
