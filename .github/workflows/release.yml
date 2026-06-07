@@ -109,15 +109,13 @@ jobs:
           name: sonicterm-mac-aarch64
           path: dist/aarch64
 
-      - name: Make universal binary
+      - name: Verify macOS release binaries
         run: |
           chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
-          lipo -create \
-            dist/x86_64/sonicterm-mac \
-            dist/aarch64/sonicterm-mac \
-            -output dist/sonicterm-mac
-          file dist/sonicterm-mac
-          lipo -verify_arch x86_64 arm64 dist/sonicterm-mac
+          file dist/x86_64/sonicterm-mac
+          file dist/aarch64/sonicterm-mac
+          test "$(lipo -archs dist/x86_64/sonicterm-mac)" = "x86_64"
+          test "$(lipo -archs dist/aarch64/sonicterm-mac)" = "arm64"
 
       - name: Build icons
         run: |
@@ -125,7 +123,9 @@ jobs:
           bash assets/icons/bake-icons.sh
 
       - name: Build dmg
-        run: bash packaging/mac/make-dmg.sh dist/sonicterm-mac "${{ github.ref_name }}" mac-universal
+        run: |
+          bash packaging/mac/make-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
+          bash packaging/mac/make-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
 
       - uses: actions/upload-artifact@v5
         with:

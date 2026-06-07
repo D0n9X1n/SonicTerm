@@ -22,7 +22,8 @@ trap 'rm -rf "$TMP"' EXIT
   grep -q "SonicTerm v0.9.1" notes.md
   grep -q "Changes since v0.9.2" notes.md
   grep -q "fix: polish palette" notes.md
-  grep -q "SonicTerm-v0.9.1-mac-universal.dmg" notes.md
+  grep -q "SonicTerm-v0.9.1-mac-aarch64.dmg" notes.md
+  grep -q "SonicTerm-v0.9.1-mac-x86_64.dmg" notes.md
   grep -q "SHA256SUMS.txt" notes.md
 )
 
