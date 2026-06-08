@@ -94,10 +94,6 @@ impl App {
         // pins `self.windows` for the rest of the match. Used only by
         // the `RedrawRequested` arm but cheap enough to compute once.
         let palette_here = self.palette_attached_window == Some(win_id);
-        let cheatsheet_here =
-            self.cheatsheet_open && self.cheatsheet_attached_window == Some(win_id);
-        let cheatsheet_payload =
-            cheatsheet_here.then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
         // Split-borrow the palette out so the renderer can mutate it
         // even though `child` borrows `self.windows` below. Disjoint
         // fields — safe.
@@ -266,13 +262,12 @@ impl App {
                             &child.tabs,
                             search,
                             // Epic #289 follow-up: render the app-level
-                            // command palette / cheat sheet HERE when they
-                            // were opened while this child window was OS
+                            // command palette HERE when it
+                            // was opened while this child window was OS
                             // frontmost. Pre-fix these were hardcoded to
                             // `None` so the palette silently appeared on
                             // the main window instead.
                             palette_for_render,
-                            cheatsheet_payload,
                             None, // ime preedit: not exposed in child window yet
                             pane.viewport_top_abs,
                         ) {
@@ -552,7 +547,7 @@ impl App {
                     }
                     return;
                 }
-                // Epic #289 follow-up: when the cheat sheet / command
+                // Epic #289 follow-up: when the command
                 // palette is attached to THIS child window, route the
                 // keystroke into the overlay handler exactly like the
                 // main window does in window_event.rs ~line 855. Without
@@ -560,35 +555,6 @@ impl App {
                 // a child got forwarded to the PTY instead of filtering
                 // the palette query.
                 let palette_here = self.palette_attached_window == Some(win_id);
-                let cheatsheet_here =
-                    self.cheatsheet_open && self.cheatsheet_attached_window == Some(win_id);
-                if cheatsheet_here {
-                    // Capture the child window's own modifier state BEFORE
-                    // dropping the borrow — overlay chord lookup must use the
-                    // modifiers of the window that received the key, not the
-                    // main window's `self.modifiers`. Without this, an overlay
-                    // toggle chord pressed in a child window would be matched
-                    // against whatever the main window happened to be holding.
-                    let child_mods = child.modifiers;
-                    let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if matches!(action, Action::ShowKeymapCheatsheet) {
-                                self.run_action_for_window(&action, win_id);
-                                self.drain_pending_window_creates(el);
-                                if let Some(c) = self.windows.get(&win_id) {
-                                    c.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.cheatsheet_handle_key(&event);
-                    if let Some(c) = self.windows.get(&win_id) {
-                        c.request_redraw();
-                    }
-                    return;
-                }
                 if palette_here {
                     let child_mods = child.modifiers;
                     let _ = child;

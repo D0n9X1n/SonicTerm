@@ -43,7 +43,7 @@ cursor_shape = "block"
 # Floating panel inner padding:
 # +------------- panel -------------+
 # | panel_padding                   |
-# |  command palette / cheatsheet   |
+# |        command palette          |
 # | panel_padding                   |
 # +---------------------------------+
 opacity = 1.0

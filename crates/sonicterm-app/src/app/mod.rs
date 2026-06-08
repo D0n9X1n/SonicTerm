@@ -56,7 +56,6 @@ pub fn with_backdrop_transparency(
 use crate::config_watch::ConfigWatcher;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::broadcast::BroadcastState;
-use sonicterm_ui::cheatsheet::CheatsheetState;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::ime::ImeState;
@@ -863,15 +862,8 @@ pub struct App {
     /// window and each child window consult this so the palette only
     /// paints on the frontmost window at the moment it was opened,
     /// fixing the bug where Cmd+Shift+P typed in a torn-out child
-    /// silently opened the palette on the original main window. See
-    /// also `cheatsheet_attached_window`.
+    /// silently opened the palette on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
-    pub(super) cheatsheet_open: bool,
-    pub(super) cheatsheet: CheatsheetState,
-    /// Sibling to `palette_attached_window` for the keymap cheat sheet
-    /// overlay (super+?). Same rationale: the overlay is App-level and
-    /// modal, so a tag is enough — we don't need per-window state.
-    pub(super) cheatsheet_attached_window: Option<WindowId>,
     // PR-B3d (#365): `App.drag_session` field removed; per-window
     // drag sessions live on `WindowState`. Access via
     // `self.main_mut()?.drag_session` / per-window iteration.
@@ -1178,9 +1170,6 @@ impl App {
             pending_exit: false,
             command_palette,
             palette_attached_window: None,
-            cheatsheet_open: false,
-            cheatsheet: CheatsheetState::new(),
-            cheatsheet_attached_window: None,
             os_drag_handoff_started: false,
             windows: HashMap::new(),
             main_window_id: None,
@@ -2184,23 +2173,10 @@ impl App {
         self.palette_attached_window
     }
 
-    /// Test-only sibling of `__test_palette_attached_window` for the
-    /// keymap cheat sheet overlay.
-    #[doc(hidden)]
-    pub fn __test_cheatsheet_attached_window(&self) -> Option<WindowId> {
-        self.cheatsheet_attached_window
-    }
-
     /// Test-only: whether the command palette is currently open.
     #[doc(hidden)]
     pub fn __test_palette_open(&self) -> bool {
         self.command_palette.is_open()
-    }
-
-    /// Test-only: whether the keymap cheat sheet is currently open.
-    #[doc(hidden)]
-    pub fn __test_cheatsheet_open(&self) -> bool {
-        self.cheatsheet_open
     }
 
     /// Test-only invoker for `open_search_in_child`. Mirrors the

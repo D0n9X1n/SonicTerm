@@ -370,7 +370,6 @@ impl App {
             Action::EditConfigFile => self.open_config_file(),
             Action::OpenKeymapFile => self.open_keymap_file(),
             Action::OpenCommandPalette => self.toggle_command_palette(),
-            Action::ShowKeymapCheatsheet => self.toggle_cheatsheet(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
             Action::OpenSshPane(target) => self.open_ssh_pane(target),

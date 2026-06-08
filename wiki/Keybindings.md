@@ -27,7 +27,7 @@ You can also point `keymap` at any TOML file path.
 3. Change `~/.sonicterm/keymaps/<name>.toml`.
 4. Run **Reload Config** from the command palette.
 
-The command palette and keymap cheatsheet read the active keymap, so shortcut
+The command palette reads the active keymap, so shortcut
 hints update after reload.
 
 ### Binding syntax
@@ -110,7 +110,6 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Fullscreen | `toggle_fullscreen` |
 | Search | `open_search` |
 | Command palette | `open_command_palette` |
-| Keymap cheatsheet | `show_keymap_cheatsheet` |
 | Edit config file | `edit_config_file` |
 | Edit keymap file | `open_keymap_file` |
 | Reload config | `reload_config` |
@@ -187,7 +186,7 @@ keymap = "sonicterm-macos"
 3. 修改 `~/.sonicterm/keymaps/<name>.toml`。
 4. 回到命令面板执行 **Reload Config**。
 
-命令面板和快捷键 cheatsheet 都会读取当前 keymap，所以 reload 之后快捷键提示也会更新。
+命令面板会读取当前 keymap，所以 reload 之后快捷键提示也会更新。
 
 ### 绑定格式
 
@@ -268,7 +267,6 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 全屏 | `toggle_fullscreen` |
 | 搜索 | `open_search` |
 | 命令面板 | `open_command_palette` |
-| 快捷键 cheatsheet | `show_keymap_cheatsheet` |
 | 编辑配置文件 | `edit_config_file` |
 | 编辑 keymap 文件 | `open_keymap_file` |
 | 重新加载配置 | `reload_config` |

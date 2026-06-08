@@ -35,7 +35,6 @@ pub sonicterm_types::action::Action::ResizePaneUp
 pub sonicterm_types::action::Action::Scroll(sonicterm_types::action::ScrollAction)
 pub sonicterm_types::action::Action::ScrollToNextPrompt
 pub sonicterm_types::action::Action::ScrollToPrevPrompt
-pub sonicterm_types::action::Action::ShowKeymapCheatsheet
 pub sonicterm_types::action::Action::SplitDown
 pub sonicterm_types::action::Action::SplitRight
 pub sonicterm_types::action::Action::ToggleBroadcast
@@ -680,7 +679,6 @@ pub sonicterm_types::Action::ResizePaneUp
 pub sonicterm_types::Action::Scroll(sonicterm_types::action::ScrollAction)
 pub sonicterm_types::Action::ScrollToNextPrompt
 pub sonicterm_types::Action::ScrollToPrevPrompt
-pub sonicterm_types::Action::ShowKeymapCheatsheet
 pub sonicterm_types::Action::SplitDown
 pub sonicterm_types::Action::SplitRight
 pub sonicterm_types::Action::ToggleBroadcast

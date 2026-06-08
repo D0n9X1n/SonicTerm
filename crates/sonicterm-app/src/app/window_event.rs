@@ -318,9 +318,6 @@ impl App {
                     r.set_inactive_pane_cursors(Vec::new());
                 }
 
-                let cheatsheet_render = (self.cheatsheet_open
-                    && self.cheatsheet_attached_window.is_none())
-                .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
                 // PR-B1a: lift the main window Arc clone before the
                 // mut borrow on `self.renderer` below, so the IME
                 // cursor-area branch can still touch
@@ -506,7 +503,6 @@ impl App {
                             self.palette_attached_window
                                 .is_none()
                                 .then_some(&mut self.command_palette),
-                            cheatsheet_render,
                             ws_ime_ref,
                             pane.viewport_top_abs,
                         ) {
@@ -1388,28 +1384,6 @@ impl App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if self.cheatsheet_open {
-                    // Let the toggle binding (super+?) still close the cheat
-                    // sheet; everything else routes into overlay state and is
-                    // NOT forwarded to the pty.
-                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if matches!(action, Action::ShowKeymapCheatsheet) {
-                                self.run_action_for_window(&action, win_id);
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.cheatsheet_handle_key(&event);
-                    self.drain_pending_window_creates(el);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
                 if self.command_palette.is_open() {
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette

@@ -245,14 +245,13 @@ use sonicterm_text::{
     shape::{run_is_ascii_fast, RunStyle},
 };
 use sonicterm_ui::{
-    cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
         search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
+        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
     },
@@ -323,115 +322,6 @@ pub fn emit_tab_bar_quads(
                 ..Default::default()
             });
         }
-    }
-}
-
-struct CheatsheetLayout {
-    scrim: sonicterm_ui::tabbar_view::Rect,
-    border: sonicterm_ui::tabbar_view::Rect,
-    bg: sonicterm_ui::tabbar_view::Rect,
-    query_row: sonicterm_ui::tabbar_view::Rect,
-    rows: Vec<sonicterm_ui::tabbar_view::Rect>,
-    selected_row: Option<usize>,
-    query_label: String,
-    row_labels: Vec<String>,
-    footer: sonicterm_ui::tabbar_view::Rect,
-    footer_label: String,
-}
-
-fn compute_cheatsheet_layout(
-    state: &CheatsheetState,
-    bindings: &[(String, String)],
-    window_w: f32,
-    window_h: f32,
-    panel_padding: f32,
-) -> CheatsheetLayout {
-    let panel_padding = panel_padding.max(0.0);
-    let modal_w = 760.0_f32.min((window_w - 48.0).max(180.0));
-    let modal_h = 520.0_f32.min((window_h - 96.0).max(140.0));
-    let border = sonicterm_ui::tabbar_view::Rect {
-        x: ((window_w - modal_w) * 0.5).max(0.0),
-        y: (window_h * 0.14).max(48.0).min((window_h - modal_h).max(0.0)),
-        w: modal_w,
-        h: modal_h,
-    };
-    let bg = sonicterm_ui::tabbar_view::Rect {
-        x: border.x + PALETTE_BORDER,
-        y: border.y + PALETTE_BORDER,
-        w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
-        h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
-    };
-    let query_row = sonicterm_ui::tabbar_view::Rect {
-        x: bg.x + panel_padding,
-        y: bg.y + panel_padding,
-        w: (bg.w - panel_padding * 2.0).max(0.0),
-        h: 44.0,
-    };
-    let footer = sonicterm_ui::tabbar_view::Rect {
-        x: bg.x,
-        y: (bg.y + bg.h - 32.0).max(query_row.y + query_row.h),
-        w: bg.w,
-        h: 32.0,
-    };
-    let list_top = query_row.y + query_row.h + panel_padding;
-    let list_bottom = footer.y - panel_padding;
-    let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
-    let max_rows = (((list_bottom - list_top).max(0.0) + PALETTE_ROW_GAP) / row_stride)
-        .floor()
-        .max(0.0) as usize;
-
-    let idxs = filter_indices(bindings, &state.query);
-    let total = idxs.len();
-    let selected = state.selected_idx.min(total.saturating_sub(1));
-    let window_start = selected.saturating_sub(max_rows.saturating_sub(1));
-    let window_end = (window_start + max_rows).min(total);
-    let selected_row = (total > 0).then_some(selected - window_start);
-
-    let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
-    let mut row_labels = Vec::new();
-    for (row_i, idx_pos) in (window_start..window_end).enumerate() {
-        rows.push(sonicterm_ui::tabbar_view::Rect {
-            x: bg.x + panel_padding,
-            y: list_top + (row_i as f32) * row_stride,
-            w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_ROW_HEIGHT,
-        });
-        if let Some((keys, action)) = idxs.get(idx_pos).and_then(|idx| bindings.get(*idx)) {
-            row_labels.push(format!("{keys}    {action}"));
-        }
-    }
-    if total == 0 {
-        rows.push(sonicterm_ui::tabbar_view::Rect {
-            x: bg.x + panel_padding,
-            y: list_top,
-            w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_ROW_HEIGHT,
-        });
-        row_labels.push("No shortcuts found".to_string());
-    }
-
-    let query_label = if state.query.is_empty() {
-        "Search keyboard shortcuts… ▏".to_string()
-    } else {
-        format!("{}▏", state.query)
-    };
-    let footer_label = format!(
-        "{} shortcut{} · ↑↓ navigate · type to search · esc close",
-        total,
-        if total == 1 { "" } else { "s" }
-    );
-
-    CheatsheetLayout {
-        scrim: sonicterm_ui::tabbar_view::Rect { x: 0.0, y: 0.0, w: window_w, h: window_h },
-        border,
-        bg,
-        query_row,
-        rows,
-        selected_row,
-        query_label,
-        row_labels,
-        footer,
-        footer_label,
     }
 }
 
@@ -552,12 +442,12 @@ pub struct GpuRenderer {
     search_bg: [f32; 4],
     // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
     // fields that lived here (search, quick_select, palette_{query,rows,
-    // footer}, cheatsheet_{query,rows,footer}, ime, broadcast,
+    // footer}, ime, broadcast,
     // drag_chip) are gone. Every chrome string is now shaped on demand
     // inside `render()` via `chrome_text::layout(...)`; the resulting
     // glyph instances feed either `glyph_instances` (pre-overlay
     // chrome — tab titles, search status bar) or
-    // `overlay_glyph_instances` (modal chrome — palette, cheatsheet,
+    // `overlay_glyph_instances` (modal chrome — palette,
     // IME preedit, drag-chip title). No per-renderer the legacy chrome layer buffer
     // state survives.
     /// Cached drag-chip rect from the last `render()` call (in logical
@@ -677,7 +567,6 @@ struct FrameKey {
     search_hash: u64,
     palette_hash: u64,
     ime_hash: u64,
-    cheatsheet_hash: u64,
     width: u32,
     height: u32,
     tab_hash: u64,
@@ -2138,7 +2027,6 @@ impl GpuRenderer {
         tabs: &TabBar,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
-        cheatsheet: Option<(CheatsheetState, Vec<(String, String)>)>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
     ) -> Result<()> {
@@ -2353,18 +2241,6 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
-        let cheatsheet_hash: u64 = cheatsheet
-            .as_ref()
-            .map(|(state, bindings)| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                0xC4EA_75EE_u64.hash(&mut h);
-                state.query.hash(&mut h);
-                state.selected_idx.hash(&mut h);
-                bindings.hash(&mut h);
-                h.finish()
-            })
-            .unwrap_or(0);
         // Likewise for IME preedit — composition changes don't bump grid
         // revision until commit.
         let ime_hash: u64 = ime
@@ -2462,7 +2338,6 @@ impl GpuRenderer {
             search_hash,
             palette_hash,
             ime_hash,
-            cheatsheet_hash,
             width: self.config.width,
             height: self.config.height,
             tab_hash,
@@ -4054,150 +3929,6 @@ impl GpuRenderer {
             }
         }
 
-        // -------- Keyboard shortcuts cheat sheet overlay --------------------
-        let cheatsheet_layout = cheatsheet.as_ref().map(|(state, bindings)| {
-            compute_cheatsheet_layout(state, bindings, sw, sh, self.panel_padding)
-        });
-        if let Some(layout) = &cheatsheet_layout {
-            let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
-            let accent_rgba = palette_chrome.accent;
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.scrim.x,
-                    layout.scrim.y,
-                    layout.scrim.w,
-                    layout.scrim.h,
-                    sw,
-                    sh,
-                ),
-                color: palette_chrome.scrim,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.border.x,
-                    layout.border.y,
-                    layout.border.w,
-                    layout.border.h,
-                    sw,
-                    sh,
-                ),
-                color: palette_chrome.border_subtle,
-                size_px: [layout.border.w, layout.border.h],
-                radius_px: PALETTE_PANEL_RADIUS + PALETTE_BORDER,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: palette_chrome.bg_elevated,
-                size_px: [layout.bg.w, layout.bg.h],
-                radius_px: PALETTE_PANEL_RADIUS,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.query_row.x,
-                    layout.query_row.y,
-                    layout.query_row.w,
-                    layout.query_row.h,
-                    sw,
-                    sh,
-                ),
-                color: palette_chrome.bg_base,
-                size_px: [layout.query_row.w, layout.query_row.h],
-                radius_px: PALETTE_QUERY_RADIUS,
-                ..Default::default()
-            });
-            if let Some(sel) = layout.selected_row {
-                if let Some(row) = layout.rows.get(sel) {
-                    quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(row.x, row.y, row.w, row.h, sw, sh),
-                        color: premultiply([accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16]),
-                        size_px: [row.w, row.h],
-                        radius_px: PALETTE_ROW_RADIUS,
-                        ..Default::default()
-                    });
-                }
-            }
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
-                color: palette_chrome.border_subtle,
-                ..Default::default()
-            });
-            // T14: cheatsheet query / rows / footer → chrome_text into
-            // the overlay glyph instance vec.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
-                // Query
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    &layout.query_label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.query_row.x + 12.0,
-                    layout.query_row.y + 2.0 + self.font_size * 0.8,
-                    [
-                        layout.query_row.x,
-                        layout.query_row.y,
-                        layout.query_row.w,
-                        layout.query_row.h,
-                    ],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-                // Rows
-                for (row, label) in layout.rows.iter().zip(layout.row_labels.iter()) {
-                    emit_overlay_text_glyphs(
-                        &mut self.glyph_atlas,
-                        stack,
-                        self.font_size,
-                        native_em,
-                        &mut wt,
-                        label,
-                        self.search_fg,
-                        ChromeAttrs::default(),
-                        row.x + 12.0,
-                        row.y + (row.h + self.font_size * 0.8) * 0.5,
-                        bounds_bg,
-                        sw,
-                        sh,
-                        &mut overlay_glyph_instances,
-                        None,
-                    );
-                }
-                // Footer
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size * 0.85,
-                    native_em,
-                    &mut wt,
-                    &layout.footer_label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.footer.x + 12.0,
-                    layout.footer.y + 8.0 + self.font_size * 0.85 * 0.8,
-                    [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-            }
-        }
-
         // -------- IME preedit overlay --------------------------------------
         let ime_layout = ime.and_then(|i| {
             // #489: anchor IME preedit at the snapped cursor cell edge
@@ -4398,7 +4129,7 @@ impl GpuRenderer {
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
-        // palette, cheatsheet, IME preedit, broadcast banner, drag-
+        // palette, IME preedit, broadcast banner, drag-
         // chip title, quick-select hints) via `chrome_text::layout`
         // earlier in this function. The atlas upload + per-pass draw
         // calls below carry those instances to the GPU.
