@@ -1276,7 +1276,22 @@ impl App {
                                 }
                                 return;
                             }
-                            self.selection_set(Some(Selection::new(row, col)));
+                            // Multi-click selection: 1 = point, 2 = word,
+                            // 3 = line. Record the click against the main
+                            // window's streak state, then build the right
+                            // Selection. word_at/line_at need the grid; the
+                            // helpers below lock the parser only to read it
+                            // and return an owned (Copy) Selection, so no
+                            // grid lock is held across selection_set/redraw
+                            // (CLAUDE.md §4).
+                            let click_count =
+                                self.main_mut().map(|ws| ws.register_click(row, col)).unwrap_or(1);
+                            let sel = match click_count {
+                                2 => self.word_selection_at(row, col),
+                                3 => self.line_selection_at(row),
+                                _ => Selection::new(row, col),
+                            };
+                            self.selection_set(Some(sel));
                             if let Some(panes) = self.main_panes() {
                                 mark_all_panes_dirty(panes);
                             }

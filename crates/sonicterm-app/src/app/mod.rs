@@ -102,6 +102,24 @@ pub struct SplitterDragState {
     pub last_pos: (f32, f32),
 }
 
+/// Maximum gap (ms) between consecutive left-presses on the same cell for
+/// them to count as a double/triple click. Beyond this the streak resets
+/// to a single click.
+pub const MULTI_CLICK_MS: u128 = 400;
+
+/// Multi-click counter. Returns the new click count (1, 2, 3, then wraps
+/// back to 1 after a triple). A click counts as a continuation when it
+/// lands on the same cell within the multi-click interval; otherwise the
+/// streak restarts at 1. Pure so it is unit-testable without a real
+/// pointer event sequence.
+pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 {
+    if same_cell && within_interval && prev >= 1 && prev < 3 {
+        prev + 1
+    } else {
+        1
+    }
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -126,6 +144,14 @@ pub struct WindowState {
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
     pub selection: Option<Selection>,
+    /// Multi-click tracking for word/line selection. `last_click_time` is
+    /// the timestamp of the most recent left-press; `last_click_cell` is
+    /// the grid cell it landed on; `click_count` is the current streak
+    /// (1 = single, 2 = double, 3 = triple, then wraps to 1). Updated via
+    /// [`WindowState::register_click`].
+    pub last_click_time: Option<Instant>,
+    pub last_click_cell: (u16, u16),
+    pub click_count: u8,
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
     // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
@@ -232,6 +258,61 @@ impl WindowState {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Record a left-press at grid cell `(row, col)` and return the
+    /// resulting click count (1 = single, 2 = double, 3 = triple, then
+    /// wraps back to 1). A press counts as a continuation of the previous
+    /// streak when it lands on the *same* cell within
+    /// [`MULTI_CLICK_MS`] of the previous press. Updates the
+    /// `last_click_time` / `last_click_cell` / `click_count` fields in
+    /// place. Pure counting logic lives in [`next_click_count`] so it can
+    /// be unit-tested without a `WindowState`.
+    pub fn register_click(&mut self, row: u16, col: u16) -> u8 {
+        let now = Instant::now();
+        let within_interval = self
+            .last_click_time
+            .map(|t| now.duration_since(t).as_millis() <= MULTI_CLICK_MS)
+            .unwrap_or(false);
+        let same_cell = self.last_click_cell == (row, col);
+        let count = next_click_count(self.click_count, same_cell, within_interval);
+        self.last_click_time = Some(now);
+        self.last_click_cell = (row, col);
+        self.click_count = count;
+        count
+    }
+
+    /// Compute the selection for a multi-click `count` (1 = point, 2 =
+    /// word, 3 = line) at grid `(row, col)` using THIS window's active
+    /// pane grid. Locks that pane's parser only long enough to read the
+    /// grid and build the (Copy) `Selection`, then drops it — so the
+    /// caller never holds a grid lock across the selection assignment /
+    /// redraw (CLAUDE.md §4). Falls back to a point selection when there
+    /// is no active pane or the parser is busy. Used by the child-window
+    /// mouse path; the main-window path has equivalent `App`-level
+    /// helpers (`word_selection_at` / `line_selection_at`) that resolve
+    /// the pane through `App::active_pane`.
+    pub fn multi_click_selection(&self, count: u8, row: u16, col: u16) -> Selection {
+        if count < 2 {
+            return Selection::new(row, col);
+        }
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id));
+        let Some(pane) = pane else {
+            return Selection::new(row, col);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(row, col);
+        };
+        let sel = match count {
+            2 => Selection::word_at(guard.grid(), row, col),
+            _ => Selection::line_at(guard.grid(), row),
+        };
+        drop(guard);
+        sel
     }
 
     /// #447 follow-up to PR #443: clear the drag-chip overlay in one
@@ -2012,6 +2093,9 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -2707,6 +2791,9 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -3504,5 +3591,38 @@ impl ApplicationHandler<UserEvent> for App {
         // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.
         sonicterm_logging::record_loop_exiting();
+    }
+}
+
+#[cfg(test)]
+mod click_count_tests {
+    use super::next_click_count;
+
+    #[test]
+    fn single_double_triple_then_wraps() {
+        // Same cell, within interval: 1 → 2 → 3 → back to 1.
+        let c1 = next_click_count(0, true, true); // fresh streak
+        assert_eq!(c1, 1);
+        let c2 = next_click_count(c1, true, true);
+        assert_eq!(c2, 2);
+        let c3 = next_click_count(c2, true, true);
+        assert_eq!(c3, 3);
+        let c4 = next_click_count(c3, true, true);
+        assert_eq!(c4, 1); // wraps after triple
+    }
+
+    #[test]
+    fn different_cell_resets_to_one() {
+        // A double-click is in progress (prev = 2) but the new press is
+        // on a different cell → streak restarts at 1.
+        assert_eq!(next_click_count(2, false, true), 1);
+        assert_eq!(next_click_count(1, false, true), 1);
+    }
+
+    #[test]
+    fn timeout_resets_to_one() {
+        // Same cell but past the multi-click interval → restart at 1.
+        assert_eq!(next_click_count(2, true, false), 1);
+        assert_eq!(next_click_count(1, true, false), 1);
     }
 }

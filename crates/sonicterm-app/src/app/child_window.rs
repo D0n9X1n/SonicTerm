@@ -454,7 +454,19 @@ impl App {
                     if let Some((row, col)) =
                         r.pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
                     {
-                        child.selection = Some(Selection::new(row, col));
+                        // Multi-click selection: 1 = point, 2 = word,
+                        // 3 = line. Mirrors the main-window path in
+                        // window_event.rs. `multi_click_selection` locks
+                        // the active pane's parser only to read the grid
+                        // and returns an owned (Copy) Selection, so no grid
+                        // lock is held across the assignment / redraw
+                        // (CLAUDE.md §4). For count == 1 it returns the same
+                        // point Selection as before — single-click is
+                        // unchanged. (`r`'s last use was pixel_to_cell
+                        // above, so the &mut child borrows below are fine.)
+                        let count = child.register_click(row, col);
+                        let sel = child.multi_click_selection(count, row, col);
+                        child.selection = Some(sel);
                         mark_all_panes_dirty(&child.panes);
                     }
                     child.request_redraw();

@@ -67,6 +67,38 @@ impl App {
         sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
+    /// Compute a word selection (double-click) at `(row, col)` from the
+    /// focused pane's grid. Locks the parser only long enough to read the
+    /// grid and build the `Selection`, drops it, then returns the owned
+    /// (Copy) value — so callers never hold the parser lock across
+    /// `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
+    /// selection when the parser is busy.
+    pub(super) fn word_selection_at(&self, row: u16, col: u16) -> Selection {
+        let Some(pane) = self.active_pane() else {
+            return Selection::new(row, col);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(row, col);
+        };
+        let sel = Selection::word_at(guard.grid(), row, col);
+        drop(guard);
+        sel
+    }
+
+    /// Compute a line selection (triple-click) at `row` from the focused
+    /// pane's grid. Same lock discipline as [`Self::word_selection_at`].
+    pub(super) fn line_selection_at(&self, row: u16) -> Selection {
+        let Some(pane) = self.active_pane() else {
+            return Selection::new(row, 0);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(row, 0);
+        };
+        let sel = Selection::line_at(guard.grid(), row);
+        drop(guard);
+        sel
+    }
+
     /// OSC 8-only lookup: returns the cell's interned hyperlink URI,
     /// ignoring auto-detected plain-text URLs. Used by the hover
     /// pointer-cursor logic so OSC 8 keeps its existing unconditional
@@ -453,6 +485,9 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
