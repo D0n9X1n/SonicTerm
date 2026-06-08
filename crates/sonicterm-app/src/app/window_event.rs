@@ -13,8 +13,8 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::overlays::{
-    search_bar_label, SearchBarLayout, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
-    SEARCH_BAR_PAD_RIGHT,
+    search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
+    SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
 };
 use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
@@ -347,10 +347,21 @@ impl App {
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
-                let search_ime_label = self.main().and_then(|ws| {
-                    let i = ws.tabs.active_index();
-                    ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(search_bar_label)
-                });
+                // Search-bar IME geometry: the visible label (`/ {query}▏ —
+                // N/M`) drives the box width, but the caret/candidate-window
+                // anchor must sit at the END OF THE QUERY (the `▏`), not the
+                // end of the whole label. Produce both strings here from the
+                // same search state so the OS candidate area below agrees with
+                // the inline preedit drawn by the renderer.
+                let (search_ime_label, search_ime_prefix) = self
+                    .main()
+                    .and_then(|ws| {
+                        let i = ws.tabs.active_index();
+                        ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
+                            (search_bar_label(s), search_query_caret_prefix(s))
+                        })
+                    })
+                    .unzip();
                 // PR-B1b borrow-split: pull the renderer out via direct
                 // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
                 // which would borrow all of `self`). That keeps
@@ -595,9 +606,20 @@ impl App {
                                 + SEARCH_BAR_PAD_LEFT * scale
                                 + icon_w
                                 + SEARCH_BAR_ICON_GAP * scale;
-                            let caret_x = (layout.border.x + layout.border.w
+                            // Right inner edge: the candidate window must never
+                            // push past the box padding.
+                            let right_edge = (layout.border.x + layout.border.w
                                 - SEARCH_BAR_PAD_RIGHT * scale)
                                 .max(text_x);
+                            // Anchor the OS candidate window at the END OF THE
+                            // QUERY (`text_x + width("/ " + query)`), matching
+                            // the inline preedit caret, then clamp to the right
+                            // inner edge. `font_size` already folds in `scale`.
+                            let prefix_w = search_ime_prefix
+                                .as_ref()
+                                .map(|p| estimate_overlay_text_width(p, font_size))
+                                .unwrap_or(0.0);
+                            let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                             let pos = winit::dpi::PhysicalPosition::new(
                                 caret_x as i32,
                                 layout.border.y as i32,

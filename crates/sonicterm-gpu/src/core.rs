@@ -259,7 +259,7 @@ use sonicterm_ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        search_bar_label, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
+        search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
@@ -3654,7 +3654,7 @@ impl GpuRenderer {
         let search_label = search.map(search_bar_label);
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
-                + SEARCH_BAR_ICON_GAP
+                + self.chrome_px(SEARCH_BAR_ICON_GAP)
                 + estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
@@ -3691,16 +3691,30 @@ impl GpuRenderer {
                 let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
-                let visible_w =
-                    (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
+                let visible_w = (layout.border.x + layout.border.w
+                    - self.chrome_px(SEARCH_BAR_PAD_RIGHT)
+                    - text_x)
+                    .max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
                 let scroll_x = (text_w - visible_w).max(0.0);
-                // Inline IME preedit anchor: caret sits at the end of the
-                // (possibly scrolled) query text, clamped to the visible
+                // Inline IME preedit anchor: the caret sits at the END OF THE
+                // QUERY (the `▏` in the label = width of `"/ " + query`), NOT
+                // at the end of the whole label — measuring the full label
+                // would land the composing text past the ` — N/M` suffix. So
+                // measure the prefix-only string, apply the SAME horizontal
+                // scroll the visible label uses, and clamp to the visible
                 // region so the composing text starts just past the caret
                 // instead of off the box edge.
-                let caret_x = (text_x - scroll_x + text_w)
-                    .clamp(text_x, text_x + visible_w);
+                let prefix_w = search
+                    .map(|s| {
+                        estimate_badge_text_width(
+                            &search_query_caret_prefix(s),
+                            search_font_size,
+                        )
+                    })
+                    .unwrap_or(text_w);
+                let caret_x =
+                    (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
                 search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
