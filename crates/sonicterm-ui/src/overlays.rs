@@ -110,7 +110,7 @@ pub const SEARCH_BAR_MIN_WIDTH: f32 = 250.0;
 pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;
 
 /// Right padding inside the search/read-only badges.
-pub const SEARCH_BAR_PAD_RIGHT: f32 = 10.0;
+pub const SEARCH_BAR_PAD_RIGHT: f32 = 15.0;
 
 /// Gap between the fixed leading Nerd Font icon and text.
 pub const SEARCH_BAR_ICON_GAP: f32 = 10.0;
