@@ -27,7 +27,17 @@ if (-not $vcpkgRoot) {
 }
 
 $vcpkg = Join-Path -Path $vcpkgRoot -ChildPath "vcpkg.exe"
-& $vcpkg install "cairo:$Triplet" "pkgconf:$HostTriplet"
+
+# When a binary cache directory is provided (CI), make sure it exists so vcpkg
+# can populate/restore prebuilt packages instead of compiling Cairo from source.
+if ($env:VCPKG_DEFAULT_BINARY_CACHE) {
+    New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+}
+
+# Pass package arguments => classic mode. Force-disable manifest mode so a stray
+# vcpkg.json anywhere in the working-directory chain can never flip this command
+# into manifest mode (which rejects positional package args and would fail).
+& $vcpkg install "cairo:$Triplet" "pkgconf:$HostTriplet" "--feature-flags=-manifests"
 if ($LASTEXITCODE -ne 0) {
     throw "vcpkg failed to install cairo:$Triplet and pkgconf:$HostTriplet."
 }

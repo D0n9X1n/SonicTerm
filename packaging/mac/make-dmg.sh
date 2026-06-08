@@ -63,7 +63,19 @@ for font in Regular Italic Bold BoldItalic; do
     test -f "$APP/Contents/Resources/Fonts/RecMonoSt.Helens-${font}.ttf"
 done
 
-echo "Note: building UNSIGNED .dmg — see CLAUDE.md §9"
+# Seal the fully-assembled bundle with an ad-hoc signature.
+#
+# We have no Apple Developer ID, so we can neither Developer-ID-sign nor
+# notarize. But copying Resources AFTER the binary's linker signature leaves the
+# bundle UNSEALED (no Contents/_CodeSignature/CodeResources). A quarantined,
+# unsealed bundle is reported by Gatekeeper as "damaged" — a hard block users
+# cannot override. Re-signing the bundle ad-hoc AFTER all resources are in place
+# makes it internally consistent, downgrading that to the normal, overridable
+# "unidentified developer" prompt (right-click → Open, or strip quarantine).
+# See CLAUDE.md §9 and wiki install docs for the user-facing first-open steps.
+echo "==> Ad-hoc signing $APP (no Developer ID; not notarized)"
+codesign --force --deep --sign - "$APP"
+codesign --verify --strict --verbose=2 "$APP"
 
 echo "==> Creating .dmg"
 DMG="$DIST/SonicTerm-${VERSION}-${ARTIFACT_SUFFIX}.dmg"
