@@ -1895,6 +1895,15 @@ impl GpuRenderer {
         // back to the prior measurement if the font stack rejects the
         // load (e.g. test fixtures without bundled fonts).
         if let Some(stack) = self.font_stack.as_ref() {
+            // DPI fix: the atlas + caches above are cleared, but glyphs would
+            // otherwise re-rasterize through a font stack still holding the
+            // DPI from the previous display. Push the new rasterizer DPI in
+            // first (same `72 * scale_factor` contract as startup, core.rs
+            // FontStack::try_new_full) so re-rasterized glyphs and the cell
+            // metrics below both reflect the new scale factor. Preserve the
+            // user's logical font scale by reusing the current value.
+            let fs_dpi = (72.0 * sf).round() as usize;
+            stack.change_scaling(stack.get_font_scale(), fs_dpi);
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
                 let natural = m.cell_h as f32;
