@@ -3652,10 +3652,27 @@ impl GpuRenderer {
         });
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         let search_label = search.map(search_bar_label);
+        // When search is active and the IME has a non-empty composing run, the
+        // preedit is drawn INLINE inside the search box (display-only — it does
+        // NOT drive matching; only committed text does). Fold its width plus a
+        // leading gap into `content_w` so the box GROWS in real time to contain
+        // the composition, instead of letting it overflow past the box edge and
+        // overlap the ` — N/M` suffix. Only counted when search is active.
+        let search_preedit = search
+            .and(ime)
+            .map(|i| i.preedit())
+            .filter(|s| !s.is_empty());
+        let search_preedit_w = search_preedit
+            .map(|p| {
+                estimate_badge_text_width(p, search_font_size)
+                    + self.chrome_px(SEARCH_BAR_ICON_GAP)
+            })
+            .unwrap_or(0.0);
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
                 + self.chrome_px(SEARCH_BAR_ICON_GAP)
-                + estimate_badge_text_width(label, search_font_size);
+                + estimate_badge_text_width(label, search_font_size)
+                + search_preedit_w;
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
@@ -4156,14 +4173,27 @@ impl GpuRenderer {
                 // line, nudged a hair right so it doesn't kiss the cell edge.
                 // No highlight background (user preference): just the text +
                 // an underline mark the in-flight run.
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
+                // native_em MUST equal font_size here. chrome_text scales each
+                // glyph tile by `font_size_px / native_em_px`; using cell_h
+                // (which includes line spacing, so cell_h > raster_px(font))
+                // made `scale < 1` and rendered the preedit visibly SMALLER
+                // than body text. Pass raster_px(font_size) for both so
+                // scale == 1 and the composing text matches the body size. #B14
+                let native_em = font_size;
                 let mut wt = stack.clone();
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
+                // Preedit foreground: when anchored to the SEARCH box, the run
+                // is composing text typed INTO the yellow box, so it must use
+                // the box's dark foreground (same color as the query text:
+                // `hex_to_chrome_color(theme.colors.background.0)`) for
+                // contrast. For the terminal-cursor anchor (no search), keep
+                // the existing `self.search_fg`. Underline is unchanged.
+                let preedit_fg = if search_ime_anchor.is_some() {
+                    hex_to_chrome_color(theme.colors.background.0.as_str())
+                } else {
+                    self.search_fg
+                };
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -4171,7 +4201,7 @@ impl GpuRenderer {
                     native_em,
                     &mut wt,
                     text,
-                    self.search_fg,
+                    preedit_fg,
                     ChromeAttrs::default(),
                     start_x + text_pad,
                     baseline_y,
