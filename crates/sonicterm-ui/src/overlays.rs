@@ -104,7 +104,7 @@ pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 pub const SEARCH_BAR_WIDTH: f32 = 600.0;
 
 /// Minimum width of the search bar before query text expands it.
-pub const SEARCH_BAR_MIN_WIDTH: f32 = 250.0;
+pub const SEARCH_BAR_MIN_WIDTH: f32 = 200.0;
 
 /// Left padding inside the search/read-only badges.
 pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;

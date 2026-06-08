@@ -1695,6 +1695,29 @@ impl App {
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
                     self.write_to_pty(bytes);
+                    // Scroll-to-bottom on Enter (#B12): pressing Enter while
+                    // scrolled up in history should jump back to the live
+                    // bottom so the latest input/output is visible. Plain Enter
+                    // only — Shift+Enter inserts a newline and must not jump.
+                    let is_plain_enter = matches!(event.logical_key, Key::Named(NamedKey::Enter))
+                        && !self.main_modifiers().shift_key();
+                    if is_plain_enter {
+                        if let Some(id) = self.active_pane_id() {
+                            if let Some(pane) =
+                                self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
+                            {
+                                if pane.viewport_top_abs.is_some() {
+                                    pane.viewport_top_abs = None; // back to live
+                                    if let Some(panes) = self.main_panes() {
+                                        mark_all_panes_dirty(panes);
+                                    }
+                                    if let Some(w) = self.main_window() {
+                                        w.request_redraw();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
                         self.selection_set(None);
                         if let Some(panes) = self.main_panes() {

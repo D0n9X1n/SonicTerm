@@ -3784,20 +3784,13 @@ impl GpuRenderer {
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
-                let label_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    READ_ONLY_BADGE_LABEL,
-                    text_color,
-                    ChromeAttrs { bold: true, italic: false },
-                    font_size,
-                    native_em,
-                    (0.0, baseline),
-                    (sw, sh),
-                    Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
-                );
-                let label_x = badge_x + badge_w - badge_pad_right - label_layout.width_px;
+                // Place the label immediately after the lock icon (no big
+                // right-aligned gap): icon_x + icon width + the icon gap.
+                let label_x = badge_x
+                    + badge_pad_left
+                    + icon_layout.width_px
+                    + self.chrome_px(SEARCH_BAR_ICON_GAP);
+                let _ = badge_pad_right;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -4145,34 +4138,10 @@ impl GpuRenderer {
                 // pane and would be clipped away otherwise.
                 let clip_to_pane = search_ime_anchor.is_none();
 
-                // (1) Highlight background quad — subtle translucent tint so
-                // the composing run reads as "in flight" without obscuring
-                // the glyphs underneath.
-                let highlight = premultiply([0.55, 0.55, 0.60, 0.35]);
-                if clip_to_pane {
-                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                        (start_x, top_y, pre_w, line_h),
-                        active_pane_x,
-                        active_pane_y,
-                        active_pane_w,
-                        active_pane_h,
-                    ) {
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                            color: highlight,
-                            ..Default::default()
-                        });
-                    }
-                } else {
-                    quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(start_x, top_y, pre_w, line_h, sw, sh),
-                        color: highlight,
-                        ..Default::default()
-                    });
-                }
-
-                // (2) Composing text glyphs — vertically centered in the
+                // (1) Composing text glyphs — vertically centered in the
                 // line, nudged a hair right so it doesn't kiss the cell edge.
+                // No highlight background (user preference): just the text +
+                // an underline mark the in-flight run.
                 let native_em = stack
                     .cell_metrics_raster_px()
                     .ok()
