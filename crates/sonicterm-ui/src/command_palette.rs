@@ -558,4 +558,20 @@ mod tests {
         assert!(visible.iter().any(|a| matches!(a, Action::ActivateTab(1))));
         assert!(!visible.iter().any(|a| matches!(a, Action::ActivateTab(2))));
     }
+
+    #[test]
+    fn palette_query_height_scales_on_large_window() {
+        use crate::overlays::PaletteLayout;
+        // Huge window so the window-relative clamps never bind; only the
+        // SIZE terms drive the layout, so a pure SIZE field (the query-row
+        // height) must double at 2x. panel_padding is held at 0 so it does
+        // not enter this assertion.
+        let mut palette = CommandPalette::new();
+        palette.open();
+        let one = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
+            .expect("open palette yields a layout");
+        let two = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 2.0)
+            .expect("open palette yields a layout");
+        assert_eq!(two.query_row.h, one.query_row.h * 2.0);
+    }
 }

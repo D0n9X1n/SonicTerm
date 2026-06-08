@@ -536,11 +536,17 @@ impl App {
                     if let Some(w) = main_window_for_ime {
                         if let Some(search_label) = search_ime_label.as_ref() {
                             let window_size = w.inner_size();
-                            let font_size =
-                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size());
+                            // #651: window_size + the SearchBarLayout it feeds are
+                            // physical px, so every logical-px term here must be
+                            // scaled by the renderer's scale factor or the IME
+                            // caret rect drifts on HiDPI displays.
+                            let scale = r.scale_factor();
+                            let font_size = sonicterm_ui::tab_spans::tab_title_font_size(
+                                r.font_size(),
+                            ) * scale;
                             let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
-                                + SEARCH_BAR_ICON_GAP
+                                + SEARCH_BAR_ICON_GAP * scale
                                 + estimate_overlay_text_width(search_label, font_size);
                             let row =
                                 u8::from(ws_copy_mode_ref.is_some_and(|cm| cm.is_read_only()));
@@ -549,13 +555,14 @@ impl App {
                                 window_size.height as f32,
                                 content_w,
                                 row,
+                                scale,
                             );
                             let text_x = layout.border.x
-                                + SEARCH_BAR_PAD_LEFT
+                                + SEARCH_BAR_PAD_LEFT * scale
                                 + icon_w
-                                + SEARCH_BAR_ICON_GAP;
+                                + SEARCH_BAR_ICON_GAP * scale;
                             let caret_x = (layout.border.x + layout.border.w
-                                - SEARCH_BAR_PAD_RIGHT)
+                                - SEARCH_BAR_PAD_RIGHT * scale)
                                 .max(text_x);
                             let pos = winit::dpi::PhysicalPosition::new(
                                 caret_x as i32,

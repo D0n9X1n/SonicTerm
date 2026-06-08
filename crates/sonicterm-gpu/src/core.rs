@@ -96,9 +96,13 @@ fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
 }
 
-fn read_only_badge_rect(sw: f32, sh: f32) -> (f32, f32, f32, f32) {
-    let w = READ_ONLY_BADGE_W.min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
-    let h = READ_ONLY_BADGE_H.min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
+fn read_only_badge_rect(sw: f32, sh: f32, scale: f32) -> (f32, f32, f32, f32) {
+    // #651: badge SIZE scales with DPI; the edge MARGIN is a window-anchored
+    // position and stays in window space so the badge hugs the same corner at
+    // every scale factor.
+    let s = scale.max(0.01);
+    let w = (READ_ONLY_BADGE_W * s).min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
+    let h = (READ_ONLY_BADGE_H * s).min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
     let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
     let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
     (x, y, w, h)
@@ -125,6 +129,7 @@ pub fn emit_pane_scrollbar(
     sw: f32,
     sh: f32,
     alpha: f32,
+    scale: f32,
 ) -> usize {
     // PR-D: hidden / nearly-hidden early-out. Mirrors
     // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
@@ -132,9 +137,9 @@ pub fn emit_pane_scrollbar(
         return 0;
     }
     let alpha = alpha.clamp(0.0, 1.0);
-    // Bar width in logical px. Held local to the emitter; PR-D may lift
-    // this into config once hover-driven width animation lands.
-    const SCROLLBAR_WIDTH_PX: f32 = 8.0;
+    // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
+    // bar keeps a constant physical size across displays (#651), min 1px.
+    let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
     let geom_rect =
         sonicterm_ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
     let Some(geom) = sonicterm_ui::scrollbar::compute(
@@ -143,7 +148,7 @@ pub fn emit_pane_scrollbar(
         view_top,
         geom_rect,
         mode,
-        SCROLLBAR_WIDTH_PX,
+        scrollbar_width_px,
     ) else {
         return 0;
     };
@@ -359,6 +364,13 @@ pub struct GpuRenderer {
     font_family: String,
     font_size: f32,
     line_height: f32,
+    /// Multiplier applied to the font's natural cell height to derive the
+    /// rendered line height (`cell_h = natural_cell_h * line_height_mult`).
+    /// Stored so a DPI/scale-factor change can recompute `cell_h` from the
+    /// freshly-rasterized natural height — see `rebuild_for_sf`. Without it,
+    /// the rebuild had to back this factor out of the stale `line_height`,
+    /// which algebraically cancelled and pinned `cell_h` to the old DPI.
+    line_height_mult: f32,
     /// DPI multiplier (e.g. 2.0 on Retina). Post-G1a (wezterm-takeover)
     /// the renderer is raster-px end-to-end, so draw and hit-test sites
     /// no longer multiply/divide by this; its sole job is sizing the
@@ -955,6 +967,7 @@ impl GpuRenderer {
             font_family: font_family.to_string(),
             font_size,
             line_height,
+            line_height_mult: line_height_mult.max(0.0).max(0.01),
             scale_factor: sf,
             cell_w,
             cell_h,
@@ -1595,6 +1608,13 @@ impl GpuRenderer {
         self.font_size
     }
 
+    /// Current OS display scale factor (physical px per logical px). Exposed so
+    /// the app layer can scale window-event geometry (e.g. the search-bar IME
+    /// caret rect) to match the renderer's physical-px coordinate space. #651.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
     /// Number of glyph tiles currently resident in the rasterizer atlas.
     /// Test-only; the atlas is cleared and rebuilt by [`Self::set_font`].
     #[doc(hidden)]
@@ -1711,6 +1731,7 @@ impl GpuRenderer {
         self.font_family = family.to_string();
         self.font_size = size;
         self.line_height = new_line_h;
+        self.line_height_mult = line_height_mult.max(0.0).max(0.01);
         self.font_stack = new_stack;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
@@ -1771,6 +1792,17 @@ impl GpuRenderer {
         font_size * self.scale_factor
     }
 
+    /// Scale a logical-px chrome constant into the renderer's physical/raster-px
+    /// coordinate space. Chrome layout literals (badge/search-bar/palette sizes,
+    /// paddings, radii, sub-cell thicknesses) are authored at scale-factor 1.0;
+    /// route them through this so they track the display DPI like glyphs do.
+    /// Window-anchored POSITIONS (edge margins, centering offsets) must NOT use
+    /// this — they stay in window space. See #651.
+    #[inline]
+    fn chrome_px(&self, logical: f32) -> f32 {
+        logical * self.scale_factor
+    }
+
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
@@ -1796,8 +1828,15 @@ impl GpuRenderer {
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
                 let natural = m.cell_h as f32;
-                let multiplier = if natural > 0.0 { self.line_height / natural } else { 1.0 };
-                self.cell_h = natural * multiplier.max(0.01);
+                // E1 (#651): recompute cell_h from the freshly-rasterized
+                // natural height using the STORED line-height multiplier.
+                // The prior code derived the multiplier as
+                // `self.line_height / natural`, then `natural * multiplier`
+                // — which algebraically cancels back to the old
+                // `self.line_height`, pinning cell_h to the previous DPI
+                // while cell_w correctly updated. Using the stored mult lets
+                // height track the scale factor like width does.
+                self.cell_h = natural * self.line_height_mult.max(0.01);
                 self.line_height = self.cell_h;
             }
         }
@@ -2890,6 +2929,7 @@ impl GpuRenderer {
                 sw,
                 sh,
                 pv.scrollbar_alpha,
+                self.scale_factor,
             );
         }
 
@@ -3009,10 +3049,12 @@ impl GpuRenderer {
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge
                 //   Underline → 2px horizontal bar pinned to the bottom
-                // We pick a 2px sub-cell thickness rather than something
+                // We pick a ~2px sub-cell thickness rather than something
                 // proportional to cell_h so the bar stays crisp on both
                 // small and large font sizes (no half-pixel sub-stem).
-                const SUBSHAPE_PX: f32 = 2.0;
+                // #651: 2 logical px scaled to physical px so the bar/underline
+                // keep a constant physical thickness across DPIs (min 1px).
+                let subshape_px: f32 = (2.0 * self.scale_factor).round().max(1.0);
                 match self.cursor_shape {
                     CursorShape::Block => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
@@ -3056,7 +3098,7 @@ impl GpuRenderer {
                     }
                     CursorShape::Bar => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                            (cx, cy, SUBSHAPE_PX, self.cell_h),
+                            (cx, cy, subshape_px, self.cell_h),
                             active_pane_x,
                             active_pane_y,
                             active_pane_w,
@@ -3071,7 +3113,7 @@ impl GpuRenderer {
                     }
                     CursorShape::Underline => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                            (cx, cy + self.cell_h - SUBSHAPE_PX, cw, SUBSHAPE_PX),
+                            (cx, cy + self.cell_h - subshape_px, cw, subshape_px),
                             active_pane_x,
                             active_pane_y,
                             active_pane_w,
@@ -3496,7 +3538,8 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
-        let read_only_badge = read_only_mode.then(|| read_only_badge_rect(sw, sh));
+        let read_only_badge =
+            read_only_mode.then(|| read_only_badge_rect(sw, sh, self.scale_factor));
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         let search_label = search.map(search_bar_label);
         let search_bar_layout = search_label.as_ref().map(|label| {
@@ -3504,9 +3547,9 @@ impl GpuRenderer {
                 + SEARCH_BAR_ICON_GAP
                 + estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
-                SearchBarLayout::compute_at_row(sw, sh, content_w, 1)
+                SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
-                SearchBarLayout::compute(sw, sh, content_w)
+                SearchBarLayout::compute(sw, sh, content_w, self.scale_factor)
             }
         });
         if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
@@ -3523,15 +3566,15 @@ impl GpuRenderer {
                 ),
                 search_badge_bg,
                 [layout.border.w, layout.border.h],
-                READ_ONLY_BADGE_RADIUS,
+                self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let Some(stack) = self.font_stack.as_ref() {
                 let mut wt = stack.clone();
                 let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
-                let icon_x = layout.border.x + SEARCH_BAR_PAD_LEFT;
-                let text_x = icon_x + icon_w + SEARCH_BAR_ICON_GAP;
+                let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
                 let visible_w =
                     (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
@@ -3584,7 +3627,7 @@ impl GpuRenderer {
                 px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
                 badge_bg,
                 [badge_w, badge_h],
-                READ_ONLY_BADGE_RADIUS,
+                self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
             if let Some(stack) = self.font_stack.as_ref() {
                 let native_em = stack
@@ -3596,8 +3639,14 @@ impl GpuRenderer {
                 let font_size =
                     self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
-                let baseline =
-                    badge_y + (badge_h + font_size * 0.8) * 0.5 + READ_ONLY_BADGE_BASELINE_NUDGE_Y;
+                let baseline = badge_y
+                    + (badge_h + font_size * 0.8) * 0.5
+                    + self.chrome_px(READ_ONLY_BADGE_BASELINE_NUDGE_Y);
+                // Pre-scale chrome paddings into locals BEFORE the
+                // `&mut self.glyph_atlas` borrow below, so we don't borrow
+                // `*self` immutably (chrome_px) while it's mutably borrowed.
+                let badge_pad_left = self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let badge_pad_right = self.chrome_px(READ_ONLY_BADGE_PAD_RIGHT);
                 let icon_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3607,7 +3656,7 @@ impl GpuRenderer {
                     ChromeAttrs { bold: true, italic: false },
                     font_size,
                     native_em,
-                    (badge_x + SEARCH_BAR_PAD_LEFT, baseline),
+                    (badge_x + badge_pad_left, baseline),
                     (sw, sh),
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
@@ -3625,7 +3674,7 @@ impl GpuRenderer {
                     (sw, sh),
                     Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
                 );
-                let label_x = badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px;
+                let label_x = badge_x + badge_w - badge_pad_right - label_layout.width_px;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -3665,7 +3714,9 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_layout =
-            palette.and_then(|p| PaletteLayout::compute(p, sw, sh, self.panel_padding));
+            palette.and_then(|p| {
+                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor)
+            });
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -3769,7 +3820,8 @@ impl GpuRenderer {
                 let palette_native_em = palette_font_size;
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
-                let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                let query_origin_x =
+                    layout.query_row.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
@@ -3805,13 +3857,14 @@ impl GpuRenderer {
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
-                    let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                    let origin_x =
+                        row.rect.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
                     let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
-                            - sonicterm_ui::overlays::PALETTE_ROW_PAD_X * 2.0
-                            - sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP)
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X) * 2.0
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP))
                             .max(0.0),
                         None => row.rect.w,
                     };
@@ -3834,7 +3887,7 @@ impl GpuRenderer {
                     );
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
-                            - sonicterm_ui::overlays::PALETTE_ROW_PAD_X
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X)
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = 180;
@@ -3860,9 +3913,11 @@ impl GpuRenderer {
                 // Empty-state placeholder + hint.
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
-                        + self.panel_padding
-                        + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                    let empty_y_top = layout.query_row.y + layout.query_row.h + self.panel_padding;
+                        + self.chrome_px(self.panel_padding)
+                        + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                    let empty_y_top = layout.query_row.y
+                        + layout.query_row.h
+                        + self.chrome_px(self.panel_padding);
                     let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
@@ -3938,7 +3993,16 @@ impl GpuRenderer {
                 .copied()
                 .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
             let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
-            ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
+            ImePreeditLayout::compute(
+                i,
+                cursor_x,
+                cursor_y,
+                self.cell_w,
+                self.cell_h,
+                sw,
+                sh,
+                self.scale_factor,
+            )
         });
         if let (Some(state), Some(layout)) = (ime, &ime_layout) {
             quads_overlay.push(QuadInstance {
