@@ -1,8 +1,13 @@
 //! Grid selection model.
 //!
-//! Coordinates are grid cells, not pixels. (0,0) is top-left of the visible
-//! region. The selection is anchored at `start` and extends to `end`; the
-//! pair may be in any order.
+//! Coordinates are grid cells, not pixels. The ROW is a scrollback-ABSOLUTE
+//! index (0 = oldest scrollback row; `scrollback_len()` = first live row) so
+//! a selection tracks the same TEXT as the viewport scrolls. The COLUMN is a
+//! plain cell column. The selection is anchored at `start` and extends to
+//! `end`; the pair may be in any order. The app layer converts the
+//! viewport-relative row returned by `pixel_to_cell` to an absolute row
+//! (via `viewport_row_to_abs`) before building/extending a `Selection`, and
+//! the renderer maps the absolute row back to a viewport row for drawing.
 
 use sonicterm_grid::grid::{CellFlags, Grid};
 
@@ -25,8 +30,8 @@ pub enum SelectMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    pub start: (u16, u16), // (row, col)
-    pub end: (u16, u16),
+    pub start: (u64, u16), // (abs_row, col)
+    pub end: (u64, u16),
     /// Distinguishes a deliberate region from a bare point anchor.
     ///
     /// `false` = a point/click anchor (single-click): it is "empty" while
@@ -38,16 +43,16 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn new(row: u16, col: u16) -> Self {
+    pub fn new(row: u64, col: u16) -> Self {
         Self { start: (row, col), end: (row, col), anchored: false }
     }
 
-    pub fn extend(&mut self, row: u16, col: u16) {
+    pub fn extend(&mut self, row: u64, col: u16) {
         self.end = (row, col);
     }
 
     /// Return the normalized (top-left, bottom-right) pair.
-    pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
+    pub fn normalized(&self) -> ((u64, u16), (u64, u16)) {
         let (mut a, mut b) = (self.start, self.end);
         if (a.0, a.1) > (b.0, b.1) {
             std::mem::swap(&mut a, &mut b);
@@ -55,8 +60,8 @@ impl Selection {
         (a, b)
     }
 
-    /// True when (row, col) is inside the selection (inclusive).
-    pub fn contains(&self, row: u16, col: u16) -> bool {
+    /// True when (abs_row, col) is inside the selection (inclusive).
+    pub fn contains(&self, row: u64, col: u16) -> bool {
         let (a, b) = self.normalized();
         let p = (row, col);
         p >= a && p <= b
@@ -71,7 +76,10 @@ impl Selection {
         self.start == self.end && !self.anchored
     }
 
-    /// Select the word under `(row, col)` — the double-click behavior.
+    /// Select the word under `(abs_row, col)` — the double-click behavior.
+    /// `abs_row` is a scrollback-ABSOLUTE row; the matching `Row` is read via
+    /// [`Grid::row_at_abs`] so word boundaries come from the correct line
+    /// whether the viewport is scrolled or not.
     ///
     /// A "word" is the maximal run of word characters (see
     /// [`is_word_char`]) around the clicked column on the same row. Wide
@@ -80,11 +88,10 @@ impl Selection {
     /// expands from the lead column. If the clicked cell is itself a
     /// boundary (whitespace / non-word punctuation), the selection is just
     /// that single cell — it does not expand across whitespace.
-    pub fn word_at(grid: &Grid, row: u16, col: u16) -> Selection {
-        if row >= grid.rows {
+    pub fn word_at(grid: &Grid, row: u64, col: u16) -> Selection {
+        let Some(line) = grid.row_at_abs(row) else {
             return Selection::new(row, col);
-        }
-        let line = grid.row(row);
+        };
         let len = line.len();
         if len == 0 {
             return Selection::new(row, col);
@@ -109,14 +116,14 @@ impl Selection {
         Selection { start: (row, left as u16), end: (row, right as u16), anchored: true }
     }
 
-    /// Select the whole visible row under `row` — the triple-click
-    /// behavior. Spans column 0 through the last column. `as_text` trims
-    /// trailing whitespace on copy, so selecting the full width is fine.
-    pub fn line_at(grid: &Grid, row: u16) -> Selection {
-        let last_col = if row < grid.rows {
-            grid.row(row).len().saturating_sub(1) as u16
-        } else {
-            grid.cols.saturating_sub(1)
+    /// Select the whole row under `abs_row` — the triple-click behavior.
+    /// `abs_row` is a scrollback-ABSOLUTE row. Spans column 0 through the
+    /// last column. `as_text` trims trailing whitespace on copy, so
+    /// selecting the full width is fine.
+    pub fn line_at(grid: &Grid, row: u64) -> Selection {
+        let last_col = match grid.row_at_abs(row) {
+            Some(line) => line.len().saturating_sub(1) as u16,
+            None => grid.cols.saturating_sub(1),
         };
         Selection { start: (row, 0), end: (row, last_col), anchored: true }
     }
@@ -133,7 +140,7 @@ impl Selection {
     /// just the anchor word) or onto a word that is fully contained in it.
     /// Single-cell words and cross-row drags fall out of the (row, col)
     /// min/max naturally. Always `anchored = true`.
-    pub fn word_drag(grid: &Grid, anchor: (u16, u16), cursor: (u16, u16)) -> Selection {
+    pub fn word_drag(grid: &Grid, anchor: (u64, u16), cursor: (u64, u16)) -> Selection {
         let a = Selection::word_at(grid, anchor.0, anchor.1);
         let c = Selection::word_at(grid, cursor.0, cursor.1);
         // Each of a/c is already a single-row span with start <= end, but
@@ -152,26 +159,34 @@ impl Selection {
     /// The anchor row is always inside `min..=max`, so the selection never
     /// shrinks below the originally triple-clicked line. Always
     /// `anchored = true`.
-    pub fn line_drag(grid: &Grid, anchor_row: u16, cursor_row: u16) -> Selection {
+    pub fn line_drag(grid: &Grid, anchor_row: u64, cursor_row: u64) -> Selection {
         let top = anchor_row.min(cursor_row);
         let bottom = anchor_row.max(cursor_row);
-        let last_col = if bottom < grid.rows {
-            grid.row(bottom).len().saturating_sub(1) as u16
-        } else {
-            grid.cols.saturating_sub(1)
+        let last_col = match grid.row_at_abs(bottom) {
+            Some(line) => line.len().saturating_sub(1) as u16,
+            None => grid.cols.saturating_sub(1),
         };
         Selection { start: (top, 0), end: (bottom, last_col), anchored: true }
     }
 
-    /// Serialize the covered cells from `grid`.
+    /// Serialize the covered cells from `grid`. Rows are scrollback-ABSOLUTE
+    /// and read via [`Grid::row_at_abs`]; a row past the bottom of the
+    /// available buffer (`None`) ends the walk.
     pub fn as_text(&self, grid: &Grid) -> String {
         let (a, b) = self.normalized();
         let mut out = String::new();
+        // Emit the row separator BEFORE each row after the first, so a walk
+        // cut short by an unavailable absolute row (`row_at_abs` → None)
+        // never leaves a dangling trailing newline.
+        let mut first = true;
         for r in a.0..=b.0 {
-            if r >= grid.rows {
+            let Some(row) = grid.row_at_abs(r) else {
                 break;
+            };
+            if !first {
+                out.push('\n');
             }
-            let row = grid.row(r);
+            first = false;
             let col_start = if r == a.0 { a.1 as usize } else { 0 };
             let col_end = if r == b.0 { (b.1 as usize + 1).min(row.len()) } else { row.len() };
             let mut line = String::new();
@@ -184,11 +199,7 @@ impl Selection {
                     line.push_str(extras);
                 }
             }
-            let trimmed = line.trim_end();
-            out.push_str(trimmed);
-            if r < b.0 {
-                out.push('\n');
-            }
+            out.push_str(line.trim_end());
         }
         out
     }
@@ -466,14 +477,56 @@ mod tests {
         assert_eq!(sel.as_text(&grid), "x");
     }
 
+    /// Build a multi-row grid then scroll `scroll` rows into scrollback, so
+    /// the live region sits at absolute rows `scroll..`. Returns the grid;
+    /// the first `scroll` lines are addressable only via `row_at_abs`.
+    fn grid_scrolled(lines: &[&str], scroll: u16) -> Grid {
+        let mut grid = grid_rows(lines);
+        grid.scroll_up(scroll);
+        grid
+    }
+
     #[test]
-    fn line_at_empty_row_is_not_empty() {
-        // An empty/blank line collapses to a single cell (last_col == 0), so
-        // start == end. Triple-click is anchored, so it stays non-empty.
-        let grid = grid_with("");
+    fn word_at_reads_scrollback_absolute_row() {
+        // 2 visible rows; scroll 2 → both originals land in scrollback at
+        // abs 0 ("alpha beta") and abs 1 ("gamma delta"); live rows are
+        // blank at abs 2..=3. word_at must read the scrollback line.
+        let grid = grid_scrolled(&["alpha beta", "gamma delta"], 2);
+        assert_eq!(grid.scrollback_len(), 2);
+        // abs row 1 = "gamma delta"; click col 2 → whole "gamma" (0..=4).
+        let sel = Selection::word_at(&grid, 1, 2);
+        assert_eq!(sel.start, (1, 0));
+        assert_eq!(sel.end, (1, 4));
+        assert_eq!(sel.as_text(&grid), "gamma");
+    }
+
+    #[test]
+    fn line_at_and_as_text_read_scrollback_absolute_row() {
+        let grid = grid_scrolled(&["alpha beta", "gamma delta"], 2);
+        // abs row 0 = "alpha beta" (now in scrollback).
         let sel = Selection::line_at(&grid, 0);
-        assert_eq!(sel.start, sel.end);
-        assert!(sel.anchored);
-        assert!(!sel.is_empty());
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end.0, 0);
+        assert_eq!(sel.as_text(&grid), "alpha beta");
+    }
+
+    #[test]
+    fn as_text_spans_scrollback_into_live_region() {
+        // Scroll only 1 row: abs 0 = "alpha beta" (scrollback), abs 1 =
+        // "gamma delta" (still live, the bottom visible row). A cross-row
+        // selection must read both the scrollback and the live row.
+        let grid = grid_scrolled(&["alpha beta", "gamma delta"], 1);
+        assert_eq!(grid.scrollback_len(), 1);
+        let sel = Selection { start: (0, 0), end: (1, 10), anchored: true };
+        assert_eq!(sel.as_text(&grid), "alpha beta\ngamma delta");
+    }
+
+    #[test]
+    fn as_text_stops_at_unavailable_absolute_row() {
+        // end.row past the bottom of the buffer: the walk stops cleanly
+        // (no panic) and yields only the rows that exist.
+        let grid = grid_rows(&["only line"]);
+        let sel = Selection { start: (0, 0), end: (50, 5), anchored: true };
+        assert_eq!(sel.as_text(&grid), "only line");
     }
 }

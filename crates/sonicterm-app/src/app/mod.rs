@@ -158,11 +158,13 @@ pub struct WindowState {
     /// granularity. See [`SelectMode`] and `Selection::word_drag` /
     /// `Selection::line_drag`.
     pub select_mode: SelectMode,
-    /// The grid cell of the press that started the current drag. Word/line
-    /// drags recompute the anchor word/line from THIS cell against the live
-    /// grid on every move (robust to scrollback), so only the cell — not
-    /// the resolved word/line bounds — needs to be retained.
-    pub select_anchor: (u16, u16),
+    /// The grid cell of the press that started the current drag, as a
+    /// scrollback-ABSOLUTE row (so word/line drags stay pinned to the same
+    /// TEXT as the viewport scrolls). Word/line drags recompute the anchor
+    /// word/line from THIS cell against the live grid on every move (robust
+    /// to scrollback), so only the cell — not the resolved word/line bounds
+    /// — needs to be retained.
+    pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
     // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
@@ -303,9 +305,29 @@ impl WindowState {
     /// mouse path; the main-window path has equivalent `App`-level
     /// helpers (`word_selection_at` / `line_selection_at`) that resolve
     /// the pane through `App::active_pane`.
-    pub fn multi_click_selection(&self, count: u8, row: u16, col: u16) -> Selection {
+    /// Convert a VIEWPORT row (0 = top visible row, from `pixel_to_cell`) to
+    /// a scrollback-ABSOLUTE row for THIS window's active pane, so a
+    /// `Selection` tracks the same TEXT as the viewport scrolls. Same
+    /// `try_lock`-then-drop discipline as [`Self::multi_click_selection`]
+    /// (CLAUDE.md §4). Returns `None` when the pane is missing or the parser
+    /// is busy; the child-window mouse path then treats the viewport row as
+    /// absolute (correct while unscrolled).
+    pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        drop(guard);
+        Some(view_top + viewport_row as u64)
+    }
+
+    pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
         if count < 2 {
-            return Selection::new(row, col);
+            return Selection::new(abs_row, col);
         }
         let pane = self
             .tab_states
@@ -313,49 +335,66 @@ impl WindowState {
             .map(|st| st.active_pane)
             .and_then(|id| self.panes.get(&id));
         let Some(pane) = pane else {
-            return Selection::new(row, col);
+            return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
-            return Selection::new(row, col);
+            return Selection::new(abs_row, col);
         };
         let sel = match count {
-            2 => Selection::word_at(guard.grid(), row, col),
-            _ => Selection::line_at(guard.grid(), row),
+            2 => Selection::word_at(guard.grid(), abs_row, col),
+            _ => Selection::line_at(guard.grid(), abs_row),
         };
         drop(guard);
         sel
     }
 
-    /// Word-mode drag for THIS window's active pane: union of the word at
-    /// the `anchor` cell and the word at the `(row, col)` cursor cell.
-    /// Returns `None` when there is no active pane or the parser is busy,
-    /// so the child-window mouse path SKIPS the move rather than shrinking
-    /// an anchored word/line selection. Same `try_lock`-then-drop
+    /// Word-mode drag for THIS window's active pane: union of the word at the
+    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
+    /// `cursor_viewport_row` is converted to an absolute row inside the same
+    /// lock. Returns `None` when there is no active pane or the parser is
+    /// busy, so the child-window mouse path SKIPS the move rather than
+    /// shrinking an anchored word/line selection. Same `try_lock`-then-drop
     /// discipline as [`Self::multi_click_selection`] (CLAUDE.md §4).
-    pub fn word_drag_selection(&self, anchor: (u16, u16), row: u16, col: u16) -> Option<Selection> {
+    pub fn word_drag_selection(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
         let pane = self
             .tab_states
             .get(self.tabs.active_index())
             .map(|st| st.active_pane)
             .and_then(|id| self.panes.get(&id))?;
         let guard = pane.parser.try_lock()?;
-        let sel = Selection::word_drag(guard.grid(), anchor, (row, col));
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
         drop(guard);
         Some(sel)
     }
 
     /// Line-mode drag for THIS window's active pane: whole rows from the
-    /// `anchor_row` to the cursor `row` inclusive. Returns `None` when the
-    /// pane is missing or the parser is busy (see
+    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
+    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
+    /// Returns `None` when the pane is missing or the parser is busy (see
     /// [`Self::word_drag_selection`]).
-    pub fn line_drag_selection(&self, anchor_row: u16, row: u16) -> Option<Selection> {
+    pub fn line_drag_selection(
+        &self,
+        anchor_row: u64,
+        cursor_viewport_row: u16,
+    ) -> Option<Selection> {
         let pane = self
             .tab_states
             .get(self.tabs.active_index())
             .map(|st| st.active_pane)
             .and_then(|id| self.panes.get(&id))?;
         let guard = pane.parser.try_lock()?;
-        let sel = Selection::line_drag(guard.grid(), anchor_row, row);
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
         drop(guard);
         Some(sel)
     }

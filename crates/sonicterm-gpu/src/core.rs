@@ -2556,8 +2556,10 @@ impl GpuRenderer {
                     self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
                 }
                 // Normalise selection once outside the loop so we hash a
-                // canonical bbox per row.
-                let sel_bbox: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+                // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
+                // per-row membership test inside `row_hash_cells` compares
+                // them against each row's `view_top_abs + r`.
+                let sel_bbox: Option<(u64, u16, u64, u16)> = selection.map(|s| {
                     let (a, b) = s.normalized();
                     (a.0, a.1, b.0, b.1)
                 });
@@ -2865,7 +2867,7 @@ impl GpuRenderer {
         // abs_row, content+geom+style+selection hash); on a hit we
         // `extend_from_slice` the cached slice and skip the per-cell
         // run-length-encode walk in `emit_cell_bg_quads_for_row`.
-        let sel_bbox_for_quads: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+        let sel_bbox_for_quads: Option<(u64, u16, u64, u16)> = selection.map(|s| {
             let (a, b) = s.normalized();
             (a.0, a.1, b.0, b.1)
         });
@@ -3004,8 +3006,14 @@ impl GpuRenderer {
                 // Pane rect_px is the source of truth — see note above.
                 let pane_w = active_pane_w;
                 let pane_h = active_pane_h;
+                // Selection rows are scrollback-ABSOLUTE; resolve the active
+                // pane's view top so `selection_quad_rects` can map them back
+                // to viewport rows (so the highlight follows the TEXT when
+                // scrolled).
+                let sel_view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
                 for rect in selection_quad_rects(
                     sel,
+                    sel_view_top_abs,
                     grid.rows,
                     grid.cols,
                     active_origin_x,
@@ -5670,6 +5678,7 @@ pub fn command_status_hash(status: &sonicterm_ui::tabs::CommandStatus, now: Inst
 #[allow(clippy::too_many_arguments)]
 pub fn selection_quad_rects(
     sel: &sonicterm_ui::selection::Selection,
+    view_top_abs: u64,
     rows: u16,
     cols: u16,
     origin_x: f32,
@@ -5682,25 +5691,39 @@ pub fn selection_quad_rects(
         return Vec::new();
     }
     let (a, b) = sel.normalized();
-    let mut out = Vec::with_capacity(usize::from(b.0.saturating_sub(a.0)) + 1);
+    let mut out = Vec::with_capacity(usize::from(rows));
     // #489: derive each row's x/w from the shared snapped-edge cache so
     // selection rects share device-pixel edges with adjacent glyph
     // cells at fractional DPI. Empty-cache fallback preserves the old
     // raw-arithmetic behavior for callers (debug/test helpers) that
     // don't carry a real cache; integer scales make the two identical.
     let raw_fallback = snapped_cell_x.is_empty();
-    for r in a.0..=b.0 {
-        if r >= rows {
-            break;
-        }
-        let col_a = if r == a.0 { a.1 } else { 0 };
+    // Selection rows are scrollback-ABSOLUTE. Only the absolute rows that
+    // intersect the viewport produce quads, so bound the walk to
+    // `[max(a.0, view_top_abs) ..= min(b.0, view_top_abs + rows - 1)]`.
+    // This keeps per-frame cost O(viewport rows) even when the selection
+    // spans a huge multi-screen region of scrollback. The first/last-row
+    // column tests still compare against the true `a.0`/`b.0` (which may
+    // sit off-screen), so partial first/last rows render correctly.
+    if rows == 0 {
+        return out;
+    }
+    let view_bottom_abs = view_top_abs + (rows as u64 - 1);
+    let first_abs = a.0.max(view_top_abs);
+    let last_abs = b.0.min(view_bottom_abs);
+    if first_abs > last_abs {
+        return out; // selection entirely above or below the viewport
+    }
+    for abs_r in first_abs..=last_abs {
+        let vr = (abs_r - view_top_abs) as u16;
+        let col_a = if abs_r == a.0 { a.1 } else { 0 };
         // Note: do NOT clamp `col_b` to `cols - 1` here. The selection may
         // legitimately reach the grid's last column, and the per-pane clip
         // below trims any pixel overhang. Clamping pre-clip would silently
         // shrink the selection on the last row when the user dragged past
         // the rightmost cell — which is precisely the path that hides
         // bugs like the split-pane bleed-through.
-        let col_b = if r == b.0 { b.1 } else { cols.saturating_sub(1) };
+        let col_b = if abs_r == b.0 { b.1 } else { cols.saturating_sub(1) };
         if col_b < col_a {
             continue;
         }
@@ -5718,7 +5741,7 @@ pub fn selection_quad_rects(
             let hi = snapped_cell_x[cache_end as usize];
             (lo, hi - lo)
         };
-        let y = origin_y + f32::from(r) * cell_h;
+        let y = origin_y + f32::from(vr) * cell_h;
         out.push((x, y, w, cell_h));
     }
     out

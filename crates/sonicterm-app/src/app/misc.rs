@@ -67,41 +67,61 @@ impl App {
         sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
-    /// Compute a word selection (double-click) at `(row, col)` from the
-    /// focused pane's grid. Locks the parser only long enough to read the
-    /// grid and build the `Selection`, drops it, then returns the owned
-    /// (Copy) value — so callers never hold the parser lock across
-    /// `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
+    /// Convert a VIEWPORT row (0 = top visible row, as returned by
+    /// `GpuRenderer::pixel_to_cell`) to a scrollback-ABSOLUTE row for the
+    /// focused pane, so a `Selection` tracks the same TEXT as the viewport
+    /// scrolls. Resolves the pane's view top under the same `try_lock`
+    /// discipline as the selection helpers (CLAUDE.md §4) and drops the lock
+    /// before returning. Returns `None` when there is no active pane or the
+    /// parser is busy; callers fall back to treating the viewport row as
+    /// absolute (correct while unscrolled).
+    pub(super) fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        drop(guard);
+        Some(view_top + viewport_row as u64)
+    }
+
+    /// Compute a word selection (double-click) at scrollback-ABSOLUTE
+    /// `abs_row` / `col` from the focused pane's grid. Locks the parser only
+    /// long enough to read the grid and build the `Selection`, drops it, then
+    /// returns the owned (Copy) value — so callers never hold the parser lock
+    /// across `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
     /// selection when the parser is busy.
-    pub(super) fn word_selection_at(&self, row: u16, col: u16) -> Selection {
+    pub(super) fn word_selection_at(&self, abs_row: u64, col: u16) -> Selection {
         let Some(pane) = self.active_pane() else {
-            return Selection::new(row, col);
+            return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
-            return Selection::new(row, col);
+            return Selection::new(abs_row, col);
         };
-        let sel = Selection::word_at(guard.grid(), row, col);
+        let sel = Selection::word_at(guard.grid(), abs_row, col);
         drop(guard);
         sel
     }
 
-    /// Compute a line selection (triple-click) at `row` from the focused
-    /// pane's grid. Same lock discipline as [`Self::word_selection_at`].
-    pub(super) fn line_selection_at(&self, row: u16) -> Selection {
+    /// Compute a line selection (triple-click) at scrollback-ABSOLUTE
+    /// `abs_row` from the focused pane's grid. Same lock discipline as
+    /// [`Self::word_selection_at`].
+    pub(super) fn line_selection_at(&self, abs_row: u64) -> Selection {
         let Some(pane) = self.active_pane() else {
-            return Selection::new(row, 0);
+            return Selection::new(abs_row, 0);
         };
         let Some(guard) = pane.parser.try_lock() else {
-            return Selection::new(row, 0);
+            return Selection::new(abs_row, 0);
         };
-        let sel = Selection::line_at(guard.grid(), row);
+        let sel = Selection::line_at(guard.grid(), abs_row);
         drop(guard);
         sel
     }
 
     /// Word-mode drag (double-click then drag): union of the word at the
-    /// `anchor` cell and the word at the `(row, col)` cursor cell, from the
-    /// focused pane's grid. Returns `None` when there is no active pane or
+    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
+    /// `cursor_viewport_row` is the live viewport row from `pixel_to_cell`;
+    /// it is converted to an absolute row against the pane's current view top
+    /// inside the same lock. Returns `None` when there is no active pane or
     /// the parser is busy — the caller then SKIPS this move rather than
     /// collapsing the selection (a cell-extend would shrink the word/line
     /// region). Same `try_lock`-then-drop discipline as
@@ -109,25 +129,36 @@ impl App {
     /// only to build the owned (Copy) `Selection`, never across redraw.
     pub(super) fn word_drag_selection_at(
         &self,
-        anchor: (u16, u16),
-        row: u16,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
         col: u16,
     ) -> Option<Selection> {
         let pane = self.active_pane()?;
         let guard = pane.parser.try_lock()?;
-        let sel = Selection::word_drag(guard.grid(), anchor, (row, col));
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
         drop(guard);
         Some(sel)
     }
 
-    /// Line-mode drag (triple-click then drag): whole rows from the anchor
-    /// row to the cursor `row` inclusive, from the focused pane's grid.
+    /// Line-mode drag (triple-click then drag): whole rows from the
+    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
+    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
     /// Returns `None` when there is no active pane or the parser is busy —
     /// the caller SKIPS this move (see [`Self::word_drag_selection_at`]).
-    pub(super) fn line_drag_selection_at(&self, anchor_row: u16, row: u16) -> Option<Selection> {
+    pub(super) fn line_drag_selection_at(
+        &self,
+        anchor_row: u64,
+        cursor_viewport_row: u16,
+    ) -> Option<Selection> {
         let pane = self.active_pane()?;
         let guard = pane.parser.try_lock()?;
-        let sel = Selection::line_drag(guard.grid(), anchor_row, row);
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
         drop(guard);
         Some(sel)
     }

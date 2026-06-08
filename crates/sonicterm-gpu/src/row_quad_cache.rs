@@ -170,7 +170,7 @@ pub fn row_quad_hash(
     origin_y: f32,
     pane_w: f32,
     pane_h: f32,
-    selection: Option<(u16, u16, u16, u16)>,
+    selection: Option<(u64, u16, u64, u16)>,
 ) -> u64 {
     row_quad_hash_cells(
         view_top_abs,
@@ -200,14 +200,15 @@ pub fn row_quad_hash_cells<I, C>(
     origin_y: f32,
     pane_w: f32,
     pane_h: f32,
-    selection: Option<(u16, u16, u16, u16)>,
+    selection: Option<(u64, u16, u64, u16)>,
 ) -> u64
 where
     I: IntoIterator<Item = C>,
     C: Borrow<Cell>,
 {
     let mut h = DefaultHasher::new();
-    (view_top_abs + r as u64).hash(&mut h);
+    let row_abs = view_top_abs + r as u64;
+    row_abs.hash(&mut h);
     for cell in row_cells {
         cell.borrow().hash(&mut h);
     }
@@ -219,13 +220,15 @@ where
     pane_w.to_bits().hash(&mut h);
     pane_h.to_bits().hash(&mut h);
     if let Some((s_row, s_col, e_row, e_col)) = selection {
+        // Rows are scrollback-ABSOLUTE; compare against this row's absolute
+        // index so background-fill invalidation tracks the selected TEXT as
+        // the viewport scrolls (mirrors `row_hash_cells`).
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))
         } else {
             ((e_row, e_col), (s_row, s_col))
         };
-        let r16 = r as u16;
-        if r16 >= lo.0 && r16 <= hi.0 {
+        if row_abs >= lo.0 && row_abs <= hi.0 {
             0x71D5_5E1E_u64.hash(&mut h);
             lo.0.hash(&mut h);
             lo.1.hash(&mut h);

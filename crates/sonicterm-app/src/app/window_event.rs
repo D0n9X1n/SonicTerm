@@ -993,6 +993,8 @@ impl App {
                             // parser was busy → SKIP this move (a cell-extend
                             // would shrink the word/line region); None = Cell
                             // mode (handled by the extend branch below).
+                            // `anchor.0` is ABSOLUTE; the helpers convert the
+                            // viewport `row` to absolute internally.
                             let replacement = match mode {
                                 SelectMode::Word => {
                                     Some(self.word_drag_selection_at(anchor, row, col))
@@ -1001,6 +1003,20 @@ impl App {
                                     Some(self.line_drag_selection_at(anchor.0, row))
                                 }
                                 SelectMode::Cell => None,
+                            };
+                            // Cell-mode extend needs the cursor's ABSOLUTE row
+                            // too. Resolve it before the &mut borrow below.
+                            // None = no active pane / parser busy → SKIP this
+                            // move rather than fall back to the viewport row:
+                            // treating a viewport row as absolute while scrolled
+                            // would extend a far-away anchor (e.g. abs 1000) down
+                            // to a small on-screen row and balloon the selection.
+                            // Only Cell mode consumes it, so skip the extra
+                            // try_lock for word/line drags. (#B10 review)
+                            let cursor_abs_row = if matches!(mode, SelectMode::Cell) {
+                                self.viewport_row_to_abs(row)
+                            } else {
+                                None
                             };
                             // PR-B3c (#365): selection lives on WindowState.
                             // Split-borrow `ws.selection` and `ws.panes`
@@ -1013,12 +1029,15 @@ impl App {
                                             // collapse a double/triple-click
                                             // (word/line) selection down to the
                                             // cursor cell. Only a plain
-                                            // point-drag extends. (#651)
+                                            // point-drag extends. (#651) Skip if
+                                            // the absolute row was unavailable.
                                             if !sel.anchored {
-                                                sel.extend(row, col);
-                                                mark_all_panes_dirty(&ws.panes);
-                                                if let Some(w) = ws.window.as_ref() {
-                                                    w.request_redraw();
+                                                if let Some(abs) = cursor_abs_row {
+                                                    sel.extend(abs, col);
+                                                    mark_all_panes_dirty(&ws.panes);
+                                                    if let Some(w) = ws.window.as_ref() {
+                                                        w.request_redraw();
+                                                    }
                                                 }
                                             }
                                         }
@@ -1389,23 +1408,32 @@ impl App {
                             // (CLAUDE.md §4).
                             let click_count =
                                 self.main_mut().map(|ws| ws.register_click(row, col)).unwrap_or(1);
+                            // Selection rows are scrollback-ABSOLUTE so the
+                            // highlight tracks the same TEXT as the viewport
+                            // scrolls. Convert the viewport row from
+                            // `pixel_to_cell` once; fall back to treating it
+                            // as absolute (correct while unscrolled) if the
+                            // parser is momentarily busy.
+                            let abs_row =
+                                self.viewport_row_to_abs(row).unwrap_or(row as u64);
                             let sel = match click_count {
-                                2 => self.word_selection_at(row, col),
-                                3 => self.line_selection_at(row),
-                                _ => Selection::new(row, col),
+                                2 => self.word_selection_at(abs_row, col),
+                                3 => self.line_selection_at(abs_row),
+                                _ => Selection::new(abs_row, col),
                             };
                             // Record the WezTerm-style drag granularity +
                             // anchor cell so a subsequent CursorMoved (button
                             // held) extends by word / line / cell. The anchor
-                            // is the press cell; word/line drags recompute the
-                            // anchor word/line from it on each move.
+                            // is the press cell (ABSOLUTE row); word/line drags
+                            // recompute the anchor word/line from it on each
+                            // move.
                             if let Some(ws) = self.main_mut() {
                                 ws.select_mode = match click_count {
                                     2 => SelectMode::Word,
                                     3 => SelectMode::Line,
                                     _ => SelectMode::Cell,
                                 };
-                                ws.select_anchor = (row, col);
+                                ws.select_anchor = (abs_row, col);
                             }
                             self.selection_set(Some(sel));
                             if let Some(panes) = self.main_panes() {

@@ -407,11 +407,12 @@ impl App {
                     if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
                     {
                         // WezTerm-style drag granularity (#651). The press set
-                        // `select_mode` + `select_anchor`; extend by Cell /
-                        // Word / Line. Word/Line recompute the region from the
-                        // live grid via try_lock (lock dropped before redraw —
-                        // CLAUDE.md §4). `r`'s last use was pixel_to_cell, so
-                        // the &child borrows below are fine.
+                        // `select_mode` + `select_anchor` (ABSOLUTE row);
+                        // extend by Cell / Word / Line. Word/Line recompute the
+                        // region from the live grid via try_lock (lock dropped
+                        // before redraw — CLAUDE.md §4), converting the viewport
+                        // `row` to absolute internally. `r`'s last use was
+                        // pixel_to_cell, so the &child borrows below are fine.
                         let replacement = match child.select_mode {
                             SelectMode::Word => {
                                 Some(child.word_drag_selection(child.select_anchor, row, col))
@@ -421,16 +422,27 @@ impl App {
                             }
                             SelectMode::Cell => None,
                         };
+                        // Cell-mode extend needs the cursor's ABSOLUTE row.
+                        // Only Cell mode consumes it. None = parser busy → SKIP
+                        // (don't fall back to viewport-as-absolute, which would
+                        // balloon a scrolled selection). (#B10 review)
+                        let cursor_abs_row = if matches!(child.select_mode, SelectMode::Cell) {
+                            child.viewport_row_to_abs(row)
+                        } else {
+                            None
+                        };
                         if let Some(sel) = child.selection.as_mut() {
                             match child.select_mode {
                                 SelectMode::Cell => {
                                     // Mirror the main window: don't collapse an
                                     // anchored (word/line) selection on a plain
-                                    // cell move. (#651)
+                                    // cell move. (#651) Skip if abs row missing.
                                     if !sel.anchored {
-                                        sel.extend(row, col);
-                                        mark_all_panes_dirty(&child.panes);
-                                        child.request_redraw();
+                                        if let Some(abs) = cursor_abs_row {
+                                            sel.extend(abs, col);
+                                            mark_all_panes_dirty(&child.panes);
+                                            child.request_redraw();
+                                        }
                                     }
                                 }
                                 SelectMode::Word | SelectMode::Line => {
@@ -503,16 +515,24 @@ impl App {
                         // unchanged. (`r`'s last use was pixel_to_cell
                         // above, so the &mut child borrows below are fine.)
                         let count = child.register_click(row, col);
-                        let sel = child.multi_click_selection(count, row, col);
+                        // Selection rows are scrollback-ABSOLUTE so the
+                        // highlight tracks the same TEXT as the viewport
+                        // scrolls. Convert the viewport row from
+                        // `pixel_to_cell` once; fall back to treating it as
+                        // absolute (correct while unscrolled) if the parser
+                        // is momentarily busy.
+                        let abs_row = child.viewport_row_to_abs(row).unwrap_or(row as u64);
+                        let sel = child.multi_click_selection(count, abs_row, col);
                         // Record WezTerm-style drag granularity + anchor cell
                         // (mirrors the main-window path) so a held-button
-                        // CursorMoved extends by cell / word / line. (#651)
+                        // CursorMoved extends by cell / word / line. The
+                        // anchor row is ABSOLUTE. (#651)
                         child.select_mode = match count {
                             2 => SelectMode::Word,
                             3 => SelectMode::Line,
                             _ => SelectMode::Cell,
                         };
-                        child.select_anchor = (row, col);
+                        child.select_anchor = (abs_row, col);
                         child.selection = Some(sel);
                         mark_all_panes_dirty(&child.panes);
                     }
