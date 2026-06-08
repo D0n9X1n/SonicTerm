@@ -21,6 +21,7 @@ pub fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
         Key::Named(n) => Some(match n {
+            NamedKey::Enter if mods.shift_key() => b"\x1b\r".to_vec(),
             NamedKey::Enter => b"\r".to_vec(),
             NamedKey::Backspace => b"\x7f".to_vec(),
             NamedKey::Tab => b"\t".to_vec(),
@@ -159,5 +160,26 @@ impl KeyName {
             Self::Static(s) => s,
             Self::Owned(s) => s.as_str(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_encodes_carriage_return() {
+        assert_eq!(
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn shift_enter_encodes_escape_carriage_return() {
+        assert_eq!(
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
+            Some(b"\x1b\r".to_vec())
+        );
     }
 }
