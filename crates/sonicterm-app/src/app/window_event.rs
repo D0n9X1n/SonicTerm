@@ -35,6 +35,29 @@ fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
+/// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
+/// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
+/// `sgr` true → SGR encoding `ESC[<Btn;col;row M` (1-based, unbounded).
+/// `sgr` false → legacy X10 `ESC[M` + 3 bytes (button+32, col+32, row+32),
+/// each byte clamped to the classic 223 ceiling (col/row+32 ≤ 255).
+/// `col`/`row` are 1-based cell coordinates of the cell under the cursor.
+fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count: usize) -> Vec<u8> {
+    let btn: u32 = if up { 64 } else { 65 };
+    let mut out = Vec::new();
+    for _ in 0..count {
+        if sgr {
+            out.extend_from_slice(format!("\x1b[<{btn};{col};{row}M").as_bytes());
+        } else {
+            // X10: parameters are value+32, capped so col/row+32 fit a byte.
+            let cb = (btn + 32).min(255) as u8;
+            let cx = (col.min(223) + 32) as u8;
+            let cy = (row.min(223) + 32) as u8;
+            out.extend_from_slice(&[0x1b, b'[', b'M', cb, cx, cy]);
+        }
+    }
+    out
+}
+
 impl App {
     pub(super) fn do_window_event(
         &mut self,
@@ -1003,27 +1026,52 @@ impl App {
                 };
                 if delta_lines != 0 {
                     if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
-                        // Alt-screen wheel → arrow keys (#T7). Full-screen
-                        // TUIs (less, vim, man) live on the alt screen and
-                        // expect the wheel to drive their own scroll via
-                        // arrow keys when they have NOT enabled mouse
-                        // tracking. Snapshot the three parser flags we need
-                        // under the lock, then DROP it before any PTY write
-                        // (CLAUDE.md §4: never hold a parser/grid lock across
-                        // a PTY write).
-                        let (is_alt, mouse_on, app_cursor) = self
+                        // Alt-screen wheel handling (#658). Full-screen TUIs
+                        // live on the alt screen. Two cases:
+                        //   * mouse tracking ON (?1000/?1002/?1003): the app
+                        //     wants wheel as MOUSE events — send SGR (or legacy)
+                        //     wheel reports (button 64=up / 65=down) so claude /
+                        //     copilot scroll their own transcript.
+                        //   * tracking OFF: translate to arrow keys so pagers
+                        //     (less/vim/man) scroll.
+                        // NOTE: ?1006 (SGR) is an ENCODING modifier, NOT a
+                        // tracking enable — it must be excluded from the
+                        // "tracking on" test (xterm ctlseqs).
+                        // Snapshot the flags + the cell under the cursor under
+                        // the lock, then DROP it before any PTY write
+                        // (CLAUDE.md §4).
+                        let cell = self
+                            .main_renderer()
+                            .and_then(|r| r.pixel_to_cell(lx, ly));
+                        let (is_alt, tracking_on, sgr, app_cursor) = self
                             .main()
                             .and_then(|ws| ws.panes.get(&pane_id))
                             .map(|pane| {
                                 let parser = pane.parser.lock();
                                 let is_alt = parser.grid().is_alt();
-                                let mouse_on = parser.mouse_tracking_enabled()
-                                    || parser.mouse_sgr_enabled();
+                                let tracking_on = parser.mouse_tracking_enabled();
+                                let sgr = parser.mouse_sgr_enabled();
                                 let app_cursor = parser.application_cursor_keys();
-                                (is_alt, mouse_on, app_cursor)
+                                (is_alt, tracking_on, sgr, app_cursor)
                             })
-                            .unwrap_or((false, false, false));
-                        if is_alt && !mouse_on {
+                            .unwrap_or((false, false, false, false));
+                        if is_alt && tracking_on {
+                            // App wants mouse events: emit one wheel report per
+                            // line of motion at the cell under the cursor.
+                            let up = delta_lines < 0;
+                            let (col1, row1) = cell
+                                .map(|(r, c)| (c as u32 + 1, r as u32 + 1))
+                                .unwrap_or((1, 1));
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let payload = wheel_report_bytes(sgr, up, col1, row1, count);
+                            if let Some(pane) =
+                                self.main().and_then(|ws| ws.panes.get(&pane_id))
+                            {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else if is_alt {
                             // Build the arrow sequence: ESC O A/B in
                             // application-cursor-keys mode, else ESC [ A/B.
                             // Up when scrolling back into history
@@ -1810,5 +1858,46 @@ fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::R
     } else {
         let live = row_idx - sb;
         (live < grid.rows as usize).then(|| grid.row(live as u16))
+    }
+}
+
+#[cfg(test)]
+mod wheel_report_tests {
+    use super::wheel_report_bytes;
+
+    #[test]
+    fn sgr_wheel_up_is_button_64() {
+        // col=5, row=3, one tick up → ESC[<64;5;3M
+        assert_eq!(wheel_report_bytes(true, true, 5, 3, 1), b"\x1b[<64;5;3M".to_vec());
+    }
+
+    #[test]
+    fn sgr_wheel_down_is_button_65() {
+        assert_eq!(wheel_report_bytes(true, false, 5, 3, 1), b"\x1b[<65;5;3M".to_vec());
+    }
+
+    #[test]
+    fn sgr_emits_one_report_per_line() {
+        // 3 ticks → three concatenated reports.
+        assert_eq!(
+            wheel_report_bytes(true, true, 1, 1, 3),
+            b"\x1b[<64;1;1M\x1b[<64;1;1M\x1b[<64;1;1M".to_vec()
+        );
+    }
+
+    #[test]
+    fn legacy_x10_encodes_button_and_coords_plus_32() {
+        // up=button 64 → 64+32=96 ('`'); col 5 → 37 ('%'); row 3 → 35 ('#').
+        assert_eq!(
+            wheel_report_bytes(false, true, 5, 3, 1),
+            vec![0x1b, b'[', b'M', 96, 37, 35]
+        );
+    }
+
+    #[test]
+    fn legacy_x10_clamps_large_coords() {
+        // col/row clamp to 223 so +32 stays within a byte (255).
+        let out = wheel_report_bytes(false, false, 9999, 9999, 1);
+        assert_eq!(out, vec![0x1b, b'[', b'M', 97, 255, 255]); // 65+32=97
     }
 }
