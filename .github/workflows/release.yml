@@ -14,25 +14,60 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  unit-tests:
-    name: ${{ matrix.os }} / unit tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-latest]
+  unit-tests-mac:
+    name: macOS / unit tests
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Cairo for Windows
-        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-unit-macos-14
+      - name: Run unit tests
+        run: cargo test --workspace --lib --bins
+
+      - name: Run per-crate unit/build gate
+        shell: bash
+        run: bash scripts/check-workspace-crates.sh
+
+      - name: Run release-note unit test
+        shell: bash
+        run: bash scripts/test-release-notes.sh
+
+  unit-tests-windows:
+    name: Windows / unit tests
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve vcpkg commit (for cache key)
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          $sha = (git -C $root rev-parse HEAD).Trim()
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache vcpkg binaries (Cairo)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-unit-${{ matrix.os }}
+          shared-key: release-unit-windows
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
 
@@ -47,7 +82,10 @@ jobs:
   build-mac-x86_64:
     name: Build macOS x86_64 binary
     runs-on: macos-15-intel
-    needs: [unit-tests]
+    needs: [unit-tests-mac]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v5
 
@@ -73,7 +111,10 @@ jobs:
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
-    needs: [unit-tests]
+    needs: [unit-tests-mac]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v5
 
@@ -100,6 +141,9 @@ jobs:
     name: Package macOS dmg
     runs-on: macos-14
     needs: [build-mac-x86_64, build-mac-aarch64]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v5
 
@@ -139,7 +183,9 @@ jobs:
   build-windows:
     name: Build Windows msi
     runs-on: windows-latest
-    needs: [unit-tests]
+    needs: [unit-tests-windows]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@v5
 
@@ -147,6 +193,23 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Resolve vcpkg commit (for cache key)
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          $sha = (git -C $root rev-parse HEAD).Trim()
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache vcpkg binaries (Cairo)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo
         shell: pwsh
@@ -204,7 +267,7 @@ jobs:
             find dist -maxdepth 2 -type f -print >&2
             exit 1
           fi
-          (cd dist && shasum -a 256 *.dmg *.msi > SHA256SUMS.txt)
+          (cd dist && shasum -a 256 ./*.dmg ./*.msi > SHA256SUMS.txt)
           ls -lh dist
 
       - name: Generate release notes
