@@ -3662,6 +3662,12 @@ impl GpuRenderer {
                 SearchBarLayout::compute(sw, sh, content_w, self.scale_factor)
             }
         });
+        // When search is active the inline IME preedit must anchor to the
+        // search box caret (end of the query text), not the terminal cursor.
+        // Populated inside the search-render block below; read by the inline
+        // preedit block further down. (cx = caret_left, by = box_top, bh =
+        // box_height)
+        let mut search_ime_anchor: Option<(f32, f32, f32)> = None;
         if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
             let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
@@ -3689,6 +3695,13 @@ impl GpuRenderer {
                     (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
                 let scroll_x = (text_w - visible_w).max(0.0);
+                // Inline IME preedit anchor: caret sits at the end of the
+                // (possibly scrolled) query text, clamped to the visible
+                // region so the composing text starts just past the caret
+                // instead of off the box edge.
+                let caret_x = (text_x - scroll_x + text_w)
+                    .clamp(text_x, text_x + visible_w);
+                search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
                     stack,
@@ -4094,12 +4107,125 @@ impl GpuRenderer {
             }
         }
 
-        // IME preedit is intentionally NOT self-drawn. macOS renders the
-        // in-flight composition inline at the reported text-cursor area, and
-        // the candidate window attaches there too. We just report the cursor
-        // area accurately (see window_event.rs `set_ime_cursor_area`, which
-        // anchors to the search box when search is active). Drawing our own
-        // popover fought the OS one and mis-placed it. (#B9 → removed)
+        // Inline IME preedit (WezTerm-style): macOS does NOT draw the
+        // in-flight composition (the pinyin typed before commit) for a
+        // terminal — the app must. We draw the composing text INLINE at the
+        // cursor: a subtle highlight background + the text + an accent
+        // underline, all DPI-scaled. The OS candidate window is positioned
+        // separately via `set_ime_cursor_area` (window_event.rs); we only
+        // draw the inline composing run here, never the candidate list. This
+        // is a per-frame overlay (quads_overlay / overlay_glyph_instances),
+        // NOT folded into the row glyph cache. The FrameKey already hashes
+        // `i.preedit()` (see `ime_hash` above) so composition changes
+        // re-render.
+        if ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
+            if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
+                let text = i.preedit();
+                // Body-matched, DPI-scaled font size (same as terminal text).
+                let font_size = self.raster_px(self.font_size);
+                // Anchor: search box caret when search is active, else the
+                // terminal cursor cell.
+                let (start_x, top_y, line_h) =
+                    if let Some((cx, by, bh)) = search_ime_anchor {
+                        (cx, by, bh)
+                    } else {
+                        let start_x = active_snapped_cell_x
+                            .get(grid.cursor.col as usize)
+                            .copied()
+                            .unwrap_or(
+                                active_origin_x + f32::from(grid.cursor.col) * self.cell_w,
+                            );
+                        let top_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                        (start_x, top_y, self.cell_h)
+                    };
+                // Per-char advance estimate mirrors the body/badge text path.
+                let pre_w = estimate_badge_text_width(text, font_size).max(self.cell_w);
+                // Whether to clip to the active pane: only for the in-grid
+                // (cursor) anchor — the search box lives in chrome above the
+                // pane and would be clipped away otherwise.
+                let clip_to_pane = search_ime_anchor.is_none();
+
+                // (1) Highlight background quad — subtle translucent tint so
+                // the composing run reads as "in flight" without obscuring
+                // the glyphs underneath.
+                let highlight = premultiply([0.55, 0.55, 0.60, 0.35]);
+                if clip_to_pane {
+                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                        (start_x, top_y, pre_w, line_h),
+                        active_pane_x,
+                        active_pane_y,
+                        active_pane_w,
+                        active_pane_h,
+                    ) {
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                            color: highlight,
+                            ..Default::default()
+                        });
+                    }
+                } else {
+                    quads_overlay.push(QuadInstance {
+                        rect: px_to_ndc(start_x, top_y, pre_w, line_h, sw, sh),
+                        color: highlight,
+                        ..Default::default()
+                    });
+                }
+
+                // (2) Composing text glyphs — vertically centered in the
+                // line, nudged a hair right so it doesn't kiss the cell edge.
+                let native_em = stack
+                    .cell_metrics_raster_px()
+                    .ok()
+                    .map(|m| m.cell_h as f32)
+                    .unwrap_or(self.cell_h);
+                let mut wt = stack.clone();
+                let text_pad = self.chrome_px(2.0);
+                let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    text,
+                    self.search_fg,
+                    ChromeAttrs::default(),
+                    start_x + text_pad,
+                    baseline_y,
+                    [start_x, top_y, pre_w, line_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+
+                // (3) Underline quad — DPI-scaled accent line along the
+                // bottom of the composing run (the in-flight affordance).
+                let thickness = (2.0 * self.scale_factor).round().max(1.0);
+                let uy = top_y + line_h - thickness;
+                if clip_to_pane {
+                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                        (start_x, uy, pre_w, thickness),
+                        active_pane_x,
+                        active_pane_y,
+                        active_pane_w,
+                        active_pane_h,
+                    ) {
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                            color: self.hyperlink_underline,
+                            ..Default::default()
+                        });
+                    }
+                } else {
+                    quads_overlay.push(QuadInstance {
+                        rect: px_to_ndc(start_x, uy, pre_w, thickness, sw, sh),
+                        color: self.hyperlink_underline,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
 
         // Drag-chip overlay: translucent ~120×24 quad that follows the
         // cursor while a tab is held. Drawn AFTER ime/search so it
