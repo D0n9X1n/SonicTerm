@@ -23,6 +23,7 @@ use winit::{
 
 use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, UserEvent};
 use crate::config_watch::ConfigWatcher;
+use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
 impl App {
@@ -298,6 +299,8 @@ impl App {
             last_click_time: None,
             last_click_cell: (0, 0),
             click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: std::time::Instant::now(),

@@ -104,7 +104,7 @@ pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 pub const SEARCH_BAR_WIDTH: f32 = 600.0;
 
 /// Minimum width of the search bar before query text expands it.
-pub const SEARCH_BAR_MIN_WIDTH: f32 = 300.0;
+pub const SEARCH_BAR_MIN_WIDTH: f32 = 250.0;
 
 /// Left padding inside the search/read-only badges.
 pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;
@@ -116,7 +116,7 @@ pub const SEARCH_BAR_PAD_RIGHT: f32 = 10.0;
 pub const SEARCH_BAR_ICON_GAP: f32 = 10.0;
 
 /// Height of the small top-right search bar.
-pub const SEARCH_BAR_HEIGHT: f32 = 44.0;
+pub const SEARCH_BAR_HEIGHT: f32 = 26.0;
 
 /// Layout of the command-palette modal.
 #[derive(Debug, Clone)]
@@ -248,11 +248,8 @@ impl PaletteLayout {
         let list_bottom = footer.y - panel_padding;
         let avail = (list_bottom - list_top).max(0.0);
         let row_stride = row_height + row_gap;
-        let max_rows = if row_stride > 0.0 {
-            ((avail + row_gap) / row_stride).floor() as usize
-        } else {
-            0
-        };
+        let max_rows =
+            if row_stride > 0.0 { ((avail + row_gap) / row_stride).floor() as usize } else { 0 };
 
         // Publish viewport size to the state so the next key press can
         // clamp scroll_offset correctly.
@@ -386,7 +383,11 @@ impl SearchBarLayout {
         let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
         let h = (SEARCH_BAR_HEIGHT * s).min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
         let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
-        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN);
+        // Row stacking: the per-row advance (bar height + gap) is a SIZE term
+        // and must scale with DPI — otherwise row 1 (search bar under the
+        // read-only badge) overlaps the DPI-scaled badge at scale > 1. Only the
+        // initial top margin stays a window-anchored offset.
+        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
         let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
@@ -433,6 +434,23 @@ mod tests {
         let first = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 0, 1.0);
         let second = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 1, 1.0);
         assert!(second.border.y > first.border.y);
+    }
+
+    #[test]
+    fn search_bar_row1_clears_dpi_scaled_readonly_badge() {
+        // Regression (#657-adjacent): at scale 2.0 the read-only badge is
+        // SEARCH_BAR_HEIGHT*2 tall anchored at SEARCH_BAR_MARGIN. The search
+        // bar at row 1 must sit BELOW the badge's bottom edge, not overlap it.
+        let scale = 2.0;
+        let badge_bottom = SEARCH_BAR_MARGIN + SEARCH_BAR_HEIGHT * scale;
+        let row1 =
+            SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
+        assert!(
+            row1.border.y >= badge_bottom,
+            "search bar row1 (y={}) overlaps the scaled badge (bottom={})",
+            row1.border.y,
+            badge_bottom
+        );
     }
 
     #[test]

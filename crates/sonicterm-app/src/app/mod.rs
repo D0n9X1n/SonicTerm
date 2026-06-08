@@ -61,7 +61,7 @@ use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::ime::ImeState;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 
 /// A child terminal window spawned by tearing a tab off the bar.
@@ -152,6 +152,17 @@ pub struct WindowState {
     pub last_click_time: Option<Instant>,
     pub last_click_cell: (u16, u16),
     pub click_count: u8,
+    /// WezTerm-style drag granularity, set on left-press from the click
+    /// count: `Cell` (single), `Word` (double), `Line` (triple). While the
+    /// button is held, `CursorMoved` extends the selection at this
+    /// granularity. See [`SelectMode`] and `Selection::word_drag` /
+    /// `Selection::line_drag`.
+    pub select_mode: SelectMode,
+    /// The grid cell of the press that started the current drag. Word/line
+    /// drags recompute the anchor word/line from THIS cell against the live
+    /// grid on every move (robust to scrollback), so only the cell — not
+    /// the resolved word/line bounds — needs to be retained.
+    pub select_anchor: (u16, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
     // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
@@ -313,6 +324,40 @@ impl WindowState {
         };
         drop(guard);
         sel
+    }
+
+    /// Word-mode drag for THIS window's active pane: union of the word at
+    /// the `anchor` cell and the word at the `(row, col)` cursor cell.
+    /// Returns `None` when there is no active pane or the parser is busy,
+    /// so the child-window mouse path SKIPS the move rather than shrinking
+    /// an anchored word/line selection. Same `try_lock`-then-drop
+    /// discipline as [`Self::multi_click_selection`] (CLAUDE.md §4).
+    pub fn word_drag_selection(&self, anchor: (u16, u16), row: u16, col: u16) -> Option<Selection> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let sel = Selection::word_drag(guard.grid(), anchor, (row, col));
+        drop(guard);
+        Some(sel)
+    }
+
+    /// Line-mode drag for THIS window's active pane: whole rows from the
+    /// `anchor_row` to the cursor `row` inclusive. Returns `None` when the
+    /// pane is missing or the parser is busy (see
+    /// [`Self::word_drag_selection`]).
+    pub fn line_drag_selection(&self, anchor_row: u16, row: u16) -> Option<Selection> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, row);
+        drop(guard);
+        Some(sel)
     }
 
     /// #447 follow-up to PR #443: clear the drag-chip overlay in one
@@ -1640,10 +1685,8 @@ impl App {
                 }
             }
         }
-        let kitty_flags = self
-            .active_pane()
-            .map(|pane| pane.parser.lock().kitty_keyboard_flags())
-            .unwrap_or(0);
+        let kitty_flags =
+            self.active_pane().map(|pane| pane.parser.lock().kitty_keyboard_flags()).unwrap_or(0);
         (None, encode_logical(key, mods, kitty_flags))
     }
 
@@ -2096,6 +2139,8 @@ impl App {
             last_click_time: None,
             last_click_cell: (0, 0),
             click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -2794,6 +2839,8 @@ impl App {
             last_click_time: None,
             last_click_cell: (0, 0),
             click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),

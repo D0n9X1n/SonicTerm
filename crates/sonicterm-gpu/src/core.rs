@@ -38,7 +38,7 @@ const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
-const READ_ONLY_BADGE_W: f32 = 240.0;
+const READ_ONLY_BADGE_W: f32 = 250.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
 const READ_ONLY_BADGE_PAD_RIGHT: f32 = 32.0;
@@ -96,12 +96,16 @@ fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
 }
 
-fn read_only_badge_rect(sw: f32, sh: f32, scale: f32) -> (f32, f32, f32, f32) {
-    // #651: badge SIZE scales with DPI; the edge MARGIN is a window-anchored
-    // position and stays in window space so the badge hugs the same corner at
-    // every scale factor.
+fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f32, f32, f32) {
+    // Badge width hugs its content (icon + "READONLY") instead of a fixed
+    // constant, so it never looks over-long. `content_w` is already in raster
+    // px (estimated from the DPI-scaled badge font); add scaled paddings. The
+    // edge MARGIN is a window-anchored position and stays in window space.
     let s = scale.max(0.01);
-    let w = (READ_ONLY_BADGE_W * s).min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
+    let pad = (SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT) * s;
+    let w = (content_w + pad)
+        .max(READ_ONLY_BADGE_W * 0.4 * s) // small floor so it never collapses
+        .min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
     let h = (READ_ONLY_BADGE_H * s).min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
     let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
     let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
@@ -255,7 +259,7 @@ use sonicterm_ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
+        search_bar_label, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
         PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
@@ -613,6 +617,10 @@ struct FrameKey {
     close_override: u8,
     broadcast_receivers_hash: u64,
     inline_media_hash: u64,
+    /// Cmd-hovered URL cell range. Folded into the key so moving the
+    /// hover onto / off a URL (or to a different URL span) invalidates
+    /// the cached frame and re-shapes with / without the accent recolor.
+    hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
 }
 
 #[doc(hidden)]
@@ -2068,6 +2076,12 @@ impl GpuRenderer {
         palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
+        // Cmd-hovered auto-detected URL cell range (viewport coords),
+        // or `None` when no URL is hovered while the open-URL modifier
+        // is held. When set on the active pane, the URL's glyphs are
+        // recolored with the theme accent (companion to the existing
+        // hover underline). Same lifetime/gating as the underline.
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
     ) -> Result<()> {
         // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
         // unchanged inside the body — we extract the active pane's grid into
@@ -2401,6 +2415,7 @@ impl GpuRenderer {
             close_override: u8::from(self.tab_close_override.is_some()),
             broadcast_receivers_hash,
             inline_media_hash,
+            hovered_url_cells,
         };
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -2497,6 +2512,16 @@ impl GpuRenderer {
             // hook on FontStack rasterization, it would attach in this
             // same scope.
             let _ = self.async_loader.clone();
+            // Theme accent for the Cmd-hovered URL recolor, computed
+            // ONCE per frame (mirrors how `hyperlink_underline` is
+            // derived at construction). `UiPalette::accent` is already
+            // a linear-sRGB `[f32;4]` with alpha 1.0 — the same space
+            // the per-glyph `color` field carries
+            // (`chrome_color_to_linear_rgba` output), so it drops in
+            // directly with no conversion. Only consumed when
+            // `hovered_url_cells` is set on the active pane.
+            let hovered_url_accent: [f32; 4] =
+                sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
             // Part B step 3: iterate every pane. Each iteration rebinds
             // `grid` to that pane's Grid (via the raw pointer collected
             // into pane_views above), uses the pane's own origin instead
@@ -2547,6 +2572,12 @@ impl GpuRenderer {
                 // fast path in `snap_to_device_pixels` makes this a no-op at
                 // scale 1.0/2.0 (mac dHash snapshots stay green).
                 let snapped_cell_x: Vec<f32> = build_snapped_cell_x(pad, cell_w, grid.cols);
+                // The Cmd-hover URL recolor applies only to the active
+                // pane (the hover hit-test runs against the focused
+                // pane). Non-active panes always pass `None` so split
+                // panes never inherit another pane's hover accent.
+                let pane_hovered_url =
+                    if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -2573,6 +2604,27 @@ impl GpuRenderer {
                         1.0,
                         sel_bbox,
                     );
+                    // Fold the Cmd-hover URL span into the cache key for
+                    // the row it sits on. The hover recolor overrides the
+                    // per-cell fg below, so a cached row shaped WITHOUT
+                    // the accent must not be replayed once the same row
+                    // becomes hovered (and vice-versa when the hover
+                    // leaves). Hover changes don't bump the grid revision
+                    // or mark rows dirty, so without this the recolor
+                    // would stick on a stale cache hit. Only the hovered
+                    // row's key is perturbed — peer rows keep replaying.
+                    let key = match pane_hovered_url {
+                        Some(h) if h.row == r => {
+                            use std::hash::{Hash, Hasher};
+                            let mut hsh = std::collections::hash_map::DefaultHasher::new();
+                            key.hash(&mut hsh);
+                            0x55_524C_u64.hash(&mut hsh); // "URL" salt
+                            h.start_col.hash(&mut hsh);
+                            h.end_col.hash(&mut hsh);
+                            hsh.finish()
+                        }
+                        _ => key,
+                    };
                     if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
@@ -2698,6 +2750,8 @@ impl GpuRenderer {
                                     &snapped_cell_x,
                                     self.font_stack.as_ref(),
                                     wt_raster.as_mut(),
+                                    pane_hovered_url,
+                                    hovered_url_accent,
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -2730,6 +2784,8 @@ impl GpuRenderer {
                             &snapped_cell_x,
                             self.font_stack.as_ref(),
                             wt_raster.as_mut(),
+                            pane_hovered_url,
+                            hovered_url_accent,
                         );
                     }
                     // Capture this row's contributions and insert into
@@ -3236,6 +3292,45 @@ impl GpuRenderer {
             );
         }
 
+        // Cmd-hover URL underline (#660). The hovered URL's glyphs are
+        // recolored to the theme accent in the glyph loop; draw a matching
+        // accent underline here as a per-frame overlay (not cached — hover
+        // state isn't part of the row cache key for underlines). Uses the
+        // active pane's origin + snapped cell edges so it lines up with the
+        // recolored text. `hovered_url_cells` is already gated to the active
+        // pane and to Cmd-held hover.
+        if let Some(h) = hovered_url_cells {
+            if h.end_col > h.start_col {
+                let hov_accent = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
+                let active_grid_cols = pane_views[active_view_idx].grid.cols;
+                let hcache = build_snapped_cell_x(active_origin_x, self.cell_w, active_grid_cols);
+                let last_col = active_grid_cols.saturating_sub(1);
+                let col_a = h.start_col.min(last_col) as usize;
+                let col_b = h.end_col.min(active_grid_cols) as usize; // exclusive edge
+                let hx = hcache
+                    .get(col_a)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(h.start_col) * self.cell_w);
+                let hw = hcache
+                    .get(col_b.min(hcache.len().saturating_sub(1)))
+                    .map(|r| r - hx)
+                    .unwrap_or_else(|| f32::from(h.end_col - h.start_col) * self.cell_w);
+                let hy = active_origin_y + f32::from(h.row) * self.cell_h;
+                push_underline_quads(
+                    &mut quads,
+                    UnderlineStyle::Single,
+                    hx,
+                    hy,
+                    hw,
+                    self.cell_h,
+                    underline_thickness,
+                    sw,
+                    sh,
+                    hov_accent,
+                );
+            }
+        }
+
         // -------- Missing-glyph tofu fallback ------------------------------
         // For cells whose rasterizer returned no tile (and char isn't
         // whitespace), draw a thin outlined rectangle so the gap is
@@ -3538,8 +3633,15 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
-        let read_only_badge =
-            read_only_mode.then(|| read_only_badge_rect(sw, sh, self.scale_factor));
+        let read_only_badge = read_only_mode.then(|| {
+            // Content width = icon + gap + "READONLY", in the badge's own
+            // (DPI-scaled) font, so the badge hugs its text.
+            let badge_font = self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
+            let content_w = estimate_badge_text_width(READ_ONLY_BADGE_ICON, badge_font)
+                + self.chrome_px(SEARCH_BAR_ICON_GAP)
+                + estimate_badge_text_width(READ_ONLY_BADGE_LABEL, badge_font);
+            read_only_badge_rect(sw, sh, self.scale_factor, content_w)
+        });
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         let search_label = search.map(search_bar_label);
         let search_bar_layout = search_label.as_ref().map(|label| {
@@ -3984,76 +4086,12 @@ impl GpuRenderer {
             }
         }
 
-        // -------- IME preedit overlay --------------------------------------
-        let ime_layout = ime.and_then(|i| {
-            // #489: anchor IME preedit at the snapped cursor cell edge
-            // so the preedit underline lines up with the cursor cell.
-            let cursor_x = active_snapped_cell_x
-                .get(grid.cursor.col as usize)
-                .copied()
-                .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
-            let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
-            ImePreeditLayout::compute(
-                i,
-                cursor_x,
-                cursor_y,
-                self.cell_w,
-                self.cell_h,
-                sw,
-                sh,
-                self.scale_factor,
-            )
-        });
-        if let (Some(state), Some(layout)) = (ime, &ime_layout) {
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: premultiply([0.10, 0.11, 0.14, 0.95]),
-                ..Default::default()
-            });
-            // Clip the preedit underline to the active pane (PR #270
-            // follow-up) — the underline anchors under the cursor cell
-            // and would otherwise paint into a neighbour split pane when
-            // the cursor sits near the pane's right edge.
-            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                (layout.underline.x, layout.underline.y, layout.underline.w, layout.underline.h),
-                active_pane_x,
-                active_pane_y,
-                active_pane_w,
-                active_pane_h,
-            ) {
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                    color: self.hyperlink_underline,
-                    ..Default::default()
-                });
-            }
-            // T14: IME preedit → chrome_text.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    state.preedit(),
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.bg.x + 4.0,
-                    layout.bg.y + 2.0 + self.font_size * 0.8,
-                    [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-            }
-        }
+        // IME preedit is intentionally NOT self-drawn. macOS renders the
+        // in-flight composition inline at the reported text-cursor area, and
+        // the candidate window attaches there too. We just report the cursor
+        // area accurately (see window_event.rs `set_ime_cursor_area`, which
+        // anchors to the search box when search is active). Drawing our own
+        // popover fought the OS one and mis-placed it. (#B9 → removed)
 
         // Drag-chip overlay: translucent ~120×24 quad that follows the
         // cursor while a tab is held. Drawn AFTER ime/search so it
@@ -4478,10 +4516,33 @@ impl GpuRenderer {
         // still paints quads (bg, cursor, underlines) so the frame is
         // visually coherent.
         mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
+        // Cmd-hovered URL cell range for this pane (viewport coords),
+        // already gated to the active pane by the caller. When a cell's
+        // (row, col) falls inside this span the glyph's foreground is
+        // overridden with `hovered_url_accent`. `None` = no recolor.
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        // Theme accent in linear-sRGB `[f32;4]` (alpha 1.0) used for the
+        // recolor above. Same color space the per-glyph `color` field
+        // already carries, so it is assigned with no conversion.
+        hovered_url_accent: [f32; 4],
     ) {
         if cells.is_empty() {
             return;
         }
+
+        // Resolve a monochrome glyph's foreground to linear-sRGB rgba,
+        // swapping in the theme accent when this cell sits inside the
+        // Cmd-hovered URL span. `row` is fixed for the whole run; only
+        // `col` varies per glyph. Used by every non-color emit path
+        // below so the recolor is applied uniformly (ASCII fast path,
+        // char-fallback, and the main shaped path). Color glyphs
+        // (`info.is_color`) bypass this and keep their own tile color.
+        let resolve_fg = |col: u16, base: ChromeColor| -> [f32; 4] {
+            match hovered_url_cells {
+                Some(h) if h.contains(row, col) => hovered_url_accent,
+                _ => chrome_color_to_linear_rgba(base),
+            }
+        };
 
         // ASCII fast path: every cell is printable-ASCII (0x20..=0x7E)
         // with no cluster extras and no ligature trigger, so the shaper
@@ -4535,7 +4596,7 @@ impl GpuRenderer {
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba = chrome_color_to_linear_rgba(color);
+                let rgba = resolve_fg(*col, color);
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -4810,11 +4871,12 @@ impl GpuRenderer {
                 // block_sprite emits BGRA tiles. The atlas reports
                 // `is_color = true`, so the shader uses the tile
                 // unmodulated; set `color` to white as a safety net
-                // mirroring the color-emoji path.
+                // mirroring the color-emoji path. Monochrome block
+                // glyphs honour the Cmd-hover URL recolor like text.
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    chrome_color_to_linear_rgba(color)
+                    resolve_fg(g.lead_col, color)
                 };
                 tracing::debug!(
                     target: "sonic::render::glyph",
@@ -4899,7 +4961,7 @@ impl GpuRenderer {
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    chrome_color_to_linear_rgba(color)
+                    resolve_fg(g.lead_col, color)
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
@@ -4963,7 +5025,7 @@ impl GpuRenderer {
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
-                chrome_color_to_linear_rgba(color)
+                resolve_fg(g.lead_col, color)
             };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);

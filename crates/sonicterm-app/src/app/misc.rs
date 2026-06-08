@@ -18,7 +18,7 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -99,6 +99,39 @@ impl App {
         sel
     }
 
+    /// Word-mode drag (double-click then drag): union of the word at the
+    /// `anchor` cell and the word at the `(row, col)` cursor cell, from the
+    /// focused pane's grid. Returns `None` when there is no active pane or
+    /// the parser is busy — the caller then SKIPS this move rather than
+    /// collapsing the selection (a cell-extend would shrink the word/line
+    /// region). Same `try_lock`-then-drop discipline as
+    /// [`Self::word_selection_at`] (CLAUDE.md §4): the grid lock is held
+    /// only to build the owned (Copy) `Selection`, never across redraw.
+    pub(super) fn word_drag_selection_at(
+        &self,
+        anchor: (u16, u16),
+        row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let sel = Selection::word_drag(guard.grid(), anchor, (row, col));
+        drop(guard);
+        Some(sel)
+    }
+
+    /// Line-mode drag (triple-click then drag): whole rows from the anchor
+    /// row to the cursor `row` inclusive, from the focused pane's grid.
+    /// Returns `None` when there is no active pane or the parser is busy —
+    /// the caller SKIPS this move (see [`Self::word_drag_selection_at`]).
+    pub(super) fn line_drag_selection_at(&self, anchor_row: u16, row: u16) -> Option<Selection> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, row);
+        drop(guard);
+        Some(sel)
+    }
+
     /// OSC 8-only lookup: returns the cell's interned hyperlink URI,
     /// ignoring auto-detected plain-text URLs. Used by the hover
     /// pointer-cursor logic so OSC 8 keeps its existing unconditional
@@ -176,6 +209,20 @@ impl App {
             return None;
         }
         let cursor_pos = self.main()?.cursor_pos;
+        // Gate to the ACTIVE pane: `pixel_to_cell` hit-tests against the
+        // window, but `focused_pane_row_text` (below) reads the active pane's
+        // grid. In a split, Cmd-hovering an INACTIVE pane at a row/col that
+        // happens to match a URL in the active pane would otherwise highlight
+        // the active pane's URL. Only proceed when the cursor is over the
+        // active pane itself. (#660 review)
+        let active_id = self
+            .main()
+            .and_then(|ws| ws.tab_states.get(ws.tabs.active_index()))
+            .map(|st| st.active_pane);
+        let hit = self.pane_at_cursor(cursor_pos.0 as f32, cursor_pos.1 as f32);
+        if hit != active_id {
+            return None;
+        }
         let r = self.main_renderer()?;
         let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
         // OSC 8 has its own affordance — don't double up.
@@ -488,6 +535,8 @@ impl App {
             last_click_time: None,
             last_click_cell: (0, 0),
             click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),

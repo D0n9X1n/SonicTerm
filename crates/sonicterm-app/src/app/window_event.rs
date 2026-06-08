@@ -16,7 +16,7 @@ use sonicterm_ui::overlays::{
     search_bar_label, SearchBarLayout, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
     SEARCH_BAR_PAD_RIGHT,
 };
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
@@ -374,6 +374,7 @@ impl App {
                     ws_ime_ref,
                     ws_ime_throttle_ref,
                     ws_viewport_tops,
+                    ws_hovered_url_cells,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonicterm_ui::tabs::TabBar>,
@@ -386,6 +387,7 @@ impl App {
                     Option<&sonicterm_ui::ime::ImeState>,
                     Option<&mut sonicterm_ui::ime::ImeCursorThrottle>,
                     std::collections::HashMap<u64, Option<u64>>,
+                    Option<sonicterm_render_model::inputs::HoveredUrlCells>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -404,6 +406,13 @@ impl App {
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
+                        // Map the per-window Cmd-hovered URL (set only
+                        // while the open-URL modifier is held; cleared on
+                        // release / pointer drift) into the Copy
+                        // `HoveredUrlCells` the renderer recolors with the
+                        // theme accent. Immutable read, disjoint from the
+                        // mut borrows of ws.{renderer,tabs,...}.
+                        let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
                         let viewport_tops = ws
                             .panes
                             .iter()
@@ -421,6 +430,7 @@ impl App {
                             Some(&ws.ime),
                             Some(&mut ws.ime_cursor_throttle),
                             viewport_tops,
+                            hovered_url_cells,
                         )
                     }
                     None => (
@@ -435,6 +445,7 @@ impl App {
                         None,
                         None,
                         std::collections::HashMap::new(),
+                        None,
                     ),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
@@ -528,6 +539,7 @@ impl App {
                                 .then_some(&mut self.command_palette),
                             ws_ime_ref,
                             pane.viewport_top_abs,
+                            ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
                         }
@@ -564,9 +576,8 @@ impl App {
                             // scaled by the renderer's scale factor or the IME
                             // caret rect drifts on HiDPI displays.
                             let scale = r.scale_factor();
-                            let font_size = sonicterm_ui::tab_spans::tab_title_font_size(
-                                r.font_size(),
-                            ) * scale;
+                            let font_size =
+                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size()) * scale;
                             let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
                                 + SEARCH_BAR_ICON_GAP * scale
@@ -964,21 +975,65 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
+                            // WezTerm-style drag granularity (#651 follow-up).
+                            // The press recorded `select_mode` + `select_anchor`;
+                            // extend by Cell / Word / Line accordingly.
+                            //
+                            // Word/Line need the live grid, so compute the
+                            // replacement Selection up front while we still
+                            // hold only &self (via try_lock inside the helper,
+                            // which drops the grid lock before we redraw —
+                            // CLAUDE.md §4). `r`'s last use was pixel_to_cell,
+                            // so the &self / &mut self borrows below are fine.
+                            let (mode, anchor) = self
+                                .main()
+                                .map(|ws| (ws.select_mode, ws.select_anchor))
+                                .unwrap_or((SelectMode::Cell, (0, 0)));
+                            // Some(Some(_)) = recomputed region; Some(None) =
+                            // parser was busy → SKIP this move (a cell-extend
+                            // would shrink the word/line region); None = Cell
+                            // mode (handled by the extend branch below).
+                            let replacement = match mode {
+                                SelectMode::Word => {
+                                    Some(self.word_drag_selection_at(anchor, row, col))
+                                }
+                                SelectMode::Line => {
+                                    Some(self.line_drag_selection_at(anchor.0, row))
+                                }
+                                SelectMode::Cell => None,
+                            };
                             // PR-B3c (#365): selection lives on WindowState.
                             // Split-borrow `ws.selection` and `ws.panes`
                             // disjointly.
                             if let Some(ws) = self.main_mut() {
                                 if let Some(sel) = ws.selection.as_mut() {
-                                    // Don't let a stray CursorMoved collapse a
-                                    // double/triple-click (word/line) selection
-                                    // down to the cursor cell. Anchored
-                                    // selections are deliberate regions; only
-                                    // a plain point-drag extends. (#651)
-                                    if !sel.anchored {
-                                        sel.extend(row, col);
-                                        mark_all_panes_dirty(&ws.panes);
-                                        if let Some(w) = ws.window.as_ref() {
-                                            w.request_redraw();
+                                    match ws.select_mode {
+                                        SelectMode::Cell => {
+                                            // Don't let a stray CursorMoved
+                                            // collapse a double/triple-click
+                                            // (word/line) selection down to the
+                                            // cursor cell. Only a plain
+                                            // point-drag extends. (#651)
+                                            if !sel.anchored {
+                                                sel.extend(row, col);
+                                                mark_all_panes_dirty(&ws.panes);
+                                                if let Some(w) = ws.window.as_ref() {
+                                                    w.request_redraw();
+                                                }
+                                            }
+                                        }
+                                        SelectMode::Word | SelectMode::Line => {
+                                            // Replace with the recomputed union
+                                            // / row-span; on Some(None) (busy
+                                            // parser) skip — never shrink below
+                                            // the anchor word/line.
+                                            if let Some(Some(new_sel)) = replacement {
+                                                *sel = new_sel;
+                                                mark_all_panes_dirty(&ws.panes);
+                                                if let Some(w) = ws.window.as_ref() {
+                                                    w.request_redraw();
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1040,9 +1095,7 @@ impl App {
                         // Snapshot the flags + the cell under the cursor under
                         // the lock, then DROP it before any PTY write
                         // (CLAUDE.md §4).
-                        let cell = self
-                            .main_renderer()
-                            .and_then(|r| r.pixel_to_cell(lx, ly));
+                        let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
                         let (is_alt, tracking_on, sgr, app_cursor) = self
                             .main()
                             .and_then(|ws| ws.panes.get(&pane_id))
@@ -1059,14 +1112,11 @@ impl App {
                             // App wants mouse events: emit one wheel report per
                             // line of motion at the cell under the cursor.
                             let up = delta_lines < 0;
-                            let (col1, row1) = cell
-                                .map(|(r, c)| (c as u32 + 1, r as u32 + 1))
-                                .unwrap_or((1, 1));
+                            let (col1, row1) =
+                                cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
                             let count = delta_lines.unsigned_abs() as usize;
                             let payload = wheel_report_bytes(sgr, up, col1, row1, count);
-                            if let Some(pane) =
-                                self.main().and_then(|ws| ws.panes.get(&pane_id))
-                            {
+                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
                                     let _ = pty.in_tx.send(payload);
                                 }
@@ -1089,9 +1139,7 @@ impl App {
                             for _ in 0..count {
                                 payload.extend_from_slice(seq);
                             }
-                            if let Some(pane) =
-                                self.main().and_then(|ws| ws.panes.get(&pane_id))
-                            {
+                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
                                     let _ = pty.in_tx.send(payload);
                                 }
@@ -1346,6 +1394,19 @@ impl App {
                                 3 => self.line_selection_at(row),
                                 _ => Selection::new(row, col),
                             };
+                            // Record the WezTerm-style drag granularity +
+                            // anchor cell so a subsequent CursorMoved (button
+                            // held) extends by word / line / cell. The anchor
+                            // is the press cell; word/line drags recompute the
+                            // anchor word/line from it on each move.
+                            if let Some(ws) = self.main_mut() {
+                                ws.select_mode = match click_count {
+                                    2 => SelectMode::Word,
+                                    3 => SelectMode::Line,
+                                    _ => SelectMode::Cell,
+                                };
+                                ws.select_anchor = (row, col);
+                            }
                             self.selection_set(Some(sel));
                             if let Some(panes) = self.main_panes() {
                                 mark_all_panes_dirty(panes);
@@ -1888,10 +1949,7 @@ mod wheel_report_tests {
     #[test]
     fn legacy_x10_encodes_button_and_coords_plus_32() {
         // up=button 64 → 64+32=96 ('`'); col 5 → 37 ('%'); row 3 → 35 ('#').
-        assert_eq!(
-            wheel_report_bytes(false, true, 5, 3, 1),
-            vec![0x1b, b'[', b'M', 96, 37, 35]
-        );
+        assert_eq!(wheel_report_bytes(false, true, 5, 3, 1), vec![0x1b, b'[', b'M', 96, 37, 35]);
     }
 
     #[test]

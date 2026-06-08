@@ -18,7 +18,7 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -270,6 +270,10 @@ impl App {
                             palette_for_render,
                             None, // ime preedit: not exposed in child window yet
                             pane.viewport_top_abs,
+                            // Cmd-hover URL recolor is computed against the
+                            // main window's focused pane only; child windows
+                            // never carry a hovered_url, so no recolor here.
+                            None,
                         ) {
                             tracing::warn!("child render error: {e}");
                         }
@@ -402,13 +406,43 @@ impl App {
                 if child.mouse_down {
                     if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
                     {
+                        // WezTerm-style drag granularity (#651). The press set
+                        // `select_mode` + `select_anchor`; extend by Cell /
+                        // Word / Line. Word/Line recompute the region from the
+                        // live grid via try_lock (lock dropped before redraw —
+                        // CLAUDE.md §4). `r`'s last use was pixel_to_cell, so
+                        // the &child borrows below are fine.
+                        let replacement = match child.select_mode {
+                            SelectMode::Word => {
+                                Some(child.word_drag_selection(child.select_anchor, row, col))
+                            }
+                            SelectMode::Line => {
+                                Some(child.line_drag_selection(child.select_anchor.0, row))
+                            }
+                            SelectMode::Cell => None,
+                        };
                         if let Some(sel) = child.selection.as_mut() {
-                            // Mirror the main window: don't collapse an anchored
-                            // (word/line) selection on cursor move. (#651)
-                            if !sel.anchored {
-                                sel.extend(row, col);
-                                mark_all_panes_dirty(&child.panes);
-                                child.request_redraw();
+                            match child.select_mode {
+                                SelectMode::Cell => {
+                                    // Mirror the main window: don't collapse an
+                                    // anchored (word/line) selection on a plain
+                                    // cell move. (#651)
+                                    if !sel.anchored {
+                                        sel.extend(row, col);
+                                        mark_all_panes_dirty(&child.panes);
+                                        child.request_redraw();
+                                    }
+                                }
+                                SelectMode::Word | SelectMode::Line => {
+                                    // Replace with the recomputed region; skip
+                                    // on a busy parser (Some(None)) — never
+                                    // shrink below the anchor word/line.
+                                    if let Some(Some(new_sel)) = replacement {
+                                        *sel = new_sel;
+                                        mark_all_panes_dirty(&child.panes);
+                                        child.request_redraw();
+                                    }
+                                }
                             }
                         }
                     }
@@ -470,6 +504,15 @@ impl App {
                         // above, so the &mut child borrows below are fine.)
                         let count = child.register_click(row, col);
                         let sel = child.multi_click_selection(count, row, col);
+                        // Record WezTerm-style drag granularity + anchor cell
+                        // (mirrors the main-window path) so a held-button
+                        // CursorMoved extends by cell / word / line. (#651)
+                        child.select_mode = match count {
+                            2 => SelectMode::Word,
+                            3 => SelectMode::Line,
+                            _ => SelectMode::Cell,
+                        };
+                        child.select_anchor = (row, col);
                         child.selection = Some(sel);
                         mark_all_panes_dirty(&child.panes);
                     }

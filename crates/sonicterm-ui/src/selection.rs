@@ -6,6 +6,23 @@
 
 use sonicterm_grid::grid::{CellFlags, Grid};
 
+/// The granularity a drag extends at, set on press by the click count.
+///
+/// WezTerm calls this the `SelectionMode`. After a double-click (word) or
+/// triple-click (line), dragging extends the selection BY WHOLE WORDS /
+/// WHOLE LINES around the original anchor cell, rather than cell-by-cell.
+/// A single click is `Cell` and keeps the exact-cell extend behavior.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SelectMode {
+    /// Single-click: drag extends to the exact cell under the cursor.
+    #[default]
+    Cell,
+    /// Double-click: drag extends by whole words, keeping the anchor word.
+    Word,
+    /// Triple-click: drag extends by whole rows, keeping the anchor row.
+    Line,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub start: (u16, u16), // (row, col)
@@ -104,6 +121,48 @@ impl Selection {
         Selection { start: (row, 0), end: (row, last_col), anchored: true }
     }
 
+    /// Word-mode drag (WezTerm `SelectionMode::Word`): the selection spans
+    /// the union of the word at the `anchor` cell and the word at the
+    /// `cursor` cell. Concretely, `word_at(anchor)` and `word_at(cursor)`
+    /// are each resolved against the grid, then merged so the result's
+    /// `start` is the earlier (row, col) corner and `end` the later one.
+    ///
+    /// Because the anchor word is always one of the two unioned spans, the
+    /// selection NEVER shrinks below the originally double-clicked word —
+    /// even when the cursor drags back onto the anchor (then the union is
+    /// just the anchor word) or onto a word that is fully contained in it.
+    /// Single-cell words and cross-row drags fall out of the (row, col)
+    /// min/max naturally. Always `anchored = true`.
+    pub fn word_drag(grid: &Grid, anchor: (u16, u16), cursor: (u16, u16)) -> Selection {
+        let a = Selection::word_at(grid, anchor.0, anchor.1);
+        let c = Selection::word_at(grid, cursor.0, cursor.1);
+        // Each of a/c is already a single-row span with start <= end, but
+        // the two may be on different rows or ordered either way, so merge
+        // by (row, col) corner: the min of the two starts and the max of
+        // the two ends.
+        let start = a.start.min(c.start);
+        let end = a.end.max(c.end);
+        Selection { start, end, anchored: true }
+    }
+
+    /// Line-mode drag (WezTerm `SelectionMode::Line`): the selection spans
+    /// whole rows from `anchor_row` to `cursor_row` inclusive, in either
+    /// drag direction. `start` is column 0 of the top row; `end` is the
+    /// last column of the bottom row (so `as_text` yields full lines).
+    /// The anchor row is always inside `min..=max`, so the selection never
+    /// shrinks below the originally triple-clicked line. Always
+    /// `anchored = true`.
+    pub fn line_drag(grid: &Grid, anchor_row: u16, cursor_row: u16) -> Selection {
+        let top = anchor_row.min(cursor_row);
+        let bottom = anchor_row.max(cursor_row);
+        let last_col = if bottom < grid.rows {
+            grid.row(bottom).len().saturating_sub(1) as u16
+        } else {
+            grid.cols.saturating_sub(1)
+        };
+        Selection { start: (top, 0), end: (bottom, last_col), anchored: true }
+    }
+
     /// Serialize the covered cells from `grid`.
     pub fn as_text(&self, grid: &Grid) -> String {
         let (a, b) = self.normalized();
@@ -194,6 +253,22 @@ mod tests {
         grid
     }
 
+    /// Build a multi-row grid from `lines`, writing each line left-aligned
+    /// from column 0 of its row. Grid width is the widest line (min 1).
+    /// Used by the `word_drag` / `line_drag` cross-row tests.
+    fn grid_rows(lines: &[&str]) -> Grid {
+        let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1) as u16;
+        let rows = lines.len().max(1) as u16;
+        let mut grid = Grid::new(cols, rows);
+        for (r, line) in lines.iter().enumerate() {
+            grid.goto(r as u16, 0);
+            for ch in line.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+        }
+        grid
+    }
+
     // ---- word_bounds (pure helper) ----
 
     #[test]
@@ -274,6 +349,95 @@ mod tests {
         assert_eq!(sel.start, (0, 0));
         assert_eq!(sel.end, (0, 14)); // last col = len - 1
         assert_eq!(sel.as_text(&grid), "foo bar.baz qux");
+    }
+
+    // ---- word_drag / line_drag (WezTerm SelectionMode drag) ----
+
+    #[test]
+    fn word_drag_same_row_forward_includes_both_words() {
+        // "foo bar.baz qux" — anchor in "foo" (col 1), drag onto "qux"
+        // (col 13). The union spans the whole "foo" word through the whole
+        // "qux" word: cols 0..=14.
+        let grid = grid_with("foo bar.baz qux");
+        let sel = Selection::word_drag(&grid, (0, 1), (0, 13));
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (0, 14));
+        assert!(sel.anchored);
+        assert_eq!(sel.as_text(&grid), "foo bar.baz qux");
+    }
+
+    #[test]
+    fn word_drag_same_row_backward_includes_both_words() {
+        // Anchor in "qux" (col 13), drag BACK onto "foo" (col 1). The union
+        // is identical to the forward case — order-independent.
+        let grid = grid_with("foo bar.baz qux");
+        let sel = Selection::word_drag(&grid, (0, 13), (0, 1));
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (0, 14));
+        assert!(sel.anchored);
+    }
+
+    #[test]
+    fn word_drag_cursor_inside_anchor_word_equals_word_at_anchor() {
+        // Anchor on "bar.baz" (col 4), cursor still inside that same word
+        // (col 9). The union must collapse to exactly word_at(anchor) — the
+        // selection never shrinks below, but also never grows past, the
+        // anchor word when the cursor never leaves it.
+        let grid = grid_with("foo bar.baz qux");
+        let anchor = Selection::word_at(&grid, 0, 4);
+        let sel = Selection::word_drag(&grid, (0, 4), (0, 9));
+        assert_eq!(sel.start, anchor.start);
+        assert_eq!(sel.end, anchor.end);
+        assert_eq!((sel.start, sel.end), ((0, 4), (0, 10)));
+    }
+
+    #[test]
+    fn word_drag_cross_row_unions_by_corner() {
+        // Row 0 "alpha beta", row 1 "gamma delta". Anchor in "beta"
+        // (row 0, col 7), drag down into "gamma" (row 1, col 2). The union
+        // start is the top-left corner (beta's start), the end is the
+        // bottom-right corner (gamma's end).
+        let grid = grid_rows(&["alpha beta", "gamma delta"]);
+        let sel = Selection::word_drag(&grid, (0, 7), (1, 2));
+        assert_eq!(sel.start, (0, 6)); // "beta" starts at col 6
+        assert_eq!(sel.end, (1, 4)); // "gamma" ends at col 4
+        assert!(sel.anchored);
+        // Backward drag (anchor below, cursor above) yields the same union.
+        let rev = Selection::word_drag(&grid, (1, 2), (0, 7));
+        assert_eq!((rev.start, rev.end), (sel.start, sel.end));
+    }
+
+    #[test]
+    fn line_drag_forward_spans_full_rows() {
+        let grid = grid_rows(&["first line", "second line", "third line"]);
+        // Anchor row 0, drag down to row 2. Spans row 0 col 0 through the
+        // last col of row 2.
+        let sel = Selection::line_drag(&grid, 0, 2);
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (2, grid.row(2).len() as u16 - 1));
+        assert!(sel.anchored);
+        assert_eq!(sel.as_text(&grid), "first line\nsecond line\nthird line");
+    }
+
+    #[test]
+    fn line_drag_backward_spans_full_rows() {
+        let grid = grid_rows(&["first line", "second line", "third line"]);
+        // Anchor row 2, drag UP to row 0 — same inclusive row span as the
+        // forward case; end is still the last col of the bottom row (2).
+        let sel = Selection::line_drag(&grid, 2, 0);
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (2, grid.row(2).len() as u16 - 1));
+        assert!(sel.anchored);
+    }
+
+    #[test]
+    fn line_drag_single_row_is_full_line() {
+        // Anchor == cursor row: collapses to a single full row, identical
+        // to line_at — the selection never drops below the anchor line.
+        let grid = grid_rows(&["only row here"]);
+        let sel = Selection::line_drag(&grid, 0, 0);
+        let line = Selection::line_at(&grid, 0);
+        assert_eq!((sel.start, sel.end), (line.start, line.end));
     }
 
     // ---- anchored vs point-anchor emptiness (single-cell edge case) ----
