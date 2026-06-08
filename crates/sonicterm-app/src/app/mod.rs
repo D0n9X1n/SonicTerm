@@ -1559,7 +1559,11 @@ impl App {
                 }
             }
         }
-        (None, encode_logical(key, mods))
+        let kitty_flags = self
+            .active_pane()
+            .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+            .unwrap_or(0);
+        (None, encode_logical(key, mods, kitty_flags))
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {

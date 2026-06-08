@@ -11,17 +11,41 @@ use winit::{
 
 pub(super) fn _scroll_used(_a: ScrollAction) {}
 
-pub(super) fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
-    encode_logical(&event.logical_key, mods)
+pub(super) fn encode_key(
+    event: &KeyEvent,
+    mods: ModifiersState,
+    kitty_flags: u8,
+) -> Option<Vec<u8>> {
+    encode_logical(&event.logical_key, mods, kitty_flags)
 }
 
+/// Encode a logical key + modifiers into the bytes to send to the PTY.
+///
+/// `kitty_flags` is the active kitty keyboard protocol flag set reported by
+/// the focused pane's parser (see [`sonicterm_vt`]). `0` means no kitty
+/// progressive enhancement is active, so we emit legacy encodings. When a
+/// modern TUI (Copilot CLI, claude, etc.) has pushed a non-zero flag set, we
+/// encode the keys that matter for multi-line input in CSI-u form — at minimum
+/// Shift+Enter as `CSI 13 ; 2 u` so the app inserts a newline instead of
+/// submitting. Everything else falls through to the legacy encoding.
 #[doc(hidden)]
-#[doc(hidden)]
-pub fn encode_logical(key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
+pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
         Key::Named(n) => Some(match n {
-            NamedKey::Enter if mods.shift_key() => b"\x1b\r".to_vec(),
+            // Shift+Enter: under the kitty keyboard protocol, encode the
+            // disambiguated CSI-u form (codepoint 13 = Return, modifier 2 =
+            // 1 + Shift bit). Copilot CLI / claude treat this as "insert
+            // newline" rather than "submit". With no kitty flags active we
+            // fall back to the WezTerm-default ESC+CR, which most apps map to
+            // the same intent and is harmless for those that don't.
+            NamedKey::Enter if mods.shift_key() => {
+                if kitty_flags != 0 {
+                    b"\x1b[13;2u".to_vec()
+                } else {
+                    b"\x1b\r".to_vec()
+                }
+            }
             NamedKey::Enter => b"\r".to_vec(),
             NamedKey::Backspace => b"\x7f".to_vec(),
             NamedKey::Tab => b"\t".to_vec(),
@@ -170,16 +194,37 @@ mod tests {
     #[test]
     fn enter_encodes_carriage_return() {
         assert_eq!(
-            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 0),
             Some(b"\r".to_vec())
         );
     }
 
     #[test]
     fn shift_enter_encodes_escape_carriage_return() {
+        // Legacy (no kitty flags): Shift+Enter falls back to ESC+CR.
         assert_eq!(
-            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 0),
             Some(b"\x1b\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn shift_enter_kitty_encodes_csi_u() {
+        // With kitty keyboard flags active, Shift+Enter is the disambiguated
+        // CSI-u form so Copilot CLI / claude insert a newline.
+        assert_eq!(
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 1),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    #[test]
+    fn plain_enter_stays_carriage_return_under_kitty() {
+        // Plain Enter must remain CR even when kitty flags are active, so we
+        // don't regress "submit" in apps that accept bare CR.
+        assert_eq!(
+            encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 1),
+            Some(b"\r".to_vec())
         );
     }
 }

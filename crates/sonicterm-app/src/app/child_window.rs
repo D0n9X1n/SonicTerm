@@ -640,7 +640,15 @@ impl App {
                     Some(st) => st.active_pane,
                     None => return,
                 };
-                if let Some(bytes) = encode_key(&event, mods) {
+                // Read the active child pane's kitty keyboard flags under the
+                // parser lock, then drop it before the PTY write (CLAUDE.md
+                // §4). Non-zero flags drive CSI-u key encoding (Shift+Enter).
+                let kitty_flags = child
+                    .panes
+                    .get(&active_id)
+                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .unwrap_or(0);
+                if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
                     if let Some(pane) = child.panes.get(&active_id) {
                         if let Some(pty) = pane.pty.as_ref() {
                             let _ = pty.in_tx.send(bytes);

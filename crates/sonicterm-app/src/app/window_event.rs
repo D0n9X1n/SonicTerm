@@ -1525,7 +1525,16 @@ impl App {
                         }
                     }
                 }
-                if let Some(bytes) = encode_key(&event, self.main_modifiers()) {
+                // Read the focused pane's kitty keyboard flags under the
+                // parser lock, then DROP the lock before any PTY write
+                // (CLAUDE.md §4). When non-zero, `encode_key` emits CSI-u
+                // forms (e.g. Shift+Enter => CSI 13;2u) so modern TUIs treat
+                // Shift+Enter as "insert newline" instead of "submit".
+                let kitty_flags = self
+                    .active_pane()
+                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .unwrap_or(0);
+                if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
                     self.write_to_pty(bytes);
                     if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
                         self.selection_set(None);

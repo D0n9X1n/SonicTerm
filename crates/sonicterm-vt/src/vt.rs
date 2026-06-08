@@ -370,6 +370,15 @@ impl Parser {
         self.performer.mouse_tracking
     }
 
+    /// Active kitty keyboard protocol flags (the top of the progressive
+    /// enhancement push/pop stack). `0` means no flags / legacy encoding.
+    /// The host reads this to decide whether to emit CSI-u key encodings —
+    /// e.g. Shift+Enter as `CSI 13 ; 2 u` when a TUI like Copilot CLI has
+    /// pushed the disambiguate flag.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.performer.kitty_keyboard_flags()
+    }
+
     /// Latest OSC 0/2 window title (sticky), or `None` if no title has been
     /// set. Used by the tab bar to label tabs with the shell's reported title.
     pub fn title(&self) -> Option<&str> {
@@ -448,7 +457,16 @@ struct Performer {
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
+    /// Kitty keyboard protocol progressive-enhancement flag stack. The active
+    /// flags are the top of stack (`last()`); empty stack == flags 0 == legacy
+    /// encoding. Apps push with `CSI > flags u`, pop with `CSI < number u`,
+    /// set with `CSI = flags ; mode u`, and query with `CSI ? u`.
+    kitty_kbd_flags: Vec<u8>,
 }
+
+/// Maximum depth of the kitty keyboard flag stack. The protocol allows nested
+/// push/pop but a misbehaving app must not be able to grow it without bound.
+const KITTY_KBD_STACK_MAX: usize = 32;
 
 impl Performer {
     fn new(grid: Grid, reply_tx: Option<Sender<Vec<u8>>>) -> Self {
@@ -479,6 +497,7 @@ impl Performer {
             ground: true,
             last_printed_char: None,
             dcs_capture: None,
+            kitty_kbd_flags: Vec::new(),
         }
     }
 
@@ -497,6 +516,12 @@ impl Performer {
         if let Some(tx) = &self.reply_tx {
             let _ = tx.send(bytes.to_vec());
         }
+    }
+
+    /// Active kitty keyboard protocol flags (top of the push/pop stack).
+    /// Empty stack reports 0, meaning legacy (non-kitty) key encoding.
+    fn kitty_keyboard_flags(&self) -> u8 {
+        *self.kitty_kbd_flags.last().unwrap_or(&0)
     }
 
     fn reset_last_printed_char(&mut self) {
@@ -540,6 +565,7 @@ impl Performer {
         self.scroll_bottom = None;
         self.last_printed_char = None;
         self.dcs_capture = None;
+        self.kitty_kbd_flags.clear();
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
         }
@@ -884,6 +910,12 @@ impl Perform for Performer {
                     self.handle_dec_private_mode(params, false);
                     return;
                 }
+                'u' => {
+                    // Kitty keyboard protocol query: report the active flags.
+                    let flags = self.kitty_keyboard_flags();
+                    self.reply(format!("\x1b[?{flags}u").as_bytes());
+                    return;
+                }
                 _ => return,
             }
         }
@@ -904,7 +936,50 @@ impl Perform for Performer {
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
+                'u' => {
+                    // Kitty keyboard protocol push: `CSI > flags u`. Push the
+                    // requested flag set onto the stack. Cap the depth so a
+                    // misbehaving app can't grow it without bound.
+                    if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
+                        self.kitty_kbd_flags.push(p0() as u8);
+                    }
+                }
                 _ => {}
+            }
+            return;
+        }
+        // CSI with `<` intermediate — kitty keyboard protocol pop.
+        // `CSI < number u` pops up to `number` (default 1) entries off the
+        // flag stack. Other `<`-prefixed sequences are not used by SonicTerm.
+        if inter.first() == Some(&b'<') {
+            if action == 'u' {
+                let n = (p0() as usize).max(1);
+                let new_len = self.kitty_kbd_flags.len().saturating_sub(n);
+                self.kitty_kbd_flags.truncate(new_len);
+            }
+            return;
+        }
+        // CSI with `=` intermediate — kitty keyboard protocol set.
+        // `CSI = flags ; mode u` sets the current (top-of-stack) flags. `mode`
+        // selects all (1)/set-or (2)/reset-and (3); we keep the common cases
+        // and otherwise replace. With an empty stack there is nothing to set,
+        // so push the requested flags as the active set.
+        if inter.first() == Some(&b'=') {
+            if action == 'u' {
+                let flags = p0() as u8;
+                let mode = p1();
+                let current = self.kitty_keyboard_flags();
+                let next = match mode {
+                    2 => current | flags,
+                    3 => current & !flags,
+                    // mode 1 (default) and anything else: replace.
+                    _ => flags,
+                };
+                if let Some(top) = self.kitty_kbd_flags.last_mut() {
+                    *top = next;
+                } else if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
+                    self.kitty_kbd_flags.push(next);
+                }
             }
             return;
         }
@@ -1469,5 +1544,104 @@ mod tests {
 
         assert!(!parser.application_cursor_keys());
         assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn kitty_keyboard_push_sets_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+
+        // CSI > 1 u — push flags = 1 (disambiguate escape codes).
+        parser.advance(b"\x1b[>1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop_restores_previous_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[>5u");
+        assert_eq!(parser.kitty_keyboard_flags(), 5);
+
+        // CSI < u — pop one entry (default count 1).
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+
+        // Pop the last entry back to legacy (0).
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+
+        // Popping an empty stack is a no-op, not a panic.
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop_count_pops_multiple() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[>2u");
+        parser.advance(b"\x1b[>4u");
+        assert_eq!(parser.kitty_keyboard_flags(), 4);
+
+        // CSI < 2 u — pop two entries.
+        parser.advance(b"\x1b[<2u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_set_replaces_top() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        // CSI = flags u with an empty stack pushes the active set.
+        parser.advance(b"\x1b[=3u");
+        assert_eq!(parser.kitty_keyboard_flags(), 3);
+
+        // CSI = 5 ; 1 u — mode 1 (default) replaces the top.
+        parser.advance(b"\x1b[=5;1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 5);
+
+        // CSI = 2 ; 2 u — mode 2 ORs in the new bits.
+        parser.advance(b"\x1b[=2;2u");
+        assert_eq!(parser.kitty_keyboard_flags(), 7);
+
+        // CSI = 1 ; 3 u — mode 3 clears the given bits.
+        parser.advance(b"\x1b[=1;3u");
+        assert_eq!(parser.kitty_keyboard_flags(), 6);
+    }
+
+    #[test]
+    fn kitty_keyboard_stack_depth_is_capped() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        // Push far more than the cap; flags must stay valid and the stack must
+        // not grow without bound.
+        for _ in 0..100 {
+            parser.advance(b"\x1b[>1u");
+        }
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_query_reports_current_flags() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+
+        // Query with no flags pushed → reply CSI ? 0 u.
+        parser.advance(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?0u".to_vec());
+
+        // Push flags = 1, then query → reply CSI ? 1 u.
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?1u".to_vec());
+    }
+
+    #[test]
+    fn ris_resets_kitty_keyboard_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+
+        parser.advance(b"\x1bc");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
     }
 }
