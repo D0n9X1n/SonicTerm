@@ -260,6 +260,10 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
     }
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
+    // Match the GUI PTY env (sonicterm-io/pty.rs) so programs see the same
+    // terminal identity over the mux daemon path.
+    builder.env("TERM_PROGRAM", "SonicTerm");
+    builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
     let child = pair.slave.spawn_command(builder)?;
     drop(pair.slave);
