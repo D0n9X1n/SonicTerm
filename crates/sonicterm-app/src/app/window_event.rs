@@ -996,7 +996,54 @@ impl App {
                 };
                 if delta_lines != 0 {
                     if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
-                        self.scroll_pane(pane_id, delta_lines);
+                        // Alt-screen wheel → arrow keys (#T7). Full-screen
+                        // TUIs (less, vim, man) live on the alt screen and
+                        // expect the wheel to drive their own scroll via
+                        // arrow keys when they have NOT enabled mouse
+                        // tracking. Snapshot the three parser flags we need
+                        // under the lock, then DROP it before any PTY write
+                        // (CLAUDE.md §4: never hold a parser/grid lock across
+                        // a PTY write).
+                        let (is_alt, mouse_on, app_cursor) = self
+                            .main()
+                            .and_then(|ws| ws.panes.get(&pane_id))
+                            .map(|pane| {
+                                let parser = pane.parser.lock();
+                                let is_alt = parser.grid().is_alt();
+                                let mouse_on = parser.mouse_tracking_enabled()
+                                    || parser.mouse_sgr_enabled();
+                                let app_cursor = parser.application_cursor_keys();
+                                (is_alt, mouse_on, app_cursor)
+                            })
+                            .unwrap_or((false, false, false));
+                        if is_alt && !mouse_on {
+                            // Build the arrow sequence: ESC O A/B in
+                            // application-cursor-keys mode, else ESC [ A/B.
+                            // Up when scrolling back into history
+                            // (delta_lines < 0), down otherwise. Emit one
+                            // copy per line of motion.
+                            let up = delta_lines < 0;
+                            let seq: &[u8] = match (app_cursor, up) {
+                                (true, true) => b"\x1bOA",
+                                (true, false) => b"\x1bOB",
+                                (false, true) => b"\x1b[A",
+                                (false, false) => b"\x1b[B",
+                            };
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let mut payload = Vec::with_capacity(seq.len() * count);
+                            for _ in 0..count {
+                                payload.extend_from_slice(seq);
+                            }
+                            if let Some(pane) =
+                                self.main().and_then(|ws| ws.panes.get(&pane_id))
+                            {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else {
+                            self.scroll_pane(pane_id, delta_lines);
+                        }
                     }
                 }
             }

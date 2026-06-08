@@ -356,6 +356,20 @@ impl Parser {
         self.performer.mouse_sgr
     }
 
+    /// Whether DECCKM ?1 (application cursor keys) is currently enabled. When
+    /// true, arrow-key sequences — including the synthetic ones SonicTerm
+    /// emits for alt-screen wheel scroll — use the `ESC O A` form.
+    pub fn application_cursor_keys(&self) -> bool {
+        self.performer.app_cursor_keys
+    }
+
+    /// Whether any of DECSET ?1000/?1002/?1003 (mouse tracking) is currently
+    /// enabled. When true, the host should forward wheel events to the PTY as
+    /// mouse reports rather than synthesizing scroll/arrow-key motion.
+    pub fn mouse_tracking_enabled(&self) -> bool {
+        self.performer.mouse_tracking
+    }
+
     /// Latest OSC 0/2 window title (sticky), or `None` if no title has been
     /// set. Used by the tab bar to label tabs with the shell's reported title.
     pub fn title(&self) -> Option<&str> {
@@ -385,6 +399,14 @@ struct Performer {
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
     mouse_sgr: bool,
+    /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the
+    /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
+    /// must use the `ESC O A` form instead of `ESC [ A`.
+    app_cursor_keys: bool,
+    /// DECSET ?1000/?1002/?1003 — X10/button/any-motion mouse tracking. When
+    /// any of these is on the application wants raw mouse reports, so the host
+    /// must forward wheel events to the PTY rather than synthesizing scroll.
+    mouse_tracking: bool,
     focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
@@ -443,6 +465,8 @@ impl Performer {
             saved_cursor: None,
             bracketed_paste: false,
             mouse_sgr: false,
+            app_cursor_keys: false,
+            mouse_tracking: false,
             focus_reporting: false,
             title: None,
             cwd: None,
@@ -508,6 +532,8 @@ impl Performer {
         self.saved_cursor = None;
         self.bracketed_paste = false;
         self.mouse_sgr = false;
+        self.app_cursor_keys = false;
+        self.mouse_tracking = false;
         self.focus_reporting = false;
         self.current_hyperlink = None;
         self.scroll_top = None;
@@ -612,6 +638,7 @@ impl Performer {
         for slice in params.iter() {
             let code = slice.first().copied().unwrap_or(0);
             match code {
+                1 => self.app_cursor_keys = set,
                 25 => self.events.push(VtEvent::CursorVisibility(set)),
                 47 => {
                     let before = self.grid.is_alt();
@@ -688,6 +715,7 @@ impl Performer {
                 }
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
+                1000 | 1002 | 1003 => self.mouse_tracking = set,
                 1004 => self.focus_reporting = set,
                 2026 => { /* synchronized output (BSU/ESU) — accept silently for now;
                      defer-paint optimisation tracked separately. Prevents future
@@ -1389,5 +1417,57 @@ mod tests {
 
         assert_eq!(parser.grid().cursor.row, 3);
         assert_eq!(parser.grid().cursor.col, 6);
+    }
+
+    #[test]
+    fn dec_private_mode_1_toggles_application_cursor_keys() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert!(!parser.application_cursor_keys());
+
+        parser.advance(b"\x1b[?1h");
+        assert!(parser.application_cursor_keys());
+
+        parser.advance(b"\x1b[?1l");
+        assert!(!parser.application_cursor_keys());
+    }
+
+    #[test]
+    fn dec_private_mode_1000_toggles_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert!(!parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1000h");
+        assert!(parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1000l");
+        assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn dec_private_mode_1002_1003_toggle_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+
+        parser.advance(b"\x1b[?1002h");
+        assert!(parser.mouse_tracking_enabled());
+        parser.advance(b"\x1b[?1002l");
+        assert!(!parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1003h");
+        assert!(parser.mouse_tracking_enabled());
+        parser.advance(b"\x1b[?1003l");
+        assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn ris_resets_app_cursor_keys_and_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[?1h\x1b[?1000h");
+        assert!(parser.application_cursor_keys());
+        assert!(parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1bc");
+
+        assert!(!parser.application_cursor_keys());
+        assert!(!parser.mouse_tracking_enabled());
     }
 }
