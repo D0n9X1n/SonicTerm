@@ -4099,20 +4099,30 @@ impl GpuRenderer {
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
-            let scale = chip.scale.clamp(0.5, 2.0);
+            // #651 follow-up: two independent multipliers compose here.
+            // `chip.scale` is the tear-out ANIMATION ease (1.0 in-bar, 1.02
+            // on tear); `dpi` is the display scale factor. The chip's logical
+            // size + decorations must scale by DPI so it keeps a constant
+            // physical size across displays. `top_left` is already in physical
+            // px (cursor-relative, from the app layer) so it is NOT scaled —
+            // only the size and the size-derived centering offset are.
+            let dpi = self.scale_factor;
+            let scale = chip.scale.clamp(0.5, 2.0) * dpi;
             let w = CHIP_W * scale;
             let h = CHIP_H * scale;
             // Re-center the scaled chip so growth is centered around
             // the original anchor point (cursor-relative offset is
             // preserved by the caller in `top_left`).
-            let cx = chip.top_left.0 + CHIP_W * 0.5;
-            let cy = chip.top_left.1 + CHIP_H * 0.5;
+            let cx = chip.top_left.0 + CHIP_W * 0.5 * dpi;
+            let cy = chip.top_left.1 + CHIP_H * 0.5 * dpi;
             let x0 = cx - w * 0.5;
             let y0 = cy - h * 0.5;
 
             // Soft drop shadow: stack two dimmer quads with growing
             // offset to fake an 8px blur without a fragment shader.
+            // Offsets are logical px → scale by DPI (#651).
             for (off, alpha) in [(2.0_f32, 0.18_f32), (4.0_f32, 0.10_f32), (8.0_f32, 0.05_f32)] {
+                let off = off * dpi;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(x0 + off, y0 + off, w, h, sw, sh),
                     color: [0.0, 0.0, 0.0, alpha],
@@ -4124,12 +4134,14 @@ impl GpuRenderer {
             // the chip so the chip floats on top if they overlap.
             if let Some(lx) = chip.drop_line_x {
                 let (ly0, ly1) = chip.drop_line_y;
-                let lh = (ly1 - ly0).max(2.0);
+                let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
                 let mut line_color = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
                 line_color[3] = 0.95;
+                // 3px line centered on lx; both the half-width offset and the
+                // width are logical px scaled by DPI.
                 quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
+                    rect: px_to_ndc(lx - 1.5 * dpi, ly0, 3.0 * dpi, lh, sw, sh),
                     color: line_color,
                     ..Default::default()
                 });
@@ -4164,8 +4176,10 @@ impl GpuRenderer {
                     let mut wt = stack.clone();
                     // Match the legacy TextArea geometry: left = x0 + 6,
                     // top = y0 + (h - font_size*0.85*1.2) * 0.5, clip to
-                    // chip body inset 4px.
-                    let chip_font_size = self.font_size * 0.85;
+                    // chip body inset 4px. Font size goes through raster_px and
+                    // the insets through dpi so the ghost title scales with the
+                    // chip on HiDPI displays (#651).
+                    let chip_font_size = self.raster_px(self.font_size * 0.85);
                     let top = y0 + ((h - chip_font_size * 1.2).max(0.0)) * 0.5;
                     let baseline_y = top + chip_font_size * 0.8;
                     let layout = chrome_text::layout(
@@ -4177,9 +4191,9 @@ impl GpuRenderer {
                         ChromeAttrs::default(),
                         chip_font_size,
                         native_em,
-                        (x0 + 6.0, baseline_y),
+                        (x0 + 6.0 * dpi, baseline_y),
                         (sw, sh),
-                        Some(ChromeClip { x: x0 + 4.0, y: y0, w: w - 8.0, h }),
+                        Some(ChromeClip { x: x0 + 4.0 * dpi, y: y0, w: w - 8.0 * dpi, h }),
                     );
                     overlay_glyph_instances.extend(layout.glyphs);
                 }
