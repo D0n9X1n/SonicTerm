@@ -946,10 +946,17 @@ impl App {
                             // disjointly.
                             if let Some(ws) = self.main_mut() {
                                 if let Some(sel) = ws.selection.as_mut() {
-                                    sel.extend(row, col);
-                                    mark_all_panes_dirty(&ws.panes);
-                                    if let Some(w) = ws.window.as_ref() {
-                                        w.request_redraw();
+                                    // Don't let a stray CursorMoved collapse a
+                                    // double/triple-click (word/line) selection
+                                    // down to the cursor cell. Anchored
+                                    // selections are deliberate regions; only
+                                    // a plain point-drag extends. (#651)
+                                    if !sel.anchored {
+                                        sel.extend(row, col);
+                                        mark_all_panes_dirty(&ws.panes);
+                                        if let Some(w) = ws.window.as_ref() {
+                                            w.request_redraw();
+                                        }
                                     }
                                 }
                             }

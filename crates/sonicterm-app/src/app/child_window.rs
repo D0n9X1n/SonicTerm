@@ -403,9 +403,13 @@ impl App {
                     if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
                     {
                         if let Some(sel) = child.selection.as_mut() {
-                            sel.extend(row, col);
-                            mark_all_panes_dirty(&child.panes);
-                            child.request_redraw();
+                            // Mirror the main window: don't collapse an anchored
+                            // (word/line) selection on cursor move. (#651)
+                            if !sel.anchored {
+                                sel.extend(row, col);
+                                mark_all_panes_dirty(&child.panes);
+                                child.request_redraw();
+                            }
                         }
                     }
                 }
