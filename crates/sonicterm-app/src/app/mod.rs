@@ -2164,6 +2164,43 @@ impl App {
         }
     }
 
+    pub(super) fn next_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.next();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn prev_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.prev();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_main_tab(&mut self, idx: usize) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.activate(idx);
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_last_main_tab(&mut self) -> bool {
+        let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
+            return false;
+        };
+        self.activate_main_tab(last)
+    }
+
     fn close_pty_pane(&mut self, pane_id: u64) -> bool {
         let mut closed = false;
         let mut resize_main = false;
@@ -2279,6 +2316,34 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
         self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
+    }
+
+    /// Test-only: install the headless pane-viewport seam on the main window
+    /// so resize wiring runs without a renderer. #pane-geom
+    #[doc(hidden)]
+    pub fn __test_set_main_pane_viewport(
+        &mut self,
+        outer: sonicterm_ui::pane::Rect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> bool {
+        self.__test_synthetic_main();
+        self.test_viewport_override = Some((outer, cell_w, cell_h));
+        true
+    }
+
+    /// Test-only: drive main-window active-tab pane resizing through the same
+    /// helper used by production window resize and tab activation.
+    #[doc(hidden)]
+    pub fn __test_resize_visible_panes(&mut self) {
+        self.resize_visible_panes();
+    }
+
+    /// Test-only: activate a main tab through the same production helper used
+    /// by keyboard/mouse tab activation.
+    #[doc(hidden)]
+    pub fn __test_invoke_activate_main_tab(&mut self, idx: usize) -> bool {
+        self.activate_main_tab(idx)
     }
 
     /// Test-only: install the headless per-window pane-viewport seam on a child

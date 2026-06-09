@@ -1243,9 +1243,7 @@ impl App {
                     if tab_action.is_some() {
                         match tab_action {
                             Some(sonicterm_ui::tabbar_view::TabHit::Activate(i)) => {
-                                if let Some(t) = self.main_tabs_mut() {
-                                    t.activate(i);
-                                }
+                                self.activate_main_tab(i);
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
                                 // tear-out gesture.

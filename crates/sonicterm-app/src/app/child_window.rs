@@ -903,6 +903,7 @@ impl App {
                         match hit {
                             TabHit::Activate(i) => {
                                 child.tabs.activate(i);
+                                resize_visible_panes_in_child(child);
                                 child.pressed_tab = Some(i);
                                 child.mouse_down = true;
                                 child.drag_session =
@@ -1655,6 +1656,7 @@ impl App {
     pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.next();
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1663,6 +1665,7 @@ impl App {
     pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.prev();
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1671,6 +1674,7 @@ impl App {
     pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.activate(idx);
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1680,6 +1684,7 @@ impl App {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
