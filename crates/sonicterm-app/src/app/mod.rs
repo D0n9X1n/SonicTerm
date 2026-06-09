@@ -2352,6 +2352,25 @@ impl App {
         self.set_child_pane_view_top(id, pane_id, view_top, live_top);
     }
 
+    /// Test-only: set the last cursor position for a synthetic child window.
+    #[doc(hidden)]
+    pub fn __test_set_child_cursor_pos(&mut self, id: WindowId, x: f64, y: f64) -> bool {
+        match self.windows.get_mut(&id) {
+            Some(c) => {
+                c.cursor_pos = (x, y);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: refresh a child window's scrollbar hover state from its last
+    /// cursor position, mirroring the production CursorMoved branch.
+    #[doc(hidden)]
+    pub fn __test_refresh_child_scrollbar_hover_from_cursor(&mut self, id: WindowId) -> bool {
+        self.refresh_scrollbar_hover_from_cursor_in_child(id)
+    }
+
     /// Test-only: seed a synthetic child WindowState without constructing a
     /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
     /// tear-out child, but `window` and `renderer` stay `None` so cargo-test

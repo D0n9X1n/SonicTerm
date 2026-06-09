@@ -293,6 +293,7 @@ impl App {
                     if let Some(c) = self.windows.get_mut(&win_id) {
                         c.cursor_pos = (position.x, position.y);
                     }
+                    self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
                     self.refresh_hovered_url_in_child(win_id);
                 }
             }

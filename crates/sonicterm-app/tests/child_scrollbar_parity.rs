@@ -10,6 +10,7 @@
 
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_ui::pane::Rect;
 
 fn seeded_child() -> (App, winit::window::WindowId, u64) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -55,5 +56,29 @@ fn child_scrollbar_active_is_pane_scoped() {
         app.__test_child_scrollbar_active(id, left),
         None,
         "the un-scrolled sibling pane must NOT be marked active"
+    );
+}
+
+#[test]
+fn child_right_edge_hover_marks_scrollbar_active() {
+    // Regression for v0.10.1: child windows showed the scrollbar on wheel
+    // scroll (mark_active path) but NOT when the mouse simply moved near the
+    // right edge. The main CursorMoved path refreshed scrollbar hover state;
+    // child CursorMoved only refreshed URL hover. This pins child parity.
+    let (mut app, id, pane) = seeded_child();
+    assert!(app.__test_set_child_pane_viewport(id, Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+
+    // Park in the middle first: no entry/activation.
+    assert!(app.__test_set_child_cursor_pos(id, 400.0, 120.0));
+    assert!(!app.__test_refresh_child_scrollbar_hover_from_cursor(id));
+    assert_eq!(app.__test_child_scrollbar_active(id, pane), Some(false));
+
+    // Move inside the 20px right-edge hover band.
+    assert!(app.__test_set_child_cursor_pos(id, 795.0, 120.0));
+    assert!(app.__test_refresh_child_scrollbar_hover_from_cursor(id));
+    assert_eq!(
+        app.__test_child_scrollbar_active(id, pane),
+        Some(true),
+        "child edge hover must light the auto-hide scrollbar like main"
     );
 }

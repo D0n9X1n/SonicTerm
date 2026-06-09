@@ -264,6 +264,39 @@ impl App {
         self.refresh_scrollbar_hover_from_cursor()
     }
 
+    /// Child-window mirror of [`Self::refresh_scrollbar_hover_from_cursor`].
+    /// Torn-out windows own their own `WindowState`, cursor position, pane
+    /// layout, and redraw target, but the Auto-mode hover math must be shared
+    /// with the main window. Returns `true` when any pane crosses the right-edge
+    /// proximity threshold.
+    pub(crate) fn refresh_scrollbar_hover_from_cursor_in_child(
+        &mut self,
+        win_id: winit::window::WindowId,
+    ) -> bool {
+        if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
+            return false;
+        }
+        let Some(child) = self.windows.get(&win_id) else { return false };
+        let pane_rects = Self::compute_pane_rects_for(child);
+        if pane_rects.is_empty() {
+            return false;
+        }
+        let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+        let rects: Vec<(u64, f32, f32, f32, f32)> =
+            pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+        let changed = self
+            .windows
+            .get_mut(&win_id)
+            .map(|child| update_hover_states(&mut child.scrollbar_vis, &rects, cursor, Instant::now()))
+            .unwrap_or(false);
+        if changed {
+            if let Some(child) = self.windows.get(&win_id) {
+                child.request_redraw();
+            }
+        }
+        changed
+    }
+
     /// Mark a pane's scrollbar as "actively in use" so its alpha
     /// resets to fully-visible and the idle hide timer restarts.
     /// Called from PR-D update points (scroll, drag, view_top jump).

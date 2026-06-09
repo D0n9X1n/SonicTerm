@@ -35,6 +35,12 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
+
+fn hovered_url_needs_accent(
+    hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+) -> bool {
+    hovered.is_some_and(|h| h.active)
+}
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -2524,10 +2530,10 @@ impl GpuRenderer {
             // sRGB→linear `powf` conversions; computing it unconditionally
             // every frame added measurable render latency to plain output
             // repaints (e.g. `ls -al`). It's only consumed when a URL is
-            // actually hovered, so compute it lazily — `[0.0;4]` otherwise
-            // (never read, since `resolve_fg`/the underline are gated on
-            // `hovered_url_cells`/`h.active`). #perf
-            let hovered_url_accent: [f32; 4] = if hovered_url_cells.is_some() {
+            // ACTIVE-hovered (modifier held) and glyphs recolor to accent;
+            // plain hover draws only a yellow underline, so compute lazily —
+            // `[0.0;4]` otherwise. #perf
+            let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
                 sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
             } else {
                 [0.0, 0.0, 0.0, 0.0]
@@ -5736,6 +5742,25 @@ mod tests {
             cell_bg_rgba(&cell, &theme),
             Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
         );
+    }
+
+    #[test]
+    fn plain_url_hover_does_not_need_accent_palette() {
+        use sonicterm_render_model::inputs::HoveredUrlCells;
+
+        assert!(!hovered_url_needs_accent(None));
+        assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
+            row: 0,
+            start_col: 1,
+            end_col: 5,
+            active: false,
+        })));
+        assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
+            row: 0,
+            start_col: 1,
+            end_col: 5,
+            active: true,
+        })));
     }
 }
 
