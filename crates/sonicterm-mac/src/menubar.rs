@@ -242,6 +242,60 @@ fn build_submenu(mtm: MainThreadMarker, sm: &Submenu, target: &MenuTarget) -> Re
     container
 }
 
+/// A standalone Window-menu item bound to a first-responder selector
+/// (`performMiniaturize:`, `performZoom:`, `arrangeInFront:`). These have
+/// **no explicit target** so AppKit routes them through the key window's
+/// responder chain — exactly like a `Binding::System` item.
+fn build_responder_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    selector: Sel,
+    key: &str,
+    mods: KeyMods,
+) -> Retained<NSMenuItem> {
+    let nsi = NSMenuItem::new(mtm);
+    nsi.setTitle(&ns(title));
+    nsi.setKeyEquivalent(&ns(key));
+    nsi.setKeyEquivalentModifierMask(flags(mods));
+    unsafe { nsi.setAction(Some(selector)) };
+    nsi
+}
+
+/// Build the standard macOS **Window** menu and hand it to AppKit via
+/// `setWindowsMenu:`. Once registered, AppKit auto-populates the menu with
+/// every open `NSWindow` (each torn-out SonicTerm window included), keeps
+/// the list live as windows open/close, checks the key window, and wires
+/// the system ⌘` "cycle windows" key equivalent — matching Terminal.app /
+/// WezTerm. We only author the static Minimize / Zoom / Bring-All-to-Front
+/// items; the dynamic window list below the separator is AppKit's.
+fn install_window_menu(mtm: MainThreadMarker, app: &NSApplication, main: &NSMenu) {
+    let container = NSMenuItem::new(mtm);
+    container.setTitle(&ns("Window"));
+    let m = NSMenu::new(mtm);
+    m.setTitle(&ns("Window"));
+    m.addItem(&build_responder_item(
+        mtm,
+        "Minimize",
+        sel!(performMiniaturize:),
+        "m",
+        KeyMods::Cmd,
+    ));
+    m.addItem(&build_responder_item(mtm, "Zoom", sel!(performZoom:), "", KeyMods::None));
+    m.addItem(&NSMenuItem::separatorItem(mtm));
+    m.addItem(&build_responder_item(
+        mtm,
+        "Bring All to Front",
+        sel!(arrangeInFront:),
+        "",
+        KeyMods::None,
+    ));
+    container.setSubmenu(Some(&m));
+    main.addItem(&container);
+    // Registering the menu is what unlocks the auto window list + ⌘`
+    // cycling; without this AppKit treats it as an ordinary submenu.
+    app.setWindowsMenu(Some(&m));
+}
+
 /// macOS [`PlatformMenu`] implementation. The `Sender` is accepted
 /// by the trait for symmetry with the Windows impl, but on macOS each
 /// click ultimately routes through the same `menubar_bridge` static
@@ -267,6 +321,12 @@ impl PlatformMenu for MacMenu {
 
         let main = NSMenu::new(mtm);
         for sm in &self.blueprint {
+            // The standard macOS Window menu conventionally sits just
+            // before Help. Insert it here so AppKit owns the live window
+            // list (all torn-out windows) + ⌘` cycling. See #window-menu.
+            if sm.title == "Help" {
+                install_window_menu(mtm, &app, &main);
+            }
             let item = build_submenu(mtm, sm, &target);
             // Append the logging affordances to the Help submenu.
             if sm.title == "Help" {

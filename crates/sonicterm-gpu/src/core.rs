@@ -38,10 +38,10 @@ const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
-const READ_ONLY_BADGE_W: f32 = 240.0;
+const READ_ONLY_BADGE_W: f32 = 250.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
-const READ_ONLY_BADGE_PAD_RIGHT: f32 = 32.0;
+const READ_ONLY_BADGE_PAD_RIGHT: f32 = 15.0;
 const READ_ONLY_BADGE_BASELINE_NUDGE_Y: f32 = -2.0;
 const READ_ONLY_BADGE_RADIUS: f32 = 7.0;
 
@@ -96,9 +96,17 @@ fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
 }
 
-fn read_only_badge_rect(sw: f32, sh: f32) -> (f32, f32, f32, f32) {
-    let w = READ_ONLY_BADGE_W.min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
-    let h = READ_ONLY_BADGE_H.min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
+fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f32, f32, f32) {
+    // Badge width hugs its content (icon + "READONLY") instead of a fixed
+    // constant, so it never looks over-long. `content_w` is already in raster
+    // px (estimated from the DPI-scaled badge font); add scaled paddings. The
+    // edge MARGIN is a window-anchored position and stays in window space.
+    let s = scale.max(0.01);
+    let pad = (SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT) * s;
+    let w = (content_w + pad)
+        .max(READ_ONLY_BADGE_W * 0.4 * s) // small floor so it never collapses
+        .min((sw - READ_ONLY_BADGE_MARGIN * 2.0).max(40.0));
+    let h = (READ_ONLY_BADGE_H * s).min((sh - READ_ONLY_BADGE_MARGIN * 2.0).max(20.0));
     let x = (sw - w - READ_ONLY_BADGE_MARGIN).max(0.0);
     let y = READ_ONLY_BADGE_MARGIN.min((sh - h).max(0.0));
     (x, y, w, h)
@@ -125,6 +133,7 @@ pub fn emit_pane_scrollbar(
     sw: f32,
     sh: f32,
     alpha: f32,
+    scale: f32,
 ) -> usize {
     // PR-D: hidden / nearly-hidden early-out. Mirrors
     // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
@@ -132,9 +141,9 @@ pub fn emit_pane_scrollbar(
         return 0;
     }
     let alpha = alpha.clamp(0.0, 1.0);
-    // Bar width in logical px. Held local to the emitter; PR-D may lift
-    // this into config once hover-driven width animation lands.
-    const SCROLLBAR_WIDTH_PX: f32 = 8.0;
+    // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
+    // bar keeps a constant physical size across displays (#651), min 1px.
+    let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
     let geom_rect =
         sonicterm_ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
     let Some(geom) = sonicterm_ui::scrollbar::compute(
@@ -143,7 +152,7 @@ pub fn emit_pane_scrollbar(
         view_top,
         geom_rect,
         mode,
-        SCROLLBAR_WIDTH_PX,
+        scrollbar_width_px,
     ) else {
         return 0;
     };
@@ -245,14 +254,13 @@ use sonicterm_text::{
     shape::{run_is_ascii_fast, RunStyle},
 };
 use sonicterm_ui::{
-    cheatsheet::{filter_indices, CheatsheetState},
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        search_bar_label, ImePreeditLayout, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS, PALETTE_ROW_GAP, PALETTE_ROW_HEIGHT,
+        search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
+        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
     },
@@ -326,115 +334,6 @@ pub fn emit_tab_bar_quads(
     }
 }
 
-struct CheatsheetLayout {
-    scrim: sonicterm_ui::tabbar_view::Rect,
-    border: sonicterm_ui::tabbar_view::Rect,
-    bg: sonicterm_ui::tabbar_view::Rect,
-    query_row: sonicterm_ui::tabbar_view::Rect,
-    rows: Vec<sonicterm_ui::tabbar_view::Rect>,
-    selected_row: Option<usize>,
-    query_label: String,
-    row_labels: Vec<String>,
-    footer: sonicterm_ui::tabbar_view::Rect,
-    footer_label: String,
-}
-
-fn compute_cheatsheet_layout(
-    state: &CheatsheetState,
-    bindings: &[(String, String)],
-    window_w: f32,
-    window_h: f32,
-    panel_padding: f32,
-) -> CheatsheetLayout {
-    let panel_padding = panel_padding.max(0.0);
-    let modal_w = 760.0_f32.min((window_w - 48.0).max(180.0));
-    let modal_h = 520.0_f32.min((window_h - 96.0).max(140.0));
-    let border = sonicterm_ui::tabbar_view::Rect {
-        x: ((window_w - modal_w) * 0.5).max(0.0),
-        y: (window_h * 0.14).max(48.0).min((window_h - modal_h).max(0.0)),
-        w: modal_w,
-        h: modal_h,
-    };
-    let bg = sonicterm_ui::tabbar_view::Rect {
-        x: border.x + PALETTE_BORDER,
-        y: border.y + PALETTE_BORDER,
-        w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
-        h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
-    };
-    let query_row = sonicterm_ui::tabbar_view::Rect {
-        x: bg.x + panel_padding,
-        y: bg.y + panel_padding,
-        w: (bg.w - panel_padding * 2.0).max(0.0),
-        h: 44.0,
-    };
-    let footer = sonicterm_ui::tabbar_view::Rect {
-        x: bg.x,
-        y: (bg.y + bg.h - 32.0).max(query_row.y + query_row.h),
-        w: bg.w,
-        h: 32.0,
-    };
-    let list_top = query_row.y + query_row.h + panel_padding;
-    let list_bottom = footer.y - panel_padding;
-    let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
-    let max_rows = (((list_bottom - list_top).max(0.0) + PALETTE_ROW_GAP) / row_stride)
-        .floor()
-        .max(0.0) as usize;
-
-    let idxs = filter_indices(bindings, &state.query);
-    let total = idxs.len();
-    let selected = state.selected_idx.min(total.saturating_sub(1));
-    let window_start = selected.saturating_sub(max_rows.saturating_sub(1));
-    let window_end = (window_start + max_rows).min(total);
-    let selected_row = (total > 0).then_some(selected - window_start);
-
-    let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
-    let mut row_labels = Vec::new();
-    for (row_i, idx_pos) in (window_start..window_end).enumerate() {
-        rows.push(sonicterm_ui::tabbar_view::Rect {
-            x: bg.x + panel_padding,
-            y: list_top + (row_i as f32) * row_stride,
-            w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_ROW_HEIGHT,
-        });
-        if let Some((keys, action)) = idxs.get(idx_pos).and_then(|idx| bindings.get(*idx)) {
-            row_labels.push(format!("{keys}    {action}"));
-        }
-    }
-    if total == 0 {
-        rows.push(sonicterm_ui::tabbar_view::Rect {
-            x: bg.x + panel_padding,
-            y: list_top,
-            w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_ROW_HEIGHT,
-        });
-        row_labels.push("No shortcuts found".to_string());
-    }
-
-    let query_label = if state.query.is_empty() {
-        "Search keyboard shortcuts… ▏".to_string()
-    } else {
-        format!("{}▏", state.query)
-    };
-    let footer_label = format!(
-        "{} shortcut{} · ↑↓ navigate · type to search · esc close",
-        total,
-        if total == 1 { "" } else { "s" }
-    );
-
-    CheatsheetLayout {
-        scrim: sonicterm_ui::tabbar_view::Rect { x: 0.0, y: 0.0, w: window_w, h: window_h },
-        border,
-        bg,
-        query_row,
-        rows,
-        selected_row,
-        query_label,
-        row_labels,
-        footer,
-        footer_label,
-    }
-}
-
 // (Per-row cache + grid SpanDesc removed in the B3 cutover — the GPU
 // atlas does an O(1) lookup per cell, so the bookkeeping is wasted
 // work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
@@ -469,6 +368,13 @@ pub struct GpuRenderer {
     font_family: String,
     font_size: f32,
     line_height: f32,
+    /// Multiplier applied to the font's natural cell height to derive the
+    /// rendered line height (`cell_h = natural_cell_h * line_height_mult`).
+    /// Stored so a DPI/scale-factor change can recompute `cell_h` from the
+    /// freshly-rasterized natural height — see `rebuild_for_sf`. Without it,
+    /// the rebuild had to back this factor out of the stale `line_height`,
+    /// which algebraically cancelled and pinned `cell_h` to the old DPI.
+    line_height_mult: f32,
     /// DPI multiplier (e.g. 2.0 on Retina). Post-G1a (wezterm-takeover)
     /// the renderer is raster-px end-to-end, so draw and hit-test sites
     /// no longer multiply/divide by this; its sole job is sizing the
@@ -552,12 +458,12 @@ pub struct GpuRenderer {
     search_bg: [f32; 4],
     // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
     // fields that lived here (search, quick_select, palette_{query,rows,
-    // footer}, cheatsheet_{query,rows,footer}, ime, broadcast,
+    // footer}, ime, broadcast,
     // drag_chip) are gone. Every chrome string is now shaped on demand
     // inside `render()` via `chrome_text::layout(...)`; the resulting
     // glyph instances feed either `glyph_instances` (pre-overlay
     // chrome — tab titles, search status bar) or
-    // `overlay_glyph_instances` (modal chrome — palette, cheatsheet,
+    // `overlay_glyph_instances` (modal chrome — palette,
     // IME preedit, drag-chip title). No per-renderer the legacy chrome layer buffer
     // state survives.
     /// Cached drag-chip rect from the last `render()` call (in logical
@@ -677,7 +583,6 @@ struct FrameKey {
     search_hash: u64,
     palette_hash: u64,
     ime_hash: u64,
-    cheatsheet_hash: u64,
     width: u32,
     height: u32,
     tab_hash: u64,
@@ -712,6 +617,10 @@ struct FrameKey {
     close_override: u8,
     broadcast_receivers_hash: u64,
     inline_media_hash: u64,
+    /// Cmd-hovered URL cell range. Folded into the key so moving the
+    /// hover onto / off a URL (or to a different URL span) invalidates
+    /// the cached frame and re-shapes with / without the accent recolor.
+    hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
 }
 
 #[doc(hidden)]
@@ -1066,6 +975,7 @@ impl GpuRenderer {
             font_family: font_family.to_string(),
             font_size,
             line_height,
+            line_height_mult: line_height_mult.max(0.0).max(0.01),
             scale_factor: sf,
             cell_w,
             cell_h,
@@ -1706,6 +1616,13 @@ impl GpuRenderer {
         self.font_size
     }
 
+    /// Current OS display scale factor (physical px per logical px). Exposed so
+    /// the app layer can scale window-event geometry (e.g. the search-bar IME
+    /// caret rect) to match the renderer's physical-px coordinate space. #651.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
     /// Number of glyph tiles currently resident in the rasterizer atlas.
     /// Test-only; the atlas is cleared and rebuilt by [`Self::set_font`].
     #[doc(hidden)]
@@ -1822,6 +1739,7 @@ impl GpuRenderer {
         self.font_family = family.to_string();
         self.font_size = size;
         self.line_height = new_line_h;
+        self.line_height_mult = line_height_mult.max(0.0).max(0.01);
         self.font_stack = new_stack;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
@@ -1882,6 +1800,17 @@ impl GpuRenderer {
         font_size * self.scale_factor
     }
 
+    /// Scale a logical-px chrome constant into the renderer's physical/raster-px
+    /// coordinate space. Chrome layout literals (badge/search-bar/palette sizes,
+    /// paddings, radii, sub-cell thicknesses) are authored at scale-factor 1.0;
+    /// route them through this so they track the display DPI like glyphs do.
+    /// Window-anchored POSITIONS (edge margins, centering offsets) must NOT use
+    /// this — they stay in window space. See #651.
+    #[inline]
+    fn chrome_px(&self, logical: f32) -> f32 {
+        logical * self.scale_factor
+    }
+
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
@@ -1907,8 +1836,15 @@ impl GpuRenderer {
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
                 let natural = m.cell_h as f32;
-                let multiplier = if natural > 0.0 { self.line_height / natural } else { 1.0 };
-                self.cell_h = natural * multiplier.max(0.01);
+                // E1 (#651): recompute cell_h from the freshly-rasterized
+                // natural height using the STORED line-height multiplier.
+                // The prior code derived the multiplier as
+                // `self.line_height / natural`, then `natural * multiplier`
+                // — which algebraically cancels back to the old
+                // `self.line_height`, pinning cell_h to the previous DPI
+                // while cell_w correctly updated. Using the stored mult lets
+                // height track the scale factor like width does.
+                self.cell_h = natural * self.line_height_mult.max(0.01);
                 self.line_height = self.cell_h;
             }
         }
@@ -2138,9 +2074,14 @@ impl GpuRenderer {
         tabs: &TabBar,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
-        cheatsheet: Option<(CheatsheetState, Vec<(String, String)>)>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
+        // Cmd-hovered auto-detected URL cell range (viewport coords),
+        // or `None` when no URL is hovered while the open-URL modifier
+        // is held. When set on the active pane, the URL's glyphs are
+        // recolored with the theme accent (companion to the existing
+        // hover underline). Same lifetime/gating as the underline.
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
     ) -> Result<()> {
         // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
         // unchanged inside the body — we extract the active pane's grid into
@@ -2353,18 +2294,6 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
-        let cheatsheet_hash: u64 = cheatsheet
-            .as_ref()
-            .map(|(state, bindings)| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                0xC4EA_75EE_u64.hash(&mut h);
-                state.query.hash(&mut h);
-                state.selected_idx.hash(&mut h);
-                bindings.hash(&mut h);
-                h.finish()
-            })
-            .unwrap_or(0);
         // Likewise for IME preedit — composition changes don't bump grid
         // revision until commit.
         let ime_hash: u64 = ime
@@ -2373,6 +2302,11 @@ impl GpuRenderer {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 i.preedit().hash(&mut h);
                 i.is_composing().hash(&mut h);
+                // Fold the composition caret too: the terminal cursor block now
+                // tracks `i.cursor()` (the in-flight caret byte), so a caret move
+                // WITHIN unchanged preedit text must still invalidate the frame —
+                // otherwise the cursor would stick at the old caret position. #B14
+                i.cursor().hash(&mut h);
                 h.finish()
             })
             .unwrap_or(0);
@@ -2462,7 +2396,6 @@ impl GpuRenderer {
             search_hash,
             palette_hash,
             ime_hash,
-            cheatsheet_hash,
             width: self.config.width,
             height: self.config.height,
             tab_hash,
@@ -2487,6 +2420,7 @@ impl GpuRenderer {
             close_override: u8::from(self.tab_close_override.is_some()),
             broadcast_receivers_hash,
             inline_media_hash,
+            hovered_url_cells,
         };
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -2583,6 +2517,21 @@ impl GpuRenderer {
             // hook on FontStack rasterization, it would attach in this
             // same scope.
             let _ = self.async_loader.clone();
+            // Theme accent for the Cmd-hovered URL recolor. `UiPalette::accent`
+            // is a linear-sRGB `[f32;4]` (alpha 1.0), the same space the
+            // per-glyph `color` field carries, so it drops in with no
+            // conversion. PERF: `UiPalette::from_theme` does ~20 hex parses +
+            // sRGB→linear `powf` conversions; computing it unconditionally
+            // every frame added measurable render latency to plain output
+            // repaints (e.g. `ls -al`). It's only consumed when a URL is
+            // actually hovered, so compute it lazily — `[0.0;4]` otherwise
+            // (never read, since `resolve_fg`/the underline are gated on
+            // `hovered_url_cells`/`h.active`). #perf
+            let hovered_url_accent: [f32; 4] = if hovered_url_cells.is_some() {
+                sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
             // Part B step 3: iterate every pane. Each iteration rebinds
             // `grid` to that pane's Grid (via the raw pointer collected
             // into pane_views above), uses the pane's own origin instead
@@ -2617,8 +2566,10 @@ impl GpuRenderer {
                     self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
                 }
                 // Normalise selection once outside the loop so we hash a
-                // canonical bbox per row.
-                let sel_bbox: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+                // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
+                // per-row membership test inside `row_hash_cells` compares
+                // them against each row's `view_top_abs + r`.
+                let sel_bbox: Option<(u64, u16, u64, u16)> = selection.map(|s| {
                     let (a, b) = s.normalized();
                     (a.0, a.1, b.0, b.1)
                 });
@@ -2633,6 +2584,12 @@ impl GpuRenderer {
                 // fast path in `snap_to_device_pixels` makes this a no-op at
                 // scale 1.0/2.0 (mac dHash snapshots stay green).
                 let snapped_cell_x: Vec<f32> = build_snapped_cell_x(pad, cell_w, grid.cols);
+                // The Cmd-hover URL recolor applies only to the active
+                // pane (the hover hit-test runs against the focused
+                // pane). Non-active panes always pass `None` so split
+                // panes never inherit another pane's hover accent.
+                let pane_hovered_url =
+                    if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -2659,6 +2616,33 @@ impl GpuRenderer {
                         1.0,
                         sel_bbox,
                     );
+                    // Fold the Cmd-hover URL span into the cache key for
+                    // the row it sits on. The hover recolor overrides the
+                    // per-cell fg below, so a cached row shaped WITHOUT
+                    // the accent must not be replayed once the same row
+                    // becomes hovered (and vice-versa when the hover
+                    // leaves). Hover changes don't bump the grid revision
+                    // or mark rows dirty, so without this the recolor
+                    // would stick on a stale cache hit. Only the hovered
+                    // row's key is perturbed — peer rows keep replaying.
+                    let key = match pane_hovered_url {
+                        // Only an ACTIVE hover recolors glyphs (resolve_fg), so
+                        // only then must the row key diverge from the plain
+                        // cache. A plain-hover hint draws no recolor (just the
+                        // overlay underline, which isn't row-cached), so it
+                        // safely reuses the non-hover key — and an active→hint
+                        // transition can't replay stale accent glyphs. #URL-hint
+                        Some(h) if h.active && h.row == r => {
+                            use std::hash::{Hash, Hasher};
+                            let mut hsh = std::collections::hash_map::DefaultHasher::new();
+                            key.hash(&mut hsh);
+                            0x55_524C_u64.hash(&mut hsh); // "URL" salt
+                            h.start_col.hash(&mut hsh);
+                            h.end_col.hash(&mut hsh);
+                            hsh.finish()
+                        }
+                        _ => key,
+                    };
                     if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
@@ -2784,6 +2768,8 @@ impl GpuRenderer {
                                     &snapped_cell_x,
                                     self.font_stack.as_ref(),
                                     wt_raster.as_mut(),
+                                    pane_hovered_url,
+                                    hovered_url_accent,
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -2816,6 +2802,8 @@ impl GpuRenderer {
                             &snapped_cell_x,
                             self.font_stack.as_ref(),
                             wt_raster.as_mut(),
+                            pane_hovered_url,
+                            hovered_url_accent,
                         );
                     }
                     // Capture this row's contributions and insert into
@@ -2895,7 +2883,7 @@ impl GpuRenderer {
         // abs_row, content+geom+style+selection hash); on a hit we
         // `extend_from_slice` the cached slice and skip the per-cell
         // run-length-encode walk in `emit_cell_bg_quads_for_row`.
-        let sel_bbox_for_quads: Option<(u16, u16, u16, u16)> = selection.map(|s| {
+        let sel_bbox_for_quads: Option<(u64, u16, u64, u16)> = selection.map(|s| {
             let (a, b) = s.normalized();
             (a.0, a.1, b.0, b.1)
         });
@@ -3015,6 +3003,7 @@ impl GpuRenderer {
                 sw,
                 sh,
                 pv.scrollbar_alpha,
+                self.scale_factor,
             );
         }
 
@@ -3033,8 +3022,14 @@ impl GpuRenderer {
                 // Pane rect_px is the source of truth — see note above.
                 let pane_w = active_pane_w;
                 let pane_h = active_pane_h;
+                // Selection rows are scrollback-ABSOLUTE; resolve the active
+                // pane's view top so `selection_quad_rects` can map them back
+                // to viewport rows (so the highlight follows the TEXT when
+                // scrolled).
+                let sel_view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
                 for rect in selection_quad_rects(
                     sel,
+                    sel_view_top_abs,
                     grid.rows,
                     grid.cols,
                     active_origin_x,
@@ -3114,7 +3109,7 @@ impl GpuRenderer {
                 // underline) lines up with its glyph cell at fractional DPI.
                 let cur_col = grid.cursor.col as usize;
                 let cur_col_clamped = cur_col.min(active_snapped_cell_x.len().saturating_sub(2));
-                let cx = active_snapped_cell_x
+                let mut cx = active_snapped_cell_x
                     .get(cur_col_clamped)
                     .copied()
                     .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
@@ -3123,6 +3118,27 @@ impl GpuRenderer {
                     .map(|r| r - cx)
                     .unwrap_or(self.cell_w);
                 let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                // #B14: when an inline IME composition is active at the terminal
+                // cursor (search NOT focused — that case anchors to the search
+                // box instead), the OS does not draw it, so we do (preedit block
+                // further down). Advance the cursor mark to the composition caret
+                // (end of the in-flight run, or the IME-reported caret byte) so it
+                // sits at the insertion point WezTerm-style, instead of frozen on
+                // the first composing glyph.
+                if search.is_none() {
+                    if let Some(i) = ime {
+                        let text = i.preedit();
+                        if !text.is_empty() {
+                            let font_size = self.raster_px(self.font_size);
+                            let mut caret_byte =
+                                i.cursor().map(|(_, e)| e).unwrap_or(text.len()).min(text.len());
+                            if !text.is_char_boundary(caret_byte) {
+                                caret_byte = text.len();
+                            }
+                            cx += estimate_badge_text_width(&text[..caret_byte], font_size);
+                        }
+                    }
+                }
                 // Modulate the cursor accent with the current blink alpha.
                 // The base color is opaque (set at theme load) so we can
                 // dim through the full range without losing chroma — that
@@ -3134,10 +3150,12 @@ impl GpuRenderer {
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge
                 //   Underline → 2px horizontal bar pinned to the bottom
-                // We pick a 2px sub-cell thickness rather than something
+                // We pick a ~2px sub-cell thickness rather than something
                 // proportional to cell_h so the bar stays crisp on both
                 // small and large font sizes (no half-pixel sub-stem).
-                const SUBSHAPE_PX: f32 = 2.0;
+                // #651: 2 logical px scaled to physical px so the bar/underline
+                // keep a constant physical thickness across DPIs (min 1px).
+                let subshape_px: f32 = (2.0 * self.scale_factor).round().max(1.0);
                 match self.cursor_shape {
                     CursorShape::Block => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
@@ -3181,7 +3199,7 @@ impl GpuRenderer {
                     }
                     CursorShape::Bar => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                            (cx, cy, SUBSHAPE_PX, self.cell_h),
+                            (cx, cy, subshape_px, self.cell_h),
                             active_pane_x,
                             active_pane_y,
                             active_pane_w,
@@ -3196,7 +3214,7 @@ impl GpuRenderer {
                     }
                     CursorShape::Underline => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                            (cx, cy + self.cell_h - SUBSHAPE_PX, cw, SUBSHAPE_PX),
+                            (cx, cy + self.cell_h - subshape_px, cw, subshape_px),
                             active_pane_x,
                             active_pane_y,
                             active_pane_w,
@@ -3317,6 +3335,52 @@ impl GpuRenderer {
                 sh,
                 underline_color,
             );
+        }
+
+        // Cmd-hover URL underline (#660). The hovered URL's glyphs are
+        // recolored to the theme accent in the glyph loop; draw a matching
+        // accent underline here as a per-frame overlay (not cached — hover
+        // state isn't part of the row cache key for underlines). Uses the
+        // active pane's origin + snapped cell edges so it lines up with the
+        // recolored text. `hovered_url_cells` is already gated to the active
+        // pane and to Cmd-held hover.
+        if let Some(h) = hovered_url_cells {
+            if h.end_col > h.start_col {
+                // Two-tier hover: `active` (open-URL modifier held) → theme
+                // accent underline matching the recolored glyphs; plain hover
+                // → a yellow HINT underline only (no glyph recolor). #URL-hint
+                let hov_accent = if h.active {
+                    sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+                } else {
+                    hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                };
+                let active_grid_cols = pane_views[active_view_idx].grid.cols;
+                let hcache = build_snapped_cell_x(active_origin_x, self.cell_w, active_grid_cols);
+                let last_col = active_grid_cols.saturating_sub(1);
+                let col_a = h.start_col.min(last_col) as usize;
+                let col_b = h.end_col.min(active_grid_cols) as usize; // exclusive edge
+                let hx = hcache
+                    .get(col_a)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(h.start_col) * self.cell_w);
+                let hw = hcache
+                    .get(col_b.min(hcache.len().saturating_sub(1)))
+                    .map(|r| r - hx)
+                    .unwrap_or_else(|| f32::from(h.end_col - h.start_col) * self.cell_w);
+                let hy = active_origin_y + f32::from(h.row) * self.cell_h;
+                push_underline_quads(
+                    &mut quads,
+                    UnderlineStyle::Single,
+                    hx,
+                    hy,
+                    hw,
+                    self.cell_h,
+                    underline_thickness,
+                    sw,
+                    sh,
+                    hov_accent,
+                );
+            }
         }
 
         // -------- Missing-glyph tofu fallback ------------------------------
@@ -3621,19 +3685,44 @@ impl GpuRenderer {
         // distinct from the legacy full-width status bar above. It shows
         // whenever search state exists, so the user has a persistent
         // affordance while typing.
-        let read_only_badge = read_only_mode.then(|| read_only_badge_rect(sw, sh));
+        let read_only_badge = read_only_mode.then(|| {
+            // Content width = icon + gap + "READONLY", in the badge's own
+            // (DPI-scaled) font, so the badge hugs its text.
+            let badge_font = self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
+            let content_w = estimate_badge_text_width(READ_ONLY_BADGE_ICON, badge_font)
+                + self.chrome_px(SEARCH_BAR_ICON_GAP)
+                + estimate_badge_text_width(READ_ONLY_BADGE_LABEL, badge_font);
+            read_only_badge_rect(sw, sh, self.scale_factor, content_w)
+        });
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
-        let search_label = search.map(search_bar_label);
+        // When search is active and the IME has a non-empty composing run, splice
+        // the preedit INTO the label (between the query and the ▏ caret) so the
+        // whole bar renders as one continuous string: the box grows to fit it and
+        // the ` — N/M` counter flows to the RIGHT of the composition instead of
+        // being overlapped. Display-only — the preedit does NOT drive matching
+        // (only committed text does). (#B14)
+        let search_preedit: &str = search
+            .and(ime)
+            .map(|i| i.preedit())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let search_label = search.map(|s| search_bar_label(s, search_preedit));
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
-                + SEARCH_BAR_ICON_GAP
+                + self.chrome_px(SEARCH_BAR_ICON_GAP)
                 + estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
-                SearchBarLayout::compute_at_row(sw, sh, content_w, 1)
+                SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
-                SearchBarLayout::compute(sw, sh, content_w)
+                SearchBarLayout::compute(sw, sh, content_w, self.scale_factor)
             }
         });
+        // When search is active the inline IME preedit must anchor to the
+        // search box caret (end of the query text), not the terminal cursor.
+        // Populated inside the search-render block below; read by the inline
+        // preedit block further down. (cx = caret_left, by = box_top, bh =
+        // box_height)
+        let mut search_ime_anchor: Option<(f32, f32, f32)> = None;
         if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
             let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
@@ -3648,19 +3737,40 @@ impl GpuRenderer {
                 ),
                 search_badge_bg,
                 [layout.border.w, layout.border.h],
-                READ_ONLY_BADGE_RADIUS,
+                self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let Some(stack) = self.font_stack.as_ref() {
                 let mut wt = stack.clone();
                 let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
-                let icon_x = layout.border.x + SEARCH_BAR_PAD_LEFT;
-                let text_x = icon_x + icon_w + SEARCH_BAR_ICON_GAP;
-                let visible_w =
-                    (layout.border.x + layout.border.w - SEARCH_BAR_PAD_RIGHT - text_x).max(0.0);
+                let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
+                let visible_w = (layout.border.x + layout.border.w
+                    - self.chrome_px(SEARCH_BAR_PAD_RIGHT)
+                    - text_x)
+                    .max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
                 let scroll_x = (text_w - visible_w).max(0.0);
+                // Inline IME preedit anchor: the caret sits at the END OF THE
+                // QUERY (the `▏` in the label = width of `"/ " + query`), NOT
+                // at the end of the whole label — measuring the full label
+                // would land the composing text past the ` — N/M` suffix. So
+                // measure the prefix-only string, apply the SAME horizontal
+                // scroll the visible label uses, and clamp to the visible
+                // region so the composing text starts just past the caret
+                // instead of off the box edge.
+                let prefix_w = search
+                    .map(|s| {
+                        estimate_badge_text_width(
+                            &search_query_caret_prefix(s, search_preedit),
+                            search_font_size,
+                        )
+                    })
+                    .unwrap_or(text_w);
+                let caret_x =
+                    (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
+                search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
                     stack,
@@ -3709,7 +3819,7 @@ impl GpuRenderer {
                 px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
                 badge_bg,
                 [badge_w, badge_h],
-                READ_ONLY_BADGE_RADIUS,
+                self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
             if let Some(stack) = self.font_stack.as_ref() {
                 let native_em = stack
@@ -3721,8 +3831,14 @@ impl GpuRenderer {
                 let font_size =
                     self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
-                let baseline =
-                    badge_y + (badge_h + font_size * 0.8) * 0.5 + READ_ONLY_BADGE_BASELINE_NUDGE_Y;
+                let baseline = badge_y
+                    + (badge_h + font_size * 0.8) * 0.5
+                    + self.chrome_px(READ_ONLY_BADGE_BASELINE_NUDGE_Y);
+                // Pre-scale chrome paddings into locals BEFORE the
+                // `&mut self.glyph_atlas` borrow below, so we don't borrow
+                // `*self` immutably (chrome_px) while it's mutably borrowed.
+                let badge_pad_left = self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let badge_pad_right = self.chrome_px(READ_ONLY_BADGE_PAD_RIGHT);
                 let icon_layout = chrome_text::layout(
                     stack,
                     &mut wt,
@@ -3732,25 +3848,18 @@ impl GpuRenderer {
                     ChromeAttrs { bold: true, italic: false },
                     font_size,
                     native_em,
-                    (badge_x + SEARCH_BAR_PAD_LEFT, baseline),
+                    (badge_x + badge_pad_left, baseline),
                     (sw, sh),
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
-                let label_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    READ_ONLY_BADGE_LABEL,
-                    text_color,
-                    ChromeAttrs { bold: true, italic: false },
-                    font_size,
-                    native_em,
-                    (0.0, baseline),
-                    (sw, sh),
-                    Some(ChromeClip { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
-                );
-                let label_x = badge_x + badge_w - READ_ONLY_BADGE_PAD_RIGHT - label_layout.width_px;
+                // Place the label immediately after the lock icon (no big
+                // right-aligned gap): icon_x + icon width + the icon gap.
+                let label_x = badge_x
+                    + badge_pad_left
+                    + icon_layout.width_px
+                    + self.chrome_px(SEARCH_BAR_ICON_GAP);
+                let _ = badge_pad_right;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
@@ -3790,7 +3899,9 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_layout =
-            palette.and_then(|p| PaletteLayout::compute(p, sw, sh, self.panel_padding));
+            palette.and_then(|p| {
+                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor)
+            });
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -3894,7 +4005,8 @@ impl GpuRenderer {
                 let palette_native_em = palette_font_size;
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
-                let query_origin_x = layout.query_row.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
+                let query_origin_x =
+                    layout.query_row.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
@@ -3922,7 +4034,6 @@ impl GpuRenderer {
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
-                let row_h = sonicterm_ui::overlays::PALETTE_ROW_HEIGHT;
                 let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
                 for (i, label) in layout.row_labels.iter().enumerate() {
                     let Some(row) = layout.rows.get(i) else { continue };
@@ -3930,13 +4041,20 @@ impl GpuRenderer {
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
-                    let origin_x = row.rect.x + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                    let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
+                    let origin_x =
+                        row.rect.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                    // Vertically centre the label in the row. Use the row's
+                    // ACTUAL (DPI-scaled) height `row.rect.h`, NOT the unscaled
+                    // PALETTE_ROW_HEIGHT constant — mixing a logical-px height
+                    // with the scaled `row.rect.y` / `palette_font_size` pushed
+                    // the baseline off-centre at fractional DPI (the query row
+                    // already centres correctly via `query_row.h`). #palette
+                    let baseline_y = row.rect.y + (row.rect.h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
-                            - sonicterm_ui::overlays::PALETTE_ROW_PAD_X * 2.0
-                            - sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP)
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X) * 2.0
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP))
                             .max(0.0),
                         None => row.rect.w,
                     };
@@ -3959,7 +4077,7 @@ impl GpuRenderer {
                     );
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
-                            - sonicterm_ui::overlays::PALETTE_ROW_PAD_X
+                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X)
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = 180;
@@ -3985,10 +4103,16 @@ impl GpuRenderer {
                 // Empty-state placeholder + hint.
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
-                        + self.panel_padding
-                        + sonicterm_ui::overlays::PALETTE_ROW_PAD_X;
-                    let empty_y_top = layout.query_row.y + layout.query_row.h + self.panel_padding;
-                    let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
+                        + self.chrome_px(self.panel_padding)
+                        + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                    let empty_y_top = layout.query_row.y
+                        + layout.query_row.h
+                        + self.chrome_px(self.panel_padding);
+                    // No row rect here (empty state), so derive the scaled row
+                    // height via chrome_px — same DPI basis as the row path. #palette
+                    let empty_row_h = self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_HEIGHT);
+                    let empty_baseline_y =
+                        empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
@@ -4054,209 +4178,88 @@ impl GpuRenderer {
             }
         }
 
-        // -------- Keyboard shortcuts cheat sheet overlay --------------------
-        let cheatsheet_layout = cheatsheet.as_ref().map(|(state, bindings)| {
-            compute_cheatsheet_layout(state, bindings, sw, sh, self.panel_padding)
-        });
-        if let Some(layout) = &cheatsheet_layout {
-            let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
-            let accent_rgba = palette_chrome.accent;
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.scrim.x,
-                    layout.scrim.y,
-                    layout.scrim.w,
-                    layout.scrim.h,
+        // Inline IME preedit at the TERMINAL CURSOR (WezTerm-style): macOS does
+        // NOT draw the in-flight composition for a terminal, so the app must.
+        // When SEARCH is active the preedit is instead spliced into the search
+        // label (see search_bar_label above) and rendered as part of that
+        // string — so we skip the self-drawn overlay here to avoid drawing it
+        // twice / overlapping the ` — N/M` suffix. This block only handles the
+        // terminal-cursor case. Per-frame overlay (not row-cached); the
+        // FrameKey hashes `i.preedit()` so composition changes re-render.
+        let search_active = search_ime_anchor.is_some();
+        if !search_active && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
+            if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
+                let text = i.preedit();
+                // Body-matched, DPI-scaled font size (same as terminal text).
+                let font_size = self.raster_px(self.font_size);
+                let start_x = active_snapped_cell_x
+                    .get(grid.cursor.col as usize)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
+                let top_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                let line_h = self.cell_h;
+                // Per-char advance estimate mirrors the body/badge text path.
+                let pre_w = estimate_badge_text_width(text, font_size).max(self.cell_w);
+                let clip_to_pane = true;
+
+                // (1) Composing text glyphs — vertically centered in the
+                // line, nudged a hair right so it doesn't kiss the cell edge.
+                // No highlight background (user preference): just the text +
+                // an underline mark the in-flight run.
+                // native_em MUST equal font_size here. chrome_text scales each
+                // glyph tile by `font_size_px / native_em_px`; using cell_h
+                // (which includes line spacing, so cell_h > raster_px(font))
+                // made `scale < 1` and rendered the preedit visibly SMALLER
+                // than body text. Pass raster_px(font_size) for both so
+                // scale == 1 and the composing text matches the body size. #B14
+                let native_em = font_size;
+                let mut wt = stack.clone();
+                let text_pad = self.chrome_px(2.0);
+                let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
+                let preedit_fg = self.search_fg;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    font_size,
+                    native_em,
+                    &mut wt,
+                    text,
+                    preedit_fg,
+                    ChromeAttrs::default(),
+                    start_x + text_pad,
+                    baseline_y,
+                    [start_x, top_y, pre_w, line_h],
                     sw,
                     sh,
-                ),
-                color: palette_chrome.scrim,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.border.x,
-                    layout.border.y,
-                    layout.border.w,
-                    layout.border.h,
-                    sw,
-                    sh,
-                ),
-                color: palette_chrome.border_subtle,
-                size_px: [layout.border.w, layout.border.h],
-                radius_px: PALETTE_PANEL_RADIUS + PALETTE_BORDER,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: palette_chrome.bg_elevated,
-                size_px: [layout.bg.w, layout.bg.h],
-                radius_px: PALETTE_PANEL_RADIUS,
-                ..Default::default()
-            });
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(
-                    layout.query_row.x,
-                    layout.query_row.y,
-                    layout.query_row.w,
-                    layout.query_row.h,
-                    sw,
-                    sh,
-                ),
-                color: palette_chrome.bg_base,
-                size_px: [layout.query_row.w, layout.query_row.h],
-                radius_px: PALETTE_QUERY_RADIUS,
-                ..Default::default()
-            });
-            if let Some(sel) = layout.selected_row {
-                if let Some(row) = layout.rows.get(sel) {
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+
+                // (3) Underline quad — DPI-scaled accent line along the
+                // bottom of the composing run (the in-flight affordance).
+                let thickness = (2.0 * self.scale_factor).round().max(1.0);
+                let uy = top_y + line_h - thickness;
+                if clip_to_pane {
+                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                        (start_x, uy, pre_w, thickness),
+                        active_pane_x,
+                        active_pane_y,
+                        active_pane_w,
+                        active_pane_h,
+                    ) {
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                            color: self.hyperlink_underline,
+                            ..Default::default()
+                        });
+                    }
+                } else {
                     quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(row.x, row.y, row.w, row.h, sw, sh),
-                        color: premultiply([accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16]),
-                        size_px: [row.w, row.h],
-                        radius_px: PALETTE_ROW_RADIUS,
+                        rect: px_to_ndc(start_x, uy, pre_w, thickness, sw, sh),
+                        color: self.hyperlink_underline,
                         ..Default::default()
                     });
                 }
-            }
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.footer.x, layout.footer.y, layout.footer.w, 1.0, sw, sh),
-                color: palette_chrome.border_subtle,
-                ..Default::default()
-            });
-            // T14: cheatsheet query / rows / footer → chrome_text into
-            // the overlay glyph instance vec.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
-                // Query
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    &layout.query_label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.query_row.x + 12.0,
-                    layout.query_row.y + 2.0 + self.font_size * 0.8,
-                    [
-                        layout.query_row.x,
-                        layout.query_row.y,
-                        layout.query_row.w,
-                        layout.query_row.h,
-                    ],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-                // Rows
-                for (row, label) in layout.rows.iter().zip(layout.row_labels.iter()) {
-                    emit_overlay_text_glyphs(
-                        &mut self.glyph_atlas,
-                        stack,
-                        self.font_size,
-                        native_em,
-                        &mut wt,
-                        label,
-                        self.search_fg,
-                        ChromeAttrs::default(),
-                        row.x + 12.0,
-                        row.y + (row.h + self.font_size * 0.8) * 0.5,
-                        bounds_bg,
-                        sw,
-                        sh,
-                        &mut overlay_glyph_instances,
-                        None,
-                    );
-                }
-                // Footer
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size * 0.85,
-                    native_em,
-                    &mut wt,
-                    &layout.footer_label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.footer.x + 12.0,
-                    layout.footer.y + 8.0 + self.font_size * 0.85 * 0.8,
-                    [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-            }
-        }
-
-        // -------- IME preedit overlay --------------------------------------
-        let ime_layout = ime.and_then(|i| {
-            // #489: anchor IME preedit at the snapped cursor cell edge
-            // so the preedit underline lines up with the cursor cell.
-            let cursor_x = active_snapped_cell_x
-                .get(grid.cursor.col as usize)
-                .copied()
-                .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
-            let cursor_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
-            ImePreeditLayout::compute(i, cursor_x, cursor_y, self.cell_w, self.cell_h, sw, sh)
-        });
-        if let (Some(state), Some(layout)) = (ime, &ime_layout) {
-            quads_overlay.push(QuadInstance {
-                rect: px_to_ndc(layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h, sw, sh),
-                color: premultiply([0.10, 0.11, 0.14, 0.95]),
-                ..Default::default()
-            });
-            // Clip the preedit underline to the active pane (PR #270
-            // follow-up) — the underline anchors under the cursor cell
-            // and would otherwise paint into a neighbour split pane when
-            // the cursor sits near the pane's right edge.
-            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                (layout.underline.x, layout.underline.y, layout.underline.w, layout.underline.h),
-                active_pane_x,
-                active_pane_y,
-                active_pane_w,
-                active_pane_h,
-            ) {
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                    color: self.hyperlink_underline,
-                    ..Default::default()
-                });
-            }
-            // T14: IME preedit → chrome_text.
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    self.font_size,
-                    native_em,
-                    &mut wt,
-                    state.preedit(),
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    layout.bg.x + 4.0,
-                    layout.bg.y + 2.0 + self.font_size * 0.8,
-                    [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
             }
         }
 
@@ -4304,20 +4307,30 @@ impl GpuRenderer {
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
-            let scale = chip.scale.clamp(0.5, 2.0);
+            // #651 follow-up: two independent multipliers compose here.
+            // `chip.scale` is the tear-out ANIMATION ease (1.0 in-bar, 1.02
+            // on tear); `dpi` is the display scale factor. The chip's logical
+            // size + decorations must scale by DPI so it keeps a constant
+            // physical size across displays. `top_left` is already in physical
+            // px (cursor-relative, from the app layer) so it is NOT scaled —
+            // only the size and the size-derived centering offset are.
+            let dpi = self.scale_factor;
+            let scale = chip.scale.clamp(0.5, 2.0) * dpi;
             let w = CHIP_W * scale;
             let h = CHIP_H * scale;
             // Re-center the scaled chip so growth is centered around
             // the original anchor point (cursor-relative offset is
             // preserved by the caller in `top_left`).
-            let cx = chip.top_left.0 + CHIP_W * 0.5;
-            let cy = chip.top_left.1 + CHIP_H * 0.5;
+            let cx = chip.top_left.0 + CHIP_W * 0.5 * dpi;
+            let cy = chip.top_left.1 + CHIP_H * 0.5 * dpi;
             let x0 = cx - w * 0.5;
             let y0 = cy - h * 0.5;
 
             // Soft drop shadow: stack two dimmer quads with growing
             // offset to fake an 8px blur without a fragment shader.
+            // Offsets are logical px → scale by DPI (#651).
             for (off, alpha) in [(2.0_f32, 0.18_f32), (4.0_f32, 0.10_f32), (8.0_f32, 0.05_f32)] {
+                let off = off * dpi;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(x0 + off, y0 + off, w, h, sw, sh),
                     color: [0.0, 0.0, 0.0, alpha],
@@ -4329,12 +4342,14 @@ impl GpuRenderer {
             // the chip so the chip floats on top if they overlap.
             if let Some(lx) = chip.drop_line_x {
                 let (ly0, ly1) = chip.drop_line_y;
-                let lh = (ly1 - ly0).max(2.0);
+                let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
                 let mut line_color = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
                 line_color[3] = 0.95;
+                // 3px line centered on lx; both the half-width offset and the
+                // width are logical px scaled by DPI.
                 quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(lx - 1.5, ly0, 3.0, lh, sw, sh),
+                    rect: px_to_ndc(lx - 1.5 * dpi, ly0, 3.0 * dpi, lh, sw, sh),
                     color: line_color,
                     ..Default::default()
                 });
@@ -4369,8 +4384,10 @@ impl GpuRenderer {
                     let mut wt = stack.clone();
                     // Match the legacy TextArea geometry: left = x0 + 6,
                     // top = y0 + (h - font_size*0.85*1.2) * 0.5, clip to
-                    // chip body inset 4px.
-                    let chip_font_size = self.font_size * 0.85;
+                    // chip body inset 4px. Font size goes through raster_px and
+                    // the insets through dpi so the ghost title scales with the
+                    // chip on HiDPI displays (#651).
+                    let chip_font_size = self.raster_px(self.font_size * 0.85);
                     let top = y0 + ((h - chip_font_size * 1.2).max(0.0)) * 0.5;
                     let baseline_y = top + chip_font_size * 0.8;
                     let layout = chrome_text::layout(
@@ -4382,9 +4399,9 @@ impl GpuRenderer {
                         ChromeAttrs::default(),
                         chip_font_size,
                         native_em,
-                        (x0 + 6.0, baseline_y),
+                        (x0 + 6.0 * dpi, baseline_y),
                         (sw, sh),
-                        Some(ChromeClip { x: x0 + 4.0, y: y0, w: w - 8.0, h }),
+                        Some(ChromeClip { x: x0 + 4.0 * dpi, y: y0, w: w - 8.0 * dpi, h }),
                     );
                     overlay_glyph_instances.extend(layout.glyphs);
                 }
@@ -4398,7 +4415,7 @@ impl GpuRenderer {
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
-        // palette, cheatsheet, IME preedit, broadcast banner, drag-
+        // palette, IME preedit, broadcast banner, drag-
         // chip title, quick-select hints) via `chrome_text::layout`
         // earlier in this function. The atlas upload + per-pass draw
         // calls below carry those instances to the GPU.
@@ -4669,10 +4686,36 @@ impl GpuRenderer {
         // still paints quads (bg, cursor, underlines) so the frame is
         // visually coherent.
         mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
+        // Cmd-hovered URL cell range for this pane (viewport coords),
+        // already gated to the active pane by the caller. When a cell's
+        // (row, col) falls inside this span the glyph's foreground is
+        // overridden with `hovered_url_accent`. `None` = no recolor.
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        // Theme accent in linear-sRGB `[f32;4]` (alpha 1.0) used for the
+        // recolor above. Same color space the per-glyph `color` field
+        // already carries, so it is assigned with no conversion.
+        hovered_url_accent: [f32; 4],
     ) {
         if cells.is_empty() {
             return;
         }
+
+        // Resolve a monochrome glyph's foreground to linear-sRGB rgba,
+        // swapping in the theme accent when this cell sits inside the
+        // Cmd-hovered URL span. `row` is fixed for the whole run; only
+        // `col` varies per glyph. Used by every non-color emit path
+        // below so the recolor is applied uniformly (ASCII fast path,
+        // char-fallback, and the main shaped path). Color glyphs
+        // (`info.is_color`) bypass this and keep their own tile color.
+        let resolve_fg = |col: u16, base: ChromeColor| -> [f32; 4] {
+            match hovered_url_cells {
+                // Only the ACTIVE (modifier-held) hover recolors glyphs to the
+                // accent. A plain-hover hint leaves the text color alone and is
+                // marked by the yellow underline only. #URL-hint
+                Some(h) if h.active && h.contains(row, col) => hovered_url_accent,
+                _ => chrome_color_to_linear_rgba(base),
+            }
+        };
 
         // ASCII fast path: every cell is printable-ASCII (0x20..=0x7E)
         // with no cluster extras and no ligature trigger, so the shaper
@@ -4726,7 +4769,7 @@ impl GpuRenderer {
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba = chrome_color_to_linear_rgba(color);
+                let rgba = resolve_fg(*col, color);
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -5001,11 +5044,12 @@ impl GpuRenderer {
                 // block_sprite emits BGRA tiles. The atlas reports
                 // `is_color = true`, so the shader uses the tile
                 // unmodulated; set `color` to white as a safety net
-                // mirroring the color-emoji path.
+                // mirroring the color-emoji path. Monochrome block
+                // glyphs honour the Cmd-hover URL recolor like text.
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    chrome_color_to_linear_rgba(color)
+                    resolve_fg(g.lead_col, color)
                 };
                 tracing::debug!(
                     target: "sonic::render::glyph",
@@ -5090,7 +5134,7 @@ impl GpuRenderer {
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
-                    chrome_color_to_linear_rgba(color)
+                    resolve_fg(g.lead_col, color)
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
@@ -5154,7 +5198,7 @@ impl GpuRenderer {
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
-                chrome_color_to_linear_rgba(color)
+                resolve_fg(g.lead_col, color)
             };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
@@ -5799,6 +5843,7 @@ pub fn command_status_hash(status: &sonicterm_ui::tabs::CommandStatus, now: Inst
 #[allow(clippy::too_many_arguments)]
 pub fn selection_quad_rects(
     sel: &sonicterm_ui::selection::Selection,
+    view_top_abs: u64,
     rows: u16,
     cols: u16,
     origin_x: f32,
@@ -5811,25 +5856,39 @@ pub fn selection_quad_rects(
         return Vec::new();
     }
     let (a, b) = sel.normalized();
-    let mut out = Vec::with_capacity(usize::from(b.0.saturating_sub(a.0)) + 1);
+    let mut out = Vec::with_capacity(usize::from(rows));
     // #489: derive each row's x/w from the shared snapped-edge cache so
     // selection rects share device-pixel edges with adjacent glyph
     // cells at fractional DPI. Empty-cache fallback preserves the old
     // raw-arithmetic behavior for callers (debug/test helpers) that
     // don't carry a real cache; integer scales make the two identical.
     let raw_fallback = snapped_cell_x.is_empty();
-    for r in a.0..=b.0 {
-        if r >= rows {
-            break;
-        }
-        let col_a = if r == a.0 { a.1 } else { 0 };
+    // Selection rows are scrollback-ABSOLUTE. Only the absolute rows that
+    // intersect the viewport produce quads, so bound the walk to
+    // `[max(a.0, view_top_abs) ..= min(b.0, view_top_abs + rows - 1)]`.
+    // This keeps per-frame cost O(viewport rows) even when the selection
+    // spans a huge multi-screen region of scrollback. The first/last-row
+    // column tests still compare against the true `a.0`/`b.0` (which may
+    // sit off-screen), so partial first/last rows render correctly.
+    if rows == 0 {
+        return out;
+    }
+    let view_bottom_abs = view_top_abs + (rows as u64 - 1);
+    let first_abs = a.0.max(view_top_abs);
+    let last_abs = b.0.min(view_bottom_abs);
+    if first_abs > last_abs {
+        return out; // selection entirely above or below the viewport
+    }
+    for abs_r in first_abs..=last_abs {
+        let vr = (abs_r - view_top_abs) as u16;
+        let col_a = if abs_r == a.0 { a.1 } else { 0 };
         // Note: do NOT clamp `col_b` to `cols - 1` here. The selection may
         // legitimately reach the grid's last column, and the per-pane clip
         // below trims any pixel overhang. Clamping pre-clip would silently
         // shrink the selection on the last row when the user dragged past
         // the rightmost cell — which is precisely the path that hides
         // bugs like the split-pane bleed-through.
-        let col_b = if r == b.0 { b.1 } else { cols.saturating_sub(1) };
+        let col_b = if abs_r == b.0 { b.1 } else { cols.saturating_sub(1) };
         if col_b < col_a {
             continue;
         }
@@ -5847,7 +5906,7 @@ pub fn selection_quad_rects(
             let hi = snapped_cell_x[cache_end as usize];
             (lo, hi - lo)
         };
-        let y = origin_y + f32::from(r) * cell_h;
+        let y = origin_y + f32::from(vr) * cell_h;
         out.push((x, y, w, cell_h));
     }
     out

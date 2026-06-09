@@ -663,10 +663,9 @@ max_crash_age_days = 2
 [appearance]
 # Window/backdrop/compositor appearance. This is separate from [window] padding:
 # - [window].padding_* controls terminal text margins.
-# - panel_padding controls the inside padding of pop-up panels (command palette,
-#   cheatsheet, etc.).
+# - panel_padding controls the inside padding of pop-up panels (command palette).
 #
-# Panel layout (for command palette / cheatsheet):
+# Panel layout (for command palette):
 #
 #   +---------------- floating panel ----------------+
 #   | panel_padding                                  |

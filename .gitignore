@@ -27,3 +27,8 @@ Thumbs.db
 *.log
 crash-reports/
 /rust_out
+
+# Local dev docs (specs / plans / reviews) — never commit these
+docs/specs/
+docs/plans/
+docs/reviews/

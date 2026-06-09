@@ -1,8 +1,8 @@
 //! T13 (wezterm-takeover G3): wezterm-driven chrome text helper.
 //!
 //! Replaces the 11 `legacy-chrome TextRenderer` chrome sites in `core.rs`
-//! (tab titles, search input, palette query/rows/footer, cheatsheet
-//! query/rows/footer, IME preedit, broadcast banner, drag-chip title)
+//! (tab titles, search input, palette query/rows/footer, IME preedit,
+//! broadcast banner, drag-chip title)
 //! plus the `tab_spans.rs` the legacy chrome layer path. Every chrome string now flows
 //! through the same `FontStack` raster path + `GlyphAtlas` + `TextPipeline`
 //! path the terminal grid uses — no second font system, no second

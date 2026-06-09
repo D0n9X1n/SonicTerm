@@ -43,7 +43,7 @@ impl App {
         // We intentionally do NOT use `try_lock` here: dropping a wheel
         // event because the PTY parser is mid-burst would be a worse UX
         // than briefly waiting for it.
-        let (live_top, current_view_top, is_alt) = {
+        let (live_top, current_view_top) = {
             let parser = pane.parser.lock();
             let grid = parser.grid();
             if grid.is_alt() {
@@ -51,9 +51,8 @@ impl App {
             }
             let live_top = grid.scrollback_len() as u64;
             let current = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-            (live_top, current, false)
+            (live_top, current)
         };
-        let _ = is_alt;
         let new_view_top: u64 = if delta_lines < 0 {
             current_view_top.saturating_sub((-(delta_lines as i64)) as u64)
         } else {

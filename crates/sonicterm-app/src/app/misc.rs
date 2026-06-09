@@ -18,7 +18,7 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -67,6 +67,131 @@ impl App {
         sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
+    /// Child-window mirror of [`Self::hyperlink_uri_at`]: resolve the URI
+    /// (OSC 8 first, then plain-text scan) under `(row, col)` in the active
+    /// pane of the child window `win_id`. Used for modifier-click open. (#pane-url)
+    pub(super) fn child_hyperlink_uri_at(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+        col: u16,
+    ) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        let r = grid.row(row);
+        if let Some(hid) = r[col as usize].hyperlink() {
+            let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
+            drop(guard);
+            return uri;
+        }
+        let mut row_text = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            row_text.push(r[i as usize].ch);
+        }
+        drop(guard);
+        sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
+    }
+
+    /// Convert a VIEWPORT row (0 = top visible row, as returned by
+    /// `GpuRenderer::pixel_to_cell`) to a scrollback-ABSOLUTE row for the
+    /// focused pane, so a `Selection` tracks the same TEXT as the viewport
+    /// scrolls. Resolves the pane's view top under the same `try_lock`
+    /// discipline as the selection helpers (CLAUDE.md §4) and drops the lock
+    /// before returning. Returns `None` when there is no active pane or the
+    /// parser is busy; callers fall back to treating the viewport row as
+    /// absolute (correct while unscrolled).
+    pub(super) fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        drop(guard);
+        Some(view_top + viewport_row as u64)
+    }
+
+    /// Compute a word selection (double-click) at scrollback-ABSOLUTE
+    /// `abs_row` / `col` from the focused pane's grid. Locks the parser only
+    /// long enough to read the grid and build the `Selection`, drops it, then
+    /// returns the owned (Copy) value — so callers never hold the parser lock
+    /// across `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
+    /// selection when the parser is busy.
+    pub(super) fn word_selection_at(&self, abs_row: u64, col: u16) -> Selection {
+        let Some(pane) = self.active_pane() else {
+            return Selection::new(abs_row, col);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(abs_row, col);
+        };
+        let sel = Selection::word_at(guard.grid(), abs_row, col);
+        drop(guard);
+        sel
+    }
+
+    /// Compute a line selection (triple-click) at scrollback-ABSOLUTE
+    /// `abs_row` from the focused pane's grid. Same lock discipline as
+    /// [`Self::word_selection_at`].
+    pub(super) fn line_selection_at(&self, abs_row: u64) -> Selection {
+        let Some(pane) = self.active_pane() else {
+            return Selection::new(abs_row, 0);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(abs_row, 0);
+        };
+        let sel = Selection::line_at(guard.grid(), abs_row);
+        drop(guard);
+        sel
+    }
+
+    /// Word-mode drag (double-click then drag): union of the word at the
+    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
+    /// `cursor_viewport_row` is the live viewport row from `pixel_to_cell`;
+    /// it is converted to an absolute row against the pane's current view top
+    /// inside the same lock. Returns `None` when there is no active pane or
+    /// the parser is busy — the caller then SKIPS this move rather than
+    /// collapsing the selection (a cell-extend would shrink the word/line
+    /// region). Same `try_lock`-then-drop discipline as
+    /// [`Self::word_selection_at`] (CLAUDE.md §4): the grid lock is held
+    /// only to build the owned (Copy) `Selection`, never across redraw.
+    pub(super) fn word_drag_selection_at(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
+        drop(guard);
+        Some(sel)
+    }
+
+    /// Line-mode drag (triple-click then drag): whole rows from the
+    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
+    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
+    /// Returns `None` when there is no active pane or the parser is busy —
+    /// the caller SKIPS this move (see [`Self::word_drag_selection_at`]).
+    pub(super) fn line_drag_selection_at(
+        &self,
+        anchor_row: u64,
+        cursor_viewport_row: u16,
+    ) -> Option<Selection> {
+        let pane = self.active_pane()?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
+        drop(guard);
+        Some(sel)
+    }
+
     /// OSC 8-only lookup: returns the cell's interned hyperlink URI,
     /// ignoring auto-detected plain-text URLs. Used by the hover
     /// pointer-cursor logic so OSC 8 keeps its existing unconditional
@@ -113,11 +238,17 @@ impl App {
         if let Some(ws) = self.main_mut() {
             ws.hovered_url = new_hover;
         }
-        // Pointer-cursor transition: auto-detected URL needs the
-        // open-URL modifier held; OSC 8 keeps its always-on pointer.
+        // Pointer-cursor transition: an auto-detected URL only flips to the
+        // pointer when it's ACTIVE (open-URL modifier held) — a plain-hover
+        // hint keeps the text cursor (it's not clickable yet). OSC 8 keeps
+        // its always-on pointer below.
         let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let has_hover = self.main().and_then(|ws| ws.hovered_url.as_ref()).is_some();
-        let want_pointer = has_hover
+        let has_active_hover = self
+            .main()
+            .and_then(|ws| ws.hovered_url.as_ref())
+            .map(|h| h.active)
+            .unwrap_or(false);
+        let want_pointer = has_active_hover
             || self
                 .main_renderer()
                 .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
@@ -140,10 +271,27 @@ impl App {
     }
 
     fn compute_current_hovered_url(&self) -> Option<super::hovered_url::HoveredUrl> {
-        if !self.url_open_modifier_held() {
+        // Two-tier hover: a URL under the cursor is detected REGARDLESS of the
+        // modifier so plain hover can show a yellow hint underline. The
+        // `active` flag (modifier held) is what upgrades it to the clickable
+        // accent look + pointer cursor downstream. Clicking still goes through
+        // the modifier-gated `dispatch_modifier_click`, so detecting without
+        // the modifier never makes a URL openable on a plain click.
+        let cursor_pos = self.main()?.cursor_pos;
+        // Gate to the ACTIVE pane: `pixel_to_cell` hit-tests against the
+        // window, but `focused_pane_row_text` (below) reads the active pane's
+        // grid. In a split, hovering an INACTIVE pane at a row/col that
+        // happens to match a URL in the active pane would otherwise highlight
+        // the active pane's URL. Only proceed when the cursor is over the
+        // active pane itself. (#660 review)
+        let active_id = self
+            .main()
+            .and_then(|ws| ws.tab_states.get(ws.tabs.active_index()))
+            .map(|st| st.active_pane);
+        let hit = self.pane_at_cursor(cursor_pos.0 as f32, cursor_pos.1 as f32);
+        if hit != active_id {
             return None;
         }
-        let cursor_pos = self.main()?.cursor_pos;
         let r = self.main_renderer()?;
         let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
         // OSC 8 has its own affordance — don't double up.
@@ -151,7 +299,9 @@ impl App {
             return None;
         }
         let row_text = self.focused_pane_row_text(row)?;
-        super::hovered_url::hovered_from_row(&row_text, row, col)
+        let mut hov = super::hovered_url::hovered_from_row(&row_text, row, col)?;
+        hov.active = self.url_open_modifier_held();
+        Some(hov)
     }
     /// True iff the platform "open this in the browser" modifier is held.
     /// macOS: Cmd (super). Windows / Linux: Ctrl.
@@ -161,6 +311,135 @@ impl App {
             mods.super_key()
         } else {
             mods.control_key()
+        }
+    }
+
+    // ── Child-window Cmd-hover URL (#pane-url) ──────────────────────────
+    // Mirrors the main-window hovered-URL affordance for torn-out windows
+    // (which previously rendered `hovered_url_cells: None` and had no
+    // refresh/open path). Reads the child's active-pane grid.
+
+    fn child_active_pane(&self, win_id: winit::window::WindowId) -> Option<&super::PaneState> {
+        let child = self.windows.get(&win_id)?;
+        let tab_idx = child.tabs.active_index();
+        let active_id = child.tab_states.get(tab_idx)?.active_pane;
+        child.panes.get(&active_id)
+    }
+
+    fn child_osc8_uri_at(&self, win_id: winit::window::WindowId, row: u16, col: u16) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        let hid = grid.row(row)[col as usize].hyperlink()?;
+        guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
+    }
+
+    fn child_focused_pane_row_text(&self, win_id: winit::window::WindowId, row: u16) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows {
+            return None;
+        }
+        let r = grid.row(row);
+        let mut s = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            s.push(r[i as usize].ch);
+        }
+        Some(s)
+    }
+
+    pub(super) fn child_url_open_modifier_held(&self, win_id: winit::window::WindowId) -> bool {
+        let mods = self.windows.get(&win_id).map(|c| c.modifiers).unwrap_or_default();
+        if cfg!(target_os = "macos") {
+            mods.super_key()
+        } else {
+            mods.control_key()
+        }
+    }
+
+    fn compute_child_hovered_url(
+        &self,
+        win_id: winit::window::WindowId,
+    ) -> Option<super::hovered_url::HoveredUrl> {
+        let child = self.windows.get(&win_id)?;
+        let cursor_pos = child.cursor_pos;
+        let active_id = child
+            .tab_states
+            .get(child.tabs.active_index())
+            .map(|st| st.active_pane);
+        // Gate to the active pane (same split rationale as the main path).
+        let hit = {
+            let mut found = None;
+            for (id, rect) in App::compute_pane_rects_for(child) {
+                let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+                if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
+                    found = Some(id);
+                    break;
+                }
+            }
+            found
+        };
+        if hit != active_id {
+            return None;
+        }
+        let r = child.renderer.as_ref()?;
+        let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
+        if self.child_osc8_uri_at(win_id, row, col).is_some() {
+            return None;
+        }
+        let row_text = self.child_focused_pane_row_text(win_id, row)?;
+        let mut hov = super::hovered_url::hovered_from_row(&row_text, row, col)?;
+        hov.active = self.child_url_open_modifier_held(win_id);
+        Some(hov)
+    }
+
+    /// Recompute the child window's hovered URL + pointer cursor. Call on
+    /// CursorMoved and ModifiersChanged in the child handler.
+    pub(super) fn refresh_hovered_url_in_child(&mut self, win_id: winit::window::WindowId) {
+        let new_hover = self.compute_child_hovered_url(win_id);
+        let prev = self.windows.get(&win_id).and_then(|c| c.hovered_url.clone());
+        let changed = new_hover != prev;
+        if let Some(c) = self.windows.get_mut(&win_id) {
+            c.hovered_url = new_hover;
+        }
+        let has_active_hover = self
+            .windows
+            .get(&win_id)
+            .and_then(|c| c.hovered_url.as_ref())
+            .map(|h| h.active)
+            .unwrap_or(false);
+        let cursor_pos = self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
+        let want_pointer = has_active_hover
+            || self
+                .windows
+                .get(&win_id)
+                .and_then(|c| c.renderer.as_ref())
+                .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
+                .and_then(|(row, col)| self.child_osc8_uri_at(win_id, row, col))
+                .is_some();
+        let current_hover_link = self.windows.get(&win_id).map(|c| c.hover_link).unwrap_or(false);
+        if want_pointer != current_hover_link {
+            if let Some(c) = self.windows.get_mut(&win_id) {
+                c.hover_link = want_pointer;
+            }
+            if let Some(c) = self.windows.get(&win_id) {
+                if let Some(w) = c.window.as_ref() {
+                    w.set_cursor(if want_pointer {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
+                }
+            }
+        }
+        if changed {
+            if let Some(c) = self.windows.get(&win_id) {
+                c.request_redraw();
+            }
         }
     }
     pub(super) fn open_ssh_pane(&mut self, target: &str) {
@@ -453,6 +732,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -470,6 +754,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);

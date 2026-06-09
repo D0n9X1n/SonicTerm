@@ -1,7 +1,7 @@
 //! Pure layout helpers for the three state-only overlays drawn over the
 //! terminal grid:
 //!
-//! 1. Command palette — centered modal (~1360×460) with a query input row
+//! 1. Command palette — centered modal (~520×460) with a query input row
 //!    and a filtered action list. State lives in
 //!    [`crate::command_palette::CommandPalette`].
 //! 2. Search bar — bottom-right single-line status with `N/M` match
@@ -30,7 +30,7 @@ use crate::tabbar_view::Rect;
 // stay self-documenting.
 
 /// Ideal modal width in physical pixels (Raycast-style redesign).
-pub const PALETTE_WIDTH: f32 = 1360.0;
+pub const PALETTE_WIDTH: f32 = 520.0;
 
 /// Ideal modal height in physical pixels.
 pub const PALETTE_HEIGHT: f32 = 460.0;
@@ -38,7 +38,7 @@ pub const PALETTE_HEIGHT: f32 = 460.0;
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
 /// `viewport_w - 48`, whichever is smaller (see [`PaletteLayout::compute`]).
-pub const PALETTE_MAX_WIDTH: f32 = 1440.0;
+pub const PALETTE_MAX_WIDTH: f32 = 560.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
@@ -60,17 +60,17 @@ pub const PALETTE_QUERY_HEIGHT: f32 = 52.0;
 pub const PALETTE_QUERY_PAD_X: f32 = 16.0;
 
 /// Vertical padding inside the query field.
-pub const PALETTE_QUERY_PAD_Y: f32 = 12.0;
+pub const PALETTE_QUERY_PAD_Y: f32 = 10.0;
 
 /// Search icon size + offset inside the query field.
 pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 34.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 4.0;
+pub const PALETTE_ROW_GAP: f32 = 3.0;
 
 /// Horizontal padding inside each row.
 pub const PALETTE_ROW_PAD_X: f32 = 18.0;
@@ -104,19 +104,19 @@ pub const SEARCH_BAR_MARGIN: f32 = 12.0;
 pub const SEARCH_BAR_WIDTH: f32 = 600.0;
 
 /// Minimum width of the search bar before query text expands it.
-pub const SEARCH_BAR_MIN_WIDTH: f32 = 300.0;
+pub const SEARCH_BAR_MIN_WIDTH: f32 = 200.0;
 
 /// Left padding inside the search/read-only badges.
 pub const SEARCH_BAR_PAD_LEFT: f32 = 20.0;
 
 /// Right padding inside the search/read-only badges.
-pub const SEARCH_BAR_PAD_RIGHT: f32 = 10.0;
+pub const SEARCH_BAR_PAD_RIGHT: f32 = 15.0;
 
 /// Gap between the fixed leading Nerd Font icon and text.
 pub const SEARCH_BAR_ICON_GAP: f32 = 10.0;
 
 /// Height of the small top-right search bar.
-pub const SEARCH_BAR_HEIGHT: f32 = 44.0;
+pub const SEARCH_BAR_HEIGHT: f32 = 26.0;
 
 /// Layout of the command-palette modal.
 #[derive(Debug, Clone)]
@@ -190,55 +190,66 @@ impl PaletteLayout {
         window_w: f32,
         window_h: f32,
         panel_padding: f32,
+        scale: f32,
     ) -> Option<PaletteLayout> {
         if !palette.is_open() {
             return None;
         }
-        let panel_padding = panel_padding.max(0.0);
-        // Spec: width is `min(1440, viewport_w - 48)`, ideal 1360.
-        // Height: `min(520, viewport_h - 96)`, ideal 460.
-        let modal_w = PALETTE_WIDTH.min(PALETTE_MAX_WIDTH).min((window_w - 48.0).max(160.0));
-        let modal_h = PALETTE_HEIGHT.min(PALETTE_MAX_HEIGHT).min((window_h - 96.0).max(120.0));
+        // DPI scale for SIZE terms only. Window-relative POSITION terms
+        // (centering, top ratio/min, the `window_w - 48` / `window_h - 96`
+        // clamps) stay in window pixels and are NOT multiplied by `s`.
+        let s = scale.max(0.01);
+        // panel_padding is a caller-supplied inset that contributes to the
+        // inner content size, so it scales with the other SIZE terms.
+        let panel_padding = panel_padding.max(0.0) * s;
+        let border_px = PALETTE_BORDER * s;
+        // Spec: width is `min(560, viewport_w - 48)`, ideal 520.
+        // Height: `min(520, viewport_h - 96)`, ideal 460. The ideal/max
+        // SIZE bounds scale; the viewport-relative clamp does not.
+        let modal_w =
+            (PALETTE_WIDTH * s).min(PALETTE_MAX_WIDTH * s).min((window_w - 48.0).max(160.0));
+        let modal_h =
+            (PALETTE_HEIGHT * s).min(PALETTE_MAX_HEIGHT * s).min((window_h - 96.0).max(120.0));
         let border_x = ((window_w - modal_w) * 0.5).max(0.0);
         let border_y =
             (window_h * PALETTE_TOP_RATIO).max(PALETTE_TOP_MIN).min((window_h - modal_h).max(0.0));
         let scrim = Rect { x: 0.0, y: 0.0, w: window_w, h: window_h };
         let border = Rect { x: border_x, y: border_y, w: modal_w, h: modal_h };
         let bg = Rect {
-            x: border.x + PALETTE_BORDER,
-            y: border.y + PALETTE_BORDER,
-            w: (border.w - PALETTE_BORDER * 2.0).max(0.0),
-            h: (border.h - PALETTE_BORDER * 2.0).max(0.0),
+            x: border.x + border_px,
+            y: border.y + border_px,
+            w: (border.w - border_px * 2.0).max(0.0),
+            h: (border.h - border_px * 2.0).max(0.0),
         };
         let query_row = Rect {
             x: bg.x + panel_padding,
             y: bg.y + panel_padding,
             w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_QUERY_HEIGHT,
+            h: PALETTE_QUERY_HEIGHT * s,
         };
         let query_icon = Rect {
-            x: query_row.x + PALETTE_QUERY_ICON_X,
-            y: query_row.y + (query_row.h - PALETTE_QUERY_ICON_SIZE) * 0.5,
-            w: PALETTE_QUERY_ICON_SIZE,
-            h: PALETTE_QUERY_ICON_SIZE,
+            x: query_row.x + PALETTE_QUERY_ICON_X * s,
+            y: query_row.y + (query_row.h - PALETTE_QUERY_ICON_SIZE * s) * 0.5,
+            w: PALETTE_QUERY_ICON_SIZE * s,
+            h: PALETTE_QUERY_ICON_SIZE * s,
         };
+        let footer_h = PALETTE_FOOTER_HEIGHT * s;
         let footer = Rect {
             x: bg.x,
-            y: (bg.y + bg.h - PALETTE_FOOTER_HEIGHT).max(query_row.y + query_row.h),
+            y: (bg.y + bg.h - footer_h).max(query_row.y + query_row.h),
             w: bg.w,
-            h: PALETTE_FOOTER_HEIGHT,
+            h: footer_h,
         };
 
         // Action list region (everything between the query row and the footer).
+        let row_height = PALETTE_ROW_HEIGHT * s;
+        let row_gap = PALETTE_ROW_GAP * s;
         let list_top = query_row.y + query_row.h + panel_padding;
         let list_bottom = footer.y - panel_padding;
         let avail = (list_bottom - list_top).max(0.0);
-        let row_stride = PALETTE_ROW_HEIGHT + PALETTE_ROW_GAP;
-        let max_rows = if row_stride > 0.0 {
-            ((avail + PALETTE_ROW_GAP) / row_stride).floor() as usize
-        } else {
-            0
-        };
+        let row_stride = row_height + row_gap;
+        let max_rows =
+            if row_stride > 0.0 { ((avail + row_gap) / row_stride).floor() as usize } else { 0 };
 
         // Publish viewport size to the state so the next key press can
         // clamp scroll_offset correctly.
@@ -259,7 +270,7 @@ impl PaletteLayout {
                 x: bg.x + panel_padding,
                 y: list_top + (i as f32) * row_stride,
                 w: (bg.w - panel_padding * 2.0).max(0.0),
-                h: PALETTE_ROW_HEIGHT,
+                h: row_height,
             };
             rows.push(PaletteRow { item_index, rect: r });
             if let Some(a) = visible.get(item_index) {
@@ -351,8 +362,8 @@ impl SearchBarLayout {
     /// responsible for picking colors and drawing the label produced by
     /// [`search_bar_label`].
     #[must_use]
-    pub fn compute(window_w: f32, window_h: f32, content_w: f32) -> SearchBarLayout {
-        Self::compute_at_row(window_w, window_h, content_w, 0)
+    pub fn compute(window_w: f32, window_h: f32, content_w: f32, scale: f32) -> SearchBarLayout {
+        Self::compute_at_row(window_w, window_h, content_w, 0, scale)
     }
 
     #[must_use]
@@ -361,14 +372,22 @@ impl SearchBarLayout {
         window_h: f32,
         content_w: f32,
         row: u8,
+        scale: f32,
     ) -> SearchBarLayout {
+        // SIZE terms scale; window-relative POSITION terms (the
+        // SEARCH_BAR_MARGIN edge offset, x, row_y) stay in window pixels.
+        let s = scale.max(0.01);
         let row = row.min(1);
-        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_LEFT + SEARCH_BAR_PAD_RIGHT)
-            .clamp(SEARCH_BAR_MIN_WIDTH, SEARCH_BAR_WIDTH);
+        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_LEFT * s + SEARCH_BAR_PAD_RIGHT * s)
+            .clamp(SEARCH_BAR_MIN_WIDTH * s, SEARCH_BAR_WIDTH * s);
         let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
-        let h = SEARCH_BAR_HEIGHT.min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
+        let h = (SEARCH_BAR_HEIGHT * s).min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
         let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
-        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN);
+        // Row stacking: the per-row advance (bar height + gap) is a SIZE term
+        // and must scale with DPI — otherwise row 1 (search bar under the
+        // read-only badge) overlaps the DPI-scaled badge at scale > 1. Only the
+        // initial top margin stays a window-anchored offset.
+        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
         let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
@@ -387,10 +406,29 @@ impl SearchBarLayout {
 /// the bar shows `0/0`. An empty query renders as `/ ` so the user sees
 /// the prompt.
 #[must_use]
-pub fn search_bar_label(search: &SearchState) -> String {
+pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|i| i + 1).unwrap_or(0);
-    format!("/ {}▏ — {}/{}", search.query, cur, total)
+    // The in-flight IME composition is spliced in right after the committed
+    // query (before the ▏ caret), so the whole bar renders as one continuous
+    // string and the ` — N/M` counter flows to the RIGHT of the composition
+    // instead of being overlapped by a separately-drawn preedit. (#B14)
+    format!("/ {}{}▏ — {}/{}", search.query, preedit, cur, total)
+}
+
+/// The portion of [`search_bar_label`] that precedes the caret: the `/ `
+/// prompt prefix plus the raw query. Measuring this string's width gives the
+/// x-offset of the inline-composition caret (the `▏` in the full label) from
+/// the start of the label text — i.e. where the IME preedit and the OS
+/// candidate window should anchor, just past the typed query and *before* the
+/// `▏ — N/M` match-counter suffix.
+///
+/// Both the inline preedit overlay ([`sonicterm-gpu`]) and the OS candidate
+/// area ([`sonicterm-app`]) measure this same string so they agree on the
+/// caret position regardless of how long the suffix grows.
+#[must_use]
+pub fn search_query_caret_prefix(search: &SearchState, preedit: &str) -> String {
+    format!("/ {}{}", search.query, preedit)
 }
 
 #[cfg(test)]
@@ -399,22 +437,98 @@ mod tests {
 
     #[test]
     fn search_bar_uses_300_to_600_width_window() {
-        let small = SearchBarLayout::compute(1000.0, 800.0, 10.0);
+        let small = SearchBarLayout::compute(1000.0, 800.0, 10.0, 1.0);
         assert_eq!(small.border.w, SEARCH_BAR_MIN_WIDTH);
 
-        let medium = SearchBarLayout::compute(1000.0, 800.0, 360.0);
+        let medium = SearchBarLayout::compute(1000.0, 800.0, 360.0, 1.0);
         assert!(medium.border.w > SEARCH_BAR_MIN_WIDTH);
         assert!(medium.border.w < SEARCH_BAR_WIDTH);
 
-        let large = SearchBarLayout::compute(1000.0, 800.0, 1000.0);
+        let large = SearchBarLayout::compute(1000.0, 800.0, 1000.0, 1.0);
         assert_eq!(large.border.w, SEARCH_BAR_WIDTH);
     }
 
     #[test]
     fn search_bar_second_row_sits_below_first_row() {
-        let first = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 0);
-        let second = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 1);
+        let first = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 0, 1.0);
+        let second = SearchBarLayout::compute_at_row(1000.0, 800.0, 10.0, 1, 1.0);
         assert!(second.border.y > first.border.y);
+    }
+
+    #[test]
+    fn search_bar_row1_clears_dpi_scaled_readonly_badge() {
+        // Regression (#657-adjacent): at scale 2.0 the read-only badge is
+        // SEARCH_BAR_HEIGHT*2 tall anchored at SEARCH_BAR_MARGIN. The search
+        // bar at row 1 must sit BELOW the badge's bottom edge, not overlap it.
+        let scale = 2.0;
+        let badge_bottom = SEARCH_BAR_MARGIN + SEARCH_BAR_HEIGHT * scale;
+        let row1 =
+            SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
+        assert!(
+            row1.border.y >= badge_bottom,
+            "search bar row1 (y={}) overlaps the scaled badge (bottom={})",
+            row1.border.y,
+            badge_bottom
+        );
+    }
+
+    #[test]
+    fn search_bar_height_scales_2x_on_large_window() {
+        // Window is huge so the window-relative clamps never bind; only
+        // the SIZE terms drive the result and they should double at 2x.
+        let one = SearchBarLayout::compute(4000.0, 2400.0, 5000.0, 1.0);
+        let two = SearchBarLayout::compute(4000.0, 2400.0, 5000.0, 2.0);
+        assert_eq!(two.border.h, one.border.h * 2.0);
+        // Content saturates the cap at both scales, so the width is the
+        // scaled SEARCH_BAR_WIDTH and must double too.
+        assert_eq!(one.border.w, SEARCH_BAR_WIDTH);
+        assert_eq!(two.border.w, SEARCH_BAR_WIDTH * 2.0);
+    }
+
+    #[test]
+    fn search_bar_clamp_binds_on_small_window_at_2x() {
+        // 2x scale would want an 88px-tall, up-to-1200px-wide bar, but the
+        // 700x400 window forces the clamp. The bar must stay inside it.
+        let layout = SearchBarLayout::compute(700.0, 400.0, 100.0, 2.0);
+        assert!(layout.border.x + layout.border.w <= 700.0);
+        assert!(layout.border.y + layout.border.h <= 400.0);
+        assert!(layout.bg.x + layout.bg.w <= 700.0);
+        assert!(layout.bg.y + layout.bg.h <= 400.0);
+    }
+
+    #[test]
+    fn search_bar_position_is_window_anchored() {
+        // The right-edge gap is a window-relative POSITION term: it equals
+        // SEARCH_BAR_MARGIN regardless of scale.
+        let one = SearchBarLayout::compute(4000.0, 2400.0, 200.0, 1.0);
+        let two = SearchBarLayout::compute(4000.0, 2400.0, 200.0, 2.0);
+        assert_eq!(4000.0 - (one.border.x + one.border.w), SEARCH_BAR_MARGIN);
+        assert_eq!(4000.0 - (two.border.x + two.border.w), SEARCH_BAR_MARGIN);
+    }
+
+    #[test]
+    fn caret_prefix_is_label_text_up_to_the_caret_marker() {
+        // The prefix must equal the slice of `search_bar_label` that precedes
+        // the `▏` caret, so both IME anchor sites land at the end of the query
+        // (not after the ` — N/M` suffix). Build the label, split on `▏`, and
+        // assert the prefix matches the leading half verbatim.
+        let mut search = SearchState::new();
+        search.query = "ni hao".to_string();
+        let label = search_bar_label(&search, "");
+        let prefix = search_query_caret_prefix(&search, "");
+        let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
+        assert_eq!(prefix, head);
+        assert_eq!(prefix, "/ ni hao");
+    }
+
+    #[test]
+    fn caret_prefix_empty_query_is_just_the_prompt() {
+        let search = SearchState::new();
+        let label = search_bar_label(&search, "");
+        let prefix = search_query_caret_prefix(&search, "");
+        let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
+        assert_eq!(prefix, head);
+        assert_eq!(prefix, "/ ");
     }
 }
 
@@ -441,22 +555,30 @@ impl ImePreeditLayout {
         cell_h: f32,
         window_w: f32,
         window_h: f32,
+        scale: f32,
     ) -> Option<ImePreeditLayout> {
         let text = ime.preedit();
         if text.is_empty() {
             return None;
         }
+        // SIZE sub-pads scale; cursor_x/cursor_y and the window clamps are
+        // POSITION terms and stay in window pixels.
+        let s = scale.max(0.01);
         let char_count = text.chars().count().max(1) as f32;
-        let w = (cell_w * char_count + 12.0).min(window_w.max(40.0));
-        let h = cell_h + 6.0;
+        let w = (cell_w * char_count + 12.0 * s).min(window_w.max(40.0));
+        let h = cell_h + 6.0 * s;
         let mut x = cursor_x;
         let y = (cursor_y + cell_h).min((window_h - h).max(0.0));
         if x + w > window_w {
             x = (window_w - w).max(0.0);
         }
         let bg = Rect { x, y, w, h };
-        let underline =
-            Rect { x: bg.x + 2.0, y: bg.y + bg.h - 2.0, w: (bg.w - 4.0).max(0.0), h: 2.0 };
+        let underline = Rect {
+            x: bg.x + 2.0 * s,
+            y: bg.y + bg.h - 2.0 * s,
+            w: (bg.w - 4.0 * s).max(0.0),
+            h: 2.0 * s,
+        };
         Some(ImePreeditLayout { bg, underline })
     }
 }

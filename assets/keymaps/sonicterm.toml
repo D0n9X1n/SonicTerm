@@ -18,10 +18,6 @@ keys = "super+shift+t"
 action = "new_tab"
 
 [[binding]]
-keys = "super+shift+?"
-action = "show_keymap_cheatsheet"
-
-[[binding]]
 keys = "super+w"
 action = "close_active_pane_or_tab"
 

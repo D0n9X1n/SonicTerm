@@ -12,10 +12,6 @@ keys = "ctrl+t"
 action = "new_tab"
 
 [[binding]]
-keys = "ctrl+shift+/"
-action = "show_keymap_cheatsheet"
-
-[[binding]]
 keys = "ctrl+shift+w"
 action = "close_active_pane_or_tab"
 

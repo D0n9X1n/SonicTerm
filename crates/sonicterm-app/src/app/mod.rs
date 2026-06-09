@@ -3,7 +3,7 @@
 //! dispatch.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -56,13 +56,12 @@ pub fn with_backdrop_transparency(
 use crate::config_watch::ConfigWatcher;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::broadcast::BroadcastState;
-use sonicterm_ui::cheatsheet::CheatsheetState;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::ime::ImeState;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 
 /// A child terminal window spawned by tearing a tab off the bar.
@@ -103,6 +102,52 @@ pub struct SplitterDragState {
     pub last_pos: (f32, f32),
 }
 
+/// Maximum gap (ms) between consecutive left-presses on the same cell for
+/// them to count as a double/triple click. Beyond this the streak resets
+/// to a single click.
+pub const MULTI_CLICK_MS: u128 = 400;
+
+/// Multi-click counter. Returns the new click count (1, 2, 3, then wraps
+/// back to 1 after a triple). A click counts as a continuation when it
+/// lands on the same cell within the multi-click interval; otherwise the
+/// streak restarts at 1. Pure so it is unit-testable without a real
+/// pointer event sequence.
+pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 {
+    if same_cell && within_interval && prev >= 1 && prev < 3 {
+        prev + 1
+    } else {
+        1
+    }
+}
+
+/// Vsync coalescing gate shared by the main-window (`window_event.rs`) and
+/// torn-out child-window (`child_window.rs`) `RedrawRequested` arms.
+///
+/// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
+/// frame boundary instead of rendering now. A redraw is deferred only when
+/// all three hold:
+/// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
+///   immediate; gating them adds perceptible latency, PR #132).
+/// - `!pty_burst` — it does not carry a fresh PTY burst (a new burst always
+///   renders so streamed bytes never stall).
+/// - `since_last_render < frame_period` — we already drew inside this vsync
+///   window, so another draw now would just burn a frame.
+///
+/// Extracted as a pure fn (Issue #43) so main and child use byte-identical
+/// coalescing logic AND it is unit-testable without a winit loop. Deferral
+/// is what lets a bursty `ls -al` coalesce to one frame per vsync; on a
+/// torn-out child the same gate also stops the render path from busy-spinning
+/// and starving the VT thread's parser lock.
+#[must_use]
+pub fn should_defer_streaming_redraw(
+    was_dirty: bool,
+    pty_burst: bool,
+    since_last_render: std::time::Duration,
+    frame_period: std::time::Duration,
+) -> bool {
+    !was_dirty && !pty_burst && since_last_render < frame_period
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -127,6 +172,27 @@ pub struct WindowState {
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
     pub selection: Option<Selection>,
+    /// Multi-click tracking for word/line selection. `last_click_time` is
+    /// the timestamp of the most recent left-press; `last_click_cell` is
+    /// the grid cell it landed on; `click_count` is the current streak
+    /// (1 = single, 2 = double, 3 = triple, then wraps to 1). Updated via
+    /// [`WindowState::register_click`].
+    pub last_click_time: Option<Instant>,
+    pub last_click_cell: (u16, u16),
+    pub click_count: u8,
+    /// WezTerm-style drag granularity, set on left-press from the click
+    /// count: `Cell` (single), `Word` (double), `Line` (triple). While the
+    /// button is held, `CursorMoved` extends the selection at this
+    /// granularity. See [`SelectMode`] and `Selection::word_drag` /
+    /// `Selection::line_drag`.
+    pub select_mode: SelectMode,
+    /// The grid cell of the press that started the current drag, as a
+    /// scrollback-ABSOLUTE row (so word/line drags stay pinned to the same
+    /// TEXT as the viewport scrolls). Word/line drags recompute the anchor
+    /// word/line from THIS cell against the live grid on every move (robust
+    /// to scrollback), so only the cell — not the resolved word/line bounds
+    /// — needs to be retained.
+    pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
     // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
@@ -201,6 +267,18 @@ pub struct WindowState {
     /// asked for (the `renderer: None` headless windows could not otherwise
     /// observe `set_drag_chip(None)`).
     pub test_drag_chip_marker: Option<bool>,
+    /// Test-only viewport override for this window's pane layout, mirroring
+    /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
+    /// cell_w, cell_h))`, [`App::compute_pane_rects_for`] uses `outer` instead
+    /// of the (absent in headless tests) renderer's logical size, and
+    /// [`crate::app::child_window::resize_visible_panes_in_child`] uses
+    /// `(cell_w, cell_h)` for cell metrics. Lets tests exercise the child
+    /// split-pane Grid/PTY resize wiring (tear-out, Resized, close, split)
+    /// without a live wgpu surface — the path that the #pane-geom tear-out
+    /// regression slipped through because synthetic children have `renderer:
+    /// None` and the resize helper silently no-opped. Stays `None` in release.
+    #[doc(hidden)]
+    pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
 }
 
 impl WindowState {
@@ -233,6 +311,132 @@ impl WindowState {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Record a left-press at grid cell `(row, col)` and return the
+    /// resulting click count (1 = single, 2 = double, 3 = triple, then
+    /// wraps back to 1). A press counts as a continuation of the previous
+    /// streak when it lands on the *same* cell within
+    /// [`MULTI_CLICK_MS`] of the previous press. Updates the
+    /// `last_click_time` / `last_click_cell` / `click_count` fields in
+    /// place. Pure counting logic lives in [`next_click_count`] so it can
+    /// be unit-tested without a `WindowState`.
+    pub fn register_click(&mut self, row: u16, col: u16) -> u8 {
+        let now = Instant::now();
+        let within_interval = self
+            .last_click_time
+            .map(|t| now.duration_since(t).as_millis() <= MULTI_CLICK_MS)
+            .unwrap_or(false);
+        let same_cell = self.last_click_cell == (row, col);
+        let count = next_click_count(self.click_count, same_cell, within_interval);
+        self.last_click_time = Some(now);
+        self.last_click_cell = (row, col);
+        self.click_count = count;
+        count
+    }
+
+    /// Compute the selection for a multi-click `count` (1 = point, 2 =
+    /// word, 3 = line) at grid `(row, col)` using THIS window's active
+    /// pane grid. Locks that pane's parser only long enough to read the
+    /// grid and build the (Copy) `Selection`, then drops it — so the
+    /// caller never holds a grid lock across the selection assignment /
+    /// redraw (CLAUDE.md §4). Falls back to a point selection when there
+    /// is no active pane or the parser is busy. Used by the child-window
+    /// mouse path; the main-window path has equivalent `App`-level
+    /// helpers (`word_selection_at` / `line_selection_at`) that resolve
+    /// the pane through `App::active_pane`.
+    /// Convert a VIEWPORT row (0 = top visible row, from `pixel_to_cell`) to
+    /// a scrollback-ABSOLUTE row for THIS window's active pane, so a
+    /// `Selection` tracks the same TEXT as the viewport scrolls. Same
+    /// `try_lock`-then-drop discipline as [`Self::multi_click_selection`]
+    /// (CLAUDE.md §4). Returns `None` when the pane is missing or the parser
+    /// is busy; the child-window mouse path then treats the viewport row as
+    /// absolute (correct while unscrolled).
+    pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        drop(guard);
+        Some(view_top + viewport_row as u64)
+    }
+
+    pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
+        if count < 2 {
+            return Selection::new(abs_row, col);
+        }
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id));
+        let Some(pane) = pane else {
+            return Selection::new(abs_row, col);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            return Selection::new(abs_row, col);
+        };
+        let sel = match count {
+            2 => Selection::word_at(guard.grid(), abs_row, col),
+            _ => Selection::line_at(guard.grid(), abs_row),
+        };
+        drop(guard);
+        sel
+    }
+
+    /// Word-mode drag for THIS window's active pane: union of the word at the
+    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
+    /// `cursor_viewport_row` is converted to an absolute row inside the same
+    /// lock. Returns `None` when there is no active pane or the parser is
+    /// busy, so the child-window mouse path SKIPS the move rather than
+    /// shrinking an anchored word/line selection. Same `try_lock`-then-drop
+    /// discipline as [`Self::multi_click_selection`] (CLAUDE.md §4).
+    pub fn word_drag_selection(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
+        drop(guard);
+        Some(sel)
+    }
+
+    /// Line-mode drag for THIS window's active pane: whole rows from the
+    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
+    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
+    /// Returns `None` when the pane is missing or the parser is busy (see
+    /// [`Self::word_drag_selection`]).
+    pub fn line_drag_selection(
+        &self,
+        anchor_row: u64,
+        cursor_viewport_row: u16,
+    ) -> Option<Selection> {
+        let pane = self
+            .tab_states
+            .get(self.tabs.active_index())
+            .map(|st| st.active_pane)
+            .and_then(|id| self.panes.get(&id))?;
+        let guard = pane.parser.try_lock()?;
+        let view_top =
+            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
+        drop(guard);
+        Some(sel)
     }
 
     /// #447 follow-up to PR #443: clear the drag-chip overlay in one
@@ -424,6 +628,51 @@ pub fn pick_prompt_target(
         grid.prompt_before(current_top_abs)
     };
     pick.map(|p| p.start_row)
+}
+
+/// Seed a freshly-created parser with the active theme's query-reply colours:
+/// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
+/// (OSC 4 `?`). Centralizes what used to be duplicated at every pane-spawn site
+/// so the OSC 4 palette wiring (#661) can't be added to one path and forgotten
+/// on another. Per-slot colours that don't resolve are simply left unseeded
+/// (the parser then suppresses that slot's reply rather than lying).
+pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
+    if let Some((r, g, b)) = theme.colors.foreground.rgb() {
+        parser.set_theme_fg(r, g, b);
+    }
+    if let Some((r, g, b)) = theme.colors.background.rgb() {
+        parser.set_theme_bg(r, g, b);
+    }
+    if let Some((r, g, b)) = theme.colors.cursor.rgb() {
+        parser.set_theme_cursor(r, g, b);
+    }
+    // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
+    // in the standard xterm slot order.
+    let normal = [
+        &theme.colors.ansi.black,
+        &theme.colors.ansi.red,
+        &theme.colors.ansi.green,
+        &theme.colors.ansi.yellow,
+        &theme.colors.ansi.blue,
+        &theme.colors.ansi.magenta,
+        &theme.colors.ansi.cyan,
+        &theme.colors.ansi.white,
+    ];
+    let bright = [
+        &theme.colors.bright.black,
+        &theme.colors.bright.red,
+        &theme.colors.bright.green,
+        &theme.colors.bright.yellow,
+        &theme.colors.bright.blue,
+        &theme.colors.bright.magenta,
+        &theme.colors.bright.cyan,
+        &theme.colors.bright.white,
+    ];
+    for (i, hex) in normal.iter().chain(bright.iter()).enumerate() {
+        if let Some((r, g, b)) = hex.rgb() {
+            parser.set_theme_palette_color(i as u8, r, g, b);
+        }
+    }
 }
 
 /// Resize every pane in `panes` to `(cols, rows)`: both the parser's
@@ -863,15 +1112,8 @@ pub struct App {
     /// window and each child window consult this so the palette only
     /// paints on the frontmost window at the moment it was opened,
     /// fixing the bug where Cmd+Shift+P typed in a torn-out child
-    /// silently opened the palette on the original main window. See
-    /// also `cheatsheet_attached_window`.
+    /// silently opened the palette on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
-    pub(super) cheatsheet_open: bool,
-    pub(super) cheatsheet: CheatsheetState,
-    /// Sibling to `palette_attached_window` for the keymap cheat sheet
-    /// overlay (super+?). Same rationale: the overlay is App-level and
-    /// modal, so a tag is enough — we don't need per-window state.
-    pub(super) cheatsheet_attached_window: Option<WindowId>,
     // PR-B3d (#365): `App.drag_session` field removed; per-window
     // drag sessions live on `WindowState`. Access via
     // `self.main_mut()?.drag_session` / per-window iteration.
@@ -958,6 +1200,17 @@ pub struct App {
     /// the pending request onto the next vsync tick rather than
     /// burning a frame.
     pub(super) pending_redraw: bool,
+    /// Per-CHILD-window analogue of [`Self::pending_redraw`]. The main
+    /// window's deferred-redraw latch is a single bool keyed off
+    /// `main().last_render`; torn-out child windows each carry their own
+    /// `WindowState.last_render` and `request_redraw()`, so a child that
+    /// defers a PTY-streaming or lock-contended redraw records its
+    /// `WindowId` here. `about_to_wait` folds each pending child's
+    /// `last_render + frame_period` into the next `WaitUntil` deadline,
+    /// and `new_events`' `ResumeTimeReached` arm re-requests a redraw on
+    /// exactly those windows. An entry is cleared when that child next
+    /// renders past the coalescing gate (or when the window is reaped).
+    pub(super) pending_redraw_windows: HashSet<WindowId>,
     /// Set true whenever a user-driven event (keyboard, mouse click,
     /// cursor move while dragging, resize, IME, modifier change) or a
     /// live-reload of theme/font/keymap occurs. The next
@@ -1115,6 +1368,12 @@ impl App {
     ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
+        // Test-only viewport override (mirrors main `test_viewport_override`):
+        // headless child windows have `renderer: None`, so without this the
+        // child resize path can't be unit-tested. #pane-geom
+        if let Some((outer, _, _)) = child.test_pane_viewport {
+            return st.tree.layout(outer);
+        }
         let Some(r) = child.renderer.as_ref() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = (r.top_inset() - r.padding_top_px()).max(0.0);
@@ -1178,9 +1437,6 @@ impl App {
             pending_exit: false,
             command_palette,
             palette_attached_window: None,
-            cheatsheet_open: false,
-            cheatsheet: CheatsheetState::new(),
-            cheatsheet_attached_window: None,
             os_drag_handoff_started: false,
             windows: HashMap::new(),
             main_window_id: None,
@@ -1194,6 +1450,7 @@ impl App {
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
             pending_redraw: false,
+            pending_redraw_windows: HashSet::new(),
             input_dirty: false,
             pty_burst_gen: Arc::new(AtomicU32::new(0)),
             last_seen_burst_gen: 0,
@@ -1375,6 +1632,37 @@ impl App {
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
         self.pending_redraw = true;
         self.input_dirty = was_dirty;
+    }
+
+    /// Child-window analogue of [`Self::defer_redraw_on_lock_contention`]
+    /// plus the vsync coalescing gate. Records `win_id` in
+    /// [`Self::pending_redraw_windows`] so `about_to_wait` schedules a
+    /// `WaitUntil` at that child's next frame boundary and
+    /// `new_events` re-requests the redraw there — instead of the child
+    /// busy-spinning a bare `request_redraw()` that re-contends the very
+    /// parser lock the VT thread needs to drain a burst (Issue #43:
+    /// `ls -al` was smooth in main but laggy in a torn-out child because
+    /// the child render path had neither the gate nor this backoff).
+    /// Preserves the `input_dirty` flag captured at the top of the
+    /// handler so a deferred input-driven redraw still bypasses the gate
+    /// when it re-fires.
+    #[doc(hidden)]
+    pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
+        self.pending_redraw_windows.insert(win_id);
+        self.input_dirty = was_dirty;
+    }
+
+    /// Test-only: `true` if `win_id` has a deferred redraw queued in
+    /// [`Self::pending_redraw_windows`] (the child-window coalescing latch).
+    #[doc(hidden)]
+    pub fn __test_child_redraw_deferred(&self, win_id: WindowId) -> bool {
+        self.pending_redraw_windows.contains(&win_id)
+    }
+
+    /// Test-only: read the shared input-driven-redraw flag.
+    #[doc(hidden)]
+    pub fn __test_input_dirty(&self) -> bool {
+        self.input_dirty
     }
 
     /// Install a one-shot callback fired at the top of the first
@@ -1570,7 +1858,9 @@ impl App {
                 }
             }
         }
-        (None, encode_logical(key, mods))
+        let kitty_flags =
+            self.active_pane().map(|pane| pane.parser.lock().kitty_keyboard_flags()).unwrap_or(0);
+        (None, encode_logical(key, mods, kitty_flags))
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
@@ -1991,6 +2281,77 @@ impl App {
         self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
     }
 
+    /// Test-only: install the headless per-window pane-viewport seam on a child
+    /// so the split/close resize wiring runs without a renderer. #pane-geom
+    #[doc(hidden)]
+    pub fn __test_set_child_pane_viewport(
+        &mut self,
+        id: WindowId,
+        outer: sonicterm_ui::pane::Rect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> bool {
+        match self.windows.get_mut(&id) {
+            Some(c) => {
+                c.test_pane_viewport = Some((outer, cell_w, cell_h));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: split the active pane of the named child window to the right,
+    /// driving the same `split_active_pane_in_child` path the keymap uses.
+    #[doc(hidden)]
+    pub fn __test_child_split_active_right(&mut self, id: WindowId) -> bool {
+        self.split_active_pane_in_child(id, sonicterm_cfg::keymap::Direction::Right)
+    }
+
+    /// Test-only: grid (cols, rows) of a specific pane in the named child.
+    #[doc(hidden)]
+    pub fn __test_child_pane_grid_size(&self, id: WindowId, pane_id: u64) -> Option<(u16, u16)> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        Some((grid.cols, grid.rows))
+    }
+
+    /// Test-only: the active pane id in the named child's active tab.
+    #[doc(hidden)]
+    pub fn __test_child_active_pane(&self, id: WindowId) -> Option<u64> {
+        let child = self.windows.get(&id)?;
+        let tab_idx = child.tabs.active_index();
+        child.tab_states.get(tab_idx).map(|st| st.active_pane)
+    }
+
+    /// Test-only: `true` when the named child pane's scrollbar is currently
+    /// inside its idle-visible window (i.e. `mark_active` fired recently).
+    /// Used to assert wheel-scroll / view_top jumps light the auto-hide bar
+    /// on torn-out windows the same way they do on the main window.
+    #[doc(hidden)]
+    pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
+        let st = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
+        let idle_ms = match st.last_active {
+            Some(t) => t.elapsed().as_millis() as u64,
+            None => u64::MAX,
+        };
+        Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
+    }
+
+    /// Test-only: write a child pane's `viewport_top_abs` through the same
+    /// production path the scrollbar uses (`set_child_pane_view_top`), so a
+    /// test can drive a scroll and observe the visibility side effect.
+    #[doc(hidden)]
+    pub fn __test_child_set_pane_view_top(
+        &mut self,
+        id: WindowId,
+        pane_id: u64,
+        view_top: u64,
+        live_top: u64,
+    ) {
+        self.set_child_pane_view_top(id, pane_id, view_top, live_top);
+    }
+
     /// Test-only: seed a synthetic child WindowState without constructing a
     /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
     /// tear-out child, but `window` and `renderer` stay `None` so cargo-test
@@ -2019,6 +2380,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -2036,6 +2402,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(id, child);
         id
@@ -2184,23 +2551,10 @@ impl App {
         self.palette_attached_window
     }
 
-    /// Test-only sibling of `__test_palette_attached_window` for the
-    /// keymap cheat sheet overlay.
-    #[doc(hidden)]
-    pub fn __test_cheatsheet_attached_window(&self) -> Option<WindowId> {
-        self.cheatsheet_attached_window
-    }
-
     /// Test-only: whether the command palette is currently open.
     #[doc(hidden)]
     pub fn __test_palette_open(&self) -> bool {
         self.command_palette.is_open()
-    }
-
-    /// Test-only: whether the keymap cheat sheet is currently open.
-    #[doc(hidden)]
-    pub fn __test_cheatsheet_open(&self) -> bool {
-        self.cheatsheet_open
     }
 
     /// Test-only invoker for `open_search_in_child`. Mirrors the
@@ -2727,6 +3081,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -2744,6 +3103,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);
@@ -2777,15 +3137,7 @@ impl App {
             return false;
         };
         let mut parser = pane.parser.lock();
-        if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
-            parser.set_theme_fg(r, g, b);
-        }
-        if let Some((r, g, b)) = self.theme.colors.background.rgb() {
-            parser.set_theme_bg(r, g, b);
-        }
-        if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
-            parser.set_theme_cursor(r, g, b);
-        }
+        seed_parser_theme_colors(&mut parser, &self.theme);
         true
     }
 
@@ -3524,5 +3876,93 @@ impl ApplicationHandler<UserEvent> for App {
         // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.
         sonicterm_logging::record_loop_exiting();
+    }
+}
+
+#[cfg(test)]
+mod click_count_tests {
+    use super::next_click_count;
+
+    #[test]
+    fn single_double_triple_then_wraps() {
+        // Same cell, within interval: 1 → 2 → 3 → back to 1.
+        let c1 = next_click_count(0, true, true); // fresh streak
+        assert_eq!(c1, 1);
+        let c2 = next_click_count(c1, true, true);
+        assert_eq!(c2, 2);
+        let c3 = next_click_count(c2, true, true);
+        assert_eq!(c3, 3);
+        let c4 = next_click_count(c3, true, true);
+        assert_eq!(c4, 1); // wraps after triple
+    }
+
+    #[test]
+    fn different_cell_resets_to_one() {
+        // A double-click is in progress (prev = 2) but the new press is
+        // on a different cell → streak restarts at 1.
+        assert_eq!(next_click_count(2, false, true), 1);
+        assert_eq!(next_click_count(1, false, true), 1);
+    }
+
+    #[test]
+    fn timeout_resets_to_one() {
+        // Same cell but past the multi-click interval → restart at 1.
+        assert_eq!(next_click_count(2, true, false), 1);
+        assert_eq!(next_click_count(1, true, false), 1);
+    }
+}
+
+#[cfg(test)]
+mod redraw_coalescing_tests {
+    //! Issue #43: the vsync coalescing gate shared by the main and child
+    //! `RedrawRequested` arms. These pin the exact deferral policy that
+    //! lets a bursty `ls -al` coalesce to one frame per vsync and stops a
+    //! torn-out child from busy-spinning the VT thread's parser lock. The
+    //! same predicate now backs BOTH windows, so this one spec covers
+    //! main/child parity for the gate.
+
+    use super::should_defer_streaming_redraw;
+    use std::time::Duration;
+
+    const FRAME: Duration = Duration::from_micros(16_667); // ~60Hz
+
+    #[test]
+    fn streaming_redraw_within_frame_defers() {
+        // Pure PTY-streaming repaint that already drew this vsync window:
+        // defer to the next boundary (the coalescing win).
+        assert!(should_defer_streaming_redraw(
+            false, // not input-driven
+            false, // no fresh burst
+            Duration::from_millis(2),
+            FRAME,
+        ));
+    }
+
+    #[test]
+    fn input_driven_redraw_never_defers() {
+        // Keystroke / resize / theme / IME must render immediately even
+        // inside the vsync window — gating them adds perceptible latency.
+        assert!(!should_defer_streaming_redraw(true, false, Duration::from_millis(1), FRAME));
+    }
+
+    #[test]
+    fn fresh_pty_burst_never_defers() {
+        // A redraw carrying new PTY bytes always renders so streamed output
+        // never stalls behind the frame gate.
+        assert!(!should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+    }
+
+    #[test]
+    fn past_frame_boundary_never_defers() {
+        // We're past this vsync window — render now, don't defer forever.
+        assert!(!should_defer_streaming_redraw(false, false, Duration::from_millis(20), FRAME));
+        // Exactly at the boundary also renders (`<` is strict).
+        assert!(!should_defer_streaming_redraw(false, false, FRAME, FRAME));
+    }
+
+    #[test]
+    fn input_and_burst_together_render() {
+        // Belt-and-suspenders: any reason-to-render short-circuits deferral.
+        assert!(!should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
     }
 }

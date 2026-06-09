@@ -7,7 +7,7 @@ scrollbar, broadcast UI, and shared UI tokens.
 
 ## Key files
 - `tabs.rs`, `tabbar_view.rs`, `tab_spans.rs`, `tab_title.rs` - tab UI.
-- `command_palette.rs`, `command_label.rs`, `cheatsheet.rs` - command UI.
+- `command_palette.rs`, `command_label.rs` - command UI.
 - `search.rs`, `overlays.rs` - search state and overlay layout.
 - `selection.rs`, `copy_mode.rs`, `cursor.rs`, `pane.rs` - terminal UI state.
 - `ime.rs`, `drag_chip.rs`, `scrollbar.rs`, `broadcast.rs` - interaction UI.

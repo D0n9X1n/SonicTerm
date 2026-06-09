@@ -61,7 +61,6 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ToggleFullscreen",
     "OpenSearch",
     "OpenCommandPalette",
-    "ShowKeymapCheatsheet",
     "EditConfigFile",
     "OpenKeymapFile",
     "Scroll",
@@ -109,7 +108,6 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::ToggleFullscreen => "ToggleFullscreen",
         Action::OpenSearch => "OpenSearch",
         Action::OpenCommandPalette => "OpenCommandPalette",
-        Action::ShowKeymapCheatsheet => "ShowKeymapCheatsheet",
         Action::EditConfigFile => "EditConfigFile",
         Action::OpenKeymapFile => "OpenKeymapFile",
         Action::Scroll(_) => "Scroll",
@@ -162,7 +160,6 @@ pub fn label(a: &Action) -> String {
         Action::ToggleFullscreen => "Toggle Fullscreen".into(),
         Action::OpenSearch => "Open Search".into(),
         Action::OpenCommandPalette => "Open Command Palette".into(),
-        Action::ShowKeymapCheatsheet => "Show Keyboard Shortcuts".into(),
         Action::EditConfigFile => "Edit sonicterm.toml".into(),
         Action::OpenKeymapFile => "Edit keymap.toml".into(),
         Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
@@ -219,7 +216,6 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         Action::ToggleFullscreen => &["maximize", "full"],
         Action::OpenSearch => &["find"],
         Action::OpenCommandPalette => &["palette", "commands"],
-        Action::ShowKeymapCheatsheet => &["keyboard", "shortcuts", "keys", "help", "cheatsheet"],
         Action::EditConfigFile => {
             &["settings", "config", "options", "prefs", "preferences", "toml"]
         }

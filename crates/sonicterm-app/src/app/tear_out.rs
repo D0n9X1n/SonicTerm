@@ -18,7 +18,7 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -183,14 +183,15 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
-        // Resize the migrated panes to the child window's grid and
-        // swap each pane's VT-thread redraw target so further pty
-        // output triggers the CHILD window's redraw, not the parent.
+        // Swap each migrated pane's VT-thread redraw target so further pty
+        // output triggers the CHILD window's redraw, not the parent. The
+        // PER-PANE grid/PTY sizing is deferred until AFTER the child
+        // WindowState exists (below) so a SPLIT tab sizes every pane to its
+        // own sub-rect via `compute_pane_rects_for`, not the whole window —
+        // sizing every pane to the full `(cols, rows)` here is what made a
+        // torn-out split overlap (left pane painted across the right). #pane-geom
+        let _ = (cols, rows);
         for pane in panes.values() {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
             *pane.redraw_target.lock() = Some(window.clone());
         }
 
@@ -213,6 +214,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -230,8 +236,18 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
+        // #pane-geom: now that the child WindowState exists, size each migrated
+        // pane to its OWN split sub-rect (via compute_pane_rects_for) instead of
+        // the full child grid. Sizing every pane to the whole `(cols, rows)` is
+        // what made a torn-out SPLIT overlap — the left pane stayed full-window
+        // wide and wrapped/painted across the divider into the right pane. For a
+        // single-pane tab this is equivalent to the old full-grid resize.
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            super::child_window::resize_visible_panes_in_child(child);
+        }
         // Phase C2 / Haiku #295: register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
@@ -548,11 +564,11 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
+        // #pane-geom: defer per-pane sizing to after the child WindowState
+        // exists (below) so a SPLIT sizes each pane to its sub-rect, not the
+        // full window. Here we only swap the redraw target.
+        let _ = (cols, rows);
         for pane in panes.values() {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
             *pane.redraw_target.lock() = Some(window.clone());
         }
         let win_id = window.id();
@@ -574,6 +590,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
@@ -591,8 +612,14 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
+        // #pane-geom: size each migrated pane to its split sub-rect now that the
+        // child WindowState exists (mirrors install_torn_out_window).
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            super::child_window::resize_visible_panes_in_child(child);
+        }
         // Phase C2 / Haiku #295: register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac.

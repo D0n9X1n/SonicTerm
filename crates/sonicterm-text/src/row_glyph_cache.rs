@@ -227,7 +227,7 @@ pub fn row_hash(
     cell_w: f32,
     cell_h: f32,
     scale_factor: f32,
-    selection: Option<(u16, u16, u16, u16)>,
+    selection: Option<(u64, u16, u64, u16)>,
 ) -> u64 {
     row_hash_cells(
         view_top_abs,
@@ -250,14 +250,15 @@ pub fn row_hash_cells<I, C>(
     cell_w: f32,
     cell_h: f32,
     scale_factor: f32,
-    selection: Option<(u16, u16, u16, u16)>,
+    selection: Option<(u64, u16, u64, u16)>,
 ) -> u64
 where
     I: IntoIterator<Item = C>,
     C: Borrow<Cell>,
 {
     let mut h = DefaultHasher::new();
-    (view_top_abs + r as u64).hash(&mut h);
+    let row_abs = view_top_abs + r as u64;
+    row_abs.hash(&mut h);
     for cell in row_cells {
         cell.borrow().hash(&mut h);
     }
@@ -266,18 +267,21 @@ where
     cell_h.to_bits().hash(&mut h);
     scale_factor.to_bits().hash(&mut h);
     if let Some((s_row, s_col, e_row, e_col)) = selection {
-        // Normalise so (start, end) order doesn't perturb the hash.
+        // Normalise so (start, end) order doesn't perturb the hash. Rows
+        // are scrollback-ABSOLUTE, so we compare against this row's
+        // absolute index (`row_abs`), not its viewport offset `r`.
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))
         } else {
             ((e_row, e_col), (s_row, s_col))
         };
-        // Only fold the bbox in if it overlaps row `r`. A selection
-        // that doesn't touch this row has no effect on its glyphs, so
-        // including it would needlessly invalidate cache entries
-        // every time the user clicks elsewhere.
-        let r16 = r as u16;
-        if r16 >= lo.0 && r16 <= hi.0 {
+        // Only fold the bbox in if it overlaps this absolute row. A
+        // selection that doesn't touch this row has no effect on its
+        // glyphs, so including it would needlessly invalidate cache
+        // entries every time the user clicks elsewhere. Folding the
+        // ABSOLUTE membership keeps invalidation correct as scrolling
+        // changes which abs rows are visible.
+        if row_abs >= lo.0 && row_abs <= hi.0 {
             0x5E1E_C7104_u64.hash(&mut h);
             lo.0.hash(&mut h);
             lo.1.hash(&mut h);

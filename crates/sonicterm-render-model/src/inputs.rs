@@ -20,6 +20,14 @@ pub struct RenderInputs<'a> {
     /// affordance — OSC 8 hyperlinks have their own pre-existing
     /// hover-underline path and are not represented here.
     pub hovered_url_underline: Option<UnderlineRect>,
+    /// Viewport cell range of the Cmd-hovered URL to recolor with the
+    /// theme accent. `row` is the viewport row (0 = top visible),
+    /// `start_col` is inclusive, `end_col` is exclusive. `None` when no
+    /// auto-detected URL is being hovered while the open-URL modifier
+    /// (Cmd on macOS, Ctrl on Windows / Linux) is held. Shares the same
+    /// lifetime/gating as [`Self::hovered_url_underline`]; this is the
+    /// glyph-recolor companion to that underline overlay.
+    pub hovered_url_cells: Option<HoveredUrlCells>,
     /// Phase D — drag visual feedback (Epic #289).
     ///
     /// `Some(ghost)` while a tab drag session is live and the cursor
@@ -102,6 +110,41 @@ pub struct UnderlineRect {
     pub h: f32,
 }
 
+/// Viewport cell range of a Cmd-hovered auto-detected URL, carried to
+/// the renderer so it can recolor the URL's glyphs with the theme
+/// accent (in addition to the [`UnderlineRect`] hover underline).
+///
+/// Coordinates mirror `sonicterm_app`'s `HoveredUrl`: `row` is the
+/// viewport row (0 = top visible row, same index the glyph-emit loop
+/// uses), `start_col` is inclusive, and `end_col` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoveredUrlCells {
+    /// Viewport row of the URL (0 = top visible row).
+    pub row: u16,
+    /// Inclusive start column of the URL on this row.
+    pub start_col: u16,
+    /// Exclusive end column of the URL on this row.
+    pub end_col: u16,
+    /// True when the platform open-URL modifier (Cmd / Ctrl) is held, so
+    /// the URL is clickable RIGHT NOW. Drives the two-tier hover affordance:
+    /// `true` → theme-accent glyph recolor + accent underline (the existing
+    /// "ready to open" look); `false` → a plain-hover HINT, drawn as a
+    /// yellow underline only (no recolor), telling the user a URL is here and
+    /// holding the modifier will make it clickable.
+    pub active: bool,
+}
+
+impl HoveredUrlCells {
+    /// True when cell `(row, col)` (viewport coordinates) falls inside
+    /// the hovered URL span: same row, and `start_col <= col < end_col`.
+    /// Used by the renderer's per-cell foreground decision to swap in
+    /// the theme accent for the URL's glyphs only.
+    #[must_use]
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 /// Per-pane data the renderer needs to paint one terminal grid this frame.
 pub struct PaneViewModel<'a> {
     /// Borrowed rows of the grid slice currently visible (scrollback applied).
@@ -166,4 +209,38 @@ pub struct SearchView {
     pub matches: Vec<(usize, usize, usize)>,
     /// Index into `matches` of the currently focused / highlighted hit.
     pub current: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HoveredUrlCells;
+
+    #[test]
+    fn hovered_url_cells_contains_matches_inside_range_only() {
+        // URL on viewport row 3, columns 5..10 (5,6,7,8,9 inclusive).
+        let h = HoveredUrlCells { row: 3, start_col: 5, end_col: 10, active: true };
+
+        // Inclusive start, interior, and last-included column hit.
+        assert!(h.contains(3, 5), "start_col is inclusive");
+        assert!(h.contains(3, 7), "interior column");
+        assert!(h.contains(3, 9), "end_col - 1 is the last included column");
+
+        // Exclusive end and out-of-span columns miss.
+        assert!(!h.contains(3, 10), "end_col is exclusive");
+        assert!(!h.contains(3, 4), "column before the span");
+        assert!(!h.contains(3, 11), "column past the span");
+
+        // Wrong row never matches, even for in-span columns.
+        assert!(!h.contains(2, 7), "row above");
+        assert!(!h.contains(4, 7), "row below");
+    }
+
+    #[test]
+    fn hovered_url_cells_empty_span_contains_nothing() {
+        // Degenerate start == end span: end_col is exclusive so no
+        // column can satisfy `start_col <= col < end_col`.
+        let h = HoveredUrlCells { row: 0, start_col: 8, end_col: 8, active: true };
+        assert!(!h.contains(0, 8));
+        assert!(!h.contains(0, 7));
+    }
 }

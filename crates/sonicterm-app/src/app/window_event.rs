@@ -13,10 +13,10 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::overlays::{
-    search_bar_label, SearchBarLayout, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
-    SEARCH_BAR_PAD_RIGHT,
+    search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
+    SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
 };
-use sonicterm_ui::selection::Selection;
+use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
@@ -33,6 +33,29 @@ const SEARCH_BADGE_ICON: &str = "";
 
 fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
+
+/// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
+/// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
+/// `sgr` true → SGR encoding `ESC[<Btn;col;row M` (1-based, unbounded).
+/// `sgr` false → legacy X10 `ESC[M` + 3 bytes (button+32, col+32, row+32),
+/// each byte clamped to the classic 223 ceiling (col/row+32 ≤ 255).
+/// `col`/`row` are 1-based cell coordinates of the cell under the cursor.
+pub(super) fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count: usize) -> Vec<u8> {
+    let btn: u32 = if up { 64 } else { 65 };
+    let mut out = Vec::new();
+    for _ in 0..count {
+        if sgr {
+            out.extend_from_slice(format!("\x1b[<{btn};{col};{row}M").as_bytes());
+        } else {
+            // X10: parameters are value+32, capped so col/row+32 fit a byte.
+            let cb = (btn + 32).min(255) as u8;
+            let cx = (col.min(223) + 32) as u8;
+            let cy = (row.min(223) + 32) as u8;
+            out.extend_from_slice(&[0x1b, b'[', b'M', cb, cx, cy]);
+        }
+    }
+    out
 }
 
 impl App {
@@ -145,7 +168,12 @@ impl App {
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
                 let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
-                if !was_dirty && !pty_burst && last_render.elapsed() < self.frame_period {
+                if crate::app::should_defer_streaming_redraw(
+                    was_dirty,
+                    pty_burst,
+                    last_render.elapsed(),
+                    self.frame_period,
+                ) {
                     self.pending_redraw = true;
                     return;
                 }
@@ -318,19 +346,31 @@ impl App {
                     r.set_inactive_pane_cursors(Vec::new());
                 }
 
-                let cheatsheet_render = (self.cheatsheet_open
-                    && self.cheatsheet_attached_window.is_none())
-                .then(|| (self.cheatsheet.clone(), self.cheatsheet_bindings()));
                 // PR-B1a: lift the main window Arc clone before the
                 // mut borrow on `self.renderer` below, so the IME
                 // cursor-area branch can still touch
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
-                let search_ime_label = self.main().and_then(|ws| {
-                    let i = ws.tabs.active_index();
-                    ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(search_bar_label)
-                });
+                // Search-bar IME geometry: the visible label (`/ {query}▏ —
+                // N/M`) drives the box width, but the caret/candidate-window
+                // anchor must sit at the END OF THE QUERY (the `▏`), not the
+                // end of the whole label. Produce both strings here from the
+                // same search state so the OS candidate area below agrees with
+                // the inline preedit drawn by the renderer.
+                let (search_ime_label, search_ime_prefix) = self
+                    .main()
+                    .and_then(|ws| {
+                        let preedit = ws.ime.preedit();
+                        let i = ws.tabs.active_index();
+                        ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
+                            (
+                                search_bar_label(s, preedit),
+                                search_query_caret_prefix(s, preedit),
+                            )
+                        })
+                    })
+                    .unzip();
                 // PR-B1b borrow-split: pull the renderer out via direct
                 // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
                 // which would borrow all of `self`). That keeps
@@ -354,6 +394,7 @@ impl App {
                     ws_ime_ref,
                     ws_ime_throttle_ref,
                     ws_viewport_tops,
+                    ws_hovered_url_cells,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonicterm_ui::tabs::TabBar>,
@@ -366,6 +407,7 @@ impl App {
                     Option<&sonicterm_ui::ime::ImeState>,
                     Option<&mut sonicterm_ui::ime::ImeCursorThrottle>,
                     std::collections::HashMap<u64, Option<u64>>,
+                    Option<sonicterm_render_model::inputs::HoveredUrlCells>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -384,6 +426,13 @@ impl App {
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
+                        // Map the per-window Cmd-hovered URL (set only
+                        // while the open-URL modifier is held; cleared on
+                        // release / pointer drift) into the Copy
+                        // `HoveredUrlCells` the renderer recolors with the
+                        // theme accent. Immutable read, disjoint from the
+                        // mut borrows of ws.{renderer,tabs,...}.
+                        let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
                         let viewport_tops = ws
                             .panes
                             .iter()
@@ -401,6 +450,7 @@ impl App {
                             Some(&ws.ime),
                             Some(&mut ws.ime_cursor_throttle),
                             viewport_tops,
+                            hovered_url_cells,
                         )
                     }
                     None => (
@@ -415,6 +465,7 @@ impl App {
                         None,
                         None,
                         std::collections::HashMap::new(),
+                        None,
                     ),
                 };
                 if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
@@ -506,9 +557,9 @@ impl App {
                             self.palette_attached_window
                                 .is_none()
                                 .then_some(&mut self.command_palette),
-                            cheatsheet_render,
                             ws_ime_ref,
                             pane.viewport_top_abs,
+                            ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
                         }
@@ -540,11 +591,16 @@ impl App {
                     if let Some(w) = main_window_for_ime {
                         if let Some(search_label) = search_ime_label.as_ref() {
                             let window_size = w.inner_size();
+                            // #651: window_size + the SearchBarLayout it feeds are
+                            // physical px, so every logical-px term here must be
+                            // scaled by the renderer's scale factor or the IME
+                            // caret rect drifts on HiDPI displays.
+                            let scale = r.scale_factor();
                             let font_size =
-                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size());
+                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size()) * scale;
                             let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
-                                + SEARCH_BAR_ICON_GAP
+                                + SEARCH_BAR_ICON_GAP * scale
                                 + estimate_overlay_text_width(search_label, font_size);
                             let row =
                                 u8::from(ws_copy_mode_ref.is_some_and(|cm| cm.is_read_only()));
@@ -553,14 +609,26 @@ impl App {
                                 window_size.height as f32,
                                 content_w,
                                 row,
+                                scale,
                             );
                             let text_x = layout.border.x
-                                + SEARCH_BAR_PAD_LEFT
+                                + SEARCH_BAR_PAD_LEFT * scale
                                 + icon_w
-                                + SEARCH_BAR_ICON_GAP;
-                            let caret_x = (layout.border.x + layout.border.w
-                                - SEARCH_BAR_PAD_RIGHT)
+                                + SEARCH_BAR_ICON_GAP * scale;
+                            // Right inner edge: the candidate window must never
+                            // push past the box padding.
+                            let right_edge = (layout.border.x + layout.border.w
+                                - SEARCH_BAR_PAD_RIGHT * scale)
                                 .max(text_x);
+                            // Anchor the OS candidate window at the END OF THE
+                            // QUERY (`text_x + width("/ " + query)`), matching
+                            // the inline preedit caret, then clamp to the right
+                            // inner edge. `font_size` already folds in `scale`.
+                            let prefix_w = search_ime_prefix
+                                .as_ref()
+                                .map(|p| estimate_overlay_text_width(p, font_size))
+                                .unwrap_or(0.0);
+                            let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                             let pos = winit::dpi::PhysicalPosition::new(
                                 caret_x as i32,
                                 layout.border.y as i32,
@@ -938,15 +1006,85 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
+                            // WezTerm-style drag granularity (#651 follow-up).
+                            // The press recorded `select_mode` + `select_anchor`;
+                            // extend by Cell / Word / Line accordingly.
+                            //
+                            // Word/Line need the live grid, so compute the
+                            // replacement Selection up front while we still
+                            // hold only &self (via try_lock inside the helper,
+                            // which drops the grid lock before we redraw —
+                            // CLAUDE.md §4). `r`'s last use was pixel_to_cell,
+                            // so the &self / &mut self borrows below are fine.
+                            let (mode, anchor) = self
+                                .main()
+                                .map(|ws| (ws.select_mode, ws.select_anchor))
+                                .unwrap_or((SelectMode::Cell, (0, 0)));
+                            // Some(Some(_)) = recomputed region; Some(None) =
+                            // parser was busy → SKIP this move (a cell-extend
+                            // would shrink the word/line region); None = Cell
+                            // mode (handled by the extend branch below).
+                            // `anchor.0` is ABSOLUTE; the helpers convert the
+                            // viewport `row` to absolute internally.
+                            let replacement = match mode {
+                                SelectMode::Word => {
+                                    Some(self.word_drag_selection_at(anchor, row, col))
+                                }
+                                SelectMode::Line => {
+                                    Some(self.line_drag_selection_at(anchor.0, row))
+                                }
+                                SelectMode::Cell => None,
+                            };
+                            // Cell-mode extend needs the cursor's ABSOLUTE row
+                            // too. Resolve it before the &mut borrow below.
+                            // None = no active pane / parser busy → SKIP this
+                            // move rather than fall back to the viewport row:
+                            // treating a viewport row as absolute while scrolled
+                            // would extend a far-away anchor (e.g. abs 1000) down
+                            // to a small on-screen row and balloon the selection.
+                            // Only Cell mode consumes it, so skip the extra
+                            // try_lock for word/line drags. (#B10 review)
+                            let cursor_abs_row = if matches!(mode, SelectMode::Cell) {
+                                self.viewport_row_to_abs(row)
+                            } else {
+                                None
+                            };
                             // PR-B3c (#365): selection lives on WindowState.
                             // Split-borrow `ws.selection` and `ws.panes`
                             // disjointly.
                             if let Some(ws) = self.main_mut() {
                                 if let Some(sel) = ws.selection.as_mut() {
-                                    sel.extend(row, col);
-                                    mark_all_panes_dirty(&ws.panes);
-                                    if let Some(w) = ws.window.as_ref() {
-                                        w.request_redraw();
+                                    match ws.select_mode {
+                                        SelectMode::Cell => {
+                                            // Don't let a stray CursorMoved
+                                            // collapse a double/triple-click
+                                            // (word/line) selection down to the
+                                            // cursor cell. Only a plain
+                                            // point-drag extends. (#651) Skip if
+                                            // the absolute row was unavailable.
+                                            if !sel.anchored {
+                                                if let Some(abs) = cursor_abs_row {
+                                                    sel.extend(abs, col);
+                                                    mark_all_panes_dirty(&ws.panes);
+                                                    if let Some(w) = ws.window.as_ref() {
+                                                        w.request_redraw();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SelectMode::Word | SelectMode::Line => {
+                                            // Replace with the recomputed union
+                                            // / row-span; on Some(None) (busy
+                                            // parser) skip — never shrink below
+                                            // the anchor word/line.
+                                            if let Some(Some(new_sel)) = replacement {
+                                                *sel = new_sel;
+                                                mark_all_panes_dirty(&ws.panes);
+                                                if let Some(w) = ws.window.as_ref() {
+                                                    w.request_redraw();
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -993,7 +1131,72 @@ impl App {
                 };
                 if delta_lines != 0 {
                     if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
-                        self.scroll_pane(pane_id, delta_lines);
+                        // Alt-screen wheel handling (#658). Full-screen TUIs
+                        // live on the alt screen. Two cases:
+                        //   * mouse tracking ON (?1000/?1002/?1003): the app
+                        //     wants wheel as MOUSE events — send SGR (or legacy)
+                        //     wheel reports (button 64=up / 65=down) so claude /
+                        //     copilot scroll their own transcript.
+                        //   * tracking OFF: translate to arrow keys so pagers
+                        //     (less/vim/man) scroll.
+                        // NOTE: ?1006 (SGR) is an ENCODING modifier, NOT a
+                        // tracking enable — it must be excluded from the
+                        // "tracking on" test (xterm ctlseqs).
+                        // Snapshot the flags + the cell under the cursor under
+                        // the lock, then DROP it before any PTY write
+                        // (CLAUDE.md §4).
+                        let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
+                        let (is_alt, tracking_on, sgr, app_cursor) = self
+                            .main()
+                            .and_then(|ws| ws.panes.get(&pane_id))
+                            .map(|pane| {
+                                let parser = pane.parser.lock();
+                                let is_alt = parser.grid().is_alt();
+                                let tracking_on = parser.mouse_tracking_enabled();
+                                let sgr = parser.mouse_sgr_enabled();
+                                let app_cursor = parser.application_cursor_keys();
+                                (is_alt, tracking_on, sgr, app_cursor)
+                            })
+                            .unwrap_or((false, false, false, false));
+                        if is_alt && tracking_on {
+                            // App wants mouse events: emit one wheel report per
+                            // line of motion at the cell under the cursor.
+                            let up = delta_lines < 0;
+                            let (col1, row1) =
+                                cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let payload = wheel_report_bytes(sgr, up, col1, row1, count);
+                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else if is_alt {
+                            // Build the arrow sequence: ESC O A/B in
+                            // application-cursor-keys mode, else ESC [ A/B.
+                            // Up when scrolling back into history
+                            // (delta_lines < 0), down otherwise. Emit one
+                            // copy per line of motion.
+                            let up = delta_lines < 0;
+                            let seq: &[u8] = match (app_cursor, up) {
+                                (true, true) => b"\x1bOA",
+                                (true, false) => b"\x1bOB",
+                                (false, true) => b"\x1b[A",
+                                (false, false) => b"\x1b[B",
+                            };
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let mut payload = Vec::with_capacity(seq.len() * count);
+                            for _ in 0..count {
+                                payload.extend_from_slice(seq);
+                            }
+                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else {
+                            self.scroll_pane(pane_id, delta_lines);
+                        }
                     }
                 }
             }
@@ -1226,7 +1429,44 @@ impl App {
                                 }
                                 return;
                             }
-                            self.selection_set(Some(Selection::new(row, col)));
+                            // Multi-click selection: 1 = point, 2 = word,
+                            // 3 = line. Record the click against the main
+                            // window's streak state, then build the right
+                            // Selection. word_at/line_at need the grid; the
+                            // helpers below lock the parser only to read it
+                            // and return an owned (Copy) Selection, so no
+                            // grid lock is held across selection_set/redraw
+                            // (CLAUDE.md §4).
+                            let click_count =
+                                self.main_mut().map(|ws| ws.register_click(row, col)).unwrap_or(1);
+                            // Selection rows are scrollback-ABSOLUTE so the
+                            // highlight tracks the same TEXT as the viewport
+                            // scrolls. Convert the viewport row from
+                            // `pixel_to_cell` once; fall back to treating it
+                            // as absolute (correct while unscrolled) if the
+                            // parser is momentarily busy.
+                            let abs_row =
+                                self.viewport_row_to_abs(row).unwrap_or(row as u64);
+                            let sel = match click_count {
+                                2 => self.word_selection_at(abs_row, col),
+                                3 => self.line_selection_at(abs_row),
+                                _ => Selection::new(abs_row, col),
+                            };
+                            // Record the WezTerm-style drag granularity +
+                            // anchor cell so a subsequent CursorMoved (button
+                            // held) extends by word / line / cell. The anchor
+                            // is the press cell (ABSOLUTE row); word/line drags
+                            // recompute the anchor word/line from it on each
+                            // move.
+                            if let Some(ws) = self.main_mut() {
+                                ws.select_mode = match click_count {
+                                    2 => SelectMode::Word,
+                                    3 => SelectMode::Line,
+                                    _ => SelectMode::Cell,
+                                };
+                                ws.select_anchor = (abs_row, col);
+                            }
+                            self.selection_set(Some(sel));
                             if let Some(panes) = self.main_panes() {
                                 mark_all_panes_dirty(panes);
                             }
@@ -1388,28 +1628,6 @@ impl App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if self.cheatsheet_open {
-                    // Let the toggle binding (super+?) still close the cheat
-                    // sheet; everything else routes into overlay state and is
-                    // NOT forwarded to the pty.
-                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if matches!(action, Action::ShowKeymapCheatsheet) {
-                                self.run_action_for_window(&action, win_id);
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.cheatsheet_handle_key(&event);
-                    self.drain_pending_window_creates(el);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
                 if self.command_palette.is_open() {
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette
@@ -1497,8 +1715,40 @@ impl App {
                         }
                     }
                 }
-                if let Some(bytes) = encode_key(&event, self.main_modifiers()) {
+                // Read the focused pane's kitty keyboard flags under the
+                // parser lock, then DROP the lock before any PTY write
+                // (CLAUDE.md §4). When non-zero, `encode_key` emits CSI-u
+                // forms (e.g. Shift+Enter => CSI 13;2u) so modern TUIs treat
+                // Shift+Enter as "insert newline" instead of "submit".
+                let kitty_flags = self
+                    .active_pane()
+                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .unwrap_or(0);
+                if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
                     self.write_to_pty(bytes);
+                    // Scroll-to-bottom on Enter (#B12): pressing Enter while
+                    // scrolled up in history should jump back to the live
+                    // bottom so the latest input/output is visible. Plain Enter
+                    // only — Shift+Enter inserts a newline and must not jump.
+                    let is_plain_enter = matches!(event.logical_key, Key::Named(NamedKey::Enter))
+                        && !self.main_modifiers().shift_key();
+                    if is_plain_enter {
+                        if let Some(id) = self.active_pane_id() {
+                            if let Some(pane) =
+                                self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
+                            {
+                                if pane.viewport_top_abs.is_some() {
+                                    pane.viewport_top_abs = None; // back to live
+                                    if let Some(panes) = self.main_panes() {
+                                        mark_all_panes_dirty(panes);
+                                    }
+                                    if let Some(w) = self.main_window() {
+                                        w.request_redraw();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
                         self.selection_set(None);
                         if let Some(panes) = self.main_panes() {
@@ -1751,5 +2001,43 @@ fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::R
     } else {
         let live = row_idx - sb;
         (live < grid.rows as usize).then(|| grid.row(live as u16))
+    }
+}
+
+#[cfg(test)]
+mod wheel_report_tests {
+    use super::wheel_report_bytes;
+
+    #[test]
+    fn sgr_wheel_up_is_button_64() {
+        // col=5, row=3, one tick up → ESC[<64;5;3M
+        assert_eq!(wheel_report_bytes(true, true, 5, 3, 1), b"\x1b[<64;5;3M".to_vec());
+    }
+
+    #[test]
+    fn sgr_wheel_down_is_button_65() {
+        assert_eq!(wheel_report_bytes(true, false, 5, 3, 1), b"\x1b[<65;5;3M".to_vec());
+    }
+
+    #[test]
+    fn sgr_emits_one_report_per_line() {
+        // 3 ticks → three concatenated reports.
+        assert_eq!(
+            wheel_report_bytes(true, true, 1, 1, 3),
+            b"\x1b[<64;1;1M\x1b[<64;1;1M\x1b[<64;1;1M".to_vec()
+        );
+    }
+
+    #[test]
+    fn legacy_x10_encodes_button_and_coords_plus_32() {
+        // up=button 64 → 64+32=96 ('`'); col 5 → 37 ('%'); row 3 → 35 ('#').
+        assert_eq!(wheel_report_bytes(false, true, 5, 3, 1), vec![0x1b, b'[', b'M', 96, 37, 35]);
+    }
+
+    #[test]
+    fn legacy_x10_clamps_large_coords() {
+        // col/row clamp to 223 so +32 stays within a byte (255).
+        let out = wheel_report_bytes(false, false, 9999, 9999, 1);
+        assert_eq!(out, vec![0x1b, b'[', b'M', 97, 255, 255]); // 65+32=97
     }
 }

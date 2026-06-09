@@ -23,6 +23,7 @@ use winit::{
 
 use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, UserEvent};
 use crate::config_watch::ConfigWatcher;
+use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
 impl App {
@@ -57,6 +58,18 @@ impl App {
         if self.pending_redraw {
             if let Some(last_render) = self.main().map(|ws| ws.last_render) {
                 next = Some(last_render + self.frame_period);
+            }
+        }
+        // Issue #43: same vsync-pacing schedule for any CHILD window that
+        // deferred a redraw (PTY-streaming gate or lock-contention
+        // backoff). Each torn-out child keys off its own
+        // `WindowState.last_render`, so fold each pending child's next
+        // frame boundary into the wake deadline. Stale ids (window
+        // reaped) are skipped here and pruned in `new_events`.
+        for win_id in &self.pending_redraw_windows {
+            if let Some(last_render) = self.windows.get(win_id).map(|ws| ws.last_render) {
+                let at = last_render + self.frame_period;
+                next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
         if let Some(r) = self.main_renderer() {
@@ -100,6 +113,26 @@ impl App {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
+            // Issue #43: also re-request the redraw on every CHILD window
+            // that deferred one (vsync gate or lock-contention backoff).
+            // We do NOT clear an entry on request — exactly like the main
+            // window's `pending_redraw`, the marker is cleared when the
+            // child actually renders past the gate in
+            // `handle_child_window_event`. Take the set out to avoid
+            // borrowing `self.windows` and `self.pending_redraw_windows`
+            // at once, prune ids whose window was reaped (so the set can't
+            // leak / wake the loop forever), then put the survivors back.
+            let pending = std::mem::take(&mut self.pending_redraw_windows);
+            self.pending_redraw_windows = pending
+                .into_iter()
+                .filter(|win_id| match self.windows.get(win_id) {
+                    Some(ws) => {
+                        ws.request_redraw();
+                        true
+                    }
+                    None => false,
+                })
+                .collect();
         }
     }
 
@@ -295,6 +328,11 @@ impl App {
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             selection: None,
+            last_click_time: None,
+            last_click_cell: (0, 0),
+            click_count: 0,
+            select_mode: SelectMode::Cell,
+            select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             last_render: std::time::Instant::now(),
@@ -312,6 +350,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(main_id, shadow);
 

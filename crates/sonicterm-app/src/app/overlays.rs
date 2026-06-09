@@ -52,80 +52,6 @@ impl App {
         self.command_palette.set_tab_count(tab_count);
     }
 
-    pub(super) fn cheatsheet_bindings(&self) -> Vec<(String, String)> {
-        self.keymap
-            .bindings
-            .iter()
-            .map(|binding| (binding.keys.clone(), format!("{:?}", binding.action.0)))
-            .collect()
-    }
-
-    pub(super) fn cheatsheet_handle_key(&mut self, event: &KeyEvent) -> bool {
-        use sonicterm_ui::cheatsheet::filter_indices;
-        use winit::keyboard::{Key, NamedKey};
-        if !self.cheatsheet_open {
-            return false;
-        }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.cheatsheet_open = false;
-                self.cheatsheet_attached_window = None;
-                self.cheatsheet.clear();
-                true
-            }
-            Key::Named(NamedKey::ArrowDown) => {
-                let bindings = self.cheatsheet_bindings();
-                let len = filter_indices(&bindings, &self.cheatsheet.query).len();
-                self.cheatsheet.move_selection_down(len);
-                true
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                let bindings = self.cheatsheet_bindings();
-                let len = filter_indices(&bindings, &self.cheatsheet.query).len();
-                self.cheatsheet.move_selection_up(len);
-                true
-            }
-            Key::Named(NamedKey::Backspace) => {
-                self.cheatsheet.backspace();
-                true
-            }
-            Key::Character(s) => {
-                for ch in s.chars() {
-                    if !ch.is_control() {
-                        self.cheatsheet.input_char(ch);
-                    }
-                }
-                true
-            }
-            _ => true,
-        }
-    }
-
-    pub(super) fn toggle_cheatsheet(&mut self) {
-        self.cheatsheet_open = !self.cheatsheet_open;
-        if self.cheatsheet_open {
-            // Epic #289 follow-up: tag the overlay with the OS-frontmost
-            // window so the renderer paints it on THAT window, not
-            // unconditionally on main. `Child(id)` → that child. `Main`
-            // / `Other` / `None` → main (encoded as `None`).
-            self.cheatsheet_attached_window = match self.frontmost_kind() {
-                FrontmostKind::Child(id) => Some(id),
-                _ => None,
-            };
-            self.command_palette.close();
-            self.palette_attached_window = None;
-            self.cheatsheet.clear();
-        } else {
-            self.cheatsheet_attached_window = None;
-        }
-        tracing::info!(
-            open = self.cheatsheet_open,
-            attached = ?self.cheatsheet_attached_window,
-            "keymap cheat sheet toggled"
-        );
-        self.request_redraw_for_overlay(self.cheatsheet_attached_window);
-    }
-
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {
@@ -356,7 +282,7 @@ impl App {
     }
 
     /// Epic #289 follow-up — redraw helper for app-level overlays
-    /// (palette / cheatsheet) that need to wake whichever window is
+    /// (palette) that need to wake whichever window is
     /// currently hosting them. `None` ⇒ main window; `Some(id)` ⇒ that
     /// child window. Silently no-ops if the recorded id is stale.
     pub(super) fn request_redraw_for_overlay(&self, attached: Option<WindowId>) {

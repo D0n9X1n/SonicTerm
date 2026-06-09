@@ -206,6 +206,17 @@ impl Parser {
         self.performer.theme_cursor = Some((r, g, b));
     }
 
+    /// Seed one slot (0..=15) of the 16-colour ANSI palette used to answer
+    /// `OSC 4 ; <index> ; ? ST` queries. Indices map to the standard xterm
+    /// layout: 0..=7 normal, 8..=15 bright. Some CLIs (e.g. GitHub Copilot)
+    /// require the full palette query reply to enable their richer prompt
+    /// frame — without it they treat the terminal as colourless. (#661)
+    pub fn set_theme_palette_color(&mut self, index: u8, r: u8, g: u8, b: u8) {
+        if (index as usize) < self.performer.theme_palette.len() {
+            self.performer.theme_palette[index as usize] = Some((r, g, b));
+        }
+    }
+
     /// Whether DECSET ?1004 (focus reporting) is currently enabled. App should
     /// send `\e[I` / `\e[O` on focus in/out when this is true.
     pub fn focus_reporting_enabled(&self) -> bool {
@@ -356,6 +367,29 @@ impl Parser {
         self.performer.mouse_sgr
     }
 
+    /// Whether DECCKM ?1 (application cursor keys) is currently enabled. When
+    /// true, arrow-key sequences — including the synthetic ones SonicTerm
+    /// emits for alt-screen wheel scroll — use the `ESC O A` form.
+    pub fn application_cursor_keys(&self) -> bool {
+        self.performer.app_cursor_keys
+    }
+
+    /// Whether any of DECSET ?1000/?1002/?1003 (mouse tracking) is currently
+    /// enabled. When true, the host should forward wheel events to the PTY as
+    /// mouse reports rather than synthesizing scroll/arrow-key motion.
+    pub fn mouse_tracking_enabled(&self) -> bool {
+        self.performer.mouse_tracking
+    }
+
+    /// Active kitty keyboard protocol flags (the top of the progressive
+    /// enhancement push/pop stack). `0` means no flags / legacy encoding.
+    /// The host reads this to decide whether to emit CSI-u key encodings —
+    /// e.g. Shift+Enter as `CSI 13 ; 2 u` when a TUI like Copilot CLI has
+    /// pushed the disambiguate flag.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.performer.kitty_keyboard_flags()
+    }
+
     /// Latest OSC 0/2 window title (sticky), or `None` if no title has been
     /// set. Used by the tab bar to label tabs with the shell's reported title.
     pub fn title(&self) -> Option<&str> {
@@ -385,6 +419,14 @@ struct Performer {
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
     mouse_sgr: bool,
+    /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the
+    /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
+    /// must use the `ESC O A` form instead of `ESC [ A`.
+    app_cursor_keys: bool,
+    /// DECSET ?1000/?1002/?1003 — X10/button/any-motion mouse tracking. When
+    /// any of these is on the application wants raw mouse reports, so the host
+    /// must forward wheel events to the PTY rather than synthesizing scroll.
+    mouse_tracking: bool,
     focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
@@ -405,6 +447,11 @@ struct Performer {
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
     theme_cursor: Option<(u8, u8, u8)>,
+    /// 16-colour ANSI palette (sRGB) used to answer `OSC 4 ; <i> ; ? ST`
+    /// queries (index 0..=15: 0-7 normal, 8-15 bright). Per-slot `None`
+    /// suppresses that slot's reply so we never report a colour we were
+    /// not told. (#661)
+    theme_palette: [Option<(u8, u8, u8)>; 16],
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -426,7 +473,16 @@ struct Performer {
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
+    /// Kitty keyboard protocol progressive-enhancement flag stack. The active
+    /// flags are the top of stack (`last()`); empty stack == flags 0 == legacy
+    /// encoding. Apps push with `CSI > flags u`, pop with `CSI < number u`,
+    /// set with `CSI = flags ; mode u`, and query with `CSI ? u`.
+    kitty_kbd_flags: Vec<u8>,
 }
+
+/// Maximum depth of the kitty keyboard flag stack. The protocol allows nested
+/// push/pop but a misbehaving app must not be able to grow it without bound.
+const KITTY_KBD_STACK_MAX: usize = 32;
 
 impl Performer {
     fn new(grid: Grid, reply_tx: Option<Sender<Vec<u8>>>) -> Self {
@@ -443,6 +499,8 @@ impl Performer {
             saved_cursor: None,
             bracketed_paste: false,
             mouse_sgr: false,
+            app_cursor_keys: false,
+            mouse_tracking: false,
             focus_reporting: false,
             title: None,
             cwd: None,
@@ -450,11 +508,13 @@ impl Performer {
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
+            theme_palette: [None; 16],
             scroll_top: None,
             scroll_bottom: None,
             ground: true,
             last_printed_char: None,
             dcs_capture: None,
+            kitty_kbd_flags: Vec::new(),
         }
     }
 
@@ -473,6 +533,12 @@ impl Performer {
         if let Some(tx) = &self.reply_tx {
             let _ = tx.send(bytes.to_vec());
         }
+    }
+
+    /// Active kitty keyboard protocol flags (top of the push/pop stack).
+    /// Empty stack reports 0, meaning legacy (non-kitty) key encoding.
+    fn kitty_keyboard_flags(&self) -> u8 {
+        *self.kitty_kbd_flags.last().unwrap_or(&0)
     }
 
     fn reset_last_printed_char(&mut self) {
@@ -508,12 +574,15 @@ impl Performer {
         self.saved_cursor = None;
         self.bracketed_paste = false;
         self.mouse_sgr = false;
+        self.app_cursor_keys = false;
+        self.mouse_tracking = false;
         self.focus_reporting = false;
         self.current_hyperlink = None;
         self.scroll_top = None;
         self.scroll_bottom = None;
         self.last_printed_char = None;
         self.dcs_capture = None;
+        self.kitty_kbd_flags.clear();
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
         }
@@ -612,6 +681,7 @@ impl Performer {
         for slice in params.iter() {
             let code = slice.first().copied().unwrap_or(0);
             match code {
+                1 => self.app_cursor_keys = set,
                 25 => self.events.push(VtEvent::CursorVisibility(set)),
                 47 => {
                     let before = self.grid.is_alt();
@@ -688,6 +758,7 @@ impl Performer {
                 }
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
+                1000 | 1002 | 1003 => self.mouse_tracking = set,
                 1004 => self.focus_reporting = set,
                 2026 => { /* synchronized output (BSU/ESU) — accept silently for now;
                      defer-paint optimisation tracked separately. Prevents future
@@ -856,6 +927,12 @@ impl Perform for Performer {
                     self.handle_dec_private_mode(params, false);
                     return;
                 }
+                'u' => {
+                    // Kitty keyboard protocol query: report the active flags.
+                    let flags = self.kitty_keyboard_flags();
+                    self.reply(format!("\x1b[?{flags}u").as_bytes());
+                    return;
+                }
                 _ => return,
             }
         }
@@ -876,7 +953,50 @@ impl Perform for Performer {
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
+                'u' => {
+                    // Kitty keyboard protocol push: `CSI > flags u`. Push the
+                    // requested flag set onto the stack. Cap the depth so a
+                    // misbehaving app can't grow it without bound.
+                    if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
+                        self.kitty_kbd_flags.push(p0() as u8);
+                    }
+                }
                 _ => {}
+            }
+            return;
+        }
+        // CSI with `<` intermediate — kitty keyboard protocol pop.
+        // `CSI < number u` pops up to `number` (default 1) entries off the
+        // flag stack. Other `<`-prefixed sequences are not used by SonicTerm.
+        if inter.first() == Some(&b'<') {
+            if action == 'u' {
+                let n = (p0() as usize).max(1);
+                let new_len = self.kitty_kbd_flags.len().saturating_sub(n);
+                self.kitty_kbd_flags.truncate(new_len);
+            }
+            return;
+        }
+        // CSI with `=` intermediate — kitty keyboard protocol set.
+        // `CSI = flags ; mode u` sets the current (top-of-stack) flags. `mode`
+        // selects all (1)/set-or (2)/reset-and (3); we keep the common cases
+        // and otherwise replace. With an empty stack there is nothing to set,
+        // so push the requested flags as the active set.
+        if inter.first() == Some(&b'=') {
+            if action == 'u' {
+                let flags = p0() as u8;
+                let mode = p1();
+                let current = self.kitty_keyboard_flags();
+                let next = match mode {
+                    2 => current | flags,
+                    3 => current & !flags,
+                    // mode 1 (default) and anything else: replace.
+                    _ => flags,
+                };
+                if let Some(top) = self.kitty_kbd_flags.last_mut() {
+                    *top = next;
+                } else if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
+                    self.kitty_kbd_flags.push(next);
+                }
             }
             return;
         }
@@ -1142,6 +1262,51 @@ impl Perform for Performer {
                     });
                 }
             }
+            Some(4) => {
+                // OSC 4 ; <index> ; ? ST — query a palette colour. xterm
+                // allows multiple `index ; spec` pairs in one OSC 4, so we
+                // walk the params two at a time. A `?` spec is a query → reply
+                // `ESC ] 4 ; <index> ; rgb:RRRR/GGGG/BBBB ST` (16-bit channels,
+                // xterm canonical). A non-`?` spec would be a *set*, which we
+                // don't implement yet (theme owns the palette) — skip it.
+                //
+                // Some CLIs (GitHub Copilot's prompt frame) gate their richer
+                // UI on being able to read backgroundSecondary via the full
+                // OSC 4 palette + OSC 10/11 set; without these replies they
+                // treat SonicTerm as colourless and disable the frame. (#661)
+                //
+                // LIMITATION: vte caps OSC at MAX_OSC_PARAMS = 16, so a single
+                // batched query of MORE than ~7 `index;?` pairs (e.g. all 16
+                // colours in one `OSC 4;0;?;1;?;...;15;? ST`) is truncated by
+                // the parser before we see it — we reply only for the first ~7.
+                // The primary client (#661 Copilot) sends each index as its own
+                // OSC 4 (3 params), so it is unaffected. Full batched-query
+                // support needs vte-level work and is tracked separately. (#667)
+                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+                let mut i = 1;
+                while i + 1 < params.len() {
+                    let idx = std::str::from_utf8(params[i])
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u8>().ok());
+                    let spec = std::str::from_utf8(params[i + 1]).ok().map(str::trim);
+                    if let (Some(idx), Some("?")) = (idx, spec) {
+                        if let Some(Some((r, g, b))) =
+                            self.theme_palette.get(idx as usize).copied()
+                        {
+                            let mut buf = Vec::with_capacity(28);
+                            buf.extend_from_slice(b"\x1b]4;");
+                            buf.extend_from_slice(idx.to_string().as_bytes());
+                            buf.extend_from_slice(
+                                format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")
+                                    .as_bytes(),
+                            );
+                            buf.extend_from_slice(terminator);
+                            self.reply(&buf);
+                        }
+                    }
+                    i += 2;
+                }
+            }
             Some(code @ 10..=12) => {
                 // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
                 // Reply format (xterm): `ESC ] N ; rgb:RRRR/GGGG/BBBB ST`
@@ -1389,5 +1554,204 @@ mod tests {
 
         assert_eq!(parser.grid().cursor.row, 3);
         assert_eq!(parser.grid().cursor.col, 6);
+    }
+
+    #[test]
+    fn dec_private_mode_1_toggles_application_cursor_keys() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert!(!parser.application_cursor_keys());
+
+        parser.advance(b"\x1b[?1h");
+        assert!(parser.application_cursor_keys());
+
+        parser.advance(b"\x1b[?1l");
+        assert!(!parser.application_cursor_keys());
+    }
+
+    #[test]
+    fn dec_private_mode_1000_toggles_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert!(!parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1000h");
+        assert!(parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1000l");
+        assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn dec_private_mode_1002_1003_toggle_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+
+        parser.advance(b"\x1b[?1002h");
+        assert!(parser.mouse_tracking_enabled());
+        parser.advance(b"\x1b[?1002l");
+        assert!(!parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1b[?1003h");
+        assert!(parser.mouse_tracking_enabled());
+        parser.advance(b"\x1b[?1003l");
+        assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn ris_resets_app_cursor_keys_and_mouse_tracking() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[?1h\x1b[?1000h");
+        assert!(parser.application_cursor_keys());
+        assert!(parser.mouse_tracking_enabled());
+
+        parser.advance(b"\x1bc");
+
+        assert!(!parser.application_cursor_keys());
+        assert!(!parser.mouse_tracking_enabled());
+    }
+
+    #[test]
+    fn kitty_keyboard_push_sets_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+
+        // CSI > 1 u — push flags = 1 (disambiguate escape codes).
+        parser.advance(b"\x1b[>1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop_restores_previous_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[>5u");
+        assert_eq!(parser.kitty_keyboard_flags(), 5);
+
+        // CSI < u — pop one entry (default count 1).
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+
+        // Pop the last entry back to legacy (0).
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+
+        // Popping an empty stack is a no-op, not a panic.
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop_count_pops_multiple() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[>2u");
+        parser.advance(b"\x1b[>4u");
+        assert_eq!(parser.kitty_keyboard_flags(), 4);
+
+        // CSI < 2 u — pop two entries.
+        parser.advance(b"\x1b[<2u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_set_replaces_top() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        // CSI = flags u with an empty stack pushes the active set.
+        parser.advance(b"\x1b[=3u");
+        assert_eq!(parser.kitty_keyboard_flags(), 3);
+
+        // CSI = 5 ; 1 u — mode 1 (default) replaces the top.
+        parser.advance(b"\x1b[=5;1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 5);
+
+        // CSI = 2 ; 2 u — mode 2 ORs in the new bits.
+        parser.advance(b"\x1b[=2;2u");
+        assert_eq!(parser.kitty_keyboard_flags(), 7);
+
+        // CSI = 1 ; 3 u — mode 3 clears the given bits.
+        parser.advance(b"\x1b[=1;3u");
+        assert_eq!(parser.kitty_keyboard_flags(), 6);
+    }
+
+    #[test]
+    fn kitty_keyboard_stack_depth_is_capped() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        // Push far more than the cap; flags must stay valid and the stack must
+        // not grow without bound.
+        for _ in 0..100 {
+            parser.advance(b"\x1b[>1u");
+        }
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_query_reports_current_flags() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+
+        // Query with no flags pushed → reply CSI ? 0 u.
+        parser.advance(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?0u".to_vec());
+
+        // Push flags = 1, then query → reply CSI ? 1 u.
+        parser.advance(b"\x1b[>1u");
+        parser.advance(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?1u".to_vec());
+    }
+
+    #[test]
+    fn ris_resets_kitty_keyboard_flags() {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[>1u");
+        assert_eq!(parser.kitty_keyboard_flags(), 1);
+
+        parser.advance(b"\x1bc");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn osc4_palette_query_replies_with_seeded_color() {
+        // #661: OSC 4 ; <i> ; ? ST must reply with the seeded palette colour
+        // so CLIs like Copilot can read the full colour set. Reply format is
+        // `ESC ] 4 ; <i> ; rgb:RRRR/GGGG/BBBB ST` with 16-bit channels.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.set_theme_palette_color(1, 0xAA, 0xBB, 0xCC); // ANSI red slot
+
+        // BEL-terminated query.
+        parser.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x07".to_vec()
+        );
+
+        // ST-terminated query echoes an ST terminator.
+        parser.advance(b"\x1b]4;1;?\x1b\\");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc4_unseeded_slot_is_silent() {
+        // A slot we were never told about must NOT reply (don't lie about a
+        // colour we don't have).
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.advance(b"\x1b]4;5;?\x07");
+        assert!(rx.try_recv().is_err(), "unseeded slot must not reply");
+    }
+
+    #[test]
+    fn osc4_multi_pair_query_replies_per_index() {
+        // xterm allows several `index ; spec` pairs in one OSC 4 — each `?`
+        // gets its own reply, in order.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.set_theme_palette_color(0, 0x10, 0x20, 0x30);
+        parser.set_theme_palette_color(15, 0xF0, 0xE0, 0xD0);
+
+        parser.advance(b"\x1b]4;0;?;15;?\x07");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;0;rgb:1010/2020/3030\x07".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;15;rgb:f0f0/e0e0/d0d0\x07".to_vec());
     }
 }

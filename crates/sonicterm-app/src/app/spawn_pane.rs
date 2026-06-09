@@ -42,18 +42,11 @@ impl App {
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface
-        // (#369).
+        // (#369). Also seeds the OSC 4 palette so CLIs like Copilot can read
+        // the full colour set and enable their prompt frame (#661).
         {
             let mut p = parser.lock();
-            if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
-                p.set_theme_fg(r, g, b);
-            }
-            if let Some((r, g, b)) = self.theme.colors.background.rgb() {
-                p.set_theme_bg(r, g, b);
-            }
-            if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
-                p.set_theme_cursor(r, g, b);
-            }
+            super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         // Pre-create the redraw target Arc bound to the current parent
         // window. If the pane later tears out, `tear_out_tab` swaps the

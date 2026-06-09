@@ -911,6 +911,13 @@ impl FontConfigInner {
         self.fonts.borrow_mut().clear();
         self.metrics.borrow_mut().take();
         self.title_font.borrow_mut().take();
+        // E4 (#651): a DPI/scale change must drop the chrome font caches too,
+        // not just title_font — otherwise the command palette / char-select /
+        // pane-select chrome would re-rasterize at the old DPI. Mirror the full
+        // invalidation that `config_changed` performs.
+        self.pane_select_font.borrow_mut().take();
+        self.char_select_font.borrow_mut().take();
+        self.command_palette_font.borrow_mut().take();
 
         (prior_font, prior_dpi)
     }

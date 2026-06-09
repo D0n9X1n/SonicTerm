@@ -1,7 +1,8 @@
-# CLAUDE.md — SonicTerm 1.0.0
+# CLAUDE.md — SonicTerm
 
 SonicTerm is a GPU-accelerated terminal for macOS and Windows. Keep changes
 small, typed, and cross-platform unless the crate is explicitly platform-only.
+The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`).
 
 ## Read first
 
@@ -28,6 +29,11 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 | `sonicterm-io` | PTY/process/SSH IO. |
 | `sonicterm-text` | Glyph atlas and row text cache. |
 | `sonicterm-font` | Font discovery, shaping, fallback, rasterization. |
+| `sonicterm-font-config` | Font configuration model shared by the font stack. |
+| `sonicterm-freetype` | FreeType rasterization FFI wrapper. |
+| `sonicterm-harfbuzz` | HarfBuzz shaping FFI wrapper. |
+| `sonicterm-fontconfig` | Fontconfig discovery FFI wrapper (non-macOS). |
+| `sonicterm-engine` | Font-facing engine seam (`FontStack`, cell metrics). |
 | `sonicterm-block-glyph` | Box/block/Powerline/Braille geometry. |
 | `sonicterm-render-model` | Renderer-agnostic frame data. |
 | `sonicterm-ui` | Tabs, palette, search, selection, IME. |

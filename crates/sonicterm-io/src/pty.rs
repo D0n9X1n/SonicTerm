@@ -194,6 +194,11 @@ impl PtyHandle {
         }
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
+        // Identify the terminal to programs that branch on TERM_PROGRAM
+        // (e.g. Copilot CLI, shells, prompt frameworks). Mirrors iTerm2 /
+        // WezTerm, which set TERM_PROGRAM + TERM_PROGRAM_VERSION.
+        builder.env("TERM_PROGRAM", "SonicTerm");
+        builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         apply_terminal_locale_env(&mut builder);
 
         let child = pair.slave.spawn_command(builder)?;
