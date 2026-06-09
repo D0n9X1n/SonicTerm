@@ -125,6 +125,13 @@ pub struct HoveredUrlCells {
     pub start_col: u16,
     /// Exclusive end column of the URL on this row.
     pub end_col: u16,
+    /// True when the platform open-URL modifier (Cmd / Ctrl) is held, so
+    /// the URL is clickable RIGHT NOW. Drives the two-tier hover affordance:
+    /// `true` → theme-accent glyph recolor + accent underline (the existing
+    /// "ready to open" look); `false` → a plain-hover HINT, drawn as a
+    /// yellow underline only (no recolor), telling the user a URL is here and
+    /// holding the modifier will make it clickable.
+    pub active: bool,
 }
 
 impl HoveredUrlCells {
@@ -211,7 +218,7 @@ mod tests {
     #[test]
     fn hovered_url_cells_contains_matches_inside_range_only() {
         // URL on viewport row 3, columns 5..10 (5,6,7,8,9 inclusive).
-        let h = HoveredUrlCells { row: 3, start_col: 5, end_col: 10 };
+        let h = HoveredUrlCells { row: 3, start_col: 5, end_col: 10, active: true };
 
         // Inclusive start, interior, and last-included column hit.
         assert!(h.contains(3, 5), "start_col is inclusive");
@@ -232,7 +239,7 @@ mod tests {
     fn hovered_url_cells_empty_span_contains_nothing() {
         // Degenerate start == end span: end_col is exclusive so no
         // column can satisfy `start_col <= col < end_col`.
-        let h = HoveredUrlCells { row: 0, start_col: 8, end_col: 8 };
+        let h = HoveredUrlCells { row: 0, start_col: 8, end_col: 8, active: true };
         assert!(!h.contains(0, 8));
         assert!(!h.contains(0, 7));
     }

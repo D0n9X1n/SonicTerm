@@ -45,6 +45,10 @@ pub struct HoveredUrl {
     /// The matched URL string — kept so a subsequent click on the
     /// same cell while the modifier is still held can avoid re-scanning.
     pub url: String,
+    /// True when the platform open-URL modifier is held over this URL, so
+    /// it is clickable now. `false` = plain-hover hint (yellow underline,
+    /// no recolor); `true` = ready-to-open (accent recolor + underline).
+    pub active: bool,
 }
 
 impl HoveredUrl {
@@ -61,6 +65,7 @@ impl HoveredUrl {
             row: self.row,
             start_col: self.start_col,
             end_col: self.end_col,
+            active: self.active,
         }
     }
 }
@@ -134,7 +139,7 @@ pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl
     if end_col <= start_col {
         return None;
     }
-    Some(HoveredUrl { row, start_col, end_col, url: m.url })
+    Some(HoveredUrl { row, start_col, end_col, url: m.url, active: false })
 }
 
 #[cfg(test)]
@@ -148,6 +153,7 @@ mod tests {
             start_col: 6,
             end_col: 21,
             url: "https://example.com".to_string(),
+            active: true,
         };
         let cells = h.to_cells();
         assert_eq!(cells.row, 4);
@@ -163,6 +169,7 @@ mod tests {
             start_col: 6,
             end_col: 21,
             url: "https://example.com".to_string(),
+            active: true,
         };
         let cells = h.to_cells();
 

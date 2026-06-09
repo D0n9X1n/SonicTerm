@@ -209,11 +209,17 @@ impl App {
         if let Some(ws) = self.main_mut() {
             ws.hovered_url = new_hover;
         }
-        // Pointer-cursor transition: auto-detected URL needs the
-        // open-URL modifier held; OSC 8 keeps its always-on pointer.
+        // Pointer-cursor transition: an auto-detected URL only flips to the
+        // pointer when it's ACTIVE (open-URL modifier held) — a plain-hover
+        // hint keeps the text cursor (it's not clickable yet). OSC 8 keeps
+        // its always-on pointer below.
         let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let has_hover = self.main().and_then(|ws| ws.hovered_url.as_ref()).is_some();
-        let want_pointer = has_hover
+        let has_active_hover = self
+            .main()
+            .and_then(|ws| ws.hovered_url.as_ref())
+            .map(|h| h.active)
+            .unwrap_or(false);
+        let want_pointer = has_active_hover
             || self
                 .main_renderer()
                 .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
@@ -236,13 +242,16 @@ impl App {
     }
 
     fn compute_current_hovered_url(&self) -> Option<super::hovered_url::HoveredUrl> {
-        if !self.url_open_modifier_held() {
-            return None;
-        }
+        // Two-tier hover: a URL under the cursor is detected REGARDLESS of the
+        // modifier so plain hover can show a yellow hint underline. The
+        // `active` flag (modifier held) is what upgrades it to the clickable
+        // accent look + pointer cursor downstream. Clicking still goes through
+        // the modifier-gated `dispatch_modifier_click`, so detecting without
+        // the modifier never makes a URL openable on a plain click.
         let cursor_pos = self.main()?.cursor_pos;
         // Gate to the ACTIVE pane: `pixel_to_cell` hit-tests against the
         // window, but `focused_pane_row_text` (below) reads the active pane's
-        // grid. In a split, Cmd-hovering an INACTIVE pane at a row/col that
+        // grid. In a split, hovering an INACTIVE pane at a row/col that
         // happens to match a URL in the active pane would otherwise highlight
         // the active pane's URL. Only proceed when the cursor is over the
         // active pane itself. (#660 review)
@@ -261,7 +270,9 @@ impl App {
             return None;
         }
         let row_text = self.focused_pane_row_text(row)?;
-        super::hovered_url::hovered_from_row(&row_text, row, col)
+        let mut hov = super::hovered_url::hovered_from_row(&row_text, row, col)?;
+        hov.active = self.url_open_modifier_held();
+        Some(hov)
     }
     /// True iff the platform "open this in the browser" modifier is held.
     /// macOS: Cmd (super). Windows / Linux: Ctrl.
