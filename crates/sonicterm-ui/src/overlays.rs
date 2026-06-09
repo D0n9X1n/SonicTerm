@@ -1,7 +1,7 @@
 //! Pure layout helpers for the three state-only overlays drawn over the
 //! terminal grid:
 //!
-//! 1. Command palette — centered modal (~720×460) with a query input row
+//! 1. Command palette — centered modal (~520×460) with a query input row
 //!    and a filtered action list. State lives in
 //!    [`crate::command_palette::CommandPalette`].
 //! 2. Search bar — bottom-right single-line status with `N/M` match
@@ -30,7 +30,7 @@ use crate::tabbar_view::Rect;
 // stay self-documenting.
 
 /// Ideal modal width in physical pixels (Raycast-style redesign).
-pub const PALETTE_WIDTH: f32 = 720.0;
+pub const PALETTE_WIDTH: f32 = 520.0;
 
 /// Ideal modal height in physical pixels.
 pub const PALETTE_HEIGHT: f32 = 460.0;
@@ -38,7 +38,7 @@ pub const PALETTE_HEIGHT: f32 = 460.0;
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
 /// `viewport_w - 48`, whichever is smaller (see [`PaletteLayout::compute`]).
-pub const PALETTE_MAX_WIDTH: f32 = 780.0;
+pub const PALETTE_MAX_WIDTH: f32 = 560.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
@@ -203,7 +203,7 @@ impl PaletteLayout {
         // inner content size, so it scales with the other SIZE terms.
         let panel_padding = panel_padding.max(0.0) * s;
         let border_px = PALETTE_BORDER * s;
-        // Spec: width is `min(780, viewport_w - 48)`, ideal 720.
+        // Spec: width is `min(560, viewport_w - 48)`, ideal 520.
         // Height: `min(520, viewport_h - 96)`, ideal 460. The ideal/max
         // SIZE bounds scale; the viewport-relative clamp does not.
         let modal_w =
