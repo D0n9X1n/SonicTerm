@@ -2253,6 +2253,31 @@ impl App {
         child.tab_states.get(tab_idx).map(|st| st.active_pane)
     }
 
+    /// Test-only: `true` when the named child pane's scrollbar is currently
+    /// inside its idle-visible window (i.e. `mark_active` fired recently).
+    /// Used to assert wheel-scroll / view_top jumps light the auto-hide bar
+    /// on torn-out windows the same way they do on the main window.
+    #[doc(hidden)]
+    pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
+        let st = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
+        let idle_ms = st.last_active.elapsed().as_millis() as u64;
+        Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
+    }
+
+    /// Test-only: write a child pane's `viewport_top_abs` through the same
+    /// production path the scrollbar uses (`set_child_pane_view_top`), so a
+    /// test can drive a scroll and observe the visibility side effect.
+    #[doc(hidden)]
+    pub fn __test_child_set_pane_view_top(
+        &mut self,
+        id: WindowId,
+        pane_id: u64,
+        view_top: u64,
+        live_top: u64,
+    ) {
+        self.set_child_pane_view_top(id, pane_id, view_top, live_top);
+    }
+
     /// Test-only: seed a synthetic child WindowState without constructing a
     /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
     /// tear-out child, but `window` and `renderer` stay `None` so cargo-test

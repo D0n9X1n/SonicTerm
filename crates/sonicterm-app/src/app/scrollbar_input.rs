@@ -316,9 +316,18 @@ impl App {
             pane.viewport_top_abs = if view_top >= live_top { None } else { Some(view_top) };
         }
         super::mark_all_panes_dirty(&child.panes);
-        if let Some(st) = child.scrollbar_vis.get_mut(&pane_id) {
-            st.mark_active(std::time::Instant::now());
-        }
+        // Parity with the main window's `mark_scrollbar_active`: use
+        // `entry().or_insert_with` (NOT `get_mut`). The `scrollbar_vis`
+        // entry is created lazily by the render path, so on a freshly
+        // torn-out child the first scroll happens BEFORE any entry exists —
+        // `get_mut` would silently no-op and the auto-hide bar would stay
+        // hidden until something else rendered. Create-on-demand fixes that.
+        let now = std::time::Instant::now();
+        child
+            .scrollbar_vis
+            .entry(pane_id)
+            .or_insert_with(|| super::scrollbar_visibility::ScrollbarVisState::new(now))
+            .mark_active(now);
         child.request_redraw();
     }
 

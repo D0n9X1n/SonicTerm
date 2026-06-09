@@ -1888,6 +1888,17 @@ fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
     if let Some(pane) = child.panes.get_mut(&pane_id) {
         pane.viewport_top_abs = if new_view_top >= live_top { None } else { Some(new_view_top) };
     }
+    // Parity with the main window's wheel path (`scroll.rs` →
+    // `mark_scrollbar_active`): a wheel scroll briefly shows the auto-hide
+    // scrollbar so the user can see where they are in the scrollback. Use
+    // `entry().or_insert_with` (not `get_mut`) so a scroll BEFORE the first
+    // render — common right after tear-out — still lights the bar.
+    let now = Instant::now();
+    child
+        .scrollbar_vis
+        .entry(pane_id)
+        .or_insert_with(|| crate::app::scrollbar_visibility::ScrollbarVisState::new(now))
+        .mark_active(now);
     mark_all_panes_dirty(&child.panes);
     child.request_redraw();
 }
