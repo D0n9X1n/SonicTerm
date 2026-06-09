@@ -238,6 +238,15 @@ impl App {
             test_drag_chip_marker: None,
         };
         self.windows.insert(win_id, child);
+        // #pane-geom: now that the child WindowState exists, size each migrated
+        // pane to its OWN split sub-rect (via compute_pane_rects_for) instead of
+        // the full child grid. Sizing every pane to the whole `(cols, rows)` is
+        // what made a torn-out SPLIT overlap — the left pane stayed full-window
+        // wide and wrapped/painted across the divider into the right pane. For a
+        // single-pane tab this is equivalent to the old full-grid resize.
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            super::child_window::resize_visible_panes_in_child(child);
+        }
         // Phase C2 / Haiku #295: register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
@@ -554,11 +563,11 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
+        // #pane-geom: defer per-pane sizing to after the child WindowState
+        // exists (below) so a SPLIT sizes each pane to its sub-rect, not the
+        // full window. Here we only swap the redraw target.
+        let _ = (cols, rows);
         for pane in panes.values() {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
             *pane.redraw_target.lock() = Some(window.clone());
         }
         let win_id = window.id();
@@ -604,6 +613,11 @@ impl App {
             test_drag_chip_marker: None,
         };
         self.windows.insert(win_id, child);
+        // #pane-geom: size each migrated pane to its split sub-rect now that the
+        // child WindowState exists (mirrors install_torn_out_window).
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            super::child_window::resize_visible_panes_in_child(child);
+        }
         // Phase C2 / Haiku #295: register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac.
