@@ -2302,6 +2302,11 @@ impl GpuRenderer {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 i.preedit().hash(&mut h);
                 i.is_composing().hash(&mut h);
+                // Fold the composition caret too: the terminal cursor block now
+                // tracks `i.cursor()` (the in-flight caret byte), so a caret move
+                // WITHIN unchanged preedit text must still invalidate the frame —
+                // otherwise the cursor would stick at the old caret position. #B14
+                i.cursor().hash(&mut h);
                 h.finish()
             })
             .unwrap_or(0);
@@ -2616,7 +2621,13 @@ impl GpuRenderer {
                     // would stick on a stale cache hit. Only the hovered
                     // row's key is perturbed — peer rows keep replaying.
                     let key = match pane_hovered_url {
-                        Some(h) if h.row == r => {
+                        // Only an ACTIVE hover recolors glyphs (resolve_fg), so
+                        // only then must the row key diverge from the plain
+                        // cache. A plain-hover hint draws no recolor (just the
+                        // overlay underline, which isn't row-cached), so it
+                        // safely reuses the non-hover key — and an active→hint
+                        // transition can't replay stale accent glyphs. #URL-hint
+                        Some(h) if h.active && h.row == r => {
                             use std::hash::{Hash, Hasher};
                             let mut hsh = std::collections::hash_map::DefaultHasher::new();
                             key.hash(&mut hsh);
@@ -3093,7 +3104,7 @@ impl GpuRenderer {
                 // underline) lines up with its glyph cell at fractional DPI.
                 let cur_col = grid.cursor.col as usize;
                 let cur_col_clamped = cur_col.min(active_snapped_cell_x.len().saturating_sub(2));
-                let cx = active_snapped_cell_x
+                let mut cx = active_snapped_cell_x
                     .get(cur_col_clamped)
                     .copied()
                     .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
@@ -3102,6 +3113,27 @@ impl GpuRenderer {
                     .map(|r| r - cx)
                     .unwrap_or(self.cell_w);
                 let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                // #B14: when an inline IME composition is active at the terminal
+                // cursor (search NOT focused — that case anchors to the search
+                // box instead), the OS does not draw it, so we do (preedit block
+                // further down). Advance the cursor mark to the composition caret
+                // (end of the in-flight run, or the IME-reported caret byte) so it
+                // sits at the insertion point WezTerm-style, instead of frozen on
+                // the first composing glyph.
+                if search.is_none() {
+                    if let Some(i) = ime {
+                        let text = i.preedit();
+                        if !text.is_empty() {
+                            let font_size = self.raster_px(self.font_size);
+                            let mut caret_byte =
+                                i.cursor().map(|(_, e)| e).unwrap_or(text.len()).min(text.len());
+                            if !text.is_char_boundary(caret_byte) {
+                                caret_byte = text.len();
+                            }
+                            cx += estimate_badge_text_width(&text[..caret_byte], font_size);
+                        }
+                    }
+                }
                 // Modulate the cursor accent with the current blink alpha.
                 // The base color is opaque (set at theme load) so we can
                 // dim through the full range without losing chroma — that
@@ -3309,7 +3341,14 @@ impl GpuRenderer {
         // pane and to Cmd-held hover.
         if let Some(h) = hovered_url_cells {
             if h.end_col > h.start_col {
-                let hov_accent = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
+                // Two-tier hover: `active` (open-URL modifier held) → theme
+                // accent underline matching the recolored glyphs; plain hover
+                // → a yellow HINT underline only (no glyph recolor). #URL-hint
+                let hov_accent = if h.active {
+                    sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+                } else {
+                    hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                };
                 let active_grid_cols = pane_views[active_view_idx].grid.cols;
                 let hcache = build_snapped_cell_x(active_origin_x, self.cell_w, active_grid_cols);
                 let last_col = active_grid_cols.saturating_sub(1);
@@ -3990,7 +4029,6 @@ impl GpuRenderer {
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
-                let row_h = sonicterm_ui::overlays::PALETTE_ROW_HEIGHT;
                 let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
                 for (i, label) in layout.row_labels.iter().enumerate() {
                     let Some(row) = layout.rows.get(i) else { continue };
@@ -4000,7 +4038,13 @@ impl GpuRenderer {
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
                     let origin_x =
                         row.rect.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
-                    let baseline_y = row.rect.y + (row_h + palette_font_size * 0.8) * 0.5;
+                    // Vertically centre the label in the row. Use the row's
+                    // ACTUAL (DPI-scaled) height `row.rect.h`, NOT the unscaled
+                    // PALETTE_ROW_HEIGHT constant — mixing a logical-px height
+                    // with the scaled `row.rect.y` / `palette_font_size` pushed
+                    // the baseline off-centre at fractional DPI (the query row
+                    // already centres correctly via `query_row.h`). #palette
+                    let baseline_y = row.rect.y + (row.rect.h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
@@ -4059,7 +4103,11 @@ impl GpuRenderer {
                     let empty_y_top = layout.query_row.y
                         + layout.query_row.h
                         + self.chrome_px(self.panel_padding);
-                    let empty_baseline_y = empty_y_top + (row_h + palette_font_size * 0.8) * 0.5;
+                    // No row rect here (empty state), so derive the scaled row
+                    // height via chrome_px — same DPI basis as the row path. #palette
+                    let empty_row_h = self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_HEIGHT);
+                    let empty_baseline_y =
+                        empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
@@ -4656,7 +4704,10 @@ impl GpuRenderer {
         // (`info.is_color`) bypass this and keep their own tile color.
         let resolve_fg = |col: u16, base: ChromeColor| -> [f32; 4] {
             match hovered_url_cells {
-                Some(h) if h.contains(row, col) => hovered_url_accent,
+                // Only the ACTIVE (modifier-held) hover recolors glyphs to the
+                // accent. A plain-hover hint leaves the text color alone and is
+                // marked by the yellow underline only. #URL-hint
+                Some(h) if h.active && h.contains(row, col) => hovered_url_accent,
                 _ => chrome_color_to_linear_rgba(base),
             }
         };
