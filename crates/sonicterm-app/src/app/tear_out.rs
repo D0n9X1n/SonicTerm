@@ -236,6 +236,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
@@ -612,6 +613,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);

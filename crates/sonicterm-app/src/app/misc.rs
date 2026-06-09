@@ -243,11 +243,8 @@ impl App {
         // hint keeps the text cursor (it's not clickable yet). OSC 8 keeps
         // its always-on pointer below.
         let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let has_active_hover = self
-            .main()
-            .and_then(|ws| ws.hovered_url.as_ref())
-            .map(|h| h.active)
-            .unwrap_or(false);
+        let has_active_hover =
+            self.main().and_then(|ws| ws.hovered_url.as_ref()).map(|h| h.active).unwrap_or(false);
         let want_pointer = has_active_hover
             || self
                 .main_renderer()
@@ -326,7 +323,12 @@ impl App {
         child.panes.get(&active_id)
     }
 
-    fn child_osc8_uri_at(&self, win_id: winit::window::WindowId, row: u16, col: u16) -> Option<String> {
+    fn child_osc8_uri_at(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+        col: u16,
+    ) -> Option<String> {
         let pane = self.child_active_pane(win_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -337,7 +339,11 @@ impl App {
         guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
     }
 
-    fn child_focused_pane_row_text(&self, win_id: winit::window::WindowId, row: u16) -> Option<String> {
+    fn child_focused_pane_row_text(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+    ) -> Option<String> {
         let pane = self.child_active_pane(win_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -367,10 +373,7 @@ impl App {
     ) -> Option<super::hovered_url::HoveredUrl> {
         let child = self.windows.get(&win_id)?;
         let cursor_pos = child.cursor_pos;
-        let active_id = child
-            .tab_states
-            .get(child.tabs.active_index())
-            .map(|st| st.active_pane);
+        let active_id = child.tab_states.get(child.tabs.active_index()).map(|st| st.active_pane);
         // Gate to the active pane (same split rationale as the main path).
         let hit = {
             let mut found = None;
@@ -509,6 +512,10 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if self.test_clipboard_text.is_some() {
+            self.test_clipboard_text = Some(text.clone());
+            return;
+        }
         if let Some(cb) = self.clipboard.as_mut() {
             if let Err(e) = cb.set_text(text.clone()) {
                 tracing::warn!("clipboard set failed: {e}");
@@ -518,15 +525,18 @@ impl App {
         }
     }
     pub(super) fn paste_clipboard(&mut self) {
-        if let Some(cb) = self.clipboard.as_mut() {
-            if let Ok(text) = cb.get_text() {
-                let bracketed = self
-                    .active_pane()
-                    .map(|p| p.parser.lock().bracketed_paste_enabled())
-                    .unwrap_or(false);
-                let bytes = wrap_paste(&text, bracketed);
-                self.write_to_pty(bytes);
-            }
+        let text = if let Some(text) = self.test_clipboard_text.clone() {
+            Some(text)
+        } else {
+            self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
+        };
+        if let Some(text) = text {
+            let bracketed = self
+                .active_pane()
+                .map(|p| p.parser.lock().bracketed_paste_enabled())
+                .unwrap_or(false);
+            let bytes = wrap_paste(&text, bracketed);
+            self.write_to_pty(bytes);
         }
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
@@ -754,6 +764,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);

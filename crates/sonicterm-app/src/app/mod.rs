@@ -267,6 +267,13 @@ pub struct WindowState {
     /// asked for (the `renderer: None` headless windows could not otherwise
     /// observe `set_drag_chip(None)`).
     pub test_drag_chip_marker: Option<bool>,
+    /// Test-only renderer-focus marker. Headless child windows have
+    /// `renderer: None`, so focus lifecycle regression tests seed this marker
+    /// and expect the same focus transition that would call
+    /// `GpuRenderer::set_window_focused` to update it. Production leaves this
+    /// `None`.
+    #[doc(hidden)]
+    pub test_renderer_focus_marker: Option<bool>,
     /// Test-only viewport override for this window's pane layout, mirroring
     /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
     /// cell_w, cell_h))`, [`App::compute_pane_rects_for`] uses `outer` instead
@@ -1042,6 +1049,17 @@ pub struct App {
     // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
     // direct field access through `self.main()?.copy_mode` etc.
     pub(super) clipboard: Option<Clipboard>,
+    /// Test-only in-memory clipboard override for integration tests that need
+    /// to observe copy/paste routing without depending on a desktop clipboard
+    /// service. `None` means production arboard behavior; `Some(_)` means reads
+    /// and writes use this buffer instead.
+    #[doc(hidden)]
+    pub(super) test_clipboard_text: Option<String>,
+    /// Test-only PTY write ledger. `write_to_pane` records every boundary write
+    /// here before resolving the pane to a real PTY, so headless tests can assert
+    /// which pane an action targeted without constructing a process-backed PTY.
+    #[doc(hidden)]
+    pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
     // #404: `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -1318,11 +1336,6 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
-    /// Test-only PTY write log. When enabled, [`Self::dispatch_pty_write_effect`]
-    /// records `(pane_id, bytes)` instead of touching live PTY handles so
-    /// integration tests can assert broadcast fan-out without spawning shells.
-    #[doc(hidden)]
-    pub test_pty_write_log: Option<Arc<Mutex<Vec<(u64, Vec<u8>)>>>>,
     /// M6a-expand-2b — winit-agnostic state machine. Routed Intents
     /// (PTY write, scroll, hyperlink open, …) flow through here and
     /// the platform shell's [`Self::dispatch_effects`] translates the
@@ -1435,6 +1448,8 @@ impl App {
             config,
             keymap,
             clipboard: Clipboard::new().ok(),
+            test_clipboard_text: None,
+            test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             pending_new_window: false,
             pending_tear_out: None,
             pending_os_teardown: false,
@@ -1472,7 +1487,6 @@ impl App {
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
-            test_pty_write_log: None,
             machine,
         }
     }
@@ -1944,12 +1958,9 @@ impl App {
     pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             let pane_id = pane.0;
-            let Some(p) = self.pane_by_id(pane_id) else { return };
             let bytes = data.to_vec();
-            if let Some(log) = self.test_pty_write_log.as_ref() {
-                log.lock().push((pane_id, bytes));
-                return;
-            }
+            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
                 let _ = pty.in_tx.send(bytes);
             }
@@ -2402,16 +2413,16 @@ impl App {
         self.broadcast_receivers()
     }
 
-    /// Test-only: log PTY writes instead of forwarding them to live PTYs.
+    /// Test-only: clear the PTY write ledger before a broadcast assertion.
     #[doc(hidden)]
     pub fn __test_enable_pty_write_log(&mut self) {
-        self.test_pty_write_log = Some(Arc::new(Mutex::new(Vec::new())));
+        self.test_pty_writes.lock().clear();
     }
 
     /// Test-only: snapshot logged `(pane_id, bytes)` PTY writes.
     #[doc(hidden)]
     pub fn __test_pty_write_log(&self) -> Vec<(u64, Vec<u8>)> {
-        self.test_pty_write_log.as_ref().map(|log| log.lock().clone()).unwrap_or_default()
+        self.test_pty_writes.lock().clone()
     }
 
     /// Test-only: drive the same write + broadcast fan-out as normal input.
@@ -2618,6 +2629,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(id, child);
@@ -2780,6 +2792,113 @@ impl App {
     #[doc(hidden)]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
+    }
+
+    /// Test-only: install an in-memory clipboard buffer. This avoids depending
+    /// on the OS clipboard in headless integration tests while exercising the
+    /// same `set_clipboard_text` / `paste_clipboard` dispatch paths.
+    #[doc(hidden)]
+    pub fn __test_set_memory_clipboard(&mut self, text: &str) {
+        self.test_clipboard_text = Some(text.to_string());
+    }
+
+    /// Test-only: read the in-memory clipboard buffer if installed.
+    #[doc(hidden)]
+    pub fn __test_memory_clipboard(&self) -> Option<String> {
+        self.test_clipboard_text.clone()
+    }
+
+    /// Test-only: drain the PTY write ledger populated by `write_to_pane`.
+    #[doc(hidden)]
+    pub fn __test_drain_pty_writes(&self) -> Vec<(u64, Vec<u8>)> {
+        std::mem::take(&mut *self.test_pty_writes.lock())
+    }
+
+    /// Test-only: set the synthetic main window's selection.
+    #[doc(hidden)]
+    pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
+        let Some(ws) = self.main_mut() else { return false };
+        ws.selection = selection;
+        true
+    }
+
+    /// Test-only: set a synthetic child window's selection.
+    #[doc(hidden)]
+    pub fn __test_set_child_selection(
+        &mut self,
+        id: WindowId,
+        selection: Option<Selection>,
+    ) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.selection = selection;
+        true
+    }
+
+    /// Test-only: feed bytes into a child pane's parser.
+    #[doc(hidden)]
+    pub fn __test_advance_child_pane_parser(
+        &self,
+        id: WindowId,
+        pane_id: u64,
+        bytes: &[u8],
+    ) -> bool {
+        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            return false;
+        };
+        pane.parser.lock().advance(bytes);
+        true
+    }
+
+    /// Test-only: clear all dirty row flags for a child pane.
+    #[doc(hidden)]
+    pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
+        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            return false;
+        };
+        pane.parser.lock().grid_mut().clear_dirty();
+        true
+    }
+
+    /// Test-only: count dirty rows for a child pane.
+    #[doc(hidden)]
+    pub fn __test_child_pane_dirty_count(&self, id: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        Some(pane.parser.lock().grid().dirty_count())
+    }
+
+    /// Test-only: seed child IME preedit state.
+    #[doc(hidden)]
+    pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.ime.handle_preedit(text, Some((text.len(), text.len())));
+        true
+    }
+
+    /// Test-only: read whether a child IME composition is active.
+    #[doc(hidden)]
+    pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).map(|child| child.ime.is_composing())
+    }
+
+    /// Test-only: seed the headless renderer-focus marker for a child window.
+    #[doc(hidden)]
+    pub fn __test_set_child_renderer_focus_marker(&mut self, id: WindowId, focused: bool) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.test_renderer_focus_marker = Some(focused);
+        true
+    }
+
+    /// Test-only: read the headless renderer-focus marker for a child window.
+    #[doc(hidden)]
+    pub fn __test_child_renderer_focus_marker(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).and_then(|child| child.test_renderer_focus_marker)
+    }
+
+    /// Test-only: invoke the child focus transition handler without constructing
+    /// a winit `ActiveEventLoop`.
+    #[doc(hidden)]
+    pub fn __test_handle_child_focus_changed(&mut self, id: WindowId, focused: bool) {
+        self.handle_child_focus_changed(id, focused);
     }
 
     /// Epic #289 Phase A — classify [`Self::frontmost_window`] without
@@ -3319,6 +3438,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(id, ws);
