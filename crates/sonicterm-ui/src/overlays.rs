@@ -406,10 +406,14 @@ impl SearchBarLayout {
 /// the bar shows `0/0`. An empty query renders as `/ ` so the user sees
 /// the prompt.
 #[must_use]
-pub fn search_bar_label(search: &SearchState) -> String {
+pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|i| i + 1).unwrap_or(0);
-    format!("/ {}▏ — {}/{}", search.query, cur, total)
+    // The in-flight IME composition is spliced in right after the committed
+    // query (before the ▏ caret), so the whole bar renders as one continuous
+    // string and the ` — N/M` counter flows to the RIGHT of the composition
+    // instead of being overlapped by a separately-drawn preedit. (#B14)
+    format!("/ {}{}▏ — {}/{}", search.query, preedit, cur, total)
 }
 
 /// The portion of [`search_bar_label`] that precedes the caret: the `/ `
@@ -423,8 +427,8 @@ pub fn search_bar_label(search: &SearchState) -> String {
 /// area ([`sonicterm-app`]) measure this same string so they agree on the
 /// caret position regardless of how long the suffix grows.
 #[must_use]
-pub fn search_query_caret_prefix(search: &SearchState) -> String {
-    format!("/ {}", search.query)
+pub fn search_query_caret_prefix(search: &SearchState, preedit: &str) -> String {
+    format!("/ {}{}", search.query, preedit)
 }
 
 #[cfg(test)]
@@ -510,8 +514,8 @@ mod tests {
         // assert the prefix matches the leading half verbatim.
         let mut search = SearchState::new();
         search.query = "ni hao".to_string();
-        let label = search_bar_label(&search);
-        let prefix = search_query_caret_prefix(&search);
+        let label = search_bar_label(&search, "");
+        let prefix = search_query_caret_prefix(&search, "");
         let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
         assert_eq!(prefix, head);
         assert_eq!(prefix, "/ ni hao");
@@ -520,8 +524,8 @@ mod tests {
     #[test]
     fn caret_prefix_empty_query_is_just_the_prompt() {
         let search = SearchState::new();
-        let label = search_bar_label(&search);
-        let prefix = search_query_caret_prefix(&search);
+        let label = search_bar_label(&search, "");
+        let prefix = search_query_caret_prefix(&search, "");
         let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
         assert_eq!(prefix, head);
         assert_eq!(prefix, "/ ");

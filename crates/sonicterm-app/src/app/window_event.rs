@@ -356,9 +356,13 @@ impl App {
                 let (search_ime_label, search_ime_prefix) = self
                     .main()
                     .and_then(|ws| {
+                        let preedit = ws.ime.preedit();
                         let i = ws.tabs.active_index();
                         ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
-                            (search_bar_label(s), search_query_caret_prefix(s))
+                            (
+                                search_bar_label(s, preedit),
+                                search_query_caret_prefix(s, preedit),
+                            )
                         })
                     })
                     .unzip();

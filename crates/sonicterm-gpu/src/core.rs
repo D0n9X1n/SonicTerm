@@ -3651,28 +3651,22 @@ impl GpuRenderer {
             read_only_badge_rect(sw, sh, self.scale_factor, content_w)
         });
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
-        let search_label = search.map(search_bar_label);
-        // When search is active and the IME has a non-empty composing run, the
-        // preedit is drawn INLINE inside the search box (display-only — it does
-        // NOT drive matching; only committed text does). Fold its width plus a
-        // leading gap into `content_w` so the box GROWS in real time to contain
-        // the composition, instead of letting it overflow past the box edge and
-        // overlap the ` — N/M` suffix. Only counted when search is active.
-        let search_preedit = search
+        // When search is active and the IME has a non-empty composing run, splice
+        // the preedit INTO the label (between the query and the ▏ caret) so the
+        // whole bar renders as one continuous string: the box grows to fit it and
+        // the ` — N/M` counter flows to the RIGHT of the composition instead of
+        // being overlapped. Display-only — the preedit does NOT drive matching
+        // (only committed text does). (#B14)
+        let search_preedit: &str = search
             .and(ime)
             .map(|i| i.preedit())
-            .filter(|s| !s.is_empty());
-        let search_preedit_w = search_preedit
-            .map(|p| {
-                estimate_badge_text_width(p, search_font_size)
-                    + self.chrome_px(SEARCH_BAR_ICON_GAP)
-            })
-            .unwrap_or(0.0);
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let search_label = search.map(|s| search_bar_label(s, search_preedit));
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
                 + self.chrome_px(SEARCH_BAR_ICON_GAP)
-                + estimate_badge_text_width(label, search_font_size)
-                + search_preedit_w;
+                + estimate_badge_text_width(label, search_font_size);
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
@@ -3725,7 +3719,7 @@ impl GpuRenderer {
                 let prefix_w = search
                     .map(|s| {
                         estimate_badge_text_width(
-                            &search_query_caret_prefix(s),
+                            &search_query_caret_prefix(s, search_preedit),
                             search_font_size,
                         )
                     })
@@ -4131,43 +4125,29 @@ impl GpuRenderer {
             }
         }
 
-        // Inline IME preedit (WezTerm-style): macOS does NOT draw the
-        // in-flight composition (the pinyin typed before commit) for a
-        // terminal — the app must. We draw the composing text INLINE at the
-        // cursor: a subtle highlight background + the text + an accent
-        // underline, all DPI-scaled. The OS candidate window is positioned
-        // separately via `set_ime_cursor_area` (window_event.rs); we only
-        // draw the inline composing run here, never the candidate list. This
-        // is a per-frame overlay (quads_overlay / overlay_glyph_instances),
-        // NOT folded into the row glyph cache. The FrameKey already hashes
-        // `i.preedit()` (see `ime_hash` above) so composition changes
-        // re-render.
-        if ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
+        // Inline IME preedit at the TERMINAL CURSOR (WezTerm-style): macOS does
+        // NOT draw the in-flight composition for a terminal, so the app must.
+        // When SEARCH is active the preedit is instead spliced into the search
+        // label (see search_bar_label above) and rendered as part of that
+        // string — so we skip the self-drawn overlay here to avoid drawing it
+        // twice / overlapping the ` — N/M` suffix. This block only handles the
+        // terminal-cursor case. Per-frame overlay (not row-cached); the
+        // FrameKey hashes `i.preedit()` so composition changes re-render.
+        let search_active = search_ime_anchor.is_some();
+        if !search_active && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
                 let text = i.preedit();
                 // Body-matched, DPI-scaled font size (same as terminal text).
                 let font_size = self.raster_px(self.font_size);
-                // Anchor: search box caret when search is active, else the
-                // terminal cursor cell.
-                let (start_x, top_y, line_h) =
-                    if let Some((cx, by, bh)) = search_ime_anchor {
-                        (cx, by, bh)
-                    } else {
-                        let start_x = active_snapped_cell_x
-                            .get(grid.cursor.col as usize)
-                            .copied()
-                            .unwrap_or(
-                                active_origin_x + f32::from(grid.cursor.col) * self.cell_w,
-                            );
-                        let top_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
-                        (start_x, top_y, self.cell_h)
-                    };
+                let start_x = active_snapped_cell_x
+                    .get(grid.cursor.col as usize)
+                    .copied()
+                    .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
+                let top_y = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
+                let line_h = self.cell_h;
                 // Per-char advance estimate mirrors the body/badge text path.
                 let pre_w = estimate_badge_text_width(text, font_size).max(self.cell_w);
-                // Whether to clip to the active pane: only for the in-grid
-                // (cursor) anchor — the search box lives in chrome above the
-                // pane and would be clipped away otherwise.
-                let clip_to_pane = search_ime_anchor.is_none();
+                let clip_to_pane = true;
 
                 // (1) Composing text glyphs — vertically centered in the
                 // line, nudged a hair right so it doesn't kiss the cell edge.
@@ -4183,17 +4163,7 @@ impl GpuRenderer {
                 let mut wt = stack.clone();
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
-                // Preedit foreground: when anchored to the SEARCH box, the run
-                // is composing text typed INTO the yellow box, so it must use
-                // the box's dark foreground (same color as the query text:
-                // `hex_to_chrome_color(theme.colors.background.0)`) for
-                // contrast. For the terminal-cursor anchor (no search), keep
-                // the existing `self.search_fg`. Underline is unchanged.
-                let preedit_fg = if search_ime_anchor.is_some() {
-                    hex_to_chrome_color(theme.colors.background.0.as_str())
-                } else {
-                    self.search_fg
-                };
+                let preedit_fg = self.search_fg;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
