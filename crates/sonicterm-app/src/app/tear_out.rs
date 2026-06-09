@@ -183,14 +183,15 @@ impl App {
         renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
 
         let (cols, rows) = renderer.cells();
-        // Resize the migrated panes to the child window's grid and
-        // swap each pane's VT-thread redraw target so further pty
-        // output triggers the CHILD window's redraw, not the parent.
+        // Swap each migrated pane's VT-thread redraw target so further pty
+        // output triggers the CHILD window's redraw, not the parent. The
+        // PER-PANE grid/PTY sizing is deferred until AFTER the child
+        // WindowState exists (below) so a SPLIT tab sizes every pane to its
+        // own sub-rect via `compute_pane_rects_for`, not the whole window —
+        // sizing every pane to the full `(cols, rows)` here is what made a
+        // torn-out split overlap (left pane painted across the right). #pane-geom
+        let _ = (cols, rows);
         for pane in panes.values() {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
             *pane.redraw_target.lock() = Some(window.clone());
         }
 

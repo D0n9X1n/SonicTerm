@@ -500,6 +500,41 @@ impl App {
                         return;
                     }
                     child.mouse_down = true;
+                    // #pane-geom: click-to-focus the pane under the cursor in a
+                    // SPLIT child window — mirrors the main-window path in
+                    // window_event.rs. Without this, clicking an inactive pane in
+                    // a torn-out split never switched focus (keystrokes/selection
+                    // kept going to the old active pane). Uses the same per-tree
+                    // layout the renderer paints with, so hit-testing matches what
+                    // the user sees. The actual `flash_pane_focus` is deferred to
+                    // AFTER `r`'s last use below (it needs `&mut renderer`, which
+                    // would conflict with the `&renderer` held in `r`).
+                    let mut pane_focus_flash: Option<u64> = None;
+                    {
+                        let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                        let pane_rects = App::compute_pane_rects_for(child);
+                        if pane_rects.len() > 1 {
+                            let tab_idx = child.tabs.active_index();
+                            for (id, rect) in &pane_rects {
+                                if px >= rect.x
+                                    && px < rect.x + rect.w
+                                    && py >= rect.y
+                                    && py < rect.y + rect.h
+                                {
+                                    if let Some(st) = child.tab_states.get_mut(tab_idx) {
+                                        if st.active_pane != *id {
+                                            st.active_pane = *id;
+                                            pane_focus_flash = Some(*id);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            if pane_focus_flash.is_some() {
+                                mark_all_panes_dirty(&child.panes);
+                            }
+                        }
+                    }
                     // `pixel_to_cell` expects raster px.
                     if let Some((row, col)) =
                         r.pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
@@ -535,6 +570,14 @@ impl App {
                         child.select_anchor = (abs_row, col);
                         child.selection = Some(sel);
                         mark_all_panes_dirty(&child.panes);
+                    }
+                    // Deferred pane-focus flash (see #pane-geom above): safe here
+                    // because `r`'s last use was `pixel_to_cell`, so the &renderer
+                    // borrow has ended and we can take &mut renderer.
+                    if let Some(id) = pane_focus_flash {
+                        if let Some(r) = child.renderer.as_mut() {
+                            r.flash_pane_focus(id);
+                        }
                     }
                     child.request_redraw();
                 }
@@ -1060,6 +1103,16 @@ impl App {
         if st.tree.close(focus) {
             st.active_pane = new_focus;
             child.panes.remove(&focus);
+            // #pane-geom: the surviving sibling's PaneRect just grew to cover
+            // the closed pane's area. Push the new layout into its Grid +
+            // PtyHandle so the survivor (and TUIs like vim) reflow into the
+            // freed space — without this the survivor keeps its narrow
+            // split-time column count until the OS window is resized. Mirrors
+            // `close_active_pane_in_child` / main `close_active_pane`.
+            resize_visible_panes_in_child(child);
+            if let Some(r) = child.renderer.as_mut() {
+                r.flash_pane_focus(new_focus);
+            }
             child.request_redraw();
             return true;
         }
