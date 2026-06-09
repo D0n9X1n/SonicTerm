@@ -44,8 +44,14 @@ pub struct ScrollbarVisState {
     /// each frame by [`tick`].
     pub alpha: f32,
     /// Instant of the most recent "I'm relevant" event (scroll, drag,
-    /// edge-hover entry, view-change). Drives the idle-hide window.
-    pub last_active: Instant,
+    /// edge-hover entry, view-change), or `None` when the pane has never
+    /// been active. `None` reads as "infinitely idle" → hidden. Modeled as
+    /// an `Option` rather than a far-past `Instant` because
+    /// `Instant::checked_sub(3600s)` returns `None` on a freshly-booted
+    /// machine (monotonic clock younger than the offset), which silently
+    /// made the bar start VISIBLE — a real defect caught by CI on fresh
+    /// Windows runners.
+    pub last_active: Option<Instant>,
     /// Sticky bit: cursor is currently inside the right-edge proximity
     /// strip. When `true` we override the idle-hide timer.
     pub mouse_near_right_edge: bool,
@@ -55,17 +61,16 @@ pub struct ScrollbarVisState {
 }
 
 impl ScrollbarVisState {
-    /// Construct an initially-hidden state. `now` seeds `last_active`
-    /// far enough in the past that the bar starts hidden.
+    /// Construct an initially-hidden state. `last_active` is `None` so the
+    /// pane reads as fully idle (bar hidden) until the first real activity.
     pub fn new(now: Instant) -> Self {
-        let past = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
-        Self { alpha: 0.0, last_active: past, mouse_near_right_edge: false, last_tick: now }
+        Self { alpha: 0.0, last_active: None, mouse_near_right_edge: false, last_tick: now }
     }
 
     /// Record a "user is interacting with this pane's scroll" event
     /// (scrollwheel, drag, view_top jump). Resets the idle-hide window.
     pub fn mark_active(&mut self, now: Instant) {
-        self.last_active = now;
+        self.last_active = Some(now);
     }
 }
 
@@ -113,7 +118,10 @@ pub fn tick(
             0.0
         }
         ScrollbarMode::Auto => {
-            let idle_ms = now.saturating_duration_since(state.last_active).as_millis() as u64;
+            let idle_ms = match state.last_active {
+                Some(t) => now.saturating_duration_since(t).as_millis() as u64,
+                None => u64::MAX,
+            };
             let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
             let target = if visible_now { 1.0 } else { 0.0 };
             let dt_ms = now.saturating_duration_since(state.last_tick).as_millis().max(1) as f32;
@@ -139,7 +147,10 @@ pub fn is_animating(state: &ScrollbarVisState, mode: ScrollbarMode, drag_active:
     if !matches!(mode, ScrollbarMode::Auto) {
         return false;
     }
-    let idle_ms = state.last_active.elapsed().as_millis() as u64;
+    let idle_ms = match state.last_active {
+        Some(t) => t.elapsed().as_millis() as u64,
+        None => u64::MAX,
+    };
     let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
     let target = if visible_now { 1.0 } else { 0.0 };
     (state.alpha - target).abs() > f32::EPSILON
@@ -174,7 +185,7 @@ pub fn update_and_collect(
         let state = vis.entry(id).or_insert_with(|| ScrollbarVisState::new(now));
         let near = is_mouse_near_right_edge(px, py, pw, ph, cursor.0, cursor.1);
         if near && !state.mouse_near_right_edge {
-            state.last_active = now;
+            state.last_active = Some(now);
         }
         state.mouse_near_right_edge = near;
         let drag = drag_active_on_pane == Some(id) && id == active_id;
@@ -203,7 +214,7 @@ pub fn update_hover_states(
         if state.mouse_near_right_edge != near {
             state.mouse_near_right_edge = near;
             if near {
-                state.last_active = now;
+                state.last_active = Some(now);
             }
             changed = true;
         }
@@ -298,8 +309,12 @@ mod tests {
         let s = ScrollbarVisState::new(now);
         assert_eq!(s.alpha, 0.0);
         assert!(!s.mouse_near_right_edge);
-        // Seeded far in the past so the idle window is already closed.
-        assert!(s.last_active.elapsed() >= Duration::from_secs(60));
+        // `None` == never active == infinitely idle, so the bar starts
+        // hidden. This must hold even on a freshly-booted machine whose
+        // monotonic clock is younger than the old 3600s offset (the bug
+        // CI caught on fresh Windows runners).
+        assert_eq!(s.last_active, None);
+        assert!(!is_animating(&s, ScrollbarMode::Auto, false), "fresh state must not animate");
     }
 
     #[test]
@@ -353,7 +368,7 @@ mod tests {
         let v = tick(&mut st, ScrollbarMode::Auto, false, now.checked_add(Duration::from_millis(200)).unwrap());
         assert_eq!(v, 1.0, "recent activity makes the bar fully visible");
         // Long past the idle window with no further activity: fades to hidden.
-        st.last_active = at(10, now);
+        st.last_active = Some(at(10, now));
         let faded = tick(&mut st, ScrollbarMode::Auto, false, now.checked_add(Duration::from_secs(11)).unwrap());
         assert_eq!(faded, 0.0, "idle past IDLE_HIDE_MS fades the bar out");
         assert!(!is_animating(&st, ScrollbarMode::Auto, false), "fully hidden + idle must not keep redrawing");

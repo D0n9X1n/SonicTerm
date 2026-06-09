@@ -2260,7 +2260,10 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
         let st = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
-        let idle_ms = st.last_active.elapsed().as_millis() as u64;
+        let idle_ms = match st.last_active {
+            Some(t) => t.elapsed().as_millis() as u64,
+            None => u64::MAX,
+        };
         Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
     }
 
