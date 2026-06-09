@@ -3,7 +3,7 @@
 //! dispatch.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -118,6 +118,34 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
     } else {
         1
     }
+}
+
+/// Vsync coalescing gate shared by the main-window (`window_event.rs`) and
+/// torn-out child-window (`child_window.rs`) `RedrawRequested` arms.
+///
+/// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
+/// frame boundary instead of rendering now. A redraw is deferred only when
+/// all three hold:
+/// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
+///   immediate; gating them adds perceptible latency, PR #132).
+/// - `!pty_burst` — it does not carry a fresh PTY burst (a new burst always
+///   renders so streamed bytes never stall).
+/// - `since_last_render < frame_period` — we already drew inside this vsync
+///   window, so another draw now would just burn a frame.
+///
+/// Extracted as a pure fn (Issue #43) so main and child use byte-identical
+/// coalescing logic AND it is unit-testable without a winit loop. Deferral
+/// is what lets a bursty `ls -al` coalesce to one frame per vsync; on a
+/// torn-out child the same gate also stops the render path from busy-spinning
+/// and starving the VT thread's parser lock.
+#[must_use]
+pub fn should_defer_streaming_redraw(
+    was_dirty: bool,
+    pty_burst: bool,
+    since_last_render: std::time::Duration,
+    frame_period: std::time::Duration,
+) -> bool {
+    !was_dirty && !pty_burst && since_last_render < frame_period
 }
 
 pub struct WindowState {
@@ -1172,6 +1200,17 @@ pub struct App {
     /// the pending request onto the next vsync tick rather than
     /// burning a frame.
     pub(super) pending_redraw: bool,
+    /// Per-CHILD-window analogue of [`Self::pending_redraw`]. The main
+    /// window's deferred-redraw latch is a single bool keyed off
+    /// `main().last_render`; torn-out child windows each carry their own
+    /// `WindowState.last_render` and `request_redraw()`, so a child that
+    /// defers a PTY-streaming or lock-contended redraw records its
+    /// `WindowId` here. `about_to_wait` folds each pending child's
+    /// `last_render + frame_period` into the next `WaitUntil` deadline,
+    /// and `new_events`' `ResumeTimeReached` arm re-requests a redraw on
+    /// exactly those windows. An entry is cleared when that child next
+    /// renders past the coalescing gate (or when the window is reaped).
+    pub(super) pending_redraw_windows: HashSet<WindowId>,
     /// Set true whenever a user-driven event (keyboard, mouse click,
     /// cursor move while dragging, resize, IME, modifier change) or a
     /// live-reload of theme/font/keymap occurs. The next
@@ -1411,6 +1450,7 @@ impl App {
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
             pending_redraw: false,
+            pending_redraw_windows: HashSet::new(),
             input_dirty: false,
             pty_burst_gen: Arc::new(AtomicU32::new(0)),
             last_seen_burst_gen: 0,
@@ -1592,6 +1632,37 @@ impl App {
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
         self.pending_redraw = true;
         self.input_dirty = was_dirty;
+    }
+
+    /// Child-window analogue of [`Self::defer_redraw_on_lock_contention`]
+    /// plus the vsync coalescing gate. Records `win_id` in
+    /// [`Self::pending_redraw_windows`] so `about_to_wait` schedules a
+    /// `WaitUntil` at that child's next frame boundary and
+    /// `new_events` re-requests the redraw there — instead of the child
+    /// busy-spinning a bare `request_redraw()` that re-contends the very
+    /// parser lock the VT thread needs to drain a burst (Issue #43:
+    /// `ls -al` was smooth in main but laggy in a torn-out child because
+    /// the child render path had neither the gate nor this backoff).
+    /// Preserves the `input_dirty` flag captured at the top of the
+    /// handler so a deferred input-driven redraw still bypasses the gate
+    /// when it re-fires.
+    #[doc(hidden)]
+    pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
+        self.pending_redraw_windows.insert(win_id);
+        self.input_dirty = was_dirty;
+    }
+
+    /// Test-only: `true` if `win_id` has a deferred redraw queued in
+    /// [`Self::pending_redraw_windows`] (the child-window coalescing latch).
+    #[doc(hidden)]
+    pub fn __test_child_redraw_deferred(&self, win_id: WindowId) -> bool {
+        self.pending_redraw_windows.contains(&win_id)
+    }
+
+    /// Test-only: read the shared input-driven-redraw flag.
+    #[doc(hidden)]
+    pub fn __test_input_dirty(&self) -> bool {
+        self.input_dirty
     }
 
     /// Install a one-shot callback fired at the top of the first
@@ -3838,5 +3909,60 @@ mod click_count_tests {
         // Same cell but past the multi-click interval → restart at 1.
         assert_eq!(next_click_count(2, true, false), 1);
         assert_eq!(next_click_count(1, true, false), 1);
+    }
+}
+
+#[cfg(test)]
+mod redraw_coalescing_tests {
+    //! Issue #43: the vsync coalescing gate shared by the main and child
+    //! `RedrawRequested` arms. These pin the exact deferral policy that
+    //! lets a bursty `ls -al` coalesce to one frame per vsync and stops a
+    //! torn-out child from busy-spinning the VT thread's parser lock. The
+    //! same predicate now backs BOTH windows, so this one spec covers
+    //! main/child parity for the gate.
+
+    use super::should_defer_streaming_redraw;
+    use std::time::Duration;
+
+    const FRAME: Duration = Duration::from_micros(16_667); // ~60Hz
+
+    #[test]
+    fn streaming_redraw_within_frame_defers() {
+        // Pure PTY-streaming repaint that already drew this vsync window:
+        // defer to the next boundary (the coalescing win).
+        assert!(should_defer_streaming_redraw(
+            false, // not input-driven
+            false, // no fresh burst
+            Duration::from_millis(2),
+            FRAME,
+        ));
+    }
+
+    #[test]
+    fn input_driven_redraw_never_defers() {
+        // Keystroke / resize / theme / IME must render immediately even
+        // inside the vsync window — gating them adds perceptible latency.
+        assert!(!should_defer_streaming_redraw(true, false, Duration::from_millis(1), FRAME));
+    }
+
+    #[test]
+    fn fresh_pty_burst_never_defers() {
+        // A redraw carrying new PTY bytes always renders so streamed output
+        // never stalls behind the frame gate.
+        assert!(!should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+    }
+
+    #[test]
+    fn past_frame_boundary_never_defers() {
+        // We're past this vsync window — render now, don't defer forever.
+        assert!(!should_defer_streaming_redraw(false, false, Duration::from_millis(20), FRAME));
+        // Exactly at the boundary also renders (`<` is strict).
+        assert!(!should_defer_streaming_redraw(false, false, FRAME, FRAME));
+    }
+
+    #[test]
+    fn input_and_burst_together_render() {
+        // Belt-and-suspenders: any reason-to-render short-circuits deferral.
+        assert!(!should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
     }
 }

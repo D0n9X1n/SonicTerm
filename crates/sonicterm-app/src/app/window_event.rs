@@ -168,7 +168,12 @@ impl App {
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
                 let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
-                if !was_dirty && !pty_burst && last_render.elapsed() < self.frame_period {
+                if crate::app::should_defer_streaming_redraw(
+                    was_dirty,
+                    pty_burst,
+                    last_render.elapsed(),
+                    self.frame_period,
+                ) {
                     self.pending_redraw = true;
                     return;
                 }

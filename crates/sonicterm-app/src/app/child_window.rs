@@ -114,6 +114,21 @@ impl App {
         // pins `self.windows` for the rest of the match. Used only by
         // the `RedrawRequested` arm but cheap enough to compute once.
         let palette_here = self.palette_attached_window == Some(win_id);
+        // Issue #43: vsync coalescing inputs for the `RedrawRequested`
+        // arm, snapshotted BEFORE the long-lived `child` borrow of
+        // `self.windows` below (these read disjoint `self` fields the
+        // borrow would otherwise pin). Mirrors the main-window gate in
+        // `window_event.rs`: `was_dirty` carves out input-driven redraws
+        // (keystroke/resize/theme) so they stay immediate, and
+        // `pty_burst` carves out frames carrying fresh PTY bytes. Only a
+        // pure PTY-streaming redraw with neither flag set is eligible for
+        // the next-vsync deferral. `pty_burst_snapshot` is recorded as
+        // `last_seen_burst_gen` after a successful child render so the
+        // following streaming redraw coalesces instead of over-rendering.
+        let was_dirty = self.input_dirty;
+        let frame_period = self.frame_period;
+        let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
+        let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
         // Scrollbar input (#pane-scrollbar): handled HERE, before the long-lived
         // `child` borrow below, because the scrollbar helpers take `&self`/`&mut
         // self` and would conflict with that borrow inside a match arm. A press
@@ -323,6 +338,38 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Issue #43: vsync coalescing gate — the torn-out child's
+                // mirror of the main-window gate (window_event.rs). A
+                // redraw that is neither input-driven (`was_dirty`) nor
+                // carrying fresh PTY bytes (`pty_burst`), and which lands
+                // inside the current vsync window of THIS child's own
+                // frame clock, is deferred to the next frame boundary
+                // instead of rendering now. `about_to_wait` turns the
+                // `pending_redraw_windows` entry into a
+                // `WaitUntil(child.last_render + frame_period)` and
+                // `new_events` re-requests the redraw there. Net effect:
+                // a torn-out child coalesces a PTY burst (`ls -al`) into
+                // one frame per vsync like the main window, instead of
+                // rendering on every VT tick. Input-driven redraws skip
+                // the gate so typing/resize/theme stay immediate.
+                if crate::app::should_defer_streaming_redraw(
+                    was_dirty,
+                    pty_burst,
+                    child.last_render.elapsed(),
+                    frame_period,
+                ) {
+                    // End the `child` / palette borrows on this path so
+                    // the `&mut self` defer helper is callable.
+                    let _ = child;
+                    let _ = palette_for_render;
+                    self.defer_child_redraw(win_id, was_dirty);
+                    return;
+                }
+                // Rendering this frame: drop any pending-deferral marker
+                // so the frame-boundary wakeup loop stops re-requesting
+                // redraws on this child (an idle re-request loop would be
+                // the forbidden unconditional heartbeat redraw).
+                self.pending_redraw_windows.remove(&win_id);
                 child.tabs.clear_expired_command_badges(Instant::now());
                 poll_command_events_for_child_window(child, &config);
                 let tab_idx = child.tabs.active_index();
@@ -382,7 +429,21 @@ impl App {
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
-                    child.request_redraw();
+                    // Issue #43 lock-contention backoff: a bare
+                    // `child.request_redraw()` here re-enters this arm on
+                    // the very next loop turn and re-contends the parser
+                    // lock the VT thread (`spawn_pane.rs` `p.advance`)
+                    // holds almost continuously during an `ls -al` burst —
+                    // the child busy-spun, re-running all per-frame setup
+                    // (pane_rects, parser-Arc clones) and starving the VT
+                    // thread. Defer to the next frame boundary instead
+                    // (mirror of main's `defer_redraw_on_lock_contention`)
+                    // so the VT thread gets ~`frame_period` of uncontended
+                    // drain. `was_dirty` is preserved so a deferred
+                    // input-driven redraw still bypasses the gate.
+                    let _ = child;
+                    let _ = palette_for_render;
+                    self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
                 let inline_images_by_pane: std::collections::HashMap<
@@ -514,6 +575,21 @@ impl App {
                         }
                     }
                     child.last_render = Instant::now();
+                    // Issue #43: close the coalescing gate for the next
+                    // streaming redraw. `input_dirty` is the shared
+                    // main+child carve-out flag (see window_event.rs
+                    // pre-dispatch block) — clear it now that this child
+                    // has serviced the input-driven frame. Recording the
+                    // burst gen sampled at the top of THIS handler as
+                    // `last_seen_burst_gen` means a redraw arriving before
+                    // the next PTY chunk has `pty_burst == false` and
+                    // coalesces; a burst landing mid-render keeps the
+                    // counter ahead so the next redraw still renders.
+                    // Disjoint `self` fields — safe alongside the live
+                    // `child`/`pane` borrows (mirror of the
+                    // `self.os_drag_bars.publish` access below).
+                    self.input_dirty = false;
+                    self.last_seen_burst_gen = pty_burst_snapshot;
                     // Tell the OS where the child's active text cursor lives so
                     // the IME candidate window (pinyin/romaji/Hangul) appears
                     // under the edited cell instead of pinned to the screen's

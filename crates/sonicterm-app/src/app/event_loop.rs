@@ -60,6 +60,18 @@ impl App {
                 next = Some(last_render + self.frame_period);
             }
         }
+        // Issue #43: same vsync-pacing schedule for any CHILD window that
+        // deferred a redraw (PTY-streaming gate or lock-contention
+        // backoff). Each torn-out child keys off its own
+        // `WindowState.last_render`, so fold each pending child's next
+        // frame boundary into the wake deadline. Stale ids (window
+        // reaped) are skipped here and pruned in `new_events`.
+        for win_id in &self.pending_redraw_windows {
+            if let Some(last_render) = self.windows.get(win_id).map(|ws| ws.last_render) {
+                let at = last_render + self.frame_period;
+                next = Some(next.map_or(at, |cur| cur.min(at)));
+            }
+        }
         if let Some(r) = self.main_renderer() {
             // PR #400: cursor_visible is per-pane — read from the
             // active pane of the active tab so the DECTCEM flag
@@ -101,6 +113,26 @@ impl App {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
+            // Issue #43: also re-request the redraw on every CHILD window
+            // that deferred one (vsync gate or lock-contention backoff).
+            // We do NOT clear an entry on request — exactly like the main
+            // window's `pending_redraw`, the marker is cleared when the
+            // child actually renders past the gate in
+            // `handle_child_window_event`. Take the set out to avoid
+            // borrowing `self.windows` and `self.pending_redraw_windows`
+            // at once, prune ids whose window was reaped (so the set can't
+            // leak / wake the loop forever), then put the survivors back.
+            let pending = std::mem::take(&mut self.pending_redraw_windows);
+            self.pending_redraw_windows = pending
+                .into_iter()
+                .filter(|win_id| match self.windows.get(win_id) {
+                    Some(ws) => {
+                        ws.request_redraw();
+                        true
+                    }
+                    None => false,
+                })
+                .collect();
         }
     }
 

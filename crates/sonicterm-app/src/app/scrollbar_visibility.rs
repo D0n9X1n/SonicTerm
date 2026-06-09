@@ -16,7 +16,7 @@
 //! Always / Never short-circuit to alpha 1.0 / 0.0 with no animation.
 
 use sonicterm_cfg::config::ScrollbarMode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Logical-pixel distance from the pane's right edge that counts as
 /// "hovering the scrollbar gutter" and shows the bar.
@@ -295,6 +295,7 @@ mod tests {
     //! the child plumbing; this module nails the math directly.
 
     use super::*;
+    use std::time::Duration;
 
     // A single pane id=1 occupying x∈[0,800), y∈[30,600).
     const PANE: (u64, f32, f32, f32, f32) = (1, 0.0, 30.0, 800.0, 570.0);
