@@ -67,6 +67,35 @@ impl App {
         sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
+    /// Child-window mirror of [`Self::hyperlink_uri_at`]: resolve the URI
+    /// (OSC 8 first, then plain-text scan) under `(row, col)` in the active
+    /// pane of the child window `win_id`. Used for modifier-click open. (#pane-url)
+    pub(super) fn child_hyperlink_uri_at(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+        col: u16,
+    ) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        let r = grid.row(row);
+        if let Some(hid) = r[col as usize].hyperlink() {
+            let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
+            drop(guard);
+            return uri;
+        }
+        let mut row_text = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            row_text.push(r[i as usize].ch);
+        }
+        drop(guard);
+        sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
+    }
+
     /// Convert a VIEWPORT row (0 = top visible row, as returned by
     /// `GpuRenderer::pixel_to_cell`) to a scrollback-ABSOLUTE row for the
     /// focused pane, so a `Selection` tracks the same TEXT as the viewport
@@ -282,6 +311,135 @@ impl App {
             mods.super_key()
         } else {
             mods.control_key()
+        }
+    }
+
+    // ── Child-window Cmd-hover URL (#pane-url) ──────────────────────────
+    // Mirrors the main-window hovered-URL affordance for torn-out windows
+    // (which previously rendered `hovered_url_cells: None` and had no
+    // refresh/open path). Reads the child's active-pane grid.
+
+    fn child_active_pane(&self, win_id: winit::window::WindowId) -> Option<&super::PaneState> {
+        let child = self.windows.get(&win_id)?;
+        let tab_idx = child.tabs.active_index();
+        let active_id = child.tab_states.get(tab_idx)?.active_pane;
+        child.panes.get(&active_id)
+    }
+
+    fn child_osc8_uri_at(&self, win_id: winit::window::WindowId, row: u16, col: u16) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        let hid = grid.row(row)[col as usize].hyperlink()?;
+        guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
+    }
+
+    fn child_focused_pane_row_text(&self, win_id: winit::window::WindowId, row: u16) -> Option<String> {
+        let pane = self.child_active_pane(win_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        if row >= grid.rows {
+            return None;
+        }
+        let r = grid.row(row);
+        let mut s = String::with_capacity(grid.cols as usize);
+        for i in 0..grid.cols {
+            s.push(r[i as usize].ch);
+        }
+        Some(s)
+    }
+
+    pub(super) fn child_url_open_modifier_held(&self, win_id: winit::window::WindowId) -> bool {
+        let mods = self.windows.get(&win_id).map(|c| c.modifiers).unwrap_or_default();
+        if cfg!(target_os = "macos") {
+            mods.super_key()
+        } else {
+            mods.control_key()
+        }
+    }
+
+    fn compute_child_hovered_url(
+        &self,
+        win_id: winit::window::WindowId,
+    ) -> Option<super::hovered_url::HoveredUrl> {
+        let child = self.windows.get(&win_id)?;
+        let cursor_pos = child.cursor_pos;
+        let active_id = child
+            .tab_states
+            .get(child.tabs.active_index())
+            .map(|st| st.active_pane);
+        // Gate to the active pane (same split rationale as the main path).
+        let hit = {
+            let mut found = None;
+            for (id, rect) in App::compute_pane_rects_for(child) {
+                let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+                if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
+                    found = Some(id);
+                    break;
+                }
+            }
+            found
+        };
+        if hit != active_id {
+            return None;
+        }
+        let r = child.renderer.as_ref()?;
+        let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
+        if self.child_osc8_uri_at(win_id, row, col).is_some() {
+            return None;
+        }
+        let row_text = self.child_focused_pane_row_text(win_id, row)?;
+        let mut hov = super::hovered_url::hovered_from_row(&row_text, row, col)?;
+        hov.active = self.child_url_open_modifier_held(win_id);
+        Some(hov)
+    }
+
+    /// Recompute the child window's hovered URL + pointer cursor. Call on
+    /// CursorMoved and ModifiersChanged in the child handler.
+    pub(super) fn refresh_hovered_url_in_child(&mut self, win_id: winit::window::WindowId) {
+        let new_hover = self.compute_child_hovered_url(win_id);
+        let prev = self.windows.get(&win_id).and_then(|c| c.hovered_url.clone());
+        let changed = new_hover != prev;
+        if let Some(c) = self.windows.get_mut(&win_id) {
+            c.hovered_url = new_hover;
+        }
+        let has_active_hover = self
+            .windows
+            .get(&win_id)
+            .and_then(|c| c.hovered_url.as_ref())
+            .map(|h| h.active)
+            .unwrap_or(false);
+        let cursor_pos = self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
+        let want_pointer = has_active_hover
+            || self
+                .windows
+                .get(&win_id)
+                .and_then(|c| c.renderer.as_ref())
+                .and_then(|r| r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32))
+                .and_then(|(row, col)| self.child_osc8_uri_at(win_id, row, col))
+                .is_some();
+        let current_hover_link = self.windows.get(&win_id).map(|c| c.hover_link).unwrap_or(false);
+        if want_pointer != current_hover_link {
+            if let Some(c) = self.windows.get_mut(&win_id) {
+                c.hover_link = want_pointer;
+            }
+            if let Some(c) = self.windows.get(&win_id) {
+                if let Some(w) = c.window.as_ref() {
+                    w.set_cursor(if want_pointer {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
+                }
+            }
+        }
+        if changed {
+            if let Some(c) = self.windows.get(&win_id) {
+                c.request_redraw();
+            }
         }
     }
     pub(super) fn open_ssh_pane(&mut self, target: &str) {

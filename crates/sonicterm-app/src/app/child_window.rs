@@ -23,7 +23,7 @@ use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
-    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowAttributes, WindowId},
@@ -35,6 +35,7 @@ use super::{
     resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState,
     TabState, UserEvent, WindowState,
 };
+use super::scrollbar_input::HitOutcome;
 
 #[doc(hidden)]
 pub fn resize_renderer_and_panes_if_present(
@@ -113,9 +114,187 @@ impl App {
         // pins `self.windows` for the rest of the match. Used only by
         // the `RedrawRequested` arm but cheap enough to compute once.
         let palette_here = self.palette_attached_window == Some(win_id);
-        // Split-borrow the palette out so the renderer can mutate it
-        // even though `child` borrows `self.windows` below. Disjoint
-        // fields — safe.
+        // Scrollbar input (#pane-scrollbar): handled HERE, before the long-lived
+        // `child` borrow below, because the scrollbar helpers take `&self`/`&mut
+        // self` and would conflict with that borrow inside a match arm. A press
+        // on the thumb starts a drag (track click pages); a cursor move while a
+        // drag is in flight scrolls the pane. On a Miss we fall through to the
+        // normal match so pane-focus / selection still work.
+        match &event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let (px, py) = self
+                    .windows
+                    .get(&win_id)
+                    .map(|c| (c.cursor_pos.0 as f32, c.cursor_pos.1 as f32))
+                    .unwrap_or((0.0, 0.0));
+                match self.scrollbar_hit_at_in_child(win_id, px, py) {
+                    HitOutcome::Miss => {}
+                    HitOutcome::StartDrag(state) => {
+                        if let Some(c) = self.windows.get_mut(&win_id) {
+                            c.mouse_down = true;
+                            c.scrollbar_drag = Some(state);
+                            c.request_redraw();
+                        }
+                        return;
+                    }
+                    HitOutcome::PageUp => {
+                        self.scrollbar_track_page_in_child(win_id, false);
+                        return;
+                    }
+                    HitOutcome::PageDown => {
+                        self.scrollbar_track_page_in_child(win_id, true);
+                        return;
+                    }
+                }
+                // Splitter divider drag (#pane-splitter): start a drag if the
+                // press landed on a pane divider.
+                if let Some(hit) = self.splitter_hit_at_in_child(win_id, px, py) {
+                    if let Some(c) = self.windows.get_mut(&win_id) {
+                        c.splitter_drag = Some(super::SplitterDragState {
+                            splitter: hit.id,
+                            axis: hit.axis,
+                            last_pos: (px, py),
+                        });
+                        c.selection = None;
+                        c.mouse_down = true;
+                        c.request_redraw();
+                    }
+                    self.set_child_splitter_cursor(win_id, hit.axis);
+                    return;
+                }
+                // Modifier-click opens a URL (#pane-url): Cmd (macOS) / Ctrl
+                // (Win/Linux) + click on an OSC 8 or auto-detected URL. Gated by
+                // the same pure `dispatch_modifier_click` the main window uses,
+                // so a plain click never opens.
+                //
+                // IMPORTANT (#pane-url review): switch the active pane to the
+                // one UNDER THE CURSOR first. `child_hyperlink_uri_at` resolves
+                // against the ACTIVE pane's grid, but in a split the click may
+                // land on an inactive pane — without this, Cmd-clicking a URL in
+                // pane B would open pane A's URL (or miss). This mirrors the main
+                // window, which focus-switches before the URL dispatch. The main
+                // match below re-runs the (now idempotent) focus switch.
+                {
+                    if let Some(c) = self.windows.get(&win_id) {
+                        let rects = App::compute_pane_rects_for(c);
+                        if rects.len() > 1 {
+                            let mut clicked = None;
+                            for (id, rect) in &rects {
+                                if px >= rect.x
+                                    && px < rect.x + rect.w
+                                    && py >= rect.y
+                                    && py < rect.y + rect.h
+                                {
+                                    clicked = Some(*id);
+                                    break;
+                                }
+                            }
+                            if let Some(id) = clicked {
+                                if let Some(c) = self.windows.get_mut(&win_id) {
+                                    let ti = c.tabs.active_index();
+                                    if let Some(st) = c.tab_states.get_mut(ti) {
+                                        st.active_pane = id;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mods_held = self.child_url_open_modifier_held(win_id);
+                    let cell = self
+                        .windows
+                        .get(&win_id)
+                        .and_then(|c| c.renderer.as_ref())
+                        .and_then(|r| r.pixel_to_cell(px, py));
+                    if let Some((row, col)) = cell {
+                        let uri = self.child_hyperlink_uri_at(win_id, row, col);
+                        let opened = sonicterm_cfg::url_open::dispatch_modifier_click(
+                            mods_held,
+                            uri,
+                            |u| {
+                                let r = sonicterm_cfg::url_open::open(u);
+                                if let Err(ref e) = r {
+                                    tracing::warn!("url_open failed: {e}");
+                                }
+                                r
+                            },
+                        );
+                        if opened.is_some() {
+                            if let Some(c) = self.windows.get_mut(&win_id) {
+                                c.mouse_down = false;
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Splitter drag in flight → resize the divider (before scrollbar
+                // + selection). #pane-splitter
+                let splitter_dragging = self
+                    .windows
+                    .get(&win_id)
+                    .map(|c| c.splitter_drag.is_some())
+                    .unwrap_or(false);
+                if splitter_dragging {
+                    let (cx, cy) = (position.x as f32, position.y as f32);
+                    if let Some(c) = self.windows.get_mut(&win_id) {
+                        c.cursor_pos = (position.x, position.y);
+                    }
+                    self.apply_splitter_drag_in_child(win_id, cx, cy);
+                    return;
+                }
+                let dragging =
+                    self.windows.get(&win_id).map(|c| c.scrollbar_drag.is_some()).unwrap_or(false);
+                if dragging {
+                    let (cx, cy) = (position.x as f32, position.y as f32);
+                    if let Some(c) = self.windows.get_mut(&win_id) {
+                        c.cursor_pos = (position.x, position.y);
+                    }
+                    if let Some((pane_id, new_top)) =
+                        self.scrollbar_drag_apply_in_child(win_id, cx, cy)
+                    {
+                        let live_top = self
+                            .windows
+                            .get(&win_id)
+                            .and_then(|c| c.panes.get(&pane_id))
+                            .map(|p| p.parser.lock().grid().scrollback_len() as u64)
+                            .unwrap_or(new_top);
+                        self.set_child_pane_view_top(win_id, pane_id, new_top, live_top);
+                    }
+                    return;
+                }
+                // Not dragging: update cursor pos + recompute the Cmd-hover URL
+                // (#pane-url) so the yellow hint / accent underline + pointer
+                // track the cursor. Done here (free `self`) before the main
+                // match re-borrows `child`. Mouse-down selection-drag still runs
+                // in the main match below (it needs the renderer borrow).
+                let mouse_down =
+                    self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
+                if !mouse_down {
+                    if let Some(c) = self.windows.get_mut(&win_id) {
+                        c.cursor_pos = (position.x, position.y);
+                    }
+                    self.refresh_hovered_url_in_child(win_id);
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                // Pressing/releasing Cmd over a URL flips the hint→active state
+                // (yellow → accent + pointer). Refresh here so the transition is
+                // immediate. The main match also records `child.modifiers`.
+                if let Some(c) = self.windows.get_mut(&win_id) {
+                    c.modifiers = m.state();
+                }
+                self.refresh_hovered_url_in_child(win_id);
+            }
+            _ => {}
+        }
+        // Split-borrow the palette out so the renderer can mutate it even though
+        // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
+        // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
         let palette_for_render: Option<&mut CommandPalette> =
             if palette_here { Some(&mut self.command_palette) } else { None };
         let Some(child) = self.windows.get_mut(&win_id) else { return };
@@ -243,6 +422,37 @@ impl App {
                         search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                    // Scrollbar visibility (#pane-scrollbar): compute the
+                    // per-pane fade alpha so torn-out windows show the scrollbar
+                    // + auto-hide like the main window (pre-fix it was hardcoded
+                    // 0.0 = invisible). Mirrors the main render path.
+                    let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
+                        let mode = config.appearance.scrollbar;
+                        let drag_pane = child.scrollbar_drag.as_ref().map(|s| s.pane_id);
+                        let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                        let rects: Vec<(u64, f32, f32, f32, f32)> =
+                            pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+                        crate::app::scrollbar_visibility::update_and_collect(
+                            &mut child.scrollbar_vis,
+                            &rects,
+                            cursor,
+                            active_id,
+                            drag_pane,
+                            mode,
+                            Instant::now(),
+                        )
+                    };
+                    let scrollbar_needs_more_frames = {
+                        let mode = config.appearance.scrollbar;
+                        let drag_pane = child.scrollbar_drag.as_ref().map(|s| s.pane_id);
+                        child.scrollbar_vis.iter().any(|(id, st)| {
+                            crate::app::scrollbar_visibility::is_animating(
+                                st,
+                                mode,
+                                drag_pane == Some(*id),
+                            )
+                        })
+                    };
                     let mut panes_slice: Vec<sonicterm_render_model::PaneRender<'_>> = guards
                         .iter_mut()
                         .map(|(id, g, rect)| sonicterm_render_model::PaneRender {
@@ -258,7 +468,7 @@ impl App {
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
                             is_broadcast_receiver: false,
-                            scrollbar_alpha: 0.0,
+                            scrollbar_alpha: scrollbar_alpha_map.get(id).copied().unwrap_or(0.0),
                             inline_images: inline_images_by_pane
                                 .get(id)
                                 .cloned()
@@ -287,17 +497,50 @@ impl App {
                             // `None` so the palette silently appeared on
                             // the main window instead.
                             palette_for_render,
-                            None, // ime preedit: not exposed in child window yet
+                            // Inline IME preedit at the child's terminal cursor
+                            // — child windows self-draw the composition exactly
+                            // like the main window (the OS doesn't draw it for a
+                            // terminal). Pre-fix this was hardcoded `None`, so
+                            // CJK composition was invisible in torn-out windows.
+                            Some(&child.ime),
                             pane.viewport_top_abs,
-                            // Cmd-hover URL recolor is computed against the
-                            // main window's focused pane only; child windows
-                            // never carry a hovered_url, so no recolor here.
-                            None,
+                            // Cmd-hover URL recolor (#pane-url): pass the child's
+                            // own hovered-URL cells so torn-out windows get the
+                            // same yellow-hint / accent-when-Cmd underline + glyph
+                            // recolor as the main window.
+                            child.hovered_url.as_ref().map(|h| h.to_cells()),
                         ) {
                             tracing::warn!("child render error: {e}");
                         }
                     }
                     child.last_render = Instant::now();
+                    // Tell the OS where the child's active text cursor lives so
+                    // the IME candidate window (pinyin/romaji/Hangul) appears
+                    // under the edited cell instead of pinned to the screen's
+                    // top-left. Mirror of the main-window path; throttled via the
+                    // child's own ImeCursorThrottle. (#pane-ime) The active pane
+                    // guard is still held here, so read the cursor cell from it.
+                    {
+                        let (cur_row, cur_col) = {
+                            let g = guards[active_pos].1.grid_mut();
+                            (g.cursor.row, g.cursor.col)
+                        };
+                        if let (Some(win), Some(r)) =
+                            (child.window.as_ref(), child.renderer.as_ref())
+                        {
+                            if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
+                                let x = r.padding_left_px() + f32::from(cur_col) * r.cell_w;
+                                let y = r.top_inset() + f32::from(cur_row) * r.cell_h;
+                                let pos =
+                                    winit::dpi::PhysicalPosition::new(x as i32, y as i32);
+                                let size = winit::dpi::PhysicalSize::new(
+                                    r.cell_w.ceil() as u32,
+                                    r.cell_h.ceil() as u32,
+                                );
+                                win.set_ime_cursor_area(pos, size);
+                            }
+                        }
+                    }
                     // Epic #289 Phase C2 — publish this child's tab bar
                     // snapshot for cross-window OS drag hit-tests. See
                     // `App::publish_child_window_tab_bar` for the
@@ -325,11 +568,20 @@ impl App {
                         );
                         self.os_drag_bars.publish(snap);
                     }
+                    // Keep animating the scrollbar fade to completion (the
+                    // 300ms auto-hide) even when no further input arrives.
+                    if scrollbar_needs_more_frames {
+                        child.request_redraw();
+                    }
                 }
             }
             WindowEvent::Resized(size)
                 if resize_renderer_and_split_panes(child, size.width, size.height) =>
             {
+                // Cell geometry changed — force the next render to re-publish the
+                // IME cursor area even if (row, col) is unchanged, else the OS
+                // candidate window stays at the pre-resize pixel location.
+                child.ime_cursor_throttle.reset();
                 child.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
@@ -363,6 +615,12 @@ impl App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                // Drop any Cmd-hover URL highlight when the cursor leaves the
+                // child window (#pane-url).
+                if child.hovered_url.take().is_some() {
+                    child.hover_link = false;
+                    child.request_redraw();
+                }
                 if let Some(r) = child.renderer.as_mut() {
                     let changed = r.set_hover_cursor(None);
                     if changed {
@@ -474,6 +732,84 @@ impl App {
                     }
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Child-window wheel: torn-out windows had NO MouseWheel arm at
+                // all, so scrollback was unreachable and alt-screen TUIs got no
+                // wheel translation. Mirror the main-window handler
+                // (window_event.rs): route to the pane under the cursor, and on
+                // the alt screen translate to SGR/X10 wheel reports (mouse
+                // tracking on) or arrow keys (off); otherwise scroll scrollback.
+                let (lx, ly) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                let cell_h = child
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.cell_size().1)
+                    .filter(|h| *h > 0.0)
+                    .unwrap_or(16.0);
+                let lines_per_tick: f32 = 3.0;
+                let delta_lines_f: f32 = match delta {
+                    MouseScrollDelta::LineDelta(_x, y) => -y * lines_per_tick,
+                    MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
+                };
+                let delta_lines = if delta_lines_f >= 0.0 {
+                    delta_lines_f.ceil() as i32
+                } else {
+                    delta_lines_f.floor() as i32
+                };
+                if delta_lines != 0 {
+                    if let Some(pane_id) = child_pane_at_cursor(child, lx, ly) {
+                        let cell =
+                            child.renderer.as_ref().and_then(|r| r.pixel_to_cell(lx, ly));
+                        let (is_alt, tracking_on, sgr, app_cursor) = child
+                            .panes
+                            .get(&pane_id)
+                            .map(|pane| {
+                                let parser = pane.parser.lock();
+                                (
+                                    parser.grid().is_alt(),
+                                    parser.mouse_tracking_enabled(),
+                                    parser.mouse_sgr_enabled(),
+                                    parser.application_cursor_keys(),
+                                )
+                            })
+                            .unwrap_or((false, false, false, false));
+                        if is_alt && tracking_on {
+                            let up = delta_lines < 0;
+                            let (col1, row1) =
+                                cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let payload = super::window_event::wheel_report_bytes(
+                                sgr, up, col1, row1, count,
+                            );
+                            if let Some(pane) = child.panes.get(&pane_id) {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else if is_alt {
+                            let up = delta_lines < 0;
+                            let seq: &[u8] = match (app_cursor, up) {
+                                (true, true) => b"\x1bOA",
+                                (true, false) => b"\x1bOB",
+                                (false, true) => b"\x1b[A",
+                                (false, false) => b"\x1b[B",
+                            };
+                            let count = delta_lines.unsigned_abs() as usize;
+                            let mut payload = Vec::with_capacity(seq.len() * count);
+                            for _ in 0..count {
+                                payload.extend_from_slice(seq);
+                            }
+                            if let Some(pane) = child.panes.get(&pane_id) {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(payload);
+                                }
+                            }
+                        } else {
+                            scroll_child_pane(child, pane_id, delta_lines);
+                        }
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
                     let Some(r) = child.renderer.as_ref() else { return };
@@ -515,14 +851,8 @@ impl App {
                     }
                     child.mouse_down = true;
                     // #pane-geom: click-to-focus the pane under the cursor in a
-                    // SPLIT child window — mirrors the main-window path in
-                    // window_event.rs. Without this, clicking an inactive pane in
-                    // a torn-out split never switched focus (keystrokes/selection
-                    // kept going to the old active pane). Uses the same per-tree
-                    // layout the renderer paints with, so hit-testing matches what
-                    // the user sees. The actual `flash_pane_focus` is deferred to
-                    // AFTER `r`'s last use below (it needs `&mut renderer`, which
-                    // would conflict with the `&renderer` held in `r`).
+                    // SPLIT child window. The `flash_pane_focus` is deferred to
+                    // after `r`'s last use below (needs `&mut renderer`).
                     let mut pane_focus_flash: Option<u64> = None;
                     {
                         let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
@@ -600,6 +930,18 @@ impl App {
                     let foreign = child.drag_target.take();
                     let pressed = child.pressed_tab.take();
                     child.mouse_down = false;
+                    // End any in-flight scrollbar thumb drag (#pane-scrollbar).
+                    if child.scrollbar_drag.take().is_some() {
+                        child.request_redraw();
+                    }
+                    // End any in-flight splitter divider drag (#pane-splitter)
+                    // and restore the default cursor.
+                    if child.splitter_drag.take().is_some() {
+                        if let Some(w) = child.window.as_ref() {
+                            w.set_cursor(CursorIcon::Default);
+                        }
+                        child.request_redraw();
+                    }
                     if let Some(r) = child.renderer.as_mut() {
                         r.set_drag_chip(None);
                     }
@@ -723,6 +1065,34 @@ impl App {
                     child.request_redraw();
                     return;
                 }
+                // Search box routing (#pane-search): when this child's active
+                // tab has an open search box, keystrokes feed the box (not the
+                // PTY), EXCEPT keymap chords other than OpenSearch (so Cmd+G
+                // next/prev etc. still run). Mirrors the main-window gate.
+                let child_search_open = {
+                    let i = child.tabs.active_index();
+                    child.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+                };
+                if child_search_open {
+                    let child_mods = child.modifiers;
+                    let _ = child;
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            if !matches!(action, Action::OpenSearch) {
+                                self.run_action_for_window(&action, win_id);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.search_handle_key_in_child(win_id, &event, child_mods);
+                    if let Some(c) = self.windows.get(&win_id) {
+                        c.request_redraw();
+                    }
+                    return;
+                }
                 // Issue #370: the previous narrow special-case only
                 // handled `EnterCopyMode` / `EnterQuickSelect` and
                 // dropped every other action (NextTab / PrevTab /
@@ -801,6 +1171,20 @@ impl App {
                             let _ = pty.in_tx.send(bytes);
                         }
                     }
+                    // Scroll-to-bottom on plain Enter (#B12 parity): pressing
+                    // Enter while scrolled up in history jumps back to the live
+                    // bottom. Shift+Enter inserts a newline and must NOT jump.
+                    let is_plain_enter = matches!(event.logical_key, Key::Named(NamedKey::Enter))
+                        && !mods.shift_key();
+                    if is_plain_enter {
+                        if let Some(pane) = child.panes.get_mut(&active_id) {
+                            if pane.viewport_top_abs.is_some() {
+                                pane.viewport_top_abs = None; // back to live
+                                mark_all_panes_dirty(&child.panes);
+                                child.request_redraw();
+                            }
+                        }
+                    }
                     if child.selection.is_some() {
                         child.selection = None;
                         mark_all_panes_dirty(&child.panes);
@@ -834,10 +1218,21 @@ impl App {
                         child.ime.take_commits()
                     }
                 };
+                let search_open = {
+                    let i = child.tabs.active_index();
+                    child.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+                };
+                let copy_mode = child.copy_mode.is_some();
+                child.request_redraw();
                 if !committed.is_empty() {
-                    // Copy/read-only mode is navigation-only — drop commits
-                    // there instead of forwarding to the PTY (matches main).
-                    if child.copy_mode.is_none() {
+                    // Drop the `child` borrow before re-entering `self` helpers.
+                    let _ = child;
+                    if search_open {
+                        // Search box owns the commit (Chinese/Japanese search).
+                        self.search_handle_ime_commit_in_child(win_id, &committed);
+                    } else if copy_mode {
+                        // Copy/read-only mode is navigation-only — drop commits.
+                    } else if let Some(child) = self.windows.get(&win_id) {
                         let tab_idx = child.tabs.active_index();
                         if let Some(active_id) =
                             child.tab_states.get(tab_idx).map(|st| st.active_pane)
@@ -850,7 +1245,6 @@ impl App {
                         }
                     }
                 }
-                child.request_redraw();
             }
             _ => {}
         }
@@ -1359,7 +1753,92 @@ impl App {
         // Routed regardless of resize result.
         true
     }
+
+    // ── Child-window splitter (pane-divider) mouse drag (#pane-splitter) ──
+    // Mirrors the main-window splitter input. Torn-out windows had keyboard
+    // pane-resize but no MOUSE divider drag. The pure tree ops
+    // (`hit_splitter`, `resize_splitter_by_delta`, `layout`) are
+    // window-agnostic; only the state lookups differ.
+
+    /// Outer pane-layout rect for a child window (same basis the renderer
+    /// + `compute_pane_rects_for` use).
+    fn child_pane_outer_rect(&self, win_id: WindowId) -> Option<sonicterm_ui::pane::Rect> {
+        let child = self.windows.get(&win_id)?;
+        let r = child.renderer.as_ref()?;
+        let (w, h) = r.logical_size();
+        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
+        let bottom = r.bottom_inset();
+        Some(sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0)))
+    }
+
+    /// Hit-test a splitter divider in the child window `win_id`.
+    fn splitter_hit_at_in_child(
+        &self,
+        win_id: WindowId,
+        x: f32,
+        y: f32,
+    ) -> Option<sonicterm_ui::pane::SplitterHit> {
+        let outer = self.child_pane_outer_rect(win_id)?;
+        let child = self.windows.get(&win_id)?;
+        let tab_idx = child.tabs.active_index();
+        child
+            .tab_states
+            .get(tab_idx)
+            .and_then(|state| state.tree.hit_splitter(outer, CHILD_SPLITTER_HIT_THICKNESS, x, y))
+    }
+
+    fn set_child_splitter_cursor(&self, win_id: WindowId, axis: sonicterm_ui::pane::SplitAxis) {
+        if let Some(child) = self.windows.get(&win_id) {
+            if let Some(w) = child.window.as_ref() {
+                let icon = match axis {
+                    sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
+                    sonicterm_ui::pane::SplitAxis::Horizontal => CursorIcon::RowResize,
+                };
+                w.set_cursor(icon);
+            }
+        }
+    }
+
+    /// Apply an in-flight splitter drag in the child window `win_id`.
+    fn apply_splitter_drag_in_child(&mut self, win_id: WindowId, x: f32, y: f32) -> bool {
+        let Some(drag) = self.windows.get(&win_id).and_then(|c| c.splitter_drag.clone()) else {
+            return false;
+        };
+        let Some(outer) = self.child_pane_outer_rect(win_id) else { return false };
+        let dx = x - drag.last_pos.0;
+        let dy = y - drag.last_pos.1;
+        if dx == 0.0 && dy == 0.0 {
+            return true;
+        }
+        let tab_idx =
+            self.windows.get(&win_id).map(|c| c.tabs.active_index()).unwrap_or(0);
+        let changed = self
+            .windows
+            .get_mut(&win_id)
+            .and_then(|c| c.tab_states.get_mut(tab_idx))
+            .map(|state| state.tree.resize_splitter_by_delta(&drag.splitter, outer, dx, dy))
+            .unwrap_or(false);
+        if changed {
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                resize_visible_panes_in_child(child);
+            }
+        }
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(active) = child.splitter_drag.as_mut() {
+                active.last_pos = (x, y);
+            }
+            if changed {
+                mark_all_panes_dirty(&child.panes);
+                child.request_redraw();
+            }
+        }
+        self.set_child_splitter_cursor(win_id, drag.axis);
+        true
+    }
 }
+
+/// Splitter hit thickness in logical px (mirror of window_event's const).
+const CHILD_SPLITTER_HIT_THICKNESS: f32 = 8.0;
 
 /// Resize all panes in the active tab of a child window to match the
 /// current pane tree layout. Mirrors `App::resize_visible_panes` for the
@@ -1379,6 +1858,49 @@ pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
     let inset =
         [r.padding_left_px(), r.padding_right_px(), r.padding_top_px(), r.padding_bottom_px()];
     crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+}
+
+/// Scroll a pane's scrollback view in a CHILD window by `delta_lines`
+/// (negative = back into history). Child-scoped mirror of `App::scroll_pane`
+/// for the main window — torn-out windows had NO wheel handling at all, so
+/// you couldn't see scrollback in them. Returns early on the alt screen (the
+/// MouseWheel arm handles alt-screen translation before calling this).
+fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
+    if delta_lines == 0 {
+        return;
+    }
+    let Some(pane) = child.panes.get(&pane_id) else { return };
+    let (live_top, current_view_top) = {
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        if grid.is_alt() {
+            return;
+        }
+        let live_top = grid.scrollback_len() as u64;
+        let current = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        (live_top, current)
+    };
+    let new_view_top: u64 = if delta_lines < 0 {
+        current_view_top.saturating_sub((-(delta_lines as i64)) as u64)
+    } else {
+        current_view_top.saturating_add(delta_lines as u64).min(live_top)
+    };
+    if let Some(pane) = child.panes.get_mut(&pane_id) {
+        pane.viewport_top_abs = if new_view_top >= live_top { None } else { Some(new_view_top) };
+    }
+    mark_all_panes_dirty(&child.panes);
+    child.request_redraw();
+}
+
+/// Pane id under logical-px `(lx, ly)` in a CHILD window's active tab, or
+/// `None` outside every pane. Mirror of `App::pane_at_cursor`.
+fn child_pane_at_cursor(child: &WindowState, lx: f32, ly: f32) -> Option<u64> {
+    for (pane_id, rect) in App::compute_pane_rects_for(child) {
+        if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
+            return Some(pane_id);
+        }
+    }
+    None
 }
 fn child_enter_copy_mode(child: &mut WindowState) {
     let tab_idx = child.tabs.active_index();

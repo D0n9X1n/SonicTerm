@@ -366,7 +366,17 @@ impl App {
                 }
                 self.resize_active_split(Direction::Down);
             }
-            Action::OpenSearch => self.open_search(),
+            Action::OpenSearch => {
+                // Route to the frontmost child window so Cmd+F opens search in a
+                // torn-out window instead of the main one. (#pane-search)
+                if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    if self.open_search_in_child(id) {
+                        return true;
+                    }
+                    self.frontmost_window = None;
+                }
+                self.open_search();
+            }
             Action::EditConfigFile => self.open_config_file(),
             Action::OpenKeymapFile => self.open_keymap_file(),
             Action::OpenCommandPalette => self.toggle_command_palette(),

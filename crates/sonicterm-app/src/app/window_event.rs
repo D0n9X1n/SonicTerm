@@ -41,7 +41,7 @@ fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
 /// `sgr` false → legacy X10 `ESC[M` + 3 bytes (button+32, col+32, row+32),
 /// each byte clamped to the classic 223 ceiling (col/row+32 ≤ 255).
 /// `col`/`row` are 1-based cell coordinates of the cell under the cursor.
-fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count: usize) -> Vec<u8> {
+pub(super) fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count: usize) -> Vec<u8> {
     let btn: u32 = if up { 64 } else { 65 };
     let mut out = Vec::new();
     for _ in 0..count {
