@@ -1377,8 +1377,9 @@ impl App {
                     drop(removed);
                     tracing::info!(
                         "child window reaped after drag-merge; remaining children={}",
-                        self.windows.len()
+                        self.child_window_count()
                     );
+                    self.request_exit_if_no_active_windows();
                 }
             }
         }

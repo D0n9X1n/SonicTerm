@@ -131,19 +131,11 @@ impl App {
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
-                // running. Only exit when nothing else is alive.
+                // running. When no child remains, closing the main
+                // leaves no active terminal window, so quit (#669).
                 if self.child_window_count() == 0 {
-                    if Self::should_exit_on_last_window_close(&self.config) {
-                        el.exit();
-                    } else {
-                        // Chrome/Firefox/Safari-style on macOS: keep the
-                        // process alive after the last window closes so
-                        // the user can `Cmd+N` (or use the dock menu) to
-                        // open a fresh window without cold-start cost.
-                        // The main window is hidden either way — on
-                        // non-macOS we would have exited above.
-                        self.hide_main_window();
-                    }
+                    self.hide_main_window();
+                    el.exit();
                 } else {
                     self.hide_main_window();
                 }
@@ -1260,11 +1252,8 @@ impl App {
                         }
                         if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
                             if self.child_window_count() == 0 {
-                                if Self::should_exit_on_last_window_close(&self.config) {
-                                    el.exit();
-                                } else {
-                                    self.hide_main_window();
-                                }
+                                self.hide_main_window();
+                                el.exit();
                             } else {
                                 self.hide_main_window();
                             }

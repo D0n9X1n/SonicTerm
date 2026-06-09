@@ -1714,19 +1714,19 @@ impl App {
     }
 
     /// Decide whether the event loop should exit. The app should keep
-    /// running as long as ANY window owns at least one tab — that is,
-    /// the main window has tabs AND is visible, OR any child window is
-    /// still alive. This is shared by both the main-window
-    /// `CloseRequested` handler and the post-merge drain check so a
-    /// drained-but-still-visible main with live children doesn't kill
-    /// the app.
+    /// running as long as ANY active terminal window owns at least one tab:
+    /// a visible main window with tabs, or any torn-out child window. A
+    /// hidden/drained main window is intentionally NOT active for process
+    /// lifecycle purposes; once the final child is gone there is no window
+    /// the user can interact with, so #669 requires quitting instead of
+    /// leaving a dock-alive/headless process around.
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
-        let main_alive =
-            !self.main_is_hidden() && !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
-        // Phase B2 PR-A: subtract the shadow main entry so
-        // "no torn-out children" still tips this to true.
-        !main_alive && self.child_window_count() == 0
+        Self::should_exit_pure(
+            self.main_tabs().map(|t| t.len()).unwrap_or(0),
+            self.main_is_hidden(),
+            self.child_window_count(),
+        )
     }
 
     /// Test-only: pure policy fn mirroring `should_exit` so integration
@@ -1736,6 +1736,17 @@ impl App {
     pub fn should_exit_pure(main_tabs: usize, main_hidden: bool, child_count: usize) -> bool {
         let main_alive = !main_hidden && main_tabs > 0;
         !main_alive && child_count == 0
+    }
+
+    /// Mark a deferred process exit when no active terminal windows remain.
+    /// This is the `ActiveEventLoop`-free counterpart to `el.exit()` for
+    /// keymap/tab-close paths; `do_about_to_wait` drains the flag. OS window
+    /// close handlers with an event-loop handle may still call `el.exit()`
+    /// directly after this predicate becomes true.
+    pub(super) fn request_exit_if_no_active_windows(&mut self) {
+        if self.should_exit() {
+            self.pending_exit = true;
+        }
     }
 
     /// PR-B4 (#365): is the main window currently hidden / drained?
@@ -1784,13 +1795,8 @@ impl App {
             return;
         }
         if self.child_window_count() == 0 {
-            if Self::should_exit_on_last_window_close(&self.config) {
-                self.pending_exit = true;
-            } else {
-                // Chrome-style: keep the process alive but hide the
-                // empty main window.
-                self.hide_main_window();
-            }
+            self.hide_main_window();
+            self.request_exit_if_no_active_windows();
         } else {
             // Children still own tabs — just hide main; exit decision
             // happens when the last child closes.
