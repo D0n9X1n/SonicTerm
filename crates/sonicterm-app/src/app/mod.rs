@@ -602,6 +602,51 @@ pub fn pick_prompt_target(
     pick.map(|p| p.start_row)
 }
 
+/// Seed a freshly-created parser with the active theme's query-reply colours:
+/// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
+/// (OSC 4 `?`). Centralizes what used to be duplicated at every pane-spawn site
+/// so the OSC 4 palette wiring (#661) can't be added to one path and forgotten
+/// on another. Per-slot colours that don't resolve are simply left unseeded
+/// (the parser then suppresses that slot's reply rather than lying).
+pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
+    if let Some((r, g, b)) = theme.colors.foreground.rgb() {
+        parser.set_theme_fg(r, g, b);
+    }
+    if let Some((r, g, b)) = theme.colors.background.rgb() {
+        parser.set_theme_bg(r, g, b);
+    }
+    if let Some((r, g, b)) = theme.colors.cursor.rgb() {
+        parser.set_theme_cursor(r, g, b);
+    }
+    // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
+    // in the standard xterm slot order.
+    let normal = [
+        &theme.colors.ansi.black,
+        &theme.colors.ansi.red,
+        &theme.colors.ansi.green,
+        &theme.colors.ansi.yellow,
+        &theme.colors.ansi.blue,
+        &theme.colors.ansi.magenta,
+        &theme.colors.ansi.cyan,
+        &theme.colors.ansi.white,
+    ];
+    let bright = [
+        &theme.colors.bright.black,
+        &theme.colors.bright.red,
+        &theme.colors.bright.green,
+        &theme.colors.bright.yellow,
+        &theme.colors.bright.blue,
+        &theme.colors.bright.magenta,
+        &theme.colors.bright.cyan,
+        &theme.colors.bright.white,
+    ];
+    for (i, hex) in normal.iter().chain(bright.iter()).enumerate() {
+        if let Some((r, g, b)) = hex.rgb() {
+            parser.set_theme_palette_color(i as u8, r, g, b);
+        }
+    }
+}
+
 /// Resize every pane in `panes` to `(cols, rows)`: both the parser's
 /// grid and (if the pane owns one) the PTY child. Used by the window
 /// resize handler and by the font live-reload path, where changing
@@ -2993,15 +3038,7 @@ impl App {
             return false;
         };
         let mut parser = pane.parser.lock();
-        if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
-            parser.set_theme_fg(r, g, b);
-        }
-        if let Some((r, g, b)) = self.theme.colors.background.rgb() {
-            parser.set_theme_bg(r, g, b);
-        }
-        if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
-            parser.set_theme_cursor(r, g, b);
-        }
+        seed_parser_theme_colors(&mut parser, &self.theme);
         true
     }
 

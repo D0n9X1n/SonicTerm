@@ -206,6 +206,17 @@ impl Parser {
         self.performer.theme_cursor = Some((r, g, b));
     }
 
+    /// Seed one slot (0..=15) of the 16-colour ANSI palette used to answer
+    /// `OSC 4 ; <index> ; ? ST` queries. Indices map to the standard xterm
+    /// layout: 0..=7 normal, 8..=15 bright. Some CLIs (e.g. GitHub Copilot)
+    /// require the full palette query reply to enable their richer prompt
+    /// frame — without it they treat the terminal as colourless. (#661)
+    pub fn set_theme_palette_color(&mut self, index: u8, r: u8, g: u8, b: u8) {
+        if (index as usize) < self.performer.theme_palette.len() {
+            self.performer.theme_palette[index as usize] = Some((r, g, b));
+        }
+    }
+
     /// Whether DECSET ?1004 (focus reporting) is currently enabled. App should
     /// send `\e[I` / `\e[O` on focus in/out when this is true.
     pub fn focus_reporting_enabled(&self) -> bool {
@@ -436,6 +447,11 @@ struct Performer {
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
     theme_cursor: Option<(u8, u8, u8)>,
+    /// 16-colour ANSI palette (sRGB) used to answer `OSC 4 ; <i> ; ? ST`
+    /// queries (index 0..=15: 0-7 normal, 8-15 bright). Per-slot `None`
+    /// suppresses that slot's reply so we never report a colour we were
+    /// not told. (#661)
+    theme_palette: [Option<(u8, u8, u8)>; 16],
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -492,6 +508,7 @@ impl Performer {
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
+            theme_palette: [None; 16],
             scroll_top: None,
             scroll_bottom: None,
             ground: true,
@@ -1245,6 +1262,51 @@ impl Perform for Performer {
                     });
                 }
             }
+            Some(4) => {
+                // OSC 4 ; <index> ; ? ST — query a palette colour. xterm
+                // allows multiple `index ; spec` pairs in one OSC 4, so we
+                // walk the params two at a time. A `?` spec is a query → reply
+                // `ESC ] 4 ; <index> ; rgb:RRRR/GGGG/BBBB ST` (16-bit channels,
+                // xterm canonical). A non-`?` spec would be a *set*, which we
+                // don't implement yet (theme owns the palette) — skip it.
+                //
+                // Some CLIs (GitHub Copilot's prompt frame) gate their richer
+                // UI on being able to read backgroundSecondary via the full
+                // OSC 4 palette + OSC 10/11 set; without these replies they
+                // treat SonicTerm as colourless and disable the frame. (#661)
+                //
+                // LIMITATION: vte caps OSC at MAX_OSC_PARAMS = 16, so a single
+                // batched query of MORE than ~7 `index;?` pairs (e.g. all 16
+                // colours in one `OSC 4;0;?;1;?;...;15;? ST`) is truncated by
+                // the parser before we see it — we reply only for the first ~7.
+                // The primary client (#661 Copilot) sends each index as its own
+                // OSC 4 (3 params), so it is unaffected. Full batched-query
+                // support needs vte-level work and is tracked separately. (#667)
+                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+                let mut i = 1;
+                while i + 1 < params.len() {
+                    let idx = std::str::from_utf8(params[i])
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u8>().ok());
+                    let spec = std::str::from_utf8(params[i + 1]).ok().map(str::trim);
+                    if let (Some(idx), Some("?")) = (idx, spec) {
+                        if let Some(Some((r, g, b))) =
+                            self.theme_palette.get(idx as usize).copied()
+                        {
+                            let mut buf = Vec::with_capacity(28);
+                            buf.extend_from_slice(b"\x1b]4;");
+                            buf.extend_from_slice(idx.to_string().as_bytes());
+                            buf.extend_from_slice(
+                                format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")
+                                    .as_bytes(),
+                            );
+                            buf.extend_from_slice(terminator);
+                            self.reply(&buf);
+                        }
+                    }
+                    i += 2;
+                }
+            }
             Some(code @ 10..=12) => {
                 // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
                 // Reply format (xterm): `ESC ] N ; rgb:RRRR/GGGG/BBBB ST`
@@ -1643,5 +1705,53 @@ mod tests {
 
         parser.advance(b"\x1bc");
         assert_eq!(parser.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn osc4_palette_query_replies_with_seeded_color() {
+        // #661: OSC 4 ; <i> ; ? ST must reply with the seeded palette colour
+        // so CLIs like Copilot can read the full colour set. Reply format is
+        // `ESC ] 4 ; <i> ; rgb:RRRR/GGGG/BBBB ST` with 16-bit channels.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.set_theme_palette_color(1, 0xAA, 0xBB, 0xCC); // ANSI red slot
+
+        // BEL-terminated query.
+        parser.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x07".to_vec()
+        );
+
+        // ST-terminated query echoes an ST terminator.
+        parser.advance(b"\x1b]4;1;?\x1b\\");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc4_unseeded_slot_is_silent() {
+        // A slot we were never told about must NOT reply (don't lie about a
+        // colour we don't have).
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.advance(b"\x1b]4;5;?\x07");
+        assert!(rx.try_recv().is_err(), "unseeded slot must not reply");
+    }
+
+    #[test]
+    fn osc4_multi_pair_query_replies_per_index() {
+        // xterm allows several `index ; spec` pairs in one OSC 4 — each `?`
+        // gets its own reply, in order.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        parser.set_theme_palette_color(0, 0x10, 0x20, 0x30);
+        parser.set_theme_palette_color(15, 0xF0, 0xE0, 0xD0);
+
+        parser.advance(b"\x1b]4;0;?;15;?\x07");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;0;rgb:1010/2020/3030\x07".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;15;rgb:f0f0/e0e0/d0d0\x07".to_vec());
     }
 }

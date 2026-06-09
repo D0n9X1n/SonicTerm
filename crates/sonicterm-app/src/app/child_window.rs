@@ -968,18 +968,10 @@ impl App {
         use sonicterm_vt::vt::Parser;
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
-        // Seed theme defaults for OSC 10/11/12 query replies (#369).
+        // Seed theme defaults for OSC 10/11/12 (#369) + OSC 4 palette (#661).
         {
             let mut p = parser.lock();
-            if let Some((r, g, b)) = self.theme.colors.foreground.rgb() {
-                p.set_theme_fg(r, g, b);
-            }
-            if let Some((r, g, b)) = self.theme.colors.background.rgb() {
-                p.set_theme_bg(r, g, b);
-            }
-            if let Some((r, g, b)) = self.theme.colors.cursor.rgb() {
-                p.set_theme_cursor(r, g, b);
-            }
+            super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
             Arc::new(Mutex::new(Some(child_window)));

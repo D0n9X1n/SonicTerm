@@ -36,24 +36,14 @@ use super::{
 };
 
 fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {
-    let fg = theme.colors.foreground.rgb();
-    let bg = theme.colors.background.rgb();
-    let cursor = theme.colors.cursor.rgb();
-
     for pane in panes.values() {
         // Config live-reload runs on the app thread, not the render hot path,
         // so lock() is intentional here. Dropping this update would leave OSC
-        // 10/11/12 replies stale for shells already attached to the pane.
+        // 10/11/12 + OSC 4 palette replies stale for shells already attached to
+        // the pane. Re-seeds the full set (fg/bg/cursor + 16-colour palette) so
+        // a theme swap also refreshes the OSC 4 palette. (#369, #661)
         let mut parser = pane.parser.lock();
-        if let Some((r, g, b)) = fg {
-            parser.set_theme_fg(r, g, b);
-        }
-        if let Some((r, g, b)) = bg {
-            parser.set_theme_bg(r, g, b);
-        }
-        if let Some((r, g, b)) = cursor {
-            parser.set_theme_cursor(r, g, b);
-        }
+        super::seed_parser_theme_colors(&mut parser, theme);
     }
 }
 
