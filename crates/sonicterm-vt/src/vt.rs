@@ -24,6 +24,7 @@ use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry};
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
 const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RAW_OSC4_BYTES: usize = 4096;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -166,13 +167,32 @@ pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
     apc_capture: Option<MediaCapture>,
+    pending_esc: bool,
+    raw_osc: Option<RawOsc>,
+}
+
+/// SonicTerm-side OSC capture for sequences where vte's public callback loses
+/// information before dispatch. vte 0.15 stores the full OSC in a private
+/// buffer, but `Perform::osc_dispatch` exposes only up to MAX_OSC_PARAMS split
+/// params; OSC 4 needs the raw `index;?` stream for 16-colour batch queries.
+enum RawOsc {
+    /// We have consumed `ESC ]` and are checking whether the command is `4`.
+    Probe { saw_four: bool },
+    /// Capturing bytes after `OSC 4 ;` until BEL or ST.
+    Palette { content: Vec<u8> },
 }
 
 impl Parser {
     /// Build a parser bound to `grid`, with no upstream reply channel — DSR /
     /// XTVERSION queries will be silently dropped.
     pub fn new(grid: Grid) -> Self {
-        Self { inner: vte::Parser::new(), performer: Performer::new(grid, None), apc_capture: None }
+        Self {
+            inner: vte::Parser::new(),
+            performer: Performer::new(grid, None),
+            apc_capture: None,
+            pending_esc: false,
+            raw_osc: None,
+        }
     }
 
     /// Construct a parser that can send replies (DSR, DA, XTVERSION, focus
@@ -182,6 +202,8 @@ impl Parser {
             inner: vte::Parser::new(),
             performer: Performer::new(grid, Some(reply_tx)),
             apc_capture: None,
+            pending_esc: false,
+            raw_osc: None,
         }
     }
 
@@ -290,6 +312,7 @@ impl Parser {
                 // start consuming an escape (ground flips false). The
                 // Performer callbacks below update `self.performer.ground`.
                 self.performer.ground = false;
+                self.observe_osc4_byte(bytes[i]);
                 self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
                 // If vte stayed in Ground (execute() or print()), the
                 // callback has already set ground=true. If not, leave it
@@ -304,6 +327,7 @@ impl Parser {
                 // stop the moment ground flips back to true.
                 let start = i;
                 while i < len && !self.performer.ground {
+                    self.observe_osc4_byte(bytes[i]);
                     self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
                     i += 1;
                 }
@@ -334,6 +358,48 @@ impl Parser {
         } else {
             capture.append_byte(byte);
         }
+    }
+
+    fn observe_osc4_byte(&mut self, byte: u8) {
+        if let Some(mut raw_osc) = self.raw_osc.take() {
+            match &mut raw_osc {
+                RawOsc::Probe { saw_four } => match byte {
+                    b'4' if !*saw_four => {
+                        *saw_four = true;
+                        self.raw_osc = Some(raw_osc);
+                    }
+                    b';' if *saw_four => {
+                        self.raw_osc = Some(RawOsc::Palette { content: Vec::new() })
+                    }
+                    _ => self.pending_esc = byte == 0x1b,
+                },
+                RawOsc::Palette { content } => match byte {
+                    0x07 | 0x1b => {
+                        let content = std::mem::take(content);
+                        self.performer.handle_osc4_raw(&content, byte == 0x07);
+                        self.performer.suppress_next_osc4 = true;
+                        self.performer.ground = true;
+                        self.pending_esc = byte == 0x1b;
+                    }
+                    _ => {
+                        if content.len() < MAX_RAW_OSC4_BYTES {
+                            content.push(byte);
+                            self.raw_osc = Some(raw_osc);
+                        }
+                    }
+                },
+            }
+            return;
+        }
+
+        if self.pending_esc {
+            self.pending_esc = false;
+            if byte == b']' {
+                self.raw_osc = Some(RawOsc::Probe { saw_four: false });
+                return;
+            }
+        }
+        self.pending_esc = byte == 0x1b;
     }
 
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
@@ -452,6 +518,9 @@ struct Performer {
     /// suppresses that slot's reply so we never report a colour we were
     /// not told. (#661)
     theme_palette: [Option<(u8, u8, u8)>; 16],
+    /// SonicTerm's raw OSC4 capture handles full batched queries before vte's
+    /// capped `osc_dispatch`; suppress the immediately-following duplicate.
+    suppress_next_osc4: bool,
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -509,6 +578,7 @@ impl Performer {
             theme_bg: None,
             theme_cursor: None,
             theme_palette: [None; 16],
+            suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
             ground: true,
@@ -532,6 +602,45 @@ impl Performer {
     fn reply(&self, bytes: &[u8]) {
         if let Some(tx) = &self.reply_tx {
             let _ = tx.send(bytes.to_vec());
+        }
+    }
+
+    fn handle_osc4_raw(&self, raw_pairs: &[u8], bell_terminated: bool) {
+        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+        let mut parts = raw_pairs.split(|&byte| byte == b';');
+        while let Some(idx) = parts.next() {
+            let Some(spec) = parts.next() else { break };
+            let idx = std::str::from_utf8(idx).ok().and_then(|s| s.trim().parse::<u8>().ok());
+            let spec = std::str::from_utf8(spec).ok().map(str::trim);
+            if let (Some(idx), Some("?")) = (idx, spec) {
+                self.reply_osc4_query(idx, terminator);
+            }
+        }
+    }
+
+    fn handle_osc4_pairs(&self, params: &[&[u8]], bell_terminated: bool) {
+        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+        let mut i = 1;
+        while i + 1 < params.len() {
+            let idx = std::str::from_utf8(params[i]).ok().and_then(|s| s.trim().parse::<u8>().ok());
+            let spec = std::str::from_utf8(params[i + 1]).ok().map(str::trim);
+            if let (Some(idx), Some("?")) = (idx, spec) {
+                self.reply_osc4_query(idx, terminator);
+            }
+            i += 2;
+        }
+    }
+
+    fn reply_osc4_query(&self, idx: u8, terminator: &[u8]) {
+        if let Some(Some((r, g, b))) = self.theme_palette.get(idx as usize).copied() {
+            let mut buf = Vec::with_capacity(28);
+            buf.extend_from_slice(b"\x1b]4;");
+            buf.extend_from_slice(idx.to_string().as_bytes());
+            buf.extend_from_slice(
+                format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}").as_bytes(),
+            );
+            buf.extend_from_slice(terminator);
+            self.reply(&buf);
         }
     }
 
@@ -1275,37 +1384,17 @@ impl Perform for Performer {
                 // OSC 4 palette + OSC 10/11 set; without these replies they
                 // treat SonicTerm as colourless and disable the frame. (#661)
                 //
-                // LIMITATION: vte caps OSC at MAX_OSC_PARAMS = 16, so a single
-                // batched query of MORE than ~7 `index;?` pairs (e.g. all 16
-                // colours in one `OSC 4;0;?;1;?;...;15;? ST`) is truncated by
-                // the parser before we see it — we reply only for the first ~7.
-                // The primary client (#661 Copilot) sends each index as its own
-                // OSC 4 (3 params), so it is unaffected. Full batched-query
-                // support needs vte-level work and is tracked separately. (#667)
-                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-                let mut i = 1;
-                while i + 1 < params.len() {
-                    let idx = std::str::from_utf8(params[i])
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u8>().ok());
-                    let spec = std::str::from_utf8(params[i + 1]).ok().map(str::trim);
-                    if let (Some(idx), Some("?")) = (idx, spec) {
-                        if let Some(Some((r, g, b))) =
-                            self.theme_palette.get(idx as usize).copied()
-                        {
-                            let mut buf = Vec::with_capacity(28);
-                            buf.extend_from_slice(b"\x1b]4;");
-                            buf.extend_from_slice(idx.to_string().as_bytes());
-                            buf.extend_from_slice(
-                                format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")
-                                    .as_bytes(),
-                            );
-                            buf.extend_from_slice(terminator);
-                            self.reply(&buf);
-                        }
-                    }
-                    i += 2;
+                // vte 0.15 keeps the full OSC payload in a private buffer but
+                // exposes only MAX_OSC_PARAMS split params here. Parser::advance
+                // therefore captures raw OSC 4 bytes in parallel and handles
+                // full 16-colour batch queries before this capped callback. Keep
+                // this path as a fallback for synthetic/direct Performer tests
+                // and for any capture miss, but avoid duplicate replies. (#667)
+                if self.suppress_next_osc4 {
+                    self.suppress_next_osc4 = false;
+                    return;
                 }
+                self.handle_osc4_pairs(params, bell_terminated);
             }
             Some(code @ 10..=12) => {
                 // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
@@ -1718,17 +1807,11 @@ mod tests {
 
         // BEL-terminated query.
         parser.advance(b"\x1b]4;1;?\x07");
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x07".to_vec()
-        );
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x07".to_vec());
 
         // ST-terminated query echoes an ST terminator.
         parser.advance(b"\x1b]4;1;?\x1b\\");
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x1b\\".to_vec()
-        );
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x1b\\".to_vec());
     }
 
     #[test]
@@ -1753,5 +1836,40 @@ mod tests {
         parser.advance(b"\x1b]4;0;?;15;?\x07");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;0;rgb:1010/2020/3030\x07".to_vec());
         assert_eq!(rx.try_recv().unwrap(), b"\x1b]4;15;rgb:f0f0/e0e0/d0d0\x07".to_vec());
+    }
+
+    #[test]
+    fn osc4_full_16_color_batch_query_replies_for_every_seeded_slot() {
+        // #667: vte 0.15 exposes only 16 split OSC params, which truncates a
+        // full `OSC 4;0;?;...;15;? ST` query. SonicTerm's parser keeps enough
+        // raw OSC4 state to answer every seeded pair.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+        for idx in 0..16u8 {
+            parser.set_theme_palette_color(idx, idx, idx + 0x10, idx + 0x20);
+        }
+
+        let mut query = String::from("\x1b]4");
+        for idx in 0..16u8 {
+            query.push_str(&format!(";{idx};?"));
+        }
+        query.push_str("\x1b\\");
+        parser.advance(query.as_bytes());
+
+        for idx in 0..16u8 {
+            let expected = format!(
+                "\x1b]4;{idx};rgb:{idx:02x}{idx:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
+                idx + 0x10,
+                idx + 0x10,
+                idx + 0x20,
+                idx + 0x20,
+            )
+            .into_bytes();
+            assert_eq!(rx.try_recv().unwrap(), expected);
+        }
+        assert!(rx.try_recv().is_err(), "OSC4 batch must not produce duplicate replies");
+
+        parser.advance(b"Z");
+        assert_eq!(row_text(&parser, 0), "Z       ");
     }
 }
