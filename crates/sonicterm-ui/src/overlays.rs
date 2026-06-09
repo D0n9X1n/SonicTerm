@@ -1,7 +1,7 @@
 //! Pure layout helpers for the three state-only overlays drawn over the
 //! terminal grid:
 //!
-//! 1. Command palette — centered modal (~1360×460) with a query input row
+//! 1. Command palette — centered modal (~720×460) with a query input row
 //!    and a filtered action list. State lives in
 //!    [`crate::command_palette::CommandPalette`].
 //! 2. Search bar — bottom-right single-line status with `N/M` match
@@ -30,7 +30,7 @@ use crate::tabbar_view::Rect;
 // stay self-documenting.
 
 /// Ideal modal width in physical pixels (Raycast-style redesign).
-pub const PALETTE_WIDTH: f32 = 1360.0;
+pub const PALETTE_WIDTH: f32 = 720.0;
 
 /// Ideal modal height in physical pixels.
 pub const PALETTE_HEIGHT: f32 = 460.0;
@@ -38,7 +38,7 @@ pub const PALETTE_HEIGHT: f32 = 460.0;
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
 /// `viewport_w - 48`, whichever is smaller (see [`PaletteLayout::compute`]).
-pub const PALETTE_MAX_WIDTH: f32 = 1440.0;
+pub const PALETTE_MAX_WIDTH: f32 = 780.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
@@ -60,17 +60,17 @@ pub const PALETTE_QUERY_HEIGHT: f32 = 52.0;
 pub const PALETTE_QUERY_PAD_X: f32 = 16.0;
 
 /// Vertical padding inside the query field.
-pub const PALETTE_QUERY_PAD_Y: f32 = 12.0;
+pub const PALETTE_QUERY_PAD_Y: f32 = 10.0;
 
 /// Search icon size + offset inside the query field.
 pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 34.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 4.0;
+pub const PALETTE_ROW_GAP: f32 = 3.0;
 
 /// Horizontal padding inside each row.
 pub const PALETTE_ROW_PAD_X: f32 = 18.0;
@@ -203,7 +203,7 @@ impl PaletteLayout {
         // inner content size, so it scales with the other SIZE terms.
         let panel_padding = panel_padding.max(0.0) * s;
         let border_px = PALETTE_BORDER * s;
-        // Spec: width is `min(1440, viewport_w - 48)`, ideal 1360.
+        // Spec: width is `min(780, viewport_w - 48)`, ideal 720.
         // Height: `min(520, viewport_h - 96)`, ideal 460. The ideal/max
         // SIZE bounds scale; the viewport-relative clamp does not.
         let modal_w =
