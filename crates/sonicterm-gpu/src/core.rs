@@ -2517,16 +2517,21 @@ impl GpuRenderer {
             // hook on FontStack rasterization, it would attach in this
             // same scope.
             let _ = self.async_loader.clone();
-            // Theme accent for the Cmd-hovered URL recolor, computed
-            // ONCE per frame (mirrors how `hyperlink_underline` is
-            // derived at construction). `UiPalette::accent` is already
-            // a linear-sRGB `[f32;4]` with alpha 1.0 — the same space
-            // the per-glyph `color` field carries
-            // (`chrome_color_to_linear_rgba` output), so it drops in
-            // directly with no conversion. Only consumed when
-            // `hovered_url_cells` is set on the active pane.
-            let hovered_url_accent: [f32; 4] =
-                sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
+            // Theme accent for the Cmd-hovered URL recolor. `UiPalette::accent`
+            // is a linear-sRGB `[f32;4]` (alpha 1.0), the same space the
+            // per-glyph `color` field carries, so it drops in with no
+            // conversion. PERF: `UiPalette::from_theme` does ~20 hex parses +
+            // sRGB→linear `powf` conversions; computing it unconditionally
+            // every frame added measurable render latency to plain output
+            // repaints (e.g. `ls -al`). It's only consumed when a URL is
+            // actually hovered, so compute it lazily — `[0.0;4]` otherwise
+            // (never read, since `resolve_fg`/the underline are gated on
+            // `hovered_url_cells`/`h.active`). #perf
+            let hovered_url_accent: [f32; 4] = if hovered_url_cells.is_some() {
+                sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
             // Part B step 3: iterate every pane. Each iteration rebinds
             // `grid` to that pane's Grid (via the raw pointer collected
             // into pane_views above), uses the pane's own origin instead
