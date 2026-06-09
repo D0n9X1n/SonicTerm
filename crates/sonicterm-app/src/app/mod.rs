@@ -15,7 +15,7 @@ use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_cfg::config::{BackdropKind, Config};
-use sonicterm_cfg::keymap::{Action, Keymap};
+use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
@@ -1318,6 +1318,11 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
+    /// Test-only PTY write log. When enabled, [`Self::dispatch_pty_write_effect`]
+    /// records `(pane_id, bytes)` instead of touching live PTY handles so
+    /// integration tests can assert broadcast fan-out without spawning shells.
+    #[doc(hidden)]
+    pub test_pty_write_log: Option<Arc<Mutex<Vec<(u64, Vec<u8>)>>>>,
     /// M6a-expand-2b — winit-agnostic state machine. Routed Intents
     /// (PTY write, scroll, hyperlink open, …) flow through here and
     /// the platform shell's [`Self::dispatch_effects`] translates the
@@ -1467,6 +1472,7 @@ impl App {
             redraw_request_count: std::sync::atomic::AtomicUsize::new(0),
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
+            test_pty_write_log: None,
             machine,
         }
     }
@@ -1816,14 +1822,47 @@ impl App {
     }
 
     fn active_pane_id(&self) -> Option<u64> {
+        self.main_active_pane_id()
+    }
+
+    fn main_active_pane_id(&self) -> Option<u64> {
         let ws = self.main()?;
         let i = ws.tabs.active_index();
         ws.tab_states.get(i).map(|t| t.active_pane)
     }
 
+    fn active_pane_id_for_kind(&self, kind: FrontmostKind) -> Option<u64> {
+        match kind {
+            FrontmostKind::Child(id) => {
+                let ws = self.windows.get(&id)?;
+                let i = ws.tabs.active_index();
+                ws.tab_states.get(i).map(|t| t.active_pane)
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.main_active_pane_id()
+            }
+        }
+    }
+
     fn active_pane(&self) -> Option<&PaneState> {
         let id = self.active_pane_id()?;
-        self.main()?.panes.get(&id)
+        self.pane_by_id(id)
+    }
+
+    fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
+        self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
+    }
+
+    fn request_redraw_all_terminal_windows(&self) {
+        for (id, ws) in &self.windows {
+            if Some(*id) == self.main_window_id {
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            } else {
+                ws.request_redraw();
+            }
+        }
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
@@ -1900,16 +1939,19 @@ impl App {
 
     /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
     ///
-    /// Resolves the pane id back to a live [`PtyHandle`] on the main
-    /// window and forwards the bytes. M6a-expand-2b boundary layer
-    /// per spec §9.
+    /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
+    /// window and forwards the bytes. M6a-expand-2b boundary layer per spec §9.
     pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             let pane_id = pane.0;
-            if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-                if let Some(pty) = p.pty.as_ref() {
-                    let _ = pty.in_tx.send(data.to_vec());
-                }
+            let Some(p) = self.pane_by_id(pane_id) else { return };
+            let bytes = data.to_vec();
+            if let Some(log) = self.test_pty_write_log.as_ref() {
+                log.lock().push((pane_id, bytes));
+                return;
+            }
+            if let Some(pty) = p.pty.as_ref() {
+                let _ = pty.in_tx.send(bytes);
             }
         }
     }
@@ -2302,8 +2344,92 @@ impl App {
     }
 
     pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
-        let Some(ws) = self.main() else { return Default::default() };
-        self.broadcast.receiving_panes(&ws.tab_states, ws.tabs.active_index())
+        let BroadcastState::On { scope, source_pane } = self.broadcast else {
+            return Default::default();
+        };
+        self.broadcast_receivers_for(scope, source_pane)
+    }
+
+    fn broadcast_receivers_for(
+        &self,
+        scope: BroadcastScope,
+        source_pane: u64,
+    ) -> std::collections::BTreeSet<u64> {
+        let mut receivers = std::collections::BTreeSet::new();
+        for ws in self.windows.values() {
+            match scope {
+                BroadcastScope::Tab => {
+                    if let Some((tab_idx, _)) = ws
+                        .tab_states
+                        .iter()
+                        .enumerate()
+                        .find(|(_, tab)| tab.tree.leaves().contains(&source_pane))
+                    {
+                        receivers.extend(sonicterm_ui::broadcast::receiving_panes(
+                            &ws.tab_states,
+                            scope,
+                            source_pane,
+                            tab_idx,
+                        ));
+                        break;
+                    }
+                }
+                BroadcastScope::AllTabs => {
+                    receivers.extend(sonicterm_ui::broadcast::receiving_panes(
+                        &ws.tab_states,
+                        scope,
+                        source_pane,
+                        ws.tabs.active_index(),
+                    ));
+                }
+            }
+        }
+        receivers
+    }
+
+    /// Test-only: active broadcast source pane, if broadcast is enabled.
+    #[doc(hidden)]
+    pub fn __test_broadcast_source(&self) -> Option<u64> {
+        match self.broadcast {
+            BroadcastState::On { source_pane, .. } => Some(source_pane),
+            BroadcastState::Off => None,
+        }
+    }
+
+    /// Test-only: receiver panes under the current broadcast state.
+    #[doc(hidden)]
+    pub fn __test_broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
+        self.broadcast_receivers()
+    }
+
+    /// Test-only: log PTY writes instead of forwarding them to live PTYs.
+    #[doc(hidden)]
+    pub fn __test_enable_pty_write_log(&mut self) {
+        self.test_pty_write_log = Some(Arc::new(Mutex::new(Vec::new())));
+    }
+
+    /// Test-only: snapshot logged `(pane_id, bytes)` PTY writes.
+    #[doc(hidden)]
+    pub fn __test_pty_write_log(&self) -> Vec<(u64, Vec<u8>)> {
+        self.test_pty_write_log.as_ref().map(|log| log.lock().clone()).unwrap_or_default()
+    }
+
+    /// Test-only: drive the same write + broadcast fan-out as normal input.
+    #[doc(hidden)]
+    pub fn __test_write_to_pane_with_broadcast(&self, pane_id: u64, bytes: Vec<u8>) {
+        self.write_to_pane(pane_id, bytes.clone());
+        self.broadcast_from(pane_id, bytes);
+    }
+
+    /// Test-only: child render pane ids with the broadcast receiver flag that
+    /// would be passed into `sonicterm_render_model::PaneRender`.
+    #[doc(hidden)]
+    pub fn __test_child_broadcast_render_flags(&self, id: WindowId) -> Option<Vec<(u64, bool)>> {
+        let child = self.windows.get(&id)?;
+        let tab_idx = child.tabs.active_index();
+        let panes = child.tab_states.get(tab_idx)?.tree.leaves();
+        let receivers = self.broadcast_receivers();
+        Some(panes.into_iter().map(|pane| (pane, receivers.contains(&pane))).collect())
     }
 
     /// Test-only: how many tabs the named child window currently owns.

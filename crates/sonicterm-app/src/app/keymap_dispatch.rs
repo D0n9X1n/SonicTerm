@@ -616,6 +616,7 @@ impl App {
                 }
                 self.toggle_active_pane_zoom();
             }
+            Action::ToggleBroadcast { scope } => self.toggle_broadcast_for(source_kind, *scope),
             Action::FocusPane(d) => {
                 let dir = match d {
                     Direction::Left => sonicterm_app_core::SplitDir::Left,

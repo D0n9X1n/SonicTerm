@@ -311,6 +311,7 @@ impl App {
         // Split-borrow the palette out so the renderer can mutate it even though
         // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
         // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
+        let broadcast_receivers = self.broadcast_receivers();
         let palette_for_render: Option<&mut CommandPalette> =
             if palette_here { Some(&mut self.command_palette) } else { None };
         let Some(child) = self.windows.get_mut(&win_id) else { return };
@@ -529,7 +530,7 @@ impl App {
                             viewport_top_abs: viewport_tops.get(id).copied().flatten(),
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
-                            is_broadcast_receiver: false,
+                            is_broadcast_receiver: broadcast_receivers.contains(id),
                             scrollbar_alpha: scrollbar_alpha_map.get(id).copied().unwrap_or(0.0),
                             inline_images: inline_images_by_pane
                                 .get(id)
@@ -1244,11 +1245,11 @@ impl App {
                     .map(|pane| pane.parser.lock().kitty_keyboard_flags())
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
-                    if let Some(pane) = child.panes.get(&active_id) {
-                        if let Some(pty) = pane.pty.as_ref() {
-                            let _ = pty.in_tx.send(bytes);
-                        }
-                    }
+                    let broadcast_bytes = bytes.clone();
+                    let _ = child;
+                    self.write_to_pane(active_id, bytes);
+                    self.broadcast_from(active_id, broadcast_bytes);
+                    let Some(child) = self.windows.get_mut(&win_id) else { return };
                     // Scroll-to-bottom on plain Enter (#B12 parity): pressing
                     // Enter while scrolled up in history jumps back to the live
                     // bottom. Shift+Enter inserts a newline and must NOT jump.
@@ -1315,11 +1316,9 @@ impl App {
                         if let Some(active_id) =
                             child.tab_states.get(tab_idx).map(|st| st.active_pane)
                         {
-                            if let Some(pane) = child.panes.get(&active_id) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(committed.into_bytes());
-                                }
-                            }
+                            let bytes = committed.into_bytes();
+                            self.write_to_pane(active_id, bytes.clone());
+                            self.broadcast_from(active_id, bytes);
                         }
                     }
                 }

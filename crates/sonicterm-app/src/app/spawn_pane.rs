@@ -31,7 +31,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent, WindowState,
+    with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState, UserEvent,
+    WindowState,
 };
 
 impl App {
@@ -441,11 +442,17 @@ impl App {
     }
 
     pub(super) fn toggle_broadcast(&mut self, scope: sonicterm_cfg::keymap::BroadcastScope) {
-        let Some(source_pane) = self.active_pane_id() else { return };
+        self.toggle_broadcast_for(self.frontmost_kind(), scope);
+    }
+
+    pub(super) fn toggle_broadcast_for(
+        &mut self,
+        kind: FrontmostKind,
+        scope: sonicterm_cfg::keymap::BroadcastScope,
+    ) {
+        let Some(source_pane) = self.active_pane_id_for_kind(kind) else { return };
         self.broadcast = self.broadcast.toggled(scope, source_pane);
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
+        self.request_redraw_all_terminal_windows();
     }
 
     pub(super) fn resize_active_split(&mut self, dir: Direction) {
