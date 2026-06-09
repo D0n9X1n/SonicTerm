@@ -239,6 +239,18 @@ pub struct WindowState {
     /// asked for (the `renderer: None` headless windows could not otherwise
     /// observe `set_drag_chip(None)`).
     pub test_drag_chip_marker: Option<bool>,
+    /// Test-only viewport override for this window's pane layout, mirroring
+    /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
+    /// cell_w, cell_h))`, [`App::compute_pane_rects_for`] uses `outer` instead
+    /// of the (absent in headless tests) renderer's logical size, and
+    /// [`crate::app::child_window::resize_visible_panes_in_child`] uses
+    /// `(cell_w, cell_h)` for cell metrics. Lets tests exercise the child
+    /// split-pane Grid/PTY resize wiring (tear-out, Resized, close, split)
+    /// without a live wgpu surface — the path that the #pane-geom tear-out
+    /// regression slipped through because synthetic children have `renderer:
+    /// None` and the resize helper silently no-opped. Stays `None` in release.
+    #[doc(hidden)]
+    pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
 }
 
 impl WindowState {
@@ -1272,6 +1284,12 @@ impl App {
     ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
+        // Test-only viewport override (mirrors main `test_viewport_override`):
+        // headless child windows have `renderer: None`, so without this the
+        // child resize path can't be unit-tested. #pane-geom
+        if let Some((outer, _, _)) = child.test_pane_viewport {
+            return st.tree.layout(outer);
+        }
         let Some(r) = child.renderer.as_ref() else { return Vec::new() };
         let (w, h) = r.logical_size();
         let top = (r.top_inset() - r.padding_top_px()).max(0.0);
@@ -2147,6 +2165,49 @@ impl App {
         self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
     }
 
+    /// Test-only: install the headless per-window pane-viewport seam on a child
+    /// so the split/close resize wiring runs without a renderer. #pane-geom
+    #[doc(hidden)]
+    pub fn __test_set_child_pane_viewport(
+        &mut self,
+        id: WindowId,
+        outer: sonicterm_ui::pane::Rect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> bool {
+        match self.windows.get_mut(&id) {
+            Some(c) => {
+                c.test_pane_viewport = Some((outer, cell_w, cell_h));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: split the active pane of the named child window to the right,
+    /// driving the same `split_active_pane_in_child` path the keymap uses.
+    #[doc(hidden)]
+    pub fn __test_child_split_active_right(&mut self, id: WindowId) -> bool {
+        self.split_active_pane_in_child(id, sonicterm_cfg::keymap::Direction::Right)
+    }
+
+    /// Test-only: grid (cols, rows) of a specific pane in the named child.
+    #[doc(hidden)]
+    pub fn __test_child_pane_grid_size(&self, id: WindowId, pane_id: u64) -> Option<(u16, u16)> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        Some((grid.cols, grid.rows))
+    }
+
+    /// Test-only: the active pane id in the named child's active tab.
+    #[doc(hidden)]
+    pub fn __test_child_active_pane(&self, id: WindowId) -> Option<u64> {
+        let child = self.windows.get(&id)?;
+        let tab_idx = child.tabs.active_index();
+        child.tab_states.get(tab_idx).map(|st| st.active_pane)
+    }
+
     /// Test-only: seed a synthetic child WindowState without constructing a
     /// real winit Window / GpuRenderer. The pane/tab bookkeeping mirrors a
     /// tear-out child, but `window` and `renderer` stay `None` so cargo-test
@@ -2197,6 +2258,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(id, child);
         id
@@ -2897,6 +2959,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(id, ws);
         self.main_window_id = Some(id);

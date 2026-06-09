@@ -55,6 +55,25 @@ pub fn resize_renderer_and_panes_if_present(
     true
 }
 
+/// Resize the child renderer to `width × height`, then size each pane to its
+/// own SPLIT sub-rect via `resize_visible_panes_in_child` (NOT the full grid).
+///
+/// #pane-geom: the older [`resize_renderer_and_panes_if_present`] sized every
+/// pane to the whole `(cols, rows)`, which is correct for a single-pane tab but
+/// makes a SPLIT overlap — the left pane stays full-window wide and types /
+/// wraps across the divider. This is exactly the clobber that re-appeared after
+/// tear-out: `install_torn_out_window` sized panes correctly, then winit's
+/// first `Resized` ran the full-grid helper and undid it (closing+resplitting a
+/// pane "fixed" it only because those paths re-ran the per-split sizing). The
+/// child `Resized` handler now routes here so the per-split sizing sticks.
+/// Returns `true` if a renderer was present (so the caller can request_redraw).
+pub(super) fn resize_renderer_and_split_panes(child: &mut WindowState, width: u32, height: u32) -> bool {
+    let Some(r) = child.renderer.as_mut() else { return false };
+    r.resize(width, height);
+    resize_visible_panes_in_child(child);
+    true
+}
+
 #[doc(hidden)]
 pub fn apply_dpi_to_renderer_if_present(
     renderer: &mut Option<GpuRenderer>,
@@ -309,12 +328,7 @@ impl App {
                 }
             }
             WindowEvent::Resized(size)
-                if resize_renderer_and_panes_if_present(
-                    &mut child.renderer,
-                    &child.panes,
-                    size.width,
-                    size.height,
-                ) =>
+                if resize_renderer_and_split_panes(child, size.width, size.height) =>
             {
                 child.request_redraw();
             }
@@ -698,6 +712,17 @@ impl App {
                     }
                     return;
                 }
+                // While an IME composition is in flight the OS owns the
+                // keystrokes — they arrive as Ime events instead, so forwarding
+                // them here would double-type. Esc cancels the composition (no
+                // bytes to the PTY). Mirrors the main-window guard. (#pane-ime)
+                if child.ime.is_composing() {
+                    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                        child.ime.cancel();
+                    }
+                    child.request_redraw();
+                    return;
+                }
                 // Issue #370: the previous narrow special-case only
                 // handled `EnterCopyMode` / `EnterQuickSelect` and
                 // dropped every other action (NextTab / PrevTab /
@@ -782,6 +807,50 @@ impl App {
                         child.request_redraw();
                     }
                 }
+            }
+            // IME composition in a torn-out child window. Previously there was
+            // NO Ime arm here at all, so CJK/inline input was dead in child
+            // windows (the OS sent Ime events that fell through `_ => {}`). This
+            // mirrors the main-window handler (window_event.rs): update the
+            // child's own ImeState for preedit display, and on commit write the
+            // committed text to THIS child's active-pane PTY. Search/copy-mode
+            // commits are routed/handled like the main window. (#pane-ime)
+            WindowEvent::Ime(ime_event) => {
+                let committed = match ime_event {
+                    Ime::Enabled => {
+                        child.ime.handle_enabled();
+                        String::new()
+                    }
+                    Ime::Disabled => {
+                        child.ime.handle_disabled();
+                        String::new()
+                    }
+                    Ime::Preedit(text, cursor) => {
+                        child.ime.handle_preedit(&text, cursor);
+                        String::new()
+                    }
+                    Ime::Commit(text) => {
+                        child.ime.handle_commit(&text);
+                        child.ime.take_commits()
+                    }
+                };
+                if !committed.is_empty() {
+                    // Copy/read-only mode is navigation-only — drop commits
+                    // there instead of forwarding to the PTY (matches main).
+                    if child.copy_mode.is_none() {
+                        let tab_idx = child.tabs.active_index();
+                        if let Some(active_id) =
+                            child.tab_states.get(tab_idx).map(|st| st.active_pane)
+                        {
+                            if let Some(pane) = child.panes.get(&active_id) {
+                                if let Some(pty) = pane.pty.as_ref() {
+                                    let _ = pty.in_tx.send(committed.into_bytes());
+                                }
+                            }
+                        }
+                    }
+                }
+                child.request_redraw();
             }
             _ => {}
         }
@@ -1306,6 +1375,13 @@ impl App {
 /// PTY winsize the same way.
 pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
     let rects = App::compute_pane_rects_for(child);
+    // Test-only metrics override (mirrors main `test_viewport_override`): a
+    // headless child has `renderer: None`, so fall back to the seam so the
+    // child split-resize wiring is unit-testable. #pane-geom
+    if let Some((_, cw, ch)) = child.test_pane_viewport {
+        crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, [0.0, 0.0, 0.0, 0.0]);
+        return;
+    }
     let Some(r) = child.renderer.as_ref() else { return };
     let (cw, ch) = r.cell_size();
     let inset =

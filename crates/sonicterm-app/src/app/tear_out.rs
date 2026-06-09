@@ -236,6 +236,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
         // #pane-geom: now that the child WindowState exists, size each migrated
@@ -611,6 +612,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
         // #pane-geom: size each migrated pane to its split sub-rect now that the
