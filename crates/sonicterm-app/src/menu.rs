@@ -133,10 +133,13 @@ pub fn blueprint() -> MenuBlueprint {
                 },
                 sep(),
                 Item {
-                    title: "Quit SonicTerm",
+                    title: "Close Tab",
                     key: "q",
                     mods: Cmd,
-                    binding: System("terminate:"),
+                    // User preference: Cmd+Q closes the current pane/tab (like
+                    // Cmd+W) instead of terminating the whole app. Closing the
+                    // last tab still drains/quits via the normal close path.
+                    binding: Action(sonicterm_cfg::keymap::Action::CloseActivePaneOrTab),
                 },
             ],
         },
