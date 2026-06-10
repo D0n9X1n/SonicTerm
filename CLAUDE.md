@@ -61,6 +61,11 @@ cargo build --release -p sonicterm-mac
 bash scripts/test-release-notes.sh
 ```
 
+Before opening a release PR, verify user-facing docs in README, `docs/`, and
+`wiki/` match any changed config, logging, window, palette, or input behavior.
+After pushing a release tag, verify the GitHub release workflow finishes and
+publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
+
 ## Release
 
 SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:

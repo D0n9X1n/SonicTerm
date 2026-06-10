@@ -115,7 +115,7 @@ impl App {
         let mut attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(format!("SonicTerm — {}", tab.title))
+                    .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
@@ -509,7 +509,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(format!("SonicTerm — {}", tab.title))
+                    .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),

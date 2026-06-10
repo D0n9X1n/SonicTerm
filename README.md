@@ -56,6 +56,14 @@ long-running output without accidentally typing into the active shell.
 
 ![SonicTerm READONLY mode with search](assets/screenshots/read-only-search.png)
 
+### Broadcast input across panes
+
+Broadcast mode sends the same keyboard input to every pane in the current tab,
+which is useful for mirrored shell commands, paired AI CLI sessions, and quick
+multi-pane setup work.
+
+![SonicTerm broadcast input demo](assets/screenshots/broadcast-input.gif)
+
 ### Drag tabs between windows
 
 This is SonicTerm's most important workflow feature: tabs are not trapped in one

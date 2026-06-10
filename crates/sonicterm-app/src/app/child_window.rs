@@ -18,8 +18,9 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::overlays::{
-    search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout,
-    PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
+    command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix, PaletteLayout,
+    SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
+    SEARCH_BAR_PAD_RIGHT,
 };
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::{SelectMode, Selection};
@@ -583,7 +584,7 @@ impl App {
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &theme,
-                            cursor_visible_now,
+                            cursor_visible_now && !palette_here,
                             child.selection.as_ref(),
                             child.copy_mode.as_ref(),
                             &child.tabs,
@@ -658,10 +659,13 @@ impl App {
                                     config.appearance.panel_padding,
                                     scale,
                                 ) {
-                                    let cursor = palette.cursor().min(palette.query().len());
-                                    let prefix = palette.query().get(..cursor).unwrap_or(palette.query());
+                                    let prefix = command_palette_query_caret_prefix(
+                                        &palette,
+                                        child.ime.preedit(),
+                                    );
                                     let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
-                                    let caret_x = text_x + estimate_overlay_text_width(prefix, font_size);
+                                    let caret_x =
+                                        text_x + estimate_overlay_text_width(&prefix, font_size);
                                     win.set_ime_cursor_area(
                                         winit::dpi::PhysicalPosition::new(
                                             caret_x as i32,
@@ -682,7 +686,8 @@ impl App {
                                 let font_size =
                                     sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
                                         * scale;
-                                let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                                let icon_w =
+                                    estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                                 let content_w = icon_w
                                     + SEARCH_BAR_ICON_GAP * scale
                                     + estimate_overlay_text_width(&search_label, font_size);
@@ -2032,11 +2037,8 @@ impl App {
     fn refresh_child_splitter_hover(&mut self, win_id: WindowId, x: f32, y: f32) -> bool {
         let hit = self.splitter_hit_at_in_child(win_id, x, y);
         let axis = hit.map(|hit| hit.axis);
-        let changed = self
-            .windows
-            .get(&win_id)
-            .map(|child| child.splitter_hover != axis)
-            .unwrap_or(false);
+        let changed =
+            self.windows.get(&win_id).map(|child| child.splitter_hover != axis).unwrap_or(false);
         if let Some(child) = self.windows.get_mut(&win_id) {
             child.splitter_hover = axis;
         }
@@ -2094,6 +2096,9 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
         let child = self.windows.get(&win_id)?;
+        if self.command_palette.is_open() && self.palette_attached_window == Some(win_id) {
+            return Some("palette");
+        }
         let search_open = child
             .tab_states
             .get(child.tabs.active_index())

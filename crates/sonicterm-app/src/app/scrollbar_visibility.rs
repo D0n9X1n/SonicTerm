@@ -225,9 +225,7 @@ pub fn update_hover_states(
 /// Clear all right-edge hover flags, e.g. when the pointer leaves a window.
 /// Returns `true` when a pane crossed from near-edge to away, which should
 /// schedule a redraw so Auto mode can begin the normal fade-out timing.
-pub fn clear_hover_states(
-    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
-) -> bool {
+pub fn clear_hover_states(vis: &mut std::collections::HashMap<u64, ScrollbarVisState>) -> bool {
     let mut changed = false;
     for state in vis.values_mut() {
         if state.mouse_near_right_edge {
@@ -303,7 +301,9 @@ impl App {
         let changed = self
             .windows
             .get_mut(&win_id)
-            .map(|child| update_hover_states(&mut child.scrollbar_vis, &rects, cursor, Instant::now()))
+            .map(|child| {
+                update_hover_states(&mut child.scrollbar_vis, &rects, cursor, Instant::now())
+            })
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {
@@ -314,10 +314,8 @@ impl App {
     }
 
     pub(crate) fn clear_scrollbar_hover(&mut self) -> bool {
-        let changed = self
-            .main_mut()
-            .map(|ws| clear_hover_states(&mut ws.scrollbar_vis))
-            .unwrap_or(false);
+        let changed =
+            self.main_mut().map(|ws| clear_hover_states(&mut ws.scrollbar_vis)).unwrap_or(false);
         if changed {
             self.request_scrollbar_redraw();
         }
@@ -403,18 +401,14 @@ mod tests {
         let now = Instant::now();
         let mut vis = std::collections::HashMap::new();
         let cursor = (400.0, 300.0); // dead-center, far from right edge
-        let alphas = update_and_collect(
-            &mut vis,
-            &[PANE],
-            cursor,
-            PANE.0,
-            None,
-            ScrollbarMode::Auto,
-            now,
-        );
+        let alphas =
+            update_and_collect(&mut vis, &[PANE], cursor, PANE.0, None, ScrollbarMode::Auto, now);
         assert_eq!(alphas.get(&1).copied(), Some(0.0), "center cursor must keep bar hidden");
         let st = vis.get(&1).unwrap();
-        assert!(!is_animating(st, ScrollbarMode::Auto, false), "settled-hidden must not redraw-storm");
+        assert!(
+            !is_animating(st, ScrollbarMode::Auto, false),
+            "settled-hidden must not redraw-storm"
+        );
     }
 
     #[test]
@@ -443,13 +437,26 @@ mod tests {
         st.mark_active(now);
         // Immediately after activity: animating toward visible.
         assert!(is_animating(&st, ScrollbarMode::Auto, false));
-        let v = tick(&mut st, ScrollbarMode::Auto, false, now.checked_add(Duration::from_millis(200)).unwrap());
+        let v = tick(
+            &mut st,
+            ScrollbarMode::Auto,
+            false,
+            now.checked_add(Duration::from_millis(200)).unwrap(),
+        );
         assert_eq!(v, 1.0, "recent activity makes the bar fully visible");
         // Long past the idle window with no further activity: fades to hidden.
         st.last_active = Some(at(10, now));
-        let faded = tick(&mut st, ScrollbarMode::Auto, false, now.checked_add(Duration::from_secs(11)).unwrap());
+        let faded = tick(
+            &mut st,
+            ScrollbarMode::Auto,
+            false,
+            now.checked_add(Duration::from_secs(11)).unwrap(),
+        );
         assert_eq!(faded, 0.0, "idle past IDLE_HIDE_MS fades the bar out");
-        assert!(!is_animating(&st, ScrollbarMode::Auto, false), "fully hidden + idle must not keep redrawing");
+        assert!(
+            !is_animating(&st, ScrollbarMode::Auto, false),
+            "fully hidden + idle must not keep redrawing"
+        );
     }
 
     #[test]
@@ -483,10 +490,18 @@ mod tests {
         // TRUE only within EDGE_PROXIMITY_PX of the right edge.
         let (_, px, py, pw, ph) = PANE;
         assert!(!is_mouse_near_right_edge(px, py, pw, ph, 400.0, 300.0), "center is not near edge");
-        assert!(!is_mouse_near_right_edge(px, py, pw, ph, 770.0, 300.0), "30px in is outside the 20px band");
-        assert!(is_mouse_near_right_edge(px, py, pw, ph, 795.0, 300.0), "5px from edge is inside the band");
+        assert!(
+            !is_mouse_near_right_edge(px, py, pw, ph, 770.0, 300.0),
+            "30px in is outside the 20px band"
+        );
+        assert!(
+            is_mouse_near_right_edge(px, py, pw, ph, 795.0, 300.0),
+            "5px from edge is inside the band"
+        );
         // Outside the pane vertically → never near the edge.
-        assert!(!is_mouse_near_right_edge(px, py, pw, ph, 795.0, 5.0), "above the pane is not near edge");
+        assert!(
+            !is_mouse_near_right_edge(px, py, pw, ph, 795.0, 5.0),
+            "above the pane is not near edge"
+        );
     }
 }
-

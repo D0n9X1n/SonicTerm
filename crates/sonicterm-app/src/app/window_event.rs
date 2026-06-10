@@ -387,10 +387,7 @@ impl App {
                         let preedit = ws.ime.preedit();
                         let i = ws.tabs.active_index();
                         ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
-                            (
-                                search_bar_label(s, preedit),
-                                search_query_caret_prefix(s, preedit),
-                            )
+                            (search_bar_label(s, preedit), search_query_caret_prefix(s, preedit))
                         })
                     })
                     .unzip();
@@ -570,7 +567,9 @@ impl App {
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &self.theme,
-                            cursor_visible_now,
+                            cursor_visible_now
+                                && !(self.command_palette.is_open()
+                                    && self.palette_attached_window.is_none()),
                             ws_selection_ref,
                             ws_copy_mode_ref,
                             tabs_mref,
@@ -1476,8 +1475,7 @@ impl App {
                             // `pixel_to_cell` once; fall back to treating it
                             // as absolute (correct while unscrolled) if the
                             // parser is momentarily busy.
-                            let abs_row =
-                                self.viewport_row_to_abs(row).unwrap_or(row as u64);
+                            let abs_row = self.viewport_row_to_abs(row).unwrap_or(row as u64);
                             let sel = match click_count {
                                 2 => self.word_selection_at(abs_row, col),
                                 3 => self.line_selection_at(abs_row),
@@ -1768,8 +1766,7 @@ impl App {
                         && !self.main_modifiers().shift_key();
                     if is_plain_enter {
                         if let Some(id) = self.active_pane_id() {
-                            if let Some(pane) =
-                                self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
+                            if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
                             {
                                 if pane.viewport_top_abs.is_some() {
                                     pane.viewport_top_abs = None; // back to live

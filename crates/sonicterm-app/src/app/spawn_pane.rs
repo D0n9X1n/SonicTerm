@@ -253,11 +253,7 @@ impl App {
                                     if !command_side_effects.is_empty() {
                                         command_events_thread.lock().extend(command_side_effects);
                                     }
-                                    if let Some(t) = new_title {
-                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.set_title(&format!("SonicTerm — {t}"));
-                                        }
-                                    }
+                                    let _ = new_title;
                                     if last_request.elapsed() >= min_interval
                                         || pending_bytes >= FLUSH_BYTES
                                     {

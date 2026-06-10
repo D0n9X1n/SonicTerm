@@ -249,6 +249,31 @@ impl CommandPalette {
         self.cursor = iter.next().map(|(idx, _)| self.cursor + idx).unwrap_or(self.query.len());
     }
 
+    pub fn move_cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.cursor = self.query.len();
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.cursor >= self.query.len() {
+            return;
+        }
+        let end = self.query[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| self.cursor + idx)
+            .unwrap_or(self.query.len());
+        self.query.drain(self.cursor..end);
+        self.selected = 0;
+        self.scroll_offset = 0;
+        if self.mode == CommandPaletteMode::Commands {
+            self.refilter();
+        }
+    }
+
     pub fn move_selection_down(&mut self) {
         if self.items.is_empty() {
             self.selected = 0;

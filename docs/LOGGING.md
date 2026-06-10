@@ -26,6 +26,14 @@ Logging is initialized after `sonicterm.toml` is loaded so the configured level
 is honored from startup onward. Log files and crash dumps older than 2 days are
 cleaned asynchronously by default.
 
+## Render timing diagnostics
+
+Set `[logging].level = "debug"` to include `target="render_timing"` frame timing
+lines in `sonicterm.log`. The renderer reports the main/child window label and
+phase timings such as grid walk, overlay assembly, glyph upload, surface acquire,
+submit, and present. There is no separate render-timing config key or environment
+variable.
+
 ## Bug report bundle
 
 When reporting a bug, include:

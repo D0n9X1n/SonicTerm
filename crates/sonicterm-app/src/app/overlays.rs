@@ -16,7 +16,9 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
-use sonicterm_ui::overlays::{PaletteLayout, PALETTE_ROW_PAD_X};
+use sonicterm_ui::overlays::{
+    command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
+};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
 use sonicterm_ui::selection::Selection;
@@ -42,6 +44,39 @@ fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
 }
 
 impl App {
+    fn palette_ime_preedit(&self) -> &str {
+        match self.palette_attached_window {
+            Some(id) => self.windows.get(&id).map(|ws| ws.ime.preedit()).unwrap_or(""),
+            None => self.main().map(|ws| ws.ime.preedit()).unwrap_or(""),
+        }
+    }
+
+    fn update_palette_ime_state(&mut self, ime_event: &winit::event::Ime) {
+        let target = self.palette_attached_window;
+        let Some(ws) = (match target {
+            Some(id) => self.windows.get_mut(&id),
+            None => self.main_mut(),
+        }) else {
+            return;
+        };
+        match ime_event {
+            winit::event::Ime::Enabled => ws.ime.handle_enabled(),
+            winit::event::Ime::Disabled => ws.ime.handle_disabled(),
+            winit::event::Ime::Preedit(text, cursor) => ws.ime.handle_preedit(text, *cursor),
+            winit::event::Ime::Commit(text) => {
+                ws.ime.handle_commit(text);
+                let _ = ws.ime.take_commits();
+            }
+        }
+    }
+
+    fn palette_ime_is_composing(&self) -> bool {
+        match self.palette_attached_window {
+            Some(id) => self.windows.get(&id).map(|ws| ws.ime.is_composing()).unwrap_or(false),
+            None => self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false),
+        }
+    }
+
     pub(super) fn command_palette_ime_cursor_area(
         &self,
         window_w: f32,
@@ -55,15 +90,64 @@ impl App {
             return None;
         }
         let mut palette = self.command_palette.clone();
-        let layout = PaletteLayout::compute(&mut palette, window_w, window_h, panel_padding, scale)?;
-        let cursor = palette.cursor().min(palette.query().len());
-        let prefix = palette.query().get(..cursor).unwrap_or(palette.query());
+        let layout =
+            PaletteLayout::compute(&mut palette, window_w, window_h, panel_padding, scale)?;
+        let preedit = self.palette_ime_preedit();
+        let prefix = command_palette_query_caret_prefix(&palette, preedit);
         let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
-        let caret_x = text_x + estimate_palette_text_width(prefix, font_size);
+        let caret_x = text_x + estimate_palette_text_width(&prefix, font_size);
         Some((
             winit::dpi::PhysicalPosition::new(caret_x as i32, layout.query_row.y as i32),
             winit::dpi::PhysicalSize::new(cell_w.ceil() as u32, layout.query_row.h.ceil() as u32),
         ))
+    }
+
+    pub(super) fn update_command_palette_ime_cursor_area(&self) {
+        if !self.command_palette.is_open() {
+            return;
+        }
+        let target = self.palette_attached_window;
+        let (window, width, height, scale, font_size, cell_w) = if let Some(id) = target {
+            let Some(child) = self.windows.get(&id) else { return };
+            let (Some(window), Some(renderer)) = (child.window.as_ref(), child.renderer.as_ref())
+            else {
+                return;
+            };
+            let size = window.inner_size();
+            (
+                window.clone(),
+                size.width as f32,
+                size.height as f32,
+                renderer.scale_factor(),
+                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
+                    * renderer.scale_factor(),
+                renderer.cell_w,
+            )
+        } else {
+            let (Some(window), Some(renderer)) = (self.main_window(), self.main_renderer()) else {
+                return;
+            };
+            let size = window.inner_size();
+            (
+                window.clone(),
+                size.width as f32,
+                size.height as f32,
+                renderer.scale_factor(),
+                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
+                    * renderer.scale_factor(),
+                renderer.cell_w,
+            )
+        };
+        if let Some((pos, size)) = self.command_palette_ime_cursor_area(
+            width,
+            height,
+            self.config.appearance.panel_padding,
+            scale,
+            font_size,
+            cell_w,
+        ) {
+            window.set_ime_cursor_area(pos, size);
+        }
     }
 
     fn command_palette_tab_count(&self) -> usize {
@@ -85,16 +169,19 @@ impl App {
         if !self.command_palette.is_open() {
             return false;
         }
+        self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
                 for ch in text.chars() {
                     self.command_palette.input_char(ch);
                 }
+                self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);
             }
             winit::event::Ime::Preedit(_, _)
             | winit::event::Ime::Enabled
             | winit::event::Ime::Disabled => {
+                self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);
             }
         }
@@ -107,6 +194,19 @@ impl App {
             return false;
         }
         self.refresh_command_palette_context();
+        if self.palette_ime_is_composing() {
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                if let Some(ws) = match self.palette_attached_window {
+                    Some(id) => self.windows.get_mut(&id),
+                    None => self.main_mut(),
+                } {
+                    ws.ime.cancel();
+                }
+                self.update_command_palette_ime_cursor_area();
+                self.request_redraw_for_overlay(self.palette_attached_window);
+            }
+            return true;
+        }
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
@@ -127,18 +227,44 @@ impl App {
                 }
                 Key::Named(NamedKey::Backspace) => {
                     self.command_palette.backspace();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Space) => {
                     self.command_palette.input_char(' ');
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
                     self.command_palette.move_cursor_left();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowRight) => {
                     self.command_palette.move_cursor_right();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::Home) => {
+                    self.command_palette.move_cursor_home();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::End) => {
+                    self.command_palette.move_cursor_end();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::Delete) => {
+                    self.command_palette.delete_forward();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Character(s) => {
@@ -147,6 +273,8 @@ impl App {
                             self.command_palette.input_char(ch);
                         }
                     }
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 _ => true,
@@ -163,6 +291,8 @@ impl App {
                     if matches!(action, Some(sonicterm_cfg::keymap::Action::RenameTab)) {
                         let body = self.active_tab_title_body().unwrap_or_default();
                         self.command_palette.start_rename_tab(body);
+                        self.update_command_palette_ime_cursor_area();
+                        self.request_redraw_for_overlay(self.palette_attached_window);
                         return true;
                     }
                     self.command_palette.close();
@@ -182,18 +312,44 @@ impl App {
                 }
                 Key::Named(NamedKey::Backspace) => {
                     self.command_palette.backspace();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::Space) => {
                     self.command_palette.input_char(' ');
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
                     self.command_palette.move_cursor_left();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Named(NamedKey::ArrowRight) => {
                     self.command_palette.move_cursor_right();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::Home) => {
+                    self.command_palette.move_cursor_home();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::End) => {
+                    self.command_palette.move_cursor_end();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::Delete) => {
+                    self.command_palette.delete_forward();
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 Key::Character(s) => {
@@ -202,6 +358,8 @@ impl App {
                             self.command_palette.input_char(ch);
                         }
                     }
+                    self.update_command_palette_ime_cursor_area();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
                 _ => true, // swallow other keys while palette is open
@@ -227,6 +385,7 @@ impl App {
                 FrontmostKind::Child(id) => Some(id),
                 _ => None,
             };
+            self.update_command_palette_ime_cursor_area();
         } else {
             self.palette_attached_window = None;
         }
@@ -252,6 +411,7 @@ impl App {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
+        self.update_command_palette_ime_cursor_area();
         self.request_redraw_for_overlay(self.palette_attached_window);
     }
 

@@ -265,8 +265,8 @@ use sonicterm_ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
+        command_palette_query_label, search_bar_label, search_query_caret_prefix, PaletteLayout,
+        SearchBarLayout, PALETTE_BORDER, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
     },
@@ -767,6 +767,34 @@ pub struct OverlayTextGlyphDebug {
 /// the renderer doesn't paint outside the palette modal.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
+fn measure_overlay_text_width(
+    glyph_atlas: &mut GlyphAtlas,
+    font_stack: &sonicterm_engine::FontStack,
+    font_size_px: f32,
+    native_em_px: f32,
+    wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
+    text: &str,
+    color: ChromeColor,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    chrome_text::layout(
+        font_stack,
+        wt_raster,
+        glyph_atlas,
+        text,
+        color,
+        ChromeAttrs::default(),
+        font_size_px,
+        native_em_px,
+        (0.0, 0.0),
+        (1.0, 1.0),
+        None,
+    )
+    .width_px
+}
+
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
     font_stack: &sonicterm_engine::FontStack,
@@ -2115,7 +2143,8 @@ impl GpuRenderer {
             ($name:literal) => {
                 if let Some((_, last, parts)) = gpu_timing.as_mut() {
                     let now = Instant::now();
-                    parts.push(($name, now.saturating_duration_since(*last).as_secs_f32() * 1000.0));
+                    parts
+                        .push(($name, now.saturating_duration_since(*last).as_secs_f32() * 1000.0));
                     *last = now;
                 }
             };
@@ -2315,6 +2344,7 @@ impl GpuRenderer {
                 // hash.
                 0xC0DE_FA17_u64.hash(&mut h);
                 p.query().hash(&mut h);
+                p.cursor().hash(&mut h);
                 p.selected().hash(&mut h);
                 p.len().hash(&mut h);
                 p.scroll_offset().hash(&mut h);
@@ -2616,8 +2646,7 @@ impl GpuRenderer {
                 // pane (the hover hit-test runs against the focused
                 // pane). Non-active panes always pass `None` so split
                 // panes never inherit another pane's hover accent.
-                let pane_hovered_url =
-                    if pv.is_active { hovered_url_cells } else { None };
+                let pane_hovered_url = if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -3730,11 +3759,8 @@ impl GpuRenderer {
         // the ` — N/M` counter flows to the RIGHT of the composition instead of
         // being overlapped. Display-only — the preedit does NOT drive matching
         // (only committed text does). (#B14)
-        let search_preedit: &str = search
-            .and(ime)
-            .map(|i| i.preedit())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
+        let search_preedit: &str =
+            search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
@@ -3797,8 +3823,7 @@ impl GpuRenderer {
                         )
                     })
                     .unwrap_or(text_w);
-                let caret_x =
-                    (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
+                let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
                 search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
@@ -3927,10 +3952,17 @@ impl GpuRenderer {
         }
 
         // -------- Command palette overlay ----------------------------------
-        let palette_layout =
-            palette.and_then(|p| {
-                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor)
-            });
+        let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
+        let (palette_layout, palette_query_text) = if let Some(p) = palette {
+            let query_text = if palette_preedit.is_empty() {
+                None
+            } else {
+                Some(command_palette_query_label(p, palette_preedit))
+            };
+            (PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor), query_text)
+        } else {
+            (None, None)
+        };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -4019,10 +4051,12 @@ impl GpuRenderer {
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
             // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
-            let query_text = if let Some(ph) = &layout.query_placeholder {
+            let query_text = if let Some(text) = &palette_query_text {
+                text.replace('▏', "")
+            } else if let Some(ph) = &layout.query_placeholder {
                 ph.clone()
             } else {
-                layout.query_label.clone()
+                layout.query_label.replace('▏', "")
             };
             let palette_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
             // T14: chrome text needs a wezterm FontStack; when one
@@ -4060,6 +4094,30 @@ impl GpuRenderer {
                     &mut overlay_glyph_instances,
                     None,
                 );
+                let caret_prefix = if let Some(text) = &palette_query_text {
+                    text.split('▏').next().unwrap_or("")
+                } else {
+                    layout.query_label.split('▏').next().unwrap_or("")
+                };
+                let caret_x = query_origin_x
+                    + measure_overlay_text_width(
+                        &mut self.glyph_atlas,
+                        stack,
+                        palette_font_size,
+                        palette_native_em,
+                        &mut palette_rasterizer,
+                        caret_prefix,
+                        self.search_fg,
+                    )
+                    + self.chrome_px(2.0);
+                let caret_w = (self.cell_w * 0.70).max(4.0);
+                let caret_h = (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
+                let caret_y = layout.query_row.y + (layout.query_row.h - caret_h) * 0.5;
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
+                    color: self.cursor_color,
+                    ..Default::default()
+                });
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -4084,7 +4142,7 @@ impl GpuRenderer {
                             - w
                             - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X) * 2.0
                             - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP))
-                            .max(0.0),
+                        .max(0.0),
                         None => row.rect.w,
                     };
                     emit_overlay_text_glyphs(
@@ -4216,7 +4274,11 @@ impl GpuRenderer {
         // terminal-cursor case. Per-frame overlay (not row-cached); the
         // FrameKey hashes `i.preedit()` so composition changes re-render.
         let search_active = search_ime_anchor.is_some();
-        if !search_active && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
+        let palette_active = palette_layout.is_some();
+        if !search_active
+            && !palette_active
+            && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false)
+        {
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
                 let text = i.preedit();
                 // Body-matched, DPI-scaled font size (same as terminal text).
@@ -5243,11 +5305,8 @@ impl GpuRenderer {
             // cell collapses the ligature into a single-cell glyph
             // with an inert neighbour cell.
             let color = cell_fg(&lead_cell, theme, fg_default);
-            let rgba = if info.is_color {
-                [1.0, 1.0, 1.0, 1.0]
-            } else {
-                resolve_fg(g.lead_col, color)
-            };
+            let rgba =
+                if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(g.lead_col, color) };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
             glyph_instances.push(GlyphInstance {

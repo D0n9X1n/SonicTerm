@@ -102,6 +102,10 @@ pub struct SplitterDragState {
     pub last_pos: (f32, f32),
 }
 
+/// Native OS window title. Keep static; terminal/tab titles render inside
+/// SonicTerm's own tab bar.
+pub const NATIVE_WINDOW_TITLE: &str = "SonicTerm";
+
 /// Maximum gap (ms) between consecutive left-presses on the same cell for
 /// them to count as a double/triple click. Beyond this the streak resets
 /// to a single click.
@@ -905,8 +909,8 @@ mod keymap_dispatch;
 mod media;
 mod misc;
 pub mod os_drag;
-mod render_timing;
 mod overlays;
+mod render_timing;
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
@@ -2145,12 +2149,9 @@ impl App {
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }
-                // WindowSetTitle: programmatic title set. Best-effort
-                // against the main window.
+                // WindowSetTitle updates internal tab chrome only; the native
+                // OS window title intentionally stays the static "SonicTerm".
                 AppEffect::WindowSetTitle { window, title } => {
-                    if let Some(w) = self.main_window() {
-                        w.set_title(&title);
-                    }
                     tracing::debug!(
                         target: "state_machine",
                         window = window.0,
@@ -2825,6 +2826,17 @@ impl App {
         self.command_palette_handle_ime(event)
     }
 
+    /// Test-only: describe where the main window will anchor the OS IME
+    /// candidate area.
+    #[doc(hidden)]
+    pub fn __test_main_ime_candidate_anchor_kind(&self) -> &'static str {
+        if self.command_palette.is_open() && self.palette_attached_window.is_none() {
+            "palette"
+        } else {
+            "terminal"
+        }
+    }
+
     /// Test-only invoker for `open_search_in_child`. Mirrors the
     /// pattern used by `__test_invoke_close_active_tab_in_child` so
     /// integration tests can assert the stale-id no-op contract for
@@ -2923,9 +2935,7 @@ impl App {
     /// Test-only: read whether the main window is in read-only copy mode.
     #[doc(hidden)]
     pub fn __test_main_read_only(&self) -> bool {
-        self.main()
-            .and_then(|ws| ws.copy_mode.as_ref())
-            .is_some_and(|mode| mode.is_read_only())
+        self.main().and_then(|ws| ws.copy_mode.as_ref()).is_some_and(|mode| mode.is_read_only())
     }
 
     /// Test-only: read whether a child window is in read-only copy mode.
@@ -4301,6 +4311,16 @@ mod click_count_tests {
         // Same cell but past the multi-click interval → restart at 1.
         assert_eq!(next_click_count(2, true, false), 1);
         assert_eq!(next_click_count(1, true, false), 1);
+    }
+}
+
+#[cfg(test)]
+mod native_window_title_tests {
+    use super::NATIVE_WINDOW_TITLE;
+
+    #[test]
+    fn native_window_title_is_static_app_name() {
+        assert_eq!(NATIVE_WINDOW_TITLE, "SonicTerm");
     }
 }
 

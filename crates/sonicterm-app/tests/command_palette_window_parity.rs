@@ -57,6 +57,11 @@ fn command_palette_accepts_ime_commit_text_on_main_attachment() {
 
     assert_eq!(app.__test_palette_query(), "重命名");
     assert_eq!(app.__test_palette_cursor(), "重命名".len());
+    assert_eq!(
+        app.__test_main_ime_candidate_anchor_kind(),
+        "palette",
+        "main palette IME candidates must anchor to the palette input caret"
+    );
 }
 
 #[test]
@@ -71,4 +76,9 @@ fn command_palette_accepts_ime_commit_text_on_child_attachment() {
 
     assert_eq!(app.__test_palette_attached_window(), Some(child));
     assert_eq!(app.__test_palette_query(), "设置");
+    assert_eq!(
+        app.__test_child_ime_candidate_anchor_kind(child),
+        Some("palette"),
+        "child palette IME candidates must anchor to the palette input caret"
+    );
 }

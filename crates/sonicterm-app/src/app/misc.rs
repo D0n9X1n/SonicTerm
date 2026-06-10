@@ -512,10 +512,8 @@ impl App {
             FrontmostKind::Child(id) => {
                 let Some(child) = self.windows.get(&id) else { return };
                 let Some(sel) = child.selection else { return };
-                let Some(pane_id) = child
-                    .tab_states
-                    .get(child.tabs.active_index())
-                    .map(|state| state.active_pane)
+                let Some(pane_id) =
+                    child.tab_states.get(child.tabs.active_index()).map(|state| state.active_pane)
                 else {
                     return;
                 };
@@ -694,7 +692,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title("SonicTerm")
+                    .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),

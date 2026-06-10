@@ -287,17 +287,7 @@ impl PaletteLayout {
         } else {
             None
         };
-        // Query label — no `> ` prefix any more; the search icon stands
-        // in for it. Block cursor is still appended so the caret shows.
-        let query = palette.query();
-        let mut cursor = palette.cursor().min(query.len());
-        if !query.is_char_boundary(cursor) {
-            cursor = query.len();
-        }
-        let mut query_label = String::new();
-        query_label.push_str(&query[..cursor]);
-        query_label.push('▏');
-        query_label.push_str(&query[cursor..]);
+        let query_label = command_palette_query_label(palette, "");
         let query_placeholder = if palette.query().is_empty() {
             Some(match palette.mode() {
                 CommandPaletteMode::Commands => {
@@ -393,7 +383,8 @@ impl SearchBarLayout {
         // and must scale with DPI — otherwise row 1 (search bar under the
         // read-only badge) overlaps the DPI-scaled badge at scale > 1. Only the
         // initial top margin stays a window-anchored offset.
-        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
+        let row_y =
+            SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
         let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
@@ -404,6 +395,34 @@ impl SearchBarLayout {
         };
         SearchBarLayout { bg, border }
     }
+}
+
+#[must_use]
+pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> String {
+    let query = palette.query();
+    let mut cursor = palette.cursor().min(query.len());
+    if !query.is_char_boundary(cursor) {
+        cursor = query.len();
+    }
+    let mut label = String::new();
+    label.push_str(&query[..cursor]);
+    label.push_str(preedit);
+    label.push('▏');
+    label.push_str(&query[cursor..]);
+    label
+}
+
+#[must_use]
+pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &str) -> String {
+    let query = palette.query();
+    let mut cursor = palette.cursor().min(query.len());
+    if !query.is_char_boundary(cursor) {
+        cursor = query.len();
+    }
+    let mut prefix = String::new();
+    prefix.push_str(&query[..cursor]);
+    prefix.push_str(preedit);
+    prefix
 }
 
 /// Produce the text label for the bottom-right search bar.
@@ -468,8 +487,7 @@ mod tests {
         // bar at row 1 must sit BELOW the badge's bottom edge, not overlap it.
         let scale = 2.0;
         let badge_bottom = SEARCH_BAR_MARGIN + SEARCH_BAR_HEIGHT * scale;
-        let row1 =
-            SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
+        let row1 = SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
         assert!(
             row1.border.y >= badge_bottom,
             "search bar row1 (y={}) overlaps the scaled badge (bottom={})",
@@ -535,6 +553,25 @@ mod tests {
         let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
         assert_eq!(prefix, head);
         assert_eq!(prefix, "/ ");
+    }
+
+    #[test]
+    fn command_palette_query_label_places_preedit_at_caret() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        for ch in "nihao".chars() {
+            palette.input_char(ch);
+        }
+        palette.move_cursor_left();
+        palette.move_cursor_left();
+
+        let label = command_palette_query_label(&palette, "中");
+        let prefix = command_palette_query_caret_prefix(&palette, "中");
+        let (head, tail) = label.split_once('▏').expect("label carries caret marker");
+
+        assert_eq!(prefix, head);
+        assert_eq!(head, "nih中");
+        assert_eq!(tail, "ao");
     }
 
     #[test]
