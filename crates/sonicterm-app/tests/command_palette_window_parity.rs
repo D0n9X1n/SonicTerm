@@ -7,6 +7,7 @@
 
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
+use winit::event::Ime;
 
 fn app() -> App {
     App::new(Theme::default(), Config::default(), Keymap::default())
@@ -44,4 +45,30 @@ fn command_palette_opens_attached_to_child_when_child_is_frontmost() {
         Some(child),
         "child-frontmost palette should render on that child window"
     );
+}
+
+#[test]
+fn command_palette_accepts_ime_commit_text_on_main_attachment() {
+    let mut app = app();
+    app.__test_seed_tab("main");
+    assert!(app.run_action(&Action::OpenCommandPalette));
+
+    assert!(app.__test_command_palette_handle_ime(&Ime::Commit("重命名".into())));
+
+    assert_eq!(app.__test_palette_query(), "重命名");
+    assert_eq!(app.__test_palette_cursor(), "重命名".len());
+}
+
+#[test]
+fn command_palette_accepts_ime_commit_text_on_child_attachment() {
+    let mut app = app();
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(Some(child));
+    assert!(app.run_action(&Action::OpenCommandPalette));
+
+    assert!(app.__test_command_palette_handle_ime(&Ime::Commit("设置".into())));
+
+    assert_eq!(app.__test_palette_attached_window(), Some(child));
+    assert_eq!(app.__test_palette_query(), "设置");
 }

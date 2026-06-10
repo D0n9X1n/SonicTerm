@@ -37,6 +37,7 @@ pub struct CommandPalette {
     open: bool,
     mode: CommandPaletteMode,
     query: String,
+    cursor: usize,
     /// Full universe of actions, in canonical order.
     all: Vec<Action>,
     /// First keybinding hint for each action in `all`, parallel order.
@@ -73,6 +74,7 @@ impl CommandPalette {
             open: false,
             mode: CommandPaletteMode::Commands,
             query: String::new(),
+            cursor: 0,
             all,
             shortcut_hints,
             items,
@@ -89,6 +91,10 @@ impl CommandPalette {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     pub fn mode(&self) -> CommandPaletteMode {
@@ -126,6 +132,7 @@ impl CommandPalette {
         self.open = true;
         self.mode = CommandPaletteMode::Commands;
         self.query.clear();
+        self.cursor = 0;
         self.selected = 0;
         self.scroll_offset = 0;
         self.refilter();
@@ -135,6 +142,7 @@ impl CommandPalette {
         self.open = false;
         self.mode = CommandPaletteMode::Commands;
         self.query.clear();
+        self.cursor = 0;
         self.selected = 0;
         self.scroll_offset = 0;
         self.refilter();
@@ -152,6 +160,7 @@ impl CommandPalette {
 
     pub fn set_query(&mut self, q: impl Into<String>) {
         self.query = q.into();
+        self.cursor = self.query.len();
         self.selected = 0;
         self.scroll_offset = 0;
         if self.mode == CommandPaletteMode::Commands {
@@ -188,7 +197,8 @@ impl CommandPalette {
     }
 
     pub fn input_char(&mut self, ch: char) {
-        self.query.push(ch);
+        self.query.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
         self.selected = 0;
         self.scroll_offset = 0;
         if self.mode == CommandPaletteMode::Commands {
@@ -197,12 +207,17 @@ impl CommandPalette {
     }
 
     pub fn backspace(&mut self) {
-        if self.query.pop().is_some() {
-            self.selected = 0;
-            self.scroll_offset = 0;
-            if self.mode == CommandPaletteMode::Commands {
-                self.refilter();
-            }
+        if self.cursor == 0 {
+            return;
+        }
+        let Some((prev, ch)) = self.query[..self.cursor].char_indices().last() else { return };
+        self.query.drain(prev..self.cursor);
+        self.cursor = prev;
+        let _ = ch;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        if self.mode == CommandPaletteMode::Commands {
+            self.refilter();
         }
     }
 
@@ -210,9 +225,28 @@ impl CommandPalette {
         self.open = true;
         self.mode = CommandPaletteMode::RenameTab;
         self.query = title_body.into();
+        self.cursor = self.query.len();
         self.items.clear();
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        if let Some((prev, _)) = self.query[..self.cursor].char_indices().last() {
+            self.cursor = prev;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        if self.cursor >= self.query.len() {
+            return;
+        }
+        let mut iter = self.query[self.cursor..].char_indices();
+        let _ = iter.next();
+        self.cursor = iter.next().map(|(idx, _)| self.cursor + idx).unwrap_or(self.query.len());
     }
 
     pub fn move_selection_down(&mut self) {
@@ -573,5 +607,26 @@ mod tests {
         let two = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 2.0)
             .expect("open palette yields a layout");
         assert_eq!(two.query_row.h, one.query_row.h * 2.0);
+    }
+
+    #[test]
+    fn palette_text_editing_supports_space_cjk_and_caret_movement() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        for ch in "rename".chars() {
+            palette.input_char(ch);
+        }
+        palette.input_char(' ');
+        palette.input_char('标');
+        palette.input_char('题');
+        assert_eq!(palette.query(), "rename 标题");
+        assert_eq!(palette.cursor(), "rename 标题".len());
+
+        palette.move_cursor_left();
+        palette.move_cursor_left();
+        palette.input_char('-');
+        assert_eq!(palette.query(), "rename -标题");
+        palette.backspace();
+        assert_eq!(palette.query(), "rename 标题");
     }
 }

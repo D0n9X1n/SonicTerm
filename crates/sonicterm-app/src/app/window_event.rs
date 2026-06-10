@@ -169,6 +169,7 @@ impl App {
                     self.pending_redraw = true;
                     return;
                 }
+                let mut timing = crate::app::render_timing::RenderTiming::start("main");
                 self.pending_redraw = false;
                 let main_id_opt = self.main_window_id;
                 if let Some(id) = main_id_opt {
@@ -177,6 +178,9 @@ impl App {
                     }
                 }
                 self.poll_command_events_for_all_tabs();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("poll");
+                }
                 let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
@@ -208,6 +212,9 @@ impl App {
                     .map(|st| st.active_pane)
                     .unwrap_or(0);
                 let broadcast_receivers = self.broadcast_receivers();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("layout");
+                }
 
                 // #386 PR-D: per-pane scrollbar visibility/fade tick.
                 // Built BEFORE the try_lock pass since it only needs
@@ -258,6 +265,9 @@ impl App {
                         })
                         .unwrap_or(false)
                 };
+                if let Some(t) = timing.as_mut() {
+                    t.lap("scrollbar");
+                }
                 if scrollbar_needs_more_frames {
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
@@ -302,6 +312,9 @@ impl App {
                             .map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
                     })
                     .collect();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("inline_images");
+                }
                 let mut guards: Vec<(
                     u64,
                     parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser>,
@@ -327,6 +340,9 @@ impl App {
                         }
                     }
                 }
+                if let Some(t) = timing.as_mut() {
+                    t.lap("try_lock");
+                }
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
@@ -344,6 +360,21 @@ impl App {
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
+                let main_palette_ime_area = main_window_for_ime.as_ref().and_then(|w| {
+                    let r = self.main_renderer()?;
+                    if self.palette_attached_window.is_some() || !self.command_palette.is_open() {
+                        return None;
+                    }
+                    self.command_palette_ime_cursor_area(
+                        w.inner_size().width as f32,
+                        w.inner_size().height as f32,
+                        self.config.appearance.panel_padding,
+                        r.scale_factor(),
+                        sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                            * r.scale_factor(),
+                        r.cell_w,
+                    )
+                });
                 // Search-bar IME geometry: the visible label (`/ {query}▏ —
                 // N/M`) drives the box width, but the caret/candidate-window
                 // anchor must sit at the END OF THE QUERY (the `▏`), not the
@@ -497,6 +528,7 @@ impl App {
                             pane,
                             &guards[active_pos].1,
                             tab_idx,
+                            !pty_burst,
                         );
                         if let Some(search) =
                             tab_states_mref.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -534,6 +566,7 @@ impl App {
                                     .unwrap_or_default(),
                             })
                             .collect();
+                        r.set_render_timing_label("main");
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &self.theme,
@@ -554,6 +587,9 @@ impl App {
                             ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
+                        }
+                        if let Some(t) = timing.as_mut() {
+                            t.lap("render");
                         }
                         self.input_dirty = false;
                         // PR #162: mark only the generation sampled at
@@ -581,7 +617,9 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
-                        if let Some(search_label) = search_ime_label.as_ref() {
+                        if let Some((pos, size)) = main_palette_ime_area {
+                            w.set_ime_cursor_area(pos, size);
+                        } else if let Some(search_label) = search_ime_label.as_ref() {
                             let window_size = w.inner_size();
                             // #651: window_size + the SearchBarLayout it feeds are
                             // physical px, so every logical-px term here must be
@@ -648,6 +686,9 @@ impl App {
                 // for the main window. Outside the renderer borrow scope
                 // so the immutable self borrow doesn't conflict with `r`.
                 self.publish_main_window_tab_bar();
+                if let Some(t) = timing {
+                    t.finish();
+                }
             }
 
             WindowEvent::Focused(focused) => {
@@ -1578,6 +1619,9 @@ impl App {
 
             // -- IME (CJK / multi-key input methods) --
             WindowEvent::Ime(ime_event) => {
+                if self.command_palette_handle_ime(&ime_event) {
+                    return;
+                }
                 let committed = if let Some(ws) = self.main_mut() {
                     match ime_event {
                         Ime::Enabled => {

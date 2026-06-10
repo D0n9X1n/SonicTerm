@@ -482,6 +482,8 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Window label used in renderer-internal timing logs.
+    render_timing_label: &'static str,
     /// Whether the tab bar is currently shown. Toggled at runtime by the
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
@@ -1021,6 +1023,7 @@ impl GpuRenderer {
             drag_chip_visual: None,
             last_frame_key: None,
             skipped_frames: 0,
+            render_timing_label: "unknown",
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
@@ -1256,6 +1259,10 @@ impl GpuRenderer {
     /// Whether the OS window currently has keyboard focus.
     pub fn window_focused(&self) -> bool {
         self.window_focused
+    }
+
+    pub fn set_render_timing_label(&mut self, label: &'static str) {
+        self.render_timing_label = label;
     }
 
     pub fn flash_pane_focus(&mut self, pane_id: u64) {
@@ -2099,6 +2106,20 @@ impl GpuRenderer {
         if panes.is_empty() {
             return Ok(());
         }
+        let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
+            .then(|| {
+                let now = Instant::now();
+                (now, now, Vec::<(&'static str, f32)>::with_capacity(12))
+            });
+        macro_rules! gpu_lap {
+            ($name:literal) => {
+                if let Some((_, last, parts)) = gpu_timing.as_mut() {
+                    let now = Instant::now();
+                    parts.push(($name, now.saturating_duration_since(*last).as_secs_f32() * 1000.0));
+                    *last = now;
+                }
+            };
+        }
         let now = Instant::now();
         // Part B step 7: record per-pane origins for the integration test
         // hook. Populated unconditionally on every render() call so the
@@ -2442,6 +2463,7 @@ impl GpuRenderer {
             // would re-arm at 0ms and peg the redraw queue.
             return Ok(());
         }
+        gpu_lap!("frame_key");
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
         // that never actually got drawn, and the next redraw could
@@ -3289,6 +3311,7 @@ impl GpuRenderer {
             }
         }
 
+        gpu_lap!("grid_walk");
         // Underline quads — drawn last so they appear on top of the text.
         // SGR 4:n style and SGR 58 colour are stored per-cell and coalesced
         // above, matching WezTerm/xterm underline semantics instead of the
@@ -4468,6 +4491,7 @@ impl GpuRenderer {
             }
         }
 
+        gpu_lap!("overlays");
         // B3: push any new glyph tiles to the GPU texture before any
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
@@ -4477,6 +4501,7 @@ impl GpuRenderer {
             image_glyph_instances.extend(glyph_instances);
             glyph_instances = image_glyph_instances;
         }
+        gpu_lap!("glyph_upload");
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
@@ -4507,6 +4532,7 @@ impl GpuRenderer {
                 return Err(anyhow!("surface validation error"));
             }
         };
+        gpu_lap!("surface_acquire");
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
@@ -4541,8 +4567,11 @@ impl GpuRenderer {
                 &overlay_glyph_instances,
             );
         }
+        gpu_lap!("render_pass");
         self.queue.submit(Some(encoder.finish()));
+        gpu_lap!("queue_submit");
         frame.present();
+        gpu_lap!("present");
         // T13/T14: the legacy chrome layer `TextAtlas::trim` is gone with the rest of
         // the the legacy chrome layer plumbing. The chrome+grid atlas now lives in
         // `glyph_atlas` (sonicterm-text), which carries its own LRU
@@ -4578,6 +4607,19 @@ impl GpuRenderer {
         // is no longer live.
         for p in panes.iter_mut() {
             p.grid.clear_dirty();
+        }
+        if let Some((start, last, mut parts)) = gpu_timing {
+            let now = Instant::now();
+            parts.push(("cleanup", now.saturating_duration_since(last).as_secs_f32() * 1000.0));
+            let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
+            let mut line = format!(
+                "[gpu_render_timing] window={} total={total_ms:.2}ms",
+                self.render_timing_label
+            );
+            for (name, ms) in parts {
+                line.push_str(&format!(" {name}={ms:.2}ms"));
+            }
+            tracing::debug!(target: "render_timing", %line);
         }
         Ok(())
     }

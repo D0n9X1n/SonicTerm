@@ -125,13 +125,14 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 ///
 /// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
 /// frame boundary instead of rendering now. A redraw is deferred only when
-/// all three hold:
+/// both hold:
 /// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
 ///   immediate; gating them adds perceptible latency, PR #132).
-/// - `!pty_burst` — it does not carry a fresh PTY burst (a new burst always
-///   renders so streamed bytes never stall).
 /// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame.
+///   window, so another draw now would just burn a frame. PTY burst redraws are
+///   streaming work and should coalesce too; otherwise child windows can enter
+///   `surface.get_current_texture()` early and block waiting for the next
+///   drawable/vblank.
 ///
 /// Extracted as a pure fn (Issue #43) so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
@@ -145,7 +146,8 @@ pub fn should_defer_streaming_redraw(
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
-    !was_dirty && !pty_burst && since_last_render < frame_period
+    let _ = pty_burst;
+    !was_dirty && since_last_render < frame_period
 }
 
 pub struct WindowState {
@@ -773,13 +775,14 @@ pub fn refresh_active_tab_title(
     pane: &mut PaneState,
     parser: &Parser,
     tab_idx: usize,
+    allow_proc_probe: bool,
 ) -> Option<String> {
     let cwd = parser.cwd().map(str::to_string);
     let raw_title = parser.title().map(str::to_string);
     const TTL: std::time::Duration = std::time::Duration::from_millis(500);
     let now = Instant::now();
     let fresh = pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
-    if !fresh {
+    if !fresh && allow_proc_probe {
         let probed = pane
             .pty
             .as_ref()
@@ -902,6 +905,7 @@ mod keymap_dispatch;
 mod media;
 mod misc;
 pub mod os_drag;
+mod render_timing;
 mod overlays;
 mod scroll;
 pub mod scrollbar_input;
@@ -2797,6 +2801,30 @@ impl App {
         self.command_palette.is_open()
     }
 
+    /// Test-only: command palette query text.
+    #[doc(hidden)]
+    pub fn __test_palette_query(&self) -> &str {
+        self.command_palette.query()
+    }
+
+    /// Test-only: command palette caret byte offset.
+    #[doc(hidden)]
+    pub fn __test_palette_cursor(&self) -> usize {
+        self.command_palette.cursor()
+    }
+
+    /// Test-only: drive command-palette key handling.
+    #[doc(hidden)]
+    pub fn __test_command_palette_handle_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        self.command_palette_handle_key(event)
+    }
+
+    /// Test-only: drive command-palette IME handling.
+    #[doc(hidden)]
+    pub fn __test_command_palette_handle_ime(&mut self, event: &winit::event::Ime) -> bool {
+        self.command_palette_handle_ime(event)
+    }
+
     /// Test-only invoker for `open_search_in_child`. Mirrors the
     /// pattern used by `__test_invoke_close_active_tab_in_child` so
     /// integration tests can assert the stale-id no-op contract for
@@ -4310,10 +4338,11 @@ mod redraw_coalescing_tests {
     }
 
     #[test]
-    fn fresh_pty_burst_never_defers() {
-        // A redraw carrying new PTY bytes always renders so streamed output
-        // never stalls behind the frame gate.
-        assert!(!should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+    fn pty_burst_within_frame_defers_like_other_streaming_redraws() {
+        // A PTY burst is still streaming work, not input. Rendering it early
+        // can block in surface acquisition waiting for the next drawable; defer
+        // inside the current frame window and render at the next boundary.
+        assert!(should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
     }
 
     #[test]

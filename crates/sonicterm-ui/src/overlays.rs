@@ -289,9 +289,15 @@ impl PaletteLayout {
         };
         // Query label — no `> ` prefix any more; the search icon stands
         // in for it. Block cursor is still appended so the caret shows.
+        let query = palette.query();
+        let mut cursor = palette.cursor().min(query.len());
+        if !query.is_char_boundary(cursor) {
+            cursor = query.len();
+        }
         let mut query_label = String::new();
-        query_label.push_str(palette.query());
+        query_label.push_str(&query[..cursor]);
         query_label.push('▏');
+        query_label.push_str(&query[cursor..]);
         let query_placeholder = if palette.query().is_empty() {
             Some(match palette.mode() {
                 CommandPaletteMode::Commands => {

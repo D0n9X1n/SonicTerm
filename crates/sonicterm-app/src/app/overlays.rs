@@ -16,6 +16,7 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
+use sonicterm_ui::overlays::{PaletteLayout, PALETTE_ROW_PAD_X};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
 use sonicterm_ui::selection::Selection;
@@ -36,7 +37,35 @@ use super::{
     WindowState,
 };
 
+fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
+
 impl App {
+    pub(super) fn command_palette_ime_cursor_area(
+        &self,
+        window_w: f32,
+        window_h: f32,
+        panel_padding: f32,
+        scale: f32,
+        font_size: f32,
+        cell_w: f32,
+    ) -> Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)> {
+        if !self.command_palette.is_open() {
+            return None;
+        }
+        let mut palette = self.command_palette.clone();
+        let layout = PaletteLayout::compute(&mut palette, window_w, window_h, panel_padding, scale)?;
+        let cursor = palette.cursor().min(palette.query().len());
+        let prefix = palette.query().get(..cursor).unwrap_or(palette.query());
+        let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
+        let caret_x = text_x + estimate_palette_text_width(prefix, font_size);
+        Some((
+            winit::dpi::PhysicalPosition::new(caret_x as i32, layout.query_row.y as i32),
+            winit::dpi::PhysicalSize::new(cell_w.ceil() as u32, layout.query_row.h.ceil() as u32),
+        ))
+    }
+
     fn command_palette_tab_count(&self) -> usize {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
@@ -50,6 +79,26 @@ impl App {
     fn refresh_command_palette_context(&mut self) {
         let tab_count = self.command_palette_tab_count();
         self.command_palette.set_tab_count(tab_count);
+    }
+
+    pub(super) fn command_palette_handle_ime(&mut self, ime_event: &winit::event::Ime) -> bool {
+        if !self.command_palette.is_open() {
+            return false;
+        }
+        match ime_event {
+            winit::event::Ime::Commit(text) => {
+                for ch in text.chars() {
+                    self.command_palette.input_char(ch);
+                }
+                self.request_redraw_for_overlay(self.palette_attached_window);
+            }
+            winit::event::Ime::Preedit(_, _)
+            | winit::event::Ime::Enabled
+            | winit::event::Ime::Disabled => {
+                self.request_redraw_for_overlay(self.palette_attached_window);
+            }
+        }
+        true
     }
 
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
@@ -78,6 +127,18 @@ impl App {
                 }
                 Key::Named(NamedKey::Backspace) => {
                     self.command_palette.backspace();
+                    true
+                }
+                Key::Named(NamedKey::Space) => {
+                    self.command_palette.input_char(' ');
+                    true
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.command_palette.move_cursor_left();
+                    true
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.command_palette.move_cursor_right();
                     true
                 }
                 Key::Character(s) => {
@@ -121,6 +182,18 @@ impl App {
                 }
                 Key::Named(NamedKey::Backspace) => {
                     self.command_palette.backspace();
+                    true
+                }
+                Key::Named(NamedKey::Space) => {
+                    self.command_palette.input_char(' ');
+                    true
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.command_palette.move_cursor_left();
+                    true
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.command_palette.move_cursor_right();
                     true
                 }
                 Key::Character(s) => {

@@ -18,8 +18,8 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::overlays::{
-    search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
-    SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
+    search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout,
+    PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
 };
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::{SelectMode, Selection};
@@ -314,6 +314,9 @@ impl App {
                 }
                 self.refresh_hovered_url_in_child(win_id);
             }
+            WindowEvent::Ime(ime_event) if self.command_palette_handle_ime(ime_event) => {
+                return;
+            }
             _ => {}
         }
         // Split-borrow the palette out so the renderer can mutate it even though
@@ -375,6 +378,7 @@ impl App {
                     self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
+                let mut timing = crate::app::render_timing::RenderTiming::start("child");
                 // Rendering this frame: drop any pending-deferral marker
                 // so the frame-boundary wakeup loop stops re-requesting
                 // redraws on this child (an idle re-request loop would be
@@ -382,6 +386,9 @@ impl App {
                 self.pending_redraw_windows.remove(&win_id);
                 child.tabs.clear_expired_command_badges(Instant::now());
                 poll_command_events_for_child_window(child, &config);
+                if let Some(t) = timing.as_mut() {
+                    t.lap("poll");
+                }
                 let tab_idx = child.tabs.active_index();
                 let pane_rects: Vec<(u64, sonicterm_ui::pane::Rect)> = child
                     .tab_states
@@ -401,6 +408,9 @@ impl App {
                     })
                     .unwrap_or_default();
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                if let Some(t) = timing.as_mut() {
+                    t.lap("layout");
+                }
                 // PR #199 Fix 1: try_lock EVERY pane in this child window's
                 // tab and pass them all through to the renderer. Mirrors
                 // the main-window path in window_event.rs.
@@ -436,6 +446,9 @@ impl App {
                         }
                     }
                 }
+                if let Some(t) = timing.as_mut() {
+                    t.lap("try_lock");
+                }
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
@@ -466,6 +479,9 @@ impl App {
                     .collect();
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("inline_images");
+                }
                 if let Some(pane) = child.panes.get_mut(&active_id) {
                     let active_pos = guards
                         .iter()
@@ -486,6 +502,7 @@ impl App {
                         pane,
                         &guards[active_pos].1,
                         tab_idx,
+                        !pty_burst,
                     );
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -493,6 +510,9 @@ impl App {
                         search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("title_search");
+                    }
                     // Scrollbar visibility (#pane-scrollbar): compute the
                     // per-pane fade alpha so torn-out windows show the scrollbar
                     // + auto-hide like the main window (pre-fix it was hardcoded
@@ -524,6 +544,9 @@ impl App {
                             )
                         })
                     };
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("scrollbar");
+                    }
                     let mut panes_slice: Vec<sonicterm_render_model::PaneRender<'_>> = guards
                         .iter_mut()
                         .map(|(id, g, rect)| sonicterm_render_model::PaneRender {
@@ -546,6 +569,9 @@ impl App {
                                 .unwrap_or_default(),
                         })
                         .collect();
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("pane_slice");
+                    }
                     // PR #400: cursor_visible is per-pane (lives on
                     // PaneState). Read from the active pane (already
                     // borrowed mutably above) so the DECTCEM flag
@@ -553,6 +579,7 @@ impl App {
                     let cursor_visible_now =
                         pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed);
                     if let Some(r) = child.renderer.as_mut() {
+                        r.set_render_timing_label("child");
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &theme,
@@ -584,6 +611,9 @@ impl App {
                             tracing::warn!("child render error: {e}");
                         }
                     }
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("render");
+                    }
                     child.last_render = Instant::now();
                     // Issue #43: close the coalescing gate for the next
                     // streaming redraw. `input_dirty` is the shared
@@ -614,7 +644,36 @@ impl App {
                         if let (Some(win), Some(r)) =
                             (child.window.as_ref(), child.renderer.as_ref())
                         {
-                            if let Some(search) = search {
+                            if palette_here && self.command_palette.is_open() {
+                                let mut palette = self.command_palette.clone();
+                                let size = win.inner_size();
+                                let scale = r.scale_factor();
+                                let font_size =
+                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                                        * scale;
+                                if let Some(layout) = PaletteLayout::compute(
+                                    &mut palette,
+                                    size.width as f32,
+                                    size.height as f32,
+                                    config.appearance.panel_padding,
+                                    scale,
+                                ) {
+                                    let cursor = palette.cursor().min(palette.query().len());
+                                    let prefix = palette.query().get(..cursor).unwrap_or(palette.query());
+                                    let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
+                                    let caret_x = text_x + estimate_overlay_text_width(prefix, font_size);
+                                    win.set_ime_cursor_area(
+                                        winit::dpi::PhysicalPosition::new(
+                                            caret_x as i32,
+                                            layout.query_row.y as i32,
+                                        ),
+                                        winit::dpi::PhysicalSize::new(
+                                            r.cell_w.ceil() as u32,
+                                            layout.query_row.h.ceil() as u32,
+                                        ),
+                                    );
+                                }
+                            } else if let Some(search) = search {
                                 let preedit = child.ime.preedit();
                                 let search_label = search_bar_label(search, preedit);
                                 let search_prefix = search_query_caret_prefix(search, preedit);
@@ -694,6 +753,9 @@ impl App {
                             &layout,
                         );
                         self.os_drag_bars.publish(snap);
+                    }
+                    if let Some(t) = timing {
+                        t.finish();
                     }
                     // Keep animating the scrollbar fade to completion (the
                     // 300ms auto-hide) even when no further input arrives.

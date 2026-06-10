@@ -725,6 +725,7 @@ mod tests {
         assert_eq!(Config::default_path().unwrap(), dir.join("sonicterm.toml"));
     }
 
+
     #[test]
     fn seeding_user_examples_writes_theme_and_platform_keymaps() {
         let nonce =
