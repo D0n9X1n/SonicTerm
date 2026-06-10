@@ -75,10 +75,10 @@ impl App {
             return true;
         }
         match action {
-            Action::CopyToClipboard => self.copy_selection(),
-            Action::EnterCopyMode => self.enter_copy_mode(),
+            Action::CopyToClipboard => self.copy_selection_for_kind(self.frontmost_kind()),
+            Action::EnterCopyMode => self.enter_copy_mode_for_kind(self.frontmost_kind()),
             Action::EnterQuickSelect => self.enter_quick_select(),
-            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::PasteFromClipboard => self.paste_clipboard_for_kind(self.frontmost_kind()),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 // M6a-expand-2c-tab: notify the reducer the user
@@ -137,9 +137,7 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.next();
-                }
+                self.next_main_tab();
             }
             Action::PrevTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
@@ -151,9 +149,7 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.prev();
-                }
+                self.prev_main_tab();
             }
             Action::ActivateTab(i) => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
@@ -166,9 +162,7 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.activate(*i);
-                }
+                self.activate_main_tab(*i);
             }
             Action::ActivateLastTab => {
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -177,10 +171,7 @@ impl App {
                     }
                     self.frontmost_window = None;
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    let last = t.len().saturating_sub(1);
-                    t.activate(last);
-                }
+                self.activate_last_main_tab();
             }
             Action::SplitRight => {
                 // Epic #289 Phase A — route to frontmost window so Cmd+D
@@ -485,10 +476,10 @@ impl App {
             return true;
         }
         match action {
-            Action::CopyToClipboard => self.copy_selection(),
-            Action::EnterCopyMode => self.enter_copy_mode(),
+            Action::CopyToClipboard => self.copy_selection_for_kind(source_kind),
+            Action::EnterCopyMode => self.enter_copy_mode_for_kind(source_kind),
             Action::EnterQuickSelect => self.enter_quick_select(),
-            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::PasteFromClipboard => self.paste_clipboard_for_kind(source_kind),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {
@@ -527,9 +518,7 @@ impl App {
                         return true;
                     }
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.next();
-                }
+                self.next_main_tab();
             }
             Action::PrevTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
@@ -540,9 +529,7 @@ impl App {
                         return true;
                     }
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.prev();
-                }
+                self.prev_main_tab();
             }
             Action::ActivateTab(i) => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
@@ -554,9 +541,7 @@ impl App {
                         return true;
                     }
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    t.activate(*i);
-                }
+                self.activate_main_tab(*i);
             }
             Action::ActivateLastTab => {
                 if let FrontmostKind::Child(id) = source_kind {
@@ -564,10 +549,7 @@ impl App {
                         return true;
                     }
                 }
-                if let Some(t) = self.main_tabs_mut() {
-                    let last = t.len().saturating_sub(1);
-                    t.activate(last);
-                }
+                self.activate_last_main_tab();
             }
             Action::SplitRight => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
@@ -634,6 +616,7 @@ impl App {
                 }
                 self.toggle_active_pane_zoom();
             }
+            Action::ToggleBroadcast { scope } => self.toggle_broadcast_for(source_kind, *scope),
             Action::FocusPane(d) => {
                 let dir = match d {
                     Direction::Left => sonicterm_app_core::SplitDir::Left,

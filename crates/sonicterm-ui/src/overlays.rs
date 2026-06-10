@@ -33,7 +33,7 @@ use crate::tabbar_view::Rect;
 pub const PALETTE_WIDTH: f32 = 520.0;
 
 /// Ideal modal height in physical pixels.
-pub const PALETTE_HEIGHT: f32 = 460.0;
+pub const PALETTE_HEIGHT: f32 = 400.0;
 
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
@@ -42,7 +42,7 @@ pub const PALETTE_MAX_WIDTH: f32 = 560.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
-pub const PALETTE_MAX_HEIGHT: f32 = 520.0;
+pub const PALETTE_MAX_HEIGHT: f32 = 460.0;
 
 /// Top margin: the modal's top edge sits at `max(72, viewport_h * 0.18)`.
 pub const PALETTE_TOP_RATIO: f32 = 0.18;
@@ -54,32 +54,32 @@ pub const PALETTE_TOP_MIN: f32 = 72.0;
 pub const PALETTE_BORDER: f32 = 1.0;
 
 /// Height of the query input field.
-pub const PALETTE_QUERY_HEIGHT: f32 = 52.0;
+pub const PALETTE_QUERY_HEIGHT: f32 = 42.0;
 
 /// Horizontal padding inside the query field.
 pub const PALETTE_QUERY_PAD_X: f32 = 16.0;
 
 /// Vertical padding inside the query field.
-pub const PALETTE_QUERY_PAD_Y: f32 = 10.0;
+pub const PALETTE_QUERY_PAD_Y: f32 = 6.0;
 
 /// Search icon size + offset inside the query field.
 pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 34.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 28.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 3.0;
+pub const PALETTE_ROW_GAP: f32 = 2.0;
 
 /// Horizontal padding inside each row.
-pub const PALETTE_ROW_PAD_X: f32 = 18.0;
+pub const PALETTE_ROW_PAD_X: f32 = 14.0;
 
 /// Minimum gap between the command label and shortcut hint columns.
 pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;
 
 /// Footer height (count + nav hint strip at the bottom of the modal).
-pub const PALETTE_FOOTER_HEIGHT: f32 = 40.0;
+pub const PALETTE_FOOTER_HEIGHT: f32 = 30.0;
 
 /// Default inset between the modal edge and the inner content (rows, query,
 /// footer). Users can override this via `appearance.panel_padding`.
@@ -287,11 +287,7 @@ impl PaletteLayout {
         } else {
             None
         };
-        // Query label — no `> ` prefix any more; the search icon stands
-        // in for it. Block cursor is still appended so the caret shows.
-        let mut query_label = String::new();
-        query_label.push_str(palette.query());
-        query_label.push('▏');
+        let query_label = command_palette_query_label(palette, "");
         let query_placeholder = if palette.query().is_empty() {
             Some(match palette.mode() {
                 CommandPaletteMode::Commands => {
@@ -387,7 +383,8 @@ impl SearchBarLayout {
         // and must scale with DPI — otherwise row 1 (search bar under the
         // read-only badge) overlaps the DPI-scaled badge at scale > 1. Only the
         // initial top margin stays a window-anchored offset.
-        let row_y = SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
+        let row_y =
+            SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
         let y = row_y.min((window_h - h).max(0.0));
         let border = Rect { x, y, w, h };
         let bg = Rect {
@@ -398,6 +395,34 @@ impl SearchBarLayout {
         };
         SearchBarLayout { bg, border }
     }
+}
+
+#[must_use]
+pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> String {
+    let query = palette.query();
+    let mut cursor = palette.cursor().min(query.len());
+    if !query.is_char_boundary(cursor) {
+        cursor = query.len();
+    }
+    let mut label = String::new();
+    label.push_str(&query[..cursor]);
+    label.push_str(preedit);
+    label.push('▏');
+    label.push_str(&query[cursor..]);
+    label
+}
+
+#[must_use]
+pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &str) -> String {
+    let query = palette.query();
+    let mut cursor = palette.cursor().min(query.len());
+    if !query.is_char_boundary(cursor) {
+        cursor = query.len();
+    }
+    let mut prefix = String::new();
+    prefix.push_str(&query[..cursor]);
+    prefix.push_str(preedit);
+    prefix
 }
 
 /// Produce the text label for the bottom-right search bar.
@@ -462,8 +487,7 @@ mod tests {
         // bar at row 1 must sit BELOW the badge's bottom edge, not overlap it.
         let scale = 2.0;
         let badge_bottom = SEARCH_BAR_MARGIN + SEARCH_BAR_HEIGHT * scale;
-        let row1 =
-            SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
+        let row1 = SearchBarLayout::compute_at_row(4000.0, 2400.0, 10.0, 1, scale);
         assert!(
             row1.border.y >= badge_bottom,
             "search bar row1 (y={}) overlaps the scaled badge (bottom={})",
@@ -529,6 +553,58 @@ mod tests {
         let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
         assert_eq!(prefix, head);
         assert_eq!(prefix, "/ ");
+    }
+
+    #[test]
+    fn command_palette_query_label_places_preedit_at_caret() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        for ch in "nihao".chars() {
+            palette.input_char(ch);
+        }
+        palette.move_cursor_left();
+        palette.move_cursor_left();
+
+        let label = command_palette_query_label(&palette, "中");
+        let prefix = command_palette_query_caret_prefix(&palette, "中");
+        let (head, tail) = label.split_once('▏').expect("label carries caret marker");
+
+        assert_eq!(prefix, head);
+        assert_eq!(head, "nih中");
+        assert_eq!(tail, "ao");
+    }
+
+    #[test]
+    fn command_palette_uses_compact_spacing_tokens() {
+        assert!(PALETTE_HEIGHT <= 400.0);
+        assert!(PALETTE_MAX_HEIGHT <= 460.0);
+        assert!(PALETTE_QUERY_HEIGHT <= 42.0);
+        assert!(PALETTE_QUERY_PAD_Y <= 6.0);
+        assert!(PALETTE_ROW_HEIGHT <= 28.0);
+        assert!(PALETTE_ROW_GAP <= 2.0);
+        assert!(PALETTE_FOOTER_HEIGHT <= 30.0);
+    }
+
+    #[test]
+    fn command_palette_layout_is_dense_but_keeps_text_centered() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.input_char('r');
+        let layout = PaletteLayout::compute(&mut palette, 1800.0, 1000.0, PALETTE_INNER_PAD, 1.0)
+            .expect("open palette has layout");
+
+        assert_eq!(layout.border.h, PALETTE_HEIGHT);
+        assert_eq!(layout.query_row.h, PALETTE_QUERY_HEIGHT);
+        assert!(layout.rows.len() >= 10, "compact layout should fit a useful command list");
+        for row in &layout.rows {
+            assert_eq!(row.rect.h, PALETTE_ROW_HEIGHT);
+        }
+        assert_eq!(layout.footer.h, PALETTE_FOOTER_HEIGHT);
+        assert_eq!(
+            layout.query_icon.y,
+            layout.query_row.y + (layout.query_row.h - layout.query_icon.h) * 0.5,
+            "query icon remains vertically centered after compacting padding"
+        );
     }
 }
 

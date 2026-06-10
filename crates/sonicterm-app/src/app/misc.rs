@@ -32,8 +32,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    window_dpi, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
-    WindowState,
+    window_dpi, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState,
+    UserEvent, WindowState,
 };
 
 impl App {
@@ -243,11 +243,8 @@ impl App {
         // hint keeps the text cursor (it's not clickable yet). OSC 8 keeps
         // its always-on pointer below.
         let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let has_active_hover = self
-            .main()
-            .and_then(|ws| ws.hovered_url.as_ref())
-            .map(|h| h.active)
-            .unwrap_or(false);
+        let has_active_hover =
+            self.main().and_then(|ws| ws.hovered_url.as_ref()).map(|h| h.active).unwrap_or(false);
         let want_pointer = has_active_hover
             || self
                 .main_renderer()
@@ -326,7 +323,12 @@ impl App {
         child.panes.get(&active_id)
     }
 
-    fn child_osc8_uri_at(&self, win_id: winit::window::WindowId, row: u16, col: u16) -> Option<String> {
+    fn child_osc8_uri_at(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+        col: u16,
+    ) -> Option<String> {
         let pane = self.child_active_pane(win_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -337,7 +339,11 @@ impl App {
         guard.hyperlinks().lookup(hid).map(|h| h.uri.clone())
     }
 
-    fn child_focused_pane_row_text(&self, win_id: winit::window::WindowId, row: u16) -> Option<String> {
+    fn child_focused_pane_row_text(
+        &self,
+        win_id: winit::window::WindowId,
+        row: u16,
+    ) -> Option<String> {
         let pane = self.child_active_pane(win_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -367,10 +373,7 @@ impl App {
     ) -> Option<super::hovered_url::HoveredUrl> {
         let child = self.windows.get(&win_id)?;
         let cursor_pos = child.cursor_pos;
-        let active_id = child
-            .tab_states
-            .get(child.tabs.active_index())
-            .map(|st| st.active_pane);
+        let active_id = child.tab_states.get(child.tabs.active_index()).map(|st| st.active_pane);
         // Gate to the active pane (same split rationale as the main path).
         let hit = {
             let mut found = None;
@@ -463,16 +466,28 @@ impl App {
             }
         }
     }
-    pub(super) fn enter_copy_mode(&mut self) {
-        let Some(pane) = self.active_pane() else { return };
+    pub(super) fn enter_copy_mode_for_kind(&mut self, kind: FrontmostKind) {
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let Some(pane) = self.pane_by_id(pane_id) else { return };
         let cursor = {
             let guard = pane.parser.lock();
             let grid = guard.grid();
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
-        self.copy_mode_set(Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor)));
-        if let Some(panes) = self.main_panes() {
-            mark_all_panes_dirty(panes);
+        let state = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
+        match kind {
+            FrontmostKind::Child(id) => {
+                if let Some(child) = self.windows.get_mut(&id) {
+                    child.copy_mode = state;
+                    mark_all_panes_dirty(&child.panes);
+                }
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.copy_mode_set(state);
+                if let Some(panes) = self.main_panes() {
+                    mark_all_panes_dirty(panes);
+                }
+            }
         }
     }
 
@@ -492,21 +507,38 @@ impl App {
         }
     }
 
-    pub(super) fn copy_selection(&mut self) {
-        let sel = match self.main().and_then(|ws| ws.selection) {
-            Some(s) => s,
-            None => return,
+    pub(super) fn copy_selection_for_kind(&mut self, kind: FrontmostKind) {
+        let (sel, pane_id) = match kind {
+            FrontmostKind::Child(id) => {
+                let Some(child) = self.windows.get(&id) else { return };
+                let Some(sel) = child.selection else { return };
+                let Some(pane_id) =
+                    child.tab_states.get(child.tabs.active_index()).map(|state| state.active_pane)
+                else {
+                    return;
+                };
+                (sel, pane_id)
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                let Some(sel) = self.main().and_then(|ws| ws.selection) else { return };
+                let Some(pane_id) = self.main_active_pane_id() else { return };
+                (sel, pane_id)
+            }
         };
         if sel.is_empty() {
             return;
         }
-        let Some(pane) = self.active_pane() else { return };
+        let Some(pane) = self.pane_by_id(pane_id) else { return };
         let text = sel.as_text(pane.parser.lock().grid());
         self.set_clipboard_text(text);
     }
 
     pub(super) fn set_clipboard_text(&mut self, text: String) {
         if text.is_empty() {
+            return;
+        }
+        if self.test_clipboard_text.is_some() {
+            self.test_clipboard_text = Some(text.clone());
             return;
         }
         if let Some(cb) = self.clipboard.as_mut() {
@@ -517,17 +549,21 @@ impl App {
             }
         }
     }
-    pub(super) fn paste_clipboard(&mut self) {
-        if let Some(cb) = self.clipboard.as_mut() {
-            if let Ok(text) = cb.get_text() {
-                let bracketed = self
-                    .active_pane()
-                    .map(|p| p.parser.lock().bracketed_paste_enabled())
-                    .unwrap_or(false);
-                let bytes = wrap_paste(&text, bracketed);
-                self.write_to_pty(bytes);
-            }
-        }
+    pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
+        let text = if let Some(text) = self.test_clipboard_text.clone() {
+            Some(text)
+        } else {
+            self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
+        };
+        let Some(text) = text else { return };
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let bracketed = self
+            .pane_by_id(pane_id)
+            .map(|p| p.parser.lock().bracketed_paste_enabled())
+            .unwrap_or(false);
+        let bytes = wrap_paste(&text, bracketed);
+        self.write_to_pane(pane_id, bytes.clone());
+        self.broadcast_from(pane_id, bytes);
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
@@ -656,7 +692,7 @@ impl App {
         let attrs = super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title("SonicTerm")
+                    .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
@@ -754,6 +790,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);

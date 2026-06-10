@@ -59,12 +59,26 @@ pub struct PtyHandle {
 /// producing zero output. PLAN v5 split the fix into:
 ///   1. (this) — add opts + WindowsApps stub filter + shell-path accessor
 ///   2. (next PR) — ShellDialect trait + golden fixtures + actual e2e fix
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ShellSpawnOpts {
     /// Suppress shell startup banner/profile and emit clean-mode args
     /// (PowerShell `-NoLogo -NoProfile`, bash `--norc --noprofile`,
     /// zsh `-f`). For e2e gates only — production app keeps default.
     pub clean_e2e: bool,
+    /// `TERM_PROGRAM` value injected into the child PTY environment.
+    /// Defaults to `SonicTerm` to preserve existing terminal identity.
+    pub term_program: String,
+}
+
+impl ShellSpawnOpts {
+    /// Production default `TERM_PROGRAM` value.
+    pub const DEFAULT_TERM_PROGRAM: &'static str = "SonicTerm";
+}
+
+impl Default for ShellSpawnOpts {
+    fn default() -> Self {
+        Self { clean_e2e: false, term_program: Self::DEFAULT_TERM_PROGRAM.to_string() }
+    }
 }
 
 impl PtyHandle {
@@ -163,8 +177,8 @@ impl PtyHandle {
     /// interactive behavior.
     pub fn spawn_default_shell(cols: u16, rows: u16, opts: ShellSpawnOpts) -> Result<Self> {
         let shell = default_shell();
-        let args = shell_startup_args(&shell, opts);
-        Self::spawn_with_args(&shell, &args, cols, rows)
+        let args = shell_startup_args(&shell, opts.clone());
+        Self::spawn_with_args_and_opts(&shell, &args, cols, rows, opts)
     }
 
     /// Spawn `cmd` (may include arguments via shell-style splitting handled
@@ -182,6 +196,18 @@ impl PtyHandle {
     /// regression test) without re-implementing the whole pipeline.
     #[doc(hidden)]
     pub fn spawn_with_args(cmd: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
+        Self::spawn_with_args_and_opts(cmd, args, cols, rows, ShellSpawnOpts::default())
+    }
+
+    /// Internal: spawn `cmd` with `args` and explicit environment options.
+    #[doc(hidden)]
+    pub fn spawn_with_args_and_opts(
+        cmd: &str,
+        args: &[String],
+        cols: u16,
+        rows: u16,
+        opts: ShellSpawnOpts,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
@@ -192,14 +218,7 @@ impl PtyHandle {
         if let Ok(home) = std::env::var("HOME") {
             builder.cwd(home);
         }
-        builder.env("TERM", "xterm-256color");
-        builder.env("COLORTERM", "truecolor");
-        // Identify the terminal to programs that branch on TERM_PROGRAM
-        // (e.g. Copilot CLI, shells, prompt frameworks). Mirrors iTerm2 /
-        // WezTerm, which set TERM_PROGRAM + TERM_PROGRAM_VERSION.
-        builder.env("TERM_PROGRAM", "SonicTerm");
-        builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        apply_terminal_locale_env(&mut builder);
+        apply_child_pty_env(&mut builder, &opts.term_program);
 
         let child = pair.slave.spawn_command(builder)?;
         drop(pair.slave);
@@ -465,10 +484,48 @@ pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
     }
 }
 
+#[doc(hidden)]
+pub fn apply_child_pty_env(builder: &mut CommandBuilder, term_program: &str) {
+    builder.env("TERM", "xterm-256color");
+    builder.env("COLORTERM", "truecolor");
+    // Identify the terminal to programs that branch on TERM_PROGRAM
+    // (e.g. Copilot CLI, shells, prompt frameworks). Mirrors iTerm2 /
+    // WezTerm, which set TERM_PROGRAM + TERM_PROGRAM_VERSION.
+    builder.env("TERM_PROGRAM", term_program);
+    builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    apply_terminal_locale_env(builder);
+}
+
 fn shell_file_name(shell_path: &str) -> String {
     Path::new(shell_path)
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_str<'a>(builder: &'a CommandBuilder, name: &str) -> &'a str {
+        builder.get_env(name).and_then(|v| v.to_str()).unwrap()
+    }
+
+    #[test]
+    fn default_shell_spawn_opts_keep_sonicterm_term_program() {
+        let opts = ShellSpawnOpts::default();
+        assert_eq!(opts.term_program, ShellSpawnOpts::DEFAULT_TERM_PROGRAM);
+    }
+
+    #[test]
+    fn child_pty_env_uses_configured_term_program() {
+        let mut builder = CommandBuilder::new("sh");
+        apply_child_pty_env(&mut builder, "WezTerm");
+
+        assert_eq!(env_str(&builder, "TERM"), "xterm-256color");
+        assert_eq!(env_str(&builder, "COLORTERM"), "truecolor");
+        assert_eq!(env_str(&builder, "TERM_PROGRAM"), "WezTerm");
+        assert_eq!(env_str(&builder, "TERM_PROGRAM_VERSION"), env!("CARGO_PKG_VERSION"));
+    }
 }

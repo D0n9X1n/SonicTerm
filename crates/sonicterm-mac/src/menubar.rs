@@ -273,13 +273,7 @@ fn install_window_menu(mtm: MainThreadMarker, app: &NSApplication, main: &NSMenu
     container.setTitle(&ns("Window"));
     let m = NSMenu::new(mtm);
     m.setTitle(&ns("Window"));
-    m.addItem(&build_responder_item(
-        mtm,
-        "Minimize",
-        sel!(performMiniaturize:),
-        "m",
-        KeyMods::Cmd,
-    ));
+    m.addItem(&build_responder_item(mtm, "Minimize", sel!(performMiniaturize:), "m", KeyMods::Cmd));
     m.addItem(&build_responder_item(mtm, "Zoom", sel!(performZoom:), "", KeyMods::None));
     m.addItem(&NSMenuItem::separatorItem(mtm));
     m.addItem(&build_responder_item(

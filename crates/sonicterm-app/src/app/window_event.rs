@@ -131,19 +131,11 @@ impl App {
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
-                // running. Only exit when nothing else is alive.
+                // running. When no child remains, closing the main
+                // leaves no active terminal window, so quit (#669).
                 if self.child_window_count() == 0 {
-                    if Self::should_exit_on_last_window_close(&self.config) {
-                        el.exit();
-                    } else {
-                        // Chrome/Firefox/Safari-style on macOS: keep the
-                        // process alive after the last window closes so
-                        // the user can `Cmd+N` (or use the dock menu) to
-                        // open a fresh window without cold-start cost.
-                        // The main window is hidden either way — on
-                        // non-macOS we would have exited above.
-                        self.hide_main_window();
-                    }
+                    self.hide_main_window();
+                    el.exit();
                 } else {
                     self.hide_main_window();
                 }
@@ -177,6 +169,7 @@ impl App {
                     self.pending_redraw = true;
                     return;
                 }
+                let mut timing = crate::app::render_timing::RenderTiming::start("main");
                 self.pending_redraw = false;
                 let main_id_opt = self.main_window_id;
                 if let Some(id) = main_id_opt {
@@ -185,6 +178,9 @@ impl App {
                     }
                 }
                 self.poll_command_events_for_all_tabs();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("poll");
+                }
                 let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 // Compute per-pane rects in window pixels so the renderer can
                 // draw a border around each one (and a brighter one around
@@ -216,6 +212,9 @@ impl App {
                     .map(|st| st.active_pane)
                     .unwrap_or(0);
                 let broadcast_receivers = self.broadcast_receivers();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("layout");
+                }
 
                 // #386 PR-D: per-pane scrollbar visibility/fade tick.
                 // Built BEFORE the try_lock pass since it only needs
@@ -266,6 +265,9 @@ impl App {
                         })
                         .unwrap_or(false)
                 };
+                if let Some(t) = timing.as_mut() {
+                    t.lap("scrollbar");
+                }
                 if scrollbar_needs_more_frames {
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
@@ -310,6 +312,9 @@ impl App {
                             .map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
                     })
                     .collect();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("inline_images");
+                }
                 let mut guards: Vec<(
                     u64,
                     parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser>,
@@ -335,6 +340,9 @@ impl App {
                         }
                     }
                 }
+                if let Some(t) = timing.as_mut() {
+                    t.lap("try_lock");
+                }
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
@@ -352,6 +360,21 @@ impl App {
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
                 // `self`.
                 let main_window_for_ime = self.main_window().cloned();
+                let main_palette_ime_area = main_window_for_ime.as_ref().and_then(|w| {
+                    let r = self.main_renderer()?;
+                    if self.palette_attached_window.is_some() || !self.command_palette.is_open() {
+                        return None;
+                    }
+                    self.command_palette_ime_cursor_area(
+                        w.inner_size().width as f32,
+                        w.inner_size().height as f32,
+                        self.config.appearance.panel_padding,
+                        r.scale_factor(),
+                        sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                            * r.scale_factor(),
+                        r.cell_w,
+                    )
+                });
                 // Search-bar IME geometry: the visible label (`/ {query}▏ —
                 // N/M`) drives the box width, but the caret/candidate-window
                 // anchor must sit at the END OF THE QUERY (the `▏`), not the
@@ -364,10 +387,7 @@ impl App {
                         let preedit = ws.ime.preedit();
                         let i = ws.tabs.active_index();
                         ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
-                            (
-                                search_bar_label(s, preedit),
-                                search_query_caret_prefix(s, preedit),
-                            )
+                            (search_bar_label(s, preedit), search_query_caret_prefix(s, preedit))
                         })
                     })
                     .unzip();
@@ -505,6 +525,7 @@ impl App {
                             pane,
                             &guards[active_pos].1,
                             tab_idx,
+                            !pty_burst,
                         );
                         if let Some(search) =
                             tab_states_mref.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -542,10 +563,13 @@ impl App {
                                     .unwrap_or_default(),
                             })
                             .collect();
+                        r.set_render_timing_label("main");
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &self.theme,
-                            cursor_visible_now,
+                            cursor_visible_now
+                                && !(self.command_palette.is_open()
+                                    && self.palette_attached_window.is_none()),
                             ws_selection_ref,
                             ws_copy_mode_ref,
                             tabs_mref,
@@ -562,6 +586,9 @@ impl App {
                             ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
+                        }
+                        if let Some(t) = timing.as_mut() {
+                            t.lap("render");
                         }
                         self.input_dirty = false;
                         // PR #162: mark only the generation sampled at
@@ -589,7 +616,9 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
-                        if let Some(search_label) = search_ime_label.as_ref() {
+                        if let Some((pos, size)) = main_palette_ime_area {
+                            w.set_ime_cursor_area(pos, size);
+                        } else if let Some(search_label) = search_ime_label.as_ref() {
                             let window_size = w.inner_size();
                             // #651: window_size + the SearchBarLayout it feeds are
                             // physical px, so every logical-px term here must be
@@ -656,6 +685,9 @@ impl App {
                 // for the main window. Outside the renderer borrow scope
                 // so the immutable self borrow doesn't conflict with `r`.
                 self.publish_main_window_tab_bar();
+                if let Some(t) = timing {
+                    t.finish();
+                }
             }
 
             WindowEvent::Focused(focused) => {
@@ -848,6 +880,9 @@ impl App {
                     w.set_cursor(CursorIcon::Default);
                 }
                 if self.main_mut().and_then(|ws| ws.hovered_url.take()).is_some() {
+                    redraw = true;
+                }
+                if self.clear_scrollbar_hover() {
                     redraw = true;
                 }
                 if redraw {
@@ -1243,9 +1278,7 @@ impl App {
                     if tab_action.is_some() {
                         match tab_action {
                             Some(sonicterm_ui::tabbar_view::TabHit::Activate(i)) => {
-                                if let Some(t) = self.main_tabs_mut() {
-                                    t.activate(i);
-                                }
+                                self.activate_main_tab(i);
                                 // Record the press so a subsequent drag
                                 // below the tab bar can be promoted to a
                                 // tear-out gesture.
@@ -1262,11 +1295,8 @@ impl App {
                         }
                         if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
                             if self.child_window_count() == 0 {
-                                if Self::should_exit_on_last_window_close(&self.config) {
-                                    el.exit();
-                                } else {
-                                    self.hide_main_window();
-                                }
+                                self.hide_main_window();
+                                el.exit();
                             } else {
                                 self.hide_main_window();
                             }
@@ -1445,8 +1475,7 @@ impl App {
                             // `pixel_to_cell` once; fall back to treating it
                             // as absolute (correct while unscrolled) if the
                             // parser is momentarily busy.
-                            let abs_row =
-                                self.viewport_row_to_abs(row).unwrap_or(row as u64);
+                            let abs_row = self.viewport_row_to_abs(row).unwrap_or(row as u64);
                             let sel = match click_count {
                                 2 => self.word_selection_at(abs_row, col),
                                 3 => self.line_selection_at(abs_row),
@@ -1588,6 +1617,9 @@ impl App {
 
             // -- IME (CJK / multi-key input methods) --
             WindowEvent::Ime(ime_event) => {
+                if self.command_palette_handle_ime(&ime_event) {
+                    return;
+                }
                 let committed = if let Some(ws) = self.main_mut() {
                     match ime_event {
                         Ime::Enabled => {
@@ -1734,8 +1766,7 @@ impl App {
                         && !self.main_modifiers().shift_key();
                     if is_plain_enter {
                         if let Some(id) = self.active_pane_id() {
-                            if let Some(pane) =
-                                self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
+                            if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
                             {
                                 if pane.viewport_top_abs.is_some() {
                                     pane.viewport_top_abs = None; // back to live

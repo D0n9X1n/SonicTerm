@@ -15,7 +15,7 @@ use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
 use sonicterm_cfg::config::{BackdropKind, Config};
-use sonicterm_cfg::keymap::{Action, Keymap};
+use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
@@ -102,6 +102,10 @@ pub struct SplitterDragState {
     pub last_pos: (f32, f32),
 }
 
+/// Native OS window title. Keep static; terminal/tab titles render inside
+/// SonicTerm's own tab bar.
+pub const NATIVE_WINDOW_TITLE: &str = "SonicTerm";
+
 /// Maximum gap (ms) between consecutive left-presses on the same cell for
 /// them to count as a double/triple click. Beyond this the streak resets
 /// to a single click.
@@ -125,13 +129,14 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 ///
 /// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
 /// frame boundary instead of rendering now. A redraw is deferred only when
-/// all three hold:
+/// both hold:
 /// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
 ///   immediate; gating them adds perceptible latency, PR #132).
-/// - `!pty_burst` — it does not carry a fresh PTY burst (a new burst always
-///   renders so streamed bytes never stall).
 /// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame.
+///   window, so another draw now would just burn a frame. PTY burst redraws are
+///   streaming work and should coalesce too; otherwise child windows can enter
+///   `surface.get_current_texture()` early and block waiting for the next
+///   drawable/vblank.
 ///
 /// Extracted as a pure fn (Issue #43) so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
@@ -145,7 +150,8 @@ pub fn should_defer_streaming_redraw(
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
-    !was_dirty && !pty_burst && since_last_render < frame_period
+    let _ = pty_burst;
+    !was_dirty && since_last_render < frame_period
 }
 
 pub struct WindowState {
@@ -267,6 +273,13 @@ pub struct WindowState {
     /// asked for (the `renderer: None` headless windows could not otherwise
     /// observe `set_drag_chip(None)`).
     pub test_drag_chip_marker: Option<bool>,
+    /// Test-only renderer-focus marker. Headless child windows have
+    /// `renderer: None`, so focus lifecycle regression tests seed this marker
+    /// and expect the same focus transition that would call
+    /// `GpuRenderer::set_window_focused` to update it. Production leaves this
+    /// `None`.
+    #[doc(hidden)]
+    pub test_renderer_focus_marker: Option<bool>,
     /// Test-only viewport override for this window's pane layout, mirroring
     /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
     /// cell_w, cell_h))`, [`App::compute_pane_rects_for`] uses `outer` instead
@@ -766,13 +779,14 @@ pub fn refresh_active_tab_title(
     pane: &mut PaneState,
     parser: &Parser,
     tab_idx: usize,
+    allow_proc_probe: bool,
 ) -> Option<String> {
     let cwd = parser.cwd().map(str::to_string);
     let raw_title = parser.title().map(str::to_string);
     const TTL: std::time::Duration = std::time::Duration::from_millis(500);
     let now = Instant::now();
     let fresh = pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
-    if !fresh {
+    if !fresh && allow_proc_probe {
         let probed = pane
             .pty
             .as_ref()
@@ -896,6 +910,7 @@ mod media;
 mod misc;
 pub mod os_drag;
 mod overlays;
+mod render_timing;
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
@@ -1042,6 +1057,17 @@ pub struct App {
     // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
     // direct field access through `self.main()?.copy_mode` etc.
     pub(super) clipboard: Option<Clipboard>,
+    /// Test-only in-memory clipboard override for integration tests that need
+    /// to observe copy/paste routing without depending on a desktop clipboard
+    /// service. `None` means production arboard behavior; `Some(_)` means reads
+    /// and writes use this buffer instead.
+    #[doc(hidden)]
+    pub(super) test_clipboard_text: Option<String>,
+    /// Test-only PTY write ledger. `write_to_pane` records every boundary write
+    /// here before resolving the pane to a real PTY, so headless tests can assert
+    /// which pane an action targeted without constructing a process-backed PTY.
+    #[doc(hidden)]
+    pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
     // #404: `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -1430,6 +1456,8 @@ impl App {
             config,
             keymap,
             clipboard: Clipboard::new().ok(),
+            test_clipboard_text: None,
+            test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             pending_new_window: false,
             pending_tear_out: None,
             pending_os_teardown: false,
@@ -1714,19 +1742,19 @@ impl App {
     }
 
     /// Decide whether the event loop should exit. The app should keep
-    /// running as long as ANY window owns at least one tab — that is,
-    /// the main window has tabs AND is visible, OR any child window is
-    /// still alive. This is shared by both the main-window
-    /// `CloseRequested` handler and the post-merge drain check so a
-    /// drained-but-still-visible main with live children doesn't kill
-    /// the app.
+    /// running as long as ANY active terminal window owns at least one tab:
+    /// a visible main window with tabs, or any torn-out child window. A
+    /// hidden/drained main window is intentionally NOT active for process
+    /// lifecycle purposes; once the final child is gone there is no window
+    /// the user can interact with, so #669 requires quitting instead of
+    /// leaving a dock-alive/headless process around.
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
-        let main_alive =
-            !self.main_is_hidden() && !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
-        // Phase B2 PR-A: subtract the shadow main entry so
-        // "no torn-out children" still tips this to true.
-        !main_alive && self.child_window_count() == 0
+        Self::should_exit_pure(
+            self.main_tabs().map(|t| t.len()).unwrap_or(0),
+            self.main_is_hidden(),
+            self.child_window_count(),
+        )
     }
 
     /// Test-only: pure policy fn mirroring `should_exit` so integration
@@ -1736,6 +1764,17 @@ impl App {
     pub fn should_exit_pure(main_tabs: usize, main_hidden: bool, child_count: usize) -> bool {
         let main_alive = !main_hidden && main_tabs > 0;
         !main_alive && child_count == 0
+    }
+
+    /// Mark a deferred process exit when no active terminal windows remain.
+    /// This is the `ActiveEventLoop`-free counterpart to `el.exit()` for
+    /// keymap/tab-close paths; `do_about_to_wait` drains the flag. OS window
+    /// close handlers with an event-loop handle may still call `el.exit()`
+    /// directly after this predicate becomes true.
+    pub(super) fn request_exit_if_no_active_windows(&mut self) {
+        if self.should_exit() {
+            self.pending_exit = true;
+        }
     }
 
     /// PR-B4 (#365): is the main window currently hidden / drained?
@@ -1784,13 +1823,8 @@ impl App {
             return;
         }
         if self.child_window_count() == 0 {
-            if Self::should_exit_on_last_window_close(&self.config) {
-                self.pending_exit = true;
-            } else {
-                // Chrome-style: keep the process alive but hide the
-                // empty main window.
-                self.hide_main_window();
-            }
+            self.hide_main_window();
+            self.request_exit_if_no_active_windows();
         } else {
             // Children still own tabs — just hide main; exit decision
             // happens when the last child closes.
@@ -1810,14 +1844,47 @@ impl App {
     }
 
     fn active_pane_id(&self) -> Option<u64> {
+        self.main_active_pane_id()
+    }
+
+    fn main_active_pane_id(&self) -> Option<u64> {
         let ws = self.main()?;
         let i = ws.tabs.active_index();
         ws.tab_states.get(i).map(|t| t.active_pane)
     }
 
+    fn active_pane_id_for_kind(&self, kind: FrontmostKind) -> Option<u64> {
+        match kind {
+            FrontmostKind::Child(id) => {
+                let ws = self.windows.get(&id)?;
+                let i = ws.tabs.active_index();
+                ws.tab_states.get(i).map(|t| t.active_pane)
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.main_active_pane_id()
+            }
+        }
+    }
+
     fn active_pane(&self) -> Option<&PaneState> {
         let id = self.active_pane_id()?;
-        self.main()?.panes.get(&id)
+        self.pane_by_id(id)
+    }
+
+    fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
+        self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
+    }
+
+    fn request_redraw_all_terminal_windows(&self) {
+        for (id, ws) in &self.windows {
+            if Some(*id) == self.main_window_id {
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            } else {
+                ws.request_redraw();
+            }
+        }
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
@@ -1894,16 +1961,16 @@ impl App {
 
     /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
     ///
-    /// Resolves the pane id back to a live [`PtyHandle`] on the main
-    /// window and forwards the bytes. M6a-expand-2b boundary layer
-    /// per spec §9.
+    /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
+    /// window and forwards the bytes. M6a-expand-2b boundary layer per spec §9.
     pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             let pane_id = pane.0;
-            if let Some(p) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-                if let Some(pty) = p.pty.as_ref() {
-                    let _ = pty.in_tx.send(data.to_vec());
-                }
+            let bytes = data.to_vec();
+            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            let Some(p) = self.pane_by_id(pane_id) else { return };
+            if let Some(pty) = p.pty.as_ref() {
+                let _ = pty.in_tx.send(bytes);
             }
         }
     }
@@ -2082,12 +2149,9 @@ impl App {
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }
-                // WindowSetTitle: programmatic title set. Best-effort
-                // against the main window.
+                // WindowSetTitle updates internal tab chrome only; the native
+                // OS window title intentionally stays the static "SonicTerm".
                 AppEffect::WindowSetTitle { window, title } => {
-                    if let Some(w) = self.main_window() {
-                        w.set_title(&title);
-                    }
                     tracing::debug!(
                         target: "state_machine",
                         window = window.0,
@@ -2162,6 +2226,43 @@ impl App {
                 }
             }
         }
+    }
+
+    pub(super) fn next_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.next();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn prev_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.prev();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_main_tab(&mut self, idx: usize) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else { return false };
+        tabs.activate(idx);
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_last_main_tab(&mut self) -> bool {
+        let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
+            return false;
+        };
+        self.activate_main_tab(last)
     }
 
     fn close_pty_pane(&mut self, pane_id: u64) -> bool {
@@ -2259,8 +2360,92 @@ impl App {
     }
 
     pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
-        let Some(ws) = self.main() else { return Default::default() };
-        self.broadcast.receiving_panes(&ws.tab_states, ws.tabs.active_index())
+        let BroadcastState::On { scope, source_pane } = self.broadcast else {
+            return Default::default();
+        };
+        self.broadcast_receivers_for(scope, source_pane)
+    }
+
+    fn broadcast_receivers_for(
+        &self,
+        scope: BroadcastScope,
+        source_pane: u64,
+    ) -> std::collections::BTreeSet<u64> {
+        let mut receivers = std::collections::BTreeSet::new();
+        for ws in self.windows.values() {
+            match scope {
+                BroadcastScope::Tab => {
+                    if let Some((tab_idx, _)) = ws
+                        .tab_states
+                        .iter()
+                        .enumerate()
+                        .find(|(_, tab)| tab.tree.leaves().contains(&source_pane))
+                    {
+                        receivers.extend(sonicterm_ui::broadcast::receiving_panes(
+                            &ws.tab_states,
+                            scope,
+                            source_pane,
+                            tab_idx,
+                        ));
+                        break;
+                    }
+                }
+                BroadcastScope::AllTabs => {
+                    receivers.extend(sonicterm_ui::broadcast::receiving_panes(
+                        &ws.tab_states,
+                        scope,
+                        source_pane,
+                        ws.tabs.active_index(),
+                    ));
+                }
+            }
+        }
+        receivers
+    }
+
+    /// Test-only: active broadcast source pane, if broadcast is enabled.
+    #[doc(hidden)]
+    pub fn __test_broadcast_source(&self) -> Option<u64> {
+        match self.broadcast {
+            BroadcastState::On { source_pane, .. } => Some(source_pane),
+            BroadcastState::Off => None,
+        }
+    }
+
+    /// Test-only: receiver panes under the current broadcast state.
+    #[doc(hidden)]
+    pub fn __test_broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
+        self.broadcast_receivers()
+    }
+
+    /// Test-only: clear the PTY write ledger before a broadcast assertion.
+    #[doc(hidden)]
+    pub fn __test_enable_pty_write_log(&mut self) {
+        self.test_pty_writes.lock().clear();
+    }
+
+    /// Test-only: snapshot logged `(pane_id, bytes)` PTY writes.
+    #[doc(hidden)]
+    pub fn __test_pty_write_log(&self) -> Vec<(u64, Vec<u8>)> {
+        self.test_pty_writes.lock().clone()
+    }
+
+    /// Test-only: drive the same write + broadcast fan-out as normal input.
+    #[doc(hidden)]
+    pub fn __test_write_to_pane_with_broadcast(&self, pane_id: u64, bytes: Vec<u8>) {
+        self.write_to_pane(pane_id, bytes.clone());
+        self.broadcast_from(pane_id, bytes);
+    }
+
+    /// Test-only: child render pane ids with the broadcast receiver flag that
+    /// would be passed into `sonicterm_render_model::PaneRender`.
+    #[doc(hidden)]
+    pub fn __test_child_broadcast_render_flags(&self, id: WindowId) -> Option<Vec<(u64, bool)>> {
+        let child = self.windows.get(&id)?;
+        let tab_idx = child.tabs.active_index();
+        let panes = child.tab_states.get(tab_idx)?.tree.leaves();
+        let receivers = self.broadcast_receivers();
+        Some(panes.into_iter().map(|pane| (pane, receivers.contains(&pane))).collect())
     }
 
     /// Test-only: how many tabs the named child window currently owns.
@@ -2279,6 +2464,34 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
         self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
+    }
+
+    /// Test-only: install the headless pane-viewport seam on the main window
+    /// so resize wiring runs without a renderer. #pane-geom
+    #[doc(hidden)]
+    pub fn __test_set_main_pane_viewport(
+        &mut self,
+        outer: sonicterm_ui::pane::Rect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> bool {
+        self.__test_synthetic_main();
+        self.test_viewport_override = Some((outer, cell_w, cell_h));
+        true
+    }
+
+    /// Test-only: drive main-window active-tab pane resizing through the same
+    /// helper used by production window resize and tab activation.
+    #[doc(hidden)]
+    pub fn __test_resize_visible_panes(&mut self) {
+        self.resize_visible_panes();
+    }
+
+    /// Test-only: activate a main tab through the same production helper used
+    /// by keyboard/mouse tab activation.
+    #[doc(hidden)]
+    pub fn __test_invoke_activate_main_tab(&mut self, idx: usize) -> bool {
+        self.activate_main_tab(idx)
     }
 
     /// Test-only: install the headless per-window pane-viewport seam on a child
@@ -2338,6 +2551,18 @@ impl App {
         Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
     }
 
+    /// Test-only: whether the child pane is currently marked as right-edge hovered.
+    #[doc(hidden)]
+    pub fn __test_child_scrollbar_near_edge(&self, id: WindowId, pane_id: u64) -> Option<bool> {
+        self.windows.get(&id)?.scrollbar_vis.get(&pane_id).map(|st| st.mouse_near_right_edge)
+    }
+
+    /// Test-only: clear child scrollbar hover state, mirroring CursorLeft.
+    #[doc(hidden)]
+    pub fn __test_clear_child_scrollbar_hover(&mut self, id: WindowId) -> bool {
+        self.clear_scrollbar_hover_in_child(id)
+    }
+
     /// Test-only: write a child pane's `viewport_top_abs` through the same
     /// production path the scrollbar uses (`set_child_pane_view_top`), so a
     /// test can drive a scroll and observe the visibility side effect.
@@ -2350,6 +2575,25 @@ impl App {
         live_top: u64,
     ) {
         self.set_child_pane_view_top(id, pane_id, view_top, live_top);
+    }
+
+    /// Test-only: set the last cursor position for a synthetic child window.
+    #[doc(hidden)]
+    pub fn __test_set_child_cursor_pos(&mut self, id: WindowId, x: f64, y: f64) -> bool {
+        match self.windows.get_mut(&id) {
+            Some(c) => {
+                c.cursor_pos = (x, y);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: refresh a child window's scrollbar hover state from its last
+    /// cursor position, mirroring the production CursorMoved branch.
+    #[doc(hidden)]
+    pub fn __test_refresh_child_scrollbar_hover_from_cursor(&mut self, id: WindowId) -> bool {
+        self.refresh_scrollbar_hover_from_cursor_in_child(id)
     }
 
     /// Test-only: seed a synthetic child WindowState without constructing a
@@ -2402,6 +2646,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(id, child);
@@ -2557,6 +2802,41 @@ impl App {
         self.command_palette.is_open()
     }
 
+    /// Test-only: command palette query text.
+    #[doc(hidden)]
+    pub fn __test_palette_query(&self) -> &str {
+        self.command_palette.query()
+    }
+
+    /// Test-only: command palette caret byte offset.
+    #[doc(hidden)]
+    pub fn __test_palette_cursor(&self) -> usize {
+        self.command_palette.cursor()
+    }
+
+    /// Test-only: drive command-palette key handling.
+    #[doc(hidden)]
+    pub fn __test_command_palette_handle_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        self.command_palette_handle_key(event)
+    }
+
+    /// Test-only: drive command-palette IME handling.
+    #[doc(hidden)]
+    pub fn __test_command_palette_handle_ime(&mut self, event: &winit::event::Ime) -> bool {
+        self.command_palette_handle_ime(event)
+    }
+
+    /// Test-only: describe where the main window will anchor the OS IME
+    /// candidate area.
+    #[doc(hidden)]
+    pub fn __test_main_ime_candidate_anchor_kind(&self) -> &'static str {
+        if self.command_palette.is_open() && self.palette_attached_window.is_none() {
+            "palette"
+        } else {
+            "terminal"
+        }
+    }
+
     /// Test-only invoker for `open_search_in_child`. Mirrors the
     /// pattern used by `__test_invoke_close_active_tab_in_child` so
     /// integration tests can assert the stale-id no-op contract for
@@ -2564,6 +2844,127 @@ impl App {
     #[doc(hidden)]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
+    }
+
+    /// Test-only: install an in-memory clipboard buffer. This avoids depending
+    /// on the OS clipboard in headless integration tests while exercising the
+    /// same `set_clipboard_text` / `paste_clipboard` dispatch paths.
+    #[doc(hidden)]
+    pub fn __test_set_memory_clipboard(&mut self, text: &str) {
+        self.test_clipboard_text = Some(text.to_string());
+    }
+
+    /// Test-only: read the in-memory clipboard buffer if installed.
+    #[doc(hidden)]
+    pub fn __test_memory_clipboard(&self) -> Option<String> {
+        self.test_clipboard_text.clone()
+    }
+
+    /// Test-only: drain the PTY write ledger populated by `write_to_pane`.
+    #[doc(hidden)]
+    pub fn __test_drain_pty_writes(&self) -> Vec<(u64, Vec<u8>)> {
+        std::mem::take(&mut *self.test_pty_writes.lock())
+    }
+
+    /// Test-only: set the synthetic main window's selection.
+    #[doc(hidden)]
+    pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
+        let Some(ws) = self.main_mut() else { return false };
+        ws.selection = selection;
+        true
+    }
+
+    /// Test-only: set a synthetic child window's selection.
+    #[doc(hidden)]
+    pub fn __test_set_child_selection(
+        &mut self,
+        id: WindowId,
+        selection: Option<Selection>,
+    ) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.selection = selection;
+        true
+    }
+
+    /// Test-only: feed bytes into a child pane's parser.
+    #[doc(hidden)]
+    pub fn __test_advance_child_pane_parser(
+        &self,
+        id: WindowId,
+        pane_id: u64,
+        bytes: &[u8],
+    ) -> bool {
+        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            return false;
+        };
+        pane.parser.lock().advance(bytes);
+        true
+    }
+
+    /// Test-only: clear all dirty row flags for a child pane.
+    #[doc(hidden)]
+    pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
+        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            return false;
+        };
+        pane.parser.lock().grid_mut().clear_dirty();
+        true
+    }
+
+    /// Test-only: count dirty rows for a child pane.
+    #[doc(hidden)]
+    pub fn __test_child_pane_dirty_count(&self, id: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        Some(pane.parser.lock().grid().dirty_count())
+    }
+
+    /// Test-only: seed child IME preedit state.
+    #[doc(hidden)]
+    pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.ime.handle_preedit(text, Some((text.len(), text.len())));
+        true
+    }
+
+    /// Test-only: read whether a child IME composition is active.
+    #[doc(hidden)]
+    pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).map(|child| child.ime.is_composing())
+    }
+
+    /// Test-only: read whether the main window is in read-only copy mode.
+    #[doc(hidden)]
+    pub fn __test_main_read_only(&self) -> bool {
+        self.main().and_then(|ws| ws.copy_mode.as_ref()).is_some_and(|mode| mode.is_read_only())
+    }
+
+    /// Test-only: read whether a child window is in read-only copy mode.
+    #[doc(hidden)]
+    pub fn __test_child_read_only(&self, id: WindowId) -> Option<bool> {
+        self.windows
+            .get(&id)
+            .map(|child| child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()))
+    }
+
+    /// Test-only: seed the headless renderer-focus marker for a child window.
+    #[doc(hidden)]
+    pub fn __test_set_child_renderer_focus_marker(&mut self, id: WindowId, focused: bool) -> bool {
+        let Some(child) = self.windows.get_mut(&id) else { return false };
+        child.test_renderer_focus_marker = Some(focused);
+        true
+    }
+
+    /// Test-only: read the headless renderer-focus marker for a child window.
+    #[doc(hidden)]
+    pub fn __test_child_renderer_focus_marker(&self, id: WindowId) -> Option<bool> {
+        self.windows.get(&id).and_then(|child| child.test_renderer_focus_marker)
+    }
+
+    /// Test-only: invoke the child focus transition handler without constructing
+    /// a winit `ActiveEventLoop`.
+    #[doc(hidden)]
+    pub fn __test_handle_child_focus_changed(&mut self, id: WindowId, focused: bool) {
+        self.handle_child_focus_changed(id, focused);
     }
 
     /// Epic #289 Phase A — classify [`Self::frontmost_window`] without
@@ -3103,6 +3504,7 @@ impl App {
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
             test_drag_chip_marker: None,
+            test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
         self.windows.insert(id, ws);
@@ -3913,6 +4315,16 @@ mod click_count_tests {
 }
 
 #[cfg(test)]
+mod native_window_title_tests {
+    use super::NATIVE_WINDOW_TITLE;
+
+    #[test]
+    fn native_window_title_is_static_app_name() {
+        assert_eq!(NATIVE_WINDOW_TITLE, "SonicTerm");
+    }
+}
+
+#[cfg(test)]
 mod redraw_coalescing_tests {
     //! Issue #43: the vsync coalescing gate shared by the main and child
     //! `RedrawRequested` arms. These pin the exact deferral policy that
@@ -3946,10 +4358,11 @@ mod redraw_coalescing_tests {
     }
 
     #[test]
-    fn fresh_pty_burst_never_defers() {
-        // A redraw carrying new PTY bytes always renders so streamed output
-        // never stalls behind the frame gate.
-        assert!(!should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+    fn pty_burst_within_frame_defers_like_other_streaming_redraws() {
+        // A PTY burst is still streaming work, not input. Rendering it early
+        // can block in surface acquisition waiting for the next drawable; defer
+        // inside the current frame window and render at the next boundary.
+        assert!(should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
     }
 
     #[test]

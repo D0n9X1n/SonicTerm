@@ -35,6 +35,12 @@ use sonicterm_ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
+
+fn hovered_url_needs_accent(
+    hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+) -> bool {
+    hovered.is_some_and(|h| h.active)
+}
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -259,8 +265,8 @@ use sonicterm_ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        search_bar_label, search_query_caret_prefix, PaletteLayout, SearchBarLayout, PALETTE_BORDER,
-        PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
+        command_palette_query_label, search_bar_label, search_query_caret_prefix, PaletteLayout,
+        SearchBarLayout, PALETTE_BORDER, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
     },
@@ -476,6 +482,8 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Window label used in renderer-internal timing logs.
+    render_timing_label: &'static str,
     /// Whether the tab bar is currently shown. Toggled at runtime by the
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
@@ -759,6 +767,34 @@ pub struct OverlayTextGlyphDebug {
 /// the renderer doesn't paint outside the palette modal.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
+fn measure_overlay_text_width(
+    glyph_atlas: &mut GlyphAtlas,
+    font_stack: &sonicterm_engine::FontStack,
+    font_size_px: f32,
+    native_em_px: f32,
+    wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
+    text: &str,
+    color: ChromeColor,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    chrome_text::layout(
+        font_stack,
+        wt_raster,
+        glyph_atlas,
+        text,
+        color,
+        ChromeAttrs::default(),
+        font_size_px,
+        native_em_px,
+        (0.0, 0.0),
+        (1.0, 1.0),
+        None,
+    )
+    .width_px
+}
+
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
     font_stack: &sonicterm_engine::FontStack,
@@ -1015,6 +1051,7 @@ impl GpuRenderer {
             drag_chip_visual: None,
             last_frame_key: None,
             skipped_frames: 0,
+            render_timing_label: "unknown",
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
@@ -1250,6 +1287,10 @@ impl GpuRenderer {
     /// Whether the OS window currently has keyboard focus.
     pub fn window_focused(&self) -> bool {
         self.window_focused
+    }
+
+    pub fn set_render_timing_label(&mut self, label: &'static str) {
+        self.render_timing_label = label;
     }
 
     pub fn flash_pane_focus(&mut self, pane_id: u64) {
@@ -2093,6 +2134,21 @@ impl GpuRenderer {
         if panes.is_empty() {
             return Ok(());
         }
+        let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
+            .then(|| {
+                let now = Instant::now();
+                (now, now, Vec::<(&'static str, f32)>::with_capacity(12))
+            });
+        macro_rules! gpu_lap {
+            ($name:literal) => {
+                if let Some((_, last, parts)) = gpu_timing.as_mut() {
+                    let now = Instant::now();
+                    parts
+                        .push(($name, now.saturating_duration_since(*last).as_secs_f32() * 1000.0));
+                    *last = now;
+                }
+            };
+        }
         let now = Instant::now();
         // Part B step 7: record per-pane origins for the integration test
         // hook. Populated unconditionally on every render() call so the
@@ -2288,6 +2344,7 @@ impl GpuRenderer {
                 // hash.
                 0xC0DE_FA17_u64.hash(&mut h);
                 p.query().hash(&mut h);
+                p.cursor().hash(&mut h);
                 p.selected().hash(&mut h);
                 p.len().hash(&mut h);
                 p.scroll_offset().hash(&mut h);
@@ -2436,6 +2493,7 @@ impl GpuRenderer {
             // would re-arm at 0ms and peg the redraw queue.
             return Ok(());
         }
+        gpu_lap!("frame_key");
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
         // that never actually got drawn, and the next redraw could
@@ -2524,10 +2582,10 @@ impl GpuRenderer {
             // sRGB→linear `powf` conversions; computing it unconditionally
             // every frame added measurable render latency to plain output
             // repaints (e.g. `ls -al`). It's only consumed when a URL is
-            // actually hovered, so compute it lazily — `[0.0;4]` otherwise
-            // (never read, since `resolve_fg`/the underline are gated on
-            // `hovered_url_cells`/`h.active`). #perf
-            let hovered_url_accent: [f32; 4] = if hovered_url_cells.is_some() {
+            // ACTIVE-hovered (modifier held) and glyphs recolor to accent;
+            // plain hover draws only a yellow underline, so compute lazily —
+            // `[0.0;4]` otherwise. #perf
+            let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
                 sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
             } else {
                 [0.0, 0.0, 0.0, 0.0]
@@ -2588,8 +2646,7 @@ impl GpuRenderer {
                 // pane (the hover hit-test runs against the focused
                 // pane). Non-active panes always pass `None` so split
                 // panes never inherit another pane's hover accent.
-                let pane_hovered_url =
-                    if pv.is_active { hovered_url_cells } else { None };
+                let pane_hovered_url = if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
@@ -3283,6 +3340,7 @@ impl GpuRenderer {
             }
         }
 
+        gpu_lap!("grid_walk");
         // Underline quads — drawn last so they appear on top of the text.
         // SGR 4:n style and SGR 58 colour are stored per-cell and coalesced
         // above, matching WezTerm/xterm underline semantics instead of the
@@ -3701,11 +3759,8 @@ impl GpuRenderer {
         // the ` — N/M` counter flows to the RIGHT of the composition instead of
         // being overlapped. Display-only — the preedit does NOT drive matching
         // (only committed text does). (#B14)
-        let search_preedit: &str = search
-            .and(ime)
-            .map(|i| i.preedit())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
+        let search_preedit: &str =
+            search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
         let search_bar_layout = search_label.as_ref().map(|label| {
             let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
@@ -3768,8 +3823,7 @@ impl GpuRenderer {
                         )
                     })
                     .unwrap_or(text_w);
-                let caret_x =
-                    (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
+                let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
                 search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
@@ -3898,10 +3952,17 @@ impl GpuRenderer {
         }
 
         // -------- Command palette overlay ----------------------------------
-        let palette_layout =
-            palette.and_then(|p| {
-                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor)
-            });
+        let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
+        let (palette_layout, palette_query_text) = if let Some(p) = palette {
+            let query_text = if palette_preedit.is_empty() {
+                None
+            } else {
+                Some(command_palette_query_label(p, palette_preedit))
+            };
+            (PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor), query_text)
+        } else {
+            (None, None)
+        };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -3990,10 +4051,12 @@ impl GpuRenderer {
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
             // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
-            let query_text = if let Some(ph) = &layout.query_placeholder {
+            let query_text = if let Some(text) = &palette_query_text {
+                text.replace('▏', "")
+            } else if let Some(ph) = &layout.query_placeholder {
                 ph.clone()
             } else {
-                layout.query_label.clone()
+                layout.query_label.replace('▏', "")
             };
             let palette_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
             // T14: chrome text needs a wezterm FontStack; when one
@@ -4031,6 +4094,30 @@ impl GpuRenderer {
                     &mut overlay_glyph_instances,
                     None,
                 );
+                let caret_prefix = if let Some(text) = &palette_query_text {
+                    text.split('▏').next().unwrap_or("")
+                } else {
+                    layout.query_label.split('▏').next().unwrap_or("")
+                };
+                let caret_x = query_origin_x
+                    + measure_overlay_text_width(
+                        &mut self.glyph_atlas,
+                        stack,
+                        palette_font_size,
+                        palette_native_em,
+                        &mut palette_rasterizer,
+                        caret_prefix,
+                        self.search_fg,
+                    )
+                    + self.chrome_px(2.0);
+                let caret_w = (self.cell_w * 0.70).max(4.0);
+                let caret_h = (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
+                let caret_y = layout.query_row.y + (layout.query_row.h - caret_h) * 0.5;
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
+                    color: self.cursor_color,
+                    ..Default::default()
+                });
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -4055,7 +4142,7 @@ impl GpuRenderer {
                             - w
                             - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X) * 2.0
                             - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP))
-                            .max(0.0),
+                        .max(0.0),
                         None => row.rect.w,
                     };
                     emit_overlay_text_glyphs(
@@ -4187,7 +4274,11 @@ impl GpuRenderer {
         // terminal-cursor case. Per-frame overlay (not row-cached); the
         // FrameKey hashes `i.preedit()` so composition changes re-render.
         let search_active = search_ime_anchor.is_some();
-        if !search_active && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false) {
+        let palette_active = palette_layout.is_some();
+        if !search_active
+            && !palette_active
+            && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false)
+        {
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
                 let text = i.preedit();
                 // Body-matched, DPI-scaled font size (same as terminal text).
@@ -4462,6 +4553,7 @@ impl GpuRenderer {
             }
         }
 
+        gpu_lap!("overlays");
         // B3: push any new glyph tiles to the GPU texture before any
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
@@ -4471,6 +4563,7 @@ impl GpuRenderer {
             image_glyph_instances.extend(glyph_instances);
             glyph_instances = image_glyph_instances;
         }
+        gpu_lap!("glyph_upload");
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
@@ -4501,6 +4594,7 @@ impl GpuRenderer {
                 return Err(anyhow!("surface validation error"));
             }
         };
+        gpu_lap!("surface_acquire");
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
@@ -4535,8 +4629,11 @@ impl GpuRenderer {
                 &overlay_glyph_instances,
             );
         }
+        gpu_lap!("render_pass");
         self.queue.submit(Some(encoder.finish()));
+        gpu_lap!("queue_submit");
         frame.present();
+        gpu_lap!("present");
         // T13/T14: the legacy chrome layer `TextAtlas::trim` is gone with the rest of
         // the the legacy chrome layer plumbing. The chrome+grid atlas now lives in
         // `glyph_atlas` (sonicterm-text), which carries its own LRU
@@ -4572,6 +4669,19 @@ impl GpuRenderer {
         // is no longer live.
         for p in panes.iter_mut() {
             p.grid.clear_dirty();
+        }
+        if let Some((start, last, mut parts)) = gpu_timing {
+            let now = Instant::now();
+            parts.push(("cleanup", now.saturating_duration_since(last).as_secs_f32() * 1000.0));
+            let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
+            let mut line = format!(
+                "[gpu_render_timing] window={} total={total_ms:.2}ms",
+                self.render_timing_label
+            );
+            for (name, ms) in parts {
+                line.push_str(&format!(" {name}={ms:.2}ms"));
+            }
+            tracing::debug!(target: "render_timing", %line);
         }
         Ok(())
     }
@@ -5195,11 +5305,8 @@ impl GpuRenderer {
             // cell collapses the ligature into a single-cell glyph
             // with an inert neighbour cell.
             let color = cell_fg(&lead_cell, theme, fg_default);
-            let rgba = if info.is_color {
-                [1.0, 1.0, 1.0, 1.0]
-            } else {
-                resolve_fg(g.lead_col, color)
-            };
+            let rgba =
+                if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(g.lead_col, color) };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
             glyph_instances.push(GlyphInstance {
@@ -5736,6 +5843,25 @@ mod tests {
             cell_bg_rgba(&cell, &theme),
             Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
         );
+    }
+
+    #[test]
+    fn plain_url_hover_does_not_need_accent_palette() {
+        use sonicterm_render_model::inputs::HoveredUrlCells;
+
+        assert!(!hovered_url_needs_accent(None));
+        assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
+            row: 0,
+            start_col: 1,
+            end_col: 5,
+            active: false,
+        })));
+        assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
+            row: 0,
+            start_col: 1,
+            end_col: 5,
+            active: true,
+        })));
     }
 }
 

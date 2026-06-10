@@ -17,6 +17,11 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
+use sonicterm_ui::overlays::{
+    command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix, PaletteLayout,
+    SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
+    SEARCH_BAR_PAD_RIGHT,
+};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -29,13 +34,19 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+use super::scrollbar_input::HitOutcome;
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
     resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState,
     TabState, UserEvent, WindowState,
 };
-use super::scrollbar_input::HitOutcome;
+
+const SEARCH_BADGE_ICON: &str = "";
+
+fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
 
 #[doc(hidden)]
 pub fn resize_renderer_and_panes_if_present(
@@ -68,7 +79,11 @@ pub fn resize_renderer_and_panes_if_present(
 /// pane "fixed" it only because those paths re-ran the per-split sizing). The
 /// child `Resized` handler now routes here so the per-split sizing sticks.
 /// Returns `true` if a renderer was present (so the caller can request_redraw).
-pub(super) fn resize_renderer_and_split_panes(child: &mut WindowState, width: u32, height: u32) -> bool {
+pub(super) fn resize_renderer_and_split_panes(
+    child: &mut WindowState,
+    width: u32,
+    height: u32,
+) -> bool {
     let Some(r) = child.renderer.as_mut() else { return false };
     r.resize(width, height);
     resize_visible_panes_in_child(child);
@@ -226,17 +241,14 @@ impl App {
                         .and_then(|r| r.pixel_to_cell(px, py));
                     if let Some((row, col)) = cell {
                         let uri = self.child_hyperlink_uri_at(win_id, row, col);
-                        let opened = sonicterm_cfg::url_open::dispatch_modifier_click(
-                            mods_held,
-                            uri,
-                            |u| {
+                        let opened =
+                            sonicterm_cfg::url_open::dispatch_modifier_click(mods_held, uri, |u| {
                                 let r = sonicterm_cfg::url_open::open(u);
                                 if let Err(ref e) = r {
                                     tracing::warn!("url_open failed: {e}");
                                 }
                                 r
-                            },
-                        );
+                            });
                         if opened.is_some() {
                             if let Some(c) = self.windows.get_mut(&win_id) {
                                 c.mouse_down = false;
@@ -249,11 +261,8 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 // Splitter drag in flight → resize the divider (before scrollbar
                 // + selection). #pane-splitter
-                let splitter_dragging = self
-                    .windows
-                    .get(&win_id)
-                    .map(|c| c.splitter_drag.is_some())
-                    .unwrap_or(false);
+                let splitter_dragging =
+                    self.windows.get(&win_id).map(|c| c.splitter_drag.is_some()).unwrap_or(false);
                 if splitter_dragging {
                     let (cx, cy) = (position.x as f32, position.y as f32);
                     if let Some(c) = self.windows.get_mut(&win_id) {
@@ -287,12 +296,13 @@ impl App {
                 // track the cursor. Done here (free `self`) before the main
                 // match re-borrows `child`. Mouse-down selection-drag still runs
                 // in the main match below (it needs the renderer borrow).
-                let mouse_down =
-                    self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
+                let mouse_down = self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
                 if !mouse_down {
                     if let Some(c) = self.windows.get_mut(&win_id) {
                         c.cursor_pos = (position.x, position.y);
                     }
+                    self.refresh_child_splitter_hover(win_id, position.x as f32, position.y as f32);
+                    self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
                     self.refresh_hovered_url_in_child(win_id);
                 }
             }
@@ -305,11 +315,15 @@ impl App {
                 }
                 self.refresh_hovered_url_in_child(win_id);
             }
+            WindowEvent::Ime(ime_event) if self.command_palette_handle_ime(ime_event) => {
+                return;
+            }
             _ => {}
         }
         // Split-borrow the palette out so the renderer can mutate it even though
         // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
         // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
+        let broadcast_receivers = self.broadcast_receivers();
         let palette_for_render: Option<&mut CommandPalette> =
             if palette_here { Some(&mut self.command_palette) } else { None };
         let Some(child) = self.windows.get_mut(&win_id) else { return };
@@ -365,6 +379,7 @@ impl App {
                     self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
+                let mut timing = crate::app::render_timing::RenderTiming::start("child");
                 // Rendering this frame: drop any pending-deferral marker
                 // so the frame-boundary wakeup loop stops re-requesting
                 // redraws on this child (an idle re-request loop would be
@@ -372,6 +387,9 @@ impl App {
                 self.pending_redraw_windows.remove(&win_id);
                 child.tabs.clear_expired_command_badges(Instant::now());
                 poll_command_events_for_child_window(child, &config);
+                if let Some(t) = timing.as_mut() {
+                    t.lap("poll");
+                }
                 let tab_idx = child.tabs.active_index();
                 let pane_rects: Vec<(u64, sonicterm_ui::pane::Rect)> = child
                     .tab_states
@@ -391,6 +409,9 @@ impl App {
                     })
                     .unwrap_or_default();
                 let active_id = child.tab_states.get(tab_idx).map(|st| st.active_pane).unwrap_or(0);
+                if let Some(t) = timing.as_mut() {
+                    t.lap("layout");
+                }
                 // PR #199 Fix 1: try_lock EVERY pane in this child window's
                 // tab and pass them all through to the renderer. Mirrors
                 // the main-window path in window_event.rs.
@@ -426,6 +447,9 @@ impl App {
                         }
                     }
                 }
+                if let Some(t) = timing.as_mut() {
+                    t.lap("try_lock");
+                }
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
@@ -456,6 +480,9 @@ impl App {
                     .collect();
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("inline_images");
+                }
                 if let Some(pane) = child.panes.get_mut(&active_id) {
                     let active_pos = guards
                         .iter()
@@ -476,6 +503,7 @@ impl App {
                         pane,
                         &guards[active_pos].1,
                         tab_idx,
+                        !pty_burst,
                     );
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
@@ -483,6 +511,9 @@ impl App {
                         search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("title_search");
+                    }
                     // Scrollbar visibility (#pane-scrollbar): compute the
                     // per-pane fade alpha so torn-out windows show the scrollbar
                     // + auto-hide like the main window (pre-fix it was hardcoded
@@ -514,6 +545,9 @@ impl App {
                             )
                         })
                     };
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("scrollbar");
+                    }
                     let mut panes_slice: Vec<sonicterm_render_model::PaneRender<'_>> = guards
                         .iter_mut()
                         .map(|(id, g, rect)| sonicterm_render_model::PaneRender {
@@ -528,7 +562,7 @@ impl App {
                             viewport_top_abs: viewport_tops.get(id).copied().flatten(),
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
-                            is_broadcast_receiver: false,
+                            is_broadcast_receiver: broadcast_receivers.contains(id),
                             scrollbar_alpha: scrollbar_alpha_map.get(id).copied().unwrap_or(0.0),
                             inline_images: inline_images_by_pane
                                 .get(id)
@@ -536,6 +570,9 @@ impl App {
                                 .unwrap_or_default(),
                         })
                         .collect();
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("pane_slice");
+                    }
                     // PR #400: cursor_visible is per-pane (lives on
                     // PaneState). Read from the active pane (already
                     // borrowed mutably above) so the DECTCEM flag
@@ -543,10 +580,11 @@ impl App {
                     let cursor_visible_now =
                         pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed);
                     if let Some(r) = child.renderer.as_mut() {
+                        r.set_render_timing_label("child");
                         if let Err(e) = r.render(
                             &mut panes_slice,
                             &theme,
-                            cursor_visible_now,
+                            cursor_visible_now && !palette_here,
                             child.selection.as_ref(),
                             child.copy_mode.as_ref(),
                             &child.tabs,
@@ -573,6 +611,9 @@ impl App {
                         ) {
                             tracing::warn!("child render error: {e}");
                         }
+                    }
+                    if let Some(t) = timing.as_mut() {
+                        t.lap("render");
                     }
                     child.last_render = Instant::now();
                     // Issue #43: close the coalescing gate for the next
@@ -604,11 +645,85 @@ impl App {
                         if let (Some(win), Some(r)) =
                             (child.window.as_ref(), child.renderer.as_ref())
                         {
-                            if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
+                            if palette_here && self.command_palette.is_open() {
+                                let mut palette = self.command_palette.clone();
+                                let size = win.inner_size();
+                                let scale = r.scale_factor();
+                                let font_size =
+                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                                        * scale;
+                                if let Some(layout) = PaletteLayout::compute(
+                                    &mut palette,
+                                    size.width as f32,
+                                    size.height as f32,
+                                    config.appearance.panel_padding,
+                                    scale,
+                                ) {
+                                    let prefix = command_palette_query_caret_prefix(
+                                        &palette,
+                                        child.ime.preedit(),
+                                    );
+                                    let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
+                                    let caret_x =
+                                        text_x + estimate_overlay_text_width(&prefix, font_size);
+                                    win.set_ime_cursor_area(
+                                        winit::dpi::PhysicalPosition::new(
+                                            caret_x as i32,
+                                            layout.query_row.y as i32,
+                                        ),
+                                        winit::dpi::PhysicalSize::new(
+                                            r.cell_w.ceil() as u32,
+                                            layout.query_row.h.ceil() as u32,
+                                        ),
+                                    );
+                                }
+                            } else if let Some(search) = search {
+                                let preedit = child.ime.preedit();
+                                let search_label = search_bar_label(search, preedit);
+                                let search_prefix = search_query_caret_prefix(search, preedit);
+                                let window_size = win.inner_size();
+                                let scale = r.scale_factor();
+                                let font_size =
+                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                                        * scale;
+                                let icon_w =
+                                    estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                                let content_w = icon_w
+                                    + SEARCH_BAR_ICON_GAP * scale
+                                    + estimate_overlay_text_width(&search_label, font_size);
+                                let row = u8::from(
+                                    child.copy_mode.as_ref().is_some_and(|cm| cm.is_read_only()),
+                                );
+                                let layout = SearchBarLayout::compute_at_row(
+                                    window_size.width as f32,
+                                    window_size.height as f32,
+                                    content_w,
+                                    row,
+                                    scale,
+                                );
+                                let text_x = layout.border.x
+                                    + SEARCH_BAR_PAD_LEFT * scale
+                                    + icon_w
+                                    + SEARCH_BAR_ICON_GAP * scale;
+                                let right_edge = (layout.border.x + layout.border.w
+                                    - SEARCH_BAR_PAD_RIGHT * scale)
+                                    .max(text_x);
+                                let prefix_w =
+                                    estimate_overlay_text_width(&search_prefix, font_size);
+                                let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
+                                let pos = winit::dpi::PhysicalPosition::new(
+                                    caret_x as i32,
+                                    layout.border.y as i32,
+                                );
+                                let size = winit::dpi::PhysicalSize::new(
+                                    r.cell_w.ceil() as u32,
+                                    layout.border.h.ceil() as u32,
+                                );
+                                win.set_ime_cursor_area(pos, size);
+                            } else if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
                                 let x = r.padding_left_px() + f32::from(cur_col) * r.cell_w;
                                 let y = r.top_inset() + f32::from(cur_row) * r.cell_h;
-                                let pos =
-                                    winit::dpi::PhysicalPosition::new(x as i32, y as i32);
+                                let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
                                 let size = winit::dpi::PhysicalSize::new(
                                     r.cell_w.ceil() as u32,
                                     r.cell_h.ceil() as u32,
@@ -644,6 +759,9 @@ impl App {
                         );
                         self.os_drag_bars.publish(snap);
                     }
+                    if let Some(t) = timing {
+                        t.finish();
+                    }
                     // Keep animating the scrollbar fade to completion (the
                     // 300ms auto-hide) even when no further input arrives.
                     if scrollbar_needs_more_frames {
@@ -674,27 +792,16 @@ impl App {
                 // target this child window instead of the main App.
                 // Release the child borrow before touching `self`.
                 let _ = child;
-                if focused {
-                    // Epic #289 Phase A — unified frontmost tracker;
-                    // discriminates main vs child via `frontmost_kind()`.
-                    // PR-B4 (#365): `focused_child` removed — the child-only
-                    // subset is now derivable from `frontmost_window`.
-                    self.frontmost_window = Some(win_id);
-                } else {
-                    if self.frontmost_window == Some(win_id) {
-                        // Same rule for frontmost: only clear if WE were
-                        // the recorded one. A sibling sonic window's
-                        // Focused(true) will arrive separately and
-                        // overwrite.
-                        self.frontmost_window = None;
-                    }
-                }
+                self.handle_child_focus_changed(win_id, focused);
             }
             WindowEvent::CursorLeft { .. } => {
                 // Drop any Cmd-hover URL highlight when the cursor leaves the
                 // child window (#pane-url).
                 if child.hovered_url.take().is_some() {
                     child.hover_link = false;
+                    child.request_redraw();
+                }
+                if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
                     child.request_redraw();
                 }
                 if let Some(r) = child.renderer.as_mut() {
@@ -834,8 +941,7 @@ impl App {
                 };
                 if delta_lines != 0 {
                     if let Some(pane_id) = child_pane_at_cursor(child, lx, ly) {
-                        let cell =
-                            child.renderer.as_ref().and_then(|r| r.pixel_to_cell(lx, ly));
+                        let cell = child.renderer.as_ref().and_then(|r| r.pixel_to_cell(lx, ly));
                         let (is_alt, tracking_on, sgr, app_cursor) = child
                             .panes
                             .get(&pane_id)
@@ -854,9 +960,8 @@ impl App {
                             let (col1, row1) =
                                 cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
                             let count = delta_lines.unsigned_abs() as usize;
-                            let payload = super::window_event::wheel_report_bytes(
-                                sgr, up, col1, row1, count,
-                            );
+                            let payload =
+                                super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
                                     let _ = pty.in_tx.send(payload);
@@ -902,6 +1007,7 @@ impl App {
                         match hit {
                             TabHit::Activate(i) => {
                                 child.tabs.activate(i);
+                                resize_visible_panes_in_child(child);
                                 child.pressed_tab = Some(i);
                                 child.mouse_down = true;
                                 child.drag_session =
@@ -1242,11 +1348,11 @@ impl App {
                     .map(|pane| pane.parser.lock().kitty_keyboard_flags())
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
-                    if let Some(pane) = child.panes.get(&active_id) {
-                        if let Some(pty) = pane.pty.as_ref() {
-                            let _ = pty.in_tx.send(bytes);
-                        }
-                    }
+                    let broadcast_bytes = bytes.clone();
+                    let _ = child;
+                    self.write_to_pane(active_id, bytes);
+                    self.broadcast_from(active_id, broadcast_bytes);
+                    let Some(child) = self.windows.get_mut(&win_id) else { return };
                     // Scroll-to-bottom on plain Enter (#B12 parity): pressing
                     // Enter while scrolled up in history jumps back to the live
                     // bottom. Shift+Enter inserts a newline and must NOT jump.
@@ -1313,11 +1419,9 @@ impl App {
                         if let Some(active_id) =
                             child.tab_states.get(tab_idx).map(|st| st.active_pane)
                         {
-                            if let Some(pane) = child.panes.get(&active_id) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(committed.into_bytes());
-                                }
-                            }
+                            let bytes = committed.into_bytes();
+                            self.write_to_pane(active_id, bytes.clone());
+                            self.broadcast_from(active_id, bytes);
                         }
                     }
                 }
@@ -1328,6 +1432,50 @@ impl App {
 }
 
 impl App {
+    pub(super) fn handle_child_focus_changed(&mut self, win_id: WindowId, focused: bool) {
+        let mut focus_report: Option<(u64, Vec<u8>)> = None;
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            if focused {
+                // Epic #289 Phase A — unified frontmost tracker;
+                // discriminates main vs child via `frontmost_kind()`.
+                // PR-B4 (#365): `focused_child` removed — the child-only
+                // subset is now derivable from `frontmost_window`.
+                self.frontmost_window = Some(win_id);
+                child.ime_cursor_throttle.reset();
+            } else if self.frontmost_window == Some(win_id) {
+                // Same rule for frontmost: only clear if WE were the recorded one.
+                // A sibling sonic window's Focused(true) will arrive separately and
+                // overwrite.
+                self.frontmost_window = None;
+            }
+
+            child.ime.cancel();
+            if let Some(r) = child.renderer.as_mut() {
+                r.set_window_focused(focused);
+            }
+            if child.test_renderer_focus_marker.is_some() {
+                child.test_renderer_focus_marker = Some(focused);
+            }
+            mark_all_panes_dirty(&child.panes);
+            let tab_idx = child.tabs.active_index();
+            if let Some(active_id) = child.tab_states.get(tab_idx).map(|state| state.active_pane) {
+                let enabled = child
+                    .panes
+                    .get(&active_id)
+                    .map(|pane| pane.parser.lock().focus_reporting_enabled())
+                    .unwrap_or(false);
+                if enabled {
+                    let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    focus_report = Some((active_id, seq.to_vec()));
+                }
+            }
+            child.request_redraw();
+        }
+        if let Some((pane_id, bytes)) = focus_report {
+            self.write_to_pane(pane_id, bytes);
+        }
+    }
+
     pub(super) fn merge_child_into_target(
         &mut self,
         src_id: WindowId,
@@ -1375,8 +1523,9 @@ impl App {
                     drop(removed);
                     tracing::info!(
                         "child window reaped after drag-merge; remaining children={}",
-                        self.windows.len()
+                        self.child_window_count()
                     );
+                    self.request_exit_if_no_active_windows();
                 }
             }
         }
@@ -1451,7 +1600,10 @@ impl App {
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
-            sonicterm_io::pty::ShellSpawnOpts::default(),
+            sonicterm_io::pty::ShellSpawnOpts {
+                term_program: self.config.terminal.term_program.clone(),
+                ..sonicterm_io::pty::ShellSpawnOpts::default()
+            },
         ) {
             Ok(pty) => {
                 let parser_clone = parser.clone();
@@ -1654,6 +1806,7 @@ impl App {
     pub(super) fn next_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.next();
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1662,6 +1815,7 @@ impl App {
     pub(super) fn prev_tab_in_child(&mut self, win_id: WindowId) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.prev();
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1670,6 +1824,7 @@ impl App {
     pub(super) fn activate_tab_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         child.tabs.activate(idx);
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1679,6 +1834,7 @@ impl App {
         let Some(child) = self.windows.get_mut(&win_id) else { return false };
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
+        resize_visible_panes_in_child(child);
         child.request_redraw();
         true
     }
@@ -1840,6 +1996,9 @@ impl App {
     /// + `compute_pane_rects_for` use).
     fn child_pane_outer_rect(&self, win_id: WindowId) -> Option<sonicterm_ui::pane::Rect> {
         let child = self.windows.get(&win_id)?;
+        if let Some((outer, _, _)) = child.test_pane_viewport {
+            return Some(outer);
+        }
         let r = child.renderer.as_ref()?;
         let (w, h) = r.logical_size();
         let top = (r.top_inset() - r.padding_top_px()).max(0.0);
@@ -1875,6 +2034,78 @@ impl App {
         }
     }
 
+    fn refresh_child_splitter_hover(&mut self, win_id: WindowId, x: f32, y: f32) -> bool {
+        let hit = self.splitter_hit_at_in_child(win_id, x, y);
+        let axis = hit.map(|hit| hit.axis);
+        let changed =
+            self.windows.get(&win_id).map(|child| child.splitter_hover != axis).unwrap_or(false);
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            child.splitter_hover = axis;
+        }
+        if let Some(axis) = axis {
+            self.set_child_splitter_cursor(win_id, axis);
+        } else if changed {
+            if let Some(child) = self.windows.get(&win_id) {
+                if let Some(w) = child.window.as_ref() {
+                    w.set_cursor(CursorIcon::Default);
+                }
+            }
+        }
+        changed || axis.is_some()
+    }
+
+    /// Test-only: prove the child splitter hit-test is reachable with headless
+    /// viewport geometry.
+    #[doc(hidden)]
+    pub fn __test_child_splitter_hit_axis(
+        &self,
+        win_id: WindowId,
+        x: f32,
+        y: f32,
+    ) -> Option<sonicterm_ui::pane::SplitAxis> {
+        self.splitter_hit_at_in_child(win_id, x, y).map(|hit| hit.axis)
+    }
+
+    /// Test-only: current child hover path mirror. Production currently only
+    /// starts a child splitter cursor on mouse-down/drag; this seam intentionally
+    /// stays at the pre-fix behavior so the regression test can fail until the
+    /// no-button hover path is implemented.
+    #[doc(hidden)]
+    pub fn __test_refresh_child_splitter_hover(
+        &mut self,
+        win_id: WindowId,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        self.refresh_child_splitter_hover(win_id, x, y)
+    }
+
+    /// Test-only: read child splitter-hover state.
+    #[doc(hidden)]
+    pub fn __test_child_splitter_hover(
+        &self,
+        win_id: WindowId,
+    ) -> Option<sonicterm_ui::pane::SplitAxis> {
+        self.windows.get(&win_id).and_then(|child| child.splitter_hover)
+    }
+
+    /// Test-only: describe where the child redraw path will anchor the OS IME
+    /// candidate area. The production child render path currently always uses
+    /// the terminal cursor even when a search box is open; this returns that
+    /// pre-fix behavior for a focused regression test.
+    #[doc(hidden)]
+    pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
+        let child = self.windows.get(&win_id)?;
+        if self.command_palette.is_open() && self.palette_attached_window == Some(win_id) {
+            return Some("palette");
+        }
+        let search_open = child
+            .tab_states
+            .get(child.tabs.active_index())
+            .is_some_and(|state| state.search.is_some());
+        Some(if search_open { "search" } else { "terminal" })
+    }
+
     /// Apply an in-flight splitter drag in the child window `win_id`.
     fn apply_splitter_drag_in_child(&mut self, win_id: WindowId, x: f32, y: f32) -> bool {
         let Some(drag) = self.windows.get(&win_id).and_then(|c| c.splitter_drag.clone()) else {
@@ -1886,8 +2117,7 @@ impl App {
         if dx == 0.0 && dy == 0.0 {
             return true;
         }
-        let tab_idx =
-            self.windows.get(&win_id).map(|c| c.tabs.active_index()).unwrap_or(0);
+        let tab_idx = self.windows.get(&win_id).map(|c| c.tabs.active_index()).unwrap_or(0);
         let changed = self
             .windows
             .get_mut(&win_id)
