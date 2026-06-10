@@ -32,6 +32,16 @@ action = "new_tab"
 keys = "alt+shift+t"
 action = "new_tab"
 
+# Compatibility alias: keep the long-standing Ctrl+T new-tab reflex bound
+# in addition to alt+t. Without it, Ctrl+T falls through to the shell and
+# PSReadLine echoes a literal `^T` control char. Ctrl+T has no common
+# readline meaning (it's transpose-chars, rarely used in a terminal), so
+# reclaiming it is low-risk and saves muscle memory during the move to the
+# Alt scheme.
+[[binding]]
+keys = "ctrl+t"
+action = "new_tab"
+
 [[binding]]
 keys = "alt+w"
 action = "close_active_pane_or_tab"
@@ -159,6 +169,19 @@ action = "copy_to_clipboard"
 
 [[binding]]
 keys = "alt+v"
+action = "paste_from_clipboard"
+
+# Compatibility aliases: the terminal-standard Ctrl+Shift+C / Ctrl+Shift+V
+# stay bound alongside alt+c / alt+v. These chords carry no control code
+# (Ctrl+Shift+letter never reaches the PTY), so binding them is free and
+# preserves the near-universal terminal copy/paste reflex. Ctrl+C is left
+# untouched — it must remain SIGINT.
+[[binding]]
+keys = "ctrl+shift+c"
+action = "copy_to_clipboard"
+
+[[binding]]
+keys = "ctrl+shift+v"
 action = "paste_from_clipboard"
 
 # --- Font size ---
