@@ -52,20 +52,46 @@ fn app_icon() -> Option<winit::window::Icon> {
         .get_or_init(|| {
             const PNG: &[u8] =
                 include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
-            match image::load_from_memory(PNG) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    match winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
-                        Ok(icon) => Some(icon),
-                        Err(e) => {
-                            tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
-                            None
-                        }
-                    }
-                }
+            let img = match image::load_from_memory(PNG) {
+                Ok(i) => i.to_rgba8(),
                 Err(e) => {
                     tracing::warn!("app_icon: decode sonic-256.png failed: {e}");
+                    return None;
+                }
+            };
+            // Trim fully-transparent padding so the logo fills the taskbar
+            // / title-bar slot like Firefox / Windows Terminal. The source
+            // art (a macOS `.icns` rounded-rect convention) carries ~11%
+            // transparent margin on each side — the glyph fills only ~60%
+            // of the 256² canvas. On Windows that makes the taskbar button
+            // look undersized because Windows adds its own slot margin on
+            // top of the baked-in one. Cropping to the opaque bounding box
+            // lets the logo render at the same apparent size as other apps.
+            let (w, h) = img.dimensions();
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+            for y in 0..h {
+                for x in 0..w {
+                    if img.get_pixel(x, y)[3] > 16 {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            let (rgba, iw, ih) = if max_x >= min_x && max_y >= min_y {
+                let cw = max_x - min_x + 1;
+                let ch = max_y - min_y + 1;
+                let cropped = image::imageops::crop_imm(&img, min_x, min_y, cw, ch).to_image();
+                let (cwd, chd) = cropped.dimensions();
+                (cropped.into_raw(), cwd, chd)
+            } else {
+                (img.into_raw(), w, h)
+            };
+            match winit::window::Icon::from_rgba(rgba, iw, ih) {
+                Ok(icon) => Some(icon),
+                Err(e) => {
+                    tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
                     None
                 }
             }
@@ -78,7 +104,18 @@ fn app_icon() -> Option<winit::window::Icon> {
 /// children) so all windows show the logo in the title bar and taskbar.
 #[doc(hidden)]
 pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
-    attrs.with_window_icon(app_icon())
+    let attrs = attrs.with_window_icon(app_icon());
+    // winit's `with_window_icon` only sets `ICON_SMALL` (the 16px title-bar
+    // icon). The taskbar button uses `ICON_BIG`, which must be set
+    // separately on Windows — otherwise Windows upscales the 16px small
+    // icon for the taskbar and the button looks small/blurry next to other
+    // apps (Firefox, Windows Terminal).
+    #[cfg(windows)]
+    let attrs = {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs.with_taskbar_icon(app_icon())
+    };
+    attrs
 }
 
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop
