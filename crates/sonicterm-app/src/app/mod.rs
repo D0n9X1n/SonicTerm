@@ -2546,6 +2546,18 @@ impl App {
         Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
     }
 
+    /// Test-only: whether the child pane is currently marked as right-edge hovered.
+    #[doc(hidden)]
+    pub fn __test_child_scrollbar_near_edge(&self, id: WindowId, pane_id: u64) -> Option<bool> {
+        self.windows.get(&id)?.scrollbar_vis.get(&pane_id).map(|st| st.mouse_near_right_edge)
+    }
+
+    /// Test-only: clear child scrollbar hover state, mirroring CursorLeft.
+    #[doc(hidden)]
+    pub fn __test_clear_child_scrollbar_hover(&mut self, id: WindowId) -> bool {
+        self.clear_scrollbar_hover_in_child(id)
+    }
+
     /// Test-only: write a child pane's `viewport_top_abs` through the same
     /// production path the scrollbar uses (`set_child_pane_view_top`), so a
     /// test can drive a scroll and observe the visibility side effect.
@@ -2878,6 +2890,22 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|child| child.ime.is_composing())
+    }
+
+    /// Test-only: read whether the main window is in read-only copy mode.
+    #[doc(hidden)]
+    pub fn __test_main_read_only(&self) -> bool {
+        self.main()
+            .and_then(|ws| ws.copy_mode.as_ref())
+            .is_some_and(|mode| mode.is_read_only())
+    }
+
+    /// Test-only: read whether a child window is in read-only copy mode.
+    #[doc(hidden)]
+    pub fn __test_child_read_only(&self, id: WindowId) -> Option<bool> {
+        self.windows
+            .get(&id)
+            .map(|child| child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()))
     }
 
     /// Test-only: seed the headless renderer-focus marker for a child window.

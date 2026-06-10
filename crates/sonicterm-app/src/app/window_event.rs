@@ -842,6 +842,9 @@ impl App {
                 if self.main_mut().and_then(|ws| ws.hovered_url.take()).is_some() {
                     redraw = true;
                 }
+                if self.clear_scrollbar_hover() {
+                    redraw = true;
+                }
                 if redraw {
                     if let Some(w) = self.main_window() {
                         w.request_redraw();

@@ -734,6 +734,9 @@ impl App {
                     child.hover_link = false;
                     child.request_redraw();
                 }
+                if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
+                    child.request_redraw();
+                }
                 if let Some(r) = child.renderer.as_mut() {
                     let changed = r.set_hover_cursor(None);
                     if changed {

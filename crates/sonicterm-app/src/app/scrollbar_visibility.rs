@@ -222,6 +222,22 @@ pub fn update_hover_states(
     changed
 }
 
+/// Clear all right-edge hover flags, e.g. when the pointer leaves a window.
+/// Returns `true` when a pane crossed from near-edge to away, which should
+/// schedule a redraw so Auto mode can begin the normal fade-out timing.
+pub fn clear_hover_states(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+) -> bool {
+    let mut changed = false;
+    for state in vis.values_mut() {
+        if state.mouse_near_right_edge {
+            state.mouse_near_right_edge = false;
+            changed = true;
+        }
+    }
+    changed
+}
+
 use super::App;
 
 impl App {
@@ -288,6 +304,34 @@ impl App {
             .windows
             .get_mut(&win_id)
             .map(|child| update_hover_states(&mut child.scrollbar_vis, &rects, cursor, Instant::now()))
+            .unwrap_or(false);
+        if changed {
+            if let Some(child) = self.windows.get(&win_id) {
+                child.request_redraw();
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn clear_scrollbar_hover(&mut self) -> bool {
+        let changed = self
+            .main_mut()
+            .map(|ws| clear_hover_states(&mut ws.scrollbar_vis))
+            .unwrap_or(false);
+        if changed {
+            self.request_scrollbar_redraw();
+        }
+        changed
+    }
+
+    pub(crate) fn clear_scrollbar_hover_in_child(
+        &mut self,
+        win_id: winit::window::WindowId,
+    ) -> bool {
+        let changed = self
+            .windows
+            .get_mut(&win_id)
+            .map(|child| clear_hover_states(&mut child.scrollbar_vis))
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {

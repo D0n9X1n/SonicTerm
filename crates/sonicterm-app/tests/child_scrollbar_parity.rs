@@ -82,3 +82,26 @@ fn child_right_edge_hover_marks_scrollbar_active() {
         "child edge hover must light the auto-hide scrollbar like main"
     );
 }
+
+#[test]
+fn child_cursor_left_clears_edge_hover_so_fade_timing_matches_main() {
+    // Regression for #679: if the pointer left the child window directly from
+    // the right-edge gutter, child kept `mouse_near_right_edge=true`, so Auto
+    // mode considered the bar permanently hovered and the hide/fade timing
+    // diverged from main. CursorLeft must clear the hover bit and let the
+    // normal idle/fade timers take over.
+    let (mut app, id, pane) = seeded_child();
+    assert!(app.__test_set_child_pane_viewport(id, Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+
+    assert!(app.__test_set_child_cursor_pos(id, 795.0, 120.0));
+    assert!(app.__test_refresh_child_scrollbar_hover_from_cursor(id));
+    assert_eq!(app.__test_child_scrollbar_near_edge(id, pane), Some(true));
+
+    assert!(app.__test_clear_child_scrollbar_hover(id));
+    assert_eq!(
+        app.__test_child_scrollbar_near_edge(id, pane),
+        Some(false),
+        "CursorLeft must clear the child edge-hover bit so fade-out can begin"
+    );
+    assert!(!app.__test_clear_child_scrollbar_hover(id), "clearing twice is a no-op");
+}

@@ -466,16 +466,28 @@ impl App {
             }
         }
     }
-    pub(super) fn enter_copy_mode(&mut self) {
-        let Some(pane) = self.active_pane() else { return };
+    pub(super) fn enter_copy_mode_for_kind(&mut self, kind: FrontmostKind) {
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let Some(pane) = self.pane_by_id(pane_id) else { return };
         let cursor = {
             let guard = pane.parser.lock();
             let grid = guard.grid();
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
-        self.copy_mode_set(Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor)));
-        if let Some(panes) = self.main_panes() {
-            mark_all_panes_dirty(panes);
+        let state = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
+        match kind {
+            FrontmostKind::Child(id) => {
+                if let Some(child) = self.windows.get_mut(&id) {
+                    child.copy_mode = state;
+                    mark_all_panes_dirty(&child.panes);
+                }
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.copy_mode_set(state);
+                if let Some(panes) = self.main_panes() {
+                    mark_all_panes_dirty(panes);
+                }
+            }
         }
     }
 
