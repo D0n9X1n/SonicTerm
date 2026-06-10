@@ -196,7 +196,7 @@ impl App {
         let cols = self.config.window.cols;
         let rows = self.config.window.rows;
 
-        let attrs = super::with_backdrop_transparency(
+        let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
@@ -212,7 +212,7 @@ impl App {
                     )),
             ),
             self.config.appearance.backdrop,
-        );
+        ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // PANIC (above): `create_window` only fails when winit cannot reach
         // the windowing system at all (no display, broken connection). At

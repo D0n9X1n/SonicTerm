@@ -15,8 +15,38 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Embed the SonicTerm icon as a Win32 resource in the `.exe` so Explorer,
+/// taskbar pinning, and Alt+Tab show the logo. Compiled only when building
+/// for Windows (the resource compiler needs a Windows toolchain). Failure
+/// is non-fatal: we warn and continue so cross/dev builds without a
+/// resource compiler still link.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    let ico = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/exports/sonic.ico");
+    println!("cargo:rerun-if-changed={}", ico.display());
+    if !ico.exists() {
+        println!(
+            "cargo:warning=sonicterm-windows build.rs: icon {} missing; exe will have no embedded icon",
+            ico.display()
+        );
+        return;
+    }
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(&ico.to_string_lossy());
+    if let Err(e) = res.compile() {
+        println!(
+            "cargo:warning=sonicterm-windows build.rs: embedding icon resource failed: {e}"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_resources() {}
+
 fn main() {
     println!("cargo:rerun-if-changed=../../assets");
+
+    embed_windows_resources();
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_root = manifest_dir.join("../../assets");

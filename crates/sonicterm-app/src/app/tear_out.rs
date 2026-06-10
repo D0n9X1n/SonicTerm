@@ -112,7 +112,7 @@ impl App {
         panes: HashMap<u64, super::PaneState>,
         screen_pos: Option<(i32, i32)>,
     ) -> Option<WindowId> {
-        let mut attrs = super::with_backdrop_transparency(
+        let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
@@ -120,7 +120,7 @@ impl App {
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
-        );
+        ));
         if let Some((sx, sy)) = screen_pos {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
         }
@@ -506,7 +506,7 @@ impl App {
     ) -> bool {
         let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else { return false };
 
-        let attrs = super::with_backdrop_transparency(
+        let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
@@ -514,7 +514,7 @@ impl App {
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
-        );
+        ));
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

@@ -237,7 +237,20 @@ impl PtyHandle {
         spawn_writer_thread(writer, in_rx);
 
         let resize_master = master.clone();
+        // Dedup no-op resizes. Callers (e.g. tab switch via
+        // `resize_visible_panes`) invoke this on every activation even
+        // when geometry is unchanged; on Windows each call is a ConPTY
+        // `ResizePseudoConsole` that forces a console reflow + shell
+        // repaint (SIGWINCH on Unix), which shows up as tab-switch lag.
+        // Pack (cols, rows) into one u32 and skip when it matches the
+        // last applied size. Seeded to u32::MAX so the first real resize
+        // always applies.
+        let last_resize = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
         let resize = Box::new(move |cols: u16, rows: u16| {
+            let packed = (u32::from(cols) << 16) | u32::from(rows);
+            if last_resize.swap(packed, std::sync::atomic::Ordering::Relaxed) == packed {
+                return;
+            }
             let _ = resize_master.lock().resize(PtySize {
                 rows,
                 cols,

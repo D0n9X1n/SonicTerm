@@ -1,6 +1,21 @@
-# WezTerm-compatible default keymap for SonicTerm Terminal.
-# On macOS, `cmd` is used; on Windows, `ctrl` is the equivalent — `ctrl+shift`
-# matches both. Keys not listed fall through to the terminal.
+# SonicTerm default keymap — Windows.
+#
+# Design: `alt` is the SonicTerm app-modifier on Windows, mirroring `cmd`
+# (`super`) on macOS. macOS keeps Ctrl for the shell and uses Cmd for app
+# chords, which is conflict-free. Windows has no Cmd key, so `alt` takes
+# that role: Ctrl+<letter> stays with the shell/readline (Ctrl+C = SIGINT,
+# Ctrl+R = history search, Ctrl+W = kill word, Ctrl+H = Backspace, …) and
+# never gets stolen. Every binding below is the macOS chord with
+# `super` → `alt`.
+#
+# Modifier-order note: chords are matched against a normalized string in the
+# fixed order super+ctrl+alt+shift+key (see key_encoding::chord_string), so
+# `alt+shift+x` and `ctrl+alt+shift+x` are written in that exact order.
+#
+# Caveat: `alt+<letter>` shadows the shell's Meta bindings (Alt+F/B/D word
+# motions) and the native menu-bar access keys — SonicTerm intercepts these
+# chords before the menu/PTY sees them. Keys not listed fall through to the
+# terminal.
 
 [meta]
 name = "sonicterm-windows-default"
@@ -8,97 +23,91 @@ version = "1.0"
 
 # --- Tabs ---
 [[binding]]
-keys = "ctrl+t"
+keys = "alt+t"
+action = "new_tab"
+
+# WezTerm's Windows/Linux SpawnTab chord — also bound so the same muscle
+# memory works whichever OS the keyboard came from.
+[[binding]]
+keys = "alt+shift+t"
 action = "new_tab"
 
 [[binding]]
-keys = "ctrl+shift+w"
+keys = "alt+w"
 action = "close_active_pane_or_tab"
 
-# Windows-native tab navigation alternatives avoid arrow/resize/scroll chords.
 [[binding]]
-keys = "ctrl+pagedown"
+keys = "alt+shift+]"
 action = "next_tab"
 
 [[binding]]
-keys = "ctrl+pageup"
+keys = "alt+shift+["
+action = "prev_tab"
+
+# Alt+Left / Alt+Right — mirrors macOS Cmd+Left/Right tab navigation.
+[[binding]]
+keys = "alt+left"
 action = "prev_tab"
 
 [[binding]]
-keys = "ctrl+tab"
+keys = "alt+right"
 action = "next_tab"
 
 [[binding]]
-keys = "ctrl+shift+tab"
-action = "prev_tab"
-
-# Ctrl+Shift+Left / Ctrl+Shift+Right — tab navigation arrows on Windows.
-# Mirrors macOS Cmd+Left/Right (bound via super+left/right in the shared keymap).
-# Plain Ctrl+Arrow is intentionally NOT used: shells/readline use Ctrl+Left/Right
-# to jump words, and stealing them would break that muscle memory.
-[[binding]]
-keys = "ctrl+shift+left"
-action = "prev_tab"
-
-[[binding]]
-keys = "ctrl+shift+right"
-action = "next_tab"
-
-[[binding]]
-keys = "ctrl+shift+1"
+keys = "alt+1"
 action = { activate_tab = 0 }
 
 [[binding]]
-keys = "ctrl+shift+2"
+keys = "alt+2"
 action = { activate_tab = 1 }
 
 [[binding]]
-keys = "ctrl+shift+3"
+keys = "alt+3"
 action = { activate_tab = 2 }
 
 [[binding]]
-keys = "ctrl+shift+4"
+keys = "alt+4"
 action = { activate_tab = 3 }
 
 [[binding]]
-keys = "ctrl+shift+5"
+keys = "alt+5"
 action = { activate_tab = 4 }
 
 [[binding]]
-keys = "ctrl+shift+6"
+keys = "alt+6"
 action = { activate_tab = 5 }
 
 [[binding]]
-keys = "ctrl+shift+7"
+keys = "alt+7"
 action = { activate_tab = 6 }
 
 [[binding]]
-keys = "ctrl+shift+8"
+keys = "alt+8"
 action = { activate_tab = 7 }
 
 [[binding]]
-keys = "ctrl+shift+9"
+keys = "alt+9"
 action = "activate_last_tab"
 
 # --- Splits ---
 [[binding]]
-keys = "ctrl+shift+d"
+keys = "alt+d"
 action = "split_right"
 
 [[binding]]
-keys = "ctrl+alt+shift+d"
+keys = "alt+shift+d"
 action = "split_down"
 
 [[binding]]
-keys = "ctrl+alt+shift+w"
+keys = "alt+shift+w"
 action = "close_pane"
 
 [[binding]]
-keys = "ctrl+shift+z"
+keys = "alt+shift+z"
 action = "toggle_pane_zoom"
 
 [[binding]]
-keys = "ctrl+shift+b"
+keys = "alt+shift+b"
 action = { toggle_broadcast = { scope = "tab" } }
 
 [[binding]]
@@ -107,131 +116,145 @@ action = { toggle_broadcast = { scope = "all_tabs" } }
 
 # --- Pane focus (vim-style) ---
 [[binding]]
-keys = "ctrl+shift+h"
+keys = "alt+shift+h"
 action = { focus_pane = "left" }
 
 [[binding]]
-keys = "ctrl+shift+j"
+keys = "alt+shift+j"
 action = { focus_pane = "down" }
 
 [[binding]]
-keys = "ctrl+shift+k"
+keys = "alt+shift+k"
 action = { focus_pane = "up" }
 
 [[binding]]
-keys = "ctrl+shift+l"
+keys = "alt+shift+l"
 action = { focus_pane = "right" }
 
 # Arrow-key split resize: nudge the active divider by 5%.
 [[binding]]
-keys = "ctrl+alt+shift+left"
+keys = "alt+shift+left"
 action = "resize_pane_left"
 
 [[binding]]
-keys = "ctrl+alt+shift+right"
+keys = "alt+shift+right"
 action = "resize_pane_right"
 
 [[binding]]
-keys = "ctrl+alt+shift+up"
+keys = "alt+shift+up"
 action = "resize_pane_up"
 
 [[binding]]
-keys = "ctrl+alt+shift+down"
+keys = "alt+shift+down"
 action = "resize_pane_down"
 
 # --- Clipboard ---
 [[binding]]
-keys = "ctrl+shift+["
+keys = "alt+["
 action = "enter_copy_mode"
 
 [[binding]]
-keys = "ctrl+shift+c"
+keys = "alt+c"
 action = "copy_to_clipboard"
 
 [[binding]]
-keys = "ctrl+shift+v"
+keys = "alt+v"
 action = "paste_from_clipboard"
 
 # --- Font size ---
 [[binding]]
-keys = "ctrl+shift+="
+keys = "alt+="
 action = "increase_font_size"
 
-# Some keyboards/layouts deliver `+` as the character on Shift+= - bind
+# Some keyboards/layouts deliver `+` as the character on Shift+= — bind
 # both so font-zoom-in works regardless of which the OS surfaces.
 [[binding]]
-keys = "ctrl+shift++"
+keys = "alt+shift+="
 action = "increase_font_size"
 
 [[binding]]
-keys = "ctrl+shift+-"
+keys = "alt++"
+action = "increase_font_size"
+
+[[binding]]
+keys = "alt+-"
 action = "decrease_font_size"
 
 [[binding]]
-keys = "ctrl+shift+0"
+keys = "alt+0"
 action = "reset_font_size"
 
 # --- Window ---
 [[binding]]
-keys = "ctrl+shift+n"
+keys = "alt+n"
 action = "new_window"
 
+# F11 — Windows convention for full-screen toggle, kept alongside the
+# macOS-mirrored Alt+Enter chord below.
 [[binding]]
 keys = "f11"
 action = "toggle_fullscreen"
 
-# WezTerm's macOS default for full-screen toggle (mirrors the system
-# View -> Enter Full Screen shortcut).
 [[binding]]
-keys = "ctrl+shift+enter"
+keys = "alt+shift+f"
+action = "toggle_fullscreen"
+
+# Mirrors macOS Cmd+Enter (WezTerm's View → Enter Full Screen).
+[[binding]]
+keys = "alt+enter"
 action = "toggle_fullscreen"
 
 # --- Search / Palette ---
 [[binding]]
-keys = "ctrl+shift+f"
+keys = "alt+f"
 action = "open_search"
 
 [[binding]]
-keys = "ctrl+shift+p"
+keys = "alt+shift+p"
 action = "open_command_palette"
 
 # Quick select URL hints.
 [[binding]]
-keys = "ctrl+shift+space"
+keys = "alt+shift+space"
 action = "enter_quick_select"
 
 # --- Scrolling ---
 [[binding]]
-keys = "ctrl+shift+up"
+keys = "alt+up"
 action = { scroll = "line_up" }
 
 [[binding]]
-keys = "ctrl+shift+down"
+keys = "alt+down"
 action = { scroll = "line_down" }
 
 [[binding]]
-keys = "ctrl+shift+pageup"
+keys = "alt+pageup"
 action = { scroll = "page_up" }
 
 [[binding]]
-keys = "ctrl+shift+pagedown"
+keys = "alt+pagedown"
 action = { scroll = "page_down" }
 
 [[binding]]
-keys = "ctrl+shift+home"
+keys = "alt+home"
 action = { scroll = "to_top" }
 
 [[binding]]
-keys = "ctrl+shift+end"
+keys = "alt+end"
 action = { scroll = "to_bottom" }
 
 # --- Reload config ---
 [[binding]]
-keys = "ctrl+shift+r"
+keys = "alt+shift+r"
+action = "reload_config"
+
+# Bare alt+r mirrors the macOS Cmd+R alias so users don't need Shift.
+[[binding]]
+keys = "alt+r"
 action = "reload_config"
 
 # --- SSH client (example; uncomment + edit target to enable) ---
 # Requires building SonicTerm with `--features sonicterm-io/ssh`.
 # [[binding]]
-# keys = "ctrl+shift+s"
+# keys = "alt+shift+s"
 # action = { open_ssh_pane = "alice@dev.example.com:22" }

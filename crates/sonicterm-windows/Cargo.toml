@@ -52,6 +52,14 @@ serde_json = "1"
 name = "sonicterm-windows"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the app icon (and version metadata) as a Win32 resource in the
+# .exe so Explorer, taskbar pinning, and Alt+Tab show the SonicTerm logo.
+# The live-window/taskbar-button icon is set separately at runtime via
+# winit `with_window_icon` (winit's window class uses hIcon=0); this
+# resource covers the shell/file-level icon.
+winresource = "0.1"
+
 [package.metadata.wix]
 upgrade-guid = "B9F8C0F4-1F4F-4F2E-AE3C-7A9D7D6E3F11"
 path-guid    = "8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22"

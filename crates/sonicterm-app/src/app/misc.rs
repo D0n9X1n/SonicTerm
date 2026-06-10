@@ -689,7 +689,7 @@ impl App {
     pub(super) fn create_new_terminal_window(&mut self, el: &ActiveEventLoop) {
         use sonicterm_ui::tabs::Tab;
 
-        let attrs = super::with_backdrop_transparency(
+        let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
@@ -697,7 +697,7 @@ impl App {
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
-        );
+        ));
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

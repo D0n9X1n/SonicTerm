@@ -38,6 +38,49 @@ pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+/// Embedded application icon (256×256 PNG), used for the live window's
+/// title-bar icon and taskbar button. winit creates its window class with
+/// `hIcon: 0` on Windows, so the ONLY way the running window and its
+/// taskbar button get our logo (instead of the generic default) is to set
+/// it explicitly via `WindowAttributes::with_window_icon`. The MSI/exe
+/// resource icon only covers Explorer / shortcuts, not the live window —
+/// hence this runtime path. Decoded once and cached.
+static APP_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
+
+fn app_icon() -> Option<winit::window::Icon> {
+    APP_ICON
+        .get_or_init(|| {
+            const PNG: &[u8] =
+                include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
+            match image::load_from_memory(PNG) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    match winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
+                        Ok(icon) => Some(icon),
+                        Err(e) => {
+                            tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("app_icon: decode sonic-256.png failed: {e}");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Attach the bundled SonicTerm icon to a window's attributes. Applied at
+/// every window-creation site (main window, new window, tab tear-out
+/// children) so all windows show the logo in the title bar and taskbar.
+#[doc(hidden)]
+pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
+    attrs.with_window_icon(app_icon())
+}
+
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop
 /// is requested. Without this, winit creates an opaque client area and the
 /// premultiplied swapchain is composited over that instead of Mica/acrylic.
