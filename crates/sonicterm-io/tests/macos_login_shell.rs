@@ -19,7 +19,7 @@ fn production_macos_bash_and_fish_start_as_login_shells() {
 #[cfg(target_os = "macos")]
 #[test]
 fn clean_e2e_keeps_profile_suppression() {
-    let opts = ShellSpawnOpts { clean_e2e: true };
+    let opts = ShellSpawnOpts { clean_e2e: true, ..ShellSpawnOpts::default() };
     assert_eq!(shell_startup_args("/bin/zsh", opts), vec!["-f"]);
 }
 

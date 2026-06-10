@@ -36,6 +36,10 @@ padding_top = 8
 padding_bottom = 4
 
 [terminal]
+# TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
+# recognize SonicTerm yet; setting term_program = "WezTerm" can bypass their
+# terminal checks and enable their WezTerm/new terminal UI path.
+term_program = "SonicTerm"
 cursor_blink = true
 cursor_shape = "block"
 

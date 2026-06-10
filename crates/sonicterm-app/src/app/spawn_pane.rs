@@ -67,7 +67,10 @@ impl App {
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
-            sonicterm_io::pty::ShellSpawnOpts::default(),
+            sonicterm_io::pty::ShellSpawnOpts {
+                term_program: self.config.terminal.term_program.clone(),
+                ..sonicterm_io::pty::ShellSpawnOpts::default()
+            },
         ) {
             Ok(pty) => {
                 let parser_clone = parser.clone();

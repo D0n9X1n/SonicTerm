@@ -248,6 +248,8 @@ pub struct AccessibilityConfig {
 pub struct TerminalConfig {
     /// Shell to spawn (defaults to `$SHELL` / platform default when `None`).
     pub shell: Option<String>,
+    /// `TERM_PROGRAM` value passed to child PTYs.
+    pub term_program: String,
     /// Scrollback buffer depth, in rows.
     pub scrollback: usize,
     /// Blink the cursor.
@@ -396,6 +398,7 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             shell: None,
+            term_program: "SonicTerm".to_string(),
             scrollback: 10_000,
             cursor_blink: true,
             cursor_shape: CursorShape::default(),
@@ -643,6 +646,11 @@ opacity = 1.0
 blur = false
 
 [terminal]
+# TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
+# recognize SonicTerm yet; setting term_program = "WezTerm" can bypass their
+# terminal checks and enable their WezTerm/new terminal UI path.
+term_program = "{term_program}"
+
 # Scrollback line limit per pane.
 scrollback = {scrollback}
 
@@ -710,6 +718,7 @@ threshold_secs = 10
         padding_top = cfg.window.padding_top,
         padding_bottom = cfg.window.padding_bottom,
         panel_padding = cfg.appearance.panel_padding,
+        term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
     )
 }
@@ -717,6 +726,34 @@ threshold_secs = 10
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_terminal_term_program_is_sonicterm() {
+        let cfg = Config::default();
+        assert_eq!(cfg.terminal.term_program, "SonicTerm");
+    }
+
+    #[test]
+    fn parses_terminal_term_program_override() {
+        let cfg: Config = toml::from_str(
+            r#"
+[terminal]
+term_program = "WezTerm"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.terminal.term_program, "WezTerm");
+        assert_eq!(cfg.terminal.scrollback, TerminalConfig::default().scrollback);
+    }
+
+    #[test]
+    fn default_template_documents_term_program_compatibility_override() {
+        let template = default_config_template();
+        assert!(template.contains("term_program = \"SonicTerm\""));
+        assert!(template.contains("Some tools, such as Copilot"));
+        assert!(template.contains("setting term_program = \"WezTerm\""));
+        assert!(template.contains("enable their WezTerm/new terminal UI path"));
+    }
 
     #[test]
     fn default_config_paths_live_under_dot_sonicterm() {
