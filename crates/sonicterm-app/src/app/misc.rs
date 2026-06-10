@@ -32,8 +32,8 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
-    window_dpi, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
-    WindowState,
+    window_dpi, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState,
+    UserEvent, WindowState,
 };
 
 impl App {
@@ -495,15 +495,30 @@ impl App {
         }
     }
 
-    pub(super) fn copy_selection(&mut self) {
-        let sel = match self.main().and_then(|ws| ws.selection) {
-            Some(s) => s,
-            None => return,
+    pub(super) fn copy_selection_for_kind(&mut self, kind: FrontmostKind) {
+        let (sel, pane_id) = match kind {
+            FrontmostKind::Child(id) => {
+                let Some(child) = self.windows.get(&id) else { return };
+                let Some(sel) = child.selection else { return };
+                let Some(pane_id) = child
+                    .tab_states
+                    .get(child.tabs.active_index())
+                    .map(|state| state.active_pane)
+                else {
+                    return;
+                };
+                (sel, pane_id)
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                let Some(sel) = self.main().and_then(|ws| ws.selection) else { return };
+                let Some(pane_id) = self.main_active_pane_id() else { return };
+                (sel, pane_id)
+            }
         };
         if sel.is_empty() {
             return;
         }
-        let Some(pane) = self.active_pane() else { return };
+        let Some(pane) = self.pane_by_id(pane_id) else { return };
         let text = sel.as_text(pane.parser.lock().grid());
         self.set_clipboard_text(text);
     }
@@ -524,20 +539,21 @@ impl App {
             }
         }
     }
-    pub(super) fn paste_clipboard(&mut self) {
+    pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
         let text = if let Some(text) = self.test_clipboard_text.clone() {
             Some(text)
         } else {
             self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
         };
-        if let Some(text) = text {
-            let bracketed = self
-                .active_pane()
-                .map(|p| p.parser.lock().bracketed_paste_enabled())
-                .unwrap_or(false);
-            let bytes = wrap_paste(&text, bracketed);
-            self.write_to_pty(bytes);
-        }
+        let Some(text) = text else { return };
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let bracketed = self
+            .pane_by_id(pane_id)
+            .map(|p| p.parser.lock().bracketed_paste_enabled())
+            .unwrap_or(false);
+        let bytes = wrap_paste(&text, bracketed);
+        self.write_to_pane(pane_id, bytes.clone());
+        self.broadcast_from(pane_id, bytes);
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {

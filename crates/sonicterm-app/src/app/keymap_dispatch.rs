@@ -75,10 +75,10 @@ impl App {
             return true;
         }
         match action {
-            Action::CopyToClipboard => self.copy_selection(),
+            Action::CopyToClipboard => self.copy_selection_for_kind(self.frontmost_kind()),
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterQuickSelect => self.enter_quick_select(),
-            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::PasteFromClipboard => self.paste_clipboard_for_kind(self.frontmost_kind()),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 // M6a-expand-2c-tab: notify the reducer the user
@@ -476,10 +476,10 @@ impl App {
             return true;
         }
         match action {
-            Action::CopyToClipboard => self.copy_selection(),
+            Action::CopyToClipboard => self.copy_selection_for_kind(source_kind),
             Action::EnterCopyMode => self.enter_copy_mode(),
             Action::EnterQuickSelect => self.enter_quick_select(),
-            Action::PasteFromClipboard => self.paste_clipboard(),
+            Action::PasteFromClipboard => self.paste_clipboard_for_kind(source_kind),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {

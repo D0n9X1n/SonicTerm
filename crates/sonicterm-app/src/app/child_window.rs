@@ -17,6 +17,10 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::command_palette::CommandPalette;
+use sonicterm_ui::overlays::{
+    search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
+    SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
+};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -36,6 +40,12 @@ use super::{
     resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState,
     TabState, UserEvent, WindowState,
 };
+
+const SEARCH_BADGE_ICON: &str = "";
+
+fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
 
 #[doc(hidden)]
 pub fn resize_renderer_and_panes_if_present(
@@ -290,6 +300,7 @@ impl App {
                     if let Some(c) = self.windows.get_mut(&win_id) {
                         c.cursor_pos = (position.x, position.y);
                     }
+                    self.refresh_child_splitter_hover(win_id, position.x as f32, position.y as f32);
                     self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
                     self.refresh_hovered_url_in_child(win_id);
                 }
@@ -603,7 +614,49 @@ impl App {
                         if let (Some(win), Some(r)) =
                             (child.window.as_ref(), child.renderer.as_ref())
                         {
-                            if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
+                            if let Some(search) = search {
+                                let preedit = child.ime.preedit();
+                                let search_label = search_bar_label(search, preedit);
+                                let search_prefix = search_query_caret_prefix(search, preedit);
+                                let window_size = win.inner_size();
+                                let scale = r.scale_factor();
+                                let font_size =
+                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
+                                        * scale;
+                                let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                                let content_w = icon_w
+                                    + SEARCH_BAR_ICON_GAP * scale
+                                    + estimate_overlay_text_width(&search_label, font_size);
+                                let row = u8::from(
+                                    child.copy_mode.as_ref().is_some_and(|cm| cm.is_read_only()),
+                                );
+                                let layout = SearchBarLayout::compute_at_row(
+                                    window_size.width as f32,
+                                    window_size.height as f32,
+                                    content_w,
+                                    row,
+                                    scale,
+                                );
+                                let text_x = layout.border.x
+                                    + SEARCH_BAR_PAD_LEFT * scale
+                                    + icon_w
+                                    + SEARCH_BAR_ICON_GAP * scale;
+                                let right_edge = (layout.border.x + layout.border.w
+                                    - SEARCH_BAR_PAD_RIGHT * scale)
+                                    .max(text_x);
+                                let prefix_w =
+                                    estimate_overlay_text_width(&search_prefix, font_size);
+                                let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
+                                let pos = winit::dpi::PhysicalPosition::new(
+                                    caret_x as i32,
+                                    layout.border.y as i32,
+                                );
+                                let size = winit::dpi::PhysicalSize::new(
+                                    r.cell_w.ceil() as u32,
+                                    layout.border.h.ceil() as u32,
+                                );
+                                win.set_ime_cursor_area(pos, size);
+                            } else if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
                                 let x = r.padding_left_px() + f32::from(cur_col) * r.cell_w;
                                 let y = r.top_inset() + f32::from(cur_row) * r.cell_h;
                                 let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
@@ -1310,17 +1363,46 @@ impl App {
 
 impl App {
     pub(super) fn handle_child_focus_changed(&mut self, win_id: WindowId, focused: bool) {
-        if focused {
-            // Epic #289 Phase A — unified frontmost tracker;
-            // discriminates main vs child via `frontmost_kind()`.
-            // PR-B4 (#365): `focused_child` removed — the child-only
-            // subset is now derivable from `frontmost_window`.
-            self.frontmost_window = Some(win_id);
-        } else if self.frontmost_window == Some(win_id) {
-            // Same rule for frontmost: only clear if WE were the recorded one.
-            // A sibling sonic window's Focused(true) will arrive separately and
-            // overwrite.
-            self.frontmost_window = None;
+        let mut focus_report: Option<(u64, Vec<u8>)> = None;
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            if focused {
+                // Epic #289 Phase A — unified frontmost tracker;
+                // discriminates main vs child via `frontmost_kind()`.
+                // PR-B4 (#365): `focused_child` removed — the child-only
+                // subset is now derivable from `frontmost_window`.
+                self.frontmost_window = Some(win_id);
+                child.ime_cursor_throttle.reset();
+            } else if self.frontmost_window == Some(win_id) {
+                // Same rule for frontmost: only clear if WE were the recorded one.
+                // A sibling sonic window's Focused(true) will arrive separately and
+                // overwrite.
+                self.frontmost_window = None;
+            }
+
+            child.ime.cancel();
+            if let Some(r) = child.renderer.as_mut() {
+                r.set_window_focused(focused);
+            }
+            if child.test_renderer_focus_marker.is_some() {
+                child.test_renderer_focus_marker = Some(focused);
+            }
+            mark_all_panes_dirty(&child.panes);
+            let tab_idx = child.tabs.active_index();
+            if let Some(active_id) = child.tab_states.get(tab_idx).map(|state| state.active_pane) {
+                let enabled = child
+                    .panes
+                    .get(&active_id)
+                    .map(|pane| pane.parser.lock().focus_reporting_enabled())
+                    .unwrap_or(false);
+                if enabled {
+                    let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    focus_report = Some((active_id, seq.to_vec()));
+                }
+            }
+            child.request_redraw();
+        }
+        if let Some((pane_id, bytes)) = focus_report {
+            self.write_to_pane(pane_id, bytes);
         }
     }
 
@@ -1879,6 +1961,29 @@ impl App {
         }
     }
 
+    fn refresh_child_splitter_hover(&mut self, win_id: WindowId, x: f32, y: f32) -> bool {
+        let hit = self.splitter_hit_at_in_child(win_id, x, y);
+        let axis = hit.map(|hit| hit.axis);
+        let changed = self
+            .windows
+            .get(&win_id)
+            .map(|child| child.splitter_hover != axis)
+            .unwrap_or(false);
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            child.splitter_hover = axis;
+        }
+        if let Some(axis) = axis {
+            self.set_child_splitter_cursor(win_id, axis);
+        } else if changed {
+            if let Some(child) = self.windows.get(&win_id) {
+                if let Some(w) = child.window.as_ref() {
+                    w.set_cursor(CursorIcon::Default);
+                }
+            }
+        }
+        changed || axis.is_some()
+    }
+
     /// Test-only: prove the child splitter hit-test is reachable with headless
     /// viewport geometry.
     #[doc(hidden)]
@@ -1899,10 +2004,10 @@ impl App {
     pub fn __test_refresh_child_splitter_hover(
         &mut self,
         win_id: WindowId,
-        _x: f32,
-        _y: f32,
+        x: f32,
+        y: f32,
     ) -> bool {
-        self.windows.get(&win_id).is_some_and(|child| child.splitter_drag.is_some())
+        self.refresh_child_splitter_hover(win_id, x, y)
     }
 
     /// Test-only: read child splitter-hover state.
@@ -1921,11 +2026,11 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_ime_candidate_anchor_kind(&self, win_id: WindowId) -> Option<&'static str> {
         let child = self.windows.get(&win_id)?;
-        let _search_open = child
+        let search_open = child
             .tab_states
             .get(child.tabs.active_index())
             .is_some_and(|state| state.search.is_some());
-        Some("terminal")
+        Some(if search_open { "search" } else { "terminal" })
     }
 
     /// Apply an in-flight splitter drag in the child window `win_id`.
