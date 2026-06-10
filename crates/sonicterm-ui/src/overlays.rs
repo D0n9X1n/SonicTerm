@@ -33,7 +33,7 @@ use crate::tabbar_view::Rect;
 pub const PALETTE_WIDTH: f32 = 520.0;
 
 /// Ideal modal height in physical pixels.
-pub const PALETTE_HEIGHT: f32 = 460.0;
+pub const PALETTE_HEIGHT: f32 = 400.0;
 
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
@@ -42,7 +42,7 @@ pub const PALETTE_MAX_WIDTH: f32 = 560.0;
 
 /// Hard upper bound on the modal height. Viewport-relative clamp is
 /// `viewport_h - 96`.
-pub const PALETTE_MAX_HEIGHT: f32 = 520.0;
+pub const PALETTE_MAX_HEIGHT: f32 = 460.0;
 
 /// Top margin: the modal's top edge sits at `max(72, viewport_h * 0.18)`.
 pub const PALETTE_TOP_RATIO: f32 = 0.18;
@@ -54,32 +54,32 @@ pub const PALETTE_TOP_MIN: f32 = 72.0;
 pub const PALETTE_BORDER: f32 = 1.0;
 
 /// Height of the query input field.
-pub const PALETTE_QUERY_HEIGHT: f32 = 52.0;
+pub const PALETTE_QUERY_HEIGHT: f32 = 42.0;
 
 /// Horizontal padding inside the query field.
 pub const PALETTE_QUERY_PAD_X: f32 = 16.0;
 
 /// Vertical padding inside the query field.
-pub const PALETTE_QUERY_PAD_Y: f32 = 10.0;
+pub const PALETTE_QUERY_PAD_Y: f32 = 6.0;
 
 /// Search icon size + offset inside the query field.
 pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 34.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 28.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 3.0;
+pub const PALETTE_ROW_GAP: f32 = 2.0;
 
 /// Horizontal padding inside each row.
-pub const PALETTE_ROW_PAD_X: f32 = 18.0;
+pub const PALETTE_ROW_PAD_X: f32 = 14.0;
 
 /// Minimum gap between the command label and shortcut hint columns.
 pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;
 
 /// Footer height (count + nav hint strip at the bottom of the modal).
-pub const PALETTE_FOOTER_HEIGHT: f32 = 40.0;
+pub const PALETTE_FOOTER_HEIGHT: f32 = 30.0;
 
 /// Default inset between the modal edge and the inner content (rows, query,
 /// footer). Users can override this via `appearance.panel_padding`.
@@ -529,6 +529,39 @@ mod tests {
         let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
         assert_eq!(prefix, head);
         assert_eq!(prefix, "/ ");
+    }
+
+    #[test]
+    fn command_palette_uses_compact_spacing_tokens() {
+        assert!(PALETTE_HEIGHT <= 400.0);
+        assert!(PALETTE_MAX_HEIGHT <= 460.0);
+        assert!(PALETTE_QUERY_HEIGHT <= 42.0);
+        assert!(PALETTE_QUERY_PAD_Y <= 6.0);
+        assert!(PALETTE_ROW_HEIGHT <= 28.0);
+        assert!(PALETTE_ROW_GAP <= 2.0);
+        assert!(PALETTE_FOOTER_HEIGHT <= 30.0);
+    }
+
+    #[test]
+    fn command_palette_layout_is_dense_but_keeps_text_centered() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.input_char('r');
+        let layout = PaletteLayout::compute(&mut palette, 1800.0, 1000.0, PALETTE_INNER_PAD, 1.0)
+            .expect("open palette has layout");
+
+        assert_eq!(layout.border.h, PALETTE_HEIGHT);
+        assert_eq!(layout.query_row.h, PALETTE_QUERY_HEIGHT);
+        assert!(layout.rows.len() >= 10, "compact layout should fit a useful command list");
+        for row in &layout.rows {
+            assert_eq!(row.rect.h, PALETTE_ROW_HEIGHT);
+        }
+        assert_eq!(layout.footer.h, PALETTE_FOOTER_HEIGHT);
+        assert_eq!(
+            layout.query_icon.y,
+            layout.query_row.y + (layout.query_row.h - layout.query_icon.h) * 0.5,
+            "query icon remains vertically centered after compacting padding"
+        );
     }
 }
 
