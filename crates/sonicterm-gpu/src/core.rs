@@ -22,6 +22,7 @@ use wgpu::{
     RequestAdapterOptions, SurfaceConfiguration, TextureFormat, TextureUsages,
     TextureViewDescriptor,
 };
+use unicode_width::UnicodeWidthChar;
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::chrome_text::{self, ChromeAttrs, ChromeClip};
@@ -41,6 +42,23 @@ fn hovered_url_needs_accent(
 ) -> bool {
     hovered.is_some_and(|h| h.active)
 }
+
+fn cursor_char_width_at(text: &str, cursor: usize) -> usize {
+    if text.is_empty() || cursor >= text.len() {
+        return 1;
+    }
+    let mut c = cursor.min(text.len());
+    while c > 0 && !text.is_char_boundary(c) {
+        c -= 1;
+    }
+    text[c..]
+        .chars()
+        .next()
+        .and_then(UnicodeWidthChar::width)
+        .unwrap_or(1)
+        .max(1)
+}
+
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -2161,7 +2179,7 @@ impl GpuRenderer {
         copy_mode: Option<&CopyModeState>,
         tabs: &TabBar,
         search: Option<&SearchState>,
-        palette: Option<&mut CommandPalette>,
+        mut palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
         // Cmd-hovered auto-detected URL cell range (viewport coords),
@@ -3967,15 +3985,20 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
-        let (palette_layout, palette_query_text) = if let Some(p) = palette {
+        let (palette_layout, palette_query_text, palette_caret_cells) = if let Some(p) = palette.as_deref_mut() {
             let query_text = if palette_preedit.is_empty() {
                 None
             } else {
                 Some(command_palette_query_label(p, palette_preedit))
             };
-            (PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor), query_text)
+            let caret_cells = cursor_char_width_at(p.query(), p.cursor());
+            (
+                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor),
+                query_text,
+                caret_cells,
+            )
         } else {
-            (None, None)
+            (None, None, 1)
         };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
@@ -4124,7 +4147,7 @@ impl GpuRenderer {
                         self.search_fg,
                     )
                     + self.chrome_px(2.0);
-                let caret_w = (self.cell_w * 0.70).max(4.0);
+                let caret_w = (self.cell_w * palette_caret_cells as f32).max(4.0);
                 let caret_h = (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
                 let caret_y = layout.query_row.y + (layout.query_row.h - caret_h) * 0.5;
                 quads_overlay.push(QuadInstance {
@@ -4132,6 +4155,16 @@ impl GpuRenderer {
                     color: self.cursor_color,
                     ..Default::default()
                 });
+                recolor_cursor_glyphs(
+                    &mut overlay_glyph_instances,
+                    caret_x,
+                    caret_y,
+                    caret_w,
+                    caret_h,
+                    sw,
+                    sh,
+                    self.bg_rgba,
+                );
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -5858,6 +5891,20 @@ mod tests {
             cell_bg_rgba(&cell, &theme),
             Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
         );
+    }
+
+    #[test]
+    fn palette_cursor_width_tracks_current_character_width() {
+        assert_eq!(cursor_char_width_at("abc", 0), 1);
+        assert_eq!(cursor_char_width_at("a中b", 1), 2);
+        assert_eq!(cursor_char_width_at("a中b", "a中".len()), 1);
+        assert_eq!(cursor_char_width_at("a中", "a中".len()), 1);
+    }
+
+    #[test]
+    fn palette_cursor_width_handles_non_boundary_offsets() {
+        let s = "a中b";
+        assert_eq!(cursor_char_width_at(s, 2), 2);
     }
 
     #[test]
