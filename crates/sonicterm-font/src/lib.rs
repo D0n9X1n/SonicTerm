@@ -65,6 +65,23 @@ pub fn use_sonic_font_configuration(
     }
     cfg.font = config::TextStyle { font: font_attrs, foreground: None };
     cfg.font_size = font_size_pt;
+    // Windows font-rendering default: prefer FreeType's *light* autohinter
+    // over the unhinted path. `compute_load_flags_from_config` otherwise
+    // selects `NO_HINTING` whenever dpi >= 100 (i.e. >= ~125% display
+    // scaling, which is the norm on Windows laptops), producing soft,
+    // smeared stems. `Light` hinting snaps stems to the pixel grid
+    // vertically only (no horizontal distortion of advances, so monospace
+    // metrics and shaping are preserved) and the autohinter gives the most
+    // consistent result across the bundled + fallback faces. Grayscale AA
+    // is unchanged. macOS keeps its CoreText-tuned defaults (this stack is
+    // only the rasterizer there for fallback faces), so the override is
+    // Windows-only.
+    #[cfg(target_os = "windows")]
+    {
+        cfg.freetype_load_target = config::FreeTypeLoadTarget::Light;
+        cfg.freetype_render_target = Some(config::FreeTypeLoadTarget::Light);
+        cfg.freetype_load_flags = Some(config::FreeTypeLoadFlags::FORCE_AUTOHINT);
+    }
     config::use_this_configuration(cfg);
 }
 

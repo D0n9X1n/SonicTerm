@@ -278,8 +278,18 @@ pub fn layout(
         // Wezterm-font reports `y_offset` positive-down (matches the
         // grid path). Apply it on top of the baseline.
         let extra_y = (g.y_offset.get() as f32) * scale;
-        let gx = pen_x + off_x;
-        let gy = baseline_y + off_y + extra_y;
+        // Pixel-snap the glyph ORIGIN to the integer device-pixel grid.
+        // The atlas tile is sampled with linear filtering, so a glyph
+        // whose top-left lands at a fractional device pixel gets
+        // resampled across two texels in each axis — the soft, smeared
+        // look on tab titles / chrome (#blurry-tabs). Snapping the draw
+        // origin (not the advance — `pen_x` stays fractional so cluster
+        // spacing is still shaper-accurate) makes each tile land on whole
+        // pixels and sample 1:1 with the raster. We round the final
+        // device-space position rather than `pen_x` so accumulated
+        // advances don't drift.
+        let gx = (pen_x + off_x).round();
+        let gy = (baseline_y + off_y + extra_y).round();
 
         // Clip cull: reject glyphs entirely outside the supplied rect.
         if let Some(c) = clip {

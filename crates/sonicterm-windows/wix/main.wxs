@@ -88,6 +88,7 @@
                             <Directory Id='AssetsIconsExportsDir' Name='exports'>
                                 <Component Id='asset_icons' Guid='C1A21A01-0000-0000-0000-000000000104' Win64='yes'>
                                     <File Id='icon_ico'  Name='sonic.ico'  DiskId='1' Source='..\..\assets\icons\exports\sonic.ico' KeyPath='yes'/>
+                                    <File Id='icon_windows_taskbar_ico' Name='sonic-windows-taskbar.ico' DiskId='1' Source='..\..\assets\icons\exports\sonic-windows-taskbar.ico'/>
                                     <File Id='icon_icns' Name='sonic.icns' DiskId='1' Source='..\..\assets\icons\exports\sonic.icns'/>
                                 </Component>
                             </Directory>
@@ -147,7 +148,7 @@
         <Property Id='INSTALLDESKTOPSHORTCUT' Value='1'/>
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
-        <Icon Id='ProductIcon' SourceFile='..\..\assets\icons\exports\sonic.ico'/>
+        <Icon Id='ProductIcon' SourceFile='..\..\assets\icons\exports\sonic-windows-taskbar.ico'/>
         <Property Id='ARPPRODUCTICON' Value='ProductIcon'/>
         <Property Id='ARPHELPLINK' Value='https://github.com/D0n9X1n/SonicTerm'/>
 

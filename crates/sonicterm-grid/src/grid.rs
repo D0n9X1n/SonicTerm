@@ -452,24 +452,48 @@ impl Grid {
         self.bump();
     }
 
-    fn clear_wide_intersections(&mut self, row: usize, start: usize, width: usize, fill: Cell) {
+    fn wide_expanded_range(&self, row: usize, start: usize, width: usize) -> (usize, usize) {
         let cols = self.cols as usize;
-        let end = (start + width).min(cols);
-        let mut leads = Vec::with_capacity(width);
-        for c in start..end {
-            let cell = &self.visible[row][c];
-            if cell.flags.contains(CellFlags::WIDE) {
-                leads.push(c);
-            } else if cell.flags.contains(CellFlags::WIDE_CONT) && c > 0 {
-                leads.push(c - 1);
+        let mut lo = start.min(cols);
+        let mut hi = (start + width).min(cols);
+        if lo >= hi {
+            return (lo, hi);
+        }
+        loop {
+            let old = (lo, hi);
+            for c in lo..hi {
+                let cell = &self.visible[row][c];
+                if cell.flags.contains(CellFlags::WIDE) {
+                    hi = hi.max((c + 2).min(cols));
+                } else if cell.flags.contains(CellFlags::WIDE_CONT) && c > 0 {
+                    lo = lo.min(c - 1);
+                }
+            }
+            if (lo, hi) == old {
+                return (lo, hi);
             }
         }
-        leads.sort_unstable();
-        leads.dedup();
-        for lead in leads {
-            self.visible[row][lead] = fill.clone();
-            if lead + 1 < cols {
-                self.visible[row][lead + 1] = fill.clone();
+    }
+
+    fn clear_wide_intersections(&mut self, row: usize, start: usize, width: usize, fill: Cell) {
+        let (start, end) = self.wide_expanded_range(row, start, width);
+        for c in start..end {
+            self.visible[row][c] = fill.clone();
+        }
+    }
+
+    fn repair_wide_row(&mut self, row: usize, fill: Cell) {
+        let cols = self.cols as usize;
+        for c in 0..cols {
+            let flags = self.visible[row][c].flags;
+            if flags.contains(CellFlags::WIDE) {
+                if c + 1 >= cols || !self.visible[row][c + 1].flags.contains(CellFlags::WIDE_CONT) {
+                    self.visible[row][c] = fill.clone();
+                }
+            } else if flags.contains(CellFlags::WIDE_CONT)
+                && (c == 0 || !self.visible[row][c - 1].flags.contains(CellFlags::WIDE))
+            {
+                self.visible[row][c] = fill.clone();
             }
         }
     }
@@ -772,7 +796,10 @@ impl Grid {
     /// Erase from cursor to end of line using `fill`.
     pub fn erase_line_to_end_with(&mut self, fill: Cell) {
         let r = self.cursor.row as usize;
-        for c in self.cursor.col as usize..self.cols as usize {
+        let start = self.cursor.col as usize;
+        let end = self.cols as usize;
+        self.clear_wide_intersections(r, start, end.saturating_sub(start), fill.clone());
+        for c in start..end {
             self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
@@ -787,7 +814,9 @@ impl Grid {
     /// Erase from beginning of line to cursor inclusive using `fill`.
     pub fn erase_line_to_start_with(&mut self, fill: Cell) {
         let r = self.cursor.row as usize;
-        for c in 0..=(self.cursor.col as usize).min(self.cols as usize - 1) {
+        let end = (self.cursor.col as usize).min(self.cols as usize - 1) + 1;
+        self.clear_wide_intersections(r, 0, end, fill.clone());
+        for c in 0..end {
             self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
@@ -882,7 +911,8 @@ impl Grid {
         }
         let r = row as usize;
         let start = col as usize;
-        let end = (start + n).min(self.cols as usize);
+        let raw_end = (start + n).min(self.cols as usize);
+        let (start, end) = self.wide_expanded_range(r, start, raw_end.saturating_sub(start));
         for c in start..end {
             self.visible[r][c] = fill.clone();
         }
@@ -906,6 +936,7 @@ impl Grid {
         let start = col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - start);
+        self.clear_wide_intersections(r, start, n, fill.clone());
         // Shift right: dest = start+n..cols, src = start..cols-n.
         for dst in (start + n..cols).rev() {
             self.visible[r][dst] = self.visible[r][dst - n].clone();
@@ -913,6 +944,7 @@ impl Grid {
         for c in start..start + n {
             self.visible[r][c] = fill.clone();
         }
+        self.repair_wide_row(r, fill);
         self.mark_row(row);
         self.bump();
     }
@@ -932,12 +964,15 @@ impl Grid {
         let start = col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - start);
+        let (start, end) = self.wide_expanded_range(r, start, n);
+        let n = end.saturating_sub(start).min(cols - start);
         for c in start..cols - n {
             self.visible[r][c] = self.visible[r][c + n].clone();
         }
         for c in cols - n..cols {
             self.visible[r][c] = fill.clone();
         }
+        self.repair_wide_row(r, fill);
         self.mark_row(row);
         self.bump();
     }
@@ -1113,5 +1148,82 @@ mod tests {
         assert!(!grid.row(0)[0].flags.contains(CellFlags::WIDE));
         assert_eq!(grid.row(0)[1].ch, ' ');
         assert!(!grid.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
+    }
+
+    #[test]
+    fn erase_cells_splits_wide_char_cleanly() {
+        let mut grid = Grid::new(10, 1);
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.erase_cells_with(0, 1, 1, Cell::default());
+
+        assert_row_has_no_orphan_wide_cells(&grid);
+        assert_eq!(grid.row(0)[0].ch, ' ');
+        assert_eq!(grid.row(0)[1].ch, ' ');
+    }
+
+    #[test]
+    fn delete_cells_expands_single_cell_delete_to_full_wide_char() {
+        let mut grid = Grid::new(12, 1);
+        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.delete_cells_with(0, 1, 1, Cell::default());
+
+        assert_row_has_no_orphan_wide_cells(&grid);
+        assert_eq!(grid.row(0)[0].ch, 'a');
+        assert_eq!(grid.row(0)[1].ch, '文');
+        assert!(grid.row(0)[1].flags.contains(CellFlags::WIDE));
+        assert!(grid.row(0)[2].flags.contains(CellFlags::WIDE_CONT));
+        assert_eq!(grid.row(0)[3].ch, 'b');
+    }
+
+    #[test]
+    fn delete_cells_from_wide_continuation_deletes_full_wide_char() {
+        let mut grid = Grid::new(12, 1);
+        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.delete_cells_with(0, 2, 1, Cell::default());
+
+        assert_row_has_no_orphan_wide_cells(&grid);
+        assert_eq!(grid.row(0)[0].ch, 'a');
+        assert_eq!(grid.row(0)[1].ch, '文');
+        assert!(grid.row(0)[1].flags.contains(CellFlags::WIDE));
+        assert!(grid.row(0)[2].flags.contains(CellFlags::WIDE_CONT));
+        assert_eq!(grid.row(0)[3].ch, 'b');
+    }
+
+    #[test]
+    fn insert_cells_inside_wide_char_repairs_row() {
+        let mut grid = Grid::new(12, 1);
+        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
+        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
+
+        grid.insert_cells_with(0, 2, 1, Cell::default());
+
+        assert_row_has_no_orphan_wide_cells(&grid);
+    }
+
+    fn assert_row_has_no_orphan_wide_cells(grid: &Grid) {
+        let row = grid.row(0);
+        for c in 0..grid.cols as usize {
+            let flags = row[c].flags;
+            if flags.contains(CellFlags::WIDE) {
+                assert!(c + 1 < grid.cols as usize, "wide lead at row end");
+                assert!(row[c + 1].flags.contains(CellFlags::WIDE_CONT), "wide lead without continuation at col {c}");
+            }
+            if flags.contains(CellFlags::WIDE_CONT) {
+                assert!(c > 0, "wide continuation at col 0");
+                assert!(row[c - 1].flags.contains(CellFlags::WIDE), "wide continuation without lead at col {c}");
+            }
+        }
     }
 }
