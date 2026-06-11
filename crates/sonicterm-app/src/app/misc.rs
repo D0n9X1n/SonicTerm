@@ -706,6 +706,7 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
+        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
 
         let mut renderer = match GpuRenderer::new(
             window.clone(),

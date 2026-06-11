@@ -51,3 +51,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [target.'cfg(target_os = "windows")'.dependencies]
 notify-rust = "4"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }

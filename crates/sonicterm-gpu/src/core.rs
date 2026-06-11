@@ -352,11 +352,20 @@ pub fn emit_tab_bar_quads(
 // level; removing it would force per-field `_` prefixing which obscures
 // what each handle is.
 #[allow(dead_code)]
+#[derive(Clone)]
+pub struct GpuSharedContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
 /// Top-level GPU-backed terminal renderer. Owns the wgpu surface, the
 /// text + quad pipelines, the glyph atlas, font/shape caches, and all
 /// per-frame layout / cursor / overlay state. One per OS window.
 pub struct GpuRenderer {
     instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
@@ -855,7 +864,26 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
-        pollster::block_on(Self::new_async(window, event_loop, theme, settings))
+        pollster::block_on(Self::new_async(window, event_loop, theme, settings, None))
+    }
+
+    pub fn new_with_shared_context(
+        window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
+        theme: &Theme,
+        settings: RendererSettings<'_>,
+        shared: GpuSharedContext,
+    ) -> Result<Self> {
+        pollster::block_on(Self::new_async(window, event_loop, theme, settings, Some(shared)))
+    }
+
+    pub fn shared_context(&self) -> GpuSharedContext {
+        GpuSharedContext {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+        }
     }
 
     async fn new_async(
@@ -863,6 +891,7 @@ impl GpuRenderer {
         event_loop: &ActiveEventLoop,
         theme: &Theme,
         settings: RendererSettings<'_>,
+        shared: Option<GpuSharedContext>,
     ) -> Result<Self> {
         let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
             settings;
@@ -871,35 +900,52 @@ impl GpuRenderer {
         // G1a: read the OS DPI multiplier; stored verbatim into the
         // field below and only re-used by the rasterizer-target helper.
         let sf = window.scale_factor() as f32;
-        let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
-            event_loop.owned_display_handle(),
-        )));
+        let instance = shared
+            .as_ref()
+            .map(|s| s.instance.clone())
+            .unwrap_or_else(|| {
+                Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+                    event_loop.owned_display_handle(),
+                )))
+            });
         let surface = instance.create_surface(window.clone()).context("create surface")?;
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
-        let info = adapter.get_info();
-        tracing::info!(
-            backend = ?info.backend,
-            name = %info.name,
-            driver = %info.driver,
-            "wgpu adapter selected"
-        );
-        if matches!(info.backend, wgpu::Backend::Gl) {
-            tracing::warn!(
-                adapter = %info.name,
-                "GPU backend is GLES — rendering may differ from native D3D12/Metal. \
-                 Glyph sharpness, Powerline anchoring, and HiDPI snap may behave \
-                 unexpectedly. Common cause: running over RDP without GPU passthrough."
+        let (adapter, device, queue) = if let Some(shared) = shared {
+            let info = shared.adapter.get_info();
+            tracing::info!(
+                backend = ?info.backend,
+                name = %info.name,
+                driver = %info.driver,
+                "wgpu adapter reused"
             );
-        }
-        let (device, queue) =
-            adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
+            (shared.adapter, shared.device, shared.queue)
+        } else {
+            let adapter = instance
+                .request_adapter(&RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await
+                .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
+            let info = adapter.get_info();
+            tracing::info!(
+                backend = ?info.backend,
+                name = %info.name,
+                driver = %info.driver,
+                "wgpu adapter selected"
+            );
+            if matches!(info.backend, wgpu::Backend::Gl) {
+                tracing::warn!(
+                    adapter = %info.name,
+                    "GPU backend is GLES — rendering may differ from native D3D12/Metal. \
+                     Glyph sharpness, Powerline anchoring, and HiDPI snap may behave \
+                     unexpectedly. Common cause: running over RDP without GPU passthrough."
+                );
+            }
+            let (device, queue) =
+                adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
+            (adapter, device, queue)
+        };
 
         let format = TextureFormat::Bgra8UnormSrgb;
         // Prefer Mailbox when the backend exposes it: Mailbox drops in-flight
@@ -1000,6 +1046,7 @@ impl GpuRenderer {
 
         Ok(Self {
             instance,
+            adapter,
             device,
             queue,
             surface,
@@ -3164,16 +3211,28 @@ impl GpuRenderer {
                 // #489: read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
                 // underline) lines up with its glyph cell at fractional DPI.
-                let cur_col = grid.cursor.col as usize;
+                let row = grid.row(grid.cursor.row);
+                let mut cur_col = grid.cursor.col as usize;
+                let mut cursor_span = 1usize;
+                if let Some(cell) = row.get(cur_col) {
+                    if cell.flags.contains(CellFlags::WIDE_CONT) && cur_col > 0 {
+                        cur_col -= 1;
+                        cursor_span = 2;
+                    } else if cell.flags.contains(CellFlags::WIDE) {
+                        cursor_span = 2;
+                    }
+                }
                 let cur_col_clamped = cur_col.min(active_snapped_cell_x.len().saturating_sub(2));
+                let end_col = (cur_col_clamped + cursor_span)
+                    .min(active_snapped_cell_x.len().saturating_sub(1));
                 let mut cx = active_snapped_cell_x
                     .get(cur_col_clamped)
                     .copied()
                     .unwrap_or(active_origin_x + f32::from(grid.cursor.col) * self.cell_w);
                 let cw = active_snapped_cell_x
-                    .get(cur_col_clamped + 1)
+                    .get(end_col)
                     .map(|r| r - cx)
-                    .unwrap_or(self.cell_w);
+                    .unwrap_or(self.cell_w * cursor_span as f32);
                 let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
                 // #B14: when an inline IME composition is active at the terminal
                 // cursor (search NOT focused — that case anchors to the search
@@ -3288,57 +3347,12 @@ impl GpuRenderer {
             }
         }
 
-        // Hyperlink visuals: a translucent tint quad under the run plus an
-        // underline quad on top. Coalesce contiguous hyperlinked cells per
-        // row, mirroring the UNDERLINE pass below.
-        let hl_runs = collect_hyperlink_runs(grid);
-        let hl_thickness = (self.cell_h * 0.08).max(1.0);
-        for (row, col_a, col_b) in &hl_runs {
-            // #489: derive x/w from the shared active-pane snapped-edge
-            // cache so the hyperlink tint + underline share device-pixel
-            // edges with adjacent glyph cells at fractional DPI.
-            let end_exclusive = (*col_b as usize).saturating_add(1);
-            let cache_end = end_exclusive.min(active_snapped_cell_x.len().saturating_sub(1));
-            let col_a_usize = (*col_a as usize).min(cache_end);
-            let x = active_snapped_cell_x
-                .get(col_a_usize)
-                .copied()
-                .unwrap_or(active_origin_x + f32::from(*col_a) * self.cell_w);
-            let w = active_snapped_cell_x
-                .get(cache_end)
-                .map(|r| r - x)
-                .unwrap_or_else(|| f32::from(*col_b - *col_a + 1) * self.cell_w);
-            let y = active_origin_y + f32::from(*row) * self.cell_h;
-            // Clip hyperlink tint + underline to active pane (PR #270
-            // follow-up) — a hyperlinked run that reaches the last column
-            // of a narrowed pane would otherwise bleed into the neighbour.
-            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                (x, y, w, self.cell_h),
-                active_pane_x,
-                active_pane_y,
-                active_pane_w,
-                active_pane_h,
-            ) {
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                    color: self.hyperlink_tint,
-                    ..Default::default()
-                });
-            }
-            if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                (x, y + self.cell_h - hl_thickness, w, hl_thickness),
-                active_pane_x,
-                active_pane_y,
-                active_pane_w,
-                active_pane_h,
-            ) {
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                    color: self.hyperlink_underline,
-                    ..Default::default()
-                });
-            }
-        }
+        // OSC 8 hyperlinks are semantic, not visual. Do not tint/underline
+        // every hyperlink cell permanently: prompts such as Oh My Posh wrap
+        // the path segment in a `file:` hyperlink, and a permanent overlay
+        // changes the segment's configured truecolor background compared with
+        // Windows Terminal. Link affordance is drawn below only for the
+        // currently hovered URL span.
 
         gpu_lap!("grid_walk");
         // Underline quads — drawn last so they appear on top of the text.
@@ -5327,6 +5341,7 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
         color_to_chrome(cell.fg, theme, default)
     }
 }
+
 
 fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
     match color {

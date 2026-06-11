@@ -134,30 +134,41 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
+        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
 
-        // Build the renderer for the new surface. If GPU init fails
-        // we drop the panes (kills shells) and bail — the child
-        // window would otherwise be invisible/unusable.
-        let mut renderer = match GpuRenderer::new(
-            window.clone(),
-            el,
-            &self.theme,
-            sonicterm_gpu::core::RendererSettings {
-                font_family: &self.config.font.family,
-                font_size: self.config.font.size,
-                line_height_mult: self.config.font.line_height,
-                padding: [
-                    self.config.window.padding_left,
-                    self.config.window.padding_right,
-                    self.config.window.padding_top,
-                    self.config.window.padding_bottom,
-                ],
-                appearance: sonicterm_gpu::core::SurfaceAppearance {
-                    backdrop: self.config.appearance.backdrop,
-                    opacity: self.config.appearance.opacity,
-                    scrollbar: self.config.appearance.scrollbar,
-                    panel_padding: self.config.appearance.panel_padding,
-                },
+        // Build the renderer for the new surface. Reuse the parent GPU
+        // context so tab tear-out doesn't block the UI thread on another
+        // request_adapter/request_device cycle. Each child still gets its
+        // own surface, pipelines, atlas, and row caches, but shares the
+        // already-open adapter/device/queue handles.
+        let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+        let renderer_settings = sonicterm_gpu::core::RendererSettings {
+            font_family: &self.config.font.family,
+            font_size: self.config.font.size,
+            line_height_mult: self.config.font.line_height,
+            padding: [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
+            appearance: sonicterm_gpu::core::SurfaceAppearance {
+                backdrop: self.config.appearance.backdrop,
+                opacity: self.config.appearance.opacity,
+                scrollbar: self.config.appearance.scrollbar,
+                panel_padding: self.config.appearance.panel_padding,
+            },
+        };
+        let mut renderer = match shared_gpu.map_or_else(
+            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
+            |ctx| {
+                GpuRenderer::new_with_shared_context(
+                    window.clone(),
+                    el,
+                    &self.theme,
+                    renderer_settings,
+                    ctx,
+                )
             },
         ) {
             Ok(r) => r,
@@ -254,8 +265,9 @@ impl App {
         // IDropTarget::Drop. No-op on mac (pasteboard model).
         self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
-        // Epic #289 Phase B: the new window is now OS-frontmost (we
-        // just created and focused it).
+        // Epic #289 Phase B: the new window becomes OS-frontmost after
+        // the hidden first frame is rendered and the child RedrawRequested
+        // handler shows it.
         self.frontmost_window = Some(win_id);
         Some(win_id)
     }
@@ -504,6 +516,11 @@ impl App {
         src_id: WindowId,
         index: usize,
     ) -> bool {
+        let shared_gpu = self
+            .windows
+            .get(&src_id)
+            .and_then(|c| c.renderer.as_ref())
+            .map(GpuRenderer::shared_context);
         let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else { return false };
 
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
@@ -523,26 +540,34 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
-        let mut renderer = match GpuRenderer::new(
-            window.clone(),
-            el,
-            &self.theme,
-            sonicterm_gpu::core::RendererSettings {
-                font_family: &self.config.font.family,
-                font_size: self.config.font.size,
-                line_height_mult: self.config.font.line_height,
-                padding: [
-                    self.config.window.padding_left,
-                    self.config.window.padding_right,
-                    self.config.window.padding_top,
-                    self.config.window.padding_bottom,
-                ],
-                appearance: sonicterm_gpu::core::SurfaceAppearance {
-                    backdrop: self.config.appearance.backdrop,
-                    opacity: self.config.appearance.opacity,
-                    scrollbar: self.config.appearance.scrollbar,
-                    panel_padding: self.config.appearance.panel_padding,
-                },
+        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
+        let renderer_settings = sonicterm_gpu::core::RendererSettings {
+            font_family: &self.config.font.family,
+            font_size: self.config.font.size,
+            line_height_mult: self.config.font.line_height,
+            padding: [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
+            appearance: sonicterm_gpu::core::SurfaceAppearance {
+                backdrop: self.config.appearance.backdrop,
+                opacity: self.config.appearance.opacity,
+                scrollbar: self.config.appearance.scrollbar,
+                panel_padding: self.config.appearance.panel_padding,
+            },
+        };
+        let mut renderer = match shared_gpu.map_or_else(
+            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
+            |ctx| {
+                GpuRenderer::new_with_shared_context(
+                    window.clone(),
+                    el,
+                    &self.theme,
+                    renderer_settings,
+                    ctx,
+                )
             },
         ) {
             Ok(r) => r,

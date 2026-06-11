@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 /// resource compiler still link.
 #[cfg(windows)]
 fn embed_windows_resources() {
-    let ico = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/exports/sonic.ico");
+    let ico = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/icons/exports/sonic-windows-taskbar.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     if !ico.exists() {
         println!(

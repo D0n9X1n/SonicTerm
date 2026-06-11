@@ -424,7 +424,21 @@ fn interactive_shell_args(shell_path: &str) -> Vec<String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn interactive_shell_args(shell_path: &str) -> Vec<String> {
+    let name = shell_file_name(shell_path);
+    match name.as_str() {
+        "pwsh.exe" | "powershell.exe" | "pwsh" | "powershell" => vec![
+            "-NoLogo".to_string(),
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn interactive_shell_args(_shell_path: &str) -> Vec<String> {
     Vec::new()
 }
@@ -464,13 +478,25 @@ fn path_lookup(name: &str) -> Option<String> {
             let is_powershell = lname.ends_with("pwsh.exe") || lname.ends_with("powershell.exe");
             if is_powershell && !allow_windowsapps {
                 let lpath = candidate.to_string_lossy().to_lowercase();
-                if lpath.contains("\\windowsapps\\") {
+                // Skip only per-user App Execution Alias stubs. The real
+                // Microsoft Store PowerShell package also lives under a
+                // WindowsApps directory (usually `C:\Program Files\WindowsApps\
+                // Microsoft.PowerShell_*\pwsh.exe`) and works correctly under
+                // ConPTY; skipping every `\WindowsApps\` path made SonicTerm
+                // fall back to Windows PowerShell 5.1, whose PSReadLine redraw
+                // path emits literal `?` bytes for CJK edits.
+                if is_windowsapps_alias_stub_path(&lpath) {
                     return false;
                 }
             }
             true
         })
         .map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn is_windowsapps_alias_stub_path(lowercase_path: &str) -> bool {
+    lowercase_path.contains("\\appdata\\local\\microsoft\\windowsapps\\")
 }
 
 /// Returns clean-startup args appropriate for the resolved shell. For
@@ -540,5 +566,28 @@ mod tests {
         assert_eq!(env_str(&builder, "COLORTERM"), "truecolor");
         assert_eq!(env_str(&builder, "TERM_PROGRAM"), "WezTerm");
         assert_eq!(env_str(&builder, "TERM_PROGRAM_VERSION"), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windowsapps_filter_skips_user_alias_but_allows_store_package() {
+        assert!(is_windowsapps_alias_stub_path(
+            "c:\\users\\dotan\\appdata\\local\\microsoft\\windowsapps\\pwsh.exe"
+        ));
+        assert!(!is_windowsapps_alias_stub_path(
+            "c:\\program files\\windowsapps\\microsoft.powershell_7.6.2.0_x64__8wekyb3d8bbwe\\pwsh.exe"
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_interactive_args_force_utf8_codepage() {
+        let args = interactive_shell_args("pwsh.exe");
+        assert!(args.iter().any(|a| a == "-NoLogo"));
+        assert!(args.iter().any(|a| a == "-NoExit"));
+        let command = args.last().expect("command arg present");
+        assert!(command.contains("InputEncoding"));
+        assert!(command.contains("OutputEncoding"));
+        assert!(command.contains("chcp 65001"));
     }
 }

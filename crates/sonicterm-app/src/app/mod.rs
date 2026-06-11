@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicIsize, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -46,6 +46,7 @@ pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
 /// resource icon only covers Explorer / shortcuts, not the live window —
 /// hence this runtime path. Decoded once and cached.
 static APP_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
+static TASKBAR_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
 
 fn app_icon() -> Option<winit::window::Icon> {
     APP_ICON
@@ -99,6 +100,31 @@ fn app_icon() -> Option<winit::window::Icon> {
         .clone()
 }
 
+fn taskbar_icon() -> Option<winit::window::Icon> {
+    TASKBAR_ICON
+        .get_or_init(|| {
+            const PNG: &[u8] = include_bytes!(
+                "../../../../assets/icons/exports/png/sonic-windows-taskbar-256.png"
+            );
+            let img = match image::load_from_memory(PNG) {
+                Ok(i) => i.to_rgba8(),
+                Err(e) => {
+                    tracing::warn!("taskbar_icon: decode sonic-windows-taskbar-256.png failed: {e}");
+                    return None;
+                }
+            };
+            let (w, h) = img.dimensions();
+            match winit::window::Icon::from_rgba(img.into_raw(), w, h) {
+                Ok(icon) => Some(icon),
+                Err(e) => {
+                    tracing::warn!("taskbar_icon: Icon::from_rgba failed: {e}");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
 /// Attach the bundled SonicTerm icon to a window's attributes. Applied at
 /// every window-creation site (main window, new window, tab tear-out
 /// children) so all windows show the logo in the title bar and taskbar.
@@ -113,9 +139,61 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(windows)]
     let attrs = {
         use winit::platform::windows::WindowAttributesExtWindows;
-        attrs.with_taskbar_icon(app_icon())
+        attrs.with_taskbar_icon(taskbar_icon())
     };
     attrs
+}
+
+#[cfg(target_os = "windows")]
+static WINDOW_BG_BRUSH: AtomicIsize = AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn install_native_window_background(window: &Window, bg_hex: &str) {
+    let Some((r, g, b)) = parse_hex_rgb(bg_hex) else { return };
+    let brush = WINDOW_BG_BRUSH.load(Ordering::Relaxed);
+    let brush = if brush != 0 {
+        brush
+    } else {
+        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+        // COLORREF is 0x00BBGGRR.
+        let color = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+        let created = unsafe { CreateSolidBrush(color) }.0 as isize;
+        if created == 0 {
+            return;
+        }
+        match WINDOW_BG_BRUSH.compare_exchange(0, created, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => created,
+            Err(existing) => existing,
+        }
+    };
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else { return };
+    let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetClassLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GCLP_HBRBACKGROUND,
+            brush,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[doc(hidden)]
+pub fn install_native_window_background(_window: &Window, _bg_hex: &str) {}
+
+#[cfg(target_os = "windows")]
+fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let h = hex.strip_prefix('#').unwrap_or(hex);
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop

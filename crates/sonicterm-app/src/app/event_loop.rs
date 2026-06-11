@@ -221,6 +221,7 @@ impl App {
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
+        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
         let dpi_scale = f64::from(window_dpi(&window));
 
         // Perf audit #9: gate redraws to the monitor's vsync cadence.
