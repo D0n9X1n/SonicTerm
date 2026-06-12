@@ -565,6 +565,28 @@ impl App {
         self.write_to_pane(pane_id, bytes.clone());
         self.broadcast_from(pane_id, bytes);
     }
+
+    pub(super) fn paste_file_paths_for_kind<I>(&mut self, kind: FrontmostKind, paths: I)
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        let quoted = paths
+            .into_iter()
+            .map(|p| shell_quote_posix(&p.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if quoted.is_empty() {
+            return;
+        }
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let bracketed = self
+            .pane_by_id(pane_id)
+            .map(|p| p.parser.lock().bracketed_paste_enabled())
+            .unwrap_or(false);
+        let bytes = wrap_paste(&quoted, bracketed);
+        self.write_to_pane(pane_id, bytes.clone());
+        self.broadcast_from(pane_id, bytes);
+    }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
             let Some(ws) = self.main_mut() else { return };
@@ -785,6 +807,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            notification: None,
             hidden: false,
             scrollbar_drag: None,
             splitter_drag: None,
@@ -865,18 +888,8 @@ impl App {
         if drops.is_empty() {
             return;
         }
-        // Pre-compute bracketed-paste preference under a short-lived
-        // borrow so we don't hold the parser lock across write_to_pty.
-        let bracketed =
-            self.active_pane().map(|p| p.parser.lock().bracketed_paste_enabled()).unwrap_or(false);
         for paths in drops {
-            let quoted = paths
-                .iter()
-                .map(|p| shell_quote_posix(&p.to_string_lossy()))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let bytes = wrap_paste(&quoted, bracketed);
-            self.write_to_pty(bytes);
+            self.paste_file_paths_for_kind(self.frontmost_kind(), paths);
         }
         if let Some(w) = self.main_window() {
             w.request_redraw();

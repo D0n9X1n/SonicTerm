@@ -1,0 +1,55 @@
+
+use super::*;
+
+#[test]
+fn indexed_color_supports_full_xterm_256_palette() {
+    let theme = Theme::default();
+    assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
+    assert_eq!(indexed(231, &theme), Some(ChromeColor::rgb(255, 255, 255)));
+    assert_eq!(indexed(232, &theme), Some(ChromeColor::rgb(8, 8, 8)));
+    assert_eq!(indexed(255, &theme), Some(ChromeColor::rgb(238, 238, 238)));
+}
+
+#[test]
+fn inverse_swaps_foreground_and_background_for_rendering() {
+    let theme = Theme::default();
+    let cell = Cell::plain('x', Color::Indexed(1), Color::Indexed(2), CellFlags::INVERSE);
+    assert_eq!(cell_fg(&cell, &theme, ChromeColor::WHITE), indexed(2, &theme).unwrap());
+    assert_eq!(
+        cell_bg_rgba(&cell, &theme),
+        Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
+    );
+}
+
+#[test]
+fn palette_cursor_slice_tracks_current_character() {
+    assert_eq!(cursor_char_slice_at("abc", 0), Some("a"));
+    assert_eq!(cursor_char_slice_at("a中b", 1), Some("中"));
+    assert_eq!(cursor_char_slice_at("a中b", "a中".len()), Some("b"));
+    assert_eq!(cursor_char_slice_at("a中", "a中".len()), None);
+}
+
+#[test]
+fn palette_cursor_slice_handles_non_boundary_offsets() {
+    let s = "a中b";
+    assert_eq!(cursor_char_slice_at(s, 2), Some("中"));
+}
+
+#[test]
+fn plain_url_hover_does_not_need_accent_palette() {
+    use sonicterm_render_model::inputs::HoveredUrlCells;
+
+    assert!(!hovered_url_needs_accent(None));
+    assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
+        row: 0,
+        start_col: 1,
+        end_col: 5,
+        active: false,
+    })));
+    assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
+        row: 0,
+        start_col: 1,
+        end_col: 5,
+        active: true,
+    })));
+}

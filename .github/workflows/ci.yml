@@ -69,3 +69,12 @@ jobs:
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
+
+      - name: Install cargo-llvm-cov
+        if: runner.os == 'macOS'
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run Rust logic coverage gate
+        if: runner.os == 'macOS'
+        shell: bash
+        run: scripts/coverage/rust-logic.sh

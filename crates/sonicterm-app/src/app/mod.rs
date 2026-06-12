@@ -163,6 +163,7 @@ use sonicterm_ui::broadcast::BroadcastState;
 use sonicterm_ui::command_palette::CommandPalette;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::ime::ImeState;
+use sonicterm_ui::overlays::{NotificationBubble, NotificationLevel};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::search::SearchState;
 use sonicterm_ui::selection::{SelectMode, Selection};
@@ -343,6 +344,7 @@ pub struct WindowState {
     /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
     /// stays in lock-step on the main window until PR-B.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
+    pub notification: Option<NotificationBubble>,
     /// Phase B2 PR-B4 (#365): "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
     /// state lives next to the `Window` Arc it gates. Today only the main
@@ -967,6 +969,8 @@ pub enum UserEvent {
     /// the newly available face and the user's tofu cells get
     /// replaced by real glyphs.
     ClearShapeCache,
+    /// Background update check finished; show a reusable notification bubble.
+    UpdateCheckFinished { level: NotificationLevel, message: String },
 }
 
 /// Build an [`AsyncFallbackLoader`] whose notifier fires
@@ -1023,6 +1027,8 @@ mod spawn_pane;
 mod tab_state;
 pub mod tab_transfer;
 mod tear_out;
+#[doc(hidden)]
+pub mod update_check;
 mod window_event;
 pub use config_apply::{config_diff_needs_font_apply, renderer_scrollbar_mode_differs};
 pub use key_encoding::{encode_logical, key_name, key_to_string, key_to_strings, KeyName};
@@ -2744,6 +2750,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            notification: None,
             hidden: false,
             scrollbar_drag: None,
             splitter_drag: None,
@@ -2941,6 +2948,45 @@ impl App {
         }
     }
 
+    /// Test-only: read the main window notification bubble message.
+    #[doc(hidden)]
+    pub fn __test_main_notification_message(&self) -> Option<&str> {
+        self.main().and_then(|ws| ws.notification.as_ref()).map(|bubble| bubble.message.as_str())
+    }
+
+    /// Test-only: whether the main notification is ongoing.
+    #[doc(hidden)]
+    pub fn __test_main_notification_ongoing(&self) -> Option<bool> {
+        self.main().and_then(|ws| ws.notification.as_ref()).map(|bubble| bubble.expires_at.is_none())
+    }
+
+    /// Test-only: install a notification with a specific expiration.
+    #[doc(hidden)]
+    pub fn __test_show_notification_until(
+        &mut self,
+        kind: FrontmostKind,
+        level: NotificationLevel,
+        message: &str,
+        expires_at: Option<std::time::Instant>,
+    ) {
+        self.show_notification_for_kind_until(kind, level, message.to_string(), expires_at);
+    }
+
+    /// Test-only: run notification expiry and return the next wake time.
+    #[doc(hidden)]
+    pub fn __test_expire_notifications(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.expire_notifications(now)
+    }
+
+    /// Test-only: read a child window notification bubble message.
+    #[doc(hidden)]
+    pub fn __test_child_notification_message(&self, id: WindowId) -> Option<&str> {
+        self.windows
+            .get(&id)
+            .and_then(|ws| ws.notification.as_ref())
+            .map(|bubble| bubble.message.as_str())
+    }
+
     /// Test-only invoker for `open_search_in_child`. Mirrors the
     /// pattern used by `__test_invoke_close_active_tab_in_child` so
     /// integration tests can assert the stale-id no-op contract for
@@ -2968,6 +3014,16 @@ impl App {
     #[doc(hidden)]
     pub fn __test_drain_pty_writes(&self) -> Vec<(u64, Vec<u8>)> {
         std::mem::take(&mut *self.test_pty_writes.lock())
+    }
+
+    /// Test-only: exercise file-drop path paste routing without a platform drop event.
+    #[doc(hidden)]
+    pub fn __test_paste_file_paths_for_kind(
+        &mut self,
+        kind: FrontmostKind,
+        paths: Vec<std::path::PathBuf>,
+    ) {
+        self.paste_file_paths_for_kind(kind, paths);
     }
 
     /// Test-only: set the synthetic main window's selection.
@@ -3602,6 +3658,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            notification: None,
             hidden: false,
             scrollbar_drag: None,
             splitter_drag: None,

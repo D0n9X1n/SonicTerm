@@ -27,6 +27,22 @@ use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
 impl App {
+    pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
+        let mut next: Option<Instant> = None;
+        for ws in self.windows.values_mut() {
+            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at) else {
+                continue;
+            };
+            if expires_at <= now {
+                ws.notification = None;
+                ws.request_redraw();
+            } else {
+                next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
+            }
+        }
+        next
+    }
+
     pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
         // Deferred-exit drain: `run_action` (keymap dispatcher) sets
         // `pending_exit` when the user's Cmd+W chain has just closed
@@ -39,6 +55,7 @@ impl App {
             el.exit();
             return;
         }
+        let notification_wake = self.expire_notifications(Instant::now());
         // Schedule the next blink-only redraw via `WaitUntil(..)`
         // rather than `request_redraw()` from inside the render path
         // (which produced the tight redraw loop flagged on PR #81).
@@ -48,7 +65,7 @@ impl App {
         // resetting to `Wait` (rather than leaving the previous
         // `WaitUntil` in place) is what keeps idle CPU near zero —
         // otherwise an unfocused window would keep waking at 26Hz.
-        let mut next: Option<std::time::Instant> = None;
+        let mut next: Option<std::time::Instant> = notification_wake;
         // Perf audit #9: if a redraw was deferred for vsync pacing,
         // schedule the next wake at the upcoming frame boundary. This
         // takes priority over (and is bounded by) the blink deadline:
@@ -152,6 +169,9 @@ impl App {
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
+            UserEvent::UpdateCheckFinished { level, message } => {
+                self.show_notification_for_kind(self.frontmost_kind(), level, message);
+            }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
@@ -345,6 +365,7 @@ impl App {
             ime: sonicterm_ui::ime::ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            notification: None,
             hidden: false,
             scrollbar_drag: None,
             splitter_drag: None,

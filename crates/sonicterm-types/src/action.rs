@@ -147,6 +147,8 @@ pub enum Action {
     EditConfigFile,
     /// Open the editable user keymap TOML file in the OS default editor.
     OpenKeymapFile,
+    /// Check whether a newer SonicTerm release is available.
+    CheckForUpdates,
 
     /// Scroll the active pane.
     Scroll(ScrollAction),
