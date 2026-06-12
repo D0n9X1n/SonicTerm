@@ -132,6 +132,32 @@ fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f
     (x, y, w, h)
 }
 
+/// Classify a wgpu adapter as a software (CPU) rasterizer.
+///
+/// True when the adapter is a CPU device, or its name matches a known
+/// software rasterizer (Microsoft WARP, Mesa llvmpipe, Google SwiftShader).
+/// Used to drive the no-GPU degrade path (issue #713). Pure fn over the
+/// adapter info so it is unit-testable without a live GPU.
+#[must_use]
+pub fn detect_software_rendering(info: &wgpu::AdapterInfo) -> bool {
+    software_rendering_from(&info.name, info.device_type)
+}
+
+/// Inner predicate over just the adapter name + device type, so it can be
+/// unit-tested without building a full `wgpu::AdapterInfo` (which has no
+/// `Default`).
+#[must_use]
+fn software_rendering_from(name: &str, device_type: wgpu::DeviceType) -> bool {
+    if device_type == wgpu::DeviceType::Cpu {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    name.contains("microsoft basic render driver")
+        || name.contains("llvmpipe")
+        || name.contains("swiftshader")
+        || name.contains("software adapter")
+}
+
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
 /// PR-A geometry model. No-op when the pane has nothing to scroll, the
 /// mode is `Never`, or `alpha` is at or below the emit floor (PR-D).
@@ -381,6 +407,11 @@ pub struct GpuSharedContext {
 pub struct GpuRenderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
+    /// True when wgpu selected a CPU/software rasterizer (WARP, llvmpipe,
+    /// SwiftShader) — see [`detect_software_rendering`]. The app reads this
+    /// via [`GpuRenderer::is_software_rendering`] to degrade the frame cap and
+    /// per-frame animation (issue #713).
+    software_rendering: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
@@ -503,6 +534,13 @@ pub struct GpuRenderer {
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
+    /// Memoized inline IME preedit overlay glyphs (issue #714). The preedit
+    /// is re-shaped from scratch every frame otherwise; while a composition is
+    /// unchanged across frames (paused, or PTY-burst redraws while composing)
+    /// this reuses the emitted glyphs. Keyed on the text + placement + color +
+    /// the atlas eviction epoch (so cached atlas UVs can never go stale — any
+    /// eviction bumps `evictions()` and invalidates the entry).
+    preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
@@ -654,6 +692,44 @@ struct FrameKey {
     /// hover onto / off a URL (or to a different URL span) invalidates
     /// the cached frame and re-shapes with / without the accent recolor.
     hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+}
+
+/// Memoized inline IME preedit overlay glyphs (issue #714). Reused across
+/// frames when the composition text and its placement are unchanged so a
+/// paused or streaming-while-composing preedit isn't re-shaped every frame.
+/// `atlas_epoch` is the glyph atlas's cumulative eviction count at build time;
+/// any eviction bumps it and invalidates the cache, so the stored
+/// `GlyphInstance`s (which carry atlas UVs) can never reference a recycled
+/// tile.
+struct PreeditGlyphCache {
+    text: String,
+    font_size: f32,
+    start_x: f32,
+    top_y: f32,
+    color_bits: u32,
+    atlas_epoch: u64,
+    glyphs: Vec<GlyphInstance>,
+}
+
+impl PreeditGlyphCache {
+    /// True when this cache entry exactly matches the requested preedit emit
+    /// (text + placement + color + atlas generation).
+    fn matches(
+        &self,
+        text: &str,
+        font_size: f32,
+        start_x: f32,
+        top_y: f32,
+        color_bits: u32,
+        atlas_epoch: u64,
+    ) -> bool {
+        self.atlas_epoch == atlas_epoch
+            && self.color_bits == color_bits
+            && self.font_size.to_bits() == font_size.to_bits()
+            && self.start_x.to_bits() == start_x.to_bits()
+            && self.top_y.to_bits() == top_y.to_bits()
+            && self.text == text
+    }
 }
 
 #[doc(hidden)]
@@ -925,15 +1001,18 @@ impl GpuRenderer {
                 )))
             });
         let surface = instance.create_surface(window.clone()).context("create surface")?;
-        let (adapter, device, queue) = if let Some(shared) = shared {
+        let (adapter, device, queue, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
+            let software_rendering = detect_software_rendering(&info);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
+                device_type = ?info.device_type,
+                software_rendering,
                 "wgpu adapter reused"
             );
-            (shared.adapter, shared.device, shared.queue)
+            (shared.adapter, shared.device, shared.queue, software_rendering)
         } else {
             let adapter = instance
                 .request_adapter(&RequestAdapterOptions {
@@ -944,12 +1023,24 @@ impl GpuRenderer {
                 .await
                 .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
             let info = adapter.get_info();
+            let software_rendering = detect_software_rendering(&info);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
+                device_type = ?info.device_type,
+                software_rendering,
                 "wgpu adapter selected"
             );
+            if software_rendering {
+                tracing::warn!(
+                    adapter = %info.name,
+                    "No hardware GPU — wgpu fell back to a software rasterizer (CPU). \
+                     Rendering will be degraded to stay responsive (lower frame cap, \
+                     no fade animation). Common cause: RDP / VM without GPU passthrough. \
+                     See [appearance].software_render_mode."
+                );
+            }
             if matches!(info.backend, wgpu::Backend::Gl) {
                 tracing::warn!(
                     adapter = %info.name,
@@ -960,7 +1051,7 @@ impl GpuRenderer {
             }
             let (device, queue) =
                 adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
-            (adapter, device, queue)
+            (adapter, device, queue, software_rendering)
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
@@ -1063,6 +1154,7 @@ impl GpuRenderer {
         Ok(Self {
             instance,
             adapter,
+            software_rendering,
             device,
             queue,
             surface,
@@ -1113,6 +1205,7 @@ impl GpuRenderer {
             search_bg,
             drag_chip_visual: None,
             last_frame_key: None,
+            preedit_glyph_cache: None,
             skipped_frames: 0,
             render_timing_label: "unknown",
             tab_bar_visible: true,
@@ -1718,6 +1811,13 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// True when wgpu fell back to a CPU/software rasterizer for this window.
+    /// The app uses this to degrade frame pacing and per-frame animation in
+    /// the no-GPU case (issue #713).
+    pub fn is_software_rendering(&self) -> bool {
+        self.software_rendering
     }
 
     /// Current OS display scale factor (physical px per logical px). Exposed so
@@ -2670,6 +2770,15 @@ impl GpuRenderer {
             // of the window-level padding/inset, and threads its own
             // pane_id into the row_glyph_cache so split panes don't
             // collide on absolute-row keys (PR #208 prereq).
+            // Size the row glyph cache ONCE for the whole frame using the
+            // total visible rows across all panes — NOT per-pane inside the
+            // loop. Resizing to a single pane's `grid.rows` on every iteration
+            // changed the cap each time in an unequal-height split and cleared
+            // the entire cache per pane per frame, forcing all rows to
+            // re-shape every keystroke (#715 follow-up). Mirrors the quad
+            // cache's total-visible-rows sizing below.
+            let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
+            self.row_glyph_cache.resize(total_glyph_rows.max(1));
             for pv in &pane_views {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -2680,12 +2789,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                // viewport. When the user hasn't scrolled (or hasn't scrolled
-                // past the visible bottom), this is the live-buffer top, i.e.
-                // `scrollback_len()`. Otherwise it's the explicit absolute
-                // index requested by the scroll action (e.g. a prompt row).
                 let view_top_abs = Self::resolved_view_top_abs(grid, pv.viewport_top_abs);
-                self.row_glyph_cache.resize(grid.rows);
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
@@ -3731,7 +3835,13 @@ impl GpuRenderer {
             let match_fg = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
             let current_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             let current_fg = match_fg;
-            for (i, m) in s.matches.iter().enumerate() {
+            // Only walk matches whose row intersects the viewport. `matches`
+            // is row-sorted, so this is a binary-search-bounded slice — per
+            // frame cost is O(visible matches), not O(total matches), which
+            // otherwise grows with scrollback depth (issue #710). `start`
+            // keeps `i` aligned with the full slice for the cur_idx compare.
+            let (vis_start, vis_end) = s.visible_match_range(view_top_abs, grid.rows);
+            for (i, m) in s.matches[vis_start..vis_end].iter().enumerate().map(|(j, m)| (vis_start + j, m)) {
                 if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
                     continue;
                 }
@@ -4450,23 +4560,59 @@ impl GpuRenderer {
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
                 let preedit_fg = self.search_fg;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    font_size,
-                    native_em,
-                    &mut wt,
-                    text,
-                    preedit_fg,
-                    ChromeAttrs::default(),
-                    start_x + text_pad,
-                    baseline_y,
-                    [start_x, top_y, pre_w, line_h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                // Issue #714: reuse the memoized preedit glyphs when text +
+                // placement + color + atlas generation all match, so a paused
+                // or streaming-while-composing preedit isn't re-shaped each
+                // frame. Any atlas eviction bumps the epoch and forces a
+                // rebuild, so cached atlas UVs can't go stale.
+                let emit_x = start_x + text_pad;
+                let color_bits = (u32::from(preedit_fg.r) << 24)
+                    | (u32::from(preedit_fg.g) << 16)
+                    | (u32::from(preedit_fg.b) << 8)
+                    | u32::from(preedit_fg.a);
+                let atlas_epoch = self.glyph_atlas.evictions();
+                let cache_hit = self
+                    .preedit_glyph_cache
+                    .as_ref()
+                    .is_some_and(|c| {
+                        c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
+                    });
+                if cache_hit {
+                    // SAFETY of UVs: epoch match means no eviction since build.
+                    let cached = self.preedit_glyph_cache.as_ref().unwrap();
+                    overlay_glyph_instances.extend(cached.glyphs.iter().copied());
+                } else {
+                    let before = overlay_glyph_instances.len();
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        font_size,
+                        native_em,
+                        &mut wt,
+                        text,
+                        preedit_fg,
+                        ChromeAttrs::default(),
+                        emit_x,
+                        baseline_y,
+                        [start_x, top_y, pre_w, line_h],
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                    // Cache the freshly emitted glyphs. Re-read the epoch: the
+                    // emit itself may have evicted to make room, in which case
+                    // these glyphs are valid against the NEW epoch.
+                    self.preedit_glyph_cache = Some(PreeditGlyphCache {
+                        text: text.to_string(),
+                        font_size,
+                        start_x: emit_x,
+                        top_y: baseline_y,
+                        color_bits,
+                        atlas_epoch: self.glyph_atlas.evictions(),
+                        glyphs: overlay_glyph_instances[before..].to_vec(),
+                    });
+                }
 
                 // (3) Underline quad — DPI-scaled accent line along the
                 // bottom of the composing run (the in-flight affordance).

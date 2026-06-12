@@ -142,6 +142,9 @@ impl App {
         // following streaming redraw coalesces instead of over-rendering.
         let was_dirty = self.input_dirty;
         let frame_period = self.frame_period;
+        // Issue #713: snapshot the no-GPU degrade flag before the long-lived
+        // `child` borrow below so the fade-suppression check can read it.
+        let software_render_degrade = self.software_render_degrade;
         let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
         let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
         // Scrollbar input (#pane-scrollbar): handled HERE, before the long-lived
@@ -381,11 +384,19 @@ impl App {
                 // one frame per vsync like the main window, instead of
                 // rendering on every VT tick. Input-driven redraws skip
                 // the gate so typing/resize/theme stay immediate.
+                // Issue #714: lower the cap while composing an IME preedit on
+                // the software path (mirrors the main window).
+                let child_frame_period = crate::app::effective_frame_period(
+                    software_render_degrade,
+                    child.ime.is_composing(),
+                    frame_period,
+                );
                 if crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
+                    software_render_degrade,
                     child.last_render.elapsed(),
-                    frame_period,
+                    child_frame_period,
                 ) {
                     // End the `child` / palette borrows on this path so
                     // the `&mut self` defer helper is callable.
@@ -779,8 +790,10 @@ impl App {
                         t.finish();
                     }
                     // Keep animating the scrollbar fade to completion (the
-                    // 300ms auto-hide) even when no further input arrives.
-                    if scrollbar_needs_more_frames {
+                    // 300ms auto-hide) even when no further input arrives —
+                    // except in the no-GPU path, where the bar snaps instead
+                    // of burning CPU on the fade (issue #713).
+                    if scrollbar_needs_more_frames && !software_render_degrade {
                         child.request_redraw();
                     }
                 }
@@ -1355,13 +1368,15 @@ impl App {
                     Some(st) => st.active_pane,
                     None => return,
                 };
-                // Read the active child pane's kitty keyboard flags under the
-                // parser lock, then drop it before the PTY write (CLAUDE.md
-                // §4). Non-zero flags drive CSI-u key encoding (Shift+Enter).
+                // Read the active child pane's kitty keyboard flags from the
+                // lock-free per-pane snapshot instead of taking the parser
+                // lock on the keypress path (issue #710 — the VT thread holds
+                // that lock while parsing output). Non-zero flags drive CSI-u
+                // key encoding (Shift+Enter).
                 let kitty_flags = child
                     .panes
                     .get(&active_id)
-                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
                     let broadcast_bytes = bytes.clone();
@@ -1466,6 +1481,12 @@ impl App {
             }
 
             child.ime.cancel();
+            if !focused {
+                // Drop any in-flight drag interrupted by focus loss — it
+                // never gets a button-release otherwise (issue #711).
+                child.scrollbar_drag = None;
+                child.splitter_drag = None;
+            }
             if let Some(r) = child.renderer.as_mut() {
                 r.set_window_focused(focused);
             }
@@ -1602,7 +1623,11 @@ impl App {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Honour the user's configured scrollback depth (issue #710); child
+        // windows must match the main window, not the Grid's 10k default.
+        let mut grid = Grid::new(cols, rows);
+        grid.set_scrollback_limit(self.config.terminal.scrollback);
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
         // Seed theme defaults for OSC 10/11/12 (#369) + OSC 4 palette (#661).
         {
             let mut p = parser.lock();
@@ -1613,6 +1638,10 @@ impl App {
         // PR #400: per-pane cursor_visible Arc.
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Per-pane kitty-keyboard flags snapshot read lock-free on the
+        // keypress path (issue #710); mirrors the main-window pane wiring.
+        let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
+            Arc::new(std::sync::atomic::AtomicU8::new(0));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -1627,6 +1656,7 @@ impl App {
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = cursor_visible_pane.clone();
+                let kitty_flags = kitty_flags_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 std::thread::Builder::new()
                     .name("sonicterm-vt-reply-child".into())
@@ -1671,6 +1701,13 @@ impl App {
                                                 );
                                             }
                                         }
+                                        // Mirror kitty-keyboard flags under the
+                                        // lock so the keypress path reads them
+                                        // lock-free (issue #710).
+                                        kitty_flags.store(
+                                            p.kitty_keyboard_flags(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                     let pending_for = pending_since
                                         .map(|since| since.elapsed())
@@ -1727,6 +1764,7 @@ impl App {
         let mut pane_state = PaneState::new(parser, pty);
         pane_state.redraw_target = redraw_target;
         pane_state.cursor_visible = cursor_visible_pane;
+        pane_state.kitty_flags = kitty_flags_pane;
         pane_state
     }
 

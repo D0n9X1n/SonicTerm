@@ -116,6 +116,12 @@ impl TabBar {
     pub fn set_active_custom_title(&mut self, body: impl Into<String>) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let body = body.into();
+        // An empty rename clears the override so the tab reverts to its
+        // automatic title, rather than showing a blank tab (issue #716).
+        if body.trim().is_empty() {
+            tab.custom_title = None;
+            return;
+        }
         tab.custom_title = Some(body.clone());
         tab.title = title_with_replaced_body(&tab.title, &body);
     }
@@ -326,4 +332,25 @@ fn strip_index_prefix(title: &str) -> Option<&str> {
         return None;
     }
     Some(&rest[digits_end..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_rename_reverts_to_auto_title() {
+        // Issue #716: clearing the rename input must drop the custom override
+        // (revert to the auto title), not store a blank title.
+        let mut bar = TabBar::new();
+        bar.push(Tab::new("zsh"));
+        bar.set_active_custom_title("my work");
+        assert_eq!(bar.tabs[0].custom_title.as_deref(), Some("my work"));
+        // Empty (and whitespace-only) clears back to None.
+        bar.set_active_custom_title("");
+        assert_eq!(bar.tabs[0].custom_title, None);
+        bar.set_active_custom_title("renamed");
+        bar.set_active_custom_title("   ");
+        assert_eq!(bar.tabs[0].custom_title, None);
+    }
 }

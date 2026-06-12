@@ -66,6 +66,26 @@ impl SearchState {
         Self::default()
     }
 
+    /// Index window `[start, end)` into [`Self::matches`] whose rows intersect
+    /// the viewport `[view_top_abs, view_top_abs + rows)`.
+    ///
+    /// `matches` is built scrollback-rows-then-visible-rows, both ascending,
+    /// so it is sorted ascending by `row`; this is a binary-search bound. The
+    /// renderer iterates only this window instead of all matches every frame,
+    /// keeping per-frame highlight cost O(visible matches) rather than
+    /// O(total matches) — the latter scales with scrollback depth for a
+    /// common query and stutters on deep history (issue #710). Returned
+    /// indices stay valid against the full `matches` slice, so the caller can
+    /// still compare each against `self.current`.
+    #[must_use]
+    pub fn visible_match_range(&self, view_top_abs: u64, rows: u16) -> (usize, usize) {
+        let top = view_top_abs;
+        let bottom = view_top_abs.saturating_add(u64::from(rows));
+        let start = self.matches.partition_point(|m| u64::from(m.row) < top);
+        let end = self.matches.partition_point(|m| u64::from(m.row) < bottom);
+        (start, end)
+    }
+
     pub fn input_char(&mut self, ch: char, grid: &Grid) {
         if matches!(ch, '\r' | '\n') {
             return;

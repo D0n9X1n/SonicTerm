@@ -166,11 +166,21 @@ impl App {
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
                 let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
+                // Issue #714: while composing an IME preedit on the software
+                // rasterizer, drop to a lower frame cap so a long pinyin run
+                // doesn't drive a full-surface raster at full cadence.
+                let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
+                let frame_period = crate::app::effective_frame_period(
+                    self.software_render_degrade,
+                    composing,
+                    self.frame_period,
+                );
                 if crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
+                    self.software_render_degrade,
                     last_render.elapsed(),
-                    self.frame_period,
+                    frame_period,
                 ) {
                     self.pending_redraw = true;
                     return;
@@ -274,7 +284,10 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("scrollbar");
                 }
-                if scrollbar_needs_more_frames {
+                if scrollbar_needs_more_frames && !self.software_render_degrade {
+                    // Issue #713: in the no-GPU path, skip the fade-driven
+                    // extra frames — the bar snaps instead of animating, but
+                    // we don't burn CPU rasterizing a 300ms fade.
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
@@ -745,6 +758,13 @@ impl App {
                 // context cleanly on macOS / Windows.
                 if let Some(ws) = self.main_mut() {
                     ws.ime.cancel();
+                    if !focused {
+                        // A drag interrupted by focus loss never gets its
+                        // button-release; drop the gesture so it doesn't
+                        // resume on the next stray cursor move (issue #711).
+                        ws.scrollbar_drag = None;
+                        ws.splitter_drag = None;
+                    }
                 }
                 // Propagate window focus to the renderer so the text cursor
                 // disappears when the window is inactive.
@@ -1767,14 +1787,17 @@ impl App {
                         }
                     }
                 }
-                // Read the focused pane's kitty keyboard flags under the
-                // parser lock, then DROP the lock before any PTY write
-                // (CLAUDE.md §4). When non-zero, `encode_key` emits CSI-u
-                // forms (e.g. Shift+Enter => CSI 13;2u) so modern TUIs treat
-                // Shift+Enter as "insert newline" instead of "submit".
+                // Read the focused pane's kitty keyboard flags from the
+                // lock-free per-pane snapshot (the VT loop mirrors them out of
+                // the parser after each batch). Avoids taking `parser.lock()`
+                // on the keypress path — that lock is held by the VT thread
+                // while parsing output, so blocking on it added input latency
+                // whenever output was streaming (issue #710). When non-zero,
+                // `encode_key` emits CSI-u forms (e.g. Shift+Enter => CSI
+                // 13;2u) so modern TUIs treat Shift+Enter as "insert newline".
                 let kitty_flags = self
                     .active_pane()
-                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
                     self.write_to_pty(bytes);

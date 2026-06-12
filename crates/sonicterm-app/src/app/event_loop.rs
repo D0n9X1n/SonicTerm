@@ -74,7 +74,17 @@ impl App {
         // that still preserves vsync alignment.
         if self.pending_redraw {
             if let Some(last_render) = self.main().map(|ws| ws.last_render) {
-                next = Some(last_render + self.frame_period);
+                // Match the RedrawRequested gate: under IME composition on the
+                // software path the cap is lower, so schedule the wake at the
+                // same (possibly longer) period — otherwise we'd wake at 33ms,
+                // re-defer, and busy-spin (issue #714).
+                let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
+                let period = crate::app::effective_frame_period(
+                    self.software_render_degrade,
+                    composing,
+                    self.frame_period,
+                );
+                next = Some(last_render + period);
             }
         }
         // Issue #43: same vsync-pacing schedule for any CHILD window that
@@ -84,8 +94,14 @@ impl App {
         // frame boundary into the wake deadline. Stale ids (window
         // reaped) are skipped here and pruned in `new_events`.
         for win_id in &self.pending_redraw_windows {
-            if let Some(last_render) = self.windows.get(win_id).map(|ws| ws.last_render) {
-                let at = last_render + self.frame_period;
+            if let Some(ws) = self.windows.get(win_id) {
+                // Mirror the child gate's composing-aware period (issue #714).
+                let period = crate::app::effective_frame_period(
+                    self.software_render_degrade,
+                    ws.ime.is_composing(),
+                    self.frame_period,
+                );
+                let at = ws.last_render + period;
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -306,6 +322,28 @@ impl App {
         // (see apply_config below).
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+
+        // Issue #713: resolve the no-GPU degrade decision now that the
+        // renderer (and its adapter) exists. Combine the config mode with
+        // runtime software-rasterizer detection, then clamp the frame period
+        // so the CPU isn't asked to rasterize at the monitor's full refresh.
+        self.software_render_degrade = crate::app::should_degrade_for_software_render(
+            self.config.appearance.software_render_mode,
+            renderer.is_software_rendering(),
+        );
+        if self.software_render_degrade {
+            let before = self.frame_period;
+            self.frame_period =
+                crate::app::software_render_frame_period(true, self.frame_period);
+            tracing::info!(
+                detected = renderer.is_software_rendering(),
+                mode = ?self.config.appearance.software_render_mode,
+                frame_period = ?self.frame_period,
+                "software-render degrade engaged: frame cap {:?} -> {:?}",
+                before,
+                self.frame_period,
+            );
+        }
 
         // Phase C2 / Haiku #295: register the main window's HWND with
         // the OS-drag backend through the unified entry point so the

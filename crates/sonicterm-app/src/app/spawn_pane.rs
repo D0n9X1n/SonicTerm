@@ -39,7 +39,11 @@ impl App {
     pub(super) fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Honour the user's configured scrollback depth instead of the
+        // Grid's built-in 10k default (issue #710).
+        let mut grid = Grid::new(cols, rows);
+        grid.set_scrollback_limit(self.config.terminal.scrollback);
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface
@@ -64,6 +68,10 @@ impl App {
         // spawn failed (and so a no-pty pane still has a valid Arc).
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Per-pane kitty-keyboard flags snapshot, mirrored out of the parser
+        // by the VT loop so the keypress path reads it lock-free (issue #710).
+        let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
+            Arc::new(std::sync::atomic::AtomicU8::new(0));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -83,6 +91,7 @@ impl App {
                 // got replaced with a fresh Arc on tear-out — leaving
                 // the VT thread writing into an orphan AtomicBool.
                 let cursor_visible = cursor_visible_pane.clone();
+                let kitty_flags = kitty_flags_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 let inline_images_thread = inline_images.clone();
@@ -213,6 +222,14 @@ impl App {
                                                 _ => {}
                                             }
                                         }
+                                        // Mirror the parser's kitty-keyboard
+                                        // flags while we still hold the lock,
+                                        // so the keypress path can read them
+                                        // without locking (issue #710).
+                                        kitty_flags.store(
+                                            p.kitty_keyboard_flags(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                     if !inline_images.is_empty() {
                                         let mut images = inline_images_thread.lock();
@@ -291,6 +308,7 @@ impl App {
         state.redraw_target = redraw_target;
         state.command_events = command_events;
         state.cursor_visible = cursor_visible_pane;
+        state.kitty_flags = kitty_flags_pane;
         state.inline_images = inline_images;
         state
     }

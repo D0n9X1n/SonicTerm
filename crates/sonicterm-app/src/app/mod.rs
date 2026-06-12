@@ -235,13 +235,14 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 /// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
 /// frame boundary instead of rendering now. A redraw is deferred only when
 /// both hold:
-/// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
-///   immediate; gating them adds perceptible latency, PR #132).
+/// - it is *streaming-driven* — a fresh PTY burst, or not input-driven at
+///   all. A PURE input redraw (`was_dirty` with no concurrent `pty_burst`:
+///   resize/selection-drag/IME/theme) renders immediately; gating those adds
+///   perceptible latency (PR #132). Crucially a typing echo is BOTH dirty and
+///   a burst, and counts as streaming so it coalesces (issue #710) rather
+///   than rendering per echo chunk.
 /// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame. PTY burst redraws are
-///   streaming work and should coalesce too; otherwise child windows can enter
-///   `surface.get_current_texture()` early and block waiting for the next
-///   drawable/vblank.
+///   window, so another draw now would just burn a frame.
 ///
 /// Extracted as a pure fn (Issue #43) so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
@@ -252,11 +253,34 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 pub fn should_defer_streaming_redraw(
     was_dirty: bool,
     pty_burst: bool,
+    software_render: bool,
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
-    let _ = pty_burst;
-    !was_dirty && since_last_render < frame_period
+    // A redraw is coalesce-able when it is streaming-driven: either a fresh
+    // PTY burst, or not input-driven at all. Only a *pure* input redraw
+    // (input_dirty with NO concurrent PTY burst — resize/selection-drag/IME/
+    // theme) renders immediately.
+    //
+    // The decisive case is typing: a keystroke sets `input_dirty`, and the
+    // char only becomes visible via its PTY echo, which arrives as a burst.
+    // So the echo's redraw is BOTH `was_dirty` and `pty_burst`. Keying the
+    // gate on `!was_dirty` alone let that echo short-circuit coalescing and
+    // render per echo chunk — a redraw storm under fast typing and streaming
+    // apps like Claude Code (issue #710). Treating a burst as streaming work
+    // (even when input_dirty is also set) coalesces it to the frame boundary;
+    // `about_to_wait` re-requests at `last_render + frame_period`, so latency
+    // is bounded by one frame and nothing is dropped.
+    //
+    // `software_render` (issue #713): on a CPU rasterizer EVERY frame is
+    // expensive (full-screen software raster), so even *pure* input redraws
+    // are coalesced to the frame cap — fast typing in a TUI like Claude Code
+    // would otherwise force a full-screen raster per keystroke and peg the
+    // CPU. Costs at most one frame (~33ms) of extra input latency, which is
+    // an acceptable trade only because rendering is already slow here. The
+    // hardware-GPU path passes `false` and keeps input redraws immediate.
+    let streaming = software_render || pty_burst || !was_dirty;
+    streaming && since_last_render < frame_period
 }
 
 pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
@@ -266,6 +290,70 @@ pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 #[must_use]
 pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Duration) -> bool {
     pending_bytes >= PTY_REDRAW_FLUSH_BYTES || pending_for >= PTY_REDRAW_MAX_LATENCY
+}
+
+/// Frame period cap applied when rendering on a CPU/software rasterizer
+/// (~30 fps). On a real GPU the monitor's refresh period is used as-is.
+pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(33_333);
+
+/// Frame period cap while an IME composition is in flight on the software
+/// rasterizer (~15 fps). Each preedit keystroke forces a full-surface raster
+/// (issue #714); composing is interactive but doesn't need 30 fps, so we cap
+/// it lower to roughly halve the whole-surface presents while the user types
+/// a long pinyin run. Only applied when BOTH software-render and composing.
+pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
+
+/// Effective frame period given the software-render and IME-composing state
+/// (issue #714). On the hardware path this is the monitor period unchanged.
+/// On the software path it's the 30 fps cap, dropped to 15 fps while an IME
+/// composition is active so a long preedit doesn't drive a full-surface
+/// raster at full cadence.
+#[must_use]
+pub fn effective_frame_period(
+    software_render: bool,
+    composing: bool,
+    monitor_period: Duration,
+) -> Duration {
+    if software_render && composing {
+        monitor_period.max(SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD)
+    } else if software_render {
+        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+    } else {
+        monitor_period
+    }
+}
+
+/// Resolve the effective frame period for the no-GPU case (issue #713).
+///
+/// When `degrade` is true (software rasterizer detected, or forced by config),
+/// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
+/// the CPU isn't asked to rasterize at the monitor's full refresh rate. A
+/// faster monitor period is slowed to 30 fps; a slower one (rare) is kept.
+/// With `degrade` false the monitor period passes through unchanged, so the
+/// hardware-GPU path is untouched.
+#[must_use]
+pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
+    if degrade {
+        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+    } else {
+        monitor_period
+    }
+}
+
+/// Whether to engage the no-GPU degrade path, combining the config mode with
+/// runtime detection (issue #713). `Auto` follows detection; `Force` always
+/// degrades; `Off` never does.
+#[must_use]
+pub fn should_degrade_for_software_render(
+    mode: sonicterm_cfg::config::SoftwareRenderMode,
+    detected: bool,
+) -> bool {
+    use sonicterm_cfg::config::SoftwareRenderMode as M;
+    match mode {
+        M::Auto => detected,
+        M::Force => true,
+        M::Off => false,
+    }
 }
 
 pub struct WindowState {
@@ -1091,6 +1179,13 @@ pub struct PaneState {
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-pane kitty-keyboard progressive-enhancement flags (`CSI ?u`),
+    /// mirrored out of the parser by the VT loop after each parse batch.
+    /// The keypress path reads this lock-free instead of taking
+    /// `parser.lock()` before every PTY write — that lock is held by the VT
+    /// thread while parsing output, so blocking on it added input latency
+    /// whenever output was streaming (issue #710). Init 0 (legacy encoding).
+    pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
 }
@@ -1113,6 +1208,7 @@ impl PaneState {
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1187,6 +1283,14 @@ pub struct App {
     /// which pane an action targeted without constructing a process-backed PTY.
     #[doc(hidden)]
     pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+    /// Whether the PTY write ledger above is actually recorded. `false` in
+    /// production so `dispatch_pty_write_effect` does no lock/clone/push per
+    /// write (the ledger would otherwise grow unbounded for the whole
+    /// session — see issue #710). Set `true` when the app is built without an
+    /// event-loop proxy (headless/test construction) so existing tests keep
+    /// capturing writes with no per-test opt-in.
+    #[doc(hidden)]
+    pub(super) pty_write_log_enabled: bool,
     // #404: `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -1338,6 +1442,12 @@ pub struct App {
     /// over-render and by `about_to_wait` to schedule the next vsync
     /// boundary via `ControlFlow::WaitUntil`. See perf audit #9.
     pub(super) frame_period: Duration,
+    /// True when the no-GPU degrade path is engaged (software rasterizer
+    /// detected or forced via `[appearance].software_render_mode`). When set,
+    /// `frame_period` is clamped to ~30 fps and per-frame scrollbar fade
+    /// animation is suppressed so the CPU isn't asked to rasterize at full
+    /// refresh (issue #713). Resolved once after the renderer is created.
+    pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
     /// after the previous render. `about_to_wait` schedules a
     /// `WaitUntil(last_render + frame_period)` and `new_events`'
@@ -1577,6 +1687,10 @@ impl App {
             clipboard: Clipboard::new().ok(),
             test_clipboard_text: None,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
+            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
+            // writes for assertions. Production always passes `Some(proxy)`,
+            // so the ledger stays disabled and adds no per-write cost.
+            pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: false,
             pending_tear_out: None,
             pending_os_teardown: false,
@@ -1596,6 +1710,8 @@ impl App {
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
+            // Resolved after the renderer is created in `do_resumed`.
+            software_render_degrade: false,
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
             input_dirty: false,
@@ -2044,8 +2160,10 @@ impl App {
                 }
             }
         }
-        let kitty_flags =
-            self.active_pane().map(|pane| pane.parser.lock().kitty_keyboard_flags()).unwrap_or(0);
+        let kitty_flags = self
+            .active_pane()
+            .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
         (None, encode_logical(key, mods, kitty_flags))
     }
 
@@ -2086,7 +2204,12 @@ impl App {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             let pane_id = pane.0;
             let bytes = data.to_vec();
-            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            // Test-only ledger: skipped entirely in production so we don't
+            // lock+clone+push on every PTY write (issue #710 — unbounded
+            // growth + per-keystroke overhead over a long session).
+            if self.pty_write_log_enabled {
+                self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            }
             let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
                 let _ = pty.in_tx.send(bytes);
@@ -2540,6 +2663,7 @@ impl App {
     /// Test-only: clear the PTY write ledger before a broadcast assertion.
     #[doc(hidden)]
     pub fn __test_enable_pty_write_log(&mut self) {
+        self.pty_write_log_enabled = true;
         self.test_pty_writes.lock().clear();
     }
 
@@ -4271,6 +4395,11 @@ impl App {
             ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
+            // Issue #711: also abandon any scrollbar/splitter drag residue —
+            // a global drag-cancel should leave no gesture half-held on any
+            // window, mirroring the focus-loss cleanup.
+            ws.scrollbar_drag = None;
+            ws.splitter_drag = None;
             // #447 follow-up to PR #443: clear the renderer's persistent
             // drag-chip overlay AND the headless-test marker via a single
             // helper so production and test paths can never diverge. The
@@ -4515,6 +4644,7 @@ mod redraw_coalescing_tests {
         assert!(should_defer_streaming_redraw(
             false, // not input-driven
             false, // no fresh burst
+            false, // hardware GPU
             Duration::from_millis(2),
             FRAME,
         ));
@@ -4524,7 +4654,13 @@ mod redraw_coalescing_tests {
     fn input_driven_redraw_never_defers() {
         // Keystroke / resize / theme / IME must render immediately even
         // inside the vsync window — gating them adds perceptible latency.
-        assert!(!should_defer_streaming_redraw(true, false, Duration::from_millis(1), FRAME));
+        assert!(!should_defer_streaming_redraw(
+            true,
+            false,
+            false,
+            Duration::from_millis(1),
+            FRAME
+        ));
     }
 
     #[test]
@@ -4532,21 +4668,63 @@ mod redraw_coalescing_tests {
         // A PTY burst is still streaming work, not input. Rendering it early
         // can block in surface acquisition waiting for the next drawable; defer
         // inside the current frame window and render at the next boundary.
-        assert!(should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+        assert!(should_defer_streaming_redraw(
+            false,
+            true,
+            false,
+            Duration::from_millis(1),
+            FRAME
+        ));
     }
 
     #[test]
     fn past_frame_boundary_never_defers() {
         // We're past this vsync window — render now, don't defer forever.
-        assert!(!should_defer_streaming_redraw(false, false, Duration::from_millis(20), FRAME));
+        assert!(!should_defer_streaming_redraw(
+            false,
+            false,
+            false,
+            Duration::from_millis(20),
+            FRAME
+        ));
         // Exactly at the boundary also renders (`<` is strict).
-        assert!(!should_defer_streaming_redraw(false, false, FRAME, FRAME));
+        assert!(!should_defer_streaming_redraw(false, false, false, FRAME, FRAME));
     }
 
     #[test]
-    fn input_and_burst_together_render() {
-        // Belt-and-suspenders: any reason-to-render short-circuits deferral.
-        assert!(!should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
+    fn input_with_concurrent_burst_coalesces() {
+        // The typing case (issue #710): a keystroke sets input_dirty and the
+        // char's PTY echo arrives as a burst, so the echo's redraw is BOTH
+        // dirty AND a burst. It must coalesce like other streaming work, not
+        // render per echo chunk — otherwise fast typing / Claude Code streams
+        // storm the renderer.
+        assert!(should_defer_streaming_redraw(true, true, false, Duration::ZERO, FRAME));
+        // ...but only within the frame window; past the boundary it renders.
+        assert!(!should_defer_streaming_redraw(
+            true,
+            true,
+            false,
+            Duration::from_millis(20),
+            FRAME
+        ));
+    }
+
+    #[test]
+    fn software_render_defers_even_pure_input() {
+        // Issue #713: on a CPU rasterizer, even a pure input redraw (dirty,
+        // no burst) coalesces to the frame cap — fast typing must not force a
+        // full-screen software raster per keystroke. Within the frame window
+        // it defers...
+        assert!(should_defer_streaming_redraw(true, false, true, Duration::from_millis(1), FRAME));
+        // ...but still renders once past the boundary (bounded latency, not
+        // dropped).
+        assert!(!should_defer_streaming_redraw(
+            true,
+            false,
+            true,
+            Duration::from_millis(40),
+            FRAME
+        ));
     }
 
     #[test]
@@ -4561,5 +4739,63 @@ mod redraw_coalescing_tests {
             super::PTY_REDRAW_FLUSH_BYTES,
             Duration::ZERO,
         ));
+    }
+}
+
+#[cfg(test)]
+mod software_render_tests {
+    //! Issue #713: no-GPU degrade decision + frame-period clamp.
+    use super::{
+        should_degrade_for_software_render, software_render_frame_period,
+        SOFTWARE_RENDER_FRAME_PERIOD,
+    };
+    use sonicterm_cfg::config::SoftwareRenderMode;
+    use std::time::Duration;
+
+    #[test]
+    fn degrade_mode_combines_config_with_detection() {
+        // Auto follows detection.
+        assert!(should_degrade_for_software_render(SoftwareRenderMode::Auto, true));
+        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Auto, false));
+        // Force always degrades; Off never does — regardless of detection.
+        assert!(should_degrade_for_software_render(SoftwareRenderMode::Force, false));
+        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Off, true));
+    }
+
+    #[test]
+    fn frame_period_clamps_only_when_degrading() {
+        let sixty = Duration::from_micros(16_667); // 60 Hz
+        // Hardware path: untouched.
+        assert_eq!(software_render_frame_period(false, sixty), sixty);
+        // Software path: a fast monitor period is slowed to the 30fps cap.
+        assert_eq!(
+            software_render_frame_period(true, sixty),
+            SOFTWARE_RENDER_FRAME_PERIOD
+        );
+    }
+
+    #[test]
+    fn frame_period_keeps_a_slower_monitor_period() {
+        // A 20 Hz monitor (50ms) is already slower than the 30fps cap — keep it.
+        let slow = Duration::from_millis(50);
+        assert_eq!(software_render_frame_period(true, slow), slow);
+    }
+
+    #[test]
+    fn effective_frame_period_lowers_cap_while_composing() {
+        use super::{
+            effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD,
+        };
+        let sixty = Duration::from_micros(16_667);
+        // Hardware path: untouched whether composing or not.
+        assert_eq!(effective_frame_period(false, false, sixty), sixty);
+        assert_eq!(effective_frame_period(false, true, sixty), sixty);
+        // Software path, not composing: 30fps cap.
+        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
+        // Software path, composing: 15fps cap (issue #714).
+        assert_eq!(
+            effective_frame_period(true, true, sixty),
+            SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
+        );
     }
 }

@@ -49,3 +49,34 @@ fn search_accepts_ime_commit_text_as_single_line() {
     s.input_str("你\r\n好\n世界", &grid);
     assert_eq!(s.query, "你好世界");
 }
+
+#[test]
+fn visible_match_range_bounds_to_viewport() {
+    // Rows 10, 20, 30 (matches the shared fixture's ordering).
+    let s = state_with_matches();
+    // Viewport [15, 25) -> only the row-20 match (index 1).
+    assert_eq!(s.visible_match_range(15, 10), (1, 2));
+    // Viewport [0, 10) -> nothing (row 10 is excluded by the half-open top).
+    assert_eq!(s.visible_match_range(0, 10), (0, 0));
+    // Viewport covering everything.
+    assert_eq!(s.visible_match_range(0, 100), (0, 3));
+    // Viewport above all matches.
+    assert_eq!(s.visible_match_range(40, 10), (3, 3));
+}
+
+#[test]
+fn visible_match_range_includes_all_matches_on_a_boundary_row() {
+    // Multiple matches on the same row must all fall inside the window —
+    // equal-row runs are contiguous because matches are row-sorted.
+    let s = SearchState {
+        matches: vec![
+            MatchRange { row: 5, col_start: 0, col_end: 1 },
+            MatchRange { row: 5, col_start: 4, col_end: 6 },
+            MatchRange { row: 5, col_start: 9, col_end: 11 },
+            MatchRange { row: 99, col_start: 0, col_end: 2 },
+        ],
+        ..SearchState::new()
+    };
+    // Viewport [5, 6) captures all three row-5 matches, not the row-99 one.
+    assert_eq!(s.visible_match_range(5, 1), (0, 3));
+}
