@@ -235,13 +235,14 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 /// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
 /// frame boundary instead of rendering now. A redraw is deferred only when
 /// both hold:
-/// - `!was_dirty` — it is not input-driven (keystroke/resize/theme/IME stay
-///   immediate; gating them adds perceptible latency, PR #132).
+/// - it is *streaming-driven* — a fresh PTY burst, or not input-driven at
+///   all. A PURE input redraw (`was_dirty` with no concurrent `pty_burst`:
+///   resize/selection-drag/IME/theme) renders immediately; gating those adds
+///   perceptible latency (PR #132). Crucially a typing echo is BOTH dirty and
+///   a burst, and counts as streaming so it coalesces (issue #710) rather
+///   than rendering per echo chunk.
 /// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame. PTY burst redraws are
-///   streaming work and should coalesce too; otherwise child windows can enter
-///   `surface.get_current_texture()` early and block waiting for the next
-///   drawable/vblank.
+///   window, so another draw now would just burn a frame.
 ///
 /// Extracted as a pure fn (Issue #43) so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
@@ -255,8 +256,22 @@ pub fn should_defer_streaming_redraw(
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
-    let _ = pty_burst;
-    !was_dirty && since_last_render < frame_period
+    // A redraw is coalesce-able when it is streaming-driven: either a fresh
+    // PTY burst, or not input-driven at all. Only a *pure* input redraw
+    // (input_dirty with NO concurrent PTY burst — resize/selection-drag/IME/
+    // theme) renders immediately.
+    //
+    // The decisive case is typing: a keystroke sets `input_dirty`, and the
+    // char only becomes visible via its PTY echo, which arrives as a burst.
+    // So the echo's redraw is BOTH `was_dirty` and `pty_burst`. Keying the
+    // gate on `!was_dirty` alone let that echo short-circuit coalescing and
+    // render per echo chunk — a redraw storm under fast typing and streaming
+    // apps like Claude Code (issue #710). Treating a burst as streaming work
+    // (even when input_dirty is also set) coalesces it to the frame boundary;
+    // `about_to_wait` re-requests at `last_render + frame_period`, so latency
+    // is bounded by one frame and nothing is dropped.
+    let streaming = pty_burst || !was_dirty;
+    streaming && since_last_render < frame_period
 }
 
 pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
@@ -4567,9 +4582,20 @@ mod redraw_coalescing_tests {
     }
 
     #[test]
-    fn input_and_burst_together_render() {
-        // Belt-and-suspenders: any reason-to-render short-circuits deferral.
-        assert!(!should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
+    fn input_with_concurrent_burst_coalesces() {
+        // The typing case (issue #710): a keystroke sets input_dirty and the
+        // char's PTY echo arrives as a burst, so the echo's redraw is BOTH
+        // dirty AND a burst. It must coalesce like other streaming work, not
+        // render per echo chunk — otherwise fast typing / Claude Code streams
+        // storm the renderer.
+        assert!(should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
+        // ...but only within the frame window; past the boundary it renders.
+        assert!(!should_defer_streaming_redraw(
+            true,
+            true,
+            Duration::from_millis(20),
+            FRAME
+        ));
     }
 
     #[test]
