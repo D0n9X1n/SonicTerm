@@ -283,6 +283,43 @@ pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Durati
     pending_bytes >= PTY_REDRAW_FLUSH_BYTES || pending_for >= PTY_REDRAW_MAX_LATENCY
 }
 
+/// Frame period cap applied when rendering on a CPU/software rasterizer
+/// (~30 fps). On a real GPU the monitor's refresh period is used as-is.
+pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(33_333);
+
+/// Resolve the effective frame period for the no-GPU case (issue #713).
+///
+/// When `degrade` is true (software rasterizer detected, or forced by config),
+/// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
+/// the CPU isn't asked to rasterize at the monitor's full refresh rate. A
+/// faster monitor period is slowed to 30 fps; a slower one (rare) is kept.
+/// With `degrade` false the monitor period passes through unchanged, so the
+/// hardware-GPU path is untouched.
+#[must_use]
+pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
+    if degrade {
+        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+    } else {
+        monitor_period
+    }
+}
+
+/// Whether to engage the no-GPU degrade path, combining the config mode with
+/// runtime detection (issue #713). `Auto` follows detection; `Force` always
+/// degrades; `Off` never does.
+#[must_use]
+pub fn should_degrade_for_software_render(
+    mode: sonicterm_cfg::config::SoftwareRenderMode,
+    detected: bool,
+) -> bool {
+    use sonicterm_cfg::config::SoftwareRenderMode as M;
+    match mode {
+        M::Auto => detected,
+        M::Force => true,
+        M::Off => false,
+    }
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -1369,6 +1406,12 @@ pub struct App {
     /// over-render and by `about_to_wait` to schedule the next vsync
     /// boundary via `ControlFlow::WaitUntil`. See perf audit #9.
     pub(super) frame_period: Duration,
+    /// True when the no-GPU degrade path is engaged (software rasterizer
+    /// detected or forced via `[appearance].software_render_mode`). When set,
+    /// `frame_period` is clamped to ~30 fps and per-frame scrollbar fade
+    /// animation is suppressed so the CPU isn't asked to rasterize at full
+    /// refresh (issue #713). Resolved once after the renderer is created.
+    pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
     /// after the previous render. `about_to_wait` schedules a
     /// `WaitUntil(last_render + frame_period)` and `new_events`'
@@ -1631,6 +1674,8 @@ impl App {
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
+            // Resolved after the renderer is created in `do_resumed`.
+            software_render_degrade: false,
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
             input_dirty: false,
@@ -4620,5 +4665,45 @@ mod redraw_coalescing_tests {
             super::PTY_REDRAW_FLUSH_BYTES,
             Duration::ZERO,
         ));
+    }
+}
+
+#[cfg(test)]
+mod software_render_tests {
+    //! Issue #713: no-GPU degrade decision + frame-period clamp.
+    use super::{
+        should_degrade_for_software_render, software_render_frame_period,
+        SOFTWARE_RENDER_FRAME_PERIOD,
+    };
+    use sonicterm_cfg::config::SoftwareRenderMode;
+    use std::time::Duration;
+
+    #[test]
+    fn degrade_mode_combines_config_with_detection() {
+        // Auto follows detection.
+        assert!(should_degrade_for_software_render(SoftwareRenderMode::Auto, true));
+        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Auto, false));
+        // Force always degrades; Off never does — regardless of detection.
+        assert!(should_degrade_for_software_render(SoftwareRenderMode::Force, false));
+        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Off, true));
+    }
+
+    #[test]
+    fn frame_period_clamps_only_when_degrading() {
+        let sixty = Duration::from_micros(16_667); // 60 Hz
+        // Hardware path: untouched.
+        assert_eq!(software_render_frame_period(false, sixty), sixty);
+        // Software path: a fast monitor period is slowed to the 30fps cap.
+        assert_eq!(
+            software_render_frame_period(true, sixty),
+            SOFTWARE_RENDER_FRAME_PERIOD
+        );
+    }
+
+    #[test]
+    fn frame_period_keeps_a_slower_monitor_period() {
+        // A 20 Hz monitor (50ms) is already slower than the 30fps cap — keep it.
+        let slow = Duration::from_millis(50);
+        assert_eq!(software_render_frame_period(true, slow), slow);
     }
 }

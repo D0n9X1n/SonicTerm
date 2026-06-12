@@ -2,6 +2,29 @@
 use super::*;
 
 #[test]
+fn detects_cpu_device_type_as_software() {
+    // Even a "GPU-sounding" name is software if the device type is CPU.
+    assert!(software_rendering_from("Some Virtual GPU", wgpu::DeviceType::Cpu));
+}
+
+#[test]
+fn detects_known_software_rasterizers_by_name() {
+    assert!(software_rendering_from(
+        "Microsoft Basic Render Driver",
+        wgpu::DeviceType::DiscreteGpu
+    ));
+    assert!(software_rendering_from("llvmpipe (LLVM 15.0.7, 256 bits)", wgpu::DeviceType::Other));
+    assert!(software_rendering_from("Google SwiftShader", wgpu::DeviceType::Other));
+}
+
+#[test]
+fn does_not_flag_real_gpus() {
+    assert!(!software_rendering_from("NVIDIA GeForce RTX 4090", wgpu::DeviceType::DiscreteGpu));
+    assert!(!software_rendering_from("Apple M3 Max", wgpu::DeviceType::IntegratedGpu));
+    assert!(!software_rendering_from("Intel(R) Iris(R) Xe", wgpu::DeviceType::IntegratedGpu));
+}
+
+#[test]
 fn indexed_color_supports_full_xterm_256_palette() {
     let theme = Theme::default();
     assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));

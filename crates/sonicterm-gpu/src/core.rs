@@ -132,6 +132,32 @@ fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f
     (x, y, w, h)
 }
 
+/// Classify a wgpu adapter as a software (CPU) rasterizer.
+///
+/// True when the adapter is a CPU device, or its name matches a known
+/// software rasterizer (Microsoft WARP, Mesa llvmpipe, Google SwiftShader).
+/// Used to drive the no-GPU degrade path (issue #713). Pure fn over the
+/// adapter info so it is unit-testable without a live GPU.
+#[must_use]
+pub fn detect_software_rendering(info: &wgpu::AdapterInfo) -> bool {
+    software_rendering_from(&info.name, info.device_type)
+}
+
+/// Inner predicate over just the adapter name + device type, so it can be
+/// unit-tested without building a full `wgpu::AdapterInfo` (which has no
+/// `Default`).
+#[must_use]
+fn software_rendering_from(name: &str, device_type: wgpu::DeviceType) -> bool {
+    if device_type == wgpu::DeviceType::Cpu {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    name.contains("microsoft basic render driver")
+        || name.contains("llvmpipe")
+        || name.contains("swiftshader")
+        || name.contains("software adapter")
+}
+
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
 /// PR-A geometry model. No-op when the pane has nothing to scroll, the
 /// mode is `Never`, or `alpha` is at or below the emit floor (PR-D).
@@ -381,6 +407,11 @@ pub struct GpuSharedContext {
 pub struct GpuRenderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
+    /// True when wgpu selected a CPU/software rasterizer (WARP, llvmpipe,
+    /// SwiftShader) — see [`detect_software_rendering`]. The app reads this
+    /// via [`GpuRenderer::is_software_rendering`] to degrade the frame cap and
+    /// per-frame animation (issue #713).
+    software_rendering: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
@@ -925,15 +956,18 @@ impl GpuRenderer {
                 )))
             });
         let surface = instance.create_surface(window.clone()).context("create surface")?;
-        let (adapter, device, queue) = if let Some(shared) = shared {
+        let (adapter, device, queue, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
+            let software_rendering = detect_software_rendering(&info);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
+                device_type = ?info.device_type,
+                software_rendering,
                 "wgpu adapter reused"
             );
-            (shared.adapter, shared.device, shared.queue)
+            (shared.adapter, shared.device, shared.queue, software_rendering)
         } else {
             let adapter = instance
                 .request_adapter(&RequestAdapterOptions {
@@ -944,12 +978,24 @@ impl GpuRenderer {
                 .await
                 .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
             let info = adapter.get_info();
+            let software_rendering = detect_software_rendering(&info);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
+                device_type = ?info.device_type,
+                software_rendering,
                 "wgpu adapter selected"
             );
+            if software_rendering {
+                tracing::warn!(
+                    adapter = %info.name,
+                    "No hardware GPU — wgpu fell back to a software rasterizer (CPU). \
+                     Rendering will be degraded to stay responsive (lower frame cap, \
+                     no fade animation). Common cause: RDP / VM without GPU passthrough. \
+                     See [appearance].software_render_mode."
+                );
+            }
             if matches!(info.backend, wgpu::Backend::Gl) {
                 tracing::warn!(
                     adapter = %info.name,
@@ -960,7 +1006,7 @@ impl GpuRenderer {
             }
             let (device, queue) =
                 adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
-            (adapter, device, queue)
+            (adapter, device, queue, software_rendering)
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
@@ -1063,6 +1109,7 @@ impl GpuRenderer {
         Ok(Self {
             instance,
             adapter,
+            software_rendering,
             device,
             queue,
             surface,
@@ -1718,6 +1765,13 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// True when wgpu fell back to a CPU/software rasterizer for this window.
+    /// The app uses this to degrade frame pacing and per-frame animation in
+    /// the no-GPU case (issue #713).
+    pub fn is_software_rendering(&self) -> bool {
+        self.software_rendering
     }
 
     /// Current OS display scale factor (physical px per logical px). Exposed so

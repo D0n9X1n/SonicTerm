@@ -142,6 +142,9 @@ impl App {
         // following streaming redraw coalesces instead of over-rendering.
         let was_dirty = self.input_dirty;
         let frame_period = self.frame_period;
+        // Issue #713: snapshot the no-GPU degrade flag before the long-lived
+        // `child` borrow below so the fade-suppression check can read it.
+        let software_render_degrade = self.software_render_degrade;
         let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
         let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
         // Scrollbar input (#pane-scrollbar): handled HERE, before the long-lived
@@ -779,8 +782,10 @@ impl App {
                         t.finish();
                     }
                     // Keep animating the scrollbar fade to completion (the
-                    // 300ms auto-hide) even when no further input arrives.
-                    if scrollbar_needs_more_frames {
+                    // 300ms auto-hide) even when no further input arrives —
+                    // except in the no-GPU path, where the bar snaps instead
+                    // of burning CPU on the fade (issue #713).
+                    if scrollbar_needs_more_frames && !software_render_degrade {
                         child.request_redraw();
                     }
                 }

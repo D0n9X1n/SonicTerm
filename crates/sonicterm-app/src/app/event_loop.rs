@@ -307,6 +307,28 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
+        // Issue #713: resolve the no-GPU degrade decision now that the
+        // renderer (and its adapter) exists. Combine the config mode with
+        // runtime software-rasterizer detection, then clamp the frame period
+        // so the CPU isn't asked to rasterize at the monitor's full refresh.
+        self.software_render_degrade = crate::app::should_degrade_for_software_render(
+            self.config.appearance.software_render_mode,
+            renderer.is_software_rendering(),
+        );
+        if self.software_render_degrade {
+            let before = self.frame_period;
+            self.frame_period =
+                crate::app::software_render_frame_period(true, self.frame_period);
+            tracing::info!(
+                detected = renderer.is_software_rendering(),
+                mode = ?self.config.appearance.software_render_mode,
+                frame_period = ?self.frame_period,
+                "software-render degrade engaged: frame cap {:?} -> {:?}",
+                before,
+                self.frame_period,
+            );
+        }
+
         // Phase C2 / Haiku #295: register the main window's HWND with
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.

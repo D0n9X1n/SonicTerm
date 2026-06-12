@@ -166,6 +166,28 @@ pub enum ScrollbarMode {
     Never,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+/// How to handle the no-GPU / software-rasterizer case (issue #713).
+///
+/// When wgpu falls back to a CPU rasterizer (WARP, llvmpipe, SwiftShader —
+/// common under RDP / VMs / VDI), every frame is drawn on the CPU. SonicTerm
+/// can detect this and degrade (lower frame cap, no per-frame fade animation)
+/// to stay usable.
+pub enum SoftwareRenderMode {
+    /// Detect software rendering automatically and degrade when found
+    /// (default). Hardware-GPU machines are unaffected.
+    #[default]
+    Auto,
+    /// Always treat rendering as software-bound (force the degrade path even
+    /// if a GPU is reported — useful over remote sessions that look like a
+    /// GPU but aren't).
+    Force,
+    /// Never degrade; always use the full per-frame path regardless of the
+    /// adapter.
+    Off,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Appearance and compositor backdrop settings.
@@ -178,6 +200,8 @@ pub struct AppearanceConfig {
     pub scrollbar: ScrollbarMode,
     /// Padding between overlay panel chrome and its inner content, in logical px.
     pub panel_padding: f32,
+    /// No-GPU / software-rasterizer handling (issue #713).
+    pub software_render_mode: SoftwareRenderMode,
 }
 
 impl Default for AppearanceConfig {
@@ -187,6 +211,7 @@ impl Default for AppearanceConfig {
             opacity: 1.0,
             scrollbar: ScrollbarMode::default(),
             panel_padding: 2.0,
+            software_render_mode: SoftwareRenderMode::default(),
         }
     }
 }
@@ -686,6 +711,11 @@ backdrop = "opaque"
 opacity = 1.0
 scrollbar = "auto"
 panel_padding = {panel_padding}
+# No-GPU handling. When wgpu falls back to a CPU rasterizer (WARP / llvmpipe,
+# common over RDP / in VMs), every frame is drawn on the CPU. "auto" detects
+# this and lowers the frame cap + disables per-frame fade animation to stay
+# usable; "force" always degrades; "off" never does.
+software_render_mode = "auto"
 
 [render]
 # Renderer behavior switches. Keep "v2" unless bisecting a rendering regression.

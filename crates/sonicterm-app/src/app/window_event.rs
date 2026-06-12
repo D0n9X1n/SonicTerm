@@ -274,7 +274,10 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("scrollbar");
                 }
-                if scrollbar_needs_more_frames {
+                if scrollbar_needs_more_frames && !self.software_render_degrade {
+                    // Issue #713: in the no-GPU path, skip the fade-driven
+                    // extra frames — the bar snaps instead of animating, but
+                    // we don't burn CPU rasterizing a 300ms fade.
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }
