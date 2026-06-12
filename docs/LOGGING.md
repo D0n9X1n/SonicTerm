@@ -34,6 +34,15 @@ phase timings such as grid walk, overlay assembly, glyph upload, surface acquire
 submit, and present. There is no separate render-timing config key or environment
 variable.
 
+## GPU / software-render diagnostics
+
+At startup the renderer logs the selected wgpu adapter at `info` level,
+including its `device_type` and a `software_rendering` flag. When there is no
+usable GPU (RDP / VM / VDI falls back to a CPU rasterizer) it also logs a
+`software-render degrade engaged` line showing the frame-cap change. If the
+terminal feels heavy on a remote/virtual machine, check these lines first — and
+see `[appearance].software_render_mode` in the Configuration wiki.
+
 ## Bug report bundle
 
 When reporting a bug, include:
