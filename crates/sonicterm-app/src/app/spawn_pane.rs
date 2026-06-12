@@ -39,7 +39,11 @@ impl App {
     pub(super) fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Honour the user's configured scrollback depth instead of the
+        // Grid's built-in 10k default (issue #710).
+        let mut grid = Grid::new(cols, rows);
+        grid.set_scrollback_limit(self.config.terminal.scrollback);
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface

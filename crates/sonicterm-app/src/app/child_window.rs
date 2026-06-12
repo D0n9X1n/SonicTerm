@@ -1602,7 +1602,11 @@ impl App {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(cols, rows), reply_tx)));
+        // Honour the user's configured scrollback depth (issue #710); child
+        // windows must match the main window, not the Grid's 10k default.
+        let mut grid = Grid::new(cols, rows);
+        grid.set_scrollback_limit(self.config.terminal.scrollback);
+        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
         // Seed theme defaults for OSC 10/11/12 (#369) + OSC 4 palette (#661).
         {
             let mut p = parser.lock();

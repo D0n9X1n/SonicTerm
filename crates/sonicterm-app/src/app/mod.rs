@@ -1187,6 +1187,14 @@ pub struct App {
     /// which pane an action targeted without constructing a process-backed PTY.
     #[doc(hidden)]
     pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+    /// Whether the PTY write ledger above is actually recorded. `false` in
+    /// production so `dispatch_pty_write_effect` does no lock/clone/push per
+    /// write (the ledger would otherwise grow unbounded for the whole
+    /// session — see issue #710). Set `true` when the app is built without an
+    /// event-loop proxy (headless/test construction) so existing tests keep
+    /// capturing writes with no per-test opt-in.
+    #[doc(hidden)]
+    pub(super) pty_write_log_enabled: bool,
     // #404: `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -1577,6 +1585,10 @@ impl App {
             clipboard: Clipboard::new().ok(),
             test_clipboard_text: None,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
+            // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
+            // writes for assertions. Production always passes `Some(proxy)`,
+            // so the ledger stays disabled and adds no per-write cost.
+            pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: false,
             pending_tear_out: None,
             pending_os_teardown: false,
@@ -2086,7 +2098,12 @@ impl App {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             let pane_id = pane.0;
             let bytes = data.to_vec();
-            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            // Test-only ledger: skipped entirely in production so we don't
+            // lock+clone+push on every PTY write (issue #710 — unbounded
+            // growth + per-keystroke overhead over a long session).
+            if self.pty_write_log_enabled {
+                self.test_pty_writes.lock().push((pane_id, bytes.clone()));
+            }
             let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
                 let _ = pty.in_tx.send(bytes);
@@ -2540,6 +2557,7 @@ impl App {
     /// Test-only: clear the PTY write ledger before a broadcast assertion.
     #[doc(hidden)]
     pub fn __test_enable_pty_write_log(&mut self) {
+        self.pty_write_log_enabled = true;
         self.test_pty_writes.lock().clear();
     }
 

@@ -692,13 +692,16 @@ impl Grid {
             // line is non-uniform — it stays Flat. Multi-Cluster
             // segmentation of partially-uniform lines is PR-D scope.
             row.try_compress();
-            if self.scrollback.len() == self.scrollback_limit {
-                // Reuse the oldest scrollback row as the new blank line
-                // (avoids both an allocation and a free).
-                // PANIC: safe — the surrounding `if` proves the deque is at
-                // capacity, so `len >= scrollback_limit >= 1`. We only enter
-                // this branch when `scrollback_limit > 0`, and a non-empty
-                // VecDeque always yields `Some` from `pop_front`.
+            if self.scrollback.len() >= self.scrollback_limit {
+                // At (or over) capacity: reuse the oldest scrollback row as
+                // the new blank line (avoids both an allocation and a free).
+                // `>=` rather than `==` is defensive: `set_scrollback_limit`
+                // already drains any excess when the cap is lowered, but if a
+                // scrollback were ever above the limit this branch holds it
+                // steady (recycle is length-neutral) instead of letting the
+                // `else` branch grow it one row per scroll (issue #710).
+                // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
+                // above), and a non-empty VecDeque always yields `Some`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
                 // Recycled may itself have been compressed when it was
                 // ejected — force back to Flat before we mutate cells.
@@ -1215,11 +1218,17 @@ impl Grid {
         self.prompts.iter().find(|p| p.start_row > from_absolute_row)
     }
 
-    /// Set the maximum number of scrollback rows retained.
-    #[doc(hidden)]
-    #[doc(hidden)]
+    /// Set the maximum number of scrollback rows retained. When the new
+    /// limit is below the current history depth, the oldest rows are dropped
+    /// immediately so memory reflects the new cap — this is what makes
+    /// `config.terminal.scrollback` actually bound retained history, both at
+    /// pane creation and on config hot-reload (issue #710).
     pub fn set_scrollback_limit(&mut self, limit: usize) {
         self.scrollback_limit = limit;
+        if self.scrollback.len() > limit {
+            let excess = self.scrollback.len() - limit;
+            self.scrollback.drain(0..excess);
+        }
     }
 }
 

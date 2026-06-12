@@ -356,6 +356,20 @@ impl App {
             }
         }
 
+        // Scrollback depth: re-apply to every live pane across all windows
+        // (and all tabs — every pane lives in `ws.panes`, inactive tabs
+        // included). Lowering the cap drains excess history immediately
+        // (issue #710). App-thread, not render hot path, so lock() is fine.
+        if new_cfg.terminal.scrollback != self.config.terminal.scrollback {
+            let limit = new_cfg.terminal.scrollback;
+            tracing::info!("live-reload: scrollback -> {limit} rows");
+            for child in self.windows.values() {
+                for pane in child.panes.values() {
+                    pane.parser.lock().grid_mut().set_scrollback_limit(limit);
+                }
+            }
+        }
+
         self.config = new_cfg;
         if let Some(w) = self.main_window() {
             w.request_redraw();
