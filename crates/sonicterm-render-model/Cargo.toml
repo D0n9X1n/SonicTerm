@@ -1,6 +1,6 @@
 [package]
 name = "sonicterm-render-model"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -9,4 +9,4 @@ sonicterm-types = { workspace = true }
 sonicterm-text = { workspace = true }
 sonicterm-cfg = { workspace = true }
 sonicterm-grid = { workspace = true }
-sonicterm-engine = { path = "../sonicterm-engine", version = "0.10.2" }
+sonicterm-engine = { path = "../sonicterm-engine", version = "0.10.3" }

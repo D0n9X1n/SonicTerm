@@ -52,6 +52,7 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 ```bash
 cargo test --workspace --lib --bins
 bash scripts/check-workspace-crates.sh
+scripts/coverage/rust-logic.sh
 ```
 
 For release prep also run:

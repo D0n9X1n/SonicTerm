@@ -44,10 +44,173 @@ pub(super) fn read_only_allows_action(action: &Action) -> bool {
             | Action::ActivateLastTab
             | Action::FocusPane(_)
             | Action::OpenSearch
+            | Action::CheckForUpdates
     )
 }
 
 impl App {
+    pub(super) fn show_notification_for_kind(
+        &mut self,
+        kind: FrontmostKind,
+        level: sonicterm_ui::overlays::NotificationLevel,
+        message: String,
+    ) {
+        self.show_notification_for_kind_until(
+            kind,
+            level,
+            message,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(7)),
+        );
+    }
+
+    pub(super) fn show_notification_for_kind_until(
+        &mut self,
+        kind: FrontmostKind,
+        level: sonicterm_ui::overlays::NotificationLevel,
+        message: String,
+        expires_at: Option<std::time::Instant>,
+    ) {
+        let bubble = sonicterm_ui::overlays::NotificationBubble { level, message, expires_at };
+        match kind {
+            FrontmostKind::Child(id) => {
+                if let Some(child) = self.windows.get_mut(&id) {
+                    child.notification = Some(bubble);
+                    child.request_redraw();
+                    return;
+                }
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {}
+        }
+        if let Some(ws) = self.main_mut() {
+            ws.notification = Some(bubble);
+        }
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+    }
+
+    pub(super) fn dismiss_notification_at(&mut self, kind: FrontmostKind, x: f32, y: f32) -> bool {
+        let Some((message, scale, font_size, window_w, window_h, read_only, search_open)) =
+            self.notification_hit_inputs(kind)
+        else {
+            return false;
+        };
+        let content_w = message.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size;
+        let row = u8::from(read_only) + u8::from(search_open);
+        let layout = sonicterm_ui::overlays::NotificationBubbleLayout::compute(
+            window_w,
+            window_h,
+            content_w,
+            row,
+            scale,
+        );
+        let inside = x >= layout.close.x
+            && x < layout.close.x + layout.close.w
+            && y >= layout.close.y
+            && y < layout.close.y + layout.close.h;
+        if !inside {
+            return false;
+        }
+        match kind {
+            FrontmostKind::Child(id) => {
+                if let Some(child) = self.windows.get_mut(&id) {
+                    child.notification = None;
+                    child.request_redraw();
+                    return true;
+                }
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {}
+        }
+        if let Some(ws) = self.main_mut() {
+            ws.notification = None;
+        }
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    fn notification_hit_inputs(
+        &self,
+        kind: FrontmostKind,
+    ) -> Option<(String, f32, f32, f32, f32, bool, bool)> {
+        match kind {
+            FrontmostKind::Child(id) => {
+                let child = self.windows.get(&id)?;
+                let message = child.notification.as_ref()?.message.clone();
+                let renderer = child.renderer.as_ref()?;
+                let window = child.window.as_ref()?;
+                let size = window.inner_size();
+                let tab_idx = child.tabs.active_index();
+                let search_open = child.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
+                let read_only = child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
+                Some((
+                    message,
+                    renderer.scale_factor(),
+                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size()) * renderer.scale_factor(),
+                    size.width as f32,
+                    size.height as f32,
+                    read_only,
+                    search_open,
+                ))
+            }
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                let ws = self.main()?;
+                let message = ws.notification.as_ref()?.message.clone();
+                let renderer = ws.renderer.as_ref()?;
+                let window = ws.window.as_ref()?;
+                let size = window.inner_size();
+                let tab_idx = ws.tabs.active_index();
+                let search_open = ws.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
+                let read_only = ws.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
+                Some((
+                    message,
+                    renderer.scale_factor(),
+                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size()) * renderer.scale_factor(),
+                    size.width as f32,
+                    size.height as f32,
+                    read_only,
+                    search_open,
+                ))
+            }
+        }
+    }
+
+    pub(super) fn start_update_check_for_kind(&mut self, kind: FrontmostKind) {
+        self.show_notification_for_kind_until(
+            kind,
+            sonicterm_ui::overlays::NotificationLevel::Warning,
+            "Checking for updates…".to_string(),
+            None,
+        );
+        let Some(proxy) = self.event_loop_proxy.clone() else {
+            self.show_notification_for_kind(
+                kind,
+                sonicterm_ui::overlays::NotificationLevel::Error,
+                "Unable to check updates".to_string(),
+            );
+            return;
+        };
+        std::thread::spawn(move || {
+            let result = crate::app::update_check::check_latest_release(env!("CARGO_PKG_VERSION"));
+            let (level, message) = match result {
+                crate::app::update_check::UpdateCheckResult::Newer { tag, .. } => (
+                    sonicterm_ui::overlays::NotificationLevel::Warning,
+                    format!("Update available: {tag}"),
+                ),
+                crate::app::update_check::UpdateCheckResult::UpToDate => (
+                    sonicterm_ui::overlays::NotificationLevel::Info,
+                    "SonicTerm is up to date".to_string(),
+                ),
+                crate::app::update_check::UpdateCheckResult::Unavailable => (
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    "Unable to check updates".to_string(),
+                ),
+            };
+            let _ = proxy.send_event(UserEvent::UpdateCheckFinished { level, message });
+        });
+    }
+
     fn read_only_active_for_kind(&self, kind: FrontmostKind) -> bool {
         match kind {
             FrontmostKind::Main => self
@@ -370,6 +533,7 @@ impl App {
             }
             Action::EditConfigFile => self.open_config_file(),
             Action::OpenKeymapFile => self.open_keymap_file(),
+            Action::CheckForUpdates => self.start_update_check_for_kind(self.frontmost_kind()),
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),

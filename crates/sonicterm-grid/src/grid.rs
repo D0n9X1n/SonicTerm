@@ -78,6 +78,8 @@ pub struct Grid {
     dirty_rows: Vec<bool>,
     /// Prompt regions recorded from OSC 133. Oldest first.
     prompts: VecDeque<PromptRegion>,
+    autowrap: bool,
+    pending_wrap: bool,
 }
 
 impl Grid {
@@ -99,7 +101,30 @@ impl Grid {
             // clear_dirty(), the flags drop to all-false.
             dirty_rows: vec![true; rows as usize],
             prompts: VecDeque::new(),
+            autowrap: true,
+            pending_wrap: false,
         }
+    }
+
+    pub fn set_autowrap(&mut self, enabled: bool) {
+        if self.autowrap == enabled {
+            return;
+        }
+        self.autowrap = enabled;
+        self.pending_wrap = false;
+        self.bump();
+    }
+
+    pub fn autowrap(&self) -> bool {
+        self.autowrap
+    }
+
+    pub fn pending_wrap(&self) -> bool {
+        self.pending_wrap
+    }
+
+    fn clear_pending_wrap(&mut self) {
+        self.pending_wrap = false;
     }
 
     /// True if row `r` has been mutated since the last `clear_dirty()`.
@@ -201,6 +226,7 @@ impl Grid {
     /// Switch to the alt screen, saving the current visible+scrollback.
     /// No-op if already on the alt screen.
     pub fn enter_alt_screen(&mut self) {
+        self.clear_pending_wrap();
         if self.alt_screen.is_some() {
             return;
         }
@@ -225,6 +251,8 @@ impl Grid {
             revision: 0,
             dirty_rows: vec![true; rows as usize],
             prompts: VecDeque::new(),
+            autowrap: self.autowrap,
+            pending_wrap: false,
         };
         self.alt_screen = Some(Box::new(saved));
         self.mark_all();
@@ -234,6 +262,7 @@ impl Grid {
     /// Leave the alt screen, restoring the saved primary screen. No-op if
     /// not on the alt screen.
     pub fn leave_alt_screen(&mut self) {
+        self.clear_pending_wrap();
         let Some(saved) = self.alt_screen.take() else {
             return;
         };
@@ -264,6 +293,7 @@ impl Grid {
     /// Resize the grid to `cols × rows`. Existing rows are clipped or
     /// padded with default cells.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.clear_pending_wrap();
         if cols == self.cols && rows == self.rows {
             return;
         }
@@ -382,6 +412,32 @@ impl Grid {
         underline_style: UnderlineStyle,
         underline_color: Option<Color>,
     ) {
+        self.put_char_styled_in_region(
+            ch,
+            fg,
+            bg,
+            flags,
+            hyperlink,
+            underline_style,
+            underline_color,
+            None,
+            Cell::default(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_char_styled_in_region(
+        &mut self,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        hyperlink: Option<HyperlinkId>,
+        underline_style: UnderlineStyle,
+        underline_color: Option<Color>,
+        wrap_region: Option<(u16, u16)>,
+        wrap_fill: Cell,
+    ) {
         // ASCII printable fast-path: every codepoint in 0x20..=0x7E has
         // unicode_width == 1 unconditionally. `UnicodeWidthChar::width`
         // performs a binary search through several MiB of tables — for
@@ -427,27 +483,52 @@ impl Grid {
             self.bump();
             return;
         }
+        if self.pending_wrap {
+            self.pending_wrap = false;
+            if self.autowrap {
+                self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
+                self.cursor.col = 0;
+            }
+        }
+        let mut effective_width = width;
         if self.cursor.col + width > self.cols {
-            self.linefeed();
-            self.cursor.col = 0;
+            if self.autowrap {
+                self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
+                self.cursor.col = 0;
+                if width > self.cols {
+                    effective_width = 1;
+                }
+            } else {
+                self.cursor.col = self.cols.saturating_sub(1);
+                effective_width = 1;
+            }
         }
         let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
         let mut clean_flags = flags;
         clean_flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
         let mut fill = Cell::plain(' ', fg, bg, clean_flags);
         Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
-        self.clear_wide_intersections(r, c, width as usize, fill);
+        self.clear_wide_intersections(r, c, effective_width as usize, fill);
 
-        let cell_flags = if width == 2 { clean_flags | CellFlags::WIDE } else { clean_flags };
+        let cell_flags =
+            if effective_width == 2 { clean_flags | CellFlags::WIDE } else { clean_flags };
         let mut lead = Cell::plain(ch, fg, bg, cell_flags);
         Self::apply_rare_attrs(&mut lead, hyperlink, underline_style, underline_color);
         self.visible[r][c] = lead;
-        if width == 2 && c + 1 < self.cols as usize {
+        if effective_width == 2 && c + 1 < self.cols as usize {
             let mut cont = Cell::plain(' ', fg, bg, clean_flags | CellFlags::WIDE_CONT);
             Self::apply_rare_attrs(&mut cont, hyperlink, underline_style, underline_color);
             self.visible[r][c + 1] = cont;
         }
-        self.cursor.col += width;
+        self.cursor.col += effective_width;
+        if self.cursor.col >= self.cols {
+            if self.autowrap {
+                self.cursor.col = self.cols;
+                self.pending_wrap = true;
+            } else {
+                self.cursor.col = self.cols.saturating_sub(1);
+            }
+        }
         self.mark_row(r as u16);
         self.bump();
     }
@@ -510,8 +591,19 @@ impl Grid {
         cell.set_underline_color(underline_color);
     }
 
+    fn wrap_linefeed_with(&mut self, region: Option<(u16, u16)>, fill: Cell) {
+        if let Some((top, bottom)) = region {
+            if self.cursor.row == bottom {
+                self.scroll_region_up_with(top, bottom, 1, fill);
+                return;
+            }
+        }
+        self.linefeed_with(fill);
+    }
+
     /// Move the cursor to column 0 of the current row.
     pub fn carriage_return(&mut self) {
+        self.clear_pending_wrap();
         self.cursor.col = 0;
         let r = self.cursor.row;
         self.mark_row(r);
@@ -528,6 +620,7 @@ impl Grid {
     /// when a colored app scrolls, the blank line inherits the active SGR
     /// rendition instead of reverting to the theme default.
     pub fn linefeed_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         let old = self.cursor.row;
         if self.cursor.row + 1 >= self.rows {
             // scroll_up already marks every row dirty.
@@ -545,6 +638,7 @@ impl Grid {
 
     /// Move the cursor one column to the left (does not erase).
     pub fn backspace(&mut self) {
+        self.clear_pending_wrap();
         self.cursor.col = self.cursor.col.saturating_sub(1);
         let r = self.cursor.row;
         self.mark_row(r);
@@ -553,6 +647,7 @@ impl Grid {
 
     /// Advance the cursor to the next tab stop (8-column tabs).
     pub fn tab(&mut self) {
+        self.clear_pending_wrap();
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
         let r = self.cursor.row;
@@ -576,6 +671,7 @@ impl Grid {
     /// Scroll the visible region up by `n` lines, filling newly exposed rows
     /// with `fill`.
     pub fn scroll_up_with(&mut self, n: u16, fill: Cell) {
+        self.clear_pending_wrap();
         let cols = self.cols as usize;
         for _ in 0..n {
             let Some(mut row) = self.visible.pop_front() else {
@@ -641,6 +737,7 @@ impl Grid {
     /// Scroll the visible region down by `n` lines, filling newly exposed rows
     /// with `fill`.
     pub fn scroll_down_with(&mut self, n: u16, fill: Cell) {
+        self.clear_pending_wrap();
         let cols = self.cols as usize;
         let rows = self.rows as usize;
         if rows == 0 {
@@ -688,6 +785,7 @@ impl Grid {
 
     /// Scroll a sub-region up, filling newly exposed rows with `fill`.
     pub fn scroll_region_up_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
+        self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
             return;
@@ -750,6 +848,7 @@ impl Grid {
 
     /// Scroll a sub-region down, filling newly exposed rows with `fill`.
     pub fn scroll_region_down_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
+        self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
             return;
@@ -795,6 +894,7 @@ impl Grid {
 
     /// Erase from cursor to end of line using `fill`.
     pub fn erase_line_to_end_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         let r = self.cursor.row as usize;
         let start = self.cursor.col as usize;
         let end = self.cols as usize;
@@ -813,6 +913,7 @@ impl Grid {
 
     /// Erase from beginning of line to cursor inclusive using `fill`.
     pub fn erase_line_to_start_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         let r = self.cursor.row as usize;
         let end = (self.cursor.col as usize).min(self.cols as usize - 1) + 1;
         self.clear_wide_intersections(r, 0, end, fill.clone());
@@ -830,6 +931,7 @@ impl Grid {
 
     /// Erase the entire current line using `fill`.
     pub fn erase_line_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         let r = self.cursor.row as usize;
         for cell in &mut self.visible[r] {
             *cell = fill.clone();
@@ -847,6 +949,7 @@ impl Grid {
 
     /// Erase from cursor to end of screen using `fill`.
     pub fn erase_below_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         self.erase_line_to_end_with(fill.clone());
         for r in (self.cursor.row as usize + 1)..self.rows as usize {
             for cell in &mut self.visible[r] {
@@ -867,6 +970,7 @@ impl Grid {
 
     /// Erase from start of screen to cursor using `fill`.
     pub fn erase_above_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         for r in 0..self.cursor.row as usize {
             for cell in &mut self.visible[r] {
                 *cell = fill.clone();
@@ -886,6 +990,7 @@ impl Grid {
 
     /// Erase the entire visible screen using `fill`.
     pub fn erase_screen_with(&mut self, fill: Cell) {
+        self.clear_pending_wrap();
         for row in &mut self.visible {
             for cell in row.iter_mut() {
                 *cell = fill.clone();
@@ -906,6 +1011,7 @@ impl Grid {
 
     /// Erase `n` cells starting at (`row`, `col`) using `fill`.
     pub fn erase_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+        self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -929,6 +1035,7 @@ impl Grid {
 
     /// Insert `n` cells filled with `fill` at (`row`, `col`).
     pub fn insert_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+        self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -957,6 +1064,7 @@ impl Grid {
 
     /// Delete `n` cells and fill the right edge with `fill`.
     pub fn delete_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+        self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
             return;
         }
@@ -979,6 +1087,7 @@ impl Grid {
 
     /// Move cursor to (row, col), clamping to grid bounds.
     pub fn goto(&mut self, row: u16, col: u16) {
+        self.clear_pending_wrap();
         let old_row = self.cursor.row;
         self.cursor.row = row.min(self.rows.saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
@@ -1119,111 +1228,5 @@ fn make_row(cols: u16) -> Line {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overwriting_wide_lead_clears_continuation() {
-        let mut grid = Grid::new(10, 1);
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.goto(0, 0);
-        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
-
-        assert_eq!(grid.row(0)[0].ch, 'a');
-        assert!(!grid.row(0)[0].flags.contains(CellFlags::WIDE));
-        assert_eq!(grid.row(0)[1].ch, ' ');
-        assert!(!grid.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
-    }
-
-    #[test]
-    fn overwriting_wide_continuation_clears_lead() {
-        let mut grid = Grid::new(10, 1);
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.backspace();
-        grid.put_char(' ', Color::Default, Color::Default, CellFlags::empty());
-
-        assert_eq!(grid.row(0)[0].ch, ' ');
-        assert!(!grid.row(0)[0].flags.contains(CellFlags::WIDE));
-        assert_eq!(grid.row(0)[1].ch, ' ');
-        assert!(!grid.row(0)[1].flags.contains(CellFlags::WIDE_CONT));
-    }
-
-    #[test]
-    fn erase_cells_splits_wide_char_cleanly() {
-        let mut grid = Grid::new(10, 1);
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.erase_cells_with(0, 1, 1, Cell::default());
-
-        assert_row_has_no_orphan_wide_cells(&grid);
-        assert_eq!(grid.row(0)[0].ch, ' ');
-        assert_eq!(grid.row(0)[1].ch, ' ');
-    }
-
-    #[test]
-    fn delete_cells_expands_single_cell_delete_to_full_wide_char() {
-        let mut grid = Grid::new(12, 1);
-        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.delete_cells_with(0, 1, 1, Cell::default());
-
-        assert_row_has_no_orphan_wide_cells(&grid);
-        assert_eq!(grid.row(0)[0].ch, 'a');
-        assert_eq!(grid.row(0)[1].ch, '文');
-        assert!(grid.row(0)[1].flags.contains(CellFlags::WIDE));
-        assert!(grid.row(0)[2].flags.contains(CellFlags::WIDE_CONT));
-        assert_eq!(grid.row(0)[3].ch, 'b');
-    }
-
-    #[test]
-    fn delete_cells_from_wide_continuation_deletes_full_wide_char() {
-        let mut grid = Grid::new(12, 1);
-        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.delete_cells_with(0, 2, 1, Cell::default());
-
-        assert_row_has_no_orphan_wide_cells(&grid);
-        assert_eq!(grid.row(0)[0].ch, 'a');
-        assert_eq!(grid.row(0)[1].ch, '文');
-        assert!(grid.row(0)[1].flags.contains(CellFlags::WIDE));
-        assert!(grid.row(0)[2].flags.contains(CellFlags::WIDE_CONT));
-        assert_eq!(grid.row(0)[3].ch, 'b');
-    }
-
-    #[test]
-    fn insert_cells_inside_wide_char_repairs_row() {
-        let mut grid = Grid::new(12, 1);
-        grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('文', Color::Default, Color::Default, CellFlags::empty());
-        grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
-
-        grid.insert_cells_with(0, 2, 1, Cell::default());
-
-        assert_row_has_no_orphan_wide_cells(&grid);
-    }
-
-    fn assert_row_has_no_orphan_wide_cells(grid: &Grid) {
-        let row = grid.row(0);
-        for c in 0..grid.cols as usize {
-            let flags = row[c].flags;
-            if flags.contains(CellFlags::WIDE) {
-                assert!(c + 1 < grid.cols as usize, "wide lead at row end");
-                assert!(row[c + 1].flags.contains(CellFlags::WIDE_CONT), "wide lead without continuation at col {c}");
-            }
-            if flags.contains(CellFlags::WIDE_CONT) {
-                assert!(c > 0, "wide continuation at col 0");
-                assert!(row[c - 1].flags.contains(CellFlags::WIDE), "wide continuation without lead at col {c}");
-            }
-        }
-    }
-}
+#[path = "grid/tests.rs"]
+mod tests;

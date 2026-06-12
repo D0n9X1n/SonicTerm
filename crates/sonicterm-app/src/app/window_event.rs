@@ -26,7 +26,7 @@ use winit::{
 };
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
-use super::{mark_all_panes_dirty, App, TabState};
+use super::{mark_all_panes_dirty, App, FrontmostKind, TabState};
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
@@ -101,6 +101,12 @@ impl App {
             return;
         }
         match event {
+            WindowEvent::DroppedFile(path) => {
+                self.paste_file_paths_for_kind(FrontmostKind::Main, [path]);
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::CloseRequested => {
                 // M6a-expand-2c-window: notify the reducer of the
                 // close request. The reducer mutates
@@ -415,6 +421,7 @@ impl App {
                     ws_ime_throttle_ref,
                     ws_viewport_tops,
                     ws_hovered_url_cells,
+                    ws_notification_ref,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonicterm_ui::tabs::TabBar>,
@@ -428,6 +435,7 @@ impl App {
                     Option<&mut sonicterm_ui::ime::ImeCursorThrottle>,
                     std::collections::HashMap<u64, Option<u64>>,
                     Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+                    Option<&sonicterm_ui::overlays::NotificationBubble>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // PR #400: cursor_visible is now per-pane; read
@@ -453,6 +461,7 @@ impl App {
                         // theme accent. Immutable read, disjoint from the
                         // mut borrows of ws.{renderer,tabs,...}.
                         let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
+                        let notification_ref = ws.notification.as_ref();
                         let viewport_tops = ws
                             .panes
                             .iter()
@@ -471,6 +480,7 @@ impl App {
                             Some(&mut ws.ime_cursor_throttle),
                             viewport_tops,
                             hovered_url_cells,
+                            notification_ref,
                         )
                     }
                     None => (
@@ -485,6 +495,7 @@ impl App {
                         None,
                         None,
                         std::collections::HashMap::new(),
+                        None,
                         None,
                     ),
                 };
@@ -583,6 +594,7 @@ impl App {
                                 .then_some(&mut self.command_palette),
                             ws_ime_ref,
                             pane.viewport_top_abs,
+                            ws_notification_ref,
                             ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
@@ -1250,6 +1262,14 @@ impl App {
                             mods: sonicterm_types::ModKey::empty(),
                             pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                         });
+                    }
+                    let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                    if self.dismiss_notification_at(
+                        FrontmostKind::Main,
+                        cursor_pos.0 as f32,
+                        cursor_pos.1 as f32,
+                    ) {
+                        return;
                     }
                     if let Some(ws) = self.main_mut() {
                         ws.mouse_down = true;

@@ -63,6 +63,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "OpenCommandPalette",
     "EditConfigFile",
     "OpenKeymapFile",
+    "CheckForUpdates",
     "Scroll",
     "ScrollToPrevPrompt",
     "ScrollToNextPrompt",
@@ -110,6 +111,7 @@ pub fn variant_kind(a: &Action) -> &'static str {
         Action::OpenCommandPalette => "OpenCommandPalette",
         Action::EditConfigFile => "EditConfigFile",
         Action::OpenKeymapFile => "OpenKeymapFile",
+        Action::CheckForUpdates => "CheckForUpdates",
         Action::Scroll(_) => "Scroll",
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt",
         Action::ScrollToNextPrompt => "ScrollToNextPrompt",
@@ -162,6 +164,7 @@ pub fn label(a: &Action) -> String {
         Action::OpenCommandPalette => "Open Command Palette".into(),
         Action::EditConfigFile => "Edit sonicterm.toml".into(),
         Action::OpenKeymapFile => "Edit keymap.toml".into(),
+        Action::CheckForUpdates => "Check for Updates".into(),
         Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
         Action::ScrollToNextPrompt => "Scroll to Next Prompt".into(),
@@ -220,6 +223,7 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
             &["settings", "config", "options", "prefs", "preferences", "toml"]
         }
         Action::OpenKeymapFile => &["settings", "config", "keys", "bindings", "shortcuts", "toml"],
+        Action::CheckForUpdates => &["update", "updates", "upgrade", "release", "version"],
         Action::Scroll(_) => &["page", "line", "scrollback"],
         Action::ScrollToPrevPrompt => &["jump", "prompt", "previous"],
         Action::ScrollToNextPrompt => &["jump", "prompt", "next"],

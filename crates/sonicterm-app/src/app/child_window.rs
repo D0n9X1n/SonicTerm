@@ -38,8 +38,8 @@ use super::scrollbar_input::HitOutcome;
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
-    resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState,
-    TabState, UserEvent, WindowState,
+    resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind,
+    PaneState, TabState, UserEvent, WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -151,11 +151,26 @@ impl App {
         // drag is in flight scrolls the pane. On a Miss we fall through to the
         // normal match so pane-focus / selection still work.
         match &event {
+            WindowEvent::DroppedFile(path) => {
+                self.paste_file_paths_for_kind(FrontmostKind::Child(win_id), [path.clone()]);
+                if let Some(child) = self.windows.get(&win_id) {
+                    child.request_redraw();
+                }
+                return;
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
+                let cursor_pos = self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
+                if self.dismiss_notification_at(
+                    FrontmostKind::Child(win_id),
+                    cursor_pos.0 as f32,
+                    cursor_pos.1 as f32,
+                ) {
+                    return;
+                }
                 let (px, py) = self
                     .windows
                     .get(&win_id)
@@ -603,6 +618,7 @@ impl App {
                             // CJK composition was invisible in torn-out windows.
                             Some(&child.ime),
                             pane.viewport_top_abs,
+                            child.notification.as_ref(),
                             // Cmd-hover URL recolor (#pane-url): pass the child's
                             // own hovered-URL cells so torn-out windows get the
                             // same yellow-hint / accent-when-Cmd underline + glyph

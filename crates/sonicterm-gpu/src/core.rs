@@ -57,6 +57,7 @@ fn cursor_char_slice_at(text: &str, cursor: usize) -> Option<&str> {
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
+const NOTIFICATION_CLOSE_ICON: &str = "";
 const READ_ONLY_BADGE_W: f32 = 250.0;
 const READ_ONLY_BADGE_H: f32 = SEARCH_BAR_HEIGHT;
 const READ_ONLY_BADGE_MARGIN: f32 = 12.0;
@@ -278,7 +279,8 @@ use sonicterm_ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        command_palette_query_label, search_bar_label, search_query_caret_prefix, PaletteLayout,
+        command_palette_query_label, search_bar_label, search_query_caret_prefix,
+        NotificationBubble, NotificationBubbleLayout, NotificationLevel, PaletteLayout,
         SearchBarLayout, PALETTE_BORDER, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
@@ -613,6 +615,7 @@ struct FrameKey {
     search_hash: u64,
     palette_hash: u64,
     ime_hash: u64,
+    notification_hash: u64,
     width: u32,
     height: u32,
     tab_hash: u64,
@@ -2177,6 +2180,7 @@ impl GpuRenderer {
         mut palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
+        notification: Option<&NotificationBubble>,
         // Cmd-hovered auto-detected URL cell range (viewport coords),
         // or `None` when no URL is hovered while the open-URL modifier
         // is held. When set on the active pane, the URL's glyphs are
@@ -2427,6 +2431,15 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
+        let notification_hash: u64 = notification
+            .map(|n| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                n.level.hash(&mut h);
+                n.message.hash(&mut h);
+                h.finish()
+            })
+            .unwrap_or(0);
         // Hash the full tab list (titles + ids + order + active index) so
         // closing/renaming/reordering an INACTIVE tab still invalidates the
         // frame — without this, the tab bar would render stale.
@@ -2513,6 +2526,7 @@ impl GpuRenderer {
             search_hash,
             palette_hash,
             ime_hash,
+            notification_hash,
             width: self.config.width,
             height: self.config.height,
             tab_hash,
@@ -3783,7 +3797,7 @@ impl GpuRenderer {
         // When search is active and the IME has a non-empty composing run, splice
         // the preedit INTO the label (between the query and the ▏ caret) so the
         // whole bar renders as one continuous string: the box grows to fit it and
-        // the ` — N/M` counter flows to the RIGHT of the composition instead of
+        // the ` · N/M` counter flows to the RIGHT of the composition instead of
         // being overlapped. Display-only — the preedit does NOT drive matching
         // (only committed text does). (#B14)
         let search_preedit: &str =
@@ -3837,7 +3851,7 @@ impl GpuRenderer {
                 // Inline IME preedit anchor: the caret sits at the END OF THE
                 // QUERY (the `▏` in the label = width of `"/ " + query`), NOT
                 // at the end of the whole label — measuring the full label
-                // would land the composing text past the ` — N/M` suffix. So
+                // would land the composing text past the ` · N/M` suffix. So
                 // measure the prefix-only string, apply the SAME horizontal
                 // scroll the visible label uses, and clamp to the visible
                 // region so the composing text starts just past the caret
@@ -3970,6 +3984,78 @@ impl GpuRenderer {
                     label_x + 1.0,
                     baseline,
                     [badge_x, badge_y, badge_w, badge_h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+            }
+        }
+
+        if let Some(bubble) = notification {
+            let notification_font_size =
+                self.raster_px(tab_title_font_size(self.font_size).max(1.0));
+            let content_w = estimate_badge_text_width(&bubble.message, notification_font_size);
+            let row = u8::from(read_only_badge.is_some()) + u8::from(search_bar_layout.is_some());
+            let layout =
+                NotificationBubbleLayout::compute(sw, sh, content_w, row, self.scale_factor);
+            let bg_hex = match bubble.level {
+                NotificationLevel::Info => theme.colors.bright.green.0.as_str(),
+                NotificationLevel::Warning => theme.colors.ansi.yellow.0.as_str(),
+                NotificationLevel::Error => theme.colors.bright.red.0.as_str(),
+            };
+            let bubble_bg = hex_to_rgba(bg_hex, 1.0);
+            let bubble_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
+            quads_overlay.push(QuadInstance::rounded(
+                px_to_ndc(
+                    layout.border.x,
+                    layout.border.y,
+                    layout.border.w,
+                    layout.border.h,
+                    sw,
+                    sh,
+                ),
+                bubble_bg,
+                [layout.border.w, layout.border.h],
+                self.chrome_px(READ_ONLY_BADGE_RADIUS),
+            ));
+            if let Some(stack) = self.font_stack.as_ref() {
+                let mut wt = stack.clone();
+                let text_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let text_clip_w = (layout.close.x - text_x).max(0.0);
+                let baseline =
+                    layout.border.y + (layout.border.h + notification_font_size * 0.8) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    notification_font_size,
+                    notification_font_size,
+                    &mut wt,
+                    &bubble.message,
+                    bubble_fg,
+                    ChromeAttrs::default(),
+                    text_x,
+                    baseline,
+                    [text_x, layout.border.y, text_clip_w, layout.border.h],
+                    sw,
+                    sh,
+                    &mut overlay_glyph_instances,
+                    None,
+                );
+                let close_w = estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
+                let close_x = layout.close.x + (layout.close.w - close_w) * 0.5;
+                emit_overlay_text_glyphs(
+                    &mut self.glyph_atlas,
+                    stack,
+                    notification_font_size,
+                    notification_font_size,
+                    &mut wt,
+                    NOTIFICATION_CLOSE_ICON,
+                    bubble_fg,
+                    ChromeAttrs::default(),
+                    close_x,
+                    baseline,
+                    [layout.close.x, layout.close.y, layout.close.w, layout.close.h],
                     sw,
                     sh,
                     &mut overlay_glyph_instances,
@@ -4140,8 +4226,7 @@ impl GpuRenderer {
                         &mut palette_rasterizer,
                         caret_prefix,
                         self.search_fg,
-                    )
-                    + self.chrome_px(2.0);
+                    );
                 let caret_w = palette_caret_char
                     .as_deref()
                     .map(|ch| {
@@ -4157,7 +4242,8 @@ impl GpuRenderer {
                         .max(4.0)
                     })
                     .unwrap_or_else(|| (self.cell_w * 0.70).max(4.0));
-                let caret_h = (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
+                let caret_h =
+                    (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
                 let caret_y = layout.query_row.y + (layout.query_row.h - caret_h) * 0.5;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
@@ -4326,7 +4412,7 @@ impl GpuRenderer {
         // When SEARCH is active the preedit is instead spliced into the search
         // label (see search_bar_label above) and rendered as part of that
         // string — so we skip the self-drawn overlay here to avoid drawing it
-        // twice / overlapping the ` — N/M` suffix. This block only handles the
+        // twice / overlapping the ` · N/M` suffix. This block only handles the
         // terminal-cursor case. Per-frame overlay (not row-cached); the
         // FrameKey hashes `i.preedit()` so composition changes re-render.
         let search_active = search_ime_anchor.is_some();
@@ -5879,63 +5965,8 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn indexed_color_supports_full_xterm_256_palette() {
-        let theme = Theme::default();
-        assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
-        assert_eq!(indexed(231, &theme), Some(ChromeColor::rgb(255, 255, 255)));
-        assert_eq!(indexed(232, &theme), Some(ChromeColor::rgb(8, 8, 8)));
-        assert_eq!(indexed(255, &theme), Some(ChromeColor::rgb(238, 238, 238)));
-    }
-
-    #[test]
-    fn inverse_swaps_foreground_and_background_for_rendering() {
-        let theme = Theme::default();
-        let cell = Cell::plain('x', Color::Indexed(1), Color::Indexed(2), CellFlags::INVERSE);
-        assert_eq!(cell_fg(&cell, &theme, ChromeColor::WHITE), indexed(2, &theme).unwrap());
-        assert_eq!(
-            cell_bg_rgba(&cell, &theme),
-            Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
-        );
-    }
-
-    #[test]
-    fn palette_cursor_slice_tracks_current_character() {
-        assert_eq!(cursor_char_slice_at("abc", 0), Some("a"));
-        assert_eq!(cursor_char_slice_at("a中b", 1), Some("中"));
-        assert_eq!(cursor_char_slice_at("a中b", "a中".len()), Some("b"));
-        assert_eq!(cursor_char_slice_at("a中", "a中".len()), None);
-    }
-
-    #[test]
-    fn palette_cursor_slice_handles_non_boundary_offsets() {
-        let s = "a中b";
-        assert_eq!(cursor_char_slice_at(s, 2), Some("中"));
-    }
-
-    #[test]
-    fn plain_url_hover_does_not_need_accent_palette() {
-        use sonicterm_render_model::inputs::HoveredUrlCells;
-
-        assert!(!hovered_url_needs_accent(None));
-        assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
-            row: 0,
-            start_col: 1,
-            end_col: 5,
-            active: false,
-        })));
-        assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
-            row: 0,
-            start_col: 1,
-            end_col: 5,
-            active: true,
-        })));
-    }
-}
-
+#[path = "core/tests.rs"]
+mod tests;
 // T13/T14 (wezterm-takeover G3): `hex_to_the legacy chrome layer` and
 // `scale_the legacy chrome layer_alpha` have moved into `crate::color` under the
 // renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and
