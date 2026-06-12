@@ -296,6 +296,33 @@ pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Durati
 /// (~30 fps). On a real GPU the monitor's refresh period is used as-is.
 pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(33_333);
 
+/// Frame period cap while an IME composition is in flight on the software
+/// rasterizer (~15 fps). Each preedit keystroke forces a full-surface raster
+/// (issue #714); composing is interactive but doesn't need 30 fps, so we cap
+/// it lower to roughly halve the whole-surface presents while the user types
+/// a long pinyin run. Only applied when BOTH software-render and composing.
+pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
+
+/// Effective frame period given the software-render and IME-composing state
+/// (issue #714). On the hardware path this is the monitor period unchanged.
+/// On the software path it's the 30 fps cap, dropped to 15 fps while an IME
+/// composition is active so a long preedit doesn't drive a full-surface
+/// raster at full cadence.
+#[must_use]
+pub fn effective_frame_period(
+    software_render: bool,
+    composing: bool,
+    monitor_period: Duration,
+) -> Duration {
+    if software_render && composing {
+        monitor_period.max(SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD)
+    } else if software_render {
+        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+    } else {
+        monitor_period
+    }
+}
+
 /// Resolve the effective frame period for the no-GPU case (issue #713).
 ///
 /// When `degrade` is true (software rasterizer detected, or forced by config),
@@ -4752,5 +4779,23 @@ mod software_render_tests {
         // A 20 Hz monitor (50ms) is already slower than the 30fps cap — keep it.
         let slow = Duration::from_millis(50);
         assert_eq!(software_render_frame_period(true, slow), slow);
+    }
+
+    #[test]
+    fn effective_frame_period_lowers_cap_while_composing() {
+        use super::{
+            effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD,
+        };
+        let sixty = Duration::from_micros(16_667);
+        // Hardware path: untouched whether composing or not.
+        assert_eq!(effective_frame_period(false, false, sixty), sixty);
+        assert_eq!(effective_frame_period(false, true, sixty), sixty);
+        // Software path, not composing: 30fps cap.
+        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
+        // Software path, composing: 15fps cap (issue #714).
+        assert_eq!(
+            effective_frame_period(true, true, sixty),
+            SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
+        );
     }
 }

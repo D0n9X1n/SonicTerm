@@ -166,12 +166,21 @@ impl App {
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
                 let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
+                // Issue #714: while composing an IME preedit on the software
+                // rasterizer, drop to a lower frame cap so a long pinyin run
+                // doesn't drive a full-surface raster at full cadence.
+                let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
+                let frame_period = crate::app::effective_frame_period(
+                    self.software_render_degrade,
+                    composing,
+                    self.frame_period,
+                );
                 if crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
                     self.software_render_degrade,
                     last_render.elapsed(),
-                    self.frame_period,
+                    frame_period,
                 ) {
                     self.pending_redraw = true;
                     return;

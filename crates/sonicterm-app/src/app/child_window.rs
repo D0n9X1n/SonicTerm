@@ -384,12 +384,19 @@ impl App {
                 // one frame per vsync like the main window, instead of
                 // rendering on every VT tick. Input-driven redraws skip
                 // the gate so typing/resize/theme stay immediate.
+                // Issue #714: lower the cap while composing an IME preedit on
+                // the software path (mirrors the main window).
+                let child_frame_period = crate::app::effective_frame_period(
+                    software_render_degrade,
+                    child.ime.is_composing(),
+                    frame_period,
+                );
                 if crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
                     software_render_degrade,
                     child.last_render.elapsed(),
-                    frame_period,
+                    child_frame_period,
                 ) {
                     // End the `child` / palette borrows on this path so
                     // the `&mut self` defer helper is callable.

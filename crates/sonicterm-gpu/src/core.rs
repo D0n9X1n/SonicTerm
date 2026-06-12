@@ -534,6 +534,13 @@ pub struct GpuRenderer {
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
+    /// Memoized inline IME preedit overlay glyphs (issue #714). The preedit
+    /// is re-shaped from scratch every frame otherwise; while a composition is
+    /// unchanged across frames (paused, or PTY-burst redraws while composing)
+    /// this reuses the emitted glyphs. Keyed on the text + placement + color +
+    /// the atlas eviction epoch (so cached atlas UVs can never go stale — any
+    /// eviction bumps `evictions()` and invalidates the entry).
+    preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
@@ -685,6 +692,44 @@ struct FrameKey {
     /// hover onto / off a URL (or to a different URL span) invalidates
     /// the cached frame and re-shapes with / without the accent recolor.
     hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+}
+
+/// Memoized inline IME preedit overlay glyphs (issue #714). Reused across
+/// frames when the composition text and its placement are unchanged so a
+/// paused or streaming-while-composing preedit isn't re-shaped every frame.
+/// `atlas_epoch` is the glyph atlas's cumulative eviction count at build time;
+/// any eviction bumps it and invalidates the cache, so the stored
+/// `GlyphInstance`s (which carry atlas UVs) can never reference a recycled
+/// tile.
+struct PreeditGlyphCache {
+    text: String,
+    font_size: f32,
+    start_x: f32,
+    top_y: f32,
+    color_bits: u32,
+    atlas_epoch: u64,
+    glyphs: Vec<GlyphInstance>,
+}
+
+impl PreeditGlyphCache {
+    /// True when this cache entry exactly matches the requested preedit emit
+    /// (text + placement + color + atlas generation).
+    fn matches(
+        &self,
+        text: &str,
+        font_size: f32,
+        start_x: f32,
+        top_y: f32,
+        color_bits: u32,
+        atlas_epoch: u64,
+    ) -> bool {
+        self.atlas_epoch == atlas_epoch
+            && self.color_bits == color_bits
+            && self.font_size.to_bits() == font_size.to_bits()
+            && self.start_x.to_bits() == start_x.to_bits()
+            && self.top_y.to_bits() == top_y.to_bits()
+            && self.text == text
+    }
 }
 
 #[doc(hidden)]
@@ -1160,6 +1205,7 @@ impl GpuRenderer {
             search_bg,
             drag_chip_visual: None,
             last_frame_key: None,
+            preedit_glyph_cache: None,
             skipped_frames: 0,
             render_timing_label: "unknown",
             tab_bar_visible: true,
@@ -4510,23 +4556,59 @@ impl GpuRenderer {
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
                 let preedit_fg = self.search_fg;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    font_size,
-                    native_em,
-                    &mut wt,
-                    text,
-                    preedit_fg,
-                    ChromeAttrs::default(),
-                    start_x + text_pad,
-                    baseline_y,
-                    [start_x, top_y, pre_w, line_h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                // Issue #714: reuse the memoized preedit glyphs when text +
+                // placement + color + atlas generation all match, so a paused
+                // or streaming-while-composing preedit isn't re-shaped each
+                // frame. Any atlas eviction bumps the epoch and forces a
+                // rebuild, so cached atlas UVs can't go stale.
+                let emit_x = start_x + text_pad;
+                let color_bits = (u32::from(preedit_fg.r) << 24)
+                    | (u32::from(preedit_fg.g) << 16)
+                    | (u32::from(preedit_fg.b) << 8)
+                    | u32::from(preedit_fg.a);
+                let atlas_epoch = self.glyph_atlas.evictions();
+                let cache_hit = self
+                    .preedit_glyph_cache
+                    .as_ref()
+                    .is_some_and(|c| {
+                        c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
+                    });
+                if cache_hit {
+                    // SAFETY of UVs: epoch match means no eviction since build.
+                    let cached = self.preedit_glyph_cache.as_ref().unwrap();
+                    overlay_glyph_instances.extend(cached.glyphs.iter().copied());
+                } else {
+                    let before = overlay_glyph_instances.len();
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        font_size,
+                        native_em,
+                        &mut wt,
+                        text,
+                        preedit_fg,
+                        ChromeAttrs::default(),
+                        emit_x,
+                        baseline_y,
+                        [start_x, top_y, pre_w, line_h],
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                    // Cache the freshly emitted glyphs. Re-read the epoch: the
+                    // emit itself may have evicted to make room, in which case
+                    // these glyphs are valid against the NEW epoch.
+                    self.preedit_glyph_cache = Some(PreeditGlyphCache {
+                        text: text.to_string(),
+                        font_size,
+                        start_x: emit_x,
+                        top_y: baseline_y,
+                        color_bits,
+                        atlas_epoch: self.glyph_atlas.evictions(),
+                        glyphs: overlay_glyph_instances[before..].to_vec(),
+                    });
+                }
 
                 // (3) Underline quad — DPI-scaled accent line along the
                 // bottom of the composing run (the in-flight affordance).
