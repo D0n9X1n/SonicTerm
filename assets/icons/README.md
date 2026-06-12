@@ -15,6 +15,16 @@ assets/icons/
 └── bake-icons.sh             regenerator
 ```
 
+## Design
+
+The master must keep the dark squircle filling **~92% of the canvas** (a
+small ~4% transparent margin per side). The art still uses the macOS
+rounded-rect convention, but a *wide* margin makes the Windows taskbar /
+Start-menu button render a size-step smaller than neighbours (Firefox, VS
+Code), because Windows adds its own slot padding on top of the baked-in
+margin. If you replace the master, trim it to roughly this fill ratio
+before committing — otherwise the icon looks undersized on Windows.
+
 ## Regenerating
 
 ```bash
