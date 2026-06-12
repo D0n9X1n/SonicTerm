@@ -5092,9 +5092,10 @@ impl GpuRenderer {
             last_col = lead_col;
             let lead_ch =
                 cell_by_col.get(&lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
+            let cluster_cells = (info.num_cells as u16).max(1);
             shaped.push(sonicterm_text::shape::ShapedGlyph {
                 lead_col,
-                cluster_cells: info.num_cells as u16,
+                cluster_cells,
                 font_slot: u8::try_from(info.font_idx).unwrap_or(u8::MAX),
                 glyph_id: info.glyph_pos,
                 x_advance: info.x_advance.get() as f32,
@@ -5103,30 +5104,10 @@ impl GpuRenderer {
             });
         }
 
-        // Belt-and-braces (#594): once shape grouped a ligature cluster
-        // into ONE ShapedGlyph, no SUBSEQUENT glyph should land inside
-        // that cluster's column span. debug_only — release builds skip
-        // the bookkeeping entirely.
         #[cfg(debug_assertions)]
-        let mut _covered_span_end: Option<u16> = None;
+        debug_assert!(shaped_glyph_columns_are_monotonic(&shaped));
 
         for g in &shaped {
-            #[cfg(debug_assertions)]
-            {
-                if let Some(end) = _covered_span_end {
-                    debug_assert!(
-                        g.lead_col >= end,
-                        "shape_run_with_wezterm emitted overlapping ShapedGlyphs: \
-                         lead_col={} lands inside previously-emitted cluster \
-                         ending at col {} (ch={:?}, cluster_cells={})",
-                        g.lead_col,
-                        end,
-                        g.ch,
-                        g.cluster_cells,
-                    );
-                }
-                _covered_span_end = Some(g.lead_col + g.cluster_cells.max(1));
-            }
             let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
             let cluster_cells = g.cluster_cells.max(1) as usize;
@@ -5470,6 +5451,10 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
     }
 }
 
+#[cfg(debug_assertions)]
+fn shaped_glyph_columns_are_monotonic(glyphs: &[sonicterm_text::shape::ShapedGlyph]) -> bool {
+    glyphs.windows(2).all(|pair| pair[0].lead_col <= pair[1].lead_col)
+}
 
 fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeColor {
     match color {

@@ -17,14 +17,14 @@ sonicterm-render-model.workspace = true
 sonicterm-grid.workspace = true
 sonicterm-cfg.workspace = true
 sonicterm-ui.workspace = true
-sonicterm-engine = { path = "../sonicterm-engine", version = "0.10.3" }
+sonicterm-engine = { path = "../sonicterm-engine", version = "0.10.4" }
 # T9 (wezterm-takeover G2/C): `flush_shape_run` dispatches on
 # `BlockKey::from_char` at each cluster lead cell so box-drawing,
 # Powerline, Sextant, Octant, and Braille glyphs route through the
 # vendored wezterm geometry instead of the font fallback chain. The
 # atlas keys the resulting tiles under `font_slot = 0xFF` (sentinel),
 # so the wezterm shape path and the block-sprite path never collide.
-sonicterm-block-glyph = { path = "../sonicterm-block-glyph", version = "0.10.3" }
+sonicterm-block-glyph = { path = "../sonicterm-block-glyph", version = "0.10.4" }
 wgpu.workspace = true
 bytemuck.workspace = true
 winit.workspace = true

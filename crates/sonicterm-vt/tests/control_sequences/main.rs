@@ -34,6 +34,19 @@ fn erase_line_modes_use_current_position() {
 }
 
 #[test]
+fn previous_and_next_line_reset_column_for_multiline_progress_repaint() {
+    let mut parser = parser(14, 4);
+
+    parser.advance(b"Bottle a ###\nBottle b ###");
+    parser.advance(b"\x1b[1F\x1b[KBottle b ####");
+    assert_eq!(row_text(&parser, 0), "Bottle a ###  ");
+    assert_eq!(row_text(&parser, 1), "Bottle b #### ");
+
+    parser.advance(b"\x1b[1E\x1b[KBottle c ###");
+    assert_eq!(row_text(&parser, 2), "Bottle c ###  ");
+}
+
+#[test]
 fn erase_screen_modes_preserve_expected_sides() {
     let mut parser = parser(5, 3);
 

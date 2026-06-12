@@ -1641,25 +1641,78 @@ impl App {
                 std::thread::Builder::new()
                     .name("sonicterm-vt-loop-child".into())
                     .spawn(move || {
-                        while let Ok(bytes) = out_rx.recv() {
-                            if !bytes.is_empty() {
-                                let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
-                                crate::app::invariants::debug_assert_burst_gen_monotonic(
-                                    prev,
-                                    prev.wrapping_add(1),
-                                );
-                            }
-                            {
-                                let mut p = parser_clone.lock();
-                                for ev in p.advance(&bytes) {
-                                    if let VtEvent::CursorVisibility(v) = ev {
-                                        cursor_visible
-                                            .store(v, std::sync::atomic::Ordering::Relaxed);
+                        let mut pending = false;
+                        let mut pending_since: Option<Instant> = None;
+                        let mut pending_bytes: usize = 0;
+                        let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
+                        loop {
+                            match out_rx.recv_timeout(if pending {
+                                crate::app::PTY_REDRAW_QUIESCENT
+                            } else {
+                                Duration::from_secs(3600)
+                            }) {
+                                Ok(bytes) => {
+                                    if !bytes.is_empty() {
+                                        let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
+                                        crate::app::invariants::debug_assert_burst_gen_monotonic(
+                                            prev,
+                                            prev.wrapping_add(1),
+                                        );
+                                        pending_bytes = pending_bytes.saturating_add(bytes.len());
+                                        pending_since.get_or_insert_with(Instant::now);
+                                    }
+                                    {
+                                        let mut p = parser_clone.lock();
+                                        for ev in p.advance(&bytes) {
+                                            if let VtEvent::CursorVisibility(v) = ev {
+                                                cursor_visible.store(
+                                                    v,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    let pending_for = pending_since
+                                        .map(|since| since.elapsed())
+                                        .unwrap_or(Duration::ZERO);
+                                    if crate::app::should_flush_pending_pty_redraw(
+                                        pending_bytes,
+                                        pending_for,
+                                    ) {
+                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
+                                            w.request_redraw();
+                                        }
+                                        let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
+                                            crate::app::invariants::FlushReason::Buffer
+                                        } else {
+                                            crate::app::invariants::FlushReason::Interval
+                                        };
+                                        redraw_probe.note_redraw(
+                                            crate::app::PTY_REDRAW_QUIESCENT,
+                                            reason,
+                                        );
+                                        pending = false;
+                                        pending_since = None;
+                                        pending_bytes = 0;
+                                    } else {
+                                        pending = true;
                                     }
                                 }
-                            }
-                            if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                w.request_redraw();
+                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                    if pending {
+                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
+                                            w.request_redraw();
+                                        }
+                                        redraw_probe.note_redraw(
+                                            crate::app::PTY_REDRAW_QUIESCENT,
+                                            crate::app::invariants::FlushReason::Interval,
+                                        );
+                                        pending = false;
+                                        pending_since = None;
+                                        pending_bytes = 0;
+                                    }
+                                }
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                             }
                         }
                     })
