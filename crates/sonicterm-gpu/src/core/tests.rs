@@ -53,3 +53,68 @@ fn plain_url_hover_does_not_need_accent_palette() {
         active: true,
     })));
 }
+
+#[test]
+fn shaped_glyph_column_check_allows_multiple_glyphs_in_one_cell_cluster() {
+    use sonicterm_text::shape::ShapedGlyph;
+
+    let glyphs = [
+        ShapedGlyph {
+            lead_col: 0,
+            cluster_cells: 1,
+            font_slot: 0,
+            glyph_id: 1,
+            x_advance: 0.0,
+            y_offset: 0.0,
+            ch: '✔',
+        },
+        ShapedGlyph {
+            lead_col: 0,
+            cluster_cells: 1,
+            font_slot: 0,
+            glyph_id: 2,
+            x_advance: 0.0,
+            y_offset: 0.0,
+            ch: '✔',
+        },
+        ShapedGlyph {
+            lead_col: 1,
+            cluster_cells: 1,
+            font_slot: 0,
+            glyph_id: 3,
+            x_advance: 0.0,
+            y_offset: 0.0,
+            ch: 'x',
+        },
+    ];
+
+    assert!(shaped_glyph_columns_are_monotonic(&glyphs));
+}
+
+#[test]
+fn shaped_glyph_column_check_rejects_backtracking_columns() {
+    use sonicterm_text::shape::ShapedGlyph;
+
+    let glyphs = [
+        ShapedGlyph {
+            lead_col: 1,
+            cluster_cells: 1,
+            font_slot: 0,
+            glyph_id: 1,
+            x_advance: 0.0,
+            y_offset: 0.0,
+            ch: 'x',
+        },
+        ShapedGlyph {
+            lead_col: 0,
+            cluster_cells: 1,
+            font_slot: 0,
+            glyph_id: 2,
+            x_advance: 0.0,
+            y_offset: 0.0,
+            ch: 'y',
+        },
+    ];
+
+    assert!(!shaped_glyph_columns_are_monotonic(&glyphs));
+}

@@ -259,6 +259,15 @@ pub fn should_defer_streaming_redraw(
     !was_dirty && since_last_render < frame_period
 }
 
+pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
+pub const PTY_REDRAW_MAX_LATENCY: Duration = Duration::from_millis(8);
+pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
+
+#[must_use]
+pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Duration) -> bool {
+    pending_bytes >= PTY_REDRAW_FLUSH_BYTES || pending_for >= PTY_REDRAW_MAX_LATENCY
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -4494,7 +4503,7 @@ mod redraw_coalescing_tests {
     //! same predicate now backs BOTH windows, so this one spec covers
     //! main/child parity for the gate.
 
-    use super::should_defer_streaming_redraw;
+    use super::{should_defer_streaming_redraw, should_flush_pending_pty_redraw};
     use std::time::Duration;
 
     const FRAME: Duration = Duration::from_micros(16_667); // ~60Hz
@@ -4538,5 +4547,19 @@ mod redraw_coalescing_tests {
     fn input_and_burst_together_render() {
         // Belt-and-suspenders: any reason-to-render short-circuits deferral.
         assert!(!should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
+    }
+
+    #[test]
+    fn pty_redraw_flush_waits_for_burst_window() {
+        assert!(!should_flush_pending_pty_redraw(512, Duration::from_millis(2)));
+        assert!(should_flush_pending_pty_redraw(512, Duration::from_millis(8)));
+    }
+
+    #[test]
+    fn pty_redraw_flushes_large_bursts_without_waiting() {
+        assert!(should_flush_pending_pty_redraw(
+            super::PTY_REDRAW_FLUSH_BYTES,
+            Duration::ZERO,
+        ));
     }
 }

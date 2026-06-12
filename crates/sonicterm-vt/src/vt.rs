@@ -1132,6 +1132,16 @@ impl Perform for Performer {
                 let col = self.grid.cursor.col.saturating_sub(n);
                 self.grid.goto(row, col);
             }
+            'E' => {
+                let n = p0().max(1);
+                let row = (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
+                self.grid.goto(row, 0);
+            }
+            'F' => {
+                let n = p0().max(1);
+                let row = self.grid.cursor.row.saturating_sub(n);
+                self.grid.goto(row, 0);
+            }
             'H' | 'f' => {
                 let row = p0().saturating_sub(1);
                 let col = p1().saturating_sub(1);

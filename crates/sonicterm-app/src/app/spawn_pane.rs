@@ -104,37 +104,9 @@ impl App {
                 std::thread::Builder::new()
                     .name("sonicterm-vt-loop".into())
                     .spawn(move || {
-                        // Coalesce redraw requests so a burst of pty output
-                        // (oh-my-zsh banners, `cat largefile`) doesn't pin
-                        // the main thread at 100% CPU re-rendering for every
-                        // byte. Drain at least min_interval between bursts,
-                        // but ALWAYS schedule a trailing redraw when the
-                        // channel briefly quiesces so the final batch lands
-                        // on screen (this is the "Enter needs 2 presses" bug
-                        // — without the trailing flush, the redraw request
-                        // after the prompt redraw was dropped silently).
-                        let mut last_request = Instant::now() - Duration::from_secs(1);
                         let mut pending = false;
-                        // Debug-only invariant probe: consecutive
-                        // request_redraw() calls must respect the same
-                        // min_interval the loop enforces; CLAUDE.md §4.
+                        let mut pending_since: Option<Instant> = None;
                         let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
-                        // Epic #300 P3: dropped from 16ms → 3ms (with a
-                        // 128 KB byte-threshold early-flush) to match
-                        // wezterm. The original 16ms guard was justified
-                        // as "keeps the OS from marking the app
-                        // unresponsive", but that beach ball comes from
-                        // the *main* thread blocking — not from how often
-                        // a *background* thread posts redraw requests.
-                        // Our PTY thread is background; the main thread
-                        // coalesces RedrawRequested via vsync (PR #132).
-                        // So this knob is purely a CPU-efficiency throttle.
-                        // 3ms still amortises bursts effectively while
-                        // cutting input→pixel latency; wezterm ships the
-                        // same 3ms / 128KB combo. See CLAUDE.md §4.
-                        const COALESCE_MS: u64 = 3;
-                        const FLUSH_BYTES: usize = 128 * 1024;
-                        let min_interval = Duration::from_millis(COALESCE_MS);
                         let mut pending_bytes: usize = 0;
                         let mut command_started: Option<Instant> = None;
                         loop {
@@ -142,7 +114,7 @@ impl App {
                             // ~min_interval and we have a pending redraw,
                             // flush it before going back to blocking recv.
                             match out_rx.recv_timeout(if pending {
-                                min_interval
+                                crate::app::PTY_REDRAW_QUIESCENT
                             } else {
                                 Duration::from_secs(3600)
                             }) {
@@ -159,6 +131,7 @@ impl App {
                                             prev.wrapping_add(1),
                                         );
                                         pending_bytes = pending_bytes.saturating_add(bytes.len());
+                                        pending_since.get_or_insert_with(Instant::now);
                                     }
                                     // Collect side-effects under the parser
                                     // lock, then DROP it before touching winit.
@@ -254,25 +227,27 @@ impl App {
                                         command_events_thread.lock().extend(command_side_effects);
                                     }
                                     let _ = new_title;
-                                    if last_request.elapsed() >= min_interval
-                                        || pending_bytes >= FLUSH_BYTES
-                                    {
+                                    let pending_for = pending_since
+                                        .map(|since| since.elapsed())
+                                        .unwrap_or(Duration::ZERO);
+                                    if crate::app::should_flush_pending_pty_redraw(
+                                        pending_bytes,
+                                        pending_for,
+                                    ) {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
-                                        // Classify the flush: byte-threshold
-                                        // wins if both conditions are met (it
-                                        // is the more permissive reason and
-                                        // matches the operational intent of
-                                        // "ship pixels NOW under burst").
-                                        let reason = if pending_bytes >= FLUSH_BYTES {
+                                        let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
                                             crate::app::invariants::FlushReason::Buffer
                                         } else {
                                             crate::app::invariants::FlushReason::Interval
                                         };
-                                        redraw_probe.note_redraw(min_interval, reason);
-                                        last_request = Instant::now();
+                                        redraw_probe.note_redraw(
+                                            crate::app::PTY_REDRAW_QUIESCENT,
+                                            reason,
+                                        );
                                         pending = false;
+                                        pending_since = None;
                                         pending_bytes = 0;
                                     } else {
                                         pending = true;
@@ -290,11 +265,11 @@ impl App {
                                         // is naturally satisfied — classify
                                         // as Interval.
                                         redraw_probe.note_redraw(
-                                            min_interval,
+                                            crate::app::PTY_REDRAW_QUIESCENT,
                                             crate::app::invariants::FlushReason::Interval,
                                         );
-                                        last_request = Instant::now();
                                         pending = false;
+                                        pending_since = None;
                                         pending_bytes = 0;
                                     }
                                 }
