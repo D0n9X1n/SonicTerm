@@ -1774,14 +1774,17 @@ impl App {
                         }
                     }
                 }
-                // Read the focused pane's kitty keyboard flags under the
-                // parser lock, then DROP the lock before any PTY write
-                // (CLAUDE.md §4). When non-zero, `encode_key` emits CSI-u
-                // forms (e.g. Shift+Enter => CSI 13;2u) so modern TUIs treat
-                // Shift+Enter as "insert newline" instead of "submit".
+                // Read the focused pane's kitty keyboard flags from the
+                // lock-free per-pane snapshot (the VT loop mirrors them out of
+                // the parser after each batch). Avoids taking `parser.lock()`
+                // on the keypress path — that lock is held by the VT thread
+                // while parsing output, so blocking on it added input latency
+                // whenever output was streaming (issue #710). When non-zero,
+                // `encode_key` emits CSI-u forms (e.g. Shift+Enter => CSI
+                // 13;2u) so modern TUIs treat Shift+Enter as "insert newline".
                 let kitty_flags = self
                     .active_pane()
-                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
                     self.write_to_pty(bytes);

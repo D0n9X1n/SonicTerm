@@ -1106,6 +1106,13 @@ pub struct PaneState {
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-pane kitty-keyboard progressive-enhancement flags (`CSI ?u`),
+    /// mirrored out of the parser by the VT loop after each parse batch.
+    /// The keypress path reads this lock-free instead of taking
+    /// `parser.lock()` before every PTY write — that lock is held by the VT
+    /// thread while parsing output, so blocking on it added input latency
+    /// whenever output was streaming (issue #710). Init 0 (legacy encoding).
+    pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
 }
@@ -1128,6 +1135,7 @@ impl PaneState {
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -2071,8 +2079,10 @@ impl App {
                 }
             }
         }
-        let kitty_flags =
-            self.active_pane().map(|pane| pane.parser.lock().kitty_keyboard_flags()).unwrap_or(0);
+        let kitty_flags = self
+            .active_pane()
+            .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
         (None, encode_logical(key, mods, kitty_flags))
     }
 

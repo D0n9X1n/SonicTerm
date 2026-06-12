@@ -1355,13 +1355,15 @@ impl App {
                     Some(st) => st.active_pane,
                     None => return,
                 };
-                // Read the active child pane's kitty keyboard flags under the
-                // parser lock, then drop it before the PTY write (CLAUDE.md
-                // §4). Non-zero flags drive CSI-u key encoding (Shift+Enter).
+                // Read the active child pane's kitty keyboard flags from the
+                // lock-free per-pane snapshot instead of taking the parser
+                // lock on the keypress path (issue #710 — the VT thread holds
+                // that lock while parsing output). Non-zero flags drive CSI-u
+                // key encoding (Shift+Enter).
                 let kitty_flags = child
                     .panes
                     .get(&active_id)
-                    .map(|pane| pane.parser.lock().kitty_keyboard_flags())
+                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
                 if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
                     let broadcast_bytes = bytes.clone();
@@ -1623,6 +1625,10 @@ impl App {
         // PR #400: per-pane cursor_visible Arc.
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Per-pane kitty-keyboard flags snapshot read lock-free on the
+        // keypress path (issue #710); mirrors the main-window pane wiring.
+        let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
+            Arc::new(std::sync::atomic::AtomicU8::new(0));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -1637,6 +1643,7 @@ impl App {
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = cursor_visible_pane.clone();
+                let kitty_flags = kitty_flags_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 std::thread::Builder::new()
                     .name("sonicterm-vt-reply-child".into())
@@ -1681,6 +1688,13 @@ impl App {
                                                 );
                                             }
                                         }
+                                        // Mirror kitty-keyboard flags under the
+                                        // lock so the keypress path reads them
+                                        // lock-free (issue #710).
+                                        kitty_flags.store(
+                                            p.kitty_keyboard_flags(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                     let pending_for = pending_since
                                         .map(|since| since.elapsed())
@@ -1737,6 +1751,7 @@ impl App {
         let mut pane_state = PaneState::new(parser, pty);
         pane_state.redraw_target = redraw_target;
         pane_state.cursor_visible = cursor_visible_pane;
+        pane_state.kitty_flags = kitty_flags_pane;
         pane_state
     }
 
