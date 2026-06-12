@@ -3731,7 +3731,13 @@ impl GpuRenderer {
             let match_fg = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
             let current_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             let current_fg = match_fg;
-            for (i, m) in s.matches.iter().enumerate() {
+            // Only walk matches whose row intersects the viewport. `matches`
+            // is row-sorted, so this is a binary-search-bounded slice — per
+            // frame cost is O(visible matches), not O(total matches), which
+            // otherwise grows with scrollback depth (issue #710). `start`
+            // keeps `i` aligned with the full slice for the cur_idx compare.
+            let (vis_start, vis_end) = s.visible_match_range(view_top_abs, grid.rows);
+            for (i, m) in s.matches[vis_start..vis_end].iter().enumerate().map(|(j, m)| (vis_start + j, m)) {
                 if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
                     continue;
                 }
