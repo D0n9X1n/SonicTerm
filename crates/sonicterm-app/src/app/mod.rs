@@ -46,7 +46,6 @@ pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
 /// resource icon only covers Explorer / shortcuts, not the live window —
 /// hence this runtime path. Decoded once and cached.
 static APP_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
-static TASKBAR_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
 
 fn app_icon() -> Option<winit::window::Icon> {
     APP_ICON
@@ -60,64 +59,11 @@ fn app_icon() -> Option<winit::window::Icon> {
                     return None;
                 }
             };
-            // Trim fully-transparent padding so the logo fills the taskbar
-            // / title-bar slot like Firefox / Windows Terminal. The source
-            // art (a macOS `.icns` rounded-rect convention) carries ~11%
-            // transparent margin on each side — the glyph fills only ~60%
-            // of the 256² canvas. On Windows that makes the taskbar button
-            // look undersized because Windows adds its own slot margin on
-            // top of the baked-in one. Cropping to the opaque bounding box
-            // lets the logo render at the same apparent size as other apps.
-            let (w, h) = img.dimensions();
-            let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
-            for y in 0..h {
-                for x in 0..w {
-                    if img.get_pixel(x, y)[3] > 16 {
-                        min_x = min_x.min(x);
-                        max_x = max_x.max(x);
-                        min_y = min_y.min(y);
-                        max_y = max_y.max(y);
-                    }
-                }
-            }
-            let (rgba, iw, ih) = if max_x >= min_x && max_y >= min_y {
-                let cw = max_x - min_x + 1;
-                let ch = max_y - min_y + 1;
-                let cropped = image::imageops::crop_imm(&img, min_x, min_y, cw, ch).to_image();
-                let (cwd, chd) = cropped.dimensions();
-                (cropped.into_raw(), cwd, chd)
-            } else {
-                (img.into_raw(), w, h)
-            };
-            match winit::window::Icon::from_rgba(rgba, iw, ih) {
-                Ok(icon) => Some(icon),
-                Err(e) => {
-                    tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
-                    None
-                }
-            }
-        })
-        .clone()
-}
-
-fn taskbar_icon() -> Option<winit::window::Icon> {
-    TASKBAR_ICON
-        .get_or_init(|| {
-            const PNG: &[u8] = include_bytes!(
-                "../../../../assets/icons/exports/png/sonic-windows-taskbar-256.png"
-            );
-            let img = match image::load_from_memory(PNG) {
-                Ok(i) => i.to_rgba8(),
-                Err(e) => {
-                    tracing::warn!("taskbar_icon: decode sonic-windows-taskbar-256.png failed: {e}");
-                    return None;
-                }
-            };
             let (w, h) = img.dimensions();
             match winit::window::Icon::from_rgba(img.into_raw(), w, h) {
                 Ok(icon) => Some(icon),
                 Err(e) => {
-                    tracing::warn!("taskbar_icon: Icon::from_rgba failed: {e}");
+                    tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
                     None
                 }
             }
@@ -139,7 +85,7 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(windows)]
     let attrs = {
         use winit::platform::windows::WindowAttributesExtWindows;
-        attrs.with_taskbar_icon(taskbar_icon())
+        attrs.with_taskbar_icon(app_icon())
     };
     attrs
 }
