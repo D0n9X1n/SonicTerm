@@ -2770,6 +2770,15 @@ impl GpuRenderer {
             // of the window-level padding/inset, and threads its own
             // pane_id into the row_glyph_cache so split panes don't
             // collide on absolute-row keys (PR #208 prereq).
+            // Size the row glyph cache ONCE for the whole frame using the
+            // total visible rows across all panes — NOT per-pane inside the
+            // loop. Resizing to a single pane's `grid.rows` on every iteration
+            // changed the cap each time in an unequal-height split and cleared
+            // the entire cache per pane per frame, forcing all rows to
+            // re-shape every keystroke (#715 follow-up). Mirrors the quad
+            // cache's total-visible-rows sizing below.
+            let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
+            self.row_glyph_cache.resize(total_glyph_rows.max(1));
             for pv in &pane_views {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -2780,12 +2789,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                // viewport. When the user hasn't scrolled (or hasn't scrolled
-                // past the visible bottom), this is the live-buffer top, i.e.
-                // `scrollback_len()`. Otherwise it's the explicit absolute
-                // index requested by the scroll action (e.g. a prompt row).
                 let view_top_abs = Self::resolved_view_top_abs(grid, pv.viewport_top_abs);
-                self.row_glyph_cache.resize(grid.rows);
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
