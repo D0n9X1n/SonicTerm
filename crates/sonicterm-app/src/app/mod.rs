@@ -253,6 +253,7 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 pub fn should_defer_streaming_redraw(
     was_dirty: bool,
     pty_burst: bool,
+    software_render: bool,
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
@@ -270,7 +271,15 @@ pub fn should_defer_streaming_redraw(
     // (even when input_dirty is also set) coalesces it to the frame boundary;
     // `about_to_wait` re-requests at `last_render + frame_period`, so latency
     // is bounded by one frame and nothing is dropped.
-    let streaming = pty_burst || !was_dirty;
+    //
+    // `software_render` (issue #713): on a CPU rasterizer EVERY frame is
+    // expensive (full-screen software raster), so even *pure* input redraws
+    // are coalesced to the frame cap — fast typing in a TUI like Claude Code
+    // would otherwise force a full-screen raster per keystroke and peg the
+    // CPU. Costs at most one frame (~33ms) of extra input latency, which is
+    // an acceptable trade only because rendering is already slow here. The
+    // hardware-GPU path passes `false` and keeps input redraws immediate.
+    let streaming = software_render || pty_burst || !was_dirty;
     streaming && since_last_render < frame_period
 }
 
@@ -4608,6 +4617,7 @@ mod redraw_coalescing_tests {
         assert!(should_defer_streaming_redraw(
             false, // not input-driven
             false, // no fresh burst
+            false, // hardware GPU
             Duration::from_millis(2),
             FRAME,
         ));
@@ -4617,7 +4627,13 @@ mod redraw_coalescing_tests {
     fn input_driven_redraw_never_defers() {
         // Keystroke / resize / theme / IME must render immediately even
         // inside the vsync window — gating them adds perceptible latency.
-        assert!(!should_defer_streaming_redraw(true, false, Duration::from_millis(1), FRAME));
+        assert!(!should_defer_streaming_redraw(
+            true,
+            false,
+            false,
+            Duration::from_millis(1),
+            FRAME
+        ));
     }
 
     #[test]
@@ -4625,15 +4641,27 @@ mod redraw_coalescing_tests {
         // A PTY burst is still streaming work, not input. Rendering it early
         // can block in surface acquisition waiting for the next drawable; defer
         // inside the current frame window and render at the next boundary.
-        assert!(should_defer_streaming_redraw(false, true, Duration::from_millis(1), FRAME));
+        assert!(should_defer_streaming_redraw(
+            false,
+            true,
+            false,
+            Duration::from_millis(1),
+            FRAME
+        ));
     }
 
     #[test]
     fn past_frame_boundary_never_defers() {
         // We're past this vsync window — render now, don't defer forever.
-        assert!(!should_defer_streaming_redraw(false, false, Duration::from_millis(20), FRAME));
+        assert!(!should_defer_streaming_redraw(
+            false,
+            false,
+            false,
+            Duration::from_millis(20),
+            FRAME
+        ));
         // Exactly at the boundary also renders (`<` is strict).
-        assert!(!should_defer_streaming_redraw(false, false, FRAME, FRAME));
+        assert!(!should_defer_streaming_redraw(false, false, false, FRAME, FRAME));
     }
 
     #[test]
@@ -4643,12 +4671,31 @@ mod redraw_coalescing_tests {
         // dirty AND a burst. It must coalesce like other streaming work, not
         // render per echo chunk — otherwise fast typing / Claude Code streams
         // storm the renderer.
-        assert!(should_defer_streaming_redraw(true, true, Duration::ZERO, FRAME));
+        assert!(should_defer_streaming_redraw(true, true, false, Duration::ZERO, FRAME));
         // ...but only within the frame window; past the boundary it renders.
         assert!(!should_defer_streaming_redraw(
             true,
             true,
+            false,
             Duration::from_millis(20),
+            FRAME
+        ));
+    }
+
+    #[test]
+    fn software_render_defers_even_pure_input() {
+        // Issue #713: on a CPU rasterizer, even a pure input redraw (dirty,
+        // no burst) coalesces to the frame cap — fast typing must not force a
+        // full-screen software raster per keystroke. Within the frame window
+        // it defers...
+        assert!(should_defer_streaming_redraw(true, false, true, Duration::from_millis(1), FRAME));
+        // ...but still renders once past the boundary (bounded latency, not
+        // dropped).
+        assert!(!should_defer_streaming_redraw(
+            true,
+            false,
+            true,
+            Duration::from_millis(40),
             FRAME
         ));
     }

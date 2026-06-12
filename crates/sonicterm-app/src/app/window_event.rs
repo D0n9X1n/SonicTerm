@@ -169,6 +169,7 @@ impl App {
                 if crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
+                    self.software_render_degrade,
                     last_render.elapsed(),
                     self.frame_period,
                 ) {
