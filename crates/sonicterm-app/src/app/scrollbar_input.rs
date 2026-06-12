@@ -136,6 +136,25 @@ use super::App;
 use sonicterm_gpu::core::GpuRenderer;
 use winit::window::WindowId;
 
+/// Inset a pane's layout rect by the renderer's per-side content padding so
+/// the right-aligned scrollbar is hit-tested where it is actually drawn.
+///
+/// The renderer draws the bar inside `content_rect` — the pane rect minus
+/// padding (`core.rs` `emit_pane_scrollbar` consumes the padded pane view) —
+/// but hit-testing used the raw, unpadded layout rect. Since the track is
+/// right-aligned, the grabbable band sat ~`padding_right` px to the RIGHT of
+/// the visible thumb; at fractional DPI (e.g. 12 logical * 1.75 = 21 px right
+/// padding vs a 14 px bar) the two bands stopped overlapping and clicks on
+/// the visible thumb missed entirely (issue #711). Apply the same inset here.
+fn content_inset_rect(pane: Rect, pl: f32, pr: f32, pt: f32, pb: f32) -> Rect {
+    Rect::new(
+        pane.x + pl,
+        pane.y + pt,
+        (pane.w - pl - pr).max(0.0),
+        (pane.h - pt - pb).max(0.0),
+    )
+}
+
 impl App {
     /// Look up the active pane's scrollbar geometry / scrollback metrics
     /// and classify a logical-px press against them.
@@ -152,7 +171,18 @@ impl App {
         let Some((_, ui_rect)) = pane_rects.iter().find(|(id, _)| *id == active_id) else {
             return HitOutcome::Miss;
         };
-        let pane_rect = Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h);
+        // Inset by the renderer's content padding so the hit band lines up
+        // with the drawn (right-aligned) bar, not the raw pane edge (#711).
+        let pane_rect = match self.main_renderer() {
+            Some(r) => content_inset_rect(
+                Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
+                r.padding_left_px(),
+                r.padding_right_px(),
+                r.padding_top_px(),
+                r.padding_bottom_px(),
+            ),
+            None => Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
+        };
         let Some(pane) = ws.panes.get(&active_id) else { return HitOutcome::Miss };
         // try_lock keeps with the §4 land-mine "render uses try_lock,
         // not lock" rule; a busy parser briefly defers scrollbar input
@@ -255,7 +285,18 @@ impl App {
         let Some((_, ui_rect)) = pane_rects.iter().find(|(id, _)| *id == active_id) else {
             return HitOutcome::Miss;
         };
-        let pane_rect = Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h);
+        // Inset by the child renderer's content padding so the hit band lines
+        // up with the drawn right-aligned bar (#711), same as the main path.
+        let pane_rect = match child.renderer.as_ref() {
+            Some(r) => content_inset_rect(
+                Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
+                r.padding_left_px(),
+                r.padding_right_px(),
+                r.padding_top_px(),
+                r.padding_bottom_px(),
+            ),
+            None => Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
+        };
         let Some(pane) = child.panes.get(&active_id) else { return HitOutcome::Miss };
         let Some(parser) = pane.parser.try_lock() else { return HitOutcome::Miss };
         let grid = parser.grid();

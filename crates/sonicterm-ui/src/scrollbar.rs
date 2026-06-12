@@ -250,4 +250,33 @@ mod tests {
         assert_eq!(hit_test(&unscaled, press), HitTarget::None);
         assert_eq!(hit_test(&scaled, press), HitTarget::Thumb);
     }
+
+    // Regression for issue #711 (second cause): the renderer draws the bar in
+    // the PADDED content rect, but hit-testing used the raw pane rect. With a
+    // right-aligned track, the grabbable band was shifted `padding_right` px
+    // to the right of the drawn thumb — at fractional DPI the two stopped
+    // overlapping entirely. This pins that the inset content rect is what must
+    // be hit-tested. (Mirrors `content_inset_rect` in the app crate.)
+    #[test]
+    fn track_must_be_computed_from_the_padded_content_rect() {
+        let scale = 1.75_f32;
+        let pad_right = 12.0 * scale; // 21px, the default right padding
+        let bar = 8.0 * scale; // 14px
+        let full = pane(); // 0..100 wide
+        // Inset content rect: width shrinks by the right padding.
+        let content = Rect::new(full.x, full.y, full.w - pad_right, full.h);
+
+        let from_full = compute(10, 20, 0, full, ScrollbarMode::Always, bar).unwrap();
+        let from_content = compute(10, 20, 0, content, ScrollbarMode::Always, bar).unwrap();
+
+        // Drawn (correct) track is left of the raw-rect track by pad_right.
+        assert!((from_content.track_rect.x - (from_full.track_rect.x - pad_right)).abs() < 0.001);
+        // A click on the VISIBLE thumb (center of the drawn/content track).
+        let drawn_center_x = from_content.track_rect.x + from_content.track_rect.w / 2.0;
+        let press = Point::new(drawn_center_x, 10.0);
+        // Hits when geometry comes from the content rect...
+        assert_eq!(hit_test(&from_content, press), HitTarget::Thumb);
+        // ...but the old raw-rect geometry misses it entirely.
+        assert_eq!(hit_test(&from_full, press), HitTarget::None);
+    }
 }
