@@ -745,6 +745,13 @@ impl App {
                 // context cleanly on macOS / Windows.
                 if let Some(ws) = self.main_mut() {
                     ws.ime.cancel();
+                    if !focused {
+                        // A drag interrupted by focus loss never gets its
+                        // button-release; drop the gesture so it doesn't
+                        // resume on the next stray cursor move (issue #711).
+                        ws.scrollbar_drag = None;
+                        ws.splitter_drag = None;
+                    }
                 }
                 // Propagate window focus to the renderer so the text cursor
                 // disappears when the window is inactive.

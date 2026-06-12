@@ -4289,6 +4289,11 @@ impl App {
             ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
+            // Issue #711: also abandon any scrollbar/splitter drag residue —
+            // a global drag-cancel should leave no gesture half-held on any
+            // window, mirroring the focus-loss cleanup.
+            ws.scrollbar_drag = None;
+            ws.splitter_drag = None;
             // #447 follow-up to PR #443: clear the renderer's persistent
             // drag-chip overlay AND the headless-test marker via a single
             // helper so production and test paths can never diverge. The

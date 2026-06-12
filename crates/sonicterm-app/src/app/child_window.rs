@@ -1466,6 +1466,12 @@ impl App {
             }
 
             child.ime.cancel();
+            if !focused {
+                // Drop any in-flight drag interrupted by focus loss — it
+                // never gets a button-release otherwise (issue #711).
+                child.scrollbar_drag = None;
+                child.splitter_drag = None;
+            }
             if let Some(r) = child.renderer.as_mut() {
                 r.set_window_focused(focused);
             }

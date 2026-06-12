@@ -17,8 +17,12 @@
 use sonicterm_cfg::config::ScrollbarMode;
 use sonicterm_ui::scrollbar::{self, HitTarget, Point, Rect, ScrollbarGeometry};
 
-/// Bar width in logical pixels. Must stay in sync with
-/// `sonicterm_gpu::core::SCROLLBAR_WIDTH_PX` (PR-B).
+/// Bar width in logical pixels, before DPI scaling. Must stay in sync with
+/// the authored width inside `sonicterm_gpu::core::emit_pane_scrollbar`
+/// (also 8.0). Callers scale this by the renderer's `scale_factor()` so the
+/// grabbable band matches the *drawn* band — the renderer draws the bar at
+/// `8.0 * scale` raster px, so hit-testing the bare 8.0 leaves the left of
+/// the thumb dead on fractional-DPI displays (issue #711).
 pub const SCROLLBAR_WIDTH_PX: f32 = 8.0;
 
 /// Active drag gesture on a pane's scrollbar thumb.
@@ -74,6 +78,7 @@ pub fn hit(
     mode: ScrollbarMode,
     pane_id: u64,
     press: Point,
+    width_px: f32,
 ) -> HitOutcome {
     let Some(geometry) = scrollbar::compute(
         viewport_rows,
@@ -81,7 +86,7 @@ pub fn hit(
         view_top,
         pane_rect,
         mode,
-        SCROLLBAR_WIDTH_PX,
+        width_px,
     ) else {
         return HitOutcome::Miss;
     };
@@ -158,6 +163,9 @@ impl App {
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         drop(parser);
+        // Match the renderer's DPI-scaled bar width so the whole drawn thumb
+        // is grabbable, not just the rightmost 8px (issue #711).
+        let scale = self.main_renderer().map_or(1.0, GpuRenderer::scale_factor);
         hit(
             pane_rect,
             viewport_rows,
@@ -166,6 +174,7 @@ impl App {
             self.config.appearance.scrollbar,
             active_id,
             Point::new(lx, ly),
+            SCROLLBAR_WIDTH_PX * scale,
         )
     }
 
@@ -254,6 +263,8 @@ impl App {
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         drop(parser);
+        // Match the renderer's DPI-scaled bar width (issue #711).
+        let scale = child.renderer.as_ref().map_or(1.0, GpuRenderer::scale_factor);
         hit(
             pane_rect,
             viewport_rows,
@@ -262,6 +273,7 @@ impl App {
             self.config.appearance.scrollbar,
             active_id,
             Point::new(lx, ly),
+            SCROLLBAR_WIDTH_PX * scale,
         )
     }
 
