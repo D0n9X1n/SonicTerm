@@ -4,7 +4,7 @@ members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-gr
 default-members = ["crates/sonicterm-app"]
 
 [workspace.package]
-version = "0.10.4"
+version = "0.10.5"
 edition = "2021"
 rust-version = "1.80"
 authors = ["SonicTerm Terminal contributors"]
@@ -15,24 +15,24 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Internal
-sonicterm-types = { path = "crates/sonicterm-types", version = "0.10.4" }
-sonicterm-vt = { path = "crates/sonicterm-vt", version = "0.10.4" }
-sonicterm-grid = { path = "crates/sonicterm-grid", version = "0.10.4" }
-sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "0.10.4" }
-sonicterm-io = { path = "crates/sonicterm-io", version = "0.10.4" }
-sonicterm-text = { path = "crates/sonicterm-text", version = "0.10.4" }
-sonicterm-ui = { path = "crates/sonicterm-ui", version = "0.10.4" }
-sonicterm-render-model = { path = "crates/sonicterm-render-model", version = "0.10.4" }
-sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "0.10.4" }
-sonicterm-app = { path = "crates/sonicterm-app", version = "0.10.4" }
-sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "0.10.4" }
-sonicterm-logging = { path = "crates/sonicterm-logging", version = "0.10.4" }
-sonicterm-block-glyph = { path = "crates/sonicterm-block-glyph", version = "0.10.4" }
-sonicterm-font = { path = "crates/sonicterm-font", version = "0.10.4" }
-sonicterm-font-config = { path = "crates/sonicterm-font-config", version = "0.10.4" }
-sonicterm-fontconfig = { path = "crates/sonicterm-fontconfig", version = "0.10.4" }
-sonicterm-freetype = { path = "crates/sonicterm-freetype", version = "0.10.4" }
-sonicterm-harfbuzz = { path = "crates/sonicterm-harfbuzz", version = "0.10.4" }
+sonicterm-types = { path = "crates/sonicterm-types", version = "0.10.5" }
+sonicterm-vt = { path = "crates/sonicterm-vt", version = "0.10.5" }
+sonicterm-grid = { path = "crates/sonicterm-grid", version = "0.10.5" }
+sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "0.10.5" }
+sonicterm-io = { path = "crates/sonicterm-io", version = "0.10.5" }
+sonicterm-text = { path = "crates/sonicterm-text", version = "0.10.5" }
+sonicterm-ui = { path = "crates/sonicterm-ui", version = "0.10.5" }
+sonicterm-render-model = { path = "crates/sonicterm-render-model", version = "0.10.5" }
+sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "0.10.5" }
+sonicterm-app = { path = "crates/sonicterm-app", version = "0.10.5" }
+sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "0.10.5" }
+sonicterm-logging = { path = "crates/sonicterm-logging", version = "0.10.5" }
+sonicterm-block-glyph = { path = "crates/sonicterm-block-glyph", version = "0.10.5" }
+sonicterm-font = { path = "crates/sonicterm-font", version = "0.10.5" }
+sonicterm-font-config = { path = "crates/sonicterm-font-config", version = "0.10.5" }
+sonicterm-fontconfig = { path = "crates/sonicterm-fontconfig", version = "0.10.5" }
+sonicterm-freetype = { path = "crates/sonicterm-freetype", version = "0.10.5" }
+sonicterm-harfbuzz = { path = "crates/sonicterm-harfbuzz", version = "0.10.5" }
 
 # Core terminal
 vte = "0.15"
