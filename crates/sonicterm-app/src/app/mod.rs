@@ -356,6 +356,55 @@ pub fn should_degrade_for_software_render(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TearOutTiming {
+    pub source: &'static str,
+    pub start: Instant,
+    pub create_window_ms: f32,
+    pub renderer_init_ms: f32,
+    pub resize_ms: f32,
+    pub install_ms: f32,
+}
+
+impl TearOutTiming {
+    #[must_use]
+    pub fn new(source: &'static str, start: Instant) -> Self {
+        Self {
+            source,
+            start,
+            create_window_ms: 0.0,
+            renderer_init_ms: 0.0,
+            resize_ms: 0.0,
+            install_ms: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub fn total_until_first_render_ms(&self, first_render_at: Instant) -> f32 {
+        first_render_at.saturating_duration_since(self.start).as_secs_f32() * 1000.0
+    }
+}
+
+pub const WARM_WINDOW_POOL_MIN_SPARE: usize = 1;
+pub const WARM_WINDOW_POOL_MAX: usize = 5;
+
+#[must_use]
+pub fn warm_window_pool_target(configured: u8) -> usize {
+    let requested = configured as usize;
+    requested.max(WARM_WINDOW_POOL_MIN_SPARE + 1).min(WARM_WINDOW_POOL_MAX)
+}
+
+#[must_use]
+pub fn warm_window_pool_should_spawn(current_len: usize, configured: u8) -> bool {
+    current_len < warm_window_pool_target(configured)
+}
+
+pub struct WarmWindow {
+    pub window: Arc<Window>,
+    pub renderer: GpuRenderer,
+    pub created_at: Instant,
+}
+
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -463,6 +512,7 @@ pub struct WindowState {
     /// lazily on first interaction; entries for closed panes are
     /// pruned opportunistically on the next render.
     pub scrollbar_vis: HashMap<u64, scrollbar_visibility::ScrollbarVisState>,
+    pub pending_tear_out_timing: Option<TearOutTiming>,
     /// Test-only mirror of the renderer's `drag_chip` overlay (#438).
     /// Production code leaves this `None`. Headless tests use
     /// [`App::__test_set_window_drag_chip_marker`] to flip it `Some(true)`
@@ -1466,6 +1516,7 @@ pub struct App {
     /// exactly those windows. An entry is cleared when that child next
     /// renders past the coalescing gate (or when the window is reaped).
     pub(super) pending_redraw_windows: HashSet<WindowId>,
+    pub(super) warm_window_pool: Vec<WarmWindow>,
     /// Set true whenever a user-driven event (keyboard, mouse click,
     /// cursor move while dragging, resize, IME, modifier change) or a
     /// live-reload of theme/font/keymap occurs. The next
@@ -1714,6 +1765,7 @@ impl App {
             software_render_degrade: false,
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
+            warm_window_pool: Vec::new(),
             input_dirty: false,
             pty_burst_gen: Arc::new(AtomicU32::new(0)),
             last_seen_burst_gen: 0,
@@ -2889,6 +2941,7 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
+            pending_tear_out_timing: None,
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
@@ -3797,6 +3850,7 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: HashMap::new(),
+            pending_tear_out_timing: None,
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
@@ -4739,6 +4793,41 @@ mod redraw_coalescing_tests {
             super::PTY_REDRAW_FLUSH_BYTES,
             Duration::ZERO,
         ));
+    }
+}
+
+#[cfg(test)]
+mod warm_window_pool_tests {
+    use super::{warm_window_pool_should_spawn, warm_window_pool_target, WARM_WINDOW_POOL_MAX};
+
+    #[test]
+    fn warm_window_pool_keeps_one_spare_after_consuming_one() {
+        assert_eq!(warm_window_pool_target(0), 2);
+        assert_eq!(warm_window_pool_target(1), 2);
+        assert_eq!(warm_window_pool_target(2), 2);
+        assert_eq!(warm_window_pool_target(99), WARM_WINDOW_POOL_MAX);
+    }
+
+    #[test]
+    fn warm_window_pool_spawns_until_target_is_reached() {
+        assert!(warm_window_pool_should_spawn(0, 2));
+        assert!(warm_window_pool_should_spawn(1, 2));
+        assert!(!warm_window_pool_should_spawn(2, 2));
+    }
+}
+
+#[cfg(test)]
+mod tear_out_timing_tests {
+    use super::TearOutTiming;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn tear_out_first_render_total_is_measured_from_start() {
+        let start = Instant::now();
+        let timing = TearOutTiming::new("main", start);
+        let total = timing.total_until_first_render_ms(start + Duration::from_millis(42));
+
+        assert!((41.0..=43.0).contains(&total));
     }
 }
 

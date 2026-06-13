@@ -55,6 +55,7 @@ impl App {
             el.exit();
             return;
         }
+        self.warm_window_pool_maintain(el);
         let notification_wake = self.expire_notifications(Instant::now());
         // Schedule the next blink-only redraw via `WaitUntil(..)`
         // rather than `request_redraw()` from inside the render path
@@ -409,6 +410,7 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            pending_tear_out_timing: None,
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,

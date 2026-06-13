@@ -118,6 +118,8 @@ pub struct WindowConfig {
     pub opacity: f32,
     /// Enable the macOS background blur effect (no-op on other platforms).
     pub blur: bool,
+    /// Number of hidden child windows kept warm for instant tab tear-out.
+    pub warm_window_pool: u8,
 }
 
 impl WindowConfig {
@@ -415,6 +417,7 @@ impl Default for WindowConfig {
             decorations: true,
             opacity: 1.0,
             blur: false,
+            warm_window_pool: 2,
         }
     }
 }
@@ -670,6 +673,10 @@ opacity = 1.0
 # Legacy macOS blur knob. Prefer [appearance].backdrop for new config.
 blur = false
 
+# Hidden pre-created child windows kept warm for instant tab tear-out.
+# SonicTerm keeps at least one spare after consuming one; values above 5 are clamped.
+warm_window_pool = 2
+
 [terminal]
 # TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
 # recognize SonicTerm yet; setting term_program = "WezTerm" can bypass their
@@ -685,8 +692,9 @@ cursor_shape = "block"
 
 [logging]
 # Logs are written to {config_dir}/logs/sonicterm.log.
+# Levels: error, warn, info, debug. Debug includes performance/render timing.
 # SonicTerm automatically removes logs and crash dumps older than 2 days.
-level = "info"
+level = "warn"
 max_file_size_mb = 10
 max_rotated_files = 3
 max_age_days = 2

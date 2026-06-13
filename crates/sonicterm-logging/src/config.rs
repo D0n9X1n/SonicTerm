@@ -4,6 +4,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// User-facing logging levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Only errors.
+    Error,
+    /// Warnings and errors.
+    Warn,
+    /// Informational startup/runtime events plus warnings and errors.
+    Info,
+    /// Debug diagnostics, including performance/render timing.
+    Debug,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        Self::Warn
+    }
+}
+
 /// Retention + level configuration. See field docs for defaults.
 ///
 /// Total disk usage is bounded by
@@ -30,12 +50,9 @@ pub struct LoggingConfig {
     /// Delete crash dumps older than this many days. Set to `0` to
     /// disable age-based eviction. Default: 2.
     pub max_crash_age_days: u32,
-    /// Optional explicit filter directives string in
-    /// [`tracing_subscriber::EnvFilter`] syntax (e.g. `"sonic=debug"`).
-    /// When `None`, falls back to `RUST_LOG`, then to the built-in
-    /// `DEFAULT_FILTER`. Default: `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub level: Option<String>,
+    /// User-facing log level. `debug` includes performance/render timing.
+    /// Default: `warn`.
+    pub level: LogLevel,
 }
 
 impl Default for LoggingConfig {
@@ -46,7 +63,7 @@ impl Default for LoggingConfig {
             max_age_days: 2,
             max_crash_dumps: 10,
             max_crash_age_days: 2,
-            level: None,
+            level: LogLevel::default(),
         }
     }
 }

@@ -39,7 +39,7 @@ pub mod path;
 pub mod sinks;
 
 pub use cleanup::{cleanup_old_files, cleanup_old_files_async, clear_all_rotated};
-pub use config::LoggingConfig;
+pub use config::{LogLevel, LoggingConfig};
 pub use crash::install_panic_hook;
 pub use exit_trace::{exit_with, install_exit_logging, record_loop_exiting, ExitGuard, ExitReason};
 pub use path::{crash_dir, log_dir, log_file_name};
@@ -57,20 +57,23 @@ pub struct LoggingGuard {
     _file_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
-/// The default per-target filter applied when neither `RUST_LOG` nor
-/// `LoggingConfig::level` is set. Top-level `sonicterm` floor is INFO so
-/// diagnostic logs from the renamed `sonicterm_*` crates (font discovery,
-/// app loop bootstrap, platform glue) reach the rolling file. The noisy
-/// `sonicterm_vt` and `sonicterm_grid` crates are pinned to WARN to keep
-/// steady-state chatter out of the file (this is the original v0.8.1
-/// RSS-driven decision, preserved here per-crate rather than via a
-/// blanket umbrella). The `sonic_exit` target (emitted from this crate's
-/// own exit-trace module) is kept explicitly WARN-on so exit markers
-/// survive the default filter. Post-#430 rename: the prior `sonic=warn`
-/// rule matched no crate after `sonic-*` → `sonicterm-*` and silently
-/// dropped every INFO log from the renamed crates — see issue #448.
+/// Default user-facing `warn` filter. `sonic_exit` stays WARN-on so exit
+/// markers survive; noisy renderer/backend crates stay pinned to WARN.
 pub const DEFAULT_FILTER: &str =
-    "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
+    "sonic_exit=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
+
+fn filter_for_level(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Error => "error",
+        LogLevel::Warn => DEFAULT_FILTER,
+        LogLevel::Info => {
+            "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn"
+        }
+        LogLevel::Debug => {
+            "sonic_exit=warn,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,render_timing=debug,tear_out_timing=debug,wgpu=warn,naga=warn"
+        }
+    }
+}
 
 /// Initialize tracing with a stderr layer (WARN+) and a rolling file
 /// layer (INFO+ default; overridden by `RUST_LOG` or `cfg.level`).
@@ -98,11 +101,7 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
     let file_appender = tracing_appender::rolling::daily(&dir, path::log_file_name());
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter_src = cfg
-        .level
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| DEFAULT_FILTER.to_string());
+    let filter_src = std::env::var("RUST_LOG").unwrap_or_else(|_| filter_for_level(cfg.level).to_string());
     let file_filter =
         EnvFilter::try_new(&filter_src).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let stderr_filter = EnvFilter::try_new(&filter_src)

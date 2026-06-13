@@ -59,6 +59,43 @@ fn indexed_color_supports_full_xterm_256_palette() {
 }
 
 #[test]
+fn dirty_rows_damage_rect_unions_and_clips_rows() {
+    let damage = dirty_rows_damage_rect(
+        [1usize, 3usize],
+        sonicterm_render_model::geometry::PixelRect { x: 8, y: 10, w: 100, h: 50 },
+        8.0,
+        10.0,
+        10,
+        6.0,
+        12.0,
+        80,
+        80,
+    );
+
+    assert_eq!(
+        damage,
+        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 60, h: 36 })
+    );
+}
+
+#[test]
+fn dirty_rows_damage_rect_returns_none_for_no_dirty_rows() {
+    let damage = dirty_rows_damage_rect(
+        [],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 100, h: 50 },
+        0.0,
+        0.0,
+        10,
+        6.0,
+        12.0,
+        100,
+        50,
+    );
+
+    assert_eq!(damage, None);
+}
+
+#[test]
 fn inverse_swaps_foreground_and_background_for_rendering() {
     let theme = Theme::default();
     let cell = Cell::plain('x', Color::Indexed(1), Color::Indexed(2), CellFlags::INVERSE);
