@@ -34,6 +34,9 @@ padding_left = 12
 padding_right = 12
 padding_top = 8
 padding_bottom = 4
+# Hidden pre-created child windows for fast tab tear-out. The default keeps
+# one spare available even immediately after consuming a warm window.
+warm_window_pool = 2
 
 [terminal]
 # TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
@@ -88,4 +91,6 @@ macOS 和 Windows 的配置文件路径：`~/.sonicterm/sonicterm.toml`
 - `[appearance] software_render_mode`：无 GPU（RDP / 虚拟机 / VDI）时渲染会
   回退到 CPU 软件光栅。`auto` 自动检测并降帧、关闭逐帧淡入动画以保持响应；
   `force` 始终降级；`off` 从不降级。
+- `[window] warm_window_pool`：后台保持隐藏的预热窗口数量，用于让 tab 拖出新窗口
+  更快；默认 `2`，这样消耗一个预热窗口后仍保留一个备用。
 

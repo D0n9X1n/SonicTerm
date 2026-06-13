@@ -19,8 +19,8 @@ use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
-    RequestAdapterOptions, SurfaceConfiguration, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
+    RequestAdapterOptions, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
@@ -299,6 +299,7 @@ use sonicterm_text::{
     // file outright.
     shape::{run_is_ascii_fast, RunStyle},
 };
+use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
@@ -317,6 +318,61 @@ use sonicterm_ui::{
     tabbar_view::{tab_bar_height, TabBarLayout, TAB_GAP},
     tabs::TabBar,
 };
+
+#[must_use]
+fn dirty_rows_damage_rect<I>(
+    dirty_rows: I,
+    pane_rect: PixelRect,
+    origin_x: f32,
+    origin_y: f32,
+    cols: u16,
+    cell_w: f32,
+    cell_h: f32,
+    surface_w: u32,
+    surface_h: u32,
+) -> Option<PixelRect>
+where
+    I: IntoIterator<Item = usize>,
+{
+    if cols == 0 || cell_w <= 0.0 || cell_h <= 0.0 || surface_w == 0 || surface_h == 0 {
+        return None;
+    }
+    let bounds = PixelRect { x: 0, y: 0, w: surface_w, h: surface_h };
+    let pane_bounds = pane_rect.intersect(bounds)?;
+    let mut damage = DamageRect::empty();
+    let row_w = (cols as f32 * cell_w).ceil().max(1.0) as u32;
+    let row_h = cell_h.ceil().max(1.0) as u32;
+    for row in dirty_rows {
+        let x = origin_x.floor() as i32;
+        let y = (origin_y + row as f32 * cell_h).floor() as i32;
+        damage.add_clipped(PixelRect { x, y, w: row_w, h: row_h }, pane_bounds);
+    }
+    damage.rect()
+}
+
+fn full_surface_rect(width: u32, height: u32) -> PixelRect {
+    PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
+}
+
+fn create_frame_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("sonic-retained-frame"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    (texture, view)
+}
 
 /// Style and sizing inputs for tab-bar quad emission.
 pub struct TabBarQuadParams {
@@ -421,6 +477,9 @@ pub struct GpuRenderer {
     /// WezTerm-style final presentation pipeline. It consumes every glyph and
     /// geometry primitive for a frame and emits one indexed draw stream.
     present_pipeline: WeztermPipeline,
+    frame_texture: Texture,
+    frame_view: TextureView,
+    frame_blitter: wgpu::util::TextureBlitter,
 
     // B3 GPU text path for the terminal grid.
     glyph_atlas: GlyphAtlas,
@@ -1089,6 +1148,8 @@ impl GpuRenderer {
         // prebake — chrome and grid share this single atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
+        let (frame_texture, frame_view) = create_frame_texture(&device, config.width, config.height, format);
+        let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
         let mut glyph_atlas = GlyphAtlas::default_size();
         let glyph_upload = AtlasUpload::new(
             &device,
@@ -1161,6 +1222,9 @@ impl GpuRenderer {
             config,
             window,
             present_pipeline,
+            frame_texture,
+            frame_view,
+            frame_blitter,
             glyph_atlas,
             glyph_upload,
             font_family: font_family.to_string(),
@@ -1230,6 +1294,14 @@ impl GpuRenderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        let (frame_texture, frame_view) = create_frame_texture(
+            &self.device,
+            self.config.width,
+            self.config.height,
+            self.config.format,
+        );
+        self.frame_texture = frame_texture;
+        self.frame_view = frame_view;
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
         // Cell layout and absolute-row positioning both change with
@@ -2614,6 +2686,63 @@ impl GpuRenderer {
             .map_or(0, |quick| quick.hints.len() as u32);
         let read_only_mode = copy_mode.is_some_and(CopyModeState::is_read_only);
         let pane_focus_flash_bucket = self.pane_focus_flash_bucket(now);
+        let overlay_or_chrome_changed = self
+            .last_frame_key
+            .as_ref()
+            .is_none_or(|prev| {
+                prev.selection != selection.copied()
+                    || prev.copy_mode != copy_mode.cloned()
+                    || prev.quick_select_hint_count != quick_select_hint_count
+                    || prev.cursor_visible != cursor_visible
+                    || prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
+                    || prev.pane != active_pane
+                    || prev.search_hash != search_hash
+                    || prev.palette_hash != palette_hash
+                    || prev.ime_hash != ime_hash
+                    || prev.notification_hash != notification_hash
+                    || prev.width != self.config.width
+                    || prev.height != self.config.height
+                    || prev.tab_hash != tab_hash
+                    || prev.pane_rect_hash != pane_rect_hash
+                    || prev.viewport_top_abs != viewport_top_abs
+                    || prev.cursor_shape != self.cursor_shape as u8
+                    || prev.cursor_blink != self.cursor_blink
+                    || prev.window_focused != self.window_focused
+                    || prev.pane_focus_flash_bucket != pane_focus_flash_bucket
+                    || prev.hover_tab != hover_tab_idx
+                    || prev.close_override != u8::from(self.tab_close_override.is_some())
+                    || prev.broadcast_receivers_hash != broadcast_receivers_hash
+                    || prev.inline_media_hash != inline_media_hash
+                    || prev.hovered_url_cells != hovered_url_cells
+            });
+        let mut damage = DamageRect::empty();
+        let surface_rect = full_surface_rect(self.config.width, self.config.height);
+        if overlay_or_chrome_changed {
+            damage.add_clipped(surface_rect, surface_rect);
+        } else {
+            for pv in &pane_views {
+                let pane_rect = PixelRect {
+                    x: pv.origin_x.floor() as i32,
+                    y: pv.origin_y.floor() as i32,
+                    w: pv.rect_w.ceil().max(1.0) as u32,
+                    h: pv.rect_h.ceil().max(1.0) as u32,
+                };
+                if let Some(rect) = dirty_rows_damage_rect(
+                    pv.grid.dirty_rows(),
+                    pane_rect,
+                    pv.origin_x,
+                    pv.origin_y,
+                    pv.grid.cols,
+                    self.cell_w,
+                    self.cell_h,
+                    self.config.width,
+                    self.config.height,
+                ) {
+                    damage.add_clipped(rect, surface_rect);
+                }
+            }
+        }
+
         let key = FrameKey {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
@@ -4886,20 +5015,45 @@ impl GpuRenderer {
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
+        let first_retained_frame = self.last_frame_key.is_none();
+        let damage_rect = if first_retained_frame { surface_rect } else { damage.rect().unwrap_or(surface_rect) };
+        let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
+        let mut retained_quads = Vec::with_capacity(quads.len() + 1);
+        retained_quads.push(QuadInstance::sharp(
+            px_to_ndc(
+                damage_rect.x as f32,
+                damage_rect.y as f32,
+                damage_rect.w as f32,
+                damage_rect.h as f32,
+                sw,
+                sh,
+            ),
+            bg_clear,
+        ));
+        retained_quads.extend_from_slice(&quads);
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("sonic-pass"),
+                label: Some("sonic-retained-pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.frame_view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: Operations { load: LoadOp::Clear(self.bg), store: wgpu::StoreOp::Store },
+                    ops: Operations {
+                        load: if first_retained_frame { LoadOp::Clear(self.bg) } else { LoadOp::Load },
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_scissor_rect(
+                damage_rect.x.max(0) as u32,
+                damage_rect.y.max(0) as u32,
+                damage_rect.w.max(1),
+                damage_rect.h.max(1),
+            );
             // WezTerm-style final presentation: every glyph and colored
             // geometry primitive flows through one vertex/shader/indexed-draw
             // path. The ordering preserves the previous painter stack:
@@ -4911,12 +5065,13 @@ impl GpuRenderer {
                 self.glyph_upload.bind_group(),
                 sw,
                 sh,
-                &quads,
+                &retained_quads,
                 &glyph_instances,
                 &quads_overlay,
                 &overlay_glyph_instances,
             );
         }
+        self.frame_blitter.copy(&self.device, &mut encoder, &self.frame_view, &view);
         gpu_lap!("render_pass");
         self.queue.submit(Some(encoder.finish()));
         gpu_lap!("queue_submit");

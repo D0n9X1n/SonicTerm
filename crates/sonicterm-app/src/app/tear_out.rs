@@ -38,6 +38,102 @@ use super::{
 use crate::app::window_geom;
 
 impl App {
+    fn tear_out_renderer_settings(&self) -> sonicterm_gpu::core::RendererSettings<'_> {
+        sonicterm_gpu::core::RendererSettings {
+            font_family: &self.config.font.family,
+            font_size: self.config.font.size,
+            line_height_mult: self.config.font.line_height,
+            padding: [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
+            appearance: sonicterm_gpu::core::SurfaceAppearance {
+                backdrop: self.config.appearance.backdrop,
+                opacity: self.config.appearance.opacity,
+                scrollbar: self.config.appearance.scrollbar,
+                panel_padding: self.config.appearance.panel_padding,
+            },
+        }
+    }
+
+    fn configure_child_renderer(&self, renderer: &mut GpuRenderer, window: &Window) {
+        if let Some(proxy) = self.event_loop_proxy.clone() {
+            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
+        }
+        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
+        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_titlebar_inset(0.0);
+        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
+        let real_sf = window_dpi(window);
+        renderer.force_rebuild_for_scale(real_sf);
+        let real_inner = window.inner_size();
+        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+    }
+
+    pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
+        if self.main_renderer().is_none() {
+            return;
+        }
+        if super::warm_window_pool_should_spawn(
+            self.warm_window_pool.len(),
+            self.config.window.warm_window_pool,
+        ) {
+            if let Some(warm) = self.create_warm_window(el) {
+                self.warm_window_pool.push(warm);
+            }
+        }
+        let max = super::WARM_WINDOW_POOL_MAX;
+        if self.warm_window_pool.len() > max {
+            self.warm_window_pool.truncate(max);
+        }
+    }
+
+    fn create_warm_window(&mut self, el: &ActiveEventLoop) -> Option<super::WarmWindow> {
+        let attrs = super::with_app_icon(super::with_backdrop_transparency(
+            with_integrated_titlebar(
+                Window::default_attributes()
+                    .with_title(super::NATIVE_WINDOW_TITLE)
+                    .with_decorations(true)
+                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0))
+                    .with_visible(false),
+            ),
+            self.config.appearance.backdrop,
+        ));
+        let window = match el.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::warn!("warm-window-pool: create_window failed: {e}");
+                return None;
+            }
+        };
+        window.set_ime_allowed(true);
+        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
+        let settings = self.tear_out_renderer_settings();
+        let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+        let mut renderer = match shared_gpu.map_or_else(
+            || GpuRenderer::new(window.clone(), el, &self.theme, settings),
+            |ctx| GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("warm-window-pool: renderer init failed: {e}");
+                return None;
+            }
+        };
+        self.configure_child_renderer(&mut renderer, &window);
+        Some(super::WarmWindow { window, renderer, created_at: Instant::now() })
+    }
+
+    fn take_warm_window(&mut self) -> Option<super::WarmWindow> {
+        self.warm_window_pool.pop()
+    }
+
+    pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
+        self.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
+    }
+
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
         // M6a-expand-2c-misc: notify reducer of the tear-out
         // cascade. The reducer emits Render(TabRemoved) on the
@@ -82,7 +178,7 @@ impl App {
         // survives the gesture intact.
         let Some((tab, state, panes)) = self.detach_tab_state(index) else { return true };
 
-        if self.install_torn_out_window(el, tab, state, panes, None).is_none() {
+        if self.install_torn_out_window(el, tab, state, panes, None, "main").is_none() {
             return true;
         }
         // Phase B source-side cleanup: hide main if drained, else
@@ -111,88 +207,78 @@ impl App {
         state: TabState,
         panes: HashMap<u64, super::PaneState>,
         screen_pos: Option<(i32, i32)>,
+        source: &'static str,
     ) -> Option<WindowId> {
-        let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
-            with_integrated_titlebar(
-                Window::default_attributes()
-                    .with_title(super::NATIVE_WINDOW_TITLE)
-                    .with_decorations(true)
-                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
-            ),
-            self.config.appearance.backdrop,
-        ));
-        if let Some((sx, sy)) = screen_pos {
-            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
-        }
-        let window = match el.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
-                // panes drop here, which kills the child shells via
-                // PtyHandle::Drop — acceptable for an OS-level failure.
-                return None;
+        let tear_start = Instant::now();
+        let (window, mut renderer, create_window_ms, renderer_init_ms) = match self.take_warm_window()
+        {
+            Some(warm) => {
+                let window = warm.window;
+                if let Some((sx, sy)) = screen_pos {
+                    window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
+                }
+                window.set_visible(true);
+                (window, warm.renderer, 0.0, 0.0)
+            }
+            None => {
+                let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
+                    with_integrated_titlebar(
+                        Window::default_attributes()
+                            .with_title(super::NATIVE_WINDOW_TITLE)
+                            .with_decorations(true)
+                            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+                    ),
+                    self.config.appearance.backdrop,
+                ));
+                if let Some((sx, sy)) = screen_pos {
+                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
+                }
+                let create_start = Instant::now();
+                let window = match el.create_window(attrs) {
+                    Ok(w) => Arc::new(w),
+                    Err(e) => {
+                        tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
+                        return None;
+                    }
+                };
+                let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
+                window.set_ime_allowed(true);
+                super::install_native_window_background(
+                    &window,
+                    self.theme.colors.background.0.as_str(),
+                );
+                let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+                let renderer_settings = self.tear_out_renderer_settings();
+                let renderer_start = Instant::now();
+                let mut renderer = match shared_gpu.map_or_else(
+                    || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
+                    |ctx| {
+                        GpuRenderer::new_with_shared_context(
+                            window.clone(),
+                            el,
+                            &self.theme,
+                            renderer_settings,
+                            ctx,
+                        )
+                    },
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
+                        return None;
+                    }
+                };
+                let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
+                self.configure_child_renderer(&mut renderer, &window);
+                (window, renderer, create_window_ms, renderer_init_ms)
             }
         };
-        window.set_ime_allowed(true);
-        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
 
-        // Build the renderer for the new surface. Reuse the parent GPU
-        // context so tab tear-out doesn't block the UI thread on another
-        // request_adapter/request_device cycle. Each child still gets its
-        // own surface, pipelines, atlas, and row caches, but shares the
-        // already-open adapter/device/queue handles.
-        let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
-        let renderer_settings = sonicterm_gpu::core::RendererSettings {
-            font_family: &self.config.font.family,
-            font_size: self.config.font.size,
-            line_height_mult: self.config.font.line_height,
-            padding: [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
-            appearance: sonicterm_gpu::core::SurfaceAppearance {
-                backdrop: self.config.appearance.backdrop,
-                opacity: self.config.appearance.opacity,
-                scrollbar: self.config.appearance.scrollbar,
-                panel_padding: self.config.appearance.panel_padding,
-            },
-        };
-        let mut renderer = match shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
-            |ctx| {
-                GpuRenderer::new_with_shared_context(
-                    window.clone(),
-                    el,
-                    &self.theme,
-                    renderer_settings,
-                    ctx,
-                )
-            },
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
-                return None;
-            }
-        };
-        // Epic #300 P4 follow-up wire (tear-out path).
-        if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
-        }
-        // Inherit cursor config from the parent app so the torn-out
-        // window doesn't suddenly revert to default block/blink.
-        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
-        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(0.0);
-        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
+        let resize_start = Instant::now();
+        self.configure_child_renderer(&mut renderer, &window);
+        let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
 
-        let real_sf = window_dpi(&window);
-        renderer.force_rebuild_for_scale(real_sf);
-        let real_inner = window.inner_size();
-        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
-
+        let install_start = Instant::now();
         let (cols, rows) = renderer.cells();
         // Swap each migrated pane's VT-thread redraw target so further pty
         // output triggers the CHILD window's redraw, not the parent. The
@@ -247,6 +333,13 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            pending_tear_out_timing: Some({
+                let mut timing = crate::app::TearOutTiming::new(source, tear_start);
+                timing.create_window_ms = create_window_ms;
+                timing.renderer_init_ms = renderer_init_ms;
+                timing.resize_ms = resize_ms;
+                timing
+            }),
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
@@ -265,7 +358,23 @@ impl App {
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
         self.register_window_with_os_drag_backend(win_id, &window);
+        if let Some(child) = self.windows.get_mut(&win_id) {
+            if let Some(timing) = child.pending_tear_out_timing.as_mut() {
+                timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;
+                tracing::warn!(
+                    target: "tear_out_timing",
+                    source = timing.source,
+                    create_window_ms = timing.create_window_ms,
+                    renderer_init_ms = timing.renderer_init_ms,
+                    resize_ms = timing.resize_ms,
+                    install_ms = timing.install_ms,
+                    "tear-out install latency breakdown"
+                );
+            }
+        }
         window.request_redraw();
+        // The pool target is at least two, so consuming one still leaves one
+        // hidden spare. Refill on the next idle tick, not on the drop path.
         // Epic #289 Phase B: the new window becomes OS-frontmost after
         // the hidden first frame is rendered and the child RedrawRequested
         // handler shows it.
@@ -517,143 +626,11 @@ impl App {
         src_id: WindowId,
         index: usize,
     ) -> bool {
-        let shared_gpu = self
-            .windows
-            .get(&src_id)
-            .and_then(|c| c.renderer.as_ref())
-            .map(GpuRenderer::shared_context);
         let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else { return false };
-
-        let attrs = super::with_app_icon(super::with_backdrop_transparency(
-            with_integrated_titlebar(
-                Window::default_attributes()
-                    .with_title(super::NATIVE_WINDOW_TITLE)
-                    .with_decorations(true)
-                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
-            ),
-            self.config.appearance.backdrop,
-        ));
-        let window = match el.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                tracing::error!("tear-out (child→new): create_window failed: {e}; panes dropped");
-                return true;
-            }
+        let Some(win_id) = self.install_torn_out_window(el, tab, state, panes, None, "child") else {
+            tracing::warn!("tear-out (child→new): install_torn_out_window failed");
+            return true;
         };
-        window.set_ime_allowed(true);
-        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
-        let renderer_settings = sonicterm_gpu::core::RendererSettings {
-            font_family: &self.config.font.family,
-            font_size: self.config.font.size,
-            line_height_mult: self.config.font.line_height,
-            padding: [
-                self.config.window.padding_left,
-                self.config.window.padding_right,
-                self.config.window.padding_top,
-                self.config.window.padding_bottom,
-            ],
-            appearance: sonicterm_gpu::core::SurfaceAppearance {
-                backdrop: self.config.appearance.backdrop,
-                opacity: self.config.appearance.opacity,
-                scrollbar: self.config.appearance.scrollbar,
-                panel_padding: self.config.appearance.panel_padding,
-            },
-        };
-        let mut renderer = match shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
-            |ctx| {
-                GpuRenderer::new_with_shared_context(
-                    window.clone(),
-                    el,
-                    &self.theme,
-                    renderer_settings,
-                    ctx,
-                )
-            },
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("tear-out (child→new): renderer init failed: {e}; panes dropped");
-                return true;
-            }
-        };
-        // Epic #300 P4 follow-up wire (tear-out child→new path).
-        if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
-        }
-        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
-        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_titlebar_inset(0.0);
-        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        let real_sf = window_dpi(&window);
-        renderer.force_rebuild_for_scale(real_sf);
-        let real_inner = window.inner_size();
-        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
-
-        let (cols, rows) = renderer.cells();
-        // #pane-geom: defer per-pane sizing to after the child WindowState
-        // exists (below) so a SPLIT sizes each pane to its sub-rect, not the
-        // full window. Here we only swap the redraw target.
-        let _ = (cols, rows);
-        for pane in panes.values() {
-            *pane.redraw_target.lock() = Some(window.clone());
-        }
-        let win_id = window.id();
-        let mut child_tabs = TabBar::new();
-        let active_pane = state.active_pane;
-        child_tabs.push(tab);
-        let child = WindowState {
-            role: crate::app::WindowRole::Terminal,
-            window: Some(window.clone()),
-            renderer: Some(renderer),
-            tabs: child_tabs,
-            tab_states: vec![TabState {
-                tree: state.tree,
-                active_pane,
-                search: state.search,
-                command: state.command,
-            }],
-            panes,
-            cursor_pos: (0.0, 0.0),
-            mouse_down: false,
-            selection: None,
-            last_click_time: None,
-            last_click_cell: (0, 0),
-            click_count: 0,
-            select_mode: SelectMode::Cell,
-            select_anchor: (0, 0),
-            copy_mode: None,
-            modifiers: ModifiersState::empty(),
-            last_render: Instant::now(),
-            hover_link: false,
-            pressed_tab: None,
-            drag_session: None,
-            drag_target: None,
-            dpi_scale: 1.0,
-            ime: ImeState::new(),
-            ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
-            hovered_url: None,
-            notification: None,
-            hidden: false,
-            scrollbar_drag: None,
-            splitter_drag: None,
-            splitter_hover: None,
-            scrollbar_vis: std::collections::HashMap::new(),
-            test_drag_chip_marker: None,
-            test_renderer_focus_marker: None,
-            test_pane_viewport: None,
-        };
-        self.windows.insert(win_id, child);
-        // #pane-geom: size each migrated pane to its split sub-rect now that the
-        // child WindowState exists (mirrors install_torn_out_window).
-        if let Some(child) = self.windows.get_mut(&win_id) {
-            super::child_window::resize_visible_panes_in_child(child);
-        }
-        // Phase C2 / Haiku #295: register the new window's HWND with
-        // the OS-drag backend so drops on this child window reach
-        // IDropTarget::Drop. No-op on mac.
-        self.register_window_with_os_drag_backend(win_id, &window);
-        window.request_redraw();
         self.frontmost_window = Some(win_id);
         // Source child: if drained, drop it (PtyHandle::Drop on any
         // remaining panes — there shouldn't be any since we moved the

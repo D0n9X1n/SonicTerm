@@ -642,7 +642,20 @@ impl App {
                     if let Some(t) = timing.as_mut() {
                         t.lap("render");
                     }
-                    child.last_render = Instant::now();
+                    let first_render_at = Instant::now();
+                    if let Some(tear) = child.pending_tear_out_timing.take() {
+                        tracing::warn!(
+                            target: "tear_out_timing",
+                            source = tear.source,
+                            create_window_ms = tear.create_window_ms,
+                            renderer_init_ms = tear.renderer_init_ms,
+                            resize_ms = tear.resize_ms,
+                            install_ms = tear.install_ms,
+                            first_render_total_ms = tear.total_until_first_render_ms(first_render_at),
+                            "tear-out latency breakdown"
+                        );
+                    }
+                    child.last_render = first_render_at;
                     // Issue #43: close the coalescing gate for the next
                     // streaming redraw. `input_dirty` is the shared
                     // main+child carve-out flag (see window_event.rs

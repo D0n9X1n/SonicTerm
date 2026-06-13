@@ -81,6 +81,7 @@ impl App {
         // PR #132: any live-reload (theme/font/keymap) is user-driven
         // and must render immediately, not at the next vsync deadline.
         self.input_dirty = true;
+        self.warm_window_pool.clear();
         let assets = sonicterm_cfg::assets::asset_dir();
 
         // Theme

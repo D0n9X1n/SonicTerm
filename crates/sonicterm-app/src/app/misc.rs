@@ -667,7 +667,7 @@ impl App {
             );
             return;
         };
-        if self.install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos)).is_none()
+        if self.install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos), "main").is_none()
         {
             tracing::warn!("drain_pending_tear_out: install_torn_out_window failed");
             return;
@@ -813,6 +813,7 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
+            pending_tear_out_timing: None,
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,

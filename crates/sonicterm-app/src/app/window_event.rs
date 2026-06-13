@@ -86,6 +86,9 @@ impl App {
         ) {
             self.input_dirty = true;
         }
+        if self.is_warm_window_id(win_id) {
+            return;
+        }
         // Drain any pending sonicterm.toml live-reload deliveries before
         // dispatching the event — guarantees font/theme/keymap swaps
         // land on the same redraw tick they were detected on.
