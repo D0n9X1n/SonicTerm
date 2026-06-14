@@ -22,8 +22,14 @@ Tabs can be dragged out into separate windows and dragged back to merge.
 Command palette input behaves like a single-line text field: spaces, CJK IME
 composition, left/right arrows, Home, End, Delete, and Backspace all edit the
 query or rename text in place. IME candidate windows anchor to the palette input
-caret when the palette is open. **Check for Updates** checks GitHub Releases and
-shows a top-right notification bubble; it does not install anything automatically.
+caret when the palette is open. **Rename Active Tab** accepts an empty submit to
+clear the custom title and return to the automatic title. **Update Tab Color**
+opens a theme-color picker for the current tab; colors come from the active
+ANSI/bright ANSI theme palette only. The first option, **Reset to Default**,
+clears the custom color and restores the default tab highlight. Choosing a color
+updates the tab text + top accent. **Check for Updates** checks GitHub Releases
+and shows a top-right notification bubble; it does not install anything
+automatically.
 
 Broadcast mode sends input from the active pane to peer panes in the current tab
 (or all tabs when configured by keymap action), including panes in torn-out
@@ -53,7 +59,7 @@ SonicTerm 会自动创建配置目录。
 
 Tab 可以拖出成为独立窗口，也可以拖回合并。
 
-命令面板输入框支持普通单行文本编辑：空格、中文/日文等 IME 组合输入、左右方向键、Home、End、Delete 和 Backspace 都会编辑当前 query 或重命名文本。命令面板打开时，输入法候选词窗口会跟随命令面板输入光标。**Check for Updates** 会检查 GitHub Releases 并在右上角显示 notification bubble；它不会自动安装任何内容。
+命令面板输入框支持普通单行文本编辑：空格、中文/日文等 IME 组合输入、左右方向键、Home、End、Delete 和 Backspace 都会编辑当前 query 或重命名文本。命令面板打开时，输入法候选词窗口会跟随命令面板输入光标。**Rename Active Tab** 提交空标题会清除自定义标题并恢复自动标题。**Update Tab Color** 会为当前 Tab 打开主题颜色选择器；颜色只来自当前 theme 的 ANSI / bright ANSI palette。第一个选项 **Reset to Default** 会清除自定义颜色并恢复默认高亮；选中颜色后会更新 Tab 文本颜色和顶部 accent。**Check for Updates** 会检查 GitHub Releases 并在右上角显示 notification bubble；它不会自动安装任何内容。
 
 Broadcast 模式会把当前 Pane 的输入同步发送到同一个 Tab 的其他 Pane，也可以通过 keymap action 配成所有 Tab；拖出的独立窗口也会参与对应范围。
 

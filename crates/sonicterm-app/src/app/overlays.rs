@@ -15,6 +15,7 @@ use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
+use sonicterm_ui::command_palette::TabColorChoice;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::overlays::{
     command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
@@ -41,6 +42,36 @@ use super::{
 
 fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+}
+
+pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
+    let bg = theme.colors.background.0.to_ascii_lowercase();
+    let mut choices = vec![TabColorChoice { name: "Reset to Default".to_string(), hex: None }];
+    let mut pairs = vec![
+        ("ANSI Black", theme.colors.ansi.black.0.as_str()),
+        ("ANSI Red", theme.colors.ansi.red.0.as_str()),
+        ("ANSI Green", theme.colors.ansi.green.0.as_str()),
+        ("ANSI Yellow", theme.colors.ansi.yellow.0.as_str()),
+        ("ANSI Blue", theme.colors.ansi.blue.0.as_str()),
+        ("ANSI Magenta", theme.colors.ansi.magenta.0.as_str()),
+        ("ANSI Cyan", theme.colors.ansi.cyan.0.as_str()),
+        ("ANSI White", theme.colors.ansi.white.0.as_str()),
+        ("Bright Black", theme.colors.bright.black.0.as_str()),
+        ("Bright Red", theme.colors.bright.red.0.as_str()),
+        ("Bright Green", theme.colors.bright.green.0.as_str()),
+        ("Bright Yellow", theme.colors.bright.yellow.0.as_str()),
+        ("Bright Blue", theme.colors.bright.blue.0.as_str()),
+        ("Bright Magenta", theme.colors.bright.magenta.0.as_str()),
+        ("Bright Cyan", theme.colors.bright.cyan.0.as_str()),
+        ("Bright White", theme.colors.bright.white.0.as_str()),
+    ];
+    pairs.retain(|(_, hex)| hex.to_ascii_lowercase() != bg);
+    choices.extend(
+        pairs
+            .into_iter()
+            .map(|(name, hex)| TabColorChoice { name: name.to_string(), hex: Some(hex.to_string()) }),
+    );
+    choices
 }
 
 impl App {
@@ -208,6 +239,33 @@ impl App {
             return true;
         }
         if self.command_palette.mode()
+            == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
+        {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    true
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.apply_selected_tab_color();
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    true
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.command_palette.move_selection_down();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.command_palette.move_selection_up();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                    true
+                }
+                _ => true,
+            }
+        } else if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
             match &event.logical_key {
@@ -220,9 +278,7 @@ impl App {
                     let title = self.command_palette.query().trim().to_string();
                     self.command_palette.close();
                     self.palette_attached_window = None;
-                    if !title.is_empty() {
-                        self.rename_active_tab_body(title);
-                    }
+                    self.rename_active_tab_body(title);
                     true
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -293,6 +349,10 @@ impl App {
                         self.command_palette.start_rename_tab(body);
                         self.update_command_palette_ime_cursor_area();
                         self.request_redraw_for_overlay(self.palette_attached_window);
+                        return true;
+                    }
+                    if matches!(action, Some(sonicterm_cfg::keymap::Action::UpdateTabColor)) {
+                        self.start_update_tab_color();
                         return true;
                     }
                     self.command_palette.close();
@@ -444,6 +504,45 @@ impl App {
             }
         }
     }
+
+    pub(super) fn start_update_tab_color(&mut self) {
+        let title = self.active_tab_title_body().unwrap_or_else(|| "current tab".to_string());
+        let choices = theme_tab_color_choices(&self.theme);
+        self.command_palette.start_tab_color_picker(title, choices);
+        self.palette_attached_window = match self.frontmost_kind() {
+            FrontmostKind::Child(id) => Some(id),
+            _ => None,
+        };
+        self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
+    pub(super) fn apply_selected_tab_color(&mut self) {
+        let Some(choice) = self.command_palette.selected_tab_color().cloned() else { return };
+        match self.frontmost_kind() {
+            FrontmostKind::Child(id) => {
+                if let Some(ws) = self.windows.get_mut(&id) {
+                    if let Some(hex) = choice.hex {
+                        ws.tabs.set_active_custom_color(hex);
+                    } else {
+                        ws.tabs.clear_active_custom_color();
+                    }
+                    ws.request_redraw();
+                }
+            }
+            _ => {
+                if let Some(tabs) = self.main_tabs_mut() {
+                    if let Some(hex) = choice.hex {
+                        tabs.set_active_custom_color(hex);
+                    } else {
+                        tabs.clear_active_custom_color();
+                    }
+                }
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {
             return;
@@ -537,5 +636,24 @@ impl App {
         let Some(ws) = self.main() else { return false };
         let i = ws.tabs.active_index();
         ws.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::theme_tab_color_choices;
+    use sonicterm_cfg::theme::Theme;
+
+    #[test]
+    fn tab_color_choices_include_reset_and_only_ansi_colors() {
+        let theme = Theme::default();
+        let bg = theme.colors.background.0.to_ascii_lowercase();
+        let choices = theme_tab_color_choices(&theme);
+
+        assert_eq!(choices.first().map(|choice| choice.name.as_str()), Some("Reset to Default"));
+        assert_eq!(choices.first().and_then(|choice| choice.hex.as_deref()), None);
+        assert_eq!(choices.len(), 17);
+        assert!(choices.iter().skip(1).all(|choice| choice.name.starts_with("ANSI ") || choice.name.starts_with("Bright ")));
+        assert!(choices.iter().filter_map(|choice| choice.hex.as_ref()).all(|hex| hex.to_ascii_lowercase() != bg));
     }
 }

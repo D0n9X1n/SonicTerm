@@ -8,6 +8,7 @@ fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
     assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
     assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
     assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
+    assert!(actions.iter().any(|a| matches!(a, Action::UpdateTabColor)));
     assert!(actions
         .iter()
         .any(|a| { matches!(a, Action::ResizePane { dir: Direction::Left, amount: 5 }) }));
@@ -94,4 +95,26 @@ fn palette_text_editing_supports_space_cjk_and_caret_movement() {
     assert_eq!(palette.query(), "rename -标题");
     palette.backspace();
     assert_eq!(palette.query(), "rename 标题");
+}
+
+#[test]
+fn tab_color_picker_exposes_selected_choice() {
+    let mut palette = CommandPalette::new();
+    palette.start_tab_color_picker(
+        "#1 work",
+        vec![
+            TabColorChoice { name: "Reset to Default".into(), hex: None },
+            TabColorChoice { name: "ANSI Red".into(), hex: Some("#fb4934".into()) },
+            TabColorChoice { name: "ANSI Blue".into(), hex: Some("#83a598".into()) },
+        ],
+    );
+
+    assert_eq!(palette.mode(), CommandPaletteMode::TabColor);
+    assert_eq!(palette.tab_color_title(), "#1 work");
+    assert_eq!(palette.len(), 3);
+    assert_eq!(palette.selected_tab_color().map(|c| c.hex.as_deref()), Some(None));
+    palette.move_selection_down();
+    assert_eq!(palette.selected_tab_color().and_then(|c| c.hex.as_deref()), Some("#fb4934"));
+    palette.move_selection_down();
+    assert_eq!(palette.selected_tab_color().map(|c| c.name.as_str()), Some("ANSI Blue"));
 }
