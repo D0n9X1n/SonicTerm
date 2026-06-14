@@ -391,6 +391,7 @@ pub struct TabBarQuadParams {
     pub hover_tab_idx: u32,
     /// Surface dimensions in the same units as the layout rects.
     pub surface: (f32, f32),
+    pub show_active_panel_marker: bool,
 }
 
 /// Paint the tab-bar background and tab chrome quads into `quads`.
@@ -412,7 +413,7 @@ pub fn emit_tab_bar_quads(
     });
     for t in &layout.tabs {
         let is_active = layout.active == Some(t.idx);
-        if is_active || t.custom_color.is_some() {
+        if is_active && params.show_active_panel_marker {
             let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
             let inset = ACTIVE_TOP_ACCENT_INSET * scale;
             let acc = sonicterm_ui::tabbar_view::Rect {
@@ -3870,6 +3871,7 @@ impl GpuRenderer {
                     border: bar_bg,
                     hover_tab_idx,
                     surface: (sw, sh),
+                    show_active_panel_marker: self.window_focused,
                 },
             );
             for t in &layout.tabs {
@@ -3917,6 +3919,7 @@ impl GpuRenderer {
                 for t in &layout.tabs {
                     let Some(tab) = tabs.tabs().get(t.idx) else { continue };
                     let active = layout.active == Some(t.idx);
+                    let active_panel_focused = active && self.window_focused;
                     let hovered = hover_tab_idx == t.idx as u32;
                     let mut title = tab.command.clone().badge(now, active).map_or_else(
                         || tab.title.clone(),
@@ -3936,6 +3939,9 @@ impl GpuRenderer {
                         .unwrap_or_else(|| {
                             if active || hovered { self.tab_active_fg } else { self.tab_inactive_fg }
                         });
+                    if tab.custom_color.is_some() && !active_panel_focused {
+                        color = scale_chrome_text_alpha(color, 0.55);
+                    }
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
