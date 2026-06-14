@@ -25,6 +25,62 @@ fn does_not_flag_real_gpus() {
 }
 
 #[test]
+fn custom_tab_color_does_not_emit_unfocused_panel_marker() {
+    let mut tabs = sonicterm_ui::tabs::TabBar::new();
+    tabs.push(sonicterm_ui::tabs::Tab::new("one"));
+    tabs.push(sonicterm_ui::tabs::Tab::new("two"));
+    tabs.set_active_custom_color("#fabd2f");
+    tabs.activate(0);
+    tabs.set_active_custom_color("#83a598");
+
+    let layout = sonicterm_ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let mut quads = Vec::new();
+    emit_tab_bar_quads(
+        &mut quads,
+        &layout,
+        &TabBarQuadParams {
+            tab_count: tabs.tabs().len(),
+            accent: [1.0, 0.0, 0.0, 1.0],
+            separator: [0.5, 0.5, 0.5, 1.0],
+            border: [0.0, 0.0, 0.0, 1.0],
+            hover_tab_idx: u32::MAX,
+            surface: (400.0, 80.0),
+            show_active_panel_marker: false,
+        },
+    );
+
+    assert_eq!(quads.len(), 3);
+}
+
+#[test]
+fn custom_tab_color_emits_focused_panel_marker_once() {
+    let mut tabs = sonicterm_ui::tabs::TabBar::new();
+    tabs.push(sonicterm_ui::tabs::Tab::new("one"));
+    tabs.push(sonicterm_ui::tabs::Tab::new("two"));
+    tabs.set_active_custom_color("#fabd2f");
+    tabs.activate(0);
+    tabs.set_active_custom_color("#83a598");
+
+    let layout = sonicterm_ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let mut quads = Vec::new();
+    emit_tab_bar_quads(
+        &mut quads,
+        &layout,
+        &TabBarQuadParams {
+            tab_count: tabs.tabs().len(),
+            accent: [1.0, 0.0, 0.0, 1.0],
+            separator: [0.5, 0.5, 0.5, 1.0],
+            border: [0.0, 0.0, 0.0, 1.0],
+            hover_tab_idx: u32::MAX,
+            surface: (400.0, 80.0),
+            show_active_panel_marker: true,
+        },
+    );
+
+    assert_eq!(quads.len(), 4);
+}
+
+#[test]
 fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
     // Issue #714: the cache may only be reused when text + placement + color
     // AND the atlas eviction epoch are identical — an epoch bump means a tile
