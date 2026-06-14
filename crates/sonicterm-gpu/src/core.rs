@@ -315,7 +315,10 @@ use sonicterm_ui::{
     pane::{Rect as PaneRect, SplitAxis, SplitterRect},
     search::SearchState,
     selection::Selection,
-    tabbar_view::{tab_bar_height, TabBarLayout, TAB_GAP},
+    tabbar_view::{
+        tab_bar_height, TabBarLayout, ACTIVE_TOP_ACCENT_H, ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT,
+        TAB_GAP, TAB_VERT_INSET,
+    },
     tabs::TabBar,
 };
 
@@ -409,14 +412,25 @@ pub fn emit_tab_bar_quads(
     });
     for t in &layout.tabs {
         let is_active = layout.active == Some(t.idx);
-        if is_active {
-            if let Some(acc) = layout.active_accent_rect() {
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
-                    color: params.accent,
-                    ..Default::default()
-                });
-            }
+        if is_active || t.custom_color.is_some() {
+            let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
+            let inset = ACTIVE_TOP_ACCENT_INSET * scale;
+            let acc = sonicterm_ui::tabbar_view::Rect {
+                x: t.bg_rect.x + inset,
+                y: t.bg_rect.y + 1.0 * scale,
+                w: (t.bg_rect.w - inset * 2.0).max(0.0),
+                h: ACTIVE_TOP_ACCENT_H * scale,
+            };
+            let color = t
+                .custom_color
+                .as_deref()
+                .map(|hex| hex_to_rgba(hex, 1.0))
+                .unwrap_or(params.accent);
+            quads.push(QuadInstance {
+                rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
+                color,
+                ..Default::default()
+            });
         }
         if t.idx + 1 < params.tab_count {
             // Geometric scale = bar.h / default-logical-bar-h. Mirrors
@@ -2623,6 +2637,7 @@ impl GpuRenderer {
             for t in tabs.tabs() {
                 t.id.0.hash(&mut h);
                 t.title.hash(&mut h);
+                t.custom_color.hash(&mut h);
                 command_status_hash(&t.command, now).hash(&mut h);
             }
             h.finish()
@@ -3914,8 +3929,13 @@ impl GpuRenderer {
                         title = title_chars.iter().take(keep).collect();
                         title.push('…');
                     }
-                    let mut color =
-                        if active || hovered { self.tab_active_fg } else { self.tab_inactive_fg };
+                    let mut color = tab
+                        .custom_color
+                        .as_deref()
+                        .map(hex_to_chrome_color)
+                        .unwrap_or_else(|| {
+                            if active || hovered { self.tab_active_fg } else { self.tab_inactive_fg }
+                        });
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
@@ -4506,11 +4526,30 @@ impl GpuRenderer {
                 for (i, label) in layout.row_labels.iter().enumerate() {
                     let Some(row) = layout.rows.get(i) else { continue };
                     let shortcut = layout.row_shortcuts.get(i).and_then(|hint| hint.as_deref());
+                    let swatch = layout.row_swatches.get(i).and_then(|v| v.as_deref());
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
-                    let origin_x =
+                    let mut origin_x =
                         row.rect.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                    if let Some(hex) = swatch {
+                        let color = hex_to_rgba(hex, 1.0);
+                        let line_h = self.chrome_px(2.0).max(1.0);
+                        quads_overlay.push(QuadInstance::sharp(
+                            px_to_ndc(row.rect.x, row.rect.y, row.rect.w, line_h, sw, sh),
+                            color,
+                        ));
+                        let size = (row.rect.h * 0.55).max(8.0);
+                        let swatch_x = origin_x;
+                        let swatch_y = row.rect.y + (row.rect.h - size) * 0.5;
+                        quads_overlay.push(QuadInstance::rounded(
+                            px_to_ndc(swatch_x, swatch_y, size, size, sw, sh),
+                            color,
+                            [size, size],
+                            size * 0.25,
+                        ));
+                        origin_x += size + self.chrome_px(8.0);
+                    }
                     // Vertically centre the label in the row. Use the row's
                     // ACTUAL (DPI-scaled) height `row.rect.h`, NOT the unscaled
                     // PALETTE_ROW_HEIGHT constant — mixing a logical-px height

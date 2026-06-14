@@ -131,6 +131,8 @@ pub enum Action {
     ToggleTabBar,
     /// Rename the active tab title body.
     RenameTab,
+    /// Pick a custom accent color for the active tab.
+    UpdateTabColor,
 
     // Window
     /// Open a new top-level window.

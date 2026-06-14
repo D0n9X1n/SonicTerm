@@ -544,6 +544,7 @@ impl App {
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::RenameTab => self.start_rename_active_tab(),
+            Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
                 // Epic #289 Phase E (Haiku follow-up): set the pending
                 // flag; `drain_pending_window_creates` consumes it with

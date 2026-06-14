@@ -53,16 +53,18 @@ Modifier names:
 | `shift` | Shift |
 | `alt` | Option/Alt |
 
-The default macOS keymap mostly uses `super`. The default Windows keymap mostly
-uses `ctrl` and `ctrl+shift`, so Windows users usually copy examples from
-`sonicterm-windows.toml`.
+The default macOS keymap mostly uses `super` (Command). The default Windows and
+Linux keymaps use `alt` as SonicTerm's app modifier so `ctrl` shortcuts keep
+working inside the shell. Windows/Linux keep a few compatibility aliases such as
+`ctrl+t` and `ctrl+shift+c` / `ctrl+shift+v`.
 
-Keys are written in lower case. Examples: `super+t`, `super+shift+p`,
-`ctrl+alt+shift+d`, `super+left`, `super+pageup`, `super+enter`.
+Keys are written in lower case. Modifier order is normalized as
+`super+ctrl+alt+shift+key`. Examples: `super+t`, `super+shift+p`, `alt+d`,
+`alt+shift+d`, `ctrl+alt+shift+b`, `alt+left`, `alt+pageup`, `super+enter`.
 
 ### Actions with parameters
 
-Some actions need a value:
+Some actions need a value; pane resize also has direction-specific shortcut actions:
 
 ```toml
 [[binding]]
@@ -75,7 +77,7 @@ action = { focus_pane = "left" }
 
 [[binding]]
 keys = "super+shift+left"
-action = { resize_pane = { dir = "left", amount = 5 } }
+action = "resize_pane_left"
 
 [[binding]]
 keys = "super+up"
@@ -101,7 +103,7 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Close pane | `close_pane` |
 | Zoom pane | `toggle_pane_zoom` |
 | Focus pane | `{ focus_pane = "left" }` |
-| Resize pane | `{ resize_pane = { dir = "left", amount = 5 } }` |
+| Resize pane | `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
 | Copy / paste | `copy_to_clipboard`, `paste_from_clipboard` |
 | Read-only navigation mode | `enter_copy_mode` |
 | Quick select URL hints | `enter_quick_select` |
@@ -110,11 +112,14 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Fullscreen | `toggle_fullscreen` |
 | Search | `open_search` |
 | Command palette | `open_command_palette` |
+| Update tab color | `update_tab_color` |
 | Edit config file | `edit_config_file` |
 | Edit keymap file | `open_keymap_file` |
 | Reload config | `reload_config` |
 
 ### Example: make pane resize larger
+
+These examples use macOS `super`; on Windows/Linux use `alt` for the same app-level chord.
 
 ```toml
 [[binding]]
@@ -211,15 +216,17 @@ action = "split_right"
 | `shift` | Shift |
 | `alt` | Option/Alt |
 
-默认 macOS keymap 主要使用 `super`。默认 Windows keymap 主要使用 `ctrl` 和
-`ctrl+shift`，所以 Windows 用户通常直接参考 `sonicterm-windows.toml`。
+默认 macOS keymap 主要使用 `super`（Command）。默认 Windows / Linux keymap 使用
+`alt` 作为 SonicTerm 的应用修饰键，这样 `ctrl` 快捷键可以继续交给 shell 使用。
+Windows / Linux 仍保留少量兼容别名，例如 `ctrl+t` 和 `ctrl+shift+c` / `ctrl+shift+v`。
 
-按键名用小写。比如：`super+t`、`super+shift+p`、`ctrl+alt+shift+d`、
-`super+left`、`super+pageup`、`super+enter`。
+按键名用小写，修饰键会按 `super+ctrl+alt+shift+key` 的顺序规范化。比如：
+`super+t`、`super+shift+p`、`alt+d`、`alt+shift+d`、`ctrl+alt+shift+b`、
+`alt+left`、`alt+pageup`、`super+enter`。
 
 ### 带参数的 action
 
-有些 action 需要额外参数：
+有些 action 需要额外参数；Pane resize 也提供按方向命名的快捷 action：
 
 ```toml
 [[binding]]
@@ -232,7 +239,7 @@ action = { focus_pane = "left" }
 
 [[binding]]
 keys = "super+shift+left"
-action = { resize_pane = { dir = "left", amount = 5 } }
+action = "resize_pane_left"
 
 [[binding]]
 keys = "super+up"
@@ -267,11 +274,14 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 全屏 | `toggle_fullscreen` |
 | 搜索 | `open_search` |
 | 命令面板 | `open_command_palette` |
+| 修改 Tab 颜色 | `update_tab_color` |
 | 编辑配置文件 | `edit_config_file` |
 | 编辑 keymap 文件 | `open_keymap_file` |
 | 重新加载配置 | `reload_config` |
 
 ### 示例：把 pane resize 改大
+
+下面示例使用 macOS 的 `super`；Windows/Linux 上同样的应用级快捷键请把 `super` 换成 `alt`。
 
 ```toml
 [[binding]]

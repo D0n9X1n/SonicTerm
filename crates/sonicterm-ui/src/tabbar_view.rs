@@ -130,6 +130,7 @@ pub struct TabWidget {
     /// Title rect (inside the tab, centered horizontally by the renderer).
     pub title_rect: Rect,
     pub title: String,
+    pub custom_color: Option<String>,
     pub active: bool,
     pub hover: TabHover,
     /// Back-compat public field alias for the tab index. Prefer `idx`.
@@ -346,6 +347,7 @@ impl TabBarLayout {
                 close_x_rect: close,
                 title_rect: title,
                 title: tab.title.clone(),
+                custom_color: tab.custom_color.clone(),
                 active: index == bar.active_index(),
                 hover: TabHover::None,
                 index,
