@@ -112,6 +112,7 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Fullscreen | `toggle_fullscreen` |
 | Search | `open_search` |
 | Command palette | `open_command_palette` |
+| Update tab color | `update_tab_color` |
 | Edit config file | `edit_config_file` |
 | Edit keymap file | `open_keymap_file` |
 | Reload config | `reload_config` |
@@ -273,6 +274,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 全屏 | `toggle_fullscreen` |
 | 搜索 | `open_search` |
 | 命令面板 | `open_command_palette` |
+| 修改 Tab 颜色 | `update_tab_color` |
 | 编辑配置文件 | `edit_config_file` |
 | 编辑 keymap 文件 | `open_keymap_file` |
 | 重新加载配置 | `reload_config` |

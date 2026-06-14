@@ -44,7 +44,9 @@ impl CommandStatus {
 pub struct Tab {
     pub id: TabId,
     pub title: String,
+    pub auto_title: String,
     pub custom_title: Option<String>,
+    pub custom_color: Option<String>,
     pub command: CommandStatus,
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
@@ -53,13 +55,34 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(title: impl Into<String>) -> Self {
+        let title = title.into();
         Self {
             id: TabId::next(),
-            title: title.into(),
+            title: title.clone(),
+            auto_title: title,
             custom_title: None,
+            custom_color: None,
             command: CommandStatus::default(),
             icon_hint: None,
         }
+    }
+
+    fn refresh_effective_title(&mut self) {
+        self.title = self
+            .custom_title
+            .as_ref()
+            .map(|custom| title_with_replaced_body(&self.auto_title, custom))
+            .unwrap_or_else(|| self.auto_title.clone());
+    }
+
+    fn set_auto_title(&mut self, title: String) {
+        self.auto_title = title;
+        self.refresh_effective_title();
+    }
+
+    fn set_custom_title(&mut self, body: Option<String>) {
+        self.custom_title = body;
+        self.refresh_effective_title();
     }
 }
 
@@ -94,17 +117,17 @@ impl TabBar {
         self.tabs.get(self.active)
     }
 
-    /// Replace the title of the tab with `id`. No-op if not found.
+    /// Replace the automatic title of the tab with `id`. No-op if not found.
     pub fn set_title(&mut self, id: TabId, title: impl Into<String>) {
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
-            t.title = title.into();
+            t.set_auto_title(title.into());
         }
     }
 
-    /// Replace the title of the currently-active tab. No-op if empty.
+    /// Replace the automatic title of the currently-active tab. No-op if empty.
     pub fn set_active_title(&mut self, title: impl Into<String>) {
         if let Some(t) = self.tabs.get_mut(self.active) {
-            t.title = title.into();
+            t.set_auto_title(title.into());
         }
     }
 
@@ -116,14 +139,20 @@ impl TabBar {
     pub fn set_active_custom_title(&mut self, body: impl Into<String>) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let body = body.into();
-        // An empty rename clears the override so the tab reverts to its
-        // automatic title, rather than showing a blank tab (issue #716).
         if body.trim().is_empty() {
-            tab.custom_title = None;
+            tab.set_custom_title(None);
             return;
         }
-        tab.custom_title = Some(body.clone());
-        tab.title = title_with_replaced_body(&tab.title, &body);
+        tab.set_custom_title(Some(body));
+    }
+
+    pub fn set_active_custom_color(&mut self, color: impl Into<String>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        tab.custom_color = Some(color.into());
+    }
+
+    pub fn active_custom_color(&self) -> Option<&str> {
+        self.tabs.get(self.active)?.custom_color.as_deref()
     }
 
     pub fn set_command_status(&mut self, index: usize, status: CommandStatus) {
@@ -164,7 +193,7 @@ impl TabBar {
             let mut s = String::with_capacity(new_prefix.len() + body.len());
             s.push_str(&new_prefix);
             s.push_str(body);
-            tab.title = s;
+            tab.set_auto_title(s);
         }
     }
 
@@ -340,17 +369,32 @@ mod tests {
 
     #[test]
     fn empty_rename_reverts_to_auto_title() {
-        // Issue #716: clearing the rename input must drop the custom override
-        // (revert to the auto title), not store a blank title.
         let mut bar = TabBar::new();
-        bar.push(Tab::new("zsh"));
+        bar.push(Tab::new("#1 ~/work"));
         bar.set_active_custom_title("my work");
         assert_eq!(bar.tabs[0].custom_title.as_deref(), Some("my work"));
-        // Empty (and whitespace-only) clears back to None.
+        assert_eq!(bar.tabs[0].title, "#1 my work");
+
         bar.set_active_custom_title("");
         assert_eq!(bar.tabs[0].custom_title, None);
+        assert_eq!(bar.tabs[0].title, "#1 ~/work");
+
         bar.set_active_custom_title("renamed");
+        bar.set_active_title("#1 ~/new-auto");
+        assert_eq!(bar.tabs[0].title, "#1 renamed");
         bar.set_active_custom_title("   ");
         assert_eq!(bar.tabs[0].custom_title, None);
+        assert_eq!(bar.tabs[0].title, "#1 ~/new-auto");
+    }
+
+    #[test]
+    fn active_custom_color_is_stored_on_active_tab() {
+        let mut bar = TabBar::new();
+        bar.push(Tab::new("#1 ~/work"));
+
+        bar.set_active_custom_color("#fabd2f");
+
+        assert_eq!(bar.active_custom_color(), Some("#fabd2f"));
+        assert_eq!(bar.tabs[0].custom_color.as_deref(), Some("#fabd2f"));
     }
 }

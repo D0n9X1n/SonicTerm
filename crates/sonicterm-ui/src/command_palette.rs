@@ -29,6 +29,13 @@ use crate::command_label::{keybinding_hint, search_haystack, ALL_VARIANT_KINDS};
 pub enum CommandPaletteMode {
     Commands,
     RenameTab,
+    TabColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabColorChoice {
+    pub name: String,
+    pub hex: String,
 }
 
 /// State for the command palette overlay. Owned by `App`.
@@ -57,6 +64,8 @@ pub struct CommandPalette {
     /// [`Self::set_visible_rows`]. Zero means "unconstrained" — used by
     /// tests that don't know the modal size yet.
     visible_rows: usize,
+    tab_color_title: String,
+    tab_color_choices: Vec<TabColorChoice>,
 }
 
 impl Default for CommandPalette {
@@ -82,6 +91,8 @@ impl CommandPalette {
             tab_count: usize::MAX,
             scroll_offset: 0,
             visible_rows: 0,
+            tab_color_title: String::new(),
+            tab_color_choices: Vec::new(),
         }
     }
 
@@ -108,7 +119,7 @@ impl CommandPalette {
     /// Visible action list (filtered). Display order is what the renderer
     /// should show.
     pub fn visible(&self) -> Vec<&Action> {
-        if self.mode == CommandPaletteMode::RenameTab {
+        if self.mode != CommandPaletteMode::Commands {
             return Vec::new();
         }
         self.items.iter().filter_map(|&i| self.all.get(i)).collect()
@@ -229,6 +240,34 @@ impl CommandPalette {
         self.items.clear();
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    pub fn start_tab_color_picker(
+        &mut self,
+        tab_title: impl Into<String>,
+        choices: Vec<TabColorChoice>,
+    ) {
+        self.open = true;
+        self.mode = CommandPaletteMode::TabColor;
+        self.query.clear();
+        self.cursor = 0;
+        self.items = (0..choices.len()).collect();
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.tab_color_title = tab_title.into();
+        self.tab_color_choices = choices;
+    }
+
+    pub fn tab_color_title(&self) -> &str {
+        &self.tab_color_title
+    }
+
+    pub fn tab_color_choices(&self) -> &[TabColorChoice] {
+        &self.tab_color_choices
+    }
+
+    pub fn selected_tab_color(&self) -> Option<&TabColorChoice> {
+        self.tab_color_choices.get(self.selected)
     }
 
     pub fn move_cursor_left(&mut self) {
@@ -433,6 +472,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::RenameTab => "RenameTab".into(),
+        Action::UpdateTabColor => "UpdateTabColor".into(),
     }
 }
 
@@ -518,6 +558,8 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ResetFontSize,
         // UI chrome
         Action::ToggleTabBar,
+        Action::RenameTab,
+        Action::UpdateTabColor,
         // Window
         Action::NewWindow,
         Action::ToggleFullscreen,
@@ -539,7 +581,6 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ScrollToNextPrompt,
         // Config
         Action::ReloadConfig,
-        Action::RenameTab,
     ]
 }
 

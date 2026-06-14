@@ -1048,23 +1048,26 @@ pub fn refresh_active_tab_title(
         pane.fg_proc_cache = Some((now, probed));
     }
     let proc_name = pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone());
-    let pretty = sonicterm_ui::tab_title::format_tab_title(
+    let auto_title = sonicterm_ui::tab_title::format_tab_title(
         tab_idx,
         cwd.as_deref(),
         proc_name.as_deref(),
         raw_title.as_deref(),
     );
-    let pretty = tabs
+    let effective_title = tabs
         .active()
         .and_then(|tab| tab.custom_title.as_ref())
-        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&pretty, custom))
-        .unwrap_or(pretty);
+        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
+        .unwrap_or_else(|| auto_title.clone());
     let cur = tabs.active().map(|t| t.title.clone());
-    if cur.as_deref() == Some(pretty.as_str()) {
+    if cur.as_deref() == Some(effective_title.as_str()) {
+        if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
+            tabs.set_active_title(auto_title);
+        }
         return None;
     }
-    tabs.set_active_title(pretty.clone());
-    Some(pretty)
+    tabs.set_active_title(auto_title);
+    Some(effective_title)
 }
 
 /// Loader callback type used by the platform shell to reload a theme by name.
