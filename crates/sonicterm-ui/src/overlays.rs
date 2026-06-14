@@ -285,7 +285,7 @@ impl PaletteLayout {
                     if let Some(choice) = color_choices.get(item_index) {
                         row_labels.push(format!("{} — {}", choice.name, palette.tab_color_title()));
                         row_shortcuts.push(None);
-                        row_swatches.push(Some(choice.hex.clone()));
+                        row_swatches.push(choice.hex.clone());
                     } else {
                         row_labels.push(String::new());
                         row_shortcuts.push(None);

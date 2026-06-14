@@ -46,12 +46,8 @@ fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
 
 pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
     let bg = theme.colors.background.0.to_ascii_lowercase();
+    let mut choices = vec![TabColorChoice { name: "Reset to Default".to_string(), hex: None }];
     let mut pairs = vec![
-        ("Foreground", theme.colors.foreground.0.as_str()),
-        ("Cursor", theme.colors.cursor.0.as_str()),
-        ("Cursor Text", theme.colors.cursor_text.0.as_str()),
-        ("Selection", theme.colors.selection_bg.0.as_str()),
-        ("Selection Text", theme.colors.selection_fg.0.as_str()),
         ("ANSI Black", theme.colors.ansi.black.0.as_str()),
         ("ANSI Red", theme.colors.ansi.red.0.as_str()),
         ("ANSI Green", theme.colors.ansi.green.0.as_str()),
@@ -68,20 +64,14 @@ pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
         ("Bright Magenta", theme.colors.bright.magenta.0.as_str()),
         ("Bright Cyan", theme.colors.bright.cyan.0.as_str()),
         ("Bright White", theme.colors.bright.white.0.as_str()),
-        ("Tab Bar", theme.colors.tab.bar_bg.0.as_str()),
-        ("Tab Active", theme.colors.tab.active_bg.0.as_str()),
-        ("Tab Active Text", theme.colors.tab.active_fg.0.as_str()),
-        ("Tab Inactive", theme.colors.tab.inactive_bg.0.as_str()),
-        ("Tab Inactive Text", theme.colors.tab.inactive_fg.0.as_str()),
-        ("Tab Hover", theme.colors.tab.hover_bg.0.as_str()),
-        ("Tab Hover Text", theme.colors.tab.hover_fg.0.as_str()),
-        ("Tab Close", theme.colors.tab.close_button_fg.0.as_str()),
     ];
     pairs.retain(|(_, hex)| hex.to_ascii_lowercase() != bg);
-    pairs
-        .into_iter()
-        .map(|(name, hex)| TabColorChoice { name: name.to_string(), hex: hex.to_string() })
-        .collect()
+    choices.extend(
+        pairs
+            .into_iter()
+            .map(|(name, hex)| TabColorChoice { name: name.to_string(), hex: Some(hex.to_string()) }),
+    );
+    choices
 }
 
 impl App {
@@ -531,13 +521,21 @@ impl App {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
                 if let Some(ws) = self.windows.get_mut(&id) {
-                    ws.tabs.set_active_custom_color(choice.hex);
+                    if let Some(hex) = choice.hex {
+                        ws.tabs.set_active_custom_color(hex);
+                    } else {
+                        ws.tabs.clear_active_custom_color();
+                    }
                     ws.request_redraw();
                 }
             }
             _ => {
                 if let Some(tabs) = self.main_tabs_mut() {
-                    tabs.set_active_custom_color(choice.hex);
+                    if let Some(hex) = choice.hex {
+                        tabs.set_active_custom_color(hex);
+                    } else {
+                        tabs.clear_active_custom_color();
+                    }
                 }
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -647,12 +645,15 @@ mod tests {
     use sonicterm_cfg::theme::Theme;
 
     #[test]
-    fn tab_color_choices_exclude_theme_background() {
+    fn tab_color_choices_include_reset_and_only_ansi_colors() {
         let theme = Theme::default();
         let bg = theme.colors.background.0.to_ascii_lowercase();
         let choices = theme_tab_color_choices(&theme);
 
-        assert!(!choices.is_empty());
-        assert!(choices.iter().all(|choice| choice.hex.to_ascii_lowercase() != bg));
+        assert_eq!(choices.first().map(|choice| choice.name.as_str()), Some("Reset to Default"));
+        assert_eq!(choices.first().and_then(|choice| choice.hex.as_deref()), None);
+        assert_eq!(choices.len(), 17);
+        assert!(choices.iter().skip(1).all(|choice| choice.name.starts_with("ANSI ") || choice.name.starts_with("Bright ")));
+        assert!(choices.iter().filter_map(|choice| choice.hex.as_ref()).all(|hex| hex.to_ascii_lowercase() != bg));
     }
 }

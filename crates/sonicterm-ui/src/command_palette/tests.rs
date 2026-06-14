@@ -103,15 +103,18 @@ fn tab_color_picker_exposes_selected_choice() {
     palette.start_tab_color_picker(
         "#1 work",
         vec![
-            TabColorChoice { name: "ANSI Red".into(), hex: "#fb4934".into() },
-            TabColorChoice { name: "ANSI Blue".into(), hex: "#83a598".into() },
+            TabColorChoice { name: "Reset to Default".into(), hex: None },
+            TabColorChoice { name: "ANSI Red".into(), hex: Some("#fb4934".into()) },
+            TabColorChoice { name: "ANSI Blue".into(), hex: Some("#83a598".into()) },
         ],
     );
 
     assert_eq!(palette.mode(), CommandPaletteMode::TabColor);
     assert_eq!(palette.tab_color_title(), "#1 work");
-    assert_eq!(palette.len(), 2);
-    assert_eq!(palette.selected_tab_color().map(|c| c.hex.as_str()), Some("#fb4934"));
+    assert_eq!(palette.len(), 3);
+    assert_eq!(palette.selected_tab_color().map(|c| c.hex.as_deref()), Some(None));
+    palette.move_selection_down();
+    assert_eq!(palette.selected_tab_color().and_then(|c| c.hex.as_deref()), Some("#fb4934"));
     palette.move_selection_down();
     assert_eq!(palette.selected_tab_color().map(|c| c.name.as_str()), Some("ANSI Blue"));
 }

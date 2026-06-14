@@ -17,13 +17,12 @@ assets/icons/
 
 ## Design
 
-The master must keep the dark squircle filling **~92% of the canvas** (a
-small ~4% transparent margin per side). The art still uses the macOS
-rounded-rect convention, but a *wide* margin makes the Windows taskbar /
-Start-menu button render a size-step smaller than neighbours (Firefox, VS
-Code), because Windows adds its own slot padding on top of the baked-in
-margin. If you replace the master, trim it to roughly this fill ratio
-before committing — otherwise the icon looks undersized on Windows.
+The master uses an opaque black rounded background with the Sonic art inset to
+about **84% of the canvas**. The black ring gives the mark breathing room so it
+no longer touches the icon edge, while still keeping the shape large enough for
+Windows taskbar / Start-menu slots. If you replace the master, preserve a visible
+black background ring and avoid transparent edge-only padding that makes the icon
+look undersized on Windows.
 
 ## Regenerating
 
