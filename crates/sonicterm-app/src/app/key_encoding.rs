@@ -60,10 +60,18 @@ pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Optio
             NamedKey::PageUp => b"\x1b[5~".to_vec(),
             NamedKey::PageDown => b"\x1b[6~".to_vec(),
             NamedKey::Delete => b"\x1b[3~".to_vec(),
-            NamedKey::F1 => b"\x1bOP".to_vec(),
-            NamedKey::F2 => b"\x1bOQ".to_vec(),
-            NamedKey::F3 => b"\x1bOR".to_vec(),
-            NamedKey::F4 => b"\x1bOS".to_vec(),
+            NamedKey::F1 => encode_function_key(1, mods),
+            NamedKey::F2 => encode_function_key(2, mods),
+            NamedKey::F3 => encode_function_key(3, mods),
+            NamedKey::F4 => encode_function_key(4, mods),
+            NamedKey::F5 => encode_function_key(5, mods),
+            NamedKey::F6 => encode_function_key(6, mods),
+            NamedKey::F7 => encode_function_key(7, mods),
+            NamedKey::F8 => encode_function_key(8, mods),
+            NamedKey::F9 => encode_function_key(9, mods),
+            NamedKey::F10 => encode_function_key(10, mods),
+            NamedKey::F11 => encode_function_key(11, mods),
+            NamedKey::F12 => encode_function_key(12, mods),
             _ => return None,
         }),
         Key::Character(s) => {
@@ -83,6 +91,82 @@ pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Optio
             }
         }
         _ => None,
+    }
+}
+
+/// Encode a function key F1–F12 with xterm-style modifier handling.
+///
+/// `n` is the function-key number (1..=12). With no modifiers, F1–F4 use the
+/// legacy SS3 forms (`ESC O P`..`ESC O S`) and F5–F12 use the CSI tilde forms
+/// (`CSI 15~`, `CSI 17~`, …). When any modifier is held, every key switches to
+/// the parameterized CSI form xterm defines:
+///
+/// - F1–F4 → `CSI 1 ; <mod> [P|Q|R|S]`
+/// - F5–F12 → `CSI <code> ; <mod> ~`
+///
+/// `<mod>` is `1 + bitmask`, where Shift=1, Alt=2, Ctrl=4, Super/Meta=8 — the
+/// same convention xterm, WezTerm, and tmux speak, so apps like nvim decode the
+/// chord correctly.
+fn encode_function_key(n: u8, mods: ModifiersState) -> Vec<u8> {
+    // SS3 final byte for F1–F4, used only in the unmodified legacy form.
+    let ss3_final = |n: u8| match n {
+        1 => b'P',
+        2 => b'Q',
+        3 => b'R',
+        _ => b'S', // n == 4
+    };
+    // CSI tilde code for F5–F12 (the gaps at 16/22 are historical xterm).
+    let tilde_code = |n: u8| -> u8 {
+        match n {
+            5 => 15,
+            6 => 17,
+            7 => 18,
+            8 => 19,
+            9 => 20,
+            10 => 21,
+            11 => 23,
+            _ => 24, // n == 12
+        }
+    };
+
+    let modifier_param = function_key_modifier_param(mods);
+
+    match (n, modifier_param) {
+        // Unmodified F1–F4: legacy SS3.
+        (1..=4, None) => vec![0x1b, b'O', ss3_final(n)],
+        // Modified F1–F4: CSI 1 ; <mod> <final>.
+        (1..=4, Some(m)) => {
+            let mut out = format!("\x1b[1;{m}").into_bytes();
+            out.push(ss3_final(n));
+            out
+        }
+        // Unmodified F5–F12: CSI <code> ~.
+        (_, None) => format!("\x1b[{}~", tilde_code(n)).into_bytes(),
+        // Modified F5–F12: CSI <code> ; <mod> ~.
+        (_, Some(m)) => format!("\x1b[{};{m}~", tilde_code(n)).into_bytes(),
+    }
+}
+
+/// xterm modifier parameter (`1 + bitmask`) for a function-key chord, or `None`
+/// when no modifier is held. Bits: Shift=1, Alt=2, Ctrl=4, Super/Meta=8.
+fn function_key_modifier_param(mods: ModifiersState) -> Option<u8> {
+    let mut bitmask = 0u8;
+    if mods.shift_key() {
+        bitmask |= 1;
+    }
+    if mods.alt_key() {
+        bitmask |= 2;
+    }
+    if mods.control_key() {
+        bitmask |= 4;
+    }
+    if mods.super_key() {
+        bitmask |= 8;
+    }
+    if bitmask == 0 {
+        None
+    } else {
+        Some(bitmask + 1)
     }
 }
 
