@@ -7,15 +7,15 @@ SonicTerm creates its config directory on first launch.
 
 Common actions:
 
-| Action | macOS | Windows |
+| Action | macOS | Windows / Linux |
 | --- | --- | --- |
-| New tab | `Cmd+T` | `Ctrl+T` |
-| Close pane/tab | `Cmd+W` | `Ctrl+Shift+W` |
-| Split right | `Cmd+D` | `Ctrl+Shift+D` |
-| Split down | `Cmd+Shift+D` | `Ctrl+Alt+Shift+D` |
-| Command palette | `Cmd+Shift+P` | `Ctrl+Shift+P` |
-| Search | `Cmd+F` | `Ctrl+Shift+F` |
-| READONLY mode | `Cmd+[` | `Ctrl+Shift+[` |
+| New tab | `Cmd+T` | `Alt+T` (`Ctrl+T` alias) |
+| Close pane/tab | `Cmd+W` | `Alt+W` |
+| Split right | `Cmd+D` | `Alt+D` |
+| Split down | `Cmd+Shift+D` | `Alt+Shift+D` |
+| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` |
+| Search | `Cmd+F` | `Alt+F` |
+| READONLY mode | `Cmd+[` | `Alt+[` |
 
 Tabs can be dragged out into separate windows and dragged back to merge.
 
@@ -41,15 +41,15 @@ SonicTerm 会自动创建配置目录。
 
 常用操作：
 
-| 功能 | macOS | Windows |
+| 功能 | macOS | Windows / Linux |
 | --- | --- | --- |
-| 新建 Tab | `Cmd+T` | `Ctrl+T` |
-| 关闭 Pane/Tab | `Cmd+W` | `Ctrl+Shift+W` |
-| 向右分屏 | `Cmd+D` | `Ctrl+Shift+D` |
-| 向下分屏 | `Cmd+Shift+D` | `Ctrl+Alt+Shift+D` |
-| 命令面板 | `Cmd+Shift+P` | `Ctrl+Shift+P` |
-| 搜索 | `Cmd+F` | `Ctrl+Shift+F` |
-| READONLY 模式 | `Cmd+[` | `Ctrl+Shift+[` |
+| 新建 Tab | `Cmd+T` | `Alt+T`（`Ctrl+T` 兼容别名） |
+| 关闭 Pane/Tab | `Cmd+W` | `Alt+W` |
+| 向右分屏 | `Cmd+D` | `Alt+D` |
+| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` |
+| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` |
+| 搜索 | `Cmd+F` | `Alt+F` |
+| READONLY 模式 | `Cmd+[` | `Alt+[` |
 
 Tab 可以拖出成为独立窗口，也可以拖回合并。
 

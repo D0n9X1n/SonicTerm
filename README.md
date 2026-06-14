@@ -28,8 +28,9 @@ runtime, no required GUI preferences pane, and no global dotfile sprawl. User
 state lives under one directory: `~/.sonicterm`.
 
 Need installation, configuration, keybindings, or theme authoring docs? Read the
-full bilingual docs in [`wiki/`](wiki/). The README is only the product overview:
-why SonicTerm exists, what it feels like, and why you might want to use it.
+full bilingual docs in the [GitHub Wiki](https://github.com/D0n9X1n/SonicTerm/wiki).
+The README is only the product overview: why SonicTerm exists, what it feels like,
+and why you might want to use it.
 
 ## Screenshots
 
@@ -99,11 +100,11 @@ source, use the bilingual wiki:
 
 | Topic | Wiki page |
 | --- | --- |
-| Usage and installation | [`wiki/Usage.md`](wiki/Usage.md) |
-| Preferences and `sonicterm.toml` | [`wiki/Configuration.md`](wiki/Configuration.md) |
-| Keymap editing | [`wiki/Keybindings.md`](wiki/Keybindings.md) |
-| Theme authoring | [`wiki/Themes.md`](wiki/Themes.md) |
-| Logs and diagnostics | [`wiki/Logging.md`](wiki/Logging.md) |
+| Usage and installation | [Usage](https://github.com/D0n9X1n/SonicTerm/wiki/Usage) |
+| Preferences and `sonicterm.toml` | [Configuration](https://github.com/D0n9X1n/SonicTerm/wiki/Configuration) |
+| Keymap editing | [Keybindings](https://github.com/D0n9X1n/SonicTerm/wiki/Keybindings) |
+| Theme authoring | [Themes](https://github.com/D0n9X1n/SonicTerm/wiki/Themes) |
+| Logs and diagnostics | [Logging](https://github.com/D0n9X1n/SonicTerm/wiki/Logging) |
 
 ## Thanks, WezTerm
 
