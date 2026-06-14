@@ -151,6 +151,11 @@ impl TabBar {
         tab.custom_color = Some(color.into());
     }
 
+    pub fn clear_active_custom_color(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        tab.custom_color = None;
+    }
+
     pub fn active_custom_color(&self) -> Option<&str> {
         self.tabs.get(self.active)?.custom_color.as_deref()
     }
@@ -396,5 +401,7 @@ mod tests {
 
         assert_eq!(bar.active_custom_color(), Some("#fabd2f"));
         assert_eq!(bar.tabs[0].custom_color.as_deref(), Some("#fabd2f"));
+        bar.clear_active_custom_color();
+        assert_eq!(bar.active_custom_color(), None);
     }
 }

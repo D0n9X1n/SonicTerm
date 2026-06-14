@@ -35,7 +35,7 @@ pub enum CommandPaletteMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabColorChoice {
     pub name: String,
-    pub hex: String,
+    pub hex: Option<String>,
 }
 
 /// State for the command palette overlay. Owned by `App`.

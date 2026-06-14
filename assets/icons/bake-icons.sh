@@ -70,6 +70,7 @@ if command -v magick >/dev/null 2>&1; then
         "$PNG/sonic-16.png" "$PNG/sonic-32.png" "$PNG/sonic-48.png" \
         "$PNG/sonic-64.png" "$PNG/sonic-128.png" "$PNG/sonic-256.png" \
         "$OUT/sonic.ico"
+    cp "$OUT/sonic.ico" "$OUT/sonic-windows-taskbar.ico"
 fi
 
 echo
