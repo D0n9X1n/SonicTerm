@@ -39,6 +39,10 @@ padding_bottom = 4
 warm_window_pool = 2
 
 [terminal]
+# Shell to spawn. Omit to auto-detect (Windows: PowerShell 7 `pwsh.exe`,
+# including the Microsoft Store install, falling back to Windows PowerShell
+# then cmd.exe; macOS/Linux: $SHELL). Set to override:
+# shell = "pwsh.exe"
 # TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
 # recognize SonicTerm yet; setting term_program = "WezTerm" can bypass their
 # terminal checks and enable their WezTerm/new terminal UI path.
@@ -84,6 +88,10 @@ macOS 和 Windows 的配置文件路径：`~/.sonicterm/sonicterm.toml`
 
 常用配置项：
 
+- `[terminal] shell`：要启动的 shell。留空则自动探测（Windows：优先
+  PowerShell 7 `pwsh.exe`，含 Microsoft Store 安装，找不到再依次回退到
+  Windows PowerShell、`cmd.exe`；macOS/Linux：`$SHELL`）。可显式覆盖，
+  例如 `shell = "pwsh.exe"`。
 - `[terminal] scrollback`：每个面板保留的历史行数；运行时调小会立即丢弃最旧
   的历史，设为 `0` 关闭回滚。
 - `[appearance] scrollbar`：`auto`（悬停/滚动时显示）/`always`/`never`。
