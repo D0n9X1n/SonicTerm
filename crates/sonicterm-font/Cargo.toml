@@ -29,7 +29,7 @@ image = "0.25"
 lazy_static = "1.4"
 log = "0.4"
 memmap2 = "0.9"
-metrics = "0.23"
+metrics = "0.24"
 num = "0.4"
 ordered-float = { version = "4", features = ["std"] }
 unicode-segmentation.workspace = true
