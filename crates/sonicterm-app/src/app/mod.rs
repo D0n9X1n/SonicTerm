@@ -293,24 +293,36 @@ pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Durati
 }
 
 /// Frame period cap applied when rendering on a CPU/software rasterizer
-/// (~30 fps). On a real GPU the monitor's refresh period is used as-is.
-pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(33_333);
+/// (~20 fps). On a real GPU the monitor's refresh period is used as-is.
+///
+/// Issue #713/#739 follow-up: on WARP / llvmpipe the dominant per-frame cost
+/// is the software rasterizer filling the whole back buffer (measured ~36% of
+/// 16 cores for a once-per-frame full-surface present at 30 fps). That cost is
+/// linear in present rate, so capping the software path lower trades a little
+/// smoothness for a large CPU drop with no correctness risk. 20 fps stays
+/// visually fluid for a cursor/spinner/progress redraw while cutting the
+/// whole-surface present rate by a third vs 30.
+pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(50_000);
 
 /// Frame period cap while an IME composition is in flight on the software
-/// rasterizer (~15 fps). Each preedit keystroke forces a full-surface raster
-/// (issue #714); composing is interactive but doesn't need 30 fps, so we cap
-/// it lower to roughly halve the whole-surface presents while the user types
-/// a long pinyin run. Only applied when BOTH software-render and composing.
-pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
+/// rasterizer (~12 fps). Each preedit keystroke forces a full-surface raster
+/// (issue #714); composing is interactive but doesn't need a high rate, so we
+/// cap it lower to roughly halve the whole-surface presents while the user
+/// types a long pinyin run. Only applied when BOTH software-render and
+/// composing.
+pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(83_333);
 
 /// Frame period cap for sustained streaming output on the software rasterizer
-/// (~15 fps). A continuously-redrawing TUI like tmux (status bar + inner TUI +
-/// alternate screen) drives a full-surface present every frame; on a CPU
-/// rasterizer that whole-surface copy is the dominant cost and pure CPU burn.
-/// Halving the present rate during sustained streams roughly halves that CPU
-/// with no visible loss for scrolling output (issue #739). Applied only when
+/// (~6 fps). A continuously-redrawing TUI (status bar + inner TUI + alternate
+/// screen, e.g. a streaming AI CLI or tmux) drives a full-surface present every
+/// frame; on a CPU rasterizer (WARP / llvmpipe) that whole-surface fill is the
+/// dominant cost and the bulk of the CPU burn. The damaged area can't be
+/// trimmed safely under wgpu's multi-buffer present, so for large-area redraws
+/// the present *rate* is the only lever — cap it hard during sustained streams.
+/// 6 fps stays readable for scrolling/streaming output while cutting the
+/// whole-surface present rate ~40% vs 10 fps (issue #739). Applied only when
 /// software-render AND a fresh PTY burst is in flight.
-pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
+pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(166_667);
 
 /// Effective frame period given the software-render, IME-composing, and
 /// sustained-streaming state. On the hardware path this is the monitor period
