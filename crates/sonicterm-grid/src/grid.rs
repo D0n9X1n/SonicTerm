@@ -91,7 +91,7 @@ impl Grid {
             rows,
             visible,
             scrollback: VecDeque::new(),
-            scrollback_limit: 10_000,
+            scrollback_limit: 1_000,
             cursor: Pos::default(),
             default: Cell::default(),
             alt_screen: None,

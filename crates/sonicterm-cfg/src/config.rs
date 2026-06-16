@@ -427,7 +427,7 @@ impl Default for TerminalConfig {
         Self {
             shell: None,
             term_program: "SonicTerm".to_string(),
-            scrollback: 10_000,
+            scrollback: 1_000,
             cursor_blink: true,
             cursor_shape: CursorShape::default(),
         }
