@@ -49,7 +49,7 @@ warm_window_pool = 2
 term_program = "SonicTerm"
 # Scrollback lines kept per pane. Lowering this at runtime drops the oldest
 # history immediately; 0 disables scrollback.
-scrollback = 10000
+scrollback = 1000
 cursor_blink = true
 cursor_shape = "block"
 
