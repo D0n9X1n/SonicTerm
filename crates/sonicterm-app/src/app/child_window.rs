@@ -384,11 +384,12 @@ impl App {
                 // one frame per vsync like the main window, instead of
                 // rendering on every VT tick. Input-driven redraws skip
                 // the gate so typing/resize/theme stay immediate.
-                // Issue #714: lower the cap while composing an IME preedit on
-                // the software path (mirrors the main window).
+                // Issue #714/#739: lower the cap while composing an IME preedit
+                // or during a sustained PTY stream on the software path.
                 let child_frame_period = crate::app::effective_frame_period(
                     software_render_degrade,
                     child.ime.is_composing(),
+                    pty_burst,
                     frame_period,
                 );
                 if crate::app::should_defer_streaming_redraw(
@@ -1660,6 +1661,7 @@ impl App {
             rows,
             sonicterm_io::pty::ShellSpawnOpts {
                 term_program: self.config.terminal.term_program.clone(),
+                shell: self.config.terminal.shell.clone(),
                 ..sonicterm_io::pty::ShellSpawnOpts::default()
             },
         ) {

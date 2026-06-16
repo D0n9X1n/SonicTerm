@@ -68,6 +68,10 @@ pub struct ShellSpawnOpts {
     /// `TERM_PROGRAM` value injected into the child PTY environment.
     /// Defaults to `SonicTerm` to preserve existing terminal identity.
     pub term_program: String,
+    /// Explicit shell program override from `[terminal] shell`. When
+    /// `Some(non-empty)`, this is spawned verbatim instead of the
+    /// platform default (#737). `None` / empty → auto-detect.
+    pub shell: Option<String>,
 }
 
 impl ShellSpawnOpts {
@@ -77,7 +81,11 @@ impl ShellSpawnOpts {
 
 impl Default for ShellSpawnOpts {
     fn default() -> Self {
-        Self { clean_e2e: false, term_program: Self::DEFAULT_TERM_PROGRAM.to_string() }
+        Self {
+            clean_e2e: false,
+            term_program: Self::DEFAULT_TERM_PROGRAM.to_string(),
+            shell: None,
+        }
     }
 }
 
@@ -176,7 +184,7 @@ impl PtyHandle {
     /// production app passes `ShellSpawnOpts::default()` to preserve
     /// interactive behavior.
     pub fn spawn_default_shell(cols: u16, rows: u16, opts: ShellSpawnOpts) -> Result<Self> {
-        let shell = default_shell();
+        let shell = resolve_spawn_shell(opts.shell.as_deref());
         let args = shell_startup_args(&shell, opts.clone());
         Self::spawn_with_args_and_opts(&shell, &args, cols, rows, opts)
     }
@@ -348,6 +356,16 @@ fn default_shell() -> String {
     default_shell_program()
 }
 
+/// Resolve the shell to spawn: an explicit, non-empty `[terminal] shell`
+/// override wins; otherwise fall back to the platform auto-detect (#737).
+/// Pure so it can be unit-tested without the live filesystem/PATH.
+fn resolve_spawn_shell(override_shell: Option<&str>) -> String {
+    match override_shell {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => default_shell(),
+    }
+}
+
 const DEFAULT_LANG_UTF8_LOCALE: &str = "en_US.UTF-8";
 const DEFAULT_LC_CTYPE_UTF8_LOCALE: &str = "UTF-8";
 
@@ -445,9 +463,88 @@ fn interactive_shell_args(_shell_path: &str) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn default_shell_program() -> String {
+    // Prefer PowerShell 7 (`pwsh.exe`): first via PATH, then by probing the
+    // Microsoft Store package dir directly. #737: when SonicTerm is launched
+    // from Explorer (installed under `C:\Program Files\SonicTerm`), its
+    // inherited PATH often contains ONLY the per-user App Execution Alias stub
+    // (which we correctly skip) and NOT the real Store package dir, so PATH
+    // lookup alone misses a Store-installed PS7 and falls back to PS5. Fall
+    // back to Windows PowerShell, then `cmd.exe`.
     path_lookup("pwsh.exe")
+        .or_else(windowsapps_store_pwsh)
         .or_else(|| path_lookup("powershell.exe"))
         .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+/// Probe the Microsoft Store package directory for a real, executable
+/// `pwsh.exe` (PowerShell 7). Returns the highest-versioned one, or `None`.
+///
+/// `BUILTIN\Users` has read+execute on `C:\Program Files\WindowsApps`, so a
+/// normal (non-elevated) process can enumerate `Microsoft.PowerShell_*`.
+/// Honors the `SONICTERM_ALLOW_WINDOWSAPPS_SHELL` escape hatch only to the
+/// extent that this real package path is always allowed (it works under
+/// ConPTY, unlike the per-user alias stub).
+#[cfg(target_os = "windows")]
+fn windowsapps_store_pwsh() -> Option<String> {
+    let program_files = std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let windowsapps = program_files.join("WindowsApps");
+    let entries = std::fs::read_dir(&windowsapps).ok()?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let name = entry.file_name();
+        let lname = name.to_string_lossy().to_ascii_lowercase();
+        // Match the PowerShell package family; skip the `_neutral_~_`
+        // resource package (no real exe). The arch'd package
+        // (`Microsoft.PowerShell_<ver>_x64__<pub>`) carries `pwsh.exe`.
+        if !lname.starts_with("microsoft.powershell_") {
+            continue;
+        }
+        let pwsh = dir.join("pwsh.exe");
+        if pwsh.is_file() {
+            candidates.push(pwsh);
+        }
+    }
+    pick_highest_pwsh(&candidates).map(|p| p.to_string_lossy().to_string())
+}
+
+/// Pure selector: pick the highest-versioned `pwsh.exe` from candidate Store
+/// package paths. Versions are embedded in the parent dir name
+/// (`Microsoft.PowerShell_7.6.2.0_x64__...`); compare them numerically so
+/// `7.10` sorts above `7.9`. Falls back to lexical path order when no version
+/// parses. Returns `None` for an empty list.
+#[cfg(target_os = "windows")]
+fn pick_highest_pwsh(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .max_by(|a, b| {
+            let va = store_pkg_version(a);
+            let vb = store_pkg_version(b);
+            va.cmp(&vb).then_with(|| a.as_os_str().cmp(b.as_os_str()))
+        })
+        .cloned()
+}
+
+/// Extract the `[major, minor, patch, build]` version from a Store package
+/// `pwsh.exe` path's parent dir name (`Microsoft.PowerShell_<ver>_<arch>__...`).
+/// Returns all-zero when it can't be parsed, so unparseable entries sort below
+/// real ones.
+#[cfg(target_os = "windows")]
+fn store_pkg_version(pwsh_path: &Path) -> [u64; 4] {
+    let dir = pwsh_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // `Microsoft.PowerShell_7.6.2.0_x64__8wekyb3d8bbwe`
+    let after = dir.split('_').nth(1).unwrap_or("");
+    let mut out = [0u64; 4];
+    for (i, part) in after.split('.').take(4).enumerate() {
+        out[i] = part.parse().unwrap_or(0);
+    }
+    out
 }
 
 #[cfg(not(target_os = "windows"))]

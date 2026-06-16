@@ -303,19 +303,32 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(33_333)
 /// a long pinyin run. Only applied when BOTH software-render and composing.
 pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
 
-/// Effective frame period given the software-render and IME-composing state
-/// (issue #714). On the hardware path this is the monitor period unchanged.
-/// On the software path it's the 30 fps cap, dropped to 15 fps while an IME
-/// composition is active so a long preedit doesn't drive a full-surface
-/// raster at full cadence.
+/// Frame period cap for sustained streaming output on the software rasterizer
+/// (~15 fps). A continuously-redrawing TUI like tmux (status bar + inner TUI +
+/// alternate screen) drives a full-surface present every frame; on a CPU
+/// rasterizer that whole-surface copy is the dominant cost and pure CPU burn.
+/// Halving the present rate during sustained streams roughly halves that CPU
+/// with no visible loss for scrolling output (issue #739). Applied only when
+/// software-render AND a fresh PTY burst is in flight.
+pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(66_667);
+
+/// Effective frame period given the software-render, IME-composing, and
+/// sustained-streaming state. On the hardware path this is the monitor period
+/// unchanged. On the software path it's the 30 fps cap, dropped to 15 fps
+/// while an IME composition is active (issue #714) OR while a PTY burst stream
+/// is in flight (issue #739) — both reduce the full-surface present rate that
+/// is the CPU cost on a software rasterizer.
 #[must_use]
 pub fn effective_frame_period(
     software_render: bool,
     composing: bool,
+    streaming: bool,
     monitor_period: Duration,
 ) -> Duration {
     if software_render && composing {
         monitor_period.max(SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD)
+    } else if software_render && streaming {
+        monitor_period.max(SOFTWARE_RENDER_STREAM_FRAME_PERIOD)
     } else if software_render {
         monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
     } else {
@@ -4879,15 +4892,36 @@ mod software_render_tests {
             effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD,
         };
         let sixty = Duration::from_micros(16_667);
-        // Hardware path: untouched whether composing or not.
-        assert_eq!(effective_frame_period(false, false, sixty), sixty);
-        assert_eq!(effective_frame_period(false, true, sixty), sixty);
-        // Software path, not composing: 30fps cap.
-        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-        // Software path, composing: 15fps cap (issue #714).
+        // Args: (software_render, composing, streaming, monitor_period)
+        // Hardware path: untouched whatever the flags.
+        assert_eq!(effective_frame_period(false, false, false, sixty), sixty);
+        assert_eq!(effective_frame_period(false, true, false, sixty), sixty);
+        assert_eq!(effective_frame_period(false, false, true, sixty), sixty);
+        // Software path, idle: 30fps cap.
+        assert_eq!(effective_frame_period(true, false, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
+        // Software path, composing: 15fps cap (issue #714) — composing wins.
         assert_eq!(
-            effective_frame_period(true, true, sixty),
+            effective_frame_period(true, true, false, sixty),
             SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
         );
+        assert_eq!(
+            effective_frame_period(true, true, true, sixty),
+            SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
+        );
+    }
+
+    #[test]
+    fn effective_frame_period_lowers_cap_during_software_stream() {
+        use super::{effective_frame_period, SOFTWARE_RENDER_STREAM_FRAME_PERIOD};
+        let sixty = Duration::from_micros(16_667);
+        // Issue #739: software + sustained PTY stream (no composing) → 15fps
+        // cap, halving full-surface presents so a tmux-style continuous TUI
+        // burns less CPU on a software rasterizer.
+        assert_eq!(
+            effective_frame_period(true, false, true, sixty),
+            SOFTWARE_RENDER_STREAM_FRAME_PERIOD
+        );
+        // Streaming on the hardware path is untouched (no cap).
+        assert_eq!(effective_frame_period(false, false, true, sixty), sixty);
     }
 }

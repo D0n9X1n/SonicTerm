@@ -678,6 +678,12 @@ blur = false
 warm_window_pool = 2
 
 [terminal]
+# Shell to spawn. Leave commented to auto-detect (Windows: PowerShell 7
+# `pwsh.exe`, including the Microsoft Store install, falling back to Windows
+# PowerShell then cmd.exe; macOS/Linux: $SHELL). Set an explicit path/name to
+# override, e.g. shell = "pwsh.exe" or shell = "powershell.exe".
+# shell = "pwsh.exe"
+
 # TERM_PROGRAM passed to child PTYs. Some tools, such as Copilot, do not
 # recognize SonicTerm yet; setting term_program = "WezTerm" can bypass their
 # terminal checks and enable their WezTerm/new terminal UI path.

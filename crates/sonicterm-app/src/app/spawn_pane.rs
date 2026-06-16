@@ -77,6 +77,7 @@ impl App {
             rows,
             sonicterm_io::pty::ShellSpawnOpts {
                 term_program: self.config.terminal.term_program.clone(),
+                shell: self.config.terminal.shell.clone(),
                 ..sonicterm_io::pty::ShellSpawnOpts::default()
             },
         ) {
