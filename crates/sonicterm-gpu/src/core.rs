@@ -2913,6 +2913,12 @@ impl GpuRenderer {
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
+            #[cfg(target_os = "windows")]
+            if self.software_render_degrade {
+                if let Some(frame) = self.software_frame.as_ref() {
+                    frame.present(&self.window)?;
+                }
+            }
             if pane_focus_flash_bucket != 0 {
                 self.window.request_redraw();
             }

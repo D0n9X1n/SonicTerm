@@ -313,16 +313,15 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(50_000)
 pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(83_333);
 
 /// Frame period cap for sustained streaming output on the software rasterizer
-/// (~6 fps). A continuously-redrawing TUI (status bar + inner TUI + alternate
+/// (~4 fps). A continuously-redrawing TUI (status bar + inner TUI + alternate
 /// screen, e.g. a streaming AI CLI or tmux) drives a full-surface present every
 /// frame; on a CPU rasterizer (WARP / llvmpipe) that whole-surface fill is the
-/// dominant cost and the bulk of the CPU burn. The damaged area can't be
-/// trimmed safely under wgpu's multi-buffer present, so for large-area redraws
-/// the present *rate* is the only lever — cap it hard during sustained streams.
-/// 6 fps stays readable for scrolling/streaming output while cutting the
-/// whole-surface present rate ~40% vs 10 fps (issue #739). Applied only when
-/// software-render AND a fresh PTY burst is in flight.
-pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(166_667);
+/// dominant cost and the bulk of the CPU burn. The software fallback removes
+/// WARP present stalls, but a Claude Code cold start can still emit a large
+/// burst of terminal updates, so cap sustained software streams more
+/// aggressively. Applied only when software-render AND a fresh PTY burst is in
+/// flight.
+pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(250_000);
 
 /// Effective frame period given the software-render, IME-composing, and
 /// sustained-streaming state. On the hardware path this is the monitor period
