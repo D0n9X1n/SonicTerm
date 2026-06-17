@@ -5184,9 +5184,25 @@ impl GpuRenderer {
 
         #[cfg(target_os = "windows")]
         if self.software_render_degrade {
+            let first_retained_frame = self.software_frame.is_none() || self.last_frame_key.is_none();
+            let clear_all = first_retained_frame || matches!(render_mode, RenderMode::Full);
+            let damage_rect = if clear_all {
+                surface_rect
+            } else if let RenderMode::Partial(rect) = render_mode {
+                rect
+            } else {
+                damage.rect().unwrap_or(surface_rect)
+            };
             let mut retained_quads = Vec::with_capacity(quads.len() + 1);
             retained_quads.push(QuadInstance::sharp(
-                px_to_ndc(0.0, 0.0, sw, sh, sw, sh),
+                px_to_ndc(
+                    damage_rect.x as f32,
+                    damage_rect.y as f32,
+                    damage_rect.w as f32,
+                    damage_rect.h as f32,
+                    sw,
+                    sh,
+                ),
                 [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32],
             ));
             retained_quads.extend_from_slice(&quads);
@@ -5198,7 +5214,7 @@ impl GpuRenderer {
                     bg_clear,
                 )
             });
-            frame.reset(self.config.width, self.config.height, bg_clear);
+            frame.prepare(self.config.width, self.config.height, bg_clear, clear_all);
             frame.draw_layers(
                 &self.glyph_atlas,
                 &retained_quads,

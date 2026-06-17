@@ -30,14 +30,20 @@ impl WindowsSoftwareFrame {
     }
 
     pub(crate) fn reset(&mut self, width: u32, height: u32, clear: [f32; 4]) {
+        self.prepare(width, height, clear, true);
+    }
+
+    pub(crate) fn prepare(&mut self, width: u32, height: u32, clear: [f32; 4], clear_all: bool) {
         let width = width.max(1);
         let height = height.max(1);
         if self.width != width || self.height != height {
             self.width = width;
             self.height = height;
             self.pixels.resize(width as usize * height as usize * 4, 0);
+            self.clear(clear);
+        } else if clear_all {
+            self.clear(clear);
         }
-        self.clear(clear);
     }
 
     pub(crate) fn draw_layers(
@@ -403,6 +409,13 @@ mod tests {
         let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
         frame.reset(3, 1, [0.0, 1.0, 0.0, 1.0]);
         assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn prepare_can_retain_existing_pixels_for_partial_frames() {
+        let mut frame = WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]);
+        frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0], false);
+        assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
     }
 
     #[test]
