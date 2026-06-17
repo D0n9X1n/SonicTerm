@@ -234,19 +234,16 @@ impl WindowsSoftwareFrame {
         let color_glyph = glyph.flags[0] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - y) / h).clamp(0.0, 0.999_999);
-            let sy = ay0 + ((ay1 - ay0) as f32 * ty).floor() as u32;
+            let sy = ay0 as f32 + ((ay1 - ay0) as f32 * ty);
             let row = yy as usize * self.width as usize * 4;
             for xx in x0..x1 {
                 let tx = ((xx as f32 + 0.5 - x) / w).clamp(0.0, 0.999_999);
-                let sx = ax0 + ((ax1 - ax0) as f32 * tx).floor() as u32;
-                let src_off = ((sy * atlas_w + sx) * 4) as usize;
-                if src_off + 4 > atlas_pixels.len() {
-                    continue;
-                }
+                let sx = ax0 as f32 + ((ax1 - ax0) as f32 * tx);
+                let sample = sample_atlas_bilinear(atlas_pixels, atlas_w, atlas_h, sx, sy);
                 let src = if color_glyph {
-                    bgra8_to_premul_f32(&atlas_pixels[src_off..src_off + 4])
+                    sample
                 } else {
-                    let cov = atlas_pixels[src_off + 3] as f32 / 255.0;
+                    let cov = sample[3];
                     [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov]
                 };
                 if src[3] <= 0.0 {
@@ -352,6 +349,39 @@ fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
 }
 
+fn sample_atlas_bilinear(pixels: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
+    if width == 0 || height == 0 || pixels.is_empty() {
+        return [0.0; 4];
+    }
+    let x = (x - 0.5).clamp(0.0, (width - 1) as f32);
+    let y = (y - 0.5).clamp(0.0, (height - 1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let c00 = bgra_pixel_at(pixels, width, x0, y0);
+    let c10 = bgra_pixel_at(pixels, width, x1, y0);
+    let c01 = bgra_pixel_at(pixels, width, x0, y1);
+    let c11 = bgra_pixel_at(pixels, width, x1, y1);
+    let mut out = [0.0; 4];
+    for i in 0..4 {
+        let top = c00[i] * (1.0 - fx) + c10[i] * fx;
+        let bottom = c01[i] * (1.0 - fx) + c11[i] * fx;
+        out[i] = top * (1.0 - fy) + bottom * fy;
+    }
+    out
+}
+
+fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 4] {
+    let off = ((y * width + x) * 4) as usize;
+    if off + 4 > pixels.len() {
+        return [0.0; 4];
+    }
+    bgra8_to_premul_f32(&pixels[off..off + 4])
+}
+
 fn blend_premul_bgra(dst: &mut [u8], src: [f32; 4]) {
     let da = dst[3] as f32 / 255.0;
     let db = dst[0] as f32 / 255.0;
@@ -423,7 +453,10 @@ mod tests {
         let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]);
         frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
         let px = frame.pixel_bgra(0, 0);
-        assert!((120..=135).contains(&px[2]), "premultiplied red should stay half intensity: {px:?}");
+        assert!(
+            (120..=135).contains(&px[2]),
+            "premultiplied red should stay half intensity: {px:?}"
+        );
         assert_eq!(px[0], 0);
         assert_eq!(px[1], 0);
         assert_eq!(px[3], 255);
@@ -464,5 +497,15 @@ mod tests {
         assert_eq!(c[1], 0.0);
         assert_eq!(c[2], 0.0);
         assert_eq!(c[3], 0.5);
+    }
+
+    #[test]
+    fn atlas_bilinear_sampling_smooths_between_coverage_pixels() {
+        let pixels = [0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0];
+        let sample = sample_atlas_bilinear(&pixels, 2, 2, 1.0, 1.0);
+        assert!(
+            sample[3] > 0.4 && sample[3] < 0.6,
+            "center sample should blend neighbours: {sample:?}"
+        );
     }
 }
