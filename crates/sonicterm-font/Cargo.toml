@@ -31,7 +31,7 @@ log = "0.4"
 memmap2 = "0.9"
 metrics = "0.24"
 num = "0.4"
-ordered-float = { version = "4", features = ["std"] }
+ordered-float = { version = "5", features = ["std"] }
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 thiserror.workspace = true
