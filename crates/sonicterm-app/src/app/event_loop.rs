@@ -30,7 +30,8 @@ impl App {
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         for ws in self.windows.values_mut() {
-            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at) else {
+            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at)
+            else {
                 continue;
             };
             if expires_at <= now {
@@ -259,6 +260,7 @@ impl App {
                     )),
             ),
             self.config.appearance.backdrop,
+            self.config.appearance.software_render_mode,
         ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // PANIC (above): `create_window` only fails when winit cannot reach
@@ -311,6 +313,7 @@ impl App {
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
                     panel_padding: self.config.appearance.panel_padding,
+                    software_render_mode: self.config.appearance.software_render_mode,
                 },
             },
         )
@@ -342,10 +345,10 @@ impl App {
             self.config.appearance.software_render_mode,
             renderer.is_software_rendering(),
         );
+        renderer.set_software_render_degrade(self.software_render_degrade);
         if self.software_render_degrade {
             let before = self.frame_period;
-            self.frame_period =
-                crate::app::software_render_frame_period(true, self.frame_period);
+            self.frame_period = crate::app::software_render_frame_period(true, self.frame_period);
             tracing::info!(
                 detected = renderer.is_software_rendering(),
                 mode = ?self.config.appearance.software_render_mode,

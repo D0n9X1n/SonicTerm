@@ -14,7 +14,7 @@ use std::{
 use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
-use sonicterm_cfg::config::{BackdropKind, Config};
+use sonicterm_cfg::config::{BackdropKind, Config, SoftwareRenderMode};
 use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
@@ -50,8 +50,7 @@ static APP_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::O
 fn app_icon() -> Option<winit::window::Icon> {
     APP_ICON
         .get_or_init(|| {
-            const PNG: &[u8] =
-                include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
+            const PNG: &[u8] = include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
             let img = match image::load_from_memory(PNG) {
                 Ok(i) => i.to_rgba8(),
                 Err(e) => {
@@ -149,8 +148,9 @@ fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
 pub fn with_backdrop_transparency(
     attrs: WindowAttributes,
     backdrop: BackdropKind,
+    software_render_mode: SoftwareRenderMode,
 ) -> WindowAttributes {
-    if backdrop == BackdropKind::Opaque {
+    if backdrop == BackdropKind::Opaque || software_render_mode == SoftwareRenderMode::Force {
         attrs
     } else {
         attrs.with_transparent(true)
@@ -3171,7 +3171,9 @@ impl App {
     /// Test-only: whether the main notification is ongoing.
     #[doc(hidden)]
     pub fn __test_main_notification_ongoing(&self) -> Option<bool> {
-        self.main().and_then(|ws| ws.notification.as_ref()).map(|bubble| bubble.expires_at.is_none())
+        self.main()
+            .and_then(|ws| ws.notification.as_ref())
+            .map(|bubble| bubble.expires_at.is_none())
     }
 
     /// Test-only: install a notification with a specific expiration.
@@ -3188,7 +3190,10 @@ impl App {
 
     /// Test-only: run notification expiry and return the next wake time.
     #[doc(hidden)]
-    pub fn __test_expire_notifications(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+    pub fn __test_expire_notifications(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
         self.expire_notifications(now)
     }
 
@@ -4750,13 +4755,7 @@ mod redraw_coalescing_tests {
         // A PTY burst is still streaming work, not input. Rendering it early
         // can block in surface acquisition waiting for the next drawable; defer
         // inside the current frame window and render at the next boundary.
-        assert!(should_defer_streaming_redraw(
-            false,
-            true,
-            false,
-            Duration::from_millis(1),
-            FRAME
-        ));
+        assert!(should_defer_streaming_redraw(false, true, false, Duration::from_millis(1), FRAME));
     }
 
     #[test]
@@ -4817,10 +4816,7 @@ mod redraw_coalescing_tests {
 
     #[test]
     fn pty_redraw_flushes_large_bursts_without_waiting() {
-        assert!(should_flush_pending_pty_redraw(
-            super::PTY_REDRAW_FLUSH_BYTES,
-            Duration::ZERO,
-        ));
+        assert!(should_flush_pending_pty_redraw(super::PTY_REDRAW_FLUSH_BYTES, Duration::ZERO,));
     }
 }
 
@@ -4882,13 +4878,10 @@ mod software_render_tests {
     #[test]
     fn frame_period_clamps_only_when_degrading() {
         let sixty = Duration::from_micros(16_667); // 60 Hz
-        // Hardware path: untouched.
+                                                   // Hardware path: untouched.
         assert_eq!(software_render_frame_period(false, sixty), sixty);
         // Software path: a fast monitor period is slowed to the 30fps cap.
-        assert_eq!(
-            software_render_frame_period(true, sixty),
-            SOFTWARE_RENDER_FRAME_PERIOD
-        );
+        assert_eq!(software_render_frame_period(true, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
     }
 
     #[test]
@@ -4900,9 +4893,7 @@ mod software_render_tests {
 
     #[test]
     fn effective_frame_period_lowers_cap_while_composing() {
-        use super::{
-            effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD,
-        };
+        use super::{effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD};
         let sixty = Duration::from_micros(16_667);
         // Args: (software_render, composing, streaming, monitor_period)
         // Hardware path: untouched whatever the flags.

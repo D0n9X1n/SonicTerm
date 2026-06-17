@@ -307,6 +307,40 @@ impl App {
             );
         }
 
+        if new_cfg.appearance.software_render_mode != self.config.appearance.software_render_mode {
+            self.software_render_degrade = self.main_renderer().is_some_and(|r| {
+                super::should_degrade_for_software_render(
+                    new_cfg.appearance.software_render_mode,
+                    r.is_software_rendering(),
+                )
+            });
+            if let Some(r) = self.main_renderer_mut() {
+                let degrade = super::should_degrade_for_software_render(
+                    new_cfg.appearance.software_render_mode,
+                    r.is_software_rendering(),
+                );
+                r.set_software_render_degrade(degrade);
+            }
+            for child in self.windows.values_mut() {
+                if let Some(r) = child.renderer.as_mut() {
+                    let degrade = super::should_degrade_for_software_render(
+                        new_cfg.appearance.software_render_mode,
+                        r.is_software_rendering(),
+                    );
+                    r.set_software_render_degrade(degrade);
+                }
+            }
+            self.frame_period = super::software_render_frame_period(
+                self.software_render_degrade,
+                self.frame_period,
+            );
+            tracing::info!(
+                ?new_cfg.appearance.software_render_mode,
+                degrade = self.software_render_degrade,
+                "live-reload: appearance software_render_mode"
+            );
+        }
+
         // Tab close-button override (wezterm `tab_close_button_color`).
         // Diff against the live config so an edit that adds, changes,
         // or clears the value propagates to the main + every child

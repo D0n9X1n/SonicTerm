@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use sonicterm_cfg::config::BackdropKind;
+use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode};
 use sonicterm_cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use wgpu::{
@@ -80,6 +80,8 @@ pub struct SurfaceAppearance {
     pub scrollbar: sonicterm_cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     pub panel_padding: f32,
+    /// User override for the software-render degrade path.
+    pub software_render_mode: SoftwareRenderMode,
 }
 
 fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
@@ -156,6 +158,14 @@ fn software_rendering_from(name: &str, device_type: wgpu::DeviceType) -> bool {
         || name.contains("llvmpipe")
         || name.contains("swiftshader")
         || name.contains("software adapter")
+}
+
+fn software_render_degrade_from(mode: SoftwareRenderMode, detected: bool) -> bool {
+    match mode {
+        SoftwareRenderMode::Auto => detected,
+        SoftwareRenderMode::Force => true,
+        SoftwareRenderMode::Off => false,
+    }
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
@@ -282,6 +292,7 @@ use crate::{
     wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_cfg::config::CursorShape;
+use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
     glyph_atlas::GlyphAtlas,
@@ -299,7 +310,6 @@ use sonicterm_text::{
     // file outright.
     shape::{run_is_ascii_fast, RunStyle},
 };
-use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
@@ -353,6 +363,58 @@ where
     damage.rect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderMode {
+    Full,
+    Partial(PixelRect),
+    Noop,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RenderSignals {
+    pub first_frame: bool,
+    pub resize: bool,
+    pub dpi_or_scale_change: bool,
+    pub font_or_atlas_rebuild: bool,
+    pub theme_or_config_reload: bool,
+    pub surface_reconfigure: bool,
+    pub occlusion_restore: bool,
+    pub viewport_scroll: bool,
+    pub selection_change: bool,
+    pub tab_switch: bool,
+    pub pane_topology_change: bool,
+    pub overlay_active_or_toggled: bool,
+    pub degrade_state_changed: bool,
+    pub dirty_damage: Option<PixelRect>,
+}
+
+#[must_use]
+pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> RenderMode {
+    if !degrade {
+        return RenderMode::Full;
+    }
+    let force_full = signals.first_frame
+        || signals.resize
+        || signals.dpi_or_scale_change
+        || signals.font_or_atlas_rebuild
+        || signals.theme_or_config_reload
+        || signals.surface_reconfigure
+        || signals.occlusion_restore
+        || signals.viewport_scroll
+        || signals.selection_change
+        || signals.tab_switch
+        || signals.pane_topology_change
+        || signals.overlay_active_or_toggled
+        || signals.degrade_state_changed;
+    if force_full {
+        RenderMode::Full
+    } else if let Some(damage) = signals.dirty_damage {
+        RenderMode::Partial(damage)
+    } else {
+        RenderMode::Noop
+    }
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -365,7 +427,11 @@ fn create_frame_texture(
 ) -> (Texture, TextureView) {
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("sonic-retained-frame"),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
@@ -422,11 +488,8 @@ pub fn emit_tab_bar_quads(
                 w: (t.bg_rect.w - inset * 2.0).max(0.0),
                 h: ACTIVE_TOP_ACCENT_H * scale,
             };
-            let color = t
-                .custom_color
-                .as_deref()
-                .map(|hex| hex_to_rgba(hex, 1.0))
-                .unwrap_or(params.accent);
+            let color =
+                t.custom_color.as_deref().map(|hex| hex_to_rgba(hex, 1.0)).unwrap_or(params.accent);
             quads.push(QuadInstance {
                 rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
                 color,
@@ -483,10 +546,15 @@ pub struct GpuRenderer {
     /// via [`GpuRenderer::is_software_rendering`] to degrade the frame cap and
     /// per-frame animation (issue #713).
     software_rendering: bool,
+    /// Resolved no-GPU degrade state: adapter detection combined with
+    /// `[appearance].software_render_mode`.
+    software_render_degrade: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: SurfaceConfiguration,
+    hardware_present_mode: PresentMode,
+    hardware_alpha_mode: CompositeAlphaMode,
     window: Arc<Window>,
 
     /// WezTerm-style final presentation pipeline. It consumes every glyph and
@@ -1066,14 +1134,11 @@ impl GpuRenderer {
         // G1a: read the OS DPI multiplier; stored verbatim into the
         // field below and only re-used by the rasterizer-target helper.
         let sf = window.scale_factor() as f32;
-        let instance = shared
-            .as_ref()
-            .map(|s| s.instance.clone())
-            .unwrap_or_else(|| {
-                Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
-                    event_loop.owned_display_handle(),
-                )))
-            });
+        let instance = shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| {
+            Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+                event_loop.owned_display_handle(),
+            )))
+        });
         let surface = instance.create_surface(window.clone()).context("create surface")?;
         let (adapter, device, queue, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
@@ -1123,8 +1188,10 @@ impl GpuRenderer {
                      unexpectedly. Common cause: running over RDP without GPU passthrough."
                 );
             }
-            let (device, queue) =
-                adapter.request_device(&DeviceDescriptor::default()).await.context("request device")?;
+            let (device, queue) = adapter
+                .request_device(&DeviceDescriptor::default())
+                .await
+                .context("request device")?;
             (adapter, device, queue, software_rendering)
         };
 
@@ -1135,16 +1202,22 @@ impl GpuRenderer {
         // backends that don't advertise Mailbox (Fifo is universally supported
         // and remains the spec-mandated default).
         let surface_caps = surface.get_capabilities(&adapter);
-        let present_mode = if surface_caps.present_modes.contains(&PresentMode::Mailbox) {
+        let hardware_present_mode = if surface_caps.present_modes.contains(&PresentMode::Mailbox) {
             PresentMode::Mailbox
         } else {
             PresentMode::Fifo
         };
-        let alpha_mode = if appearance.backdrop == BackdropKind::Opaque {
+        let hardware_alpha_mode = if appearance.backdrop == BackdropKind::Opaque {
             CompositeAlphaMode::Opaque
         } else {
             CompositeAlphaMode::PreMultiplied
         };
+        let software_render_degrade =
+            software_render_degrade_from(appearance.software_render_mode, software_rendering);
+        let present_mode =
+            if software_render_degrade { PresentMode::Fifo } else { hardware_present_mode };
+        let alpha_mode =
+            if software_render_degrade { CompositeAlphaMode::Opaque } else { hardware_alpha_mode };
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -1153,7 +1226,7 @@ impl GpuRenderer {
             present_mode,
             alpha_mode,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: if software_render_degrade { 1 } else { 2 },
         };
         surface.configure(&device, &config);
 
@@ -1163,7 +1236,8 @@ impl GpuRenderer {
         // prebake — chrome and grid share this single atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
-        let (frame_texture, frame_view) = create_frame_texture(&device, config.width, config.height, format);
+        let (frame_texture, frame_view) =
+            create_frame_texture(&device, config.width, config.height, format);
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
         let mut glyph_atlas = GlyphAtlas::default_size();
         let glyph_upload = AtlasUpload::new(
@@ -1231,10 +1305,13 @@ impl GpuRenderer {
             instance,
             adapter,
             software_rendering,
+            software_render_degrade,
             device,
             queue,
             surface,
             config,
+            hardware_present_mode,
+            hardware_alpha_mode,
             window,
             present_pipeline,
             frame_texture,
@@ -1905,6 +1982,31 @@ impl GpuRenderer {
     /// the no-GPU case (issue #713).
     pub fn is_software_rendering(&self) -> bool {
         self.software_rendering
+    }
+
+    pub fn is_software_render_degraded(&self) -> bool {
+        self.software_render_degrade
+    }
+
+    /// Update the resolved no-GPU degrade state after a config reload.
+    /// A transition invalidates the retained frame and reconfigures the
+    /// surface with the software-render present tweaks.
+    pub fn set_software_render_degrade(&mut self, degrade: bool) {
+        if self.software_render_degrade == degrade {
+            return;
+        }
+        self.software_render_degrade = degrade;
+        if degrade {
+            self.config.present_mode = PresentMode::Fifo;
+            self.config.alpha_mode = CompositeAlphaMode::Opaque;
+            self.config.desired_maximum_frame_latency = 1;
+        } else {
+            self.config.present_mode = self.hardware_present_mode;
+            self.config.alpha_mode = self.hardware_alpha_mode;
+            self.config.desired_maximum_frame_latency = 2;
+        }
+        self.surface.configure(&self.device, &self.config);
+        self.last_frame_key = None;
     }
 
     /// Current OS display scale factor (physical px per logical px). Exposed so
@@ -2702,35 +2804,38 @@ impl GpuRenderer {
             .map_or(0, |quick| quick.hints.len() as u32);
         let read_only_mode = copy_mode.is_some_and(CopyModeState::is_read_only);
         let pane_focus_flash_bucket = self.pane_focus_flash_bucket(now);
-        let overlay_or_chrome_changed = self
-            .last_frame_key
-            .as_ref()
-            .is_none_or(|prev| {
-                prev.selection != selection.copied()
-                    || prev.copy_mode != copy_mode.cloned()
-                    || prev.quick_select_hint_count != quick_select_hint_count
-                    || prev.cursor_visible != cursor_visible
-                    || prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
-                    || prev.pane != active_pane
-                    || prev.search_hash != search_hash
-                    || prev.palette_hash != palette_hash
-                    || prev.ime_hash != ime_hash
-                    || prev.notification_hash != notification_hash
-                    || prev.width != self.config.width
-                    || prev.height != self.config.height
-                    || prev.tab_hash != tab_hash
-                    || prev.pane_rect_hash != pane_rect_hash
-                    || prev.viewport_top_abs != viewport_top_abs
-                    || prev.cursor_shape != self.cursor_shape as u8
-                    || prev.cursor_blink != self.cursor_blink
-                    || prev.window_focused != self.window_focused
-                    || prev.pane_focus_flash_bucket != pane_focus_flash_bucket
-                    || prev.hover_tab != hover_tab_idx
-                    || prev.close_override != u8::from(self.tab_close_override.is_some())
-                    || prev.broadcast_receivers_hash != broadcast_receivers_hash
-                    || prev.inline_media_hash != inline_media_hash
-                    || prev.hovered_url_cells != hovered_url_cells
-            });
+        let overlay_active = search.is_some()
+            || palette.as_deref().is_some_and(CommandPalette::is_open)
+            || notification.is_some()
+            || ime.is_some_and(|i| i.is_composing() || !i.preedit().is_empty())
+            || self.drag_chip.is_some()
+            || self.pane_focus_flash.is_some();
+        let overlay_or_chrome_changed = self.last_frame_key.as_ref().is_none_or(|prev| {
+            prev.selection != selection.copied()
+                || prev.copy_mode != copy_mode.cloned()
+                || prev.quick_select_hint_count != quick_select_hint_count
+                || prev.cursor_visible != cursor_visible
+                || prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
+                || prev.pane != active_pane
+                || prev.search_hash != search_hash
+                || prev.palette_hash != palette_hash
+                || prev.ime_hash != ime_hash
+                || prev.notification_hash != notification_hash
+                || prev.width != self.config.width
+                || prev.height != self.config.height
+                || prev.tab_hash != tab_hash
+                || prev.pane_rect_hash != pane_rect_hash
+                || prev.viewport_top_abs != viewport_top_abs
+                || prev.cursor_shape != self.cursor_shape as u8
+                || prev.cursor_blink != self.cursor_blink
+                || prev.window_focused != self.window_focused
+                || prev.pane_focus_flash_bucket != pane_focus_flash_bucket
+                || prev.hover_tab != hover_tab_idx
+                || prev.close_override != u8::from(self.tab_close_override.is_some())
+                || prev.broadcast_receivers_hash != broadcast_receivers_hash
+                || prev.inline_media_hash != inline_media_hash
+                || prev.hovered_url_cells != hovered_url_cells
+        });
         let mut damage = DamageRect::empty();
         let surface_rect = full_surface_rect(self.config.width, self.config.height);
         if overlay_or_chrome_changed {
@@ -2758,6 +2863,8 @@ impl GpuRenderer {
                 }
             }
         }
+        let dirty_damage = damage.rect();
+        let damaged_rows: usize = pane_views.iter().map(|pv| pv.grid.dirty_rows().count()).sum();
 
         let key = FrameKey {
             grid_revision: grid.revision(),
@@ -2798,6 +2905,7 @@ impl GpuRenderer {
             inline_media_hash,
             hovered_url_cells,
         };
+        let pane_revs_len = key.pane_revs.len();
         if Some(&key) == self.last_frame_key.as_ref() {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
@@ -2812,6 +2920,41 @@ impl GpuRenderer {
             // would re-arm at 0ms and peg the redraw queue.
             return Ok(());
         }
+        let prev_key = self.last_frame_key.as_ref();
+        let render_mode = decide_render_mode(
+            self.software_render_degrade,
+            RenderSignals {
+                first_frame: prev_key.is_none(),
+                resize: prev_key.is_some_and(|prev| {
+                    prev.width != self.config.width || prev.height != self.config.height
+                }),
+                dpi_or_scale_change: false,
+                font_or_atlas_rebuild: false,
+                theme_or_config_reload: false,
+                surface_reconfigure: false,
+                occlusion_restore: false,
+                viewport_scroll: prev_key
+                    .is_some_and(|prev| prev.viewport_top_abs != viewport_top_abs),
+                selection_change: prev_key.is_some_and(|prev| prev.selection != selection.copied()),
+                tab_switch: prev_key.is_some_and(|prev| {
+                    prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
+                        || prev.tab_hash != tab_hash
+                }),
+                pane_topology_change: prev_key.is_some_and(|prev| {
+                    prev.pane != active_pane
+                        || prev.pane_rect_hash != pane_rect_hash
+                        || prev.pane_revs.len() != pane_revs_len
+                }),
+                overlay_active_or_toggled: overlay_active || overlay_or_chrome_changed,
+                degrade_state_changed: false,
+                dirty_damage,
+            },
+        );
+        if matches!(render_mode, RenderMode::Noop) {
+            self.last_frame_key = Some(key);
+            return Ok(());
+        }
+        let emit_full_rows = matches!(render_mode, RenderMode::Full);
         gpu_lap!("frame_key");
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
@@ -2971,6 +3114,9 @@ impl GpuRenderer {
                 // panes never inherit another pane's hover accent.
                 let pane_hovered_url = if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
+                    if !emit_full_rows && !grid.dirty_rows().any(|dirty| dirty == r as usize) {
+                        continue;
+                    }
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
                         continue;
@@ -3294,6 +3440,9 @@ impl GpuRenderer {
             // pad and the snapped column edges differ.
             let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
             for r in 0..max_rows {
+                if !emit_full_rows && !pv_grid.dirty_rows().any(|dirty| dirty == r as usize) {
+                    continue;
+                }
                 let row_abs = view_top_abs_bg + r as u64;
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
                     continue;
@@ -3932,12 +4081,13 @@ impl GpuRenderer {
                         title = title_chars.iter().take(keep).collect();
                         title.push('…');
                     }
-                    let mut color = tab
-                        .custom_color
-                        .as_deref()
-                        .map(hex_to_chrome_color)
-                        .unwrap_or_else(|| {
-                            if active || hovered { self.tab_active_fg } else { self.tab_inactive_fg }
+                    let mut color =
+                        tab.custom_color.as_deref().map(hex_to_chrome_color).unwrap_or_else(|| {
+                            if active || hovered {
+                                self.tab_active_fg
+                            } else {
+                                self.tab_inactive_fg
+                            }
                         });
                     if tab.custom_color.is_some() && !active_panel_focused {
                         color = scale_chrome_text_alpha(color, 0.55);
@@ -3996,7 +4146,9 @@ impl GpuRenderer {
             // otherwise grows with scrollback depth (issue #710). `start`
             // keeps `i` aligned with the full slice for the cur_idx compare.
             let (vis_start, vis_end) = s.visible_match_range(view_top_abs, grid.rows);
-            for (i, m) in s.matches[vis_start..vis_end].iter().enumerate().map(|(j, m)| (vis_start + j, m)) {
+            for (i, m) in
+                s.matches[vis_start..vis_end].iter().enumerate().map(|(j, m)| (vis_start + j, m))
+            {
                 if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
                     continue;
                 }
@@ -4307,7 +4459,8 @@ impl GpuRenderer {
                     &mut overlay_glyph_instances,
                     None,
                 );
-                let close_w = estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
+                let close_w =
+                    estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
                 let close_x = layout.close.x + (layout.close.w - close_w) * 0.5;
                 emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
@@ -4331,21 +4484,22 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
-        let (palette_layout, palette_query_text, palette_caret_char) = if let Some(p) = palette.as_deref_mut() {
-            let query_text = if palette_preedit.is_empty() {
-                None
+        let (palette_layout, palette_query_text, palette_caret_char) =
+            if let Some(p) = palette.as_deref_mut() {
+                let query_text = if palette_preedit.is_empty() {
+                    None
+                } else {
+                    Some(command_palette_query_label(p, palette_preedit))
+                };
+                let caret_char = cursor_char_slice_at(p.query(), p.cursor()).map(str::to_string);
+                (
+                    PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor),
+                    query_text,
+                    caret_char,
+                )
             } else {
-                Some(command_palette_query_label(p, palette_preedit))
+                (None, None, None)
             };
-            let caret_char = cursor_char_slice_at(p.query(), p.cursor()).map(str::to_string);
-            (
-                PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor),
-                query_text,
-                caret_char,
-            )
-        } else {
-            (None, None, None)
-        };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
@@ -4745,12 +4899,9 @@ impl GpuRenderer {
                     | (u32::from(preedit_fg.b) << 8)
                     | u32::from(preedit_fg.a);
                 let atlas_epoch = self.glyph_atlas.evictions();
-                let cache_hit = self
-                    .preedit_glyph_cache
-                    .as_ref()
-                    .is_some_and(|c| {
-                        c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
-                    });
+                let cache_hit = self.preedit_glyph_cache.as_ref().is_some_and(|c| {
+                    c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
+                });
                 if cache_hit {
                     // SAFETY of UVs: epoch match means no eviction since build.
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
@@ -5034,6 +5185,7 @@ impl GpuRenderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
+                self.last_frame_key = None;
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return Ok(());
@@ -5042,11 +5194,13 @@ impl GpuRenderer {
                 // wgpu 29: Surface::configure panics if a SurfaceTexture is
                 // still alive. Drop the frame BEFORE reconfiguring.
                 drop(frame);
+                self.last_frame_key = None;
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                self.last_frame_key = None;
                 self.surface = self.instance.create_surface(self.window.clone())?;
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
@@ -5061,7 +5215,15 @@ impl GpuRenderer {
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
         let first_retained_frame = self.last_frame_key.is_none();
-        let damage_rect = if first_retained_frame { surface_rect } else { damage.rect().unwrap_or(surface_rect) };
+        let software_full_repaint =
+            self.software_render_degrade && matches!(render_mode, RenderMode::Full);
+        let damage_rect = if first_retained_frame || software_full_repaint {
+            surface_rect
+        } else if let RenderMode::Partial(rect) = render_mode {
+            rect
+        } else {
+            damage.rect().unwrap_or(surface_rect)
+        };
         let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
         let mut retained_quads = Vec::with_capacity(quads.len() + 1);
         retained_quads.push(QuadInstance::sharp(
@@ -5084,7 +5246,11 @@ impl GpuRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: if first_retained_frame { LoadOp::Clear(self.bg) } else { LoadOp::Load },
+                        load: if first_retained_frame {
+                            LoadOp::Clear(self.bg)
+                        } else {
+                            LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -5162,8 +5328,13 @@ impl GpuRenderer {
             let now = Instant::now();
             parts.push(("cleanup", now.saturating_duration_since(last).as_secs_f32() * 1000.0));
             let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
+            let mode = match render_mode {
+                RenderMode::Full => "full",
+                RenderMode::Partial(_) => "partial",
+                RenderMode::Noop => "noop",
+            };
             let mut line = format!(
-                "[gpu_render_timing] window={} total={total_ms:.2}ms",
+                "[gpu_render_timing] window={} mode={mode} damaged_rows={damaged_rows} total={total_ms:.2}ms",
                 self.render_timing_label
             );
             for (name, ms) in parts {
