@@ -201,7 +201,10 @@ pub enum FreeTypeLoadTarget {
 }
 
 bitflags::bitflags! {
-    #[derive(Default)]
+    // bitflags 2.x no longer auto-derives the standard traits on the generated
+    // type; they must be requested explicitly (parity with `ModKey` in
+    // sonicterm-types). `Copy` matches the old 1.x auto-derive behavior.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct FreeTypeLoadFlags: u32 {
         const DEFAULT = 0;
         const NO_HINTING = 2;
