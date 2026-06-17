@@ -331,6 +331,12 @@ impl GlyphAtlas {
         &self.pixels
     }
 
+    /// Borrow the CPU-side atlas pixels without draining dirty rects.
+    /// Windows software fallback rendering samples this buffer directly.
+    pub fn pixels_bgra(&self) -> &[u8] {
+        &self.pixels
+    }
+
     /// Take and clear the list of rectangles modified since the last
     /// call. The caller (typically `AtlasUpload`) should `write_texture`
     /// these subregions to the GPU before the next frame.

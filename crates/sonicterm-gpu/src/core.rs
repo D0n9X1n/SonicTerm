@@ -686,6 +686,8 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    #[cfg(target_os = "windows")]
+    software_frame: Option<crate::software_windows::WindowsSoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
     render_timing_label: &'static str,
     /// Whether the tab bar is currently shown. Toggled at runtime by the
@@ -1363,6 +1365,8 @@ impl GpuRenderer {
             last_frame_key: None,
             preedit_glyph_cache: None,
             skipped_frames: 0,
+            #[cfg(target_os = "windows")]
+            software_frame: None,
             render_timing_label: "unknown",
             tab_bar_visible: true,
             titlebar_inset: 0.0,
@@ -5167,15 +5171,54 @@ impl GpuRenderer {
         }
 
         gpu_lap!("overlays");
+        if !image_glyph_instances.is_empty() {
+            image_glyph_instances.extend(glyph_instances);
+            glyph_instances = image_glyph_instances;
+        }
+
+        #[cfg(target_os = "windows")]
+        if self.software_render_degrade {
+            let mut retained_quads = Vec::with_capacity(quads.len() + 1);
+            retained_quads.push(QuadInstance::sharp(
+                px_to_ndc(0.0, 0.0, sw, sh, sw, sh),
+                [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32],
+            ));
+            retained_quads.extend_from_slice(&quads);
+            let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
+            let frame = self.software_frame.get_or_insert_with(|| {
+                crate::software_windows::WindowsSoftwareFrame::new(
+                    self.config.width,
+                    self.config.height,
+                    bg_clear,
+                )
+            });
+            frame.reset(self.config.width, self.config.height, bg_clear);
+            frame.draw_layers(
+                &self.glyph_atlas,
+                &retained_quads,
+                &glyph_instances,
+                &quads_overlay,
+                &overlay_glyph_instances,
+            );
+            let _ = self.glyph_atlas.take_dirty_rects();
+            frame.present(&self.window)?;
+            gpu_lap!("software_present");
+            self.finish_successful_frame(
+                key,
+                missing_chars_this_frame,
+                panes,
+                render_mode,
+                damaged_rows,
+                gpu_timing,
+            );
+            return Ok(());
+        }
+
         // B3: push any new glyph tiles to the GPU texture before any
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
         // WezTerm presentation draw call in the render pass below.
         self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
-        if !image_glyph_instances.is_empty() {
-            image_glyph_instances.extend(glyph_instances);
-            glyph_instances = image_glyph_instances;
-        }
         gpu_lap!("glyph_upload");
 
         let frame = match self.surface.get_current_texture() {
@@ -5288,39 +5331,31 @@ impl GpuRenderer {
         gpu_lap!("queue_submit");
         frame.present();
         gpu_lap!("present");
-        // T13/T14: the legacy chrome layer `TextAtlas::trim` is gone with the rest of
-        // the the legacy chrome layer plumbing. The chrome+grid atlas now lives in
-        // `glyph_atlas` (sonicterm-text), which carries its own LRU
-        // eviction via `evict_lru_quartile` on insert failures and
-        // doesn't need a per-frame trim.
-        // Publish the per-frame missing-glyph list for tests / diagnostics.
-        // Done after submit so the value reflects what the user actually
-        // saw on screen (not a partial work-in-progress list).
+        self.finish_successful_frame(
+            key,
+            missing_chars_this_frame,
+            panes,
+            render_mode,
+            damaged_rows,
+            gpu_timing,
+        );
+        Ok(())
+    }
+
+    fn finish_successful_frame(
+        &mut self,
+        key: FrameKey,
+        missing_chars_this_frame: Vec<char>,
+        panes: &mut [sonicterm_render_model::PaneRender<'_>],
+        render_mode: RenderMode,
+        damaged_rows: usize,
+        gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
+    ) {
         self.last_missing_chars = missing_chars_this_frame;
-        // Cache key only after a successful submit+present. Transient
-        // surface states (Outdated/Lost/Timeout) that returned early
-        // before this point will not cache, so the next redraw will
-        // re-attempt rendering.
         self.last_frame_key = Some(key);
         if self.pane_focus_flash.is_some() {
             self.window.request_redraw();
         }
-        // Blink redraws are scheduled by the app event loop via
-        // `next_blink_redraw_at()` + `ControlFlow::WaitUntil(..)` —
-        // see PR #81 review. Calling `request_redraw()` here used to
-        // create a tight loop because every render (cached or not)
-        // re-armed the next frame immediately. The event-loop schedule
-        // wakes us exactly at the next bucket boundary instead.
-        // B2: the renderer has now consumed every dirty row's contents
-        // into either the GPU pipeline or the row_cache. Clear the
-        // bitset on EVERY pane so the next frame can re-use cached
-        // spans for the (likely many) rows that didn't change.
-        // clear_dirty does NOT bump grid.revision, so the FrameKey
-        // fast-path above still works for truly unchanged frames.
-        // PR #199 Fix 2: this is the only mutation of any grid in this
-        // function — done via the original `panes: &mut [PaneRender]`
-        // borrow, which is now reborrowed once `pane_views` (immutable)
-        // is no longer live.
         for p in panes.iter_mut() {
             p.grid.clear_dirty();
         }
@@ -5342,7 +5377,6 @@ impl GpuRenderer {
             }
             tracing::debug!(target: "render_timing", %line);
         }
-        Ok(())
     }
 
     /// T14: this function only emits the quick-select hint background
