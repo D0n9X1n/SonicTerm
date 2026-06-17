@@ -59,6 +59,12 @@ impl WindowsSoftwareFrame {
         unsafe { blit_bgra_to_hwnd(hwnd, self.width, self.height, &self.pixels) }
     }
 
+    #[cfg(test)]
+    fn pixel_bgra(&self, x: u32, y: u32) -> [u8; 4] {
+        let off = ((y * self.width + x) * 4) as usize;
+        [self.pixels[off], self.pixels[off + 1], self.pixels[off + 2], self.pixels[off + 3]]
+    }
+
     fn clear(&mut self, color: [f32; 4]) {
         let px = linear_rgba_to_bgra(color);
         for p in self.pixels.chunks_exact_mut(4) {
@@ -378,4 +384,72 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
     let cx = ax + t * vx;
     let cy = ay + t * vy;
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quad::px_to_ndc;
+
+    #[test]
+    fn clear_uses_straight_alpha_background() {
+        let frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
+        assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn reset_reuses_buffer_and_repaints_background() {
+        let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
+        frame.reset(3, 1, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn premultiplied_quad_blends_over_background() {
+        let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]);
+        frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
+        let px = frame.pixel_bgra(0, 0);
+        assert!((120..=135).contains(&px[2]), "premultiplied red should stay half intensity: {px:?}");
+        assert_eq!(px[0], 0);
+        assert_eq!(px[1], 0);
+        assert_eq!(px[3], 255);
+    }
+
+    #[test]
+    fn rounded_rect_antialiases_corner_pixels() {
+        let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]);
+        frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [1.0, 1.0, 1.0, 1.0], 3.0);
+        assert_eq!(frame.pixel_bgra(4, 4), [255, 255, 255, 255]);
+        let corner = frame.pixel_bgra(1, 1);
+        assert!(
+            corner[0] < 255,
+            "corner should be partially or fully clipped by radius: {corner:?}"
+        );
+    }
+
+    #[test]
+    fn line_quad_antialiases_near_segment() {
+        let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]);
+        let q = QuadInstance::line(
+            px_to_ndc(1.0, 1.0, 6.0, 6.0, 8.0, 8.0),
+            [0.0, 1.0, 0.0, 1.0],
+            [6.0, 6.0],
+            [-3.0, -3.0],
+            [3.0, 3.0],
+            1.0,
+        );
+        frame.draw_line_quad(&q, 1.0, 1.0, 6.0, 6.0);
+        assert!(frame.pixel_bgra(1, 1)[1] > 0);
+        assert_eq!(frame.pixel_bgra(7, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn straight_glyph_color_conversion_premultiplies_alpha() {
+        let c = straight_linear_rgba_to_premul_bgra_f32([0.0, 0.0, 1.0, 0.5]);
+        assert!((c[0] - 0.5).abs() < 0.001);
+        assert_eq!(c[1], 0.0);
+        assert_eq!(c[2], 0.0);
+        assert_eq!(c[3], 0.5);
+    }
 }
