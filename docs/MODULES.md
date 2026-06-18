@@ -8,15 +8,15 @@
 | `sonicterm-cfg` | TOML config, themes, keymaps, URL safety. |
 | `sonicterm-io` | PTY/process/SSH-facing IO abstractions. |
 | `sonicterm-text` | Glyph atlas, row glyph cache, text rendering support. |
-| `sonicterm-font` | Font discovery, fallback, shaping, rasterization. |
+| `sonicterm-font` | Font discovery, fallback, shaping, rasterization (DirectWrite default on Windows, FreeType elsewhere/fallback). |
 | `sonicterm-block-glyph` | Box drawing, block glyphs, Powerline, Braille geometry. |
 | `sonicterm-render-model` | Renderer-agnostic frame and pane input data. |
 | `sonicterm-ui` | Tabs, palette, search, selection, IME, copy mode. |
-| `sonicterm-gpu` | wgpu renderer, quad/glyph presentation pipelines. |
+| `sonicterm-gpu` | wgpu renderer, quad/glyph presentation pipelines, Windows deterministic software-render path. |
 | `sonicterm-app-core` | Winit-independent app reducer/state machine. |
 | `sonicterm-app` | Cross-platform window/tab/pane orchestration. |
 | `sonicterm-mac` | macOS binary, NSMenu, AppKit hooks, mac drag/drop. |
-| `sonicterm-windows` | Windows binary, ConPTY, Mica, OLE drag/drop, WiX packaging. |
+| `sonicterm-windows` | Windows binary, ConPTY, Mica, OLE drag/drop, software presenter, WiX packaging. |
 | `sonicterm-mux` | Future persistent PTY mux daemon. |
 | `sonicterm-logging` | Logs, panic hooks, exit tracing. |
 | `sonicterm-engine` | WezTerm-compatible font engine adapter surface. |

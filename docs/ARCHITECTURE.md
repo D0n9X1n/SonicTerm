@@ -18,7 +18,13 @@ platform shell -> sonicterm-app -> sonicterm-vt/grid -> render-model -> sonicter
    selection, search, drag/drop, and redraw scheduling.
 3. `sonicterm-vt` parses terminal bytes into `sonicterm-grid`.
 4. `sonicterm-render-model` carries renderer-agnostic pane/frame inputs.
-5. `sonicterm-gpu` builds quads and glyph instances for wgpu presentation.
+5. `sonicterm-gpu` builds quads and glyph instances for wgpu presentation. When
+   no usable GPU is present it falls back to a CPU rasterizer; on Windows the
+   software path (`sonicterm-gpu/src/software_windows.rs` +
+   `sonicterm-windows/src/software_presenter.rs`) repaints the whole surface
+   deterministically each frame. Glyphs rasterize via DirectWrite by default on
+   Windows (`sonicterm-font/src/rasterizer/directwrite.rs`), FreeType elsewhere
+   and as the Windows fallback.
 
 ## Design rules
 

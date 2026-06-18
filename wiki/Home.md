@@ -24,7 +24,10 @@ SonicTerm is split into small Rust crates with a clear data flow:
    `sonicterm-gpu`.
 5. `sonicterm-gpu` uses wgpu, a glyph atlas, retained-frame damage regions, and
    batched quads/glyphs to draw the terminal. On software renderers it lowers
-   frame pressure and uses dirty regions to avoid unnecessary work.
+   frame pressure and uses dirty regions to avoid unnecessary work; on Windows
+   the software path repaints the whole surface deterministically each frame for
+   stable output over RDP. Glyphs are rasterized with DirectWrite by default on
+   Windows (FreeType elsewhere, and as the Windows fallback).
 6. Tab tear-out uses a warm hidden-window pool so dropping a tab into a new window
    can reuse pre-created window/renderer state; the pool remains useful on
    no-GPU/software-render machines.
@@ -50,7 +53,7 @@ SonicTerm 由多个小型 Rust crate 组成，数据流清晰：
 2. `sonicterm-app` 管理窗口、Tab、Pane、PTY、拖拽、命令面板、搜索、输入法、通知和重绘调度。
 3. 每个 Pane 都有一个由 `sonicterm-io` 管理的 PTY 进程；PTY 输出由 `sonicterm-vt` 解析到 `sonicterm-grid`，Grid 负责屏幕内容、scrollback 和 dirty rows。
 4. `sonicterm-render-model` 把与渲染器无关的 frame 数据传给 `sonicterm-gpu`。
-5. `sonicterm-gpu` 基于 wgpu、glyph atlas、retained-frame damage region 和批量 quad/glyph 绘制终端。遇到软件渲染器时会降低帧压力，并用 dirty region 减少不必要的工作。
+5. `sonicterm-gpu` 基于 wgpu、glyph atlas、retained-frame damage region 和批量 quad/glyph 绘制终端。遇到软件渲染器时会降低帧压力，并用 dirty region 减少不必要的工作；Windows 上软件路径会每帧确定性地全屏重绘，以保证 RDP 等场景下输出稳定。字形默认在 Windows 上用 DirectWrite 光栅化（其他平台用 FreeType，DirectWrite 失败时也回退到 FreeType）。
 6. Tab 拖出窗口使用隐藏预热窗口池：新窗口可以复用预先创建好的 window/renderer 状态；无 GPU / 软件渲染环境下也会使用这个池。
 7. 配置、keymap、主题和日志都在 `~/.sonicterm` 下；可以通过命令面板编辑并重新加载。
 
