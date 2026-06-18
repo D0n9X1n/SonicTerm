@@ -1,4 +1,3 @@
-
 //! Coverage for the IME composition state machine. The renderer reads
 //! `preedit()` + `cursor()` to draw the inline composition and advance
 //! the cursor BLOCK to the caret byte offset — the "cursor follows the

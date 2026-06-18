@@ -1,4 +1,3 @@
-
 //! Pure-helper coverage for the auto-hide/fade model. These functions
 //! back BOTH the main-window render path (`window_event.rs`) and the
 //! torn-out child render path (`child_window.rs`) verbatim, so a single

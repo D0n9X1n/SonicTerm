@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 /// resource compiler still link.
 #[cfg(windows)]
 fn embed_windows_resources() {
-    let ico = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/exports/sonic.ico");
+    let ico =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/exports/sonic.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     if !ico.exists() {
         println!(
@@ -34,9 +35,7 @@ fn embed_windows_resources() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon(&ico.to_string_lossy());
     if let Err(e) = res.compile() {
-        println!(
-            "cargo:warning=sonicterm-windows build.rs: embedding icon resource failed: {e}"
-        );
+        println!("cargo:warning=sonicterm-windows build.rs: embedding icon resource failed: {e}");
     }
 }
 

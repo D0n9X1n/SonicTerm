@@ -293,16 +293,11 @@ pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Durati
 }
 
 /// Frame period cap applied when rendering on a CPU/software rasterizer
-/// (~20 fps). On a real GPU the monitor's refresh period is used as-is.
+/// (~40 fps). On a real GPU the monitor's refresh period is used as-is.
 ///
-/// Issue #713/#739 follow-up: on WARP / llvmpipe the dominant per-frame cost
-/// is the software rasterizer filling the whole back buffer (measured ~36% of
-/// 16 cores for a once-per-frame full-surface present at 30 fps). That cost is
-/// linear in present rate, so capping the software path lower trades a little
-/// smoothness for a large CPU drop with no correctness risk. 20 fps stays
-/// visually fluid for a cursor/spinner/progress redraw while cutting the
-/// whole-surface present rate by a third vs 30.
-pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(50_000);
+/// The DirectWrite + full-screen software path looks smooth at this cadence
+/// without asking the CPU rasterizer to track the monitor's full refresh rate.
+pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(25_000);
 
 /// Frame period cap while an IME composition is in flight on the software
 /// rasterizer (~12 fps). Each preedit keystroke forces a full-surface raster
@@ -312,36 +307,20 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(50_000)
 /// composing.
 pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(83_333);
 
-/// Frame period cap for sustained streaming output on the software rasterizer
-/// (~4 fps). A continuously-redrawing TUI (status bar + inner TUI + alternate
-/// screen, e.g. a streaming AI CLI or tmux) drives a full-surface present every
-/// frame; on a CPU rasterizer (WARP / llvmpipe) that whole-surface fill is the
-/// dominant cost and the bulk of the CPU burn. The software fallback removes
-/// WARP present stalls, but a Claude Code cold start can still emit a large
-/// burst of terminal updates, so cap sustained software streams more
-/// aggressively. Applied only when software-render AND a fresh PTY burst is in
-/// flight.
-pub const SOFTWARE_RENDER_STREAM_FRAME_PERIOD: Duration = Duration::from_micros(250_000);
-
-/// Effective frame period given the software-render, IME-composing, and
-/// sustained-streaming state. On the hardware path this is the monitor period
-/// unchanged. On the software path it's the 30 fps cap, dropped to 15 fps
-/// while an IME composition is active (issue #714) OR while a PTY burst stream
-/// is in flight (issue #739) — both reduce the full-surface present rate that
-/// is the CPU cost on a software rasterizer.
+/// Effective frame period given the software-render and IME-composing state.
+/// On the hardware path this is the monitor period unchanged. On the software
+/// path it's the 40 fps cap, dropped lower only while an IME composition is
+/// active (issue #714).
 #[must_use]
 pub fn effective_frame_period(
     software_render: bool,
     composing: bool,
-    streaming: bool,
     monitor_period: Duration,
 ) -> Duration {
     if software_render && composing {
-        monitor_period.max(SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD)
-    } else if software_render && streaming {
-        monitor_period.max(SOFTWARE_RENDER_STREAM_FRAME_PERIOD)
+        SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
     } else if software_render {
-        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+        SOFTWARE_RENDER_FRAME_PERIOD
     } else {
         monitor_period
     }
@@ -352,13 +331,13 @@ pub fn effective_frame_period(
 /// When `degrade` is true (software rasterizer detected, or forced by config),
 /// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
 /// the CPU isn't asked to rasterize at the monitor's full refresh rate. A
-/// faster monitor period is slowed to 30 fps; a slower one (rare) is kept.
+/// faster monitor period is slowed to the software cap.
 /// With `degrade` false the monitor period passes through unchanged, so the
 /// hardware-GPU path is untouched.
 #[must_use]
 pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
     if degrade {
-        monitor_period.max(SOFTWARE_RENDER_FRAME_PERIOD)
+        SOFTWARE_RENDER_FRAME_PERIOD
     } else {
         monitor_period
     }
@@ -1521,8 +1500,8 @@ pub struct App {
     pub(super) frame_period: Duration,
     /// True when the no-GPU degrade path is engaged (software rasterizer
     /// detected or forced via `[appearance].software_render_mode`). When set,
-    /// `frame_period` is clamped to ~30 fps and per-frame scrollbar fade
-    /// animation is suppressed so the CPU isn't asked to rasterize at full
+    /// `frame_period` is clamped to the software cap and per-frame scrollbar
+    /// fade animation is suppressed so the CPU isn't asked to rasterize at full
     /// refresh (issue #713). Resolved once after the renderer is created.
     pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
@@ -4879,51 +4858,26 @@ mod software_render_tests {
         let sixty = Duration::from_micros(16_667); // 60 Hz
                                                    // Hardware path: untouched.
         assert_eq!(software_render_frame_period(false, sixty), sixty);
-        // Software path: a fast monitor period is slowed to the 30fps cap.
+        // Software path: a fast monitor period is slowed to the software cap.
         assert_eq!(software_render_frame_period(true, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
     }
 
     #[test]
-    fn frame_period_keeps_a_slower_monitor_period() {
-        // A 20 Hz monitor (50ms) is already slower than the 30fps cap — keep it.
+    fn frame_period_uses_software_cap_when_degrading() {
         let slow = Duration::from_millis(50);
-        assert_eq!(software_render_frame_period(true, slow), slow);
+        assert_eq!(software_render_frame_period(true, slow), SOFTWARE_RENDER_FRAME_PERIOD);
     }
 
     #[test]
     fn effective_frame_period_lowers_cap_while_composing() {
         use super::{effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD};
         let sixty = Duration::from_micros(16_667);
-        // Args: (software_render, composing, streaming, monitor_period)
         // Hardware path: untouched whatever the flags.
-        assert_eq!(effective_frame_period(false, false, false, sixty), sixty);
-        assert_eq!(effective_frame_period(false, true, false, sixty), sixty);
-        assert_eq!(effective_frame_period(false, false, true, sixty), sixty);
-        // Software path, idle: 30fps cap.
-        assert_eq!(effective_frame_period(true, false, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-        // Software path, composing: 15fps cap (issue #714) — composing wins.
-        assert_eq!(
-            effective_frame_period(true, true, false, sixty),
-            SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
-        );
-        assert_eq!(
-            effective_frame_period(true, true, true, sixty),
-            SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
-        );
-    }
-
-    #[test]
-    fn effective_frame_period_lowers_cap_during_software_stream() {
-        use super::{effective_frame_period, SOFTWARE_RENDER_STREAM_FRAME_PERIOD};
-        let sixty = Duration::from_micros(16_667);
-        // Issue #739: software + sustained PTY stream (no composing) → 15fps
-        // cap, halving full-surface presents so a tmux-style continuous TUI
-        // burns less CPU on a software rasterizer.
-        assert_eq!(
-            effective_frame_period(true, false, true, sixty),
-            SOFTWARE_RENDER_STREAM_FRAME_PERIOD
-        );
-        // Streaming on the hardware path is untouched (no cap).
-        assert_eq!(effective_frame_period(false, false, true, sixty), sixty);
+        assert_eq!(effective_frame_period(false, false, sixty), sixty);
+        assert_eq!(effective_frame_period(false, true, sixty), sixty);
+        // Software path, idle: software cap.
+        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
+        // Software path, composing: lower cap (issue #714) — composing wins.
+        assert_eq!(effective_frame_period(true, true, sixty), SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD);
     }
 }

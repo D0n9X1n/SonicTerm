@@ -59,7 +59,11 @@ fn child_inactive_tab_resizes_when_activated_after_window_resize() {
     assert!(app.__test_set_child_pane_viewport(id, Rect::new(0.0, 0.0, 400.0, 240.0), 10.0, 10.0));
     app.__test_invoke_activate_tab_in_child(id, 0);
     assert_eq!(app.__test_child_pane_grid_size(id, first), Some((40, 24)));
-    assert_eq!(app.__test_child_pane_grid_size(id, second), Some((80, 24)), "inactive child tab starts stale");
+    assert_eq!(
+        app.__test_child_pane_grid_size(id, second),
+        Some((80, 24)),
+        "inactive child tab starts stale"
+    );
 
     assert!(app.__test_invoke_activate_tab_in_child(id, 1));
     assert_eq!(

@@ -461,11 +461,21 @@ impl Default for FontLocatorSelection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub enum FontRasterizerSelection {
-    #[default]
     FreeType,
     Harfbuzz,
+    DirectWrite,
+}
+
+impl Default for FontRasterizerSelection {
+    fn default() -> Self {
+        if cfg!(windows) {
+            Self::DirectWrite
+        } else {
+            Self::FreeType
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

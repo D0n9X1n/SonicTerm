@@ -1,4 +1,3 @@
-
 use super::*;
 #[test]
 fn row_hash_cells_accepts_owned_cells() {

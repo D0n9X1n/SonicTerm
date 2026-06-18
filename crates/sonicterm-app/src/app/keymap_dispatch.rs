@@ -95,14 +95,12 @@ impl App {
         else {
             return false;
         };
-        let content_w = message.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size;
+        let content_w =
+            message.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
+                * font_size;
         let row = u8::from(read_only) + u8::from(search_open);
         let layout = sonicterm_ui::overlays::NotificationBubbleLayout::compute(
-            window_w,
-            window_h,
-            content_w,
-            row,
-            scale,
+            window_w, window_h, content_w, row, scale,
         );
         let inside = x >= layout.close.x
             && x < layout.close.x + layout.close.w
@@ -142,12 +140,14 @@ impl App {
                 let window = child.window.as_ref()?;
                 let size = window.inner_size();
                 let tab_idx = child.tabs.active_index();
-                let search_open = child.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
+                let search_open =
+                    child.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
                 let read_only = child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
                 Some((
                     message,
                     renderer.scale_factor(),
-                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size()) * renderer.scale_factor(),
+                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
+                        * renderer.scale_factor(),
                     size.width as f32,
                     size.height as f32,
                     read_only,
@@ -161,12 +161,14 @@ impl App {
                 let window = ws.window.as_ref()?;
                 let size = window.inner_size();
                 let tab_idx = ws.tabs.active_index();
-                let search_open = ws.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
+                let search_open =
+                    ws.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
                 let read_only = ws.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
                 Some((
                     message,
                     renderer.scale_factor(),
-                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size()) * renderer.scale_factor(),
+                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
+                        * renderer.scale_factor(),
                     size.width as f32,
                     size.height as f32,
                     read_only,

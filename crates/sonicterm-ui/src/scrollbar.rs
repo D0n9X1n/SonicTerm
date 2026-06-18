@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn dpi_scaled_width_makes_the_full_drawn_thumb_grabbable() {
         let scale = 1.75; // e.g. a 175% display
-        // Width-8 (the old un-scaled hit-test): track starts at x=92.
+                          // Width-8 (the old un-scaled hit-test): track starts at x=92.
         let unscaled = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
         // Width 8*scale=14 (what the renderer actually draws): track at x=86.
         let scaled = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0 * scale).unwrap();
@@ -263,7 +263,7 @@ mod tests {
         let pad_right = 12.0 * scale; // 21px, the default right padding
         let bar = 8.0 * scale; // 14px
         let full = pane(); // 0..100 wide
-        // Inset content rect: width shrinks by the right padding.
+                           // Inset content rect: width shrinks by the right padding.
         let content = Rect::new(full.x, full.y, full.w - pad_right, full.h);
 
         let from_full = compute(10, 20, 0, full, ScrollbarMode::Always, bar).unwrap();

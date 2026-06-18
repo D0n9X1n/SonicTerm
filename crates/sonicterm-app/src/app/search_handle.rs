@@ -78,7 +78,11 @@ impl App {
     /// Child-window mirror of [`Self::search_handle_ime_commit`]: feed an IME
     /// commit into the search box of the torn-out window `win_id`. Returns
     /// `true` if a search box was open and consumed the text.
-    pub(super) fn search_handle_ime_commit_in_child(&mut self, win_id: WindowId, text: &str) -> bool {
+    pub(super) fn search_handle_ime_commit_in_child(
+        &mut self,
+        win_id: WindowId,
+        text: &str,
+    ) -> bool {
         let (i, pane_id) = {
             let Some(child) = self.windows.get(&win_id) else { return false };
             let i = child.tabs.active_index();

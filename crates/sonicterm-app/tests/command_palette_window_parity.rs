@@ -55,6 +55,7 @@ fn command_palette_accepts_ime_commit_text_on_main_attachment() {
 
     assert!(app.__test_command_palette_handle_ime(&Ime::Commit("重命名".into())));
 
+    assert!(app.__test_input_dirty());
     assert_eq!(app.__test_palette_query(), "重命名");
     assert_eq!(app.__test_palette_cursor(), "重命名".len());
     assert_eq!(
@@ -62,6 +63,17 @@ fn command_palette_accepts_ime_commit_text_on_main_attachment() {
         "palette",
         "main palette IME candidates must anchor to the palette input caret"
     );
+}
+
+#[test]
+fn command_palette_ime_preedit_marks_input_dirty() {
+    let mut app = app();
+    app.__test_seed_tab("main");
+    assert!(app.run_action(&Action::OpenCommandPalette));
+
+    assert!(app.__test_command_palette_handle_ime(&Ime::Preedit("zhong".into(), Some((5, 5)))));
+
+    assert!(app.__test_input_dirty());
 }
 
 #[test]
@@ -74,6 +86,7 @@ fn command_palette_accepts_ime_commit_text_on_child_attachment() {
 
     assert!(app.__test_command_palette_handle_ime(&Ime::Commit("设置".into())));
 
+    assert!(app.__test_input_dirty());
     assert_eq!(app.__test_palette_attached_window(), Some(child));
     assert_eq!(app.__test_palette_query(), "设置");
     assert_eq!(

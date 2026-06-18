@@ -105,6 +105,13 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
 }
 
 #[test]
+fn cursor_color_uses_theme_cursor_accent() {
+    let theme = Theme::default();
+    assert_eq!(cursor_color_from_theme(&theme), hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0));
+    assert_eq!(theme.colors.cursor, theme.colors.tab.active_fg);
+}
+
+#[test]
 fn indexed_color_supports_full_xterm_256_palette() {
     let theme = Theme::default();
     assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
@@ -176,7 +183,7 @@ fn full_repaint_forced_on_invalidation() {
     }
     assert_eq!(
         decide_render_mode(true, RenderSignals { dirty_damage: damage, ..Default::default() }),
-        RenderMode::Partial(damage.unwrap())
+        RenderMode::Full
     );
 }
 
@@ -208,6 +215,16 @@ fn overlay_active_forces_full() {
 #[test]
 fn damage_empty_is_noop() {
     assert_eq!(decide_render_mode(true, RenderSignals::default()), RenderMode::Noop);
+}
+
+#[test]
+fn underline_key_ignores_blank_cells() {
+    let mut blank = Cell::plain(' ', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
+    blank.set_underline_style(UnderlineStyle::Dashed);
+    assert_eq!(underline_key(&blank), None);
+
+    let underlined = Cell::plain('x', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
+    assert_eq!(underline_key(&underlined), Some((UnderlineStyle::Single, Color::Indexed(1))));
 }
 
 #[test]

@@ -1,4 +1,3 @@
-
 use super::Parser;
 use sonicterm_grid::grid::{CellFlags, Grid};
 

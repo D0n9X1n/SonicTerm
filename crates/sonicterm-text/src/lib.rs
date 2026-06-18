@@ -60,8 +60,6 @@ pub struct GlyphInstance {
     pub color: [f32; 4],
     /// Per-instance flags packed into a vec4 to keep WGSL vertex
     /// attribute slots simple. `flags.x` is the is-color toggle
-    /// (>= 0.5 → color glyph). The remaining components are reserved
-    /// for future use (e.g. signed-distance-field weight, oblique
-    /// shear) and currently always zero.
+    /// (>= 0.5 → color glyph). The remaining components are reserved.
     pub flags: [f32; 4],
 }

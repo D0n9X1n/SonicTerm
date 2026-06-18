@@ -76,7 +76,8 @@ impl FontRasterizer for FreeTypeRasterizer {
                                 load_flags | FT_LOAD_NO_HINTING as i32,
                             );
                         }
-                        FontRasterizerSelection::Harfbuzz => {
+                        FontRasterizerSelection::Harfbuzz
+                        | FontRasterizerSelection::DirectWrite => {
                             return self.hb_raster.rasterize_glyph(glyph_pos, size, dpi);
                         }
                     }
@@ -254,7 +255,7 @@ impl FreeTypeRasterizer {
             width,
             bearing_x: PixelLength::new(ft_glyph.bitmap_left as f64),
             bearing_y: PixelLength::new(ft_glyph.bitmap_top as f64),
-            has_color: self.has_color,
+            has_color: false,
             is_scaled,
         }
     }
@@ -307,7 +308,7 @@ impl FreeTypeRasterizer {
             width,
             bearing_x: PixelLength::new(ft_glyph.bitmap_left as f64),
             bearing_y: PixelLength::new(ft_glyph.bitmap_top as f64),
-            has_color: self.has_color,
+            has_color: false,
             is_scaled,
         }
     }

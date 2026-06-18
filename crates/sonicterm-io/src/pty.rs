@@ -81,11 +81,7 @@ impl ShellSpawnOpts {
 
 impl Default for ShellSpawnOpts {
     fn default() -> Self {
-        Self {
-            clean_e2e: false,
-            term_program: Self::DEFAULT_TERM_PROGRAM.to_string(),
-            shell: None,
-        }
+        Self { clean_e2e: false, term_program: Self::DEFAULT_TERM_PROGRAM.to_string(), shell: None }
     }
 }
 

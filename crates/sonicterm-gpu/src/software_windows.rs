@@ -29,21 +29,15 @@ impl WindowsSoftwareFrame {
         frame
     }
 
-    pub(crate) fn reset(&mut self, width: u32, height: u32, clear: [f32; 4]) {
-        self.prepare(width, height, clear, true);
-    }
-
-    pub(crate) fn prepare(&mut self, width: u32, height: u32, clear: [f32; 4], clear_all: bool) {
+    pub(crate) fn prepare(&mut self, width: u32, height: u32, clear: [f32; 4]) {
         let width = width.max(1);
         let height = height.max(1);
         if self.width != width || self.height != height {
             self.width = width;
             self.height = height;
             self.pixels.resize(width as usize * height as usize * 4, 0);
-            self.clear(clear);
-        } else if clear_all {
-            self.clear(clear);
         }
+        self.clear(clear);
     }
 
     pub(crate) fn draw_layers(
@@ -106,10 +100,10 @@ impl WindowsSoftwareFrame {
     }
 
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        let x0 = x.floor().max(0.0) as i32;
-        let y0 = y.floor().max(0.0) as i32;
-        let x1 = (x + w).ceil().min(self.width as f32) as i32;
-        let y1 = (y + h).ceil().min(self.height as f32) as i32;
+        let x0 = (x - 0.5).ceil().max(0.0) as i32;
+        let y0 = (y - 0.5).ceil().max(0.0) as i32;
+        let x1 = (x + w - 0.5).ceil().min(self.width as f32) as i32;
+        let y1 = (y + h - 0.5).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
             return;
         }
@@ -232,25 +226,39 @@ impl WindowsSoftwareFrame {
         let atlas_pixels = atlas.pixels_bgra();
         let fg = straight_linear_rgba_to_premul_bgra_f32(glyph.color);
         let color_glyph = glyph.flags[0] >= 0.5;
+        let src_w_u = (ax1 - ax0).max(1);
+        let src_h_u = (ay1 - ay0).max(1);
+        let src_w = src_w_u as f32;
+        let src_h = src_h_u as f32;
+        let one_to_one = (w - src_w).abs() < 0.01
+            && (h - src_h).abs() < 0.01
+            && (x - x.round()).abs() < 0.01
+            && (y - y.round()).abs() < 0.01;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - y) / h).clamp(0.0, 0.999_999);
-            let sy = ay0 as f32 + ((ay1 - ay0) as f32 * ty);
+            let sy = ay0 as f32 + src_h * ty;
             let row = yy as usize * self.width as usize * 4;
             for xx in x0..x1 {
                 let tx = ((xx as f32 + 0.5 - x) / w).clamp(0.0, 0.999_999);
-                let sx = ax0 as f32 + ((ax1 - ax0) as f32 * tx);
-                let sample = sample_atlas_bilinear(atlas_pixels, atlas_w, atlas_h, sx, sy);
-                let src = if color_glyph {
-                    sample
+                let sx = ax0 as f32 + src_w * tx;
+                let sample = if one_to_one {
+                    let sx = ax0 + (xx - x0) as u32;
+                    let sy = ay0 + (yy - y0) as u32;
+                    bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
                 } else {
-                    let cov = sample[3];
-                    [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov]
+                    sample_atlas_bilinear(atlas_pixels, atlas_w, atlas_h, sx, sy)
                 };
-                if src[3] <= 0.0 {
+                if sample[3] <= 0.0 {
                     continue;
                 }
                 let dst_off = row + xx as usize * 4;
-                blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
+                if color_glyph {
+                    blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
+                } else {
+                    let cov = coverage_luma(sample);
+                    let src = [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov];
+                    blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
+                }
             }
         }
     }
@@ -398,6 +406,10 @@ fn blend_premul_bgra(dst: &mut [u8], src: [f32; 4]) {
     dst[3] = to_u8(a);
 }
 
+fn coverage_luma(coverage: [f32; 4]) -> f32 {
+    coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
+}
+
 fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 {
         v * 12.92
@@ -435,17 +447,27 @@ mod tests {
     }
 
     #[test]
-    fn reset_reuses_buffer_and_repaints_background() {
+    fn prepare_resizes_buffer_and_repaints_background() {
         let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
-        frame.reset(3, 1, [0.0, 1.0, 0.0, 1.0]);
+        frame.prepare(3, 1, [0.0, 1.0, 0.0, 1.0]);
         assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
     }
 
     #[test]
-    fn prepare_can_retain_existing_pixels_for_partial_frames() {
+    fn prepare_repaints_existing_buffer() {
         let mut frame = WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]);
-        frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0], false);
-        assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
+        frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(frame.pixel_bgra(0, 0), [0, 255, 0, 255]);
+        assert_eq!(frame.pixel_bgra(1, 0), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn adjacent_sharp_rects_do_not_overlap_edges() {
+        let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]);
+        frame.fill_rect(0.0, 0.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
+        frame.fill_rect(0.0, 1.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
+        assert_eq!(frame.pixel_bgra(0, 0), frame.pixel_bgra(0, 1));
+        assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
     }
 
     #[test]
@@ -507,5 +529,21 @@ mod tests {
             sample[3] > 0.4 && sample[3] < 0.6,
             "center sample should blend neighbours: {sample:?}"
         );
+    }
+
+    #[test]
+    fn atlas_pixel_centers_sample_exact_texels() {
+        let pixels = [0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 192, 0, 0, 0, 255];
+        let sample = sample_atlas_bilinear(&pixels, 2, 2, 1.5, 1.5);
+        assert!(
+            (sample[3] - 1.0).abs() < 0.001,
+            "centered sample should hit exact texel: {sample:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_luma_is_not_max_channel() {
+        let cov = coverage_luma([0.25, 0.5, 0.75, 0.75]);
+        assert!(cov > 0.5 && cov < 0.75, "colored fallback should smooth edges: {cov}");
     }
 }

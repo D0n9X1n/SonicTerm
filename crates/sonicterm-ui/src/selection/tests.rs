@@ -1,4 +1,3 @@
-
 use super::*;
 use sonicterm_grid::grid::{Color, Grid};
 

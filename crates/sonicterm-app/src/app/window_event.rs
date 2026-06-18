@@ -176,7 +176,6 @@ impl App {
                 let frame_period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     composing,
-                    pty_burst,
                     self.frame_period,
                 );
                 if crate::app::should_defer_streaming_redraw(

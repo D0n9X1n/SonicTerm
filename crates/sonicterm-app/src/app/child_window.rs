@@ -166,7 +166,8 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                let cursor_pos = self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
+                let cursor_pos =
+                    self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
                 if self.dismiss_notification_at(
                     FrontmostKind::Child(win_id),
                     cursor_pos.0 as f32,
@@ -384,12 +385,10 @@ impl App {
                 // one frame per vsync like the main window, instead of
                 // rendering on every VT tick. Input-driven redraws skip
                 // the gate so typing/resize/theme stay immediate.
-                // Issue #714/#739: lower the cap while composing an IME preedit
-                // or during a sustained PTY stream on the software path.
+                // Issue #714: lower the cap while composing an IME preedit on the software path.
                 let child_frame_period = crate::app::effective_frame_period(
                     software_render_degrade,
                     child.ime.is_composing(),
-                    pty_burst,
                     frame_period,
                 );
                 if crate::app::should_defer_streaming_redraw(
@@ -1710,10 +1709,8 @@ impl App {
                                         let mut p = parser_clone.lock();
                                         for ev in p.advance(&bytes) {
                                             if let VtEvent::CursorVisibility(v) = ev {
-                                                cursor_visible.store(
-                                                    v,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
+                                                cursor_visible
+                                                    .store(v, std::sync::atomic::Ordering::Relaxed);
                                             }
                                         }
                                         // Mirror kitty-keyboard flags under the
@@ -1734,15 +1731,15 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
-                                        let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
+                                        let reason = if pending_bytes
+                                            >= crate::app::PTY_REDRAW_FLUSH_BYTES
+                                        {
                                             crate::app::invariants::FlushReason::Buffer
                                         } else {
                                             crate::app::invariants::FlushReason::Interval
                                         };
-                                        redraw_probe.note_redraw(
-                                            crate::app::PTY_REDRAW_QUIESCENT,
-                                            reason,
-                                        );
+                                        redraw_probe
+                                            .note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
                                         pending = false;
                                         pending_since = None;
                                         pending_bytes = 0;

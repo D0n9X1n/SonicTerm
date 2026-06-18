@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn state_with_matches() -> SearchState {

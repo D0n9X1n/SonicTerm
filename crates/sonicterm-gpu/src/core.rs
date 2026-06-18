@@ -103,6 +103,10 @@ pub struct RendererSettings<'a> {
     pub appearance: SurfaceAppearance,
 }
 
+fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
+    hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
+}
+
 fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
     let bg = theme.colors.background.color().unwrap_or_else(|| ThemeColor::rgb(0, 0, 0));
     let fg = theme.colors.foreground.color().unwrap_or_else(|| ThemeColor::rgb(255, 255, 255));
@@ -366,7 +370,6 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenderMode {
     Full,
-    Partial(PixelRect),
     Noop,
 }
 
@@ -406,10 +409,8 @@ pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> Rende
         || signals.pane_topology_change
         || signals.overlay_active_or_toggled
         || signals.degrade_state_changed;
-    if force_full {
+    if force_full || signals.dirty_damage.is_some() {
         RenderMode::Full
-    } else if let Some(damage) = signals.dirty_damage {
-        RenderMode::Partial(damage)
     } else {
         RenderMode::Noop
     }
@@ -1274,7 +1275,7 @@ impl GpuRenderer {
         let bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), appearance.opacity);
         let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         let fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        let cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
+        let cursor_color = cursor_color_from_theme(theme);
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
@@ -2283,7 +2284,7 @@ impl GpuRenderer {
         self.bg_opacity = opacity.clamp(0.0, 1.0);
         self.bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), self.bg_opacity);
         self.fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        self.cursor_color = hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0);
+        self.cursor_color = cursor_color_from_theme(theme);
         self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
@@ -4605,14 +4606,14 @@ impl GpuRenderer {
             } else {
                 layout.query_label.replace('▏', "")
             };
-            let palette_font_size = self.raster_px((self.font_size - 1.0).max(1.0));
+            let palette_font_size = self.raster_px(self.font_size);
             // T14: chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
             // emission in an `if let Some(...)` so the palette path
             // degrades gracefully instead of panicking.
             if let Some(stack) = self.font_stack.as_ref() {
-                let palette_native_em = palette_font_size;
+                let palette_native_em = self.raster_px(self.font_size);
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
                 let query_origin_x =
@@ -5184,28 +5185,6 @@ impl GpuRenderer {
 
         #[cfg(target_os = "windows")]
         if self.software_render_degrade {
-            let first_retained_frame = self.software_frame.is_none() || self.last_frame_key.is_none();
-            let clear_all = first_retained_frame || matches!(render_mode, RenderMode::Full);
-            let damage_rect = if clear_all {
-                surface_rect
-            } else if let RenderMode::Partial(rect) = render_mode {
-                rect
-            } else {
-                damage.rect().unwrap_or(surface_rect)
-            };
-            let mut retained_quads = Vec::with_capacity(quads.len() + 1);
-            retained_quads.push(QuadInstance::sharp(
-                px_to_ndc(
-                    damage_rect.x as f32,
-                    damage_rect.y as f32,
-                    damage_rect.w as f32,
-                    damage_rect.h as f32,
-                    sw,
-                    sh,
-                ),
-                [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32],
-            ));
-            retained_quads.extend_from_slice(&quads);
             let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
             let frame = self.software_frame.get_or_insert_with(|| {
                 crate::software_windows::WindowsSoftwareFrame::new(
@@ -5214,10 +5193,10 @@ impl GpuRenderer {
                     bg_clear,
                 )
             });
-            frame.prepare(self.config.width, self.config.height, bg_clear, clear_all);
+            frame.prepare(self.config.width, self.config.height, bg_clear);
             frame.draw_layers(
                 &self.glyph_atlas,
-                &retained_quads,
+                &quads,
                 &glyph_instances,
                 &quads_overlay,
                 &overlay_glyph_instances,
@@ -5284,8 +5263,6 @@ impl GpuRenderer {
             self.software_render_degrade && matches!(render_mode, RenderMode::Full);
         let damage_rect = if first_retained_frame || software_full_repaint {
             surface_rect
-        } else if let RenderMode::Partial(rect) = render_mode {
-            rect
         } else {
             damage.rect().unwrap_or(surface_rect)
         };
@@ -5387,7 +5364,6 @@ impl GpuRenderer {
             let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
             let mode = match render_mode {
                 RenderMode::Full => "full",
-                RenderMode::Partial(_) => "partial",
                 RenderMode::Noop => "noop",
             };
             let mut line = format!(
@@ -5594,12 +5570,13 @@ impl GpuRenderer {
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba = resolve_fg(*col, color);
+                let rgba =
+                    if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(*col, color) };
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
                     color: rgba,
-                    flags: [0.0, 0.0, 0.0, 0.0],
+                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 });
             }
             return;
@@ -5803,8 +5780,8 @@ impl GpuRenderer {
                         )
                         .ok()?;
                         // T7 Option A: field-for-field copy
-                        // `BlockRasterTile` → `RasterTile`. Same 7
-                        // fields, same semantics; T10 may collapse the
+                        // `BlockRasterTile` → `RasterTile`. Same
+                        // semantics; T10 may collapse the
                         // duplicate by re-exporting `RasterTile`
                         // directly from `sonicterm-text` once that
                         // crate compiles again.
@@ -5833,13 +5810,11 @@ impl GpuRenderer {
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                // Block glyphs are cell-sized BGRA tiles aligned to the
+                // Block glyphs are cell-sized tiles aligned to the
                 // cell-box origin. No baseline offset, no symbol-fit,
                 // no per-glyph stretching — `block_sprite` already
                 // emits exactly the cell rect, so we draw it 1:1 at
                 // `(cx, cy)` with width = the snapped cell-box width.
-                // Color tiles are pre-shaded (BGRA); the shader skips
-                // the `cov * fg_color` modulation.
                 let gx = cx;
                 let gy = cy;
                 let gw = cell_pixel_width_snapped;
@@ -5847,11 +5822,8 @@ impl GpuRenderer {
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(&lead_cell, theme, fg_default);
-                // block_sprite emits BGRA tiles. The atlas reports
-                // `is_color = true`, so the shader uses the tile
-                // unmodulated; set `color` to white as a safety net
-                // mirroring the color-emoji path. Monochrome block
-                // glyphs honour the Cmd-hover URL recolor like text.
+                // Block glyphs are converted to monochrome masks so they
+                // honour the cell foreground and Cmd-hover URL recolor like text.
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -5966,11 +5938,6 @@ impl GpuRenderer {
             // sonicterm-font sizes glyphs natively, so the IconCellFit
             // resample helper isn't needed either. Atlas keys remain
             // identical (font_slot, glyph_id) so cached tiles survive.
-            let span_cells = if is_wide { 2usize } else { g.cluster_cells.max(1) as usize };
-            let span_end_col = ((g.lead_col as usize) + span_cells).min(snapped_cell_x.len() - 1);
-            let cell_box_w_logical =
-                snapped_cell_x[span_end_col] - snapped_cell_x[g.lead_col as usize];
-            let _ = cell_box_w_logical;
             let Some(wt) = wt_raster.as_deref_mut() else {
                 continue;
             };
@@ -6099,8 +6066,7 @@ fn fold_u64_to_u32(value: u64) -> u32 {
 }
 
 fn underline_key(cell: &Cell) -> Option<(UnderlineStyle, Color)> {
-    cell.flags
-        .contains(CellFlags::UNDERLINE)
+    (cell.flags.contains(CellFlags::UNDERLINE) && !cell.ch.is_whitespace())
         .then(|| (cell.underline_style(), cell.underline_color().unwrap_or(cell.fg)))
 }
 

@@ -316,17 +316,18 @@ impl PaletteLayout {
         } else {
             command_palette_query_label(palette, "")
         };
-        let query_placeholder = if palette.query().is_empty() && palette.mode() != CommandPaletteMode::TabColor {
-            Some(match palette.mode() {
-                CommandPaletteMode::Commands => {
-                    String::from("Search commands, settings, shortcuts…")
-                }
-                CommandPaletteMode::RenameTab => String::from("New tab title…"),
-                CommandPaletteMode::TabColor => String::new(),
-            })
-        } else {
-            None
-        };
+        let query_placeholder =
+            if palette.query().is_empty() && palette.mode() != CommandPaletteMode::TabColor {
+                Some(match palette.mode() {
+                    CommandPaletteMode::Commands => {
+                        String::from("Search commands, settings, shortcuts…")
+                    }
+                    CommandPaletteMode::RenameTab => String::from("New tab title…"),
+                    CommandPaletteMode::TabColor => String::new(),
+                })
+            } else {
+                None
+            };
 
         let empty_label = if palette.mode() == CommandPaletteMode::RenameTab {
             None
@@ -409,7 +410,8 @@ impl NotificationBubbleLayout {
     ) -> NotificationBubbleLayout {
         let s = scale.max(0.01);
         let close_w = SEARCH_BAR_HEIGHT * s;
-        let layout = SearchBarLayout::compute_at_row(window_w, window_h, content_w + close_w, row, scale);
+        let layout =
+            SearchBarLayout::compute_at_row(window_w, window_h, content_w + close_w, row, scale);
         let close = Rect {
             x: (layout.border.x + layout.border.w - close_w).max(layout.border.x),
             y: layout.border.y,

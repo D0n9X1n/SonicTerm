@@ -8,6 +8,8 @@ use image::{ImageBuffer, Rgba};
 pub(crate) const FAKE_ITALIC_SKEW: f64 = 0.2;
 
 pub mod colr;
+#[cfg(windows)]
+pub mod directwrite;
 pub mod freetype;
 pub mod harfbuzz;
 
@@ -48,6 +50,21 @@ pub fn new_rasterizer(
         }
         FontRasterizerSelection::Harfbuzz => {
             Ok(Box::new(harfbuzz::HarfbuzzRasterizer::from_locator(handle)?))
+        }
+        FontRasterizerSelection::DirectWrite => {
+            #[cfg(windows)]
+            {
+                directwrite::DirectWriteRasterizer::from_locator(handle, pixel_geometry)
+                    .map(|r| Box::new(r) as Box<dyn FontRasterizer>)
+                    .or_else(|_| {
+                        freetype::FreeTypeRasterizer::from_locator(handle, pixel_geometry)
+                            .map(|r| Box::new(r) as Box<dyn FontRasterizer>)
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(Box::new(freetype::FreeTypeRasterizer::from_locator(handle, pixel_geometry)?))
+            }
         }
     }
 }
