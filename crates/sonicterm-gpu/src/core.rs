@@ -5030,11 +5030,19 @@ impl GpuRenderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                // Invariant: any render() that returns without a successful
+                // present must force the next render() onto the full-redraw
+                // path. Otherwise an unchanged FrameKey hits the fast path at
+                // the top of render() and skips the present again, leaving a
+                // freshly (re)configured swapchain texture blank until the
+                // next output changes the key.
+                self.last_frame_key = None;
                 self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
+                self.last_frame_key = None;
                 self.window.request_redraw();
                 return Ok(());
             }
@@ -5043,12 +5051,14 @@ impl GpuRenderer {
                 // still alive. Drop the frame BEFORE reconfiguring.
                 drop(frame);
                 self.surface.configure(&self.device, &self.config);
+                self.last_frame_key = None;
                 self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self.instance.create_surface(self.window.clone())?;
                 self.surface.configure(&self.device, &self.config);
+                self.last_frame_key = None;
                 self.window.request_redraw();
                 return Ok(());
             }
