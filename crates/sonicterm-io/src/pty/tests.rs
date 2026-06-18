@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn env_str<'a>(builder: &'a CommandBuilder, name: &str) -> &'a str {

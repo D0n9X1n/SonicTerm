@@ -1,4 +1,3 @@
-
 use super::*;
 use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
 

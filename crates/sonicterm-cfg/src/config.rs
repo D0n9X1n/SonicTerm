@@ -428,7 +428,7 @@ impl Default for TerminalConfig {
             shell: None,
             term_program: "SonicTerm".to_string(),
             scrollback: 1_000,
-            cursor_blink: true,
+            cursor_blink: false,
             cursor_shape: CursorShape::default(),
         }
     }
@@ -693,7 +693,7 @@ term_program = "{term_program}"
 scrollback = {scrollback}
 
 # Cursor behavior. Shape: "block", "bar", or "underline".
-cursor_blink = true
+cursor_blink = false
 cursor_shape = "block"
 
 [logging]

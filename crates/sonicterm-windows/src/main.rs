@@ -35,6 +35,7 @@ mod cli;
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
+mod software_presenter;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
 
@@ -90,7 +91,21 @@ fn main() -> Result<()> {
         // muda's `init_for_hwnd` requires the window to exist; the
         // `on_window_ready` hook fires exactly once, right after
         // `el.create_window(...)` succeeds in `App::resumed`.
-        let backdrop_kind = config.appearance.backdrop;
+        let software_presenter_pref =
+            software_presenter::WindowsSoftwarePresenterPreference::from_config(
+                config.appearance.software_render_mode,
+            );
+        if software_presenter_pref.should_use(false) {
+            tracing::info!(
+                mode = ?config.appearance.software_render_mode,
+                "Windows software presenter preferred by config; disabling compositor backdrop"
+            );
+        }
+        let backdrop_kind = if software_presenter_pref.forces_opaque_window() {
+            sonicterm_cfg::config::BackdropKind::Opaque
+        } else {
+            config.appearance.backdrop
+        };
         let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
             Box::new(move |raw| {
                 if let raw_window_handle::RawWindowHandle::Win32(h) = raw {

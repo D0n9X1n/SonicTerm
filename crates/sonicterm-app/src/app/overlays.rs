@@ -15,8 +15,8 @@ use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
-use sonicterm_ui::command_palette::TabColorChoice;
 use sonicterm_io::pty::PtyHandle;
+use sonicterm_ui::command_palette::TabColorChoice;
 use sonicterm_ui::overlays::{
     command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
 };
@@ -67,9 +67,10 @@ pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
     ];
     pairs.retain(|(_, hex)| hex.to_ascii_lowercase() != bg);
     choices.extend(
-        pairs
-            .into_iter()
-            .map(|(name, hex)| TabColorChoice { name: name.to_string(), hex: Some(hex.to_string()) }),
+        pairs.into_iter().map(|(name, hex)| TabColorChoice {
+            name: name.to_string(),
+            hex: Some(hex.to_string()),
+        }),
     );
     choices
 }
@@ -617,7 +618,8 @@ impl App {
     /// (palette) that need to wake whichever window is
     /// currently hosting them. `None` ⇒ main window; `Some(id)` ⇒ that
     /// child window. Silently no-ops if the recorded id is stale.
-    pub(super) fn request_redraw_for_overlay(&self, attached: Option<WindowId>) {
+    pub(super) fn request_redraw_for_overlay(&mut self, attached: Option<WindowId>) {
+        self.input_dirty = true;
         match attached {
             Some(id) => {
                 if let Some(child) = self.windows.get(&id) {
@@ -653,7 +655,13 @@ mod tests {
         assert_eq!(choices.first().map(|choice| choice.name.as_str()), Some("Reset to Default"));
         assert_eq!(choices.first().and_then(|choice| choice.hex.as_deref()), None);
         assert_eq!(choices.len(), 17);
-        assert!(choices.iter().skip(1).all(|choice| choice.name.starts_with("ANSI ") || choice.name.starts_with("Bright ")));
-        assert!(choices.iter().filter_map(|choice| choice.hex.as_ref()).all(|hex| hex.to_ascii_lowercase() != bg));
+        assert!(choices
+            .iter()
+            .skip(1)
+            .all(|choice| choice.name.starts_with("ANSI ") || choice.name.starts_with("Bright ")));
+        assert!(choices
+            .iter()
+            .filter_map(|choice| choice.hex.as_ref())
+            .all(|hex| hex.to_ascii_lowercase() != bg));
     }
 }

@@ -255,15 +255,15 @@ impl App {
                                         if let Some(w) = redraw_target_thread.lock().as_ref() {
                                             w.request_redraw();
                                         }
-                                        let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
+                                        let reason = if pending_bytes
+                                            >= crate::app::PTY_REDRAW_FLUSH_BYTES
+                                        {
                                             crate::app::invariants::FlushReason::Buffer
                                         } else {
                                             crate::app::invariants::FlushReason::Interval
                                         };
-                                        redraw_probe.note_redraw(
-                                            crate::app::PTY_REDRAW_QUIESCENT,
-                                            reason,
-                                        );
+                                        redraw_probe
+                                            .note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
                                         pending = false;
                                         pending_since = None;
                                         pending_bytes = 0;

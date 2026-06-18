@@ -1,10 +1,16 @@
-
 use super::*;
 
 #[test]
 fn default_terminal_term_program_is_sonicterm() {
     let cfg = Config::default();
     assert_eq!(cfg.terminal.term_program, "SonicTerm");
+}
+
+#[test]
+fn default_cursor_does_not_blink() {
+    let cfg = Config::default();
+    assert!(!cfg.terminal.cursor_blink);
+    assert!(default_config_template().contains("cursor_blink = false"));
 }
 
 #[test]

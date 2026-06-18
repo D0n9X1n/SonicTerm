@@ -667,7 +667,9 @@ impl App {
             );
             return;
         };
-        if self.install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos), "main").is_none()
+        if self
+            .install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos), "main")
+            .is_none()
         {
             tracing::warn!("drain_pending_tear_out: install_torn_out_window failed");
             return;
@@ -719,6 +721,7 @@ impl App {
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
             self.config.appearance.backdrop,
+            self.config.appearance.software_render_mode,
         ));
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -749,6 +752,7 @@ impl App {
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
                     panel_padding: self.config.appearance.panel_padding,
+                    software_render_mode: self.config.appearance.software_render_mode,
                 },
             },
         ) {
@@ -764,6 +768,10 @@ impl App {
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_software_render_degrade(crate::app::should_degrade_for_software_render(
+            self.config.appearance.software_render_mode,
+            renderer.is_software_rendering(),
+        ));
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window_dpi(&window);

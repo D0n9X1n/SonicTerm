@@ -14,11 +14,7 @@ use sonicterm_app::menu::{blueprint, Binding, Item, KeyMods};
 use sonicterm_cfg::keymap::Action;
 
 fn find_item<'a>(title: &str) -> Option<Item> {
-    blueprint()
-        .iter()
-        .flat_map(|sm| sm.items.iter())
-        .find(|it| it.title == title)
-        .cloned()
+    blueprint().iter().flat_map(|sm| sm.items.iter()).find(|it| it.title == title).cloned()
 }
 
 #[test]

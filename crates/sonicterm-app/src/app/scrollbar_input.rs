@@ -80,14 +80,9 @@ pub fn hit(
     press: Point,
     width_px: f32,
 ) -> HitOutcome {
-    let Some(geometry) = scrollbar::compute(
-        viewport_rows,
-        total_rows,
-        view_top,
-        pane_rect,
-        mode,
-        width_px,
-    ) else {
+    let Some(geometry) =
+        scrollbar::compute(viewport_rows, total_rows, view_top, pane_rect, mode, width_px)
+    else {
         return HitOutcome::Miss;
     };
     match scrollbar::hit_test(&geometry, press) {
@@ -147,12 +142,7 @@ use winit::window::WindowId;
 /// padding vs a 14 px bar) the two bands stopped overlapping and clicks on
 /// the visible thumb missed entirely (issue #711). Apply the same inset here.
 fn content_inset_rect(pane: Rect, pl: f32, pr: f32, pt: f32, pb: f32) -> Rect {
-    Rect::new(
-        pane.x + pl,
-        pane.y + pt,
-        (pane.w - pl - pr).max(0.0),
-        (pane.h - pt - pb).max(0.0),
-    )
+    Rect::new(pane.x + pl, pane.y + pt, (pane.w - pl - pr).max(0.0), (pane.h - pt - pb).max(0.0))
 }
 
 impl App {

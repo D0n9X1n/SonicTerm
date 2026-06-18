@@ -32,8 +32,11 @@ SonicTerm supports four user-facing levels: `error`, `warn`, `info`, and
 `debug`. Set `[logging].level = "debug"` to include performance diagnostics,
 including `target="render_timing"` frame timing lines in `sonicterm.log`. The
 renderer reports the main/child window label and phase timings such as grid walk,
-overlay assembly, glyph upload, surface acquire, submit, and present. There is no
-separate render-timing config key or environment variable.
+overlay assembly, glyph upload, surface acquire, submit, and present. Each line
+also includes `mode=full|partial` and `damaged_rows=<n>`; partial mode appears
+when the software-render path reuses the retained frame and only assembles dirty
+viewport rows. There is no separate render-timing config key or environment
+variable.
 
 ## GPU / software-render diagnostics
 

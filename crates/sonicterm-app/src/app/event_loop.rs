@@ -30,7 +30,8 @@ impl App {
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         for ws in self.windows.values_mut() {
-            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at) else {
+            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at)
+            else {
                 continue;
             };
             if expires_at <= now {
@@ -73,24 +74,12 @@ impl App {
         // typing latency must still feel instant, and a deferred
         // redraw at frame_period in the future is the tightest budget
         // that still preserves vsync alignment.
-        // Streaming flag matching the RedrawRequested gate: a fresh PTY burst
-        // not yet rendered. Used to pick the same (possibly longer) wake
-        // period so a stream-capped defer (issue #739) doesn't wake early,
-        // re-defer, and busy-spin. Global counter, shared by main + children.
-        let stream_pending =
-            self.pty_burst_gen.load(std::sync::atomic::Ordering::Acquire) != self.last_seen_burst_gen;
         if self.pending_redraw {
             if let Some(last_render) = self.main().map(|ws| ws.last_render) {
-                // Match the RedrawRequested gate: under IME composition or a
-                // sustained PTY stream on the software path the cap is lower,
-                // so schedule the wake at the same (possibly longer) period —
-                // otherwise we'd wake at 33ms, re-defer, and busy-spin
-                // (issues #714, #739).
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
                 let period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     composing,
-                    stream_pending,
                     self.frame_period,
                 );
                 next = Some(last_render + period);
@@ -104,12 +93,9 @@ impl App {
         // reaped) are skipped here and pruned in `new_events`.
         for win_id in &self.pending_redraw_windows {
             if let Some(ws) = self.windows.get(win_id) {
-                // Mirror the child gate's composing/stream-aware period
-                // (issues #714, #739).
                 let period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     ws.ime.is_composing(),
-                    stream_pending,
                     self.frame_period,
                 );
                 let at = ws.last_render + period;
@@ -259,6 +245,7 @@ impl App {
                     )),
             ),
             self.config.appearance.backdrop,
+            self.config.appearance.software_render_mode,
         ));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         // PANIC (above): `create_window` only fails when winit cannot reach
@@ -311,6 +298,7 @@ impl App {
                     opacity: self.config.appearance.opacity,
                     scrollbar: self.config.appearance.scrollbar,
                     panel_padding: self.config.appearance.panel_padding,
+                    software_render_mode: self.config.appearance.software_render_mode,
                 },
             },
         )
@@ -342,10 +330,10 @@ impl App {
             self.config.appearance.software_render_mode,
             renderer.is_software_rendering(),
         );
+        renderer.set_software_render_degrade(self.software_render_degrade);
         if self.software_render_degrade {
             let before = self.frame_period;
-            self.frame_period =
-                crate::app::software_render_frame_period(true, self.frame_period);
+            self.frame_period = crate::app::software_render_frame_period(true, self.frame_period);
             tracing::info!(
                 detected = renderer.is_software_rendering(),
                 mode = ?self.config.appearance.software_render_mode,

@@ -54,6 +54,7 @@ impl App {
                 opacity: self.config.appearance.opacity,
                 scrollbar: self.config.appearance.scrollbar,
                 panel_padding: self.config.appearance.panel_padding,
+                software_render_mode: self.config.appearance.software_render_mode,
             },
         }
     }
@@ -64,6 +65,10 @@ impl App {
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
+        renderer.set_software_render_degrade(crate::app::should_degrade_for_software_render(
+            self.config.appearance.software_render_mode,
+            renderer.is_software_rendering(),
+        ));
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
         let real_sf = window_dpi(window);
@@ -100,6 +105,7 @@ impl App {
                     .with_visible(false),
             ),
             self.config.appearance.backdrop,
+            self.config.appearance.software_render_mode,
         ));
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -114,7 +120,9 @@ impl App {
         let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
         let mut renderer = match shared_gpu.map_or_else(
             || GpuRenderer::new(window.clone(), el, &self.theme, settings),
-            |ctx| GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx),
+            |ctx| {
+                GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx)
+            },
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -210,7 +218,8 @@ impl App {
         source: &'static str,
     ) -> Option<WindowId> {
         let tear_start = Instant::now();
-        let (window, mut renderer, create_window_ms, renderer_init_ms) = match self.take_warm_window()
+        let (window, mut renderer, create_window_ms, renderer_init_ms) = match self
+            .take_warm_window()
         {
             Some(warm) => {
                 let window = warm.window;
@@ -229,6 +238,7 @@ impl App {
                             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
                     ),
                     self.config.appearance.backdrop,
+                    self.config.appearance.software_render_mode,
                 ));
                 if let Some((sx, sy)) = screen_pos {
                     attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
@@ -627,7 +637,8 @@ impl App {
         index: usize,
     ) -> bool {
         let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else { return false };
-        let Some(win_id) = self.install_torn_out_window(el, tab, state, panes, None, "child") else {
+        let Some(win_id) = self.install_torn_out_window(el, tab, state, panes, None, "child")
+        else {
             tracing::warn!("tear-out (child→new): install_torn_out_window failed");
             return true;
         };

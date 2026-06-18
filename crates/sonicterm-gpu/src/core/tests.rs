@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -106,6 +105,13 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
 }
 
 #[test]
+fn cursor_color_uses_theme_cursor_accent() {
+    let theme = Theme::default();
+    assert_eq!(cursor_color_from_theme(&theme), hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0));
+    assert_eq!(theme.colors.cursor, theme.colors.tab.active_fg);
+}
+
+#[test]
 fn indexed_color_supports_full_xterm_256_palette() {
     let theme = Theme::default();
     assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));
@@ -149,6 +155,76 @@ fn dirty_rows_damage_rect_returns_none_for_no_dirty_rows() {
     );
 
     assert_eq!(damage, None);
+}
+
+#[test]
+fn full_repaint_forced_on_invalidation() {
+    let damage = Some(sonicterm_render_model::geometry::PixelRect { x: 1, y: 2, w: 3, h: 4 });
+    let mut cases = [
+        RenderSignals { first_frame: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { resize: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { dpi_or_scale_change: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { font_or_atlas_rebuild: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { theme_or_config_reload: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { surface_reconfigure: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { occlusion_restore: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { viewport_scroll: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { selection_change: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { tab_switch: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals { pane_topology_change: true, dirty_damage: damage, ..Default::default() },
+        RenderSignals {
+            overlay_active_or_toggled: true,
+            dirty_damage: damage,
+            ..Default::default()
+        },
+    ];
+    for signals in cases.iter_mut() {
+        assert_eq!(decide_render_mode(true, *signals), RenderMode::Full);
+    }
+    assert_eq!(
+        decide_render_mode(true, RenderSignals { dirty_damage: damage, ..Default::default() }),
+        RenderMode::Full
+    );
+}
+
+#[test]
+fn non_degrade_always_full() {
+    assert_eq!(decide_render_mode(false, RenderSignals::default()), RenderMode::Full);
+}
+
+#[test]
+fn overlay_active_forces_full() {
+    assert_eq!(
+        decide_render_mode(
+            true,
+            RenderSignals {
+                overlay_active_or_toggled: true,
+                dirty_damage: Some(sonicterm_render_model::geometry::PixelRect {
+                    x: 1,
+                    y: 2,
+                    w: 3,
+                    h: 4,
+                }),
+                ..Default::default()
+            },
+        ),
+        RenderMode::Full
+    );
+}
+
+#[test]
+fn damage_empty_is_noop() {
+    assert_eq!(decide_render_mode(true, RenderSignals::default()), RenderMode::Noop);
+}
+
+#[test]
+fn underline_key_ignores_blank_cells() {
+    let mut blank = Cell::plain(' ', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
+    blank.set_underline_style(UnderlineStyle::Dashed);
+    assert_eq!(underline_key(&blank), None);
+
+    let underlined = Cell::plain('x', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
+    assert_eq!(underline_key(&underlined), Some((UnderlineStyle::Single, Color::Indexed(1))));
 }
 
 #[test]

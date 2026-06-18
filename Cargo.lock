@@ -5449,6 +5449,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "pollster",
+ "raw-window-handle",
  "sonicterm-block-glyph",
  "sonicterm-cfg",
  "sonicterm-engine",
@@ -5460,6 +5461,7 @@ dependencies = [
  "tracing",
  "unicode-width",
  "wgpu",
+ "windows 0.62.2",
  "winit",
 ]
 

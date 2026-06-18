@@ -80,13 +80,11 @@ pub struct RasterTile {
     pub offset_y: i32,
     /// Horizontal advance after drawing this glyph, in pixels.
     pub advance: f32,
-    /// When `is_color == false`: `width * height` bytes of 8-bit
-    /// coverage, row-major (the legacy alpha-mask format).
-    /// When `is_color == true`: `width * height * 4` bytes of
+    /// When `is_color == false`: `width * height` bytes of 8-bit coverage,
+    /// row-major. When `is_color == true`: `width * height * 4` bytes of
     /// premultiplied BGRA pixels, row-major.
     pub coverage: Vec<u8>,
-    /// True when `coverage` is BGRA (color emoji); false for the
-    /// monochrome coverage-mask case.
+    /// True when `coverage` is BGRA color emoji; false for text coverage.
     pub is_color: bool,
 }
 
@@ -328,6 +326,12 @@ impl GlyphAtlas {
     /// the initial empty texture; the upload path normally uses
     /// `take_dirty_rects` + subregion writes.
     pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Borrow the CPU-side atlas pixels without draining dirty rects.
+    /// Windows software fallback rendering samples this buffer directly.
+    pub fn pixels_bgra(&self) -> &[u8] {
         &self.pixels
     }
 

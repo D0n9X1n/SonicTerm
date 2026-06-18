@@ -247,7 +247,7 @@ impl BitmapImage for Bitmap {
 }
 
 /// `block_sprite`'s return payload. Structurally identical to
-/// `sonicterm_text::glyph_atlas::RasterTile` (same 7 fields, same
+/// `sonicterm_text::glyph_atlas::RasterTile` (same fields, same
 /// `is_empty()` helper) — kept LOCAL to this crate because, at the
 /// time T7 lands, `sonicterm-text` does not compile (cosmic-text /
 /// `load_font_data_with_sonic_overrides` / `terminal_font_attrs`

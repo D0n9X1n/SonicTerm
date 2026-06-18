@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use sonicterm_app::app::{App, FrontmostKind};
-use sonicterm_ui::overlays::NotificationLevel;
 use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
+use sonicterm_ui::overlays::NotificationLevel;
 
 fn app() -> App {
     App::new(Theme::default(), Config::default(), Keymap::default())

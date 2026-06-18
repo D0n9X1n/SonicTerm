@@ -52,6 +52,8 @@ pub mod quad;
 /// Moved from `sonicterm-shared::render::row_quad_cache` in M7e — caches
 /// `QuadInstance`, so it belongs on the GPU side of the layer split.
 pub mod row_quad_cache;
+#[cfg(target_os = "windows")]
+pub(crate) mod software_windows;
 /// Instanced text pipeline consuming `sonicterm_text::GlyphInstance` and
 /// sampling the GPU glyph atlas.
 pub mod text_pipeline;

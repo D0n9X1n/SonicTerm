@@ -375,7 +375,7 @@ fn push_rect_vertices(
     }
 }
 
-fn ndc_rect_to_pixels(rect: [f32; 4], sw: f32, sh: f32) -> Option<(f32, f32, f32, f32)> {
+pub(crate) fn ndc_rect_to_pixels(rect: [f32; 4], sw: f32, sh: f32) -> Option<(f32, f32, f32, f32)> {
     if sw <= 0.0 || sh <= 0.0 {
         return None;
     }
