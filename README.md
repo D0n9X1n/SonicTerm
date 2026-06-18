@@ -77,9 +77,10 @@ back when the context belongs with the original session again.
 
 - **Native macOS + Windows app** — small binaries, no Electron, no web runtime.
 - **GPU renderer** — wgpu on Metal / D3D12, with atlas-backed text and batched
-  quads for cells, chrome, selection, cursor, search, and overlays. Detects the
-  no-GPU case (RDP / VM software rasterizer) and degrades gracefully to stay
-  responsive.
+  quads for cells, chrome, selection, cursor, search, and overlays. Glyphs
+  rasterize with DirectWrite on Windows (FreeType elsewhere and as fallback).
+  Detects the no-GPU case (RDP / VM software rasterizer) and degrades gracefully
+  to stay responsive, with a deterministic full-screen software path on Windows.
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
   pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
   hints, and search.
