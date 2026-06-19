@@ -107,6 +107,54 @@ fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
     hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
 }
 
+/// Resolve the title text colour for a single tab, honouring hover.
+///
+/// Two cases, unified so a custom-coloured tab highlights on hover exactly
+/// like a default-coloured one (issue: custom tab title colour did not
+/// brighten under the cursor):
+///
+/// * **No custom colour** — pick `active_fg` when the tab is active *or*
+///   hovered, else `inactive_fg`. This is the historical default-tab
+///   behaviour.
+/// * **Custom colour** — paint the user's colour. It is only dimmed (to
+///   `0.55` alpha, matching the unfocused-panel chrome) when the tab is
+///   neither active, hovered, nor part of a focused panel. Hovering an
+///   inactive custom tab therefore restores it to full strength, giving the
+///   same "lights up under the cursor" affordance as a default tab.
+///
+/// Pure so it is unit-testable without a GPU; the renderer (both the wgpu
+/// path and the Windows software path, which blits the same glyph
+/// instances) feeds the returned colour straight into chrome text layout.
+fn tab_title_color(
+    custom_color: Option<&str>,
+    active: bool,
+    hovered: bool,
+    active_panel_focused: bool,
+    active_fg: ChromeColor,
+    inactive_fg: ChromeColor,
+) -> ChromeColor {
+    match custom_color {
+        None => {
+            if active || hovered {
+                active_fg
+            } else {
+                inactive_fg
+            }
+        }
+        Some(hex) => {
+            let color = hex_to_chrome_color(hex);
+            // Full strength when the tab is highlighted (active/hovered) or
+            // lives in the focused panel; otherwise recede with the rest of
+            // the unfocused chrome.
+            if active || hovered || active_panel_focused {
+                color
+            } else {
+                scale_chrome_text_alpha(color, 0.55)
+            }
+        }
+    }
+}
+
 fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
     let bg = theme.colors.background.color().unwrap_or_else(|| ThemeColor::rgb(0, 0, 0));
     let fg = theme.colors.foreground.color().unwrap_or_else(|| ThemeColor::rgb(255, 255, 255));
@@ -4092,17 +4140,14 @@ impl GpuRenderer {
                         title = title_chars.iter().take(keep).collect();
                         title.push('…');
                     }
-                    let mut color =
-                        tab.custom_color.as_deref().map(hex_to_chrome_color).unwrap_or_else(|| {
-                            if active || hovered {
-                                self.tab_active_fg
-                            } else {
-                                self.tab_inactive_fg
-                            }
-                        });
-                    if tab.custom_color.is_some() && !active_panel_focused {
-                        color = scale_chrome_text_alpha(color, 0.55);
-                    }
+                    let mut color = tab_title_color(
+                        tab.custom_color.as_deref(),
+                        active,
+                        hovered,
+                        active_panel_focused,
+                        self.tab_active_fg,
+                        self.tab_inactive_fg,
+                    );
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
