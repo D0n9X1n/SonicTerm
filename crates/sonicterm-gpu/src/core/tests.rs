@@ -80,6 +80,77 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
 }
 
 #[test]
+fn preedit_overlay_skips_whitespace_only_preedit() {
+    // Regression: a whitespace-only preedit (macOS can momentarily deliver a
+    // bare space as marked text during ordinary typing) carries no glyph
+    // ink, but the inline overlay's underline is clamped to >= one cell —
+    // so drawing it left a stray ~1-cell underscore at the cursor that
+    // lingered until the next repaint. The overlay must be suppressed.
+    assert!(!preedit_has_visible_ink(""), "empty preedit draws nothing");
+    assert!(!preedit_has_visible_ink(" "), "a bare space must not draw an underline");
+    assert!(!preedit_has_visible_ink("   "), "all-whitespace must not draw");
+    assert!(!preedit_has_visible_ink("\t"), "a tab is whitespace");
+}
+
+#[test]
+fn preedit_overlay_draws_for_real_composition() {
+    // Genuine composition always carries non-whitespace ink, so the overlay
+    // is never suppressed for real CJK / multi-key input.
+    assert!(preedit_has_visible_ink("ni"), "latin composing run draws");
+    assert!(preedit_has_visible_ink("\u{4f60}"), "CJK composing run draws");
+    assert!(preedit_has_visible_ink("a b"), "ink with embedded space draws");
+}
+
+// --- tab title colour hover (Issue: custom tab colour did not highlight) ---
+
+/// Distinct sentinel colours so each branch is unambiguous in asserts.
+fn active_fg() -> ChromeColor {
+    ChromeColor::rgb(0xEB, 0xDB, 0xB2) // gruvbox fg0
+}
+fn inactive_fg() -> ChromeColor {
+    ChromeColor::rgb(0x92, 0x83, 0x74) // gruvbox gray
+}
+
+#[test]
+fn default_tab_color_brightens_on_hover() {
+    // No custom colour: an inactive tab uses inactive_fg, but hovering it
+    // (or activating it) swaps to active_fg — the historical default.
+    let inactive = tab_title_color(None, false, false, false, active_fg(), inactive_fg());
+    assert_eq!(inactive, inactive_fg());
+
+    let hovered = tab_title_color(None, false, true, false, active_fg(), inactive_fg());
+    assert_eq!(hovered, active_fg(), "default tab must brighten under the cursor");
+
+    let active = tab_title_color(None, true, false, true, active_fg(), inactive_fg());
+    assert_eq!(active, active_fg());
+}
+
+#[test]
+fn custom_tab_color_brightens_on_hover() {
+    // Regression: a user-set custom title colour must light up on hover just
+    // like a default tab, instead of staying dimmed to 0.55 alpha.
+    let custom = "#83a598";
+    let full = hex_to_chrome_color(custom);
+
+    // Inactive, unhovered, unfocused panel → dimmed.
+    let dimmed = tab_title_color(Some(custom), false, false, false, active_fg(), inactive_fg());
+    assert!(dimmed.a() < 255, "inactive custom tab should be dimmed");
+    assert_eq!((dimmed.r(), dimmed.g(), dimmed.b()), (full.r(), full.g(), full.b()));
+
+    // Hovered → full strength (the fix).
+    let hovered = tab_title_color(Some(custom), false, true, false, active_fg(), inactive_fg());
+    assert_eq!(hovered, full, "hovered custom tab must paint at full alpha");
+
+    // Active tab → full strength regardless of hover.
+    let active = tab_title_color(Some(custom), true, false, true, active_fg(), inactive_fg());
+    assert_eq!(active, full);
+
+    // Focused panel keeps a custom inactive tab at full strength (unchanged).
+    let focused = tab_title_color(Some(custom), false, false, true, active_fg(), inactive_fg());
+    assert_eq!(focused, full);
+}
+
+#[test]
 fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
     // Issue #714: the cache may only be reused when text + placement + color
     // AND the atlas eviction epoch are identical — an epoch bump means a tile

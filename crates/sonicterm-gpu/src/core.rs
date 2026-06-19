@@ -88,6 +88,23 @@ fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
+/// True when an IME preedit string carries visible ink worth drawing an
+/// inline composition overlay for.
+///
+/// The inline preedit overlay (composing glyphs + a one-cell-min underline
+/// at the terminal cursor) must only paint when there is real composition
+/// text. A preedit that is empty **or whitespace-only** has no glyph ink,
+/// yet the underline quad is clamped to `max(self.cell_w)` — so drawing it
+/// leaves a stray ~1-cell underscore mark at the cursor that lingers until
+/// the next repaint. macOS can momentarily deliver a single-space marked
+/// string during ordinary typing, which is exactly that case.
+///
+/// Real CJK / multi-key composition always carries non-whitespace ink, so
+/// gating on this never suppresses a genuine composition overlay.
+fn preedit_has_visible_ink(preedit: &str) -> bool {
+    preedit.chars().any(|c| !c.is_whitespace())
+}
+
 /// Renderer initialization settings derived from config.
 #[derive(Debug, Clone, Copy)]
 pub struct RendererSettings<'a> {
@@ -105,6 +122,54 @@ pub struct RendererSettings<'a> {
 
 fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
     hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
+}
+
+/// Resolve the title text colour for a single tab, honouring hover.
+///
+/// Two cases, unified so a custom-coloured tab highlights on hover exactly
+/// like a default-coloured one (issue: custom tab title colour did not
+/// brighten under the cursor):
+///
+/// * **No custom colour** — pick `active_fg` when the tab is active *or*
+///   hovered, else `inactive_fg`. This is the historical default-tab
+///   behaviour.
+/// * **Custom colour** — paint the user's colour. It is only dimmed (to
+///   `0.55` alpha, matching the unfocused-panel chrome) when the tab is
+///   neither active, hovered, nor part of a focused panel. Hovering an
+///   inactive custom tab therefore restores it to full strength, giving the
+///   same "lights up under the cursor" affordance as a default tab.
+///
+/// Pure so it is unit-testable without a GPU; the renderer (both the wgpu
+/// path and the Windows software path, which blits the same glyph
+/// instances) feeds the returned colour straight into chrome text layout.
+fn tab_title_color(
+    custom_color: Option<&str>,
+    active: bool,
+    hovered: bool,
+    active_panel_focused: bool,
+    active_fg: ChromeColor,
+    inactive_fg: ChromeColor,
+) -> ChromeColor {
+    match custom_color {
+        None => {
+            if active || hovered {
+                active_fg
+            } else {
+                inactive_fg
+            }
+        }
+        Some(hex) => {
+            let color = hex_to_chrome_color(hex);
+            // Full strength when the tab is highlighted (active/hovered) or
+            // lives in the focused panel; otherwise recede with the rest of
+            // the unfocused chrome.
+            if active || hovered || active_panel_focused {
+                color
+            } else {
+                scale_chrome_text_alpha(color, 0.55)
+            }
+        }
+    }
 }
 
 fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
@@ -4092,17 +4157,14 @@ impl GpuRenderer {
                         title = title_chars.iter().take(keep).collect();
                         title.push('…');
                     }
-                    let mut color =
-                        tab.custom_color.as_deref().map(hex_to_chrome_color).unwrap_or_else(|| {
-                            if active || hovered {
-                                self.tab_active_fg
-                            } else {
-                                self.tab_inactive_fg
-                            }
-                        });
-                    if tab.custom_color.is_some() && !active_panel_focused {
-                        color = scale_chrome_text_alpha(color, 0.55);
-                    }
+                    let mut color = tab_title_color(
+                        tab.custom_color.as_deref(),
+                        active,
+                        hovered,
+                        active_panel_focused,
+                        self.tab_active_fg,
+                        self.tab_inactive_fg,
+                    );
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
@@ -4868,7 +4930,7 @@ impl GpuRenderer {
         let palette_active = palette_layout.is_some();
         if !search_active
             && !palette_active
-            && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false)
+            && ime.map(|i| preedit_has_visible_ink(i.preedit())).unwrap_or(false)
         {
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
                 let text = i.preedit();
@@ -4950,31 +5012,19 @@ impl GpuRenderer {
                     });
                 }
 
-                // (3) Underline quad — DPI-scaled accent line along the
-                // bottom of the composing run (the in-flight affordance).
-                let thickness = (2.0 * self.scale_factor).round().max(1.0);
-                let uy = top_y + line_h - thickness;
-                if clip_to_pane {
-                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                        (start_x, uy, pre_w, thickness),
-                        active_pane_x,
-                        active_pane_y,
-                        active_pane_w,
-                        active_pane_h,
-                    ) {
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                            color: self.hyperlink_underline,
-                            ..Default::default()
-                        });
-                    }
-                } else {
-                    quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(start_x, uy, pre_w, thickness, sw, sh),
-                        color: self.hyperlink_underline,
-                        ..Default::default()
-                    });
-                }
+                // (3) NO underline under the composing run.
+                //
+                // macOS routes ordinary typing through IME preedit whenever a
+                // CJK/Pinyin input source is active (even plain Latin romaji),
+                // so a per-keystroke composing underline reads as a stray
+                // cursor-colored bar that flashes and "follows the cursor" as
+                // you type (user-reported). The committed text is unaffected;
+                // the in-flight glyphs above already show what is being
+                // composed, so the underline added noise without information.
+                // Drawn intentionally as nothing — keep the block for the
+                // `clip_to_pane`/geometry context the glyph emit above uses.
+                let _ = (clip_to_pane, pre_w);
+
             }
         }
 
