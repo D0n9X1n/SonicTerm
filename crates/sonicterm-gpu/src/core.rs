@@ -5012,31 +5012,19 @@ impl GpuRenderer {
                     });
                 }
 
-                // (3) Underline quad — DPI-scaled accent line along the
-                // bottom of the composing run (the in-flight affordance).
-                let thickness = (2.0 * self.scale_factor).round().max(1.0);
-                let uy = top_y + line_h - thickness;
-                if clip_to_pane {
-                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
-                        (start_x, uy, pre_w, thickness),
-                        active_pane_x,
-                        active_pane_y,
-                        active_pane_w,
-                        active_pane_h,
-                    ) {
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
-                            color: self.hyperlink_underline,
-                            ..Default::default()
-                        });
-                    }
-                } else {
-                    quads_overlay.push(QuadInstance {
-                        rect: px_to_ndc(start_x, uy, pre_w, thickness, sw, sh),
-                        color: self.hyperlink_underline,
-                        ..Default::default()
-                    });
-                }
+                // (3) NO underline under the composing run.
+                //
+                // macOS routes ordinary typing through IME preedit whenever a
+                // CJK/Pinyin input source is active (even plain Latin romaji),
+                // so a per-keystroke composing underline reads as a stray
+                // cursor-colored bar that flashes and "follows the cursor" as
+                // you type (user-reported). The committed text is unaffected;
+                // the in-flight glyphs above already show what is being
+                // composed, so the underline added noise without information.
+                // Drawn intentionally as nothing — keep the block for the
+                // `clip_to_pane`/geometry context the glyph emit above uses.
+                let _ = (clip_to_pane, pre_w);
+
             }
         }
 
