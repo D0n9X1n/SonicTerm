@@ -79,6 +79,28 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
     assert_eq!(quads.len(), 4);
 }
 
+#[test]
+fn preedit_overlay_skips_whitespace_only_preedit() {
+    // Regression: a whitespace-only preedit (macOS can momentarily deliver a
+    // bare space as marked text during ordinary typing) carries no glyph
+    // ink, but the inline overlay's underline is clamped to >= one cell —
+    // so drawing it left a stray ~1-cell underscore at the cursor that
+    // lingered until the next repaint. The overlay must be suppressed.
+    assert!(!preedit_has_visible_ink(""), "empty preedit draws nothing");
+    assert!(!preedit_has_visible_ink(" "), "a bare space must not draw an underline");
+    assert!(!preedit_has_visible_ink("   "), "all-whitespace must not draw");
+    assert!(!preedit_has_visible_ink("\t"), "a tab is whitespace");
+}
+
+#[test]
+fn preedit_overlay_draws_for_real_composition() {
+    // Genuine composition always carries non-whitespace ink, so the overlay
+    // is never suppressed for real CJK / multi-key input.
+    assert!(preedit_has_visible_ink("ni"), "latin composing run draws");
+    assert!(preedit_has_visible_ink("\u{4f60}"), "CJK composing run draws");
+    assert!(preedit_has_visible_ink("a b"), "ink with embedded space draws");
+}
+
 // --- tab title colour hover (Issue: custom tab colour did not highlight) ---
 
 /// Distinct sentinel colours so each branch is unambiguous in asserts.

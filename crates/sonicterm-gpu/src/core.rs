@@ -88,6 +88,23 @@ fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
+/// True when an IME preedit string carries visible ink worth drawing an
+/// inline composition overlay for.
+///
+/// The inline preedit overlay (composing glyphs + a one-cell-min underline
+/// at the terminal cursor) must only paint when there is real composition
+/// text. A preedit that is empty **or whitespace-only** has no glyph ink,
+/// yet the underline quad is clamped to `max(self.cell_w)` — so drawing it
+/// leaves a stray ~1-cell underscore mark at the cursor that lingers until
+/// the next repaint. macOS can momentarily deliver a single-space marked
+/// string during ordinary typing, which is exactly that case.
+///
+/// Real CJK / multi-key composition always carries non-whitespace ink, so
+/// gating on this never suppresses a genuine composition overlay.
+fn preedit_has_visible_ink(preedit: &str) -> bool {
+    preedit.chars().any(|c| !c.is_whitespace())
+}
+
 /// Renderer initialization settings derived from config.
 #[derive(Debug, Clone, Copy)]
 pub struct RendererSettings<'a> {
@@ -4913,7 +4930,7 @@ impl GpuRenderer {
         let palette_active = palette_layout.is_some();
         if !search_active
             && !palette_active
-            && ime.map(|i| !i.preedit().is_empty()).unwrap_or(false)
+            && ime.map(|i| preedit_has_visible_ink(i.preedit())).unwrap_or(false)
         {
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
                 let text = i.preedit();
