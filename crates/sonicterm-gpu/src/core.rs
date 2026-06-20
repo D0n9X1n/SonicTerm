@@ -105,6 +105,24 @@ fn preedit_has_visible_ink(preedit: &str) -> bool {
     preedit.chars().any(|c| !c.is_whitespace())
 }
 
+/// Opaque-background rect for the inline IME preedit (#758).
+///
+/// Returns `(x, y, w, h)` in renderer pixels for the mask that is laid
+/// down behind the composing run so it stays legible over whatever the
+/// app already painted in those cells (placeholder/hint text). It must:
+/// * start at `start_x` — the cursor cell's left edge — so the mask's left
+///   edge aligns with where the glyphs begin (they are nudged right by
+///   `pad`, so the mask starting at `start_x` fully contains them);
+/// * span `pre_w + pad` — the same width used to emit the glyphs plus the
+///   right-nudge — so the mask covers the whole run and no wider, never
+///   bleeding onto adjacent cells;
+/// * be exactly one line tall.
+///
+/// Pure so the geometry is unit-testable without a GPU context.
+fn preedit_bg_rect(start_x: f32, top_y: f32, pre_w: f32, pad: f32, line_h: f32) -> (f32, f32, f32, f32) {
+    (start_x, top_y, pre_w + pad, line_h)
+}
+
 /// Renderer initialization settings derived from config.
 #[derive(Debug, Clone, Copy)]
 pub struct RendererSettings<'a> {
@@ -4948,10 +4966,49 @@ impl GpuRenderer {
                 let pre_w = estimate_badge_text_width(text, font_size).max(self.cell_w);
                 let clip_to_pane = true;
 
+                // (0) Opaque background behind the composing run (#758).
+                //
+                // The inline preedit is drawn over whatever the app already
+                // painted in these cells. When an app shows placeholder/hint
+                // text at an empty input (e.g. Claude Code's `Try "edit …"`),
+                // the first CJK char's in-flight pinyin would otherwise layer
+                // on top of that hint and both become illegible. Lay down the
+                // plain terminal `bg` first so the composing glyphs sit on a
+                // clean surface — mirroring what the search-bar preedit path
+                // already does. This is NOT a highlight color (preserving the
+                // "no highlight background" preference from #749); it only
+                // masks the cells the preedit actually occupies. Pushed to
+                // `quads_overlay`, which draws beneath `overlay_glyph_instances`
+                // (see `draw_layers` order), so it never covers the glyphs.
+                {
+                    // Cover the full preedit footprint: from the cell start
+                    // (start_x) across `pre_w` plus the small `text_pad` nudge
+                    // the glyphs are shifted right by (emit_x = start_x +
+                    // text_pad). Using the same width the glyphs use keeps the
+                    // mask matched to the run without bleeding onto adjacent
+                    // cells.
+                    let pad = self.chrome_px(2.0);
+                    let bg_rect = preedit_bg_rect(start_x, top_y, pre_w, pad, line_h);
+                    if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
+                        bg_rect,
+                        active_pane_x,
+                        active_pane_y,
+                        active_pane_w,
+                        active_pane_h,
+                    ) {
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(qx, qy, qw, qh, sw, sh),
+                            color: self.bg_rgba,
+                            ..Default::default()
+                        });
+                    }
+                }
+
                 // (1) Composing text glyphs — vertically centered in the
                 // line, nudged a hair right so it doesn't kiss the cell edge.
-                // No highlight background (user preference): just the text +
-                // an underline mark the in-flight run.
+                // The opaque terminal-bg mask emitted in (0) sits behind these
+                // glyphs (plain bg, not a highlight color), so the in-flight
+                // run is legible even over app placeholder/hint text (#758).
                 // native_em MUST equal font_size here. chrome_text scales each
                 // glyph tile by `font_size_px / native_em_px`; using cell_h
                 // (which includes line spacing, so cell_h > raster_px(font))

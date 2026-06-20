@@ -1,5 +1,49 @@
 use super::*;
 
+// --- Inline IME preedit opaque background (#758) -------------------------
+
+#[test]
+fn preedit_bg_rect_covers_the_glyph_run() {
+    // The glyphs are emitted at emit_x = start_x + pad, across `pre_w`.
+    // The background mask must start no later than start_x and extend past
+    // the glyph run's right edge, so app placeholder/hint text under the
+    // composing pinyin is fully masked (#758).
+    let start_x = 100.0;
+    let top_y = 50.0;
+    let pre_w = 64.0;
+    let pad = 2.0;
+    let line_h = 20.0;
+
+    let (x, y, w, h) = preedit_bg_rect(start_x, top_y, pre_w, pad, line_h);
+
+    // Left edge aligns with the cursor cell (no later than where glyphs start).
+    assert_eq!(x, start_x);
+    assert!(x <= start_x + pad, "mask starts at/under the glyph emit_x");
+    // One line tall, anchored at the cell top.
+    assert_eq!(y, top_y);
+    assert_eq!(h, line_h);
+    // Right edge reaches past the glyph run end (emit_x + pre_w).
+    let glyph_right = (start_x + pad) + pre_w;
+    assert!(x + w >= glyph_right, "mask must cover the full glyph run, got right={}", x + w);
+}
+
+#[test]
+fn preedit_bg_rect_width_is_at_least_pre_w() {
+    // Width must never be narrower than the run width used to lay glyphs,
+    // otherwise the tail of the composing text shows through to whatever is
+    // underneath. It also must not be absurdly wide (bleeding onto adjacent
+    // cells): width == pre_w + pad exactly.
+    let (_, _, w, _) = preedit_bg_rect(0.0, 0.0, 80.0, 2.0, 18.0);
+    assert!(w >= 80.0, "mask at least as wide as the glyph run");
+    assert_eq!(w, 82.0, "mask is exactly pre_w + pad, not wider");
+}
+
+#[test]
+fn preedit_bg_rect_zero_pad_equals_pre_w() {
+    let (_, _, w, _) = preedit_bg_rect(10.0, 10.0, 40.0, 0.0, 16.0);
+    assert_eq!(w, 40.0);
+}
+
 // --- Dim / faint text (SGR 2), #756 -------------------------------------
 
 #[test]
