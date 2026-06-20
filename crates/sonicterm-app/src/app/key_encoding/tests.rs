@@ -37,6 +37,14 @@ fn plain_enter_stays_carriage_return_under_kitty() {
     );
 }
 
+#[test]
+fn alt_character_encodes_legacy_meta_prefix() {
+    assert_eq!(
+        encode_logical(&Key::Character("v".into()), ModifiersState::ALT, 0),
+        Some(b"\x1bv".to_vec())
+    );
+}
+
 fn fk(named: NamedKey, mods: ModifiersState) -> Vec<u8> {
     encode_logical(&Key::Named(named), mods, 0).expect("function key should encode")
 }

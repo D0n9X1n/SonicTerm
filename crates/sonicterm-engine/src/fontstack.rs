@@ -164,15 +164,25 @@ impl Rasterizer for FontStack {
         if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
             return None;
         }
-        let (coverage, is_color) = if rg.has_color {
+        let (coverage, is_color, is_subpixel) = if rg.has_color {
             let mut bgra = Vec::with_capacity(rg.data.len());
             for px in rg.data.chunks_exact(4) {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
-            (bgra, true)
+            (bgra, true, false)
         } else {
-            let mask: Vec<u8> = rg.data.chunks_exact(4).map(|p| p[3]).collect();
-            (mask, false)
+            let has_subpixel_coverage =
+                rg.data.chunks_exact(4).any(|px| px[0] != px[1] || px[1] != px[2]);
+            if has_subpixel_coverage {
+                let mut bgra = Vec::with_capacity(rg.data.len());
+                for px in rg.data.chunks_exact(4) {
+                    bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+                (bgra, false, true)
+            } else {
+                let mask: Vec<u8> = rg.data.chunks_exact(4).map(|p| p[3]).collect();
+                (mask, false, false)
+            }
         };
         Some(RasterTile {
             width: rg.width as u32,
@@ -182,6 +192,7 @@ impl Rasterizer for FontStack {
             advance: rg.width as f32,
             coverage,
             is_color,
+            is_subpixel,
         })
     }
 }

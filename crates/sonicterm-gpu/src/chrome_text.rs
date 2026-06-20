@@ -315,7 +315,7 @@ pub fn layout(
             rect,
             uv: info.uv,
             color: inst_color,
-            flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            flags: crate::core::glyph_flags(info.is_color, info.is_subpixel),
         });
 
         if gh > max_y_extent {

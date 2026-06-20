@@ -86,6 +86,11 @@ pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Optio
                     }
                 }
                 Some(bytes)
+            } else if mods.alt_key() {
+                let mut bytes = Vec::with_capacity(1 + s.len());
+                bytes.push(0x1b);
+                bytes.extend_from_slice(s.as_bytes());
+                Some(bytes)
             } else {
                 Some(s.as_bytes().to_vec())
             }

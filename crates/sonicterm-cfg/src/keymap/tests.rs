@@ -9,6 +9,17 @@ fn default_keymap_path_lives_under_dot_sonicterm() {
     assert_eq!(path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()), Some("keymaps"));
 }
 
+#[test]
+fn windows_default_leaves_alt_v_for_terminal_apps() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    let keymap = Keymap::bundled_default();
+
+    assert_eq!(keymap.lookup("alt+v"), None);
+    assert_eq!(keymap.lookup("ctrl+shift+v"), Some(&Action::PasteFromClipboard));
+}
+
 /// Every bundled platform keymap must parse cleanly with the strict loader.
 ///
 /// Regression guard for #751: when an action is removed/renamed in the
@@ -89,8 +100,7 @@ action = "show_keymap_cheatsheet"
 keys = "super+w"
 action = "close_active_pane_or_tab"
 "#;
-    let km = Keymap::parse_resilient(toml_src, "test").expect("structurally valid → Ok");
-    // The two good bindings survive; the dead-action one is dropped.
+    let km = Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok");
     assert_eq!(km.bindings.len(), 2, "only the unknown-action binding should be dropped");
     assert_eq!(km.lookup("super+t"), Some(&Action::NewTab));
     assert_eq!(km.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
@@ -125,7 +135,6 @@ action = { scroll = "line_up" }
 /// broken files — only *unknown actions* are tolerated, not garbage.
 #[test]
 fn resilient_parse_still_errors_on_structural_damage() {
-    // Missing [meta] required field.
     let no_meta = r#"
 [[binding]]
 keys = "super+t"
@@ -133,7 +142,6 @@ action = "new_tab"
 "#;
     assert!(Keymap::parse_resilient(no_meta, "test").is_err(), "missing [meta] must error");
 
-    // Not even valid TOML.
     let garbage = "this is = = not toml [[[";
     assert!(Keymap::parse_resilient(garbage, "test").is_err(), "invalid TOML must error");
 }

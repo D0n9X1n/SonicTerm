@@ -1343,6 +1343,11 @@ impl App {
                 let mut handled = false;
                 for key_str in key_to_strings(&event.logical_key, child_mods) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                        if super::keymap_dispatch::terminal_input_passthrough_binding(
+                            &key_str, &action,
+                        ) {
+                            continue;
+                        }
                         match action {
                             Action::EnterCopyMode => {
                                 if let Some(c) = self.windows.get_mut(&win_id) {

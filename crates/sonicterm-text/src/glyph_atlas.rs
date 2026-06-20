@@ -64,6 +64,9 @@ pub struct GlyphInfo {
     /// shader treats color tiles as pre-shaded and skips the
     /// `cov * fg_color` modulation.
     pub is_color: bool,
+    /// True when this tile holds BGRA subpixel text coverage. The renderer
+    /// multiplies each coverage channel by the requested foreground color.
+    pub is_subpixel: bool,
 }
 
 /// A single rasterized glyph: alpha coverage mask + the metrics needed
@@ -80,12 +83,16 @@ pub struct RasterTile {
     pub offset_y: i32,
     /// Horizontal advance after drawing this glyph, in pixels.
     pub advance: f32,
-    /// When `is_color == false`: `width * height` bytes of 8-bit coverage,
-    /// row-major. When `is_color == true`: `width * height * 4` bytes of
-    /// premultiplied BGRA pixels, row-major.
+    /// When `is_color == false && is_subpixel == false`: `width * height`
+    /// bytes of 8-bit coverage, row-major. When `is_color == true`:
+    /// `width * height * 4` bytes of premultiplied BGRA pixels, row-major.
+    /// When `is_subpixel == true`: `width * height * 4` bytes of BGRA
+    /// subpixel coverage, row-major.
     pub coverage: Vec<u8>,
     /// True when `coverage` is BGRA color emoji; false for text coverage.
     pub is_color: bool,
+    /// True when `coverage` is BGRA subpixel text coverage.
+    pub is_subpixel: bool,
 }
 
 impl RasterTile {
@@ -374,6 +381,7 @@ impl GlyphAtlas {
                 px_offset: [0, 0],
                 advance: 0.0,
                 is_color: false,
+                is_subpixel: false,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -388,6 +396,7 @@ impl GlyphAtlas {
                 px_offset: [tile.offset_x, tile.offset_y],
                 advance: tile.advance,
                 is_color: tile.is_color,
+                is_subpixel: tile.is_subpixel,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -406,11 +415,12 @@ impl GlyphAtlas {
         // as `width*height` alpha bytes — replicate each into the four
         // BGRA channels so the shader can sample a single uniform
         // texture format. Color tiles arrive as `width*height*4` BGRA
-        // bytes already premultiplied; copy them through verbatim.
+        // bytes already premultiplied; subpixel text tiles arrive as
+        // `width*height*4` BGRA coverage. Copy both through verbatim.
         let bpp = BYTES_PER_PIXEL as usize;
         for row in 0..tile.height {
             let dst_off = ((y + row) * self.width + x) as usize * bpp;
-            if tile.is_color {
+            if tile.is_color || tile.is_subpixel {
                 let src_off = (row * tile.width) as usize * bpp;
                 let len = tile.width as usize * bpp;
                 self.pixels[dst_off..dst_off + len]
@@ -443,6 +453,7 @@ impl GlyphAtlas {
             px_offset: [tile.offset_x, tile.offset_y],
             advance: tile.advance,
             is_color: tile.is_color,
+            is_subpixel: tile.is_subpixel,
         };
         self.map.insert(
             key,
@@ -564,6 +575,7 @@ impl Rasterizer for SyntheticRasterizer {
                 advance: 8.0,
                 coverage: Vec::new(),
                 is_color: false,
+                is_subpixel: false,
             });
         }
         let side = 8 + (key.ch as u32 % 8);
@@ -584,6 +596,45 @@ impl Rasterizer for SyntheticRasterizer {
             advance: side as f32,
             coverage,
             is_color: false,
+            is_subpixel: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SubpixelRasterizer;
+
+    impl Rasterizer for SubpixelRasterizer {
+        fn rasterize(&mut self, _key: GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![10, 20, 30, 40],
+                is_color: false,
+                is_subpixel: true,
+            })
+        }
+    }
+
+    #[test]
+    fn subpixel_text_coverage_copies_bgra_channels() {
+        let mut atlas = GlyphAtlas::new(4, 4);
+        let mut rasterizer = SubpixelRasterizer;
+        let info = atlas
+            .get_or_insert(
+                GlyphKey { ch: 'V', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 },
+                &mut rasterizer,
+            )
+            .expect("subpixel tile inserts");
+
+        assert!(info.is_subpixel);
+        assert!(!info.is_color);
+        assert_eq!(&atlas.pixels_bgra()[0..4], &[10, 20, 30, 40]);
     }
 }

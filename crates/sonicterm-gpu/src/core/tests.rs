@@ -264,6 +264,15 @@ fn cursor_color_uses_theme_cursor_accent() {
 }
 
 #[test]
+fn block_cursor_stays_opaque_while_bar_and_underline_blink() {
+    let yellow = [1.0, 0.5, 0.0, 1.0];
+
+    assert_eq!(active_cursor_color(yellow, CursorShape::Block, 0.25)[3], 1.0);
+    assert_eq!(active_cursor_color(yellow, CursorShape::Bar, 0.25)[3], 0.25);
+    assert_eq!(active_cursor_color(yellow, CursorShape::Underline, 0.25)[3], 0.25);
+}
+
+#[test]
 fn indexed_color_supports_full_xterm_256_palette() {
     let theme = Theme::default();
     assert_eq!(indexed(16, &theme), Some(ChromeColor::rgb(0, 0, 0)));

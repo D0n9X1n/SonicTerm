@@ -216,30 +216,29 @@ impl WindowsSoftwareFrame {
         if ax1 <= ax0 || ay1 <= ay0 {
             return;
         }
-        let x0 = x.floor().max(0.0) as i32;
-        let y0 = y.floor().max(0.0) as i32;
-        let x1 = (x + w).ceil().min(self.width as f32) as i32;
-        let y1 = (y + h).ceil().min(self.height as f32) as i32;
+        let src_w_u = (ax1 - ax0).max(1);
+        let src_h_u = (ay1 - ay0).max(1);
+        let src_w = src_w_u as f32;
+        let src_h = src_h_u as f32;
+        let one_to_one = (w - src_w).abs() < 0.01 && (h - src_h).abs() < 0.01;
+        let draw_x = if one_to_one { x.round() } else { x };
+        let draw_y = if one_to_one { y.round() } else { y };
+        let x0 = draw_x.floor().max(0.0) as i32;
+        let y0 = draw_y.floor().max(0.0) as i32;
+        let x1 = (draw_x + w).ceil().min(self.width as f32) as i32;
+        let y1 = (draw_y + h).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
         let fg = straight_linear_rgba_to_premul_bgra_f32(glyph.color);
         let color_glyph = glyph.flags[0] >= 0.5;
-        let src_w_u = (ax1 - ax0).max(1);
-        let src_h_u = (ay1 - ay0).max(1);
-        let src_w = src_w_u as f32;
-        let src_h = src_h_u as f32;
-        let one_to_one = (w - src_w).abs() < 0.01
-            && (h - src_h).abs() < 0.01
-            && (x - x.round()).abs() < 0.01
-            && (y - y.round()).abs() < 0.01;
         for yy in y0..y1 {
-            let ty = ((yy as f32 + 0.5 - y) / h).clamp(0.0, 0.999_999);
+            let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
             let sy = ay0 as f32 + src_h * ty;
             let row = yy as usize * self.width as usize * 4;
             for xx in x0..x1 {
-                let tx = ((xx as f32 + 0.5 - x) / w).clamp(0.0, 0.999_999);
+                let tx = ((xx as f32 + 0.5 - draw_x) / w).clamp(0.0, 0.999_999);
                 let sx = ax0 as f32 + src_w * tx;
                 let sample = if one_to_one {
                     let sx = ax0 + (xx - x0) as u32;
@@ -248,14 +247,17 @@ impl WindowsSoftwareFrame {
                 } else {
                     sample_atlas_bilinear(atlas_pixels, atlas_w, atlas_h, sx, sy)
                 };
-                if sample[3] <= 0.0 {
-                    continue;
-                }
                 let dst_off = row + xx as usize * 4;
                 if color_glyph {
+                    if sample[3] <= 0.0 {
+                        continue;
+                    }
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
                 } else {
                     let cov = coverage_luma(sample);
+                    if cov < 0.08 {
+                        continue;
+                    }
                     let src = [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov];
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
                 }
@@ -545,5 +547,21 @@ mod tests {
     fn coverage_luma_is_not_max_channel() {
         let cov = coverage_luma([0.25, 0.5, 0.75, 0.75]);
         assert!(cov > 0.5 && cov < 0.75, "colored fallback should smooth edges: {cov}");
+    }
+
+    #[test]
+    fn very_low_text_coverage_is_treated_as_empty() {
+        assert!(coverage_luma([0.02, 0.04, 0.06, 0.06]) < 0.08);
+    }
+
+    #[test]
+    fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
+        let w = 8.0_f32;
+        let h = 12.0_f32;
+        let src_w = 8.0_f32;
+        let src_h = 12.0_f32;
+        let one_to_one = (w - src_w).abs() < 0.01 && (h - src_h).abs() < 0.01;
+
+        assert!(one_to_one);
     }
 }

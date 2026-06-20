@@ -2210,6 +2210,9 @@ impl App {
     ) -> (Option<Action>, Option<Vec<u8>>) {
         for key_str in key_to_strings(key, mods) {
             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                if keymap_dispatch::terminal_input_passthrough_binding(&key_str, &action) {
+                    continue;
+                }
                 if self.run_action(&action) {
                     if simulate_drain && self.pending_new_window {
                         self.pending_new_window = false;

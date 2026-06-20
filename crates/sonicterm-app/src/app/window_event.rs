@@ -1781,6 +1781,11 @@ impl App {
                 }
                 for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                        if super::keymap_dispatch::terminal_input_passthrough_binding(
+                            &key_str, &action,
+                        ) {
+                            continue;
+                        }
                         if self.run_action_for_window(&action, win_id) {
                             self.drain_pending_window_creates(el);
                             if let Some(w) = self.main_window() {

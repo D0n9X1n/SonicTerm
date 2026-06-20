@@ -124,6 +124,18 @@ fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
     hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
 }
 
+fn active_cursor_color(base: [f32; 4], shape: CursorShape, blink_alpha: f32) -> [f32; 4] {
+    let mut color = base;
+    if !matches!(shape, CursorShape::Block) {
+        color[3] *= blink_alpha;
+    }
+    color
+}
+
+pub(crate) fn glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
+    [if is_color { 1.0 } else { 0.0 }, if is_subpixel { 1.0 } else { 0.0 }, 0.0, 0.0]
+}
+
 /// Resolve the title text colour for a single tab, honouring hover.
 ///
 /// Two cases, unified so a custom-coloured tab highlights on hover exactly
@@ -3756,13 +3768,10 @@ impl GpuRenderer {
                         }
                     }
                 }
-                // Modulate the cursor accent with the current blink alpha.
-                // The base color is opaque (set at theme load) so we can
-                // dim through the full range without losing chroma — that
-                // was the bug in the pre-v0.6 hard-coded 0.6 alpha cursor
-                // (couldn't drive it brighter to express focus).
-                let mut color = self.cursor_color;
-                color[3] *= blink_alpha;
+                // Block cursor stays solid when visible; thinning/fading a
+                // full-cell cursor makes the Gruvbox yellow read as olive on
+                // dark backgrounds. Bar/underline keep the blink fade.
+                let color = active_cursor_color(self.cursor_color, self.cursor_shape, blink_alpha);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge
@@ -3790,19 +3799,12 @@ impl GpuRenderer {
                         }
                         // Recolor every glyph instance that sits in the
                         // cursor cell from fg → theme.bg, producing the
-                        // classic "inverted cell" look. The bg alpha
-                        // tracks the blink alpha so the glyph fades in
-                        // lockstep with the cursor block. RGB is also
-                        // premultiplied by the same alpha because the
-                        // text shader emits `vec4(color.rgb * cov,
-                        // color.a * cov)` and assumes the input is
-                        // already premultiplied (same gamma/blend
-                        // contract as the BGRA emoji fix in PR #65).
+                        // classic "inverted cell" look. Keep it opaque with
+                        // the solid block cursor.
                         let mut bg = self.bg_rgba;
-                        bg[0] *= blink_alpha;
-                        bg[1] *= blink_alpha;
-                        bg[2] *= blink_alpha;
-                        bg[3] *= blink_alpha;
+                        bg[0] *= bg[3];
+                        bg[1] *= bg[3];
+                        bg[2] *= bg[3];
                         recolor_cursor_glyphs(
                             &mut glyph_instances,
                             cx,
@@ -5024,7 +5026,6 @@ impl GpuRenderer {
                 // Drawn intentionally as nothing — keep the block for the
                 // `clip_to_pane`/geometry context the glyph emit above uses.
                 let _ = (clip_to_pane, pre_w);
-
             }
         }
 
@@ -5636,7 +5637,7 @@ impl GpuRenderer {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
                     color: rgba,
-                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    flags: glyph_flags(info.is_color, info.is_subpixel),
                 });
             }
             return;
@@ -5859,6 +5860,7 @@ impl GpuRenderer {
                             // it as monochrome coverage so brand/icons like
                             // claude's red block logo inherit SGR fg.
                             is_color: false,
+                            is_subpixel: false,
                         })
                     }
                 }
@@ -5904,7 +5906,7 @@ impl GpuRenderer {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
                     color: rgba,
-                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    flags: glyph_flags(info.is_color, info.is_subpixel),
                 });
                 continue;
             }
@@ -5980,7 +5982,7 @@ impl GpuRenderer {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
                     color: rgba,
-                    flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    flags: glyph_flags(info.is_color, info.is_subpixel),
                 });
                 continue;
             }
@@ -6036,7 +6038,7 @@ impl GpuRenderer {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,
                 color: rgba,
-                flags: [if info.is_color { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                flags: glyph_flags(info.is_color, info.is_subpixel),
             });
         }
     }
@@ -6124,6 +6126,7 @@ fn emit_inline_image_instances(
                     advance: self.image.width as f32,
                     coverage: self.image.bgra.as_ref().to_vec(),
                     is_color: true,
+                    is_subpixel: false,
                 })
             }
         }
