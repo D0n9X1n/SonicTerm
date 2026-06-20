@@ -125,6 +125,27 @@ pub struct Keymap {
     pub bindings: Vec<Binding>,
 }
 
+/// Intermediate keymap shape used by [`Keymap::parse_resilient`] (#751).
+///
+/// Identical to [`Keymap`] except each binding's `action` stays an
+/// unresolved [`toml::Value`], so the structural parse of the whole
+/// document never fails on a single unknown/removed action variant. Each
+/// action is resolved (and individually skipped on failure) in a second
+/// pass.
+#[derive(Debug, Clone, Deserialize)]
+struct RawKeymap {
+    meta: Meta,
+    #[serde(default, rename = "binding")]
+    binding: Vec<RawBinding>,
+}
+
+/// One binding with its action left unresolved. See [`RawKeymap`].
+#[derive(Debug, Clone, Deserialize)]
+struct RawBinding {
+    keys: String,
+    action: toml::Value,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Keymap metadata block.
 pub struct Meta {
@@ -165,11 +186,57 @@ impl Keymap {
         Self::load_or_default(&Self::resolve_path(keymap, asset_dir))
     }
 
-    /// Strict load of a keymap from a TOML file at `path`.
+    /// Load a keymap from a TOML file at `path`, resiliently (#751).
+    ///
+    /// Historically this did one whole-document `toml::from_str::<Keymap>`,
+    /// so a single binding referencing an unknown/removed action (e.g.
+    /// `show_keymap_cheatsheet` after #652) failed the entire parse — at
+    /// which point `load_or_default` silently dropped *every* binding and
+    /// fell back to the bundled default, discarding all the user's
+    /// customizations. See #751.
+    ///
+    /// Now the parse is per-binding: each binding whose action can't be
+    /// resolved is skipped with a `WARN` that names the offending `keys`,
+    /// and the remaining bindings are kept. `Err` is returned only on a
+    /// *structural* problem (invalid TOML, missing `[meta]`), which still
+    /// warrants the bundled-default fallback. This honors the crate's
+    /// guardrail: "preserve unknown/future keys where possible" and
+    /// "surface parse errors clearly instead of silently accepting bad
+    /// config".
     pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-        let km: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
-        Ok(km)
+        Self::parse_resilient(&text, &format!("{path:?}"))
+    }
+
+    /// Parse keymap TOML, dropping (with a warning) only the bindings whose
+    /// action fails to resolve, instead of failing the whole document.
+    ///
+    /// `source` is a human label used in warnings/errors (typically the
+    /// quoted path). Returns `Err` only for structural TOML errors — a bad
+    /// action in one binding never poisons the others. Pure (no
+    /// filesystem) so it is unit-testable. See #751.
+    pub fn parse_resilient(text: &str, source: &str) -> Result<Self> {
+        // First pass: structural parse with the action left as a raw value
+        // so an unknown action variant does NOT fail the whole document.
+        let raw: RawKeymap = toml::from_str(text).with_context(|| format!("parse {source}"))?;
+        let mut bindings = Vec::with_capacity(raw.binding.len());
+        for rb in raw.binding {
+            // Second pass: resolve each action individually, reusing the
+            // existing `ActionWrapper` deserializer (string or table form).
+            let resolved: std::result::Result<ActionWrapper, toml::de::Error> =
+                rb.action.try_into();
+            match resolved {
+                Ok(action) => bindings.push(Binding { keys: rb.keys, action }),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "sonicterm-cfg",
+                        "skipping keymap binding keys={:?} in {source}: {e}",
+                        rb.keys,
+                    );
+                }
+            }
+        }
+        Ok(Keymap { meta: raw.meta, bindings })
     }
 
     /// Infallible loader. On any error, logs a warning at
