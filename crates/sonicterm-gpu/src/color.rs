@@ -228,3 +228,26 @@ pub fn scale_chrome_text_alpha(c: ChromeColor, factor: f32) -> ChromeColor {
     let a = ((c.a() as f32) * f).round().clamp(0.0, 255.0) as u8;
     ChromeColor::rgba(c.r(), c.g(), c.b(), a)
 }
+
+/// Blend `fg` toward `bg` by `t` (`0.0` = unchanged `fg`, `1.0` = `bg`),
+/// preserving `fg`'s alpha. Used to render the ANSI **dim / faint**
+/// attribute (`SGR 2`): a faint cell's foreground is moved a fixed
+/// fraction toward its background so de-emphasized text (e.g. an editor's
+/// inline prediction / ghost suggestions) reads visibly fainter than
+/// normal-intensity text instead of identical to it. See #756.
+///
+/// Per-channel linear interpolation in the stored sRGB-encoded space —
+/// matching the other chrome blends in this module (`scale_chrome_text_alpha`,
+/// `ChromeColor::shift_toward` semantics) rather than round-tripping through
+/// linear light, so the result is consistent with how the rest of the
+/// chrome layer mixes colors.
+#[must_use]
+pub fn dim_toward(fg: ChromeColor, bg: ChromeColor, t: f32) -> ChromeColor {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| -> u8 {
+        let a = a as f32;
+        let b = b as f32;
+        (a + (b - a) * t).round().clamp(0.0, 255.0) as u8
+    };
+    ChromeColor::rgba(mix(fg.r(), bg.r()), mix(fg.g(), bg.g()), mix(fg.b(), bg.b()), fg.a())
+}
