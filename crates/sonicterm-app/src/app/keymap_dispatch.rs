@@ -48,6 +48,12 @@ pub(super) fn read_only_allows_action(action: &Action) -> bool {
     )
 }
 
+pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action) -> bool {
+    cfg!(target_os = "windows")
+        && key_str == "alt+v"
+        && matches!(action, Action::PasteFromClipboard)
+}
+
 impl App {
     pub(super) fn show_notification_for_kind(
         &mut self,

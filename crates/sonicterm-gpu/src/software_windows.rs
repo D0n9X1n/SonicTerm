@@ -226,6 +226,7 @@ impl WindowsSoftwareFrame {
         let atlas_pixels = atlas.pixels_bgra();
         let fg = straight_linear_rgba_to_premul_bgra_f32(glyph.color);
         let color_glyph = glyph.flags[0] >= 0.5;
+        let subpixel_glyph = glyph.flags[1] >= 0.5;
         let src_w_u = (ax1 - ax0).max(1);
         let src_h_u = (ay1 - ay0).max(1);
         let src_w = src_w_u as f32;
@@ -254,6 +255,14 @@ impl WindowsSoftwareFrame {
                 let dst_off = row + xx as usize * 4;
                 if color_glyph {
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
+                } else if subpixel_glyph {
+                    let src = [
+                        fg[0] * sample[0],
+                        fg[1] * sample[1],
+                        fg[2] * sample[2],
+                        fg[3] * sample[3],
+                    ];
+                    blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
                 } else {
                     let cov = coverage_luma(sample);
                     let src = [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov];

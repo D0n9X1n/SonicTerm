@@ -27,9 +27,10 @@ pub use sonicterm_text::GlyphInstance;
 /// WGSL for the text pass. The vertex shader builds a quad from a
 /// triangle-strip's vertex_index, mapping (0,1,2,3) -> the four
 /// corners of `rect` and corresponding `uv` corners. The fragment
-/// shader samples the alpha and outputs `color.rgb * coverage,
-/// color.a * coverage` — premultiplied so the standard "src1, 1-srcA"
-/// blend produces correct text-on-background.
+/// shader samples coverage and outputs premultiplied color so the standard
+/// "src1, 1-srcA" blend produces correct text-on-background. On Windows and
+/// FreeType LCD paths, subpixel glyphs keep RGB coverage instead of being
+/// collapsed to grayscale.
 const SHADER: &str = r#"
 struct InstanceIn {
     @location(0) rect:  vec4<f32>,
@@ -79,6 +80,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // (r, g, b, a) premultiplied. Return as-is.
         //
         return sample;
+    }
+    if (in.flags.y >= 0.5) {
+        return vec4<f32>(in.color.rgb * sample.rgb, in.color.a * sample.a);
     }
     // Monochrome glyph: atlas stores replicated coverage in all four
     // channels. Modulate by the per-instance foreground color and

@@ -53,13 +53,15 @@ pub struct GlyphInstance {
     /// `[u0, v0, u1, v1]` normalized atlas coordinates from
     /// `GlyphInfo::uv`.
     pub uv: [f32; 4],
-    /// `[r, g, b, a]` foreground color the alpha is modulated by.
+    /// `[r, g, b, a]` foreground color the coverage is modulated by.
     /// For color glyphs (`flags.x >= 0.5`) this is ignored — the
     /// fragment shader returns the premultiplied texture sample
     /// directly so the emoji's own colors come through.
     pub color: [f32; 4],
     /// Per-instance flags packed into a vec4 to keep WGSL vertex
     /// attribute slots simple. `flags.x` is the is-color toggle
-    /// (>= 0.5 → color glyph). The remaining components are reserved.
+    /// (>= 0.5 → color glyph). `flags.y` is the subpixel text coverage
+    /// toggle (>= 0.5 → RGB coverage instead of alpha-only coverage).
+    /// The remaining components are reserved.
     pub flags: [f32; 4],
 }

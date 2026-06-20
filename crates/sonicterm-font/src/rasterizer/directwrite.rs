@@ -106,11 +106,10 @@ impl DirectWriteRasterizer {
             .map_err(|hr| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hr:08x}"))?;
         let mut data = vec![0u8; width * height * 4];
         for (src, dst) in texture.chunks_exact(3).zip(data.chunks_exact_mut(4)) {
-            let cov = coverage_luma(src[0], src[1], src[2]);
-            dst[0] = cov;
-            dst[1] = cov;
-            dst[2] = cov;
-            dst[3] = cov;
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst[3] = src[0].max(src[1]).max(src[2]);
         }
 
         Ok(RasterizedGlyph {
@@ -135,8 +134,4 @@ impl FontRasterizer for DirectWriteRasterizer {
         self.rasterize_directwrite_glyph(glyph_pos, size, dpi)
             .or_else(|_| self.fallback.rasterize_glyph(glyph_pos, size, dpi))
     }
-}
-
-fn coverage_luma(r: u8, g: u8, b: u8) -> u8 {
-    (r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722).round() as u8
 }
