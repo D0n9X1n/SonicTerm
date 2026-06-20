@@ -26,8 +26,8 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::chrome_text::{self, ChromeAttrs, ChromeClip};
 use crate::color::{
-    chrome_color_to_linear_rgba, hex_to_chrome_color, hex_to_rgba, hex_to_wgpu_with_alpha,
-    ChromeColor,
+    chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_rgba,
+    hex_to_wgpu_with_alpha, ChromeColor,
 };
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
 use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
@@ -6044,12 +6044,33 @@ impl GpuRenderer {
     }
 }
 
+/// Fraction a dim/faint (`SGR 2`) cell's foreground is blended toward its
+/// background. `0.45` lands roughly at the ~55% perceived intensity that
+/// xterm/VTE/WezTerm use for faint text — enough that editor inline
+/// predictions / ghost text read as clearly fainter than committed text
+/// without becoming unreadable. See #756.
+const DIM_BLEND: f32 = 0.45;
+
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
-    if cell.flags.contains(CellFlags::INVERSE) {
+    // Resolve the foreground and the cell's effective background. INVERSE
+    // swaps the two (foreground is painted in the bg color and vice versa),
+    // so resolve both consistently and let DIM blend toward whichever
+    // background the glyph is actually drawn over.
+    let (fg, bg) = if cell.flags.contains(CellFlags::INVERSE) {
         let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
-        color_to_chrome(cell.bg, theme, default_bg)
+        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
+        (color_to_chrome(cell.bg, theme, default_bg), color_to_chrome(cell.fg, theme, default_fg))
     } else {
-        color_to_chrome(cell.fg, theme, default)
+        let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
+        (color_to_chrome(cell.fg, theme, default), color_to_chrome(cell.bg, theme, default_bg))
+    };
+    // Dim / faint (SGR 2): pull the foreground toward its background so
+    // faint text is visibly de-emphasized instead of identical to normal
+    // text. Stored but previously unread (#756).
+    if cell.flags.contains(CellFlags::DIM) {
+        dim_toward(fg, bg, DIM_BLEND)
+    } else {
+        fg
     }
 }
 

@@ -21,7 +21,6 @@ const V_BOT_RIGHT: u32 = 3;
 
 const IS_GLYPH: f32 = 0.0;
 const IS_COLOR_EMOJI: f32 = 1.0;
-const IS_SUBPIXEL_GLYPH: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
@@ -301,13 +300,7 @@ fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32
             continue;
         }
         let color = g.color;
-        let has_color = if g.flags[0] >= 0.5 {
-            IS_COLOR_EMOJI
-        } else if g.flags[1] >= 0.5 {
-            IS_SUBPIXEL_GLYPH
-        } else {
-            IS_GLYPH
-        };
+        let has_color = if g.flags[0] >= 0.5 { IS_COLOR_EMOJI } else { IS_GLYPH };
         let [u0, v0, u1, v1] = g.uv;
         let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
         push_rect_vertices(out, x, y, w, h, sw, sh, color, has_color, tex, [[0.0; 4]; 4]);
@@ -459,7 +452,6 @@ struct VertexOutput {
 
 const IS_GLYPH: f32 = 0.0;
 const IS_COLOR_EMOJI: f32 = 1.0;
-const IS_SUBPIXEL_GLYPH: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
@@ -543,10 +535,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color = in.fg_color * aa;
     } else if (in.has_color == IS_COLOR_EMOJI) {
         color = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
-    } else if (in.has_color == IS_SUBPIXEL_GLYPH) {
-        let sample = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
-        color = vec4<f32>(in.fg_color.rgb * sample.rgb, in.fg_color.a * sample.a);
-        hsv *= uniforms.foreground_text_hsb;
     } else if (in.has_color == IS_GLYPH) {
         let sample = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
         let cov = sample.a;

@@ -81,9 +81,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         //
         return sample;
     }
-    if (in.flags.y >= 0.5) {
-        return vec4<f32>(in.color.rgb * sample.rgb, in.color.a * sample.a);
-    }
     // Monochrome glyph: atlas stores replicated coverage in all four
     // channels. Modulate by the per-instance foreground color and
     // emit premultiplied (color.rgb * cov, color.a * cov).
