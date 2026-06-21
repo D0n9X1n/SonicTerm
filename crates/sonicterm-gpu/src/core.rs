@@ -105,6 +105,32 @@ fn preedit_has_visible_ink(preedit: &str) -> bool {
     preedit.chars().any(|c| !c.is_whitespace())
 }
 
+/// Horizontal advance (px) for the terminal cursor caret while an inline IME
+/// composition is active, so the cursor block sits at the composition
+/// insertion point WezTerm-style.
+///
+/// CRITICAL (#760): this MUST be gated on the SAME predicate as the inline
+/// preedit glyph overlay — [`preedit_has_visible_ink`]. macOS delivers a
+/// whitespace-only marked string during ordinary typing (and on bare Enter)
+/// whenever a CJK/Pinyin input source is active, even for plain Latin. The
+/// glyph overlay correctly suppresses that case, but if the caret advance
+/// does NOT, the cursor-colored block gets shoved right by the width of the
+/// (invisible) whitespace and floats in empty prompt space with no glyph
+/// under it — the stray "yellow line/block" users reported. Returning 0 for
+/// no-visible-ink keeps the cursor at the grid's real column. Real CJK
+/// composition always carries non-whitespace ink, so genuine compositions
+/// still advance the caret. Pure so the gate is unit-testable without a GPU.
+fn preedit_caret_advance(preedit: &str, caret_byte: usize, font_size: f32) -> f32 {
+    if !preedit_has_visible_ink(preedit) {
+        return 0.0;
+    }
+    let mut cb = caret_byte.min(preedit.len());
+    if !preedit.is_char_boundary(cb) {
+        cb = preedit.len();
+    }
+    estimate_badge_text_width(&preedit[..cb], font_size)
+}
+
 /// Opaque-background rect for the inline IME preedit (#758).
 ///
 /// Returns `(x, y, w, h)` in renderer pixels for the mask that is laid
@@ -3775,15 +3801,13 @@ impl GpuRenderer {
                 if search.is_none() {
                     if let Some(i) = ime {
                         let text = i.preedit();
-                        if !text.is_empty() {
-                            let font_size = self.raster_px(self.font_size);
-                            let mut caret_byte =
-                                i.cursor().map(|(_, e)| e).unwrap_or(text.len()).min(text.len());
-                            if !text.is_char_boundary(caret_byte) {
-                                caret_byte = text.len();
-                            }
-                            cx += estimate_badge_text_width(&text[..caret_byte], font_size);
-                        }
+                        // #760: gate on visible ink (NOT just non-empty) and
+                        // reuse the shared pure helper, so a whitespace-only
+                        // macOS marked string never shoves the cursor block
+                        // into empty space with no glyph under it.
+                        let caret_byte = i.cursor().map(|(_, e)| e).unwrap_or(text.len());
+                        let font_size = self.raster_px(self.font_size);
+                        cx += preedit_caret_advance(text, caret_byte, font_size);
                     }
                 }
                 // Block cursor stays solid when visible; thinning/fading a

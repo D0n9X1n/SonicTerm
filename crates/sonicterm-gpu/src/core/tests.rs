@@ -226,6 +226,40 @@ fn preedit_overlay_draws_for_real_composition() {
     assert!(preedit_has_visible_ink("a b"), "ink with embedded space draws");
 }
 
+#[test]
+fn preedit_caret_advance_zero_for_whitespace_only() {
+    // #760: the terminal-cursor caret advance MUST use the same visible-ink
+    // gate as the glyph overlay. macOS delivers a whitespace-only marked
+    // string during ordinary typing / bare Enter with a CJK source active;
+    // advancing the cursor for it shoved the cursor-colored block into empty
+    // prompt space with no glyph under it (the stray "yellow line/block").
+    assert_eq!(preedit_caret_advance("", 0, 16.0), 0.0, "empty → no advance");
+    assert_eq!(preedit_caret_advance(" ", 1, 16.0), 0.0, "bare space → no advance");
+    assert_eq!(preedit_caret_advance("   ", 3, 16.0), 0.0, "all-whitespace → no advance");
+    assert_eq!(preedit_caret_advance("\t", 1, 16.0), 0.0, "tab → no advance");
+}
+
+#[test]
+fn preedit_caret_advance_nonzero_for_real_composition() {
+    // Real composition still advances the caret to the insertion point.
+    assert!(
+        preedit_caret_advance("ni", 2, 16.0) > 0.0,
+        "latin composing run advances the caret"
+    );
+    assert!(
+        preedit_caret_advance("\u{4f60}", 3, 16.0) > 0.0,
+        "CJK composing run advances the caret"
+    );
+    // A caret byte that lands off a char boundary falls back to full width
+    // rather than panicking.
+    let full = preedit_caret_advance("\u{4f60}", 3, 16.0);
+    assert_eq!(
+        preedit_caret_advance("\u{4f60}", 1, 16.0),
+        full,
+        "non-boundary caret byte falls back to full width"
+    );
+}
+
 // --- tab title colour hover (Issue: custom tab colour did not highlight) ---
 
 /// Distinct sentinel colours so each branch is unambiguous in asserts.
