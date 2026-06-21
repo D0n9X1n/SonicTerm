@@ -1242,6 +1242,13 @@ pub struct PaneState {
     /// thread while parsing output, so blocking on it added input latency
     /// whenever output was streaming (issue #710). Init 0 (legacy encoding).
     pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
+    /// Per-pane DECCKM (?1, application cursor keys) snapshot, mirrored out
+    /// of the parser by the VT loop so the keypress path reads it lock-free
+    /// (same rationale as `kitty_flags`, issue #710). When `true`, arrows /
+    /// Home / End encode with the SS3 introducer (`ESC O x`) instead of CSI
+    /// so terminfo-driven apps (zsh ZLE, readline, vim, less) recognize them
+    /// (#761). Init `false` (normal cursor keys → CSI).
+    pub app_cursor_keys: Arc<std::sync::atomic::AtomicBool>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
 }
@@ -1265,6 +1272,7 @@ impl PaneState {
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            app_cursor_keys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -2225,7 +2233,11 @@ impl App {
             .active_pane()
             .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
-        (None, encode_logical(key, mods, kitty_flags))
+        let app_cursor = self
+            .active_pane()
+            .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false);
+        (None, encode_logical(key, mods, kitty_flags, app_cursor))
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {

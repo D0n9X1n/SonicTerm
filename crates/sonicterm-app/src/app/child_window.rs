@@ -1396,7 +1396,12 @@ impl App {
                     .get(&active_id)
                     .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
-                if let Some(bytes) = encode_key(&event, mods, kitty_flags) {
+                let app_cursor = child
+                    .panes
+                    .get(&active_id)
+                    .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                if let Some(bytes) = encode_key(&event, mods, kitty_flags, app_cursor) {
                     let broadcast_bytes = bytes.clone();
                     let _ = child;
                     self.write_to_pane(active_id, bytes);
@@ -1660,6 +1665,10 @@ impl App {
         // keypress path (issue #710); mirrors the main-window pane wiring.
         let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
             Arc::new(std::sync::atomic::AtomicU8::new(0));
+        // Per-pane DECCKM snapshot read lock-free on the keypress path (#761);
+        // mirrors the main-window pane wiring.
+        let app_cursor_keys_pane: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -1676,6 +1685,7 @@ impl App {
                 let redraw_target_thread = redraw_target.clone();
                 let cursor_visible = cursor_visible_pane.clone();
                 let kitty_flags = kitty_flags_pane.clone();
+                let app_cursor_keys = app_cursor_keys_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 std::thread::Builder::new()
                     .name("sonicterm-vt-reply-child".into())
@@ -1723,6 +1733,12 @@ impl App {
                                         // lock-free (issue #710).
                                         kitty_flags.store(
                                             p.kitty_keyboard_flags(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                        // Mirror DECCKM for the lock-free
+                                        // keypress encode path (#761).
+                                        app_cursor_keys.store(
+                                            p.application_cursor_keys(),
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
                                     }
@@ -1782,6 +1798,7 @@ impl App {
         pane_state.redraw_target = redraw_target;
         pane_state.cursor_visible = cursor_visible_pane;
         pane_state.kitty_flags = kitty_flags_pane;
+        pane_state.app_cursor_keys = app_cursor_keys_pane;
         pane_state
     }
 

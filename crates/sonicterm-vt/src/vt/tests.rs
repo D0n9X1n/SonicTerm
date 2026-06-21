@@ -298,3 +298,41 @@ fn osc4_full_16_color_batch_query_replies_for_every_seeded_slot() {
     parser.advance(b"Z");
     assert_eq!(row_text(&parser, 0), "Z       ");
 }
+
+// --- #762: insert-before must leave row content AND dirty state correct in a
+// single pass. Reported symptom: "type 11, move before it, insert 0. → shows
+// 0.1 not 0.11; the missing 1 reappears only on the next keystroke." That is a
+// render-side staleness — these tests pin the VT/grid data layer as correct so
+// the fix is scoped to the renderer, and guard against a future regression
+// where an in-place edit fails to grow/dirty the row. ---
+
+#[test]
+fn ich_insert_before_yields_full_line_in_one_pass() {
+    // Model the ZLE insert-before pattern with ICH (CSI @): type "11", home
+    // the cursor, open two blank cells, then print "0." into them.
+    let mut parser = Parser::new(Grid::new(8, 1));
+    parser.advance(b"11"); // "11      ", cursor col 2
+    parser.advance(b"\x1b[G"); // CHA → col 0
+    parser.advance(b"\x1b[2@"); // ICH 2 → "  11"
+    parser.advance(b"0."); // print → "0.11", cursor col 2
+    // The trailing '1' must be present immediately — no extra keystroke.
+    assert_eq!(row_text(&parser, 0), "0.11    ");
+}
+
+#[test]
+fn ich_re_dirties_row_so_trailing_cell_repaints_same_frame() {
+    // After a frame has been consumed (clear_dirty), an insert-before edit
+    // must re-dirty the row so the shifted-in trailing cells repaint in the
+    // SAME frame. If ICH failed to dirty, the shifted cells would only show
+    // after a later mutation — exactly the reported bug.
+    let mut parser = Parser::new(Grid::new(8, 1));
+    parser.advance(b"0.1");
+    parser.advance(b"\x1b[G"); // home (goto dirties the row)…
+    parser.grid_mut().clear_dirty(); // …so clear AFTER positioning to isolate ICH
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+    parser.advance(b"\x1b[2@"); // ICH 2 at col 0
+    assert!(parser.grid().is_row_dirty(0), "ICH-edited row must be dirty");
+    assert_eq!(row_text(&parser, 0), "  0.1   ");
+}
+
+

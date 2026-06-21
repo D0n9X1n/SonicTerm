@@ -72,6 +72,11 @@ impl App {
         // by the VT loop so the keypress path reads it lock-free (issue #710).
         let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
             Arc::new(std::sync::atomic::AtomicU8::new(0));
+        // Per-pane DECCKM (application cursor keys) snapshot, mirrored out of
+        // the parser by the VT loop so the keypress path reads it lock-free
+        // (#761, same rationale as kitty_flags / #710).
+        let app_cursor_keys_pane: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -93,6 +98,7 @@ impl App {
                 // the VT thread writing into an orphan AtomicBool.
                 let cursor_visible = cursor_visible_pane.clone();
                 let kitty_flags = kitty_flags_pane.clone();
+                let app_cursor_keys = app_cursor_keys_pane.clone();
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 let inline_images_thread = inline_images.clone();
@@ -231,6 +237,13 @@ impl App {
                                             p.kitty_keyboard_flags(),
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
+                                        // Mirror DECCKM (application cursor
+                                        // keys) for the lock-free keypress
+                                        // encode path (#761).
+                                        app_cursor_keys.store(
+                                            p.application_cursor_keys(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                     if !inline_images.is_empty() {
                                         let mut images = inline_images_thread.lock();
@@ -310,6 +323,7 @@ impl App {
         state.command_events = command_events;
         state.cursor_visible = cursor_visible_pane;
         state.kitty_flags = kitty_flags_pane;
+        state.app_cursor_keys = app_cursor_keys_pane;
         state.inline_images = inline_images;
         state
     }
