@@ -1046,8 +1046,17 @@ impl Grid {
         let start = col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - start);
-        self.clear_wide_intersections(r, start, n, fill.clone());
-        // Shift right: dest = start+n..cols, src = start..cols-n.
+        // Shift right FIRST, reading from the pristine row: dest =
+        // start+n..cols, src = start..cols-n. Do NOT blank [start..start+n]
+        // beforehand — those cells are the source for the first `n` shifted
+        // destinations, so pre-clearing them destroys the very text being
+        // "inserted before" and only the originally-rightmost cell survives
+        // (#762: "11" + insert "0." rendered "0.1", dropping the last cell).
+        // Wide-pair integrity is preserved by the shift (adjacency is kept)
+        // and any half-pair split by the fill gap or pushed off the right
+        // edge is cleaned by `repair_wide_row` below — so no pre-clear is
+        // needed. (Contrast `delete_cells_with`, which also does not
+        // pre-clear and reads ahead safely.)
         for dst in (start + n..cols).rev() {
             self.visible[r][dst] = self.visible[r][dst - n].clone();
         }

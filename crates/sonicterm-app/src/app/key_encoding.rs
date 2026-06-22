@@ -15,8 +15,23 @@ pub(super) fn encode_key(
     event: &KeyEvent,
     mods: ModifiersState,
     kitty_flags: u8,
+    app_cursor: bool,
 ) -> Option<Vec<u8>> {
-    encode_logical(&event.logical_key, mods, kitty_flags)
+    encode_logical(&event.logical_key, mods, kitty_flags, app_cursor)
+}
+
+/// Encode an unmodified cursor / Home / End key, honoring DECCKM (?1,
+/// application cursor keys). When DECCKM is active the introducer is SS3
+/// (`ESC O x`) instead of CSI (`ESC [ x]`) — this is what terminfo's
+/// `kcuu1`/`khome`/`kend` resolve to under `smkx`, so readline, zsh ZLE,
+/// vim, less, etc. only recognize Home/End/arrows when we send the matching
+/// form. A held modifier keeps the legacy CSI form (the full xterm
+/// `CSI 1 ; <mod> x` modified-cursor encoding is intentionally out of scope).
+fn cursor_seq(app_cursor: bool, mods: ModifiersState, final_byte: u8) -> Vec<u8> {
+    let any_mod =
+        mods.shift_key() || mods.control_key() || mods.alt_key() || mods.super_key();
+    let introducer = if app_cursor && !any_mod { b'O' } else { b'[' };
+    vec![0x1b, introducer, final_byte]
 }
 
 /// Encode a logical key + modifiers into the bytes to send to the PTY.
@@ -29,7 +44,12 @@ pub(super) fn encode_key(
 /// Shift+Enter as `CSI 13 ; 2 u` so the app inserts a newline instead of
 /// submitting. Everything else falls through to the legacy encoding.
 #[doc(hidden)]
-pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Option<Vec<u8>> {
+pub fn encode_logical(
+    key: &Key,
+    mods: ModifiersState,
+    kitty_flags: u8,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
         Key::Named(n) => Some(match n {
@@ -51,12 +71,12 @@ pub fn encode_logical(key: &Key, mods: ModifiersState, kitty_flags: u8) -> Optio
             NamedKey::Tab => b"\t".to_vec(),
             NamedKey::Escape => b"\x1b".to_vec(),
             NamedKey::Space => b" ".to_vec(),
-            NamedKey::ArrowUp => b"\x1b[A".to_vec(),
-            NamedKey::ArrowDown => b"\x1b[B".to_vec(),
-            NamedKey::ArrowRight => b"\x1b[C".to_vec(),
-            NamedKey::ArrowLeft => b"\x1b[D".to_vec(),
-            NamedKey::Home => b"\x1b[H".to_vec(),
-            NamedKey::End => b"\x1b[F".to_vec(),
+            NamedKey::ArrowUp => cursor_seq(app_cursor, mods, b'A'),
+            NamedKey::ArrowDown => cursor_seq(app_cursor, mods, b'B'),
+            NamedKey::ArrowRight => cursor_seq(app_cursor, mods, b'C'),
+            NamedKey::ArrowLeft => cursor_seq(app_cursor, mods, b'D'),
+            NamedKey::Home => cursor_seq(app_cursor, mods, b'H'),
+            NamedKey::End => cursor_seq(app_cursor, mods, b'F'),
             NamedKey::PageUp => b"\x1b[5~".to_vec(),
             NamedKey::PageDown => b"\x1b[6~".to_vec(),
             NamedKey::Delete => b"\x1b[3~".to_vec(),

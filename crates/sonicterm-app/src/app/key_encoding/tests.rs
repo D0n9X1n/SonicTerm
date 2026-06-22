@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn enter_encodes_carriage_return() {
     assert_eq!(
-        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 0),
+        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 0, false),
         Some(b"\r".to_vec())
     );
 }
@@ -12,7 +12,7 @@ fn enter_encodes_carriage_return() {
 fn shift_enter_encodes_escape_carriage_return() {
     // Legacy (no kitty flags): Shift+Enter falls back to ESC+CR.
     assert_eq!(
-        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 0),
+        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 0, false),
         Some(b"\x1b\r".to_vec())
     );
 }
@@ -22,7 +22,7 @@ fn shift_enter_kitty_encodes_csi_u() {
     // With kitty keyboard flags active, Shift+Enter is the disambiguated
     // CSI-u form so Copilot CLI / claude insert a newline.
     assert_eq!(
-        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 1),
+        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 1, false),
         Some(b"\x1b[13;2u".to_vec())
     );
 }
@@ -32,7 +32,7 @@ fn plain_enter_stays_carriage_return_under_kitty() {
     // Plain Enter must remain CR even when kitty flags are active, so we
     // don't regress "submit" in apps that accept bare CR.
     assert_eq!(
-        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 1),
+        encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 1, false),
         Some(b"\r".to_vec())
     );
 }
@@ -40,13 +40,66 @@ fn plain_enter_stays_carriage_return_under_kitty() {
 #[test]
 fn alt_character_encodes_legacy_meta_prefix() {
     assert_eq!(
-        encode_logical(&Key::Character("v".into()), ModifiersState::ALT, 0),
+        encode_logical(&Key::Character("v".into()), ModifiersState::ALT, 0, false),
         Some(b"\x1bv".to_vec())
     );
 }
 
+// --- #761: DECCKM (application cursor keys) for arrows + Home/End ---
+
+/// Encode an unmodified named key in the given DECCKM state.
+fn ck(named: NamedKey, app_cursor: bool) -> Vec<u8> {
+    encode_logical(&Key::Named(named), ModifiersState::empty(), 0, app_cursor)
+        .expect("cursor key should encode")
+}
+
+#[test]
+fn home_end_use_csi_when_decckm_off() {
+    // Normal cursor-keys mode: CSI introducer. This is the default and what
+    // bare bash/readline accepts.
+    assert_eq!(ck(NamedKey::Home, false), b"\x1b[H".to_vec());
+    assert_eq!(ck(NamedKey::End, false), b"\x1b[F".to_vec());
+}
+
+#[test]
+fn home_end_use_ss3_when_decckm_on() {
+    // #761: under DECCKM the introducer is SS3 (ESC O), which is what
+    // terminfo khome/kend resolve to under smkx — so zsh ZLE / readline /
+    // vim / less actually recognize Home and End.
+    assert_eq!(ck(NamedKey::Home, true), b"\x1bOH".to_vec());
+    assert_eq!(ck(NamedKey::End, true), b"\x1bOF".to_vec());
+}
+
+#[test]
+fn arrows_track_decckm_introducer() {
+    // Arrows follow the same DECCKM rule (locks WezTerm/xterm parity).
+    assert_eq!(ck(NamedKey::ArrowUp, false), b"\x1b[A".to_vec());
+    assert_eq!(ck(NamedKey::ArrowDown, false), b"\x1b[B".to_vec());
+    assert_eq!(ck(NamedKey::ArrowRight, false), b"\x1b[C".to_vec());
+    assert_eq!(ck(NamedKey::ArrowLeft, false), b"\x1b[D".to_vec());
+    assert_eq!(ck(NamedKey::ArrowUp, true), b"\x1bOA".to_vec());
+    assert_eq!(ck(NamedKey::ArrowDown, true), b"\x1bOB".to_vec());
+    assert_eq!(ck(NamedKey::ArrowRight, true), b"\x1bOC".to_vec());
+    assert_eq!(ck(NamedKey::ArrowLeft, true), b"\x1bOD".to_vec());
+}
+
+#[test]
+fn modified_cursor_keys_stay_csi_even_under_decckm() {
+    // A held modifier keeps the legacy CSI form even when DECCKM is on:
+    // xterm sends SS3 only for the unmodified chord. (We don't yet emit the
+    // full CSI 1 ; <mod> form, but we must NOT emit SS3 here.)
+    assert_eq!(
+        encode_logical(&Key::Named(NamedKey::Home), ModifiersState::SHIFT, 0, true),
+        Some(b"\x1b[H".to_vec())
+    );
+    assert_eq!(
+        encode_logical(&Key::Named(NamedKey::ArrowLeft), ModifiersState::CONTROL, 0, true),
+        Some(b"\x1b[D".to_vec())
+    );
+}
+
 fn fk(named: NamedKey, mods: ModifiersState) -> Vec<u8> {
-    encode_logical(&Key::Named(named), mods, 0).expect("function key should encode")
+    encode_logical(&Key::Named(named), mods, 0, false).expect("function key should encode")
 }
 
 #[test]

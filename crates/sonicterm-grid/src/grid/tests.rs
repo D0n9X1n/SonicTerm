@@ -110,3 +110,53 @@ fn assert_row_has_no_orphan_wide_cells(grid: &Grid) {
         }
     }
 }
+
+#[test]
+fn insert_cells_before_preserves_shifted_text() {
+    // #762: inserting blank cells must shift the EXISTING text right intact,
+    // not blank the source cells before the shift. Pre-fix this dropped the
+    // inserted-before text and kept only the originally-rightmost cell
+    // ("0.1" + insert 2 at col 0 → "    1   " instead of "  0.1   ").
+    let mut grid = Grid::new(8, 1);
+    for ch in "0.1".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.insert_cells_with(0, 0, 2, Cell::default());
+    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    assert_eq!(after, "  0.1   ");
+}
+
+#[test]
+fn insert_cells_mid_line_preserves_both_sides() {
+    // Insert in the middle: "abcd" + insert 1 at col 2 → "ab cd ".
+    let mut grid = Grid::new(6, 1);
+    for ch in "abcd".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.insert_cells_with(0, 2, 1, Cell::default());
+    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    assert_eq!(after, "ab cd ");
+}
+
+#[test]
+fn insert_cells_splitting_wide_pair_repairs_orphans() {
+    // A wide glyph straddling the insertion point must not leave a dangling
+    // lead/continuation. "中x" (中 occupies cols 0-1) + insert 1 at col 1
+    // splits the pair; repair_wide_row blanks the orphaned lead and the
+    // narrow 'x' (originally col 2) survives the shift.
+    let mut grid = Grid::new(6, 1);
+    grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    grid.insert_cells_with(0, 1, 1, Cell::default());
+    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    assert!(after.contains('x'), "narrow cell after the split must survive: {after:?}");
+    // No dangling wide half: every WIDE_CONT must have a WIDE lead to its left.
+    for c in 0..6 {
+        if grid.row(0)[c].flags.contains(CellFlags::WIDE_CONT) {
+            assert!(
+                c > 0 && grid.row(0)[c - 1].flags.contains(CellFlags::WIDE),
+                "orphaned wide continuation at col {c}: {after:?}"
+            );
+        }
+    }
+}

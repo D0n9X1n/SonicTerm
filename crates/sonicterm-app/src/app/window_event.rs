@@ -1807,7 +1807,12 @@ impl App {
                     .active_pane()
                     .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
-                if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags) {
+                let app_cursor = self
+                    .active_pane()
+                    .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags, app_cursor)
+                {
                     self.write_to_pty(bytes);
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while
                     // scrolled up in history should jump back to the live
