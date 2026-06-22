@@ -26,6 +26,6 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
-bincode = "1.3"
+bincode = "3.0"
 interprocess = "2.2"
 portable-pty = { workspace = true }
