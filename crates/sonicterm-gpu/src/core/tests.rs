@@ -397,6 +397,73 @@ fn dirty_rows_damage_rect_returns_none_for_no_dirty_rows() {
 }
 
 #[test]
+fn dirty_rows_damage_rect_closes_fractional_cell_seam() {
+    // #773: at fractional DPI the cell height is non-integer. A single dirty
+    // row's damage strip must extend down to the CEILED top of the next row,
+    // otherwise the boundary pixel a full-cell inverse block (zsh's
+    // reverse-video PROMPT_EOL_MARK `%`) painted into is never repainted when
+    // the cell is later cleared — leaving a 1px underline-like remnant.
+    //
+    // cell_h = 20.4, origin_y = 0:
+    //   row 2 top  = floor(2*20.4)=floor(40.8)=40
+    //   row 3 top  = ceil(3*20.4)=ceil(61.2)=62
+    //   strip      = [40, 62) → height 22
+    // The pre-fix height was ceil(20.4)=21 → [40,61), missing pixel 61, which
+    // is the start of where row 3 (= the next cell row) begins on screen.
+    let damage = dirty_rows_damage_rect(
+        [2usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        20.4,
+        600,
+        800,
+    )
+    .expect("one dirty row yields damage");
+    assert_eq!(damage.y, 40, "row top floored");
+    assert_eq!(
+        damage.y + damage.h as i32,
+        62,
+        "strip must reach the ceiled top of the next row (no rounding seam)"
+    );
+
+    // Two adjacent dirty rows must tile seamlessly: row N's bottom edge equals
+    // row N+1's top edge with no gap and no missing boundary pixel.
+    let r2 = dirty_rows_damage_rect(
+        [2usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        20.4,
+        600,
+        800,
+    )
+    .unwrap();
+    let r3 = dirty_rows_damage_rect(
+        [3usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        20.4,
+        600,
+        800,
+    )
+    .unwrap();
+    assert!(
+        r2.y + r2.h as i32 >= r3.y,
+        "row 2 strip must reach row 3 top: {} vs {}",
+        r2.y + r2.h as i32,
+        r3.y
+    );
+}
+
+#[test]
 fn full_repaint_forced_on_invalidation() {
     let damage = Some(sonicterm_render_model::geometry::PixelRect { x: 1, y: 2, w: 3, h: 4 });
     let mut cases = [

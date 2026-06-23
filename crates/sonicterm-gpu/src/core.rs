@@ -479,11 +479,21 @@ where
     let pane_bounds = pane_rect.intersect(bounds)?;
     let mut damage = DamageRect::empty();
     let row_w = (cols as f32 * cell_w).ceil().max(1.0) as u32;
-    let row_h = cell_h.ceil().max(1.0) as u32;
     for row in dirty_rows {
         let x = origin_x.floor() as i32;
-        let y = (origin_y + row as f32 * cell_h).floor() as i32;
-        damage.add_clipped(PixelRect { x, y, w: row_w, h: row_h }, pane_bounds);
+        // Span each dirty row from its floored top edge to the CEILED top edge
+        // of the NEXT row. With a fractional `cell_h` (common at fractional
+        // DPI), a fixed `ceil(cell_h)` height starting at `floor(top)` can fall
+        // one physical pixel short of where the next row begins, leaving the
+        // boundary pixel un-repainted. A full-cell glyph/inverse block (e.g.
+        // zsh's reverse-video PROMPT_EOL_MARK `%`) paints into that pixel, so
+        // when the cell is later cleared but only this row is dirty, the bottom
+        // 1px of the old block survives as a stray underline-like mark (#773).
+        // Covering through the next row's top edge closes the rounding seam.
+        let top = (origin_y + row as f32 * cell_h).floor() as i32;
+        let next_top = (origin_y + (row as f32 + 1.0) * cell_h).ceil() as i32;
+        let row_h = (next_top - top).max(1) as u32;
+        damage.add_clipped(PixelRect { x, y: top, w: row_w, h: row_h }, pane_bounds);
     }
     damage.rect()
 }
@@ -2790,6 +2800,7 @@ impl GpuRenderer {
         // active pane's cursor/scrollback/prompts. Disjoint from the
         // per-pane loop (which uses its own per-iteration borrow).
         let grid: &Grid = pane_views[active_view_idx].grid;
+
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
         // (one integer increment) and unconditional — even on a fully
