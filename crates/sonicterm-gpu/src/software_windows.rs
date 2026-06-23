@@ -232,7 +232,10 @@ impl WindowsSoftwareFrame {
         }
         let atlas_pixels = atlas.pixels_bgra();
         let fg = straight_linear_rgba_to_premul_bgra_f32(glyph.color);
+        let fg_srgb = premul_linear_rgba_to_straight_srgb(glyph.color);
+        let fg_alpha = glyph.color[3].clamp(0.0, 1.0);
         let color_glyph = glyph.flags[0] >= 0.5;
+        let subpixel_glyph = glyph.flags[1] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
             let sy = ay0 as f32 + src_h * ty;
@@ -253,6 +256,16 @@ impl WindowsSoftwareFrame {
                         continue;
                     }
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
+                } else if subpixel_glyph {
+                    if sample[3] <= 0.0 {
+                        continue;
+                    }
+                    blend_subpixel_bgra(
+                        &mut self.pixels[dst_off..dst_off + 4],
+                        sample,
+                        fg_srgb,
+                        fg_alpha,
+                    );
                 } else {
                     let cov = coverage_luma(sample);
                     if cov < 0.08 {
@@ -355,6 +368,18 @@ fn straight_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {
+    let a = color[3].clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return [0.0; 3];
+    }
+    [
+        linear_to_srgb((color[0] / a).clamp(0.0, 1.0)),
+        linear_to_srgb((color[1] / a).clamp(0.0, 1.0)),
+        linear_to_srgb((color[2] / a).clamp(0.0, 1.0)),
+    ]
+}
+
 fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
 }
@@ -408,6 +433,20 @@ fn blend_premul_bgra(dst: &mut [u8], src: [f32; 4]) {
     dst[3] = to_u8(a);
 }
 
+fn blend_subpixel_bgra(dst: &mut [u8], coverage_bgra: [f32; 4], fg_srgb: [f32; 3], fg_alpha: f32) {
+    let fg_alpha = fg_alpha.clamp(0.0, 1.0);
+    let db = dst[0] as f32 / 255.0;
+    let dg = dst[1] as f32 / 255.0;
+    let dr = dst[2] as f32 / 255.0;
+    let wb = (coverage_bgra[0] * fg_alpha).clamp(0.0, 1.0);
+    let wg = (coverage_bgra[1] * fg_alpha).clamp(0.0, 1.0);
+    let wr = (coverage_bgra[2] * fg_alpha).clamp(0.0, 1.0);
+    dst[0] = to_u8(db + (fg_srgb[2] - db) * wb);
+    dst[1] = to_u8(dg + (fg_srgb[1] - dg) * wg);
+    dst[2] = to_u8(dr + (fg_srgb[0] - dr) * wr);
+    dst[3] = 255;
+}
+
 fn coverage_luma(coverage: [f32; 4]) -> f32 {
     coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
 }
@@ -440,6 +479,25 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
 mod tests {
     use super::*;
     use crate::quad::px_to_ndc;
+    use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
+    use sonicterm_types::GlyphKey;
+
+    struct OneSubpixelGlyph;
+
+    impl Rasterizer for OneSubpixelGlyph {
+        fn rasterize(&mut self, _key: GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![0, 128, 255, 255],
+                is_color: false,
+                is_subpixel: true,
+            })
+        }
+    }
 
     #[test]
     fn clear_uses_straight_alpha_background() {
@@ -547,6 +605,41 @@ mod tests {
     fn coverage_luma_is_not_max_channel() {
         let cov = coverage_luma([0.25, 0.5, 0.75, 0.75]);
         assert!(cov > 0.5 && cov < 0.75, "colored fallback should smooth edges: {cov}");
+    }
+
+    #[test]
+    fn subpixel_text_coverage_blends_each_channel() {
+        let mut atlas = GlyphAtlas::new(4, 4);
+        let info = atlas
+            .get_or_insert(GlyphKey::new('d', false, false), &mut OneSubpixelGlyph)
+            .expect("subpixel glyph inserts");
+        assert!(info.is_subpixel);
+
+        let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]);
+        frame.draw_glyphs(
+            &atlas,
+            &[GlyphInstance {
+                rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+                uv: info.uv,
+                color: [1.0, 1.0, 1.0, 1.0],
+                flags: [0.0, 1.0, 0.0, 0.0],
+            }],
+        );
+
+        let px = frame.pixel_bgra(0, 0);
+        assert!(
+            px[2] > px[1] && px[1] > px[0],
+            "ClearType coverage must stay per-channel, got BGRA={px:?}"
+        );
+    }
+
+    #[test]
+    fn subpixel_blend_lerps_each_channel_over_colored_background() {
+        let mut dst = [32, 160, 240, 255];
+
+        blend_subpixel_bgra(&mut dst, [0.0, 0.5, 1.0, 1.0], [0.0, 0.0, 0.0], 1.0);
+
+        assert_eq!(dst, [32, 80, 0, 255]);
     }
 
     #[test]

@@ -342,12 +342,26 @@ fn cursor_color_uses_theme_cursor_accent() {
 }
 
 #[test]
-fn block_cursor_stays_opaque_while_bar_and_underline_blink() {
+fn cursor_text_color_uses_theme_cursor_text() {
+    let theme = Theme::default();
+    assert_eq!(
+        cursor_text_color_from_theme(&theme),
+        hex_to_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
+    );
+    assert_ne!(
+        cursor_text_color_from_theme(&theme),
+        cursor_color_from_theme(&theme),
+        "cursor text must not reuse the colored cursor accent"
+    );
+}
+
+#[test]
+fn cursor_stays_opaque_while_blink_phase_changes() {
     let yellow = [1.0, 0.5, 0.0, 1.0];
 
     assert_eq!(active_cursor_color(yellow, CursorShape::Block, 0.25)[3], 1.0);
-    assert_eq!(active_cursor_color(yellow, CursorShape::Bar, 0.25)[3], 0.25);
-    assert_eq!(active_cursor_color(yellow, CursorShape::Underline, 0.25)[3], 0.25);
+    assert_eq!(active_cursor_color(yellow, CursorShape::Bar, 0.25), yellow);
+    assert_eq!(active_cursor_color(yellow, CursorShape::Underline, 0.25), yellow);
 }
 
 #[test]

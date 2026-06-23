@@ -168,12 +168,12 @@ fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
     hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
 }
 
-fn active_cursor_color(base: [f32; 4], shape: CursorShape, blink_alpha: f32) -> [f32; 4] {
-    let mut color = base;
-    if !matches!(shape, CursorShape::Block) {
-        color[3] *= blink_alpha;
-    }
-    color
+fn cursor_text_color_from_theme(theme: &Theme) -> [f32; 4] {
+    hex_to_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
+}
+
+fn active_cursor_color(base: [f32; 4], _shape: CursorShape, _blink_alpha: f32) -> [f32; 4] {
+    base
 }
 
 pub(crate) fn glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
@@ -725,10 +725,12 @@ pub struct GpuRenderer {
     panel_padding: f32,
     fg_default: ChromeColor,
     cursor_color: [f32; 4],
-    /// Theme background as straight RGBA. Used to recolor the glyph
-    /// under a block cursor so the foreground inverts to bg (wezterm
-    /// parity). Pre-converted once per theme change to avoid the
-    /// wgpu::Color → [f32;4] round-trip on every frame.
+    /// Theme cursor-text color as straight RGBA. Used to recolor glyphs
+    /// under block cursors and cursor-like overlay carets without deriving
+    /// text color from the background.
+    cursor_text_color: [f32; 4],
+    /// Theme background as straight RGBA. Used by overlays that intentionally
+    /// mask text with the terminal background.
     bg_rgba: [f32; 4],
     /// Visual style of the text cursor (block / bar / underline).
     /// Live-updated from config; see [`Self::set_cursor_shape`].
@@ -1397,6 +1399,7 @@ impl GpuRenderer {
         let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
         let fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let cursor_color = cursor_color_from_theme(theme);
+        let cursor_text_color = cursor_text_color_from_theme(theme);
         let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
@@ -1460,6 +1463,7 @@ impl GpuRenderer {
             panel_padding: appearance.panel_padding.max(0.0),
             fg_default,
             cursor_color,
+            cursor_text_color,
             bg_rgba,
             cursor_shape: CursorShape::default(),
             cursor_blink: true,
@@ -2407,6 +2411,7 @@ impl GpuRenderer {
         self.fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.cursor_color = cursor_color_from_theme(theme);
         self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
+        self.cursor_text_color = cursor_text_color_from_theme(theme);
         self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
         self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
         self.tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
@@ -3742,10 +3747,6 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
-                let mut bg = self.bg_rgba;
-                bg[0] *= bg[3];
-                bg[1] *= bg[3];
-                bg[2] *= bg[3];
                 recolor_cursor_glyphs(
                     &mut glyph_instances,
                     cx,
@@ -3754,7 +3755,7 @@ impl GpuRenderer {
                     self.cell_h,
                     sw,
                     sh,
-                    bg,
+                    self.cursor_text_color,
                 );
             }
         }
@@ -3810,9 +3811,9 @@ impl GpuRenderer {
                         cx += preedit_caret_advance(text, caret_byte, font_size);
                     }
                 }
-                // Block cursor stays solid when visible; thinning/fading a
-                // full-cell cursor makes the Gruvbox yellow read as olive on
-                // dark backgrounds. Bar/underline keep the blink fade.
+                // Keep every cursor shape at its exact theme color. Alpha
+                // fading over the terminal background makes Gruvbox yellow
+                // read as olive/green during real redraws.
                 let color = active_cursor_color(self.cursor_color, self.cursor_shape, blink_alpha);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
@@ -3839,14 +3840,6 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
-                        // Recolor every glyph instance that sits in the
-                        // cursor cell from fg → theme.bg, producing the
-                        // classic "inverted cell" look. Keep it opaque with
-                        // the solid block cursor.
-                        let mut bg = self.bg_rgba;
-                        bg[0] *= bg[3];
-                        bg[1] *= bg[3];
-                        bg[2] *= bg[3];
                         recolor_cursor_glyphs(
                             &mut glyph_instances,
                             cx,
@@ -3855,7 +3848,7 @@ impl GpuRenderer {
                             self.cell_h,
                             sw,
                             sh,
-                            bg,
+                            self.cursor_text_color,
                         );
                     }
                     CursorShape::Bar => {
@@ -4794,7 +4787,7 @@ impl GpuRenderer {
                     caret_h,
                     sw,
                     sh,
-                    self.bg_rgba,
+                    self.cursor_text_color,
                 );
 
                 // Rows: emit each visible row label as its own line so the
