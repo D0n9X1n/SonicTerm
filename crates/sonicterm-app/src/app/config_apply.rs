@@ -341,6 +341,14 @@ impl App {
             );
         }
 
+        // Tab maximum width (logical px). Held process-globally in
+        // `tabbar_view`, so updating it once reaches every window's layout
+        // and hit-testing on the next frame — no per-renderer push needed.
+        if (new_cfg.tab_max_width - self.config.tab_max_width).abs() > f32::EPSILON {
+            sonicterm_ui::tabbar_view::set_max_tab_width(new_cfg.tab_max_width);
+            tracing::info!("live-reload: tab_max_width -> {}", new_cfg.tab_max_width);
+        }
+
         // Tab close-button override (wezterm `tab_close_button_color`).
         // Diff against the live config so an edit that adds, changes,
         // or clears the value propagates to the main + every child

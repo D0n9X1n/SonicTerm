@@ -1738,6 +1738,10 @@ impl App {
         machine: sonicterm_app_core::AppStateMachine,
     ) -> Self {
         theme.apply_accessibility(&config.accessibility);
+        // Seed the process-global tab width cap from config before any tab
+        // bar is laid out, so a configured value takes effect on the very
+        // first frame (hot-reload updates it later via apply_new_config).
+        sonicterm_ui::tabbar_view::set_max_tab_width(config.tab_max_width);
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
             None
         } else {
@@ -4660,239 +4664,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-#[cfg(test)]
-mod click_count_tests {
-    use super::next_click_count;
-
-    #[test]
-    fn single_double_triple_then_wraps() {
-        // Same cell, within interval: 1 → 2 → 3 → back to 1.
-        let c1 = next_click_count(0, true, true); // fresh streak
-        assert_eq!(c1, 1);
-        let c2 = next_click_count(c1, true, true);
-        assert_eq!(c2, 2);
-        let c3 = next_click_count(c2, true, true);
-        assert_eq!(c3, 3);
-        let c4 = next_click_count(c3, true, true);
-        assert_eq!(c4, 1); // wraps after triple
-    }
-
-    #[test]
-    fn different_cell_resets_to_one() {
-        // A double-click is in progress (prev = 2) but the new press is
-        // on a different cell → streak restarts at 1.
-        assert_eq!(next_click_count(2, false, true), 1);
-        assert_eq!(next_click_count(1, false, true), 1);
-    }
-
-    #[test]
-    fn timeout_resets_to_one() {
-        // Same cell but past the multi-click interval → restart at 1.
-        assert_eq!(next_click_count(2, true, false), 1);
-        assert_eq!(next_click_count(1, true, false), 1);
-    }
-}
 
 #[cfg(test)]
-mod native_window_title_tests {
-    use super::NATIVE_WINDOW_TITLE;
-
-    #[test]
-    fn native_window_title_is_static_app_name() {
-        assert_eq!(NATIVE_WINDOW_TITLE, "SonicTerm");
-    }
-}
+#[path = "tests/click_count_tests.rs"]
+mod click_count_tests;
 
 #[cfg(test)]
-mod redraw_coalescing_tests {
-    //! Issue #43: the vsync coalescing gate shared by the main and child
-    //! `RedrawRequested` arms. These pin the exact deferral policy that
-    //! lets a bursty `ls -al` coalesce to one frame per vsync and stops a
-    //! torn-out child from busy-spinning the VT thread's parser lock. The
-    //! same predicate now backs BOTH windows, so this one spec covers
-    //! main/child parity for the gate.
-
-    use super::{should_defer_streaming_redraw, should_flush_pending_pty_redraw};
-    use std::time::Duration;
-
-    const FRAME: Duration = Duration::from_micros(16_667); // ~60Hz
-
-    #[test]
-    fn streaming_redraw_within_frame_defers() {
-        // Pure PTY-streaming repaint that already drew this vsync window:
-        // defer to the next boundary (the coalescing win).
-        assert!(should_defer_streaming_redraw(
-            false, // not input-driven
-            false, // no fresh burst
-            false, // hardware GPU
-            Duration::from_millis(2),
-            FRAME,
-        ));
-    }
-
-    #[test]
-    fn input_driven_redraw_never_defers() {
-        // Keystroke / resize / theme / IME must render immediately even
-        // inside the vsync window — gating them adds perceptible latency.
-        assert!(!should_defer_streaming_redraw(
-            true,
-            false,
-            false,
-            Duration::from_millis(1),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn pty_burst_within_frame_defers_like_other_streaming_redraws() {
-        // A PTY burst is still streaming work, not input. Rendering it early
-        // can block in surface acquisition waiting for the next drawable; defer
-        // inside the current frame window and render at the next boundary.
-        assert!(should_defer_streaming_redraw(false, true, false, Duration::from_millis(1), FRAME));
-    }
-
-    #[test]
-    fn past_frame_boundary_never_defers() {
-        // We're past this vsync window — render now, don't defer forever.
-        assert!(!should_defer_streaming_redraw(
-            false,
-            false,
-            false,
-            Duration::from_millis(20),
-            FRAME
-        ));
-        // Exactly at the boundary also renders (`<` is strict).
-        assert!(!should_defer_streaming_redraw(false, false, false, FRAME, FRAME));
-    }
-
-    #[test]
-    fn input_with_concurrent_burst_coalesces() {
-        // The typing case (issue #710): a keystroke sets input_dirty and the
-        // char's PTY echo arrives as a burst, so the echo's redraw is BOTH
-        // dirty AND a burst. It must coalesce like other streaming work, not
-        // render per echo chunk — otherwise fast typing / Claude Code streams
-        // storm the renderer.
-        assert!(should_defer_streaming_redraw(true, true, false, Duration::ZERO, FRAME));
-        // ...but only within the frame window; past the boundary it renders.
-        assert!(!should_defer_streaming_redraw(
-            true,
-            true,
-            false,
-            Duration::from_millis(20),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn software_render_defers_even_pure_input() {
-        // Issue #713: on a CPU rasterizer, even a pure input redraw (dirty,
-        // no burst) coalesces to the frame cap — fast typing must not force a
-        // full-screen software raster per keystroke. Within the frame window
-        // it defers...
-        assert!(should_defer_streaming_redraw(true, false, true, Duration::from_millis(1), FRAME));
-        // ...but still renders once past the boundary (bounded latency, not
-        // dropped).
-        assert!(!should_defer_streaming_redraw(
-            true,
-            false,
-            true,
-            Duration::from_millis(40),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn pty_redraw_flush_waits_for_burst_window() {
-        assert!(!should_flush_pending_pty_redraw(512, Duration::from_millis(2)));
-        assert!(should_flush_pending_pty_redraw(512, Duration::from_millis(8)));
-    }
-
-    #[test]
-    fn pty_redraw_flushes_large_bursts_without_waiting() {
-        assert!(should_flush_pending_pty_redraw(super::PTY_REDRAW_FLUSH_BYTES, Duration::ZERO,));
-    }
-}
+#[path = "tests/native_window_title_tests.rs"]
+mod native_window_title_tests;
 
 #[cfg(test)]
-mod warm_window_pool_tests {
-    use super::{warm_window_pool_should_spawn, warm_window_pool_target, WARM_WINDOW_POOL_MAX};
-
-    #[test]
-    fn warm_window_pool_keeps_one_spare_after_consuming_one() {
-        assert_eq!(warm_window_pool_target(0), 2);
-        assert_eq!(warm_window_pool_target(1), 2);
-        assert_eq!(warm_window_pool_target(2), 2);
-        assert_eq!(warm_window_pool_target(99), WARM_WINDOW_POOL_MAX);
-    }
-
-    #[test]
-    fn warm_window_pool_spawns_until_target_is_reached() {
-        assert!(warm_window_pool_should_spawn(0, 2));
-        assert!(warm_window_pool_should_spawn(1, 2));
-        assert!(!warm_window_pool_should_spawn(2, 2));
-    }
-}
+#[path = "tests/redraw_coalescing_tests.rs"]
+mod redraw_coalescing_tests;
 
 #[cfg(test)]
-mod tear_out_timing_tests {
-    use super::TearOutTiming;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn tear_out_first_render_total_is_measured_from_start() {
-        let start = Instant::now();
-        let timing = TearOutTiming::new("main", start);
-        let total = timing.total_until_first_render_ms(start + Duration::from_millis(42));
-
-        assert!((41.0..=43.0).contains(&total));
-    }
-}
+#[path = "tests/warm_window_pool_tests.rs"]
+mod warm_window_pool_tests;
 
 #[cfg(test)]
-mod software_render_tests {
-    //! Issue #713: no-GPU degrade decision + frame-period clamp.
-    use super::{
-        should_degrade_for_software_render, software_render_frame_period,
-        SOFTWARE_RENDER_FRAME_PERIOD,
-    };
-    use sonicterm_cfg::config::SoftwareRenderMode;
-    use std::time::Duration;
+#[path = "tests/tear_out_timing_tests.rs"]
+mod tear_out_timing_tests;
 
-    #[test]
-    fn degrade_mode_combines_config_with_detection() {
-        // Auto follows detection.
-        assert!(should_degrade_for_software_render(SoftwareRenderMode::Auto, true));
-        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Auto, false));
-        // Force always degrades; Off never does — regardless of detection.
-        assert!(should_degrade_for_software_render(SoftwareRenderMode::Force, false));
-        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Off, true));
-    }
-
-    #[test]
-    fn frame_period_clamps_only_when_degrading() {
-        let sixty = Duration::from_micros(16_667); // 60 Hz
-                                                   // Hardware path: untouched.
-        assert_eq!(software_render_frame_period(false, sixty), sixty);
-        // Software path: a fast monitor period is slowed to the software cap.
-        assert_eq!(software_render_frame_period(true, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-    }
-
-    #[test]
-    fn frame_period_uses_software_cap_when_degrading() {
-        let slow = Duration::from_millis(50);
-        assert_eq!(software_render_frame_period(true, slow), SOFTWARE_RENDER_FRAME_PERIOD);
-    }
-
-    #[test]
-    fn effective_frame_period_lowers_cap_while_composing() {
-        use super::{effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD};
-        let sixty = Duration::from_micros(16_667);
-        // Hardware path: untouched whatever the flags.
-        assert_eq!(effective_frame_period(false, false, sixty), sixty);
-        assert_eq!(effective_frame_period(false, true, sixty), sixty);
-        // Software path, idle: software cap.
-        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-        // Software path, composing: lower cap (issue #714) — composing wins.
-        assert_eq!(effective_frame_period(true, true, sixty), SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD);
-    }
-}
+#[cfg(test)]
+#[path = "tests/software_render_tests.rs"]
+mod software_render_tests;

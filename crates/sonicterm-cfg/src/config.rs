@@ -56,6 +56,14 @@ pub struct Config {
     /// drawn dim, brightening on hover of the × glyph itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
+    /// Maximum width, in logical pixels, of a single tab when the tab bar
+    /// has room to spare. With a few tabs in a wide window each tab grows up
+    /// to this width so long titles (paths, `Administrator: pwsh`, …) stay
+    /// readable; once the tabs would overflow the bar they shrink to share
+    /// the available width evenly, regardless of this value. Defaults to
+    /// `240.0`. Raise it for roomier tabs, lower it to pack more in.
+    #[serde(default = "default_tab_max_width")]
+    pub tab_max_width: f32,
     /// When `true`, the app exits as soon as the last window is closed
     /// (classic single-window-app behavior). When `false` (the default,
     /// matching Chrome/Firefox/Safari on macOS), the application process
@@ -315,6 +323,13 @@ fn default_quit_on_last_window_close() -> bool {
     true
 }
 
+/// Default maximum width of a single tab, in logical pixels. Mirrors the
+/// renderer's historical built-in cap so unconfigured installs render tabs
+/// exactly as before.
+fn default_tab_max_width() -> f32 {
+    240.0
+}
+
 impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
@@ -378,6 +393,7 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             render: RenderConfig::default(),
             tab_close_button_color: None,
+            tab_max_width: default_tab_max_width(),
             quit_on_last_window_close: default_quit_on_last_window_close(),
             extra: toml::Table::new(),
         }
@@ -626,6 +642,11 @@ locale = ""
 # alive so a new window can be opened from the dock/taskbar/menu.
 quit_on_last_window_close = true
 
+# Maximum width of a single tab, in logical pixels, when the tab bar has room.
+# Tabs grow up to this width so long titles stay readable; with many tabs they
+# shrink to share the bar evenly. Default 240.
+tab_max_width = {tab_max_width}
+
 [font]
 # Font family and metrics. SonicTerm ships "Rec Mono St.Helens" by default.
 family = "{font_family}"
@@ -764,6 +785,7 @@ threshold_secs = 10
         panel_padding = cfg.appearance.panel_padding,
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
+        tab_max_width = cfg.tab_max_width,
     )
 }
 
