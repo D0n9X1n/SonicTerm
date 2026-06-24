@@ -12,6 +12,8 @@ use crate::parser::ParsedFont;
 use crate::rasterizer::{freetype::FreeTypeRasterizer, FontRasterizer, RasterizedGlyph};
 use crate::units::PixelLength;
 
+const TEXT_COVERAGE_EXPONENT: f32 = 1.20;
+
 pub struct DirectWriteRasterizer {
     face: FontFace,
     fallback: FreeTypeRasterizer,
@@ -106,10 +108,13 @@ impl DirectWriteRasterizer {
             .map_err(|hr| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hr:08x}"))?;
         let mut data = vec![0u8; width * height * 4];
         for (src, dst) in texture.chunks_exact(3).zip(data.chunks_exact_mut(4)) {
-            dst[0] = src[0];
-            dst[1] = src[1];
-            dst[2] = src[2];
-            dst[3] = src[0].max(src[1]).max(src[2]);
+            let r = enhance_text_coverage(src[0]);
+            let g = enhance_text_coverage(src[1]);
+            let b = enhance_text_coverage(src[2]);
+            dst[0] = r;
+            dst[1] = g;
+            dst[2] = b;
+            dst[3] = r.max(g).max(b);
         }
 
         Ok(RasterizedGlyph {
@@ -133,5 +138,48 @@ impl FontRasterizer for DirectWriteRasterizer {
     ) -> anyhow::Result<RasterizedGlyph> {
         self.rasterize_directwrite_glyph(glyph_pos, size, dpi)
             .or_else(|_| self.fallback.rasterize_glyph(glyph_pos, size, dpi))
+    }
+}
+
+fn enhance_text_coverage(coverage: u8) -> u8 {
+    if coverage == 0 || coverage == u8::MAX {
+        return coverage;
+    }
+    let c = coverage as f32 / 255.0;
+    ((1.0 - (1.0 - c).powf(TEXT_COVERAGE_EXPONENT)) * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directwrite_coverage_enhancement_preserves_extremes() {
+        assert_eq!(enhance_text_coverage(0), 0);
+        assert_eq!(enhance_text_coverage(255), 255);
+    }
+
+    #[test]
+    fn directwrite_coverage_enhancement_darkens_midtones() {
+        let mid = enhance_text_coverage(128);
+        assert!(mid > 128, "midtone coverage should be stronger, got {mid}");
+        assert!(mid < 160, "coverage boost should stay modest, got {mid}");
+    }
+
+    #[test]
+    fn directwrite_coverage_enhancement_is_monotonic_and_never_thins_text() {
+        let mut prev = enhance_text_coverage(0);
+        for coverage in 1..=u8::MAX {
+            let enhanced = enhance_text_coverage(coverage);
+            assert!(
+                enhanced >= coverage,
+                "coverage boost must not make glyphs thinner: {coverage} -> {enhanced}"
+            );
+            assert!(
+                enhanced >= prev,
+                "coverage boost must remain monotonic: prev {prev}, current {enhanced}"
+            );
+            prev = enhanced;
+        }
     }
 }
