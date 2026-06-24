@@ -14,7 +14,8 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 
 When auditing docs for release blockers, typos, renamed paths, or user-facing
 terminology, include `wiki/` alongside README and `docs/`; the wiki is part of
-the monitored documentation surface.
+the monitored documentation surface. Editing `wiki/` here does **not** change
+the live GitHub Wiki — see [Wiki](#wiki) for the two-repo publish step.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
@@ -74,6 +75,36 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 - macOS universal `.dmg`
 - Windows x64 `.msi`
 - release notes from commits since the previous tag
+
+## Wiki
+
+The GitHub Wiki is a **separate git repository** from this one. There are two
+copies of the same Markdown:
+
+| Location | Repo | Serves |
+| --- | --- | --- |
+| `wiki/` folder here | `D0n9X1n/SonicTerm.git` (this repo) | source/mirror copy, reviewed in PRs |
+| Live Wiki tab | `D0n9X1n/SonicTerm.wiki.git` | the rendered pages at `/SonicTerm/wiki/...` |
+
+Editing `wiki/*.md` in this repo updates only the mirror. The live page does
+**not** change until the file is also pushed to the wiki repo. Always update
+both so they stay in sync.
+
+To publish a wiki change to the live site (page file name = page title, e.g.
+`Keybindings.md` → `/wiki/Keybindings`):
+
+```bash
+WT=$(mktemp -d)
+git clone git@github.com:D0n9X1n/SonicTerm.wiki.git "$WT"
+cp wiki/Keybindings.md "$WT/Keybindings.md"   # repeat for each changed page
+git -C "$WT" add -A
+git -C "$WT" commit -m "docs(wiki): <summary>"
+git -C "$WT" push origin master                # wiki default branch is `master`
+rm -rf "$WT"
+```
+
+Then commit the matching `wiki/` edits in this repo (on a branch) so the mirror
+and the live wiki do not drift.
 
 ## WezTerm
 

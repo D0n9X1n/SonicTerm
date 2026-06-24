@@ -20,6 +20,47 @@ keymap = "sonicterm-macos"
 
 You can also point `keymap` at any TOML file path.
 
+### Default shortcuts
+
+`Cmd` is the SonicTerm app modifier on macOS; `Alt` is the app modifier on
+Windows. On Windows, `Ctrl+<letter>` is left to the shell (Ctrl+C = SIGINT,
+Ctrl+R = history search, Ctrl+W = kill word, …), so a few terminal-standard
+aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
+
+| Action | macOS | Windows |
+| --- | --- | --- |
+| New tab | `Cmd+T` (`Cmd+Shift+T`) | `Alt+T` / `Ctrl+T` (`Alt+Shift+T`) |
+| Close pane or tab | `Cmd+W` | `Alt+W` |
+| Next tab | `Cmd+Shift+]` / `Cmd+Right` | `Alt+Shift+]` / `Alt+Right` |
+| Previous tab | `Cmd+Shift+[` / `Cmd+Left` | `Alt+Shift+[` / `Alt+Left` |
+| Activate tab 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` |
+| Activate last tab | `Cmd+9` | `Alt+9` |
+| Split right | `Cmd+D` | `Alt+D` |
+| Split down | `Cmd+Shift+D` | `Alt+Shift+D` |
+| Close pane | `Cmd+Shift+W` | `Alt+Shift+W` |
+| Zoom pane | `Cmd+Shift+Z` | `Alt+Shift+Z` |
+| Focus pane (left/down/up/right) | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| Resize pane (left/right/up/down) | `Cmd+Shift+Arrow` | `Alt+Shift+Arrow` |
+| Broadcast to tab | `Cmd+Shift+B` | `Alt+Shift+B` |
+| Broadcast to all tabs | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` |
+| READONLY / copy mode | `Cmd+[` | `Alt+[` |
+| Copy | `Cmd+C` | `Alt+C` / `Ctrl+Shift+C` |
+| Paste | `Cmd+V` | `Ctrl+Shift+V` |
+| Increase font size | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
+| Decrease font size | `Cmd+-` | `Alt+-` |
+| Reset font size | `Cmd+0` | `Alt+0` |
+| New window | `Cmd+N` | `Alt+N` |
+| Toggle fullscreen | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
+| Search | `Cmd+F` | `Alt+F` |
+| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` |
+| Quick select URLs | `Cmd+Shift+Space` | `Alt+Shift+Space` |
+| Scroll line up/down | `Cmd+Up` / `Cmd+Down` | `Alt+Up` / `Alt+Down` |
+| Scroll page up/down | `Cmd+PageUp` / `Cmd+PageDown` | `Alt+PageUp` / `Alt+PageDown` |
+| Scroll to top/bottom | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
+| Reload config | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
+
+These are the bundled defaults; every row is editable in the keymap TOML below.
+
 ### Edit the active keymap
 
 1. Open the command palette.
@@ -48,10 +89,10 @@ Modifier names:
 
 | Modifier | Meaning |
 | --- | --- |
-| `super` | Command on macOS, Windows/Super key on Windows |
+| `super` | Command on macOS, Windows/Super key on Windows. App modifier on macOS. |
 | `ctrl` | Control |
 | `shift` | Shift |
-| `alt` | Option/Alt |
+| `alt` | Option on macOS, Alt on Windows/Linux. App modifier on Windows and Linux. |
 
 The default macOS keymap mostly uses `super` (Command). The default Windows and
 Linux keymaps use `alt` as SonicTerm's app modifier so `ctrl` shortcuts keep
@@ -184,6 +225,46 @@ keymap = "sonicterm-macos"
 
 也可以把 `keymap` 写成任意 TOML 文件路径。
 
+### 默认快捷键
+
+macOS 上的应用修饰键是 `Cmd`；Windows 上是 `Alt`。在 Windows 上，`Ctrl+<字母>`
+仍然交给 shell（Ctrl+C = SIGINT，Ctrl+R = 历史搜索，Ctrl+W = 删除单词……），
+因此另外保留了几个终端通用的兼容别名（`Ctrl+T`、`Ctrl+Shift+C`、`Ctrl+Shift+V`）。
+
+| 功能 | macOS | Windows |
+| --- | --- | --- |
+| 新建 Tab | `Cmd+T`（`Cmd+Shift+T`） | `Alt+T` / `Ctrl+T`（`Alt+Shift+T`） |
+| 关闭 Pane 或 Tab | `Cmd+W` | `Alt+W` |
+| 下一个 Tab | `Cmd+Shift+]` / `Cmd+Right` | `Alt+Shift+]` / `Alt+Right` |
+| 上一个 Tab | `Cmd+Shift+[` / `Cmd+Left` | `Alt+Shift+[` / `Alt+Left` |
+| 切换到 Tab 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` |
+| 切换到最后一个 Tab | `Cmd+9` | `Alt+9` |
+| 向右分屏 | `Cmd+D` | `Alt+D` |
+| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` |
+| 关闭 Pane | `Cmd+Shift+W` | `Alt+Shift+W` |
+| 放大 Pane（Zoom） | `Cmd+Shift+Z` | `Alt+Shift+Z` |
+| 切换 Pane 焦点（左/下/上/右） | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| 调整 Pane 大小（左/右/上/下） | `Cmd+Shift+方向键` | `Alt+Shift+方向键` |
+| 广播到当前 Tab | `Cmd+Shift+B` | `Alt+Shift+B` |
+| 广播到所有 Tab | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` |
+| READONLY / 复制模式 | `Cmd+[` | `Alt+[` |
+| 复制 | `Cmd+C` | `Alt+C` / `Ctrl+Shift+C` |
+| 粘贴 | `Cmd+V` | `Ctrl+Shift+V` |
+| 增大字号 | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
+| 减小字号 | `Cmd+-` | `Alt+-` |
+| 重置字号 | `Cmd+0` | `Alt+0` |
+| 新建窗口 | `Cmd+N` | `Alt+N` |
+| 切换全屏 | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
+| 搜索 | `Cmd+F` | `Alt+F` |
+| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` |
+| URL 快速选择 | `Cmd+Shift+Space` | `Alt+Shift+Space` |
+| 上滚 / 下滚一行 | `Cmd+Up` / `Cmd+Down` | `Alt+Up` / `Alt+Down` |
+| 上滚 / 下滚一页 | `Cmd+PageUp` / `Cmd+PageDown` | `Alt+PageUp` / `Alt+PageDown` |
+| 滚动到顶部 / 底部 | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
+| 重新加载配置 | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
+
+以上是内置默认值；下面的 keymap TOML 里每一行都可以自定义。
+
 ### 修改当前 keymap
 
 1. 打开命令面板。
@@ -211,10 +292,10 @@ action = "split_right"
 
 | 修饰键 | 含义 |
 | --- | --- |
-| `super` | macOS 上是 Command，Windows 上是 Windows/Super 键 |
+| `super` | macOS 上是 Command，Windows 上是 Windows/Super 键；macOS 的应用修饰键 |
 | `ctrl` | Control |
 | `shift` | Shift |
-| `alt` | Option/Alt |
+| `alt` | macOS 上是 Option，Windows/Linux 上是 Alt；Windows 和 Linux 的应用修饰键 |
 
 默认 macOS keymap 主要使用 `super`（Command）。默认 Windows / Linux keymap 使用
 `alt` 作为 SonicTerm 的应用修饰键，这样 `ctrl` 快捷键可以继续交给 shell 使用。
