@@ -14,6 +14,9 @@ theme = "wezterm"
 #   Linux   -> sonicterm-linux
 keymap = "sonicterm-macos"
 locale = ""
+# Max width (logical px) of a single tab when the bar has room. Tabs grow up to
+# this so long titles stay readable; with many tabs they shrink to share the bar.
+tab_max_width = 240
 
 [font]
 family = "Rec Mono St.Helens"
@@ -79,6 +82,9 @@ software_render_mode = "auto"
 
 Notes:
 
+- **tab_max_width** caps how wide a single tab gets (logical px, default 240).
+  Tabs grow up to this width when the bar has room so long titles stay readable;
+  with many tabs open they shrink to share the bar evenly. Applies on Reload Config.
 - **scrollbar** drag works: grab the thumb to scroll, click the track to page.
 - **scrollback** is per pane; changing it via Reload Config applies to every
   open pane immediately.
@@ -95,6 +101,8 @@ macOS 和 Windows 的配置文件路径：`~/.sonicterm/sonicterm.toml`
 
 常用配置项：
 
+- `tab_max_width`：单个标签页的最大宽度（逻辑像素，默认 `240`）。标签栏有空间时，
+  标签会增宽到该值以便显示完整标题；标签很多时则会等分压缩。Reload Config 后生效。
 - `[font] font_rasterizer`：字形光栅器。平台默认值：Windows 为 `directwrite`
   （某个字形无法用 DirectWrite 光栅化时回退到 FreeType），macOS/Linux 为
   `freetype`。可显式覆盖为 `freetype`、`harfbuzz` 或 `directwrite`。
