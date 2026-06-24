@@ -1,6 +1,6 @@
 //! Per-pane render input bundle.
 //!
-//! Part B of the per-pane render refactor (PR #199). The `GpuRenderer::render`
+//! Part B of the per-pane render refactor. The `GpuRenderer::render`
 //! signature is being changed from a single `&mut Grid` to a slice of
 //! `PaneRender<'_>` so the renderer iterates panes itself and anchors each
 //! pane's cell-emission loop at the pane's own pixel origin rather than the
@@ -67,7 +67,7 @@ pub struct PaneRender<'a> {
     /// True when this pane is receiving mirrored broadcast input from the
     /// active/source pane and therefore needs prominent safety chrome.
     pub is_broadcast_receiver: bool,
-    /// Per-pane scrollbar alpha (PR-D, #386). `1.0` = fully visible,
+    /// Per-pane scrollbar alpha. `1.0` = fully visible,
     /// `0.0` = hidden. The renderer multiplies the scrollbar tint
     /// alphas by this and skips the emit entirely below the floor.
     pub scrollbar_alpha: f32,

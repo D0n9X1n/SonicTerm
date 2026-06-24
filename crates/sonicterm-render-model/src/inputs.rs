@@ -28,7 +28,7 @@ pub struct RenderInputs<'a> {
     /// lifetime/gating as [`Self::hovered_url_underline`]; this is the
     /// glyph-recolor companion to that underline overlay.
     pub hovered_url_cells: Option<HoveredUrlCells>,
-    /// Phase D — drag visual feedback (Epic #289).
+    /// Phase D — drag visual feedback.
     ///
     /// `Some(ghost)` while a tab drag session is live and the cursor
     /// has moved at least the drag-start threshold from the press

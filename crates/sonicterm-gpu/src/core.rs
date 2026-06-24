@@ -72,7 +72,7 @@ pub struct SurfaceAppearance {
     pub backdrop: BackdropKind,
     /// Theme background opacity.
     pub opacity: f32,
-    /// Scrollbar visibility policy (#386 PR-B). `Auto` and `Always` both
+    /// Scrollbar visibility policy. `Auto` and `Always` both
     /// draw the bar when the pane has scrollback beyond the viewport;
     /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
     /// deferred to PR-D — until then `Auto` behaves like Always-when-
@@ -109,7 +109,7 @@ fn preedit_has_visible_ink(preedit: &str) -> bool {
 /// composition is active, so the cursor block sits at the composition
 /// insertion point WezTerm-style.
 ///
-/// CRITICAL (#760): this MUST be gated on the SAME predicate as the inline
+/// CRITICAL: this MUST be gated on the SAME predicate as the inline
 /// preedit glyph overlay — [`preedit_has_visible_ink`]. macOS delivers a
 /// whitespace-only marked string during ordinary typing (and on bare Enter)
 /// whenever a CJK/Pinyin input source is active, even for plain Latin. The
@@ -131,7 +131,7 @@ fn preedit_caret_advance(preedit: &str, caret_byte: usize, font_size: f32) -> f3
     estimate_badge_text_width(&preedit[..cb], font_size)
 }
 
-/// Opaque-background rect for the inline IME preedit (#758).
+/// Opaque-background rect for the inline IME preedit.
 ///
 /// Returns `(x, y, w, h)` in renderer pixels for the mask that is laid
 /// down behind the composing run so it stays legible over whatever the
@@ -263,7 +263,7 @@ fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f
 ///
 /// True when the adapter is a CPU device, or its name matches a known
 /// software rasterizer (Microsoft WARP, Mesa llvmpipe, Google SwiftShader).
-/// Used to drive the no-GPU degrade path (issue #713). Pure fn over the
+/// Used to drive the no-GPU degrade path. Pure fn over the
 /// adapter info so it is unit-testable without a live GPU.
 #[must_use]
 pub fn detect_software_rendering(info: &wgpu::AdapterInfo) -> bool {
@@ -323,7 +323,7 @@ pub fn emit_pane_scrollbar(
     }
     let alpha = alpha.clamp(0.0, 1.0);
     // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
-    // bar keeps a constant physical size across displays (#651), min 1px.
+    // bar keeps a constant physical size across displays, min 1px.
     let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
     let geom_rect =
         sonicterm_ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
@@ -488,7 +488,7 @@ where
         // boundary pixel un-repainted. A full-cell glyph/inverse block (e.g.
         // zsh's reverse-video PROMPT_EOL_MARK `%`) paints into that pixel, so
         // when the cell is later cleared but only this row is dirty, the bottom
-        // 1px of the old block survives as a stray underline-like mark (#773).
+        // 1px of the old block survives as a stray underline-like mark.
         // Covering through the next row's top edge closes the rounding seam.
         let top = (origin_y + row as f32 * cell_h).floor() as i32;
         let next_top = (origin_y + (row as f32 + 1.0) * cell_h).ceil() as i32;
@@ -676,7 +676,7 @@ pub struct GpuRenderer {
     /// True when wgpu selected a CPU/software rasterizer (WARP, llvmpipe,
     /// SwiftShader) — see [`detect_software_rendering`]. The app reads this
     /// via [`GpuRenderer::is_software_rendering`] to degrade the frame cap and
-    /// per-frame animation (issue #713).
+    /// per-frame animation.
     software_rendering: bool,
     /// Resolved no-GPU degrade state: adapter detection combined with
     /// `[appearance].software_render_mode`.
@@ -728,7 +728,7 @@ pub struct GpuRenderer {
     padding_bottom: f32,
     bg: wgpu::Color,
     bg_opacity: f32,
-    /// Scrollbar visibility policy from config (PR-B of #386). Read on
+    /// Scrollbar visibility policy from config (PR-B). Read on
     /// every frame in the per-pane scrollbar emit loop.
     scrollbar_mode: sonicterm_cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
@@ -810,7 +810,7 @@ pub struct GpuRenderer {
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
-    /// Memoized inline IME preedit overlay glyphs (issue #714). The preedit
+    /// Memoized inline IME preedit overlay glyphs. The preedit
     /// is re-shaped from scratch every frame otherwise; while a composition is
     /// unchanged across frames (paused, or PTY-burst redraws while composing)
     /// this reuses the emitted glyphs. Keyed on the text + placement + color +
@@ -854,7 +854,7 @@ pub struct GpuRenderer {
     /// bundled fonts on disk) can still construct a `GpuRenderer`
     /// even though the grid path is degraded.
     pub(crate) font_stack: Option<sonicterm_engine::FontStack>,
-    /// Per-row glyph cache (PR after #130). Stores the shaped
+    /// Per-row glyph cache. Stores the shaped
     /// `GlyphInstance`s, underline coalescing, and missing-tofu list
     /// for each visible row, keyed by absolute row index + a content
     /// hash. A row whose contents / style / selection-overlap haven't
@@ -862,7 +862,7 @@ pub struct GpuRenderer {
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
     /// Per-row cache for background/underline/hyperlink-tint quads
-    /// (Epic #300 Phase P2). Mirrors `row_glyph_cache` but for the
+    /// (Phase P2). Mirrors `row_glyph_cache` but for the
     /// `QuadInstance`s emitted by `emit_cell_bg_quads_clipped` — on a
     /// hit we splice the cached `Vec<QuadInstance>` straight into the
     /// frame's quad vector and skip the per-cell run-length-encode.
@@ -878,7 +878,7 @@ pub struct GpuRenderer {
     /// `render()` call, in raster pixels (winit reports physical-px;
     /// post-G1a the renderer is raster-px end-to-end so no boundary
     /// conversion happens). Drives the pane-aware hit-test in
-    /// [`Self::pixel_to_cell`] (#569) so clicks land on the correct
+    /// [`Self::pixel_to_cell`] so clicks land on the correct
     /// pane and column even when the per-column edge cache
     /// (`snapped_cell_x`) has jitter at fractional DPI scales. Empty
     /// before the first render — callers must handle the fallback path.
@@ -890,7 +890,7 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
-    /// Optional async font fallback loader (Epic #300 P4 follow-up).
+    /// Optional async font fallback loader (P4 follow-up).
     /// When set, every transient `SwashRasterizer` built inside
     /// `render()` / `set_font` / `rebuild_for_scale` has the loader
     /// attached so misses on CJK / emoji / nerd-font codepoints fire a
@@ -972,7 +972,7 @@ struct FrameKey {
     hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
 }
 
-/// Memoized inline IME preedit overlay glyphs (issue #714). Reused across
+/// Memoized inline IME preedit overlay glyphs. Reused across
 /// frames when the composition text and its placement are unchanged so a
 /// paused or streaming-while-composing preedit isn't re-shaped every frame.
 /// `atlas_epoch` is the glyph atlas's cumulative eviction count at build time;
@@ -1020,7 +1020,7 @@ pub struct TabTitleGlyphDebug {
 
 /// Snapshot of one pane's layout in raster pixels, captured at the
 /// end of each `render()` call. Used by [`GpuRenderer::pixel_to_cell`]
-/// (#569) to (a) figure out which pane was clicked and (b) reconstruct
+/// to (a) figure out which pane was clicked and (b) reconstruct
 /// that pane's `snapped_cell_x` edge cache on-demand so the column
 /// search uses the same device-pixel-snapped edges the renderer drew.
 ///
@@ -1120,7 +1120,7 @@ pub fn emit_tab_title_glyphs(
 }
 
 /// Debug record emitted by [`emit_overlay_text_glyphs`] so tests can
-/// assert the device-scaled atlas path was taken (see #384).
+/// assert the device-scaled atlas path was taken.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayTextGlyphDebug {
@@ -1561,7 +1561,7 @@ impl GpuRenderer {
     /// rows reserved for the OS titlebar band + user padding. Without the
     /// scale the grid was reporting one fewer row than the window could fit,
     /// leaving a dead strip below the last painted row that showed the
-    /// surface clear color instead of vim's bg (#621).
+    /// surface clear color instead of vim's bg.
     pub fn top_inset(&self) -> f32 {
         (self.titlebar_inset + self.padding_top) * self.scale_factor
     }
@@ -1713,7 +1713,7 @@ impl GpuRenderer {
     /// or `None` when blinking is disabled. The app loop should set
     /// `ControlFlow::WaitUntil(this)` so the renderer wakes up exactly
     /// at bucket boundaries instead of busy-looping `request_redraw()`
-    /// after every frame (the project landmine flagged on PR #81).
+    /// after every frame (the project landmine flagged).
     pub fn next_blink_redraw_at(&self) -> Option<Instant> {
         // Blink-driven redraws are intentionally disabled in the idle
         // path. Re-shaping the grid 26×/sec just to fade the cursor
@@ -1832,7 +1832,7 @@ impl GpuRenderer {
     /// building geometry that will be handed back to the renderer (e.g.
     /// the per-pane rect in `compute_pane_rects_for`). Mixing the
     /// logical-px accessor with raster surface dims off-by-ones the row
-    /// count and leaves a dead strip below the last painted row (#621).
+    /// count and leaves a dead strip below the last painted row.
     pub fn padding_left_px(&self) -> f32 {
         self.padding_left * self.scale_factor
     }
@@ -1954,7 +1954,7 @@ impl GpuRenderer {
         quads: &mut Vec<QuadInstance>,
         snapped_cell_x: &[f32],
     ) -> Option<(f32, f32)> {
-        // #489: derive selection-row x/w and copy-cursor cx from the
+        // derive selection-row x/w and copy-cursor cx from the
         // shared snapped-edge cache so copy-mode overlays share
         // device-pixel edges with adjacent glyph cells at fractional
         // DPI. Empty-cache fallback preserves the raw arithmetic for
@@ -2018,7 +2018,7 @@ impl GpuRenderer {
         Some((cx, cy))
     }
 
-    /// PR #199 Fix 1 test hook: number of panes the most recent
+    /// Fix 1 test hook: number of panes the most recent
     /// `render()` call received in its slice. The integration test
     /// asserts this equals the active tab's pane count so a regression
     /// to a single-element slice (the original bug) is caught
@@ -2080,7 +2080,7 @@ impl GpuRenderer {
     /// subtracted from the raster-px surface dims. `top_inset()` and
     /// `bottom_inset()` already return raster px, so they're subtracted
     /// raw. Without the per-side scale the row count was off by ~1 on 2x
-    /// Retina, which left a dead strip below the last painted row (#621).
+    /// Retina, which left a dead strip below the last painted row.
     pub fn cells(&self) -> (u16, u16) {
         let surf_w = self.config.width as f32;
         let surf_h = self.config.height as f32;
@@ -2119,7 +2119,7 @@ impl GpuRenderer {
 
     /// True when wgpu fell back to a CPU/software rasterizer for this window.
     /// The app uses this to degrade frame pacing and per-frame animation in
-    /// the no-GPU case (issue #713).
+    /// the no-GPU case.
     pub fn is_software_rendering(&self) -> bool {
         self.software_rendering
     }
@@ -2151,7 +2151,7 @@ impl GpuRenderer {
 
     /// Current OS display scale factor (physical px per logical px). Exposed so
     /// the app layer can scale window-event geometry (e.g. the search-bar IME
-    /// caret rect) to match the renderer's physical-px coordinate space. #651.
+    /// caret rect) to match the renderer's physical-px coordinate space.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor
     }
@@ -2338,7 +2338,7 @@ impl GpuRenderer {
     /// paddings, radii, sub-cell thicknesses) are authored at scale-factor 1.0;
     /// route them through this so they track the display DPI like glyphs do.
     /// Window-anchored POSITIONS (edge margins, centering offsets) must NOT use
-    /// this — they stay in window space. See #651.
+    /// this — they stay in window space. See.
     #[inline]
     fn chrome_px(&self, logical: f32) -> f32 {
         logical * self.scale_factor
@@ -2369,7 +2369,7 @@ impl GpuRenderer {
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
                 let natural = m.cell_h as f32;
-                // E1 (#651): recompute cell_h from the freshly-rasterized
+                // E1: recompute cell_h from the freshly-rasterized
                 // natural height using the STORED line-height multiplier.
                 // The prior code derived the multiplier as
                 // `self.line_height / natural`, then `natural * multiplier`
@@ -2451,7 +2451,7 @@ impl GpuRenderer {
     /// in response to `UserEvent::ClearShapeCache` — itself fired by
     /// the [`sonicterm_text::async_fallback::AsyncFallbackLoader`]
     /// notifier when a CJK/emoji family finishes loading off the hot
-    /// startup path (Epic #300 P4 follow-up).
+    /// startup path (P4 follow-up).
     ///
     /// Without this method, freshly loaded fallback faces would not
     /// take effect until something else invalidated the caches
@@ -2509,7 +2509,7 @@ impl GpuRenderer {
     /// G1a: the renderer is raster px end-to-end, so winit's physical
     /// px IS our cell-grid coordinate system — no boundary divide.
     ///
-    /// #569: pane-aware. After the first `render()` call, this resolves
+    /// pane-aware. After the first `render` call, this resolves
     /// the click against the per-pane layout captured in
     /// `last_pane_layout` and uses that pane's reconstructed
     /// `snapped_cell_x` cache to pick a column. This matters at
@@ -2592,7 +2592,7 @@ impl GpuRenderer {
     // borrow fields (no win over positional args) or force the App layer
     // to construct an interior-mutable wrapper around its own state —
     // both worse than the current shape. Suppression stays with this
-    // explanatory comment per issue #143 review.
+    // explanatory comment review.
     /// Render one frame: terminal grid + cursor + selection + overlays
     /// (tab bar, search, command palette, IME preedit). Submits to the
     /// wgpu queue and presents the surface. See the parameter comments
@@ -2666,7 +2666,7 @@ impl GpuRenderer {
                 (p.id, [x, y])
             })
             .collect();
-        // #569: per-pane raster-px layout snapshot for the pane-aware
+        // per-pane raster-px layout snapshot for the pane-aware
         // hit-test in `pixel_to_cell`. PaneRender::rect_px is raster
         // px (winit physical-px is the same coordinate system post-G1a),
         // so the snapshot reads directly from `rect_px` with no scale
@@ -2731,8 +2731,8 @@ impl GpuRenderer {
             // but the grid hasn't yet been resynced (resize is debounced
             // through the PTY) the derived value is smaller than the
             // real pane rect and overlay quads at the trailing edge get
-            // clipped away, re-introducing the bleed-through PR #274 set
-            // out to fix. See Haiku review on #274.
+            // clipped away, re-introducing the bleed-through set
+            // out to fix. See a review.
             rect_w: f32,
             rect_h: f32,
             is_active: bool,
@@ -2788,7 +2788,7 @@ impl GpuRenderer {
         // to the active pane (selection, cursor, hyperlink hover, search
         // matches, IME preedit) so a quad that would otherwise extend past
         // the pane edge never bleeds into a neighbouring split pane.
-        // See PR #270 (selection clipping) — same overflow class for the
+        // See (selection clipping) — same overflow class for the
         // other overlay families is handled here.
         let active_pane_x: f32 = active_origin_x;
         let active_pane_y: f32 = active_origin_y;
@@ -2797,8 +2797,8 @@ impl GpuRenderer {
         // pane resize the grid resync is debounced through the PTY;
         // during that window the derived extent is *smaller* than the
         // real pane rect, which clipped overlays inside the trailing
-        // edge and re-introduced the bleed-through PR #274 set out to
-        // fix. Haiku review on #274.
+        // edge and re-introduced the bleed-through set out to
+        // fix. a review.
         let active_pane_w: f32 = pane_views[active_view_idx].rect_w;
         let active_pane_h: f32 = pane_views[active_view_idx].rect_h;
         // Active grid borrow — shared, used by overlays that read the
@@ -3118,10 +3118,10 @@ impl GpuRenderer {
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
         // origin_{x,y} is the PANE's origin (pad / top_inset) and
         // `pane_cols` is the originating pane's column count, captured
-        // at insert time. Pre-fix #199 this was (row, col_a, col_b) and
+        // at insert time. Pre-fix this was (row, col_a, col_b) and
         // the emit loop used `active_origin_x/y` for every entry —
         // placing inactive-pane underlines under the active pane's
-        // coordinates. Pre-fix #532 the tuple gained origin_{x,y} but
+        // coordinates. Pre-fix the tuple gained origin_{x,y} but
         // the emit loop still sized the per-origin snapped cache from
         // `grid.cols` (== ACTIVE pane); a wider inactive pane with
         // underlines past active.cols was clamped and truncated. We
@@ -3140,7 +3140,7 @@ impl GpuRenderer {
         // Overlay glyph instances — palette text + (future) other modals.
         // Kept separate so they can be drawn AFTER `quad_overlay` paints
         // the modal backdrop, otherwise they'd be hidden by their own
-        // background. (#384 — palette text was previously routed through
+        // background. (— palette text was previously routed through
         // the legacy chrome layer's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
         let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
@@ -3154,7 +3154,7 @@ impl GpuRenderer {
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
         // G1a: surface dims, cell pitch, padding, top_inset, font_size
         // all live in raster px now, so `px_to_ndc` gets the raw surface
-        // dims — the pre-PR #63 unit mismatch can no longer arise.
+        // dims — the pre-unit mismatch can no longer arise.
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
         // Note: window-level `pad` / `top_inset` no longer cached here;
@@ -3205,13 +3205,13 @@ impl GpuRenderer {
             // into pane_views above), uses the pane's own origin instead
             // of the window-level padding/inset, and threads its own
             // pane_id into the row_glyph_cache so split panes don't
-            // collide on absolute-row keys (PR #208 prereq).
+            // collide on absolute-row keys (prereq).
             // Size the row glyph cache ONCE for the whole frame using the
             // total visible rows across all panes — NOT per-pane inside the
             // loop. Resizing to a single pane's `grid.rows` on every iteration
             // changed the cap each time in an unequal-height split and cleared
             // the entire cache per pane per frame, forcing all rows to
-            // re-shape every keystroke (#715 follow-up). Mirrors the quad
+            // re-shape every keystroke. Mirrors the quad
             // cache's total-visible-rows sizing below.
             let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
             self.row_glyph_cache.resize(total_glyph_rows.max(1));
@@ -3229,7 +3229,7 @@ impl GpuRenderer {
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
-                // PR #130 invalidation hooks; renderer-side state changes
+                // invalidation hooks; renderer-side state changes
                 // (font/theme/scale/resize) already cleared the cache
                 // wholesale above. Translating dirty row indices to
                 // absolute rows uses the current view top — the same key
@@ -3245,7 +3245,7 @@ impl GpuRenderer {
                     let (a, b) = s.normalized();
                     (a.0, a.1, b.0, b.1)
                 });
-                // #470: per-cell device-pixel snapping rounds each cell's left
+                // per-cell device-pixel snapping rounds each cell's left
                 // edge independently. At fractional DPI (1.25/1.5/1.75) that
                 // produces a 14/15/14/15 device-pixel alternation in cell
                 // pitch, which shows as 1-px gaps between adjacent Powerline
@@ -3508,7 +3508,7 @@ impl GpuRenderer {
         let mut quads: Vec<QuadInstance> = Vec::new();
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
-        // terminal content underneath. (Regression caught in PR #45 review:
+        // terminal content underneath. (Regression caught review:
         // terminal glyphs were bleeding through overlay dialogs.)
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
@@ -3527,7 +3527,7 @@ impl GpuRenderer {
             );
         }
 
-        // #489: build the active pane's shared device-pixel-snapped
+        // build the active pane's shared device-pixel-snapped
         // column-edge cache once per frame, hoisted above every overlay
         // path. Every overlay anchored to the active pane (selection,
         // cursor, copy-mode, quick-select, hyperlink, search-highlight,
@@ -3535,7 +3535,7 @@ impl GpuRenderer {
         // this cache so it stays edge-aligned with adjacent glyph cells
         // at fractional DPI. Integer scales (1.0/2.0) are an identity
         // fast path inside `snap_to_device_pixels`, so mac dHash
-        // baselines stay green by construction. Per #489 diagnosis,
+        // baselines stay green by construction. Per diagnosis,
         // per-pane bg fill builds its OWN cache (see the per-pane bg
         // loop below) — it MUST NOT share the active pane's cache.
         let active_snapped_cell_x: Vec<f32> =
@@ -3551,7 +3551,7 @@ impl GpuRenderer {
         // Part B step 3: emit bg quads for EVERY pane using each pane's
         // own origin, not just the active pane.
         //
-        // Epic #300 P2: per-row LineQuadCache. Background quads are a
+        // P2: per-row LineQuadCache. Background quads are a
         // hot QuadInstance source in dense-cell workloads. Each row's
         // emission is keyed on (pane_id,
         // abs_row, content+geom+style+selection hash); on a hit we
@@ -3582,7 +3582,7 @@ impl GpuRenderer {
             if max_cols == 0 || max_rows == 0 {
                 continue;
             }
-            // #489: per-pane snapped-edge cache for bg-fill runs. Per
+            // per-pane snapped-edge cache for bg-fill runs. Per
             // diagnosis Recommendation, per-pane bg must NOT reuse the
             // active pane's cache because each split-pane has its own
             // pad and the snapped column edges differ.
@@ -3657,7 +3657,7 @@ impl GpuRenderer {
             }
         }
 
-        // #386 PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
+        // PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
         // the per-row bg quads so the bar paints above any colored cell
         // background but below selection / cursor / modal overlays
         // (those land in `quads_overlay` later in the function). Auto
@@ -3777,7 +3777,7 @@ impl GpuRenderer {
             let live_top = grid.scrollback_len() as u64;
             let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
             if view_top == live_top {
-                // #489: read both cursor cell left edge AND width from the
+                // read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
                 // underline) lines up with its glyph cell at fractional DPI.
                 let row = grid.row(grid.cursor.row);
@@ -3813,7 +3813,7 @@ impl GpuRenderer {
                 if search.is_none() {
                     if let Some(i) = ime {
                         let text = i.preedit();
-                        // #760: gate on visible ink (NOT just non-empty) and
+                        // gate on visible ink (NOT just non-empty) and
                         // reuse the shared pure helper, so a whitespace-only
                         // macOS marked string never shoves the cursor block
                         // into empty space with no glyph under it.
@@ -3833,7 +3833,7 @@ impl GpuRenderer {
                 // We pick a ~2px sub-cell thickness rather than something
                 // proportional to cell_h so the bar stays crisp on both
                 // small and large font sizes (no half-pixel sub-stem).
-                // #651: 2 logical px scaled to physical px so the bar/underline
+                // 2 logical px scaled to physical px so the bar/underline
                 // keep a constant physical thickness across DPIs (min 1px).
                 let subshape_px: f32 = (2.0 * self.scale_factor).round().max(1.0);
                 match self.cursor_shape {
@@ -3909,11 +3909,11 @@ impl GpuRenderer {
         // above, matching WezTerm/xterm underline semantics instead of the
         // old single-colour single-line approximation.
         let underline_thickness = (self.cell_h * 0.08).max(1.0);
-        // #489: underlines are collected from every pane (each entry
+        // underlines are collected from every pane (each entry
         // carries its own `origin_x` == pane pad), so memoize a snapped
         // cache per distinct pane pad. Most frames have ≤ 2 panes, so
         // the linear-scan map is cheaper than a HashMap.
-        // #532 Step-4 revise (option (a)): each entry also carries the
+        // Step-4 revise (option (a)): each entry also carries the
         // ORIGINATING pane's column count. Previously this loop sized
         // the cache from `grid.cols` (== ACTIVE pane), which clamped
         // and truncated underlines on wider INACTIVE panes. Key the
@@ -3958,7 +3958,7 @@ impl GpuRenderer {
             );
         }
 
-        // Cmd-hover URL underline (#660). The hovered URL's glyphs are
+        // Cmd-hover URL underline. The hovered URL's glyphs are
         // recolored to the theme accent in the glyph loop; draw a matching
         // accent underline here as a per-frame overlay (not cached — hover
         // state isn't part of the row cache key for underlines). Uses the
@@ -4102,7 +4102,7 @@ impl GpuRenderer {
         }
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            // Phase D (Epic #289): open an 8 px insertion gap at the
+            // Phase D: open an 8 px insertion gap at the
             // current drop slot when a drag is active over this bar.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
             let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
@@ -4114,17 +4114,17 @@ impl GpuRenderer {
                 insertion_slot,
             )
             .with_top_offset(self.tab_bar_y_offset());
-            // Issue #112 Round 3 — premium browser-style chrome.
+            // Round 3 — premium browser-style chrome.
             // The structural colors come from `ui_tokens`, decoupled from
             // the terminal palette so every theme renders the same modern
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
             let ui_palette = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
-            // Issue #383: `tok::BG_BASE()` is a hardcoded near-black
+            // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
-            // (PR #391 diagnostic confirmed 6 quads pinned at NDC
+            // (diagnostic confirmed 6 quads pinned at NDC
             // bottom with alpha 1.0) but the bar bg was the *same
             // pixel value* as the cell-grid bg, so it disappeared.
             // Switch to `ui_palette.bg_base` which is theme-derived
@@ -4148,7 +4148,7 @@ impl GpuRenderer {
                 },
             );
             for t in &layout.tabs {
-                // Phase D D3 (Epic #289): if this tab is the source of
+                // Phase D D3: if this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to
                 // dim it to roughly `source_alpha` perceived opacity.
                 // The quad is painted AFTER the tab body + close icon
@@ -4264,7 +4264,7 @@ impl GpuRenderer {
             // Only walk matches whose row intersects the viewport. `matches`
             // is row-sorted, so this is a binary-search-bounded slice — per
             // frame cost is O(visible matches), not O(total matches), which
-            // otherwise grows with scrollback depth (issue #710). `start`
+            // otherwise grows with scrollback depth. `start`
             // keeps `i` aligned with the full slice for the cur_idx compare.
             let (vis_start, vis_end) = s.visible_match_range(view_top_abs, grid.rows);
             for (i, m) in
@@ -4277,7 +4277,7 @@ impl GpuRenderer {
                 if visible_row >= u64::from(grid.rows) {
                     continue;
                 }
-                // #489: derive x/w from the active-pane snapped-edge
+                // derive x/w from the active-pane snapped-edge
                 // cache so match highlights share device-pixel edges
                 // with adjacent glyph cells at fractional DPI.
                 let cache_end =
@@ -4297,7 +4297,7 @@ impl GpuRenderer {
                 } else {
                     (match_bg, match_fg)
                 };
-                // Clip the match highlight to the active pane (PR #270
+                // Clip the match highlight to the active pane (
                 // follow-up) — a long match that runs past the pane's
                 // last column would otherwise paint into the neighbour.
                 if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
@@ -4705,7 +4705,7 @@ impl GpuRenderer {
             // Shape the query row text. The renderer paints either the
             // placeholder (empty query) or the typed text + cursor.
             //
-            // #384: emit through the SonicTerm glyph atlas at device pixel
+            // emit through the SonicTerm glyph atlas at device pixel
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
             // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
@@ -4994,7 +4994,7 @@ impl GpuRenderer {
                 let pre_w = estimate_badge_text_width(text, font_size).max(self.cell_w);
                 let clip_to_pane = true;
 
-                // (0) Opaque background behind the composing run (#758).
+                // (0) Opaque background behind the composing run.
                 //
                 // The inline preedit is drawn over whatever the app already
                 // painted in these cells. When an app shows placeholder/hint
@@ -5004,7 +5004,7 @@ impl GpuRenderer {
                 // plain terminal `bg` first so the composing glyphs sit on a
                 // clean surface — mirroring what the search-bar preedit path
                 // already does. This is NOT a highlight color (preserving the
-                // "no highlight background" preference from #749); it only
+                // "no highlight background" preference); it only
                 // masks the cells the preedit actually occupies. Pushed to
                 // `quads_overlay`, which draws beneath `overlay_glyph_instances`
                 // (see `draw_layers` order), so it never covers the glyphs.
@@ -5036,7 +5036,7 @@ impl GpuRenderer {
                 // line, nudged a hair right so it doesn't kiss the cell edge.
                 // The opaque terminal-bg mask emitted in (0) sits behind these
                 // glyphs (plain bg, not a highlight color), so the in-flight
-                // run is legible even over app placeholder/hint text (#758).
+                // run is legible even over app placeholder/hint text.
                 // native_em MUST equal font_size here. chrome_text scales each
                 // glyph tile by `font_size_px / native_em_px`; using cell_h
                 // (which includes line spacing, so cell_h > raster_px(font))
@@ -5048,7 +5048,7 @@ impl GpuRenderer {
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
                 let preedit_fg = self.search_fg;
-                // Issue #714: reuse the memoized preedit glyphs when text +
+                // reuse the memoized preedit glyphs when text +
                 // placement + color + atlas generation all match, so a paused
                 // or streaming-while-composing preedit isn't re-shaped each
                 // frame. Any atlas eviction bumps the epoch and forces a
@@ -5158,7 +5158,7 @@ impl GpuRenderer {
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
-            // #651 follow-up: two independent multipliers compose here.
+            // follow-up: two independent multipliers compose here.
             // `chip.scale` is the tear-out ANIMATION ease (1.0 in-bar, 1.02
             // on tear); `dpi` is the display scale factor. The chip's logical
             // size + decorations must scale by DPI so it keeps a constant
@@ -5179,7 +5179,7 @@ impl GpuRenderer {
 
             // Soft drop shadow: stack two dimmer quads with growing
             // offset to fake an 8px blur without a fragment shader.
-            // Offsets are logical px → scale by DPI (#651).
+            // Offsets are logical px → scale by DPI.
             for (off, alpha) in [(2.0_f32, 0.18_f32), (4.0_f32, 0.10_f32), (8.0_f32, 0.05_f32)] {
                 let off = off * dpi;
                 quads_overlay.push(QuadInstance {
@@ -5220,7 +5220,7 @@ impl GpuRenderer {
 
             // T14: drag-chip title text → chrome_text.
             //
-            // Phase D D1 (Haiku follow-up on PR #298): scale the
+            // Phase D D1 (Haiku follow-up): scale the
             // text color alpha by `chip.ghost_alpha` (spec 0.5) so
             // the GHOST TITLE matches the ghost body translucency.
             if !chip.title.is_empty() {
@@ -5237,7 +5237,7 @@ impl GpuRenderer {
                     // top = y0 + (h - font_size*0.85*1.2) * 0.5, clip to
                     // chip body inset 4px. Font size goes through raster_px and
                     // the insets through dpi so the ghost title scales with the
-                    // chip on HiDPI displays (#651).
+                    // chip on HiDPI displays.
                     let chip_font_size = self.raster_px(self.font_size * 0.85);
                     let top = y0 + ((h - chip_font_size * 1.2).max(0.0)) * 0.5;
                     let baseline_y = top + chip_font_size * 0.8;
@@ -5542,7 +5542,7 @@ impl GpuRenderer {
         quads_overlay: &mut Vec<QuadInstance>,
         snapped_cell_x: &[f32],
     ) {
-        // #489: derive each hint cell's x/w from the shared snapped-edge
+        // derive each hint cell's x/w from the shared snapped-edge
         // cache so quick-select hint backgrounds share device-pixel
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
@@ -6133,7 +6133,7 @@ impl GpuRenderer {
 /// background. `0.45` lands roughly at the ~55% perceived intensity that
 /// xterm/VTE/WezTerm use for faint text — enough that editor inline
 /// predictions / ghost text read as clearly fainter than committed text
-/// without becoming unreadable. See #756.
+/// without becoming unreadable. See.
 const DIM_BLEND: f32 = 0.45;
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
@@ -6151,7 +6151,7 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
     };
     // Dim / faint (SGR 2): pull the foreground toward its background so
     // faint text is visibly de-emphasized instead of identical to normal
-    // text. Stored but previously unread (#756).
+    // text. Stored but previously unread.
     if cell.flags.contains(CellFlags::DIM) {
         dim_toward(fg, bg, DIM_BLEND)
     } else {
@@ -6446,7 +6446,7 @@ pub fn emit_cell_bg_quads_clipped(
     if max_cols == 0 || max_rows == 0 {
         return;
     }
-    // #489: build this pane's snapped-edge cache once. Per the
+    // build this pane's snapped-edge cache once. Per the
     // diagnosis, per-pane bg builds its own cache (not the active
     // pane's) so split-pane bg edges stay aligned with that pane's
     // glyph cells. G1a: `build_snapped_cell_x` no longer takes a
@@ -6472,7 +6472,7 @@ pub fn emit_cell_bg_quads_clipped(
     }
 }
 
-/// #489: shared device-pixel-snapped column-edge cache. Returns
+/// shared device-pixel-snapped column-edge cache. Returns
 /// `cols + 1` entries where slot `c` is the snapped left edge of cell
 /// `c`, and slot `c + span` is its right edge. Every overlay/glyph
 /// path that derives a horizontal rect from a column index must read
@@ -6503,7 +6503,7 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
 }
 
 /// Pure column-from-pixel lookup that mirrors the renderer's
-/// device-pixel-snapped edge cache (#569). `edges` is the output of
+/// device-pixel-snapped edge cache. `edges` is the output of
 /// `build_snapped_cell_x` for the pane in question (length `cols + 1`).
 /// Returns `Some(col)` for any `px` in `[edges[0], edges[cols])` using
 /// half-open buckets `edges[col] <= px < edges[col+1]` — boundary px
@@ -6542,7 +6542,7 @@ pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
 }
 
 /// Emit background quads for a single visible row. Extracted so the
-/// `LineQuadCache` miss path (Epic #300 P2) can call it for one row
+/// `LineQuadCache` miss path (P2) can call it for one row
 /// at a time and capture the resulting quads into the cache.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
@@ -6570,7 +6570,7 @@ pub fn emit_cell_bg_quads_for_row(
         let mut run_start: Option<u16> = None;
         let mut run_color: Option<[f32; 4]> = None;
         let mut col: u16 = 0;
-        // #489: derive x/w from the shared snapped-edge cache so bg
+        // derive x/w from the shared snapped-edge cache so bg
         // runs share device-pixel edges with adjacent glyph cells at
         // fractional DPI. Falls back to raw arithmetic if the cache is
         // empty (defensive — production always passes the full cache).
@@ -6778,7 +6778,7 @@ pub fn selection_quad_rects(
     }
     let (a, b) = sel.normalized();
     let mut out = Vec::with_capacity(usize::from(rows));
-    // #489: derive each row's x/w from the shared snapped-edge cache so
+    // derive each row's x/w from the shared snapped-edge cache so
     // selection rects share device-pixel edges with adjacent glyph
     // cells at fractional DPI. Empty-cache fallback preserves the old
     // raw-arithmetic behavior for callers (debug/test helpers) that

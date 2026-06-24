@@ -2,7 +2,7 @@
 //! state machine as input. The state machine reduces an Intent into
 //! zero or more `AppEffect`s (see `effect.rs`).
 //!
-//! Per spec §1 (M6a-expand-2 FINAL, #429): 63 variants. Payload types
+//! Per spec §1: 63 variants. Payload types
 //! are all pure data — zero winit / wgpu / glyphon / cosmic-text refs.
 //!
 //! M6a-expand-2a: enum + payload type surface. The per-Intent reducer

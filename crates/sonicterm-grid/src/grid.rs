@@ -13,7 +13,7 @@ use crate::line::Line;
 
 /// A row of cells.
 ///
-/// **PR-B2 (#319):** the public type alias is now `Line`. Public accessors
+/// **PR-B2:** the public type alias is now `Line`. Public accessors
 /// (`row`, `row_mut`, `rows_iter`, `scrollback_row`, `scrollback_iter`,
 /// `row_at_abs`) return `&Line` / `&mut Line` directly. Callers index cells
 /// via `Line::Index<usize>` / `Index<Range<usize>>`, iterate via
@@ -301,7 +301,7 @@ impl Grid {
         for row in &mut self.visible {
             row.resize(cols as usize, Cell::default());
         }
-        // PR-E (#319): keep scrollback consistent with the new column count.
+        // PR-E: keep scrollback consistent with the new column count.
         // `Line::resize` is now Cluster-preserving, so uniform blank
         // scrollback rows (the bulk of typical scrollback) stay compressed.
         if cols != self.cols {
@@ -687,7 +687,7 @@ impl Grid {
                 self.visible.push_back(row);
                 continue;
             }
-            // PR-C (#319): try to compress the ejected line into a
+            // PR-C: try to compress the ejected line into a
             // single Cluster (whole-line uniform attrs). No-op when the
             // line is non-uniform — it stays Flat. Multi-Cluster
             // segmentation of partially-uniform lines is PR-D scope.
@@ -699,7 +699,7 @@ impl Grid {
                 // already drains any excess when the cap is lowered, but if a
                 // scrollback were ever above the limit this branch holds it
                 // steady (recycle is length-neutral) instead of letting the
-                // `else` branch grow it one row per scroll (issue #710).
+                // `else` branch grow it one row per scroll.
                 // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
                 // above), and a non-empty VecDeque always yields `Some`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
@@ -781,7 +781,7 @@ impl Grid {
     /// with a previously-cached hash for the same `abs_row`, the
     /// renderer would replay stale quads. Marking the entire region
     /// dirty is the simple correct option and costs nothing at
-    /// terminal row counts. Closes #348.
+    /// terminal row counts.
     pub fn scroll_region_up(&mut self, top: u16, bottom: u16, n: u16) {
         self.scroll_region_up_with(top, bottom, n, Cell::default());
     }
@@ -808,7 +808,7 @@ impl Grid {
         // scrolls off the top — breaking interactive TUIs like Claude
         // Code that briefly set full-screen margins and then redraw,
         // leaving stale text bleeding through behind their UI. Fixes
-        // #425 (and the real cause behind #414).
+        // (and the real cause).
         if top_i == 0 && bot_i == rows.saturating_sub(1) {
             self.scroll_up_with(n, fill);
             return;
@@ -1051,7 +1051,7 @@ impl Grid {
         // beforehand — those cells are the source for the first `n` shifted
         // destinations, so pre-clearing them destroys the very text being
         // "inserted before" and only the originally-rightmost cell survives
-        // (#762: "11" + insert "0." rendered "0.1", dropping the last cell).
+        // .
         // Wide-pair integrity is preserved by the shift (adjacency is kept)
         // and any half-pair split by the fill gap or pushed off the right
         // edge is cleaned by `repair_wide_row` below — so no pre-clear is
@@ -1115,7 +1115,7 @@ impl Grid {
         self.scrollback.len()
     }
 
-    /// #319 PR-F: debug introspection — count (Cluster, Flat) lines in
+    /// PR-F: debug introspection — count (Cluster, Flat) lines in
     /// scrollback.
     #[doc(hidden)]
     pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
@@ -1131,7 +1131,7 @@ impl Grid {
         (cluster, flat)
     }
 
-    /// #319 PR-F: sum of per-row `approx_byte_size()` across scrollback. This
+    /// PR-F: sum of per-row `approx_byte_size` across scrollback. This
     /// is a payload-only metric used by internal compression policy tests.
     /// User-visible heap reporting should use [`Self::scrollback_heap_bytes`]
     /// so it counts reserved `Vec::capacity()` bytes and container overhead.
@@ -1140,13 +1140,13 @@ impl Grid {
         self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
     }
 
-    /// #399 review fix: reserved row slots in the scrollback container.
+    /// review fix: reserved row slots in the scrollback container.
     #[doc(hidden)]
     pub fn scrollback_capacity(&self) -> usize {
         self.scrollback.capacity()
     }
 
-    /// #399 review fix: approximate scrollback heap footprint for reporting.
+    /// review fix: approximate scrollback heap footprint for reporting.
     /// Counts the scrollback `VecDeque` ring, reserved outer row slots, one
     /// inner `Vec` header per live row, plus each inner storage buffer's
     /// reserved capacity. This intentionally reports user-visible heap shape
@@ -1231,7 +1231,7 @@ impl Grid {
     /// limit is below the current history depth, the oldest rows are dropped
     /// immediately so memory reflects the new cap — this is what makes
     /// `config.terminal.scrollback` actually bound retained history, both at
-    /// pane creation and on config hot-reload (issue #710).
+    /// pane creation and on config hot-reload.
     pub fn set_scrollback_limit(&mut self, limit: usize) {
         self.scrollback_limit = limit;
         if self.scrollback.len() > limit {

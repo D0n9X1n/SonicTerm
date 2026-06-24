@@ -184,7 +184,7 @@ use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 /// to point at this child's window so output from the shell triggers
 /// redraws on the correct surface (otherwise typing in the child
 /// would render onto the parent's window, which was the v1 bug).
-/// Epic #289 Phase B — kind of window stored in the unified
+/// Phase B — kind of window stored in the unified
 /// [`App::windows`] map. Today every torn-out terminal child window is
 /// `Terminal`.
 ///
@@ -238,13 +238,13 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
 /// - it is *streaming-driven* — a fresh PTY burst, or not input-driven at
 ///   all. A PURE input redraw (`was_dirty` with no concurrent `pty_burst`:
 ///   resize/selection-drag/IME/theme) renders immediately; gating those adds
-///   perceptible latency (PR #132). Crucially a typing echo is BOTH dirty and
-///   a burst, and counts as streaming so it coalesces (issue #710) rather
+///   perceptible latency. Crucially a typing echo is BOTH dirty and
+///   a burst, and counts as streaming so it coalesces rather
 ///   than rendering per echo chunk.
 /// - `since_last_render < frame_period` — we already drew inside this vsync
 ///   window, so another draw now would just burn a frame.
 ///
-/// Extracted as a pure fn (Issue #43) so main and child use byte-identical
+/// Extracted as a pure fn so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
 /// is what lets a bursty `ls -al` coalesce to one frame per vsync; on a
 /// torn-out child the same gate also stops the render path from busy-spinning
@@ -267,12 +267,12 @@ pub fn should_defer_streaming_redraw(
     // So the echo's redraw is BOTH `was_dirty` and `pty_burst`. Keying the
     // gate on `!was_dirty` alone let that echo short-circuit coalescing and
     // render per echo chunk — a redraw storm under fast typing and streaming
-    // apps like Claude Code (issue #710). Treating a burst as streaming work
+    // apps like Claude Code. Treating a burst as streaming work
     // (even when input_dirty is also set) coalesces it to the frame boundary;
     // `about_to_wait` re-requests at `last_render + frame_period`, so latency
     // is bounded by one frame and nothing is dropped.
     //
-    // `software_render` (issue #713): on a CPU rasterizer EVERY frame is
+    // `software_render`: on a CPU rasterizer EVERY frame is
     // expensive (full-screen software raster), so even *pure* input redraws
     // are coalesced to the frame cap — fast typing in a TUI like Claude Code
     // would otherwise force a full-screen raster per keystroke and peg the
@@ -301,7 +301,7 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(25_000)
 
 /// Frame period cap while an IME composition is in flight on the software
 /// rasterizer (~12 fps). Each preedit keystroke forces a full-surface raster
-/// (issue #714); composing is interactive but doesn't need a high rate, so we
+/// composing is interactive but doesn't need a high rate, so we
 /// cap it lower to roughly halve the whole-surface presents while the user
 /// types a long pinyin run. Only applied when BOTH software-render and
 /// composing.
@@ -310,7 +310,7 @@ pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros
 /// Effective frame period given the software-render and IME-composing state.
 /// On the hardware path this is the monitor period unchanged. On the software
 /// path it's the 40 fps cap, dropped lower only while an IME composition is
-/// active (issue #714).
+/// active.
 #[must_use]
 pub fn effective_frame_period(
     software_render: bool,
@@ -326,7 +326,7 @@ pub fn effective_frame_period(
     }
 }
 
-/// Resolve the effective frame period for the no-GPU case (issue #713).
+/// Resolve the effective frame period for the no-GPU case.
 ///
 /// When `degrade` is true (software rasterizer detected, or forced by config),
 /// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
@@ -344,7 +344,7 @@ pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> 
 }
 
 /// Whether to engage the no-GPU degrade path, combining the config mode with
-/// runtime detection (issue #713). `Auto` follows detection; `Force` always
+/// runtime detection. `Auto` follows detection; `Force` always
 /// degrades; `Off` never does.
 #[must_use]
 pub fn should_degrade_for_software_render(
@@ -411,7 +411,7 @@ pub struct WarmWindow {
 pub struct WindowState {
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
-    /// Phase B2 PR-B2-0 (#365): promoted from `Arc<Window>` to
+    /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
     /// `Option<Arc<Window>>` so test seeders can build a `WindowState`
     /// without running `do_resumed`. In production this is `Some(_)`
     /// the moment `do_resumed` (main) or `create_child_window`
@@ -421,7 +421,7 @@ pub struct WindowState {
     pub window: Option<Arc<Window>>,
     /// Per-window wgpu renderer. `Some(_)` once `do_resumed` (main
     /// window) or `create_child_window` (torn-out) populates it.
-    /// PR-B1b (#293): the main window's renderer now lives here too —
+    /// PR-B1b: the main window's renderer now lives here too —
     /// the legacy `App.renderer` field was deleted. Read through
     /// [`Self::renderer`] / [`Self::renderer_mut`] which unwrap (always
     /// safe after `do_resumed`).
@@ -455,11 +455,11 @@ pub struct WindowState {
     pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    // PR #400 follow-up: `cursor_visible` moved to `PaneState` (per-pane
+    // follow-up: `cursor_visible` moved to `PaneState` (per-pane
     // Arc travels with tear-out). Read from
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
-    /// Phase B2 PR-B3b (#365): pointer-cursor-is-link latch. Mirrors
+    /// Phase B2 PR-B3b: pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
     pub hover_link: bool,
@@ -481,7 +481,7 @@ pub struct WindowState {
     /// independently. The legacy `App.ime` continues to exist and is
     /// kept in sync on the main window until PR-B.
     pub ime: ImeState,
-    /// Phase B2 PR-B3d (#365) — per-window throttle for
+    /// Phase B2 PR-B3d — per-window throttle for
     /// `Window::set_ime_cursor_area`. Promoted from `App.ime_cursor_throttle`
     /// so each torn-out window can throttle its own IMK runloop traffic
     /// independently. The legacy field stayed in lock-step on the main
@@ -494,14 +494,14 @@ pub struct WindowState {
     /// stays in lock-step on the main window until PR-B.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
     pub notification: Option<NotificationBubble>,
-    /// Phase B2 PR-B4 (#365): "this window is hidden / drained" latch.
+    /// Phase B2 PR-B4: "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
     /// state lives next to the `Window` Arc it gates. Today only the main
     /// window flips this to `true` (when its last tab is torn out and
     /// child windows keep the event loop alive); child windows leave it
     /// `false` and reap on empty instead.
     pub hidden: bool,
-    /// Active scrollbar-drag gesture (#386 PR-C). `Some(_)` between a
+    /// Active scrollbar-drag gesture. `Some(_)` between a
     /// thumb mouse-down and the matching release; cursor moves while
     /// set route to the scrollbar instead of extending a selection.
     pub scrollbar_drag: Option<scrollbar_input::ScrollbarDragState>,
@@ -511,12 +511,12 @@ pub struct WindowState {
     /// Current split-divider hover axis, used to restore the OS cursor when
     /// the pointer leaves the divider.
     pub splitter_hover: Option<sonicterm_ui::pane::SplitAxis>,
-    /// Per-pane scrollbar visibility/fade state (#386 PR-D). Inserted
+    /// Per-pane scrollbar visibility/fade state. Inserted
     /// lazily on first interaction; entries for closed panes are
     /// pruned opportunistically on the next render.
     pub scrollbar_vis: HashMap<u64, scrollbar_visibility::ScrollbarVisState>,
     pub pending_tear_out_timing: Option<TearOutTiming>,
-    /// Test-only mirror of the renderer's `drag_chip` overlay (#438).
+    /// Test-only mirror of the renderer's `drag_chip` overlay.
     /// Production code leaves this `None`. Headless tests use
     /// [`App::__test_set_window_drag_chip_marker`] to flip it `Some(true)`
     /// before calling [`App::cancel_drag_session`], then assert it is
@@ -525,7 +525,7 @@ pub struct WindowState {
     /// `renderer.set_drag_chip(None)` call (when `Some(_)`), so the test
     /// observes the SAME loop iteration the production path runs — if
     /// someone deletes the per-window iteration the marker stays `Some(true)`
-    /// and the test fails. This is the test seam Haiku review of PR #443
+    /// the test fails. This is the test seam a review
     /// asked for (the `renderer: None` headless windows could not otherwise
     /// observe `set_drag_chip(None)`).
     pub test_drag_chip_marker: Option<bool>,
@@ -571,7 +571,7 @@ impl WindowState {
             .expect("WindowState::renderer_mut() called before do_resumed populated it")
     }
 
-    /// Phase B2 PR-B2-0 (#365): convenience that short-circuits when
+    /// Phase B2 PR-B2-0: convenience that short-circuits when
     /// `window` is `None`. Most call sites previously did
     /// `ws.window.request_redraw()` unconditionally; after the
     /// `Option` promotion they want a no-op when the window is gone.
@@ -708,7 +708,7 @@ impl WindowState {
         Some(sel)
     }
 
-    /// #447 follow-up to PR #443: clear the drag-chip overlay in one
+    /// follow-up to clear the drag-chip overlay in one
     /// place. The renderer's persistent overlay (drawn by the per-frame
     /// emitter at render/core.rs:3945+) and the headless-test marker
     /// (`test_drag_chip_marker`, asserted by os_drag_cleanup.rs) used
@@ -717,7 +717,7 @@ impl WindowState {
     /// test green while breaking production. Unify both clears here so
     /// every caller flips them in lock-step.
     ///
-    /// **Contract (#462 speculative fix codification):** this helper is
+    /// **Contract:** this helper is
     /// **tolerant** — it is safe to call on a `WindowState` whose
     /// `renderer` is `None` (e.g. a transitional window that hasn't
     /// finished initialization yet, or a headless test window) AND on
@@ -726,7 +726,7 @@ impl WindowState {
     /// `pending_os_teardown` drain (see [`App::cancel_drag_session`]
     /// and `App::drain_pending_os_teardown`) iterates a snapshot of
     /// `self.windows.keys()`, and a tear-out spawn that just landed
-    /// (#462 race) may have produced a `WindowState` whose renderer
+    /// may have produced a `WindowState` whose renderer
     /// is still being constructed. Both fields are flipped together —
     /// callers MUST NOT split them, or the headless-test lock-step
     /// guarantee in `tests/os_drag_cleanup.rs` regresses.
@@ -740,14 +740,14 @@ impl WindowState {
         }
     }
 
-    /// #535 + #540 — intra-window tab reorder that keeps `tabs` and
+    /// — intra-window tab reorder that keeps `tabs` and
     /// `tab_states` in lock-step. Extracted from `window_event.rs`'s
     /// main-window `ReorderTab` branch so the production path and the
     /// regression tests exercise the SAME code.
     ///
     /// Semantics match `tab_transfer::reorder_within`:
     /// - `from` out of range → no-op.
-    /// - `to` clamped to `len - 1` (#540 — drop-past-last must land at
+    /// - `to` clamped to `len - 1` (— drop-past-last must land at
     ///   the end, not silently no-op like `TabBar::reorder` does).
     /// - `to == from` after clamp → no-op.
     /// - Otherwise: `tabs.reorder(from, to)` AND
@@ -785,7 +785,7 @@ fn next_synthetic_child_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
 }
 
-/// Phase B2 PR-B2a (#365): stable synthetic `WindowId` used by the
+/// Phase B2 PR-B2a: stable synthetic `WindowId` used by the
 /// test-only [`App::__test_synthetic_main`] seam so the main entry in
 /// `App.windows` can be addressed without a live winit window. winit's
 /// `WindowId` is `#[repr(transparent)] struct WindowId(u64)` so a
@@ -806,7 +806,7 @@ pub fn synthetic_main_window_id() -> WindowId {
 }
 
 /// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
-/// Epic #289 Phase A — classification of which terminal window currently
+/// Phase A — classification of which terminal window currently
 /// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
 /// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
@@ -902,7 +902,7 @@ pub fn pick_prompt_target(
 /// Seed a freshly-created parser with the active theme's query-reply colours:
 /// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
 /// (OSC 4 `?`). Centralizes what used to be duplicated at every pane-spawn site
-/// so the OSC 4 palette wiring (#661) can't be added to one path and forgotten
+/// so the OSC 4 palette wiring can't be added to one path and forgotten
 /// on another. Per-slot colours that don't resolve are simply left unseeded
 /// (the parser then suppresses that slot's reply rather than lying).
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
@@ -1112,7 +1112,7 @@ pub enum UserEvent {
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
     DragEnded,
-    /// Epic #300 P4 follow-up: a previously-deferred font fallback
+    /// P4 follow-up: a previously-deferred font fallback
     /// family finished loading in the
     /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`] background
     /// thread. The handler walks every live window's `GpuRenderer`,
@@ -1134,7 +1134,7 @@ pub enum UserEvent {
 /// first use).
 ///
 /// This is the production wire that `Haiku` flagged as missing on
-/// PR #318: pre-fix, the loader was wired only inside tests, and
+/// pre-fix, the loader was wired only inside tests, and
 /// real frame-time misses never spawned `request_load` calls. With
 /// this helper, every `GpuRenderer::new` site in `sonicterm-app`
 /// constructs the loader from its event-loop proxy and hands it to
@@ -1230,7 +1230,7 @@ pub struct PaneState {
     /// Per-pane DECTCEM cursor-visibility flag (`CSI ?25h/l`). Written
     /// by the VT loop, read by the render path for the active pane.
     /// **Per-pane (not per-window)** so the Arc travels with the pane
-    /// when a tab is torn out into a new window — pre-fix #400 the Arc
+    /// when a tab is torn out into a new window — pre-fix the Arc
     /// lived on `WindowState`, so tear-out's destination got a fresh
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
@@ -1240,14 +1240,14 @@ pub struct PaneState {
     /// The keypress path reads this lock-free instead of taking
     /// `parser.lock()` before every PTY write — that lock is held by the VT
     /// thread while parsing output, so blocking on it added input latency
-    /// whenever output was streaming (issue #710). Init 0 (legacy encoding).
+    /// whenever output was streaming. Init 0 (legacy encoding).
     pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
     /// Per-pane DECCKM (?1, application cursor keys) snapshot, mirrored out
     /// of the parser by the VT loop so the keypress path reads it lock-free
-    /// (same rationale as `kitty_flags`, issue #710). When `true`, arrows /
+    /// (same rationale as `kitty_flags`,). When `true`, arrows /
     /// Home / End encode with the SS3 introducer (`ESC O x`) instead of CSI
     /// so terminfo-driven apps (zsh ZLE, readline, vim, less) recognize them
-    /// (#761). Init `false` (normal cursor keys → CSI).
+    /// . Init `false` (normal cursor keys → CSI).
     pub app_cursor_keys: Arc<std::sync::atomic::AtomicBool>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
@@ -1294,7 +1294,7 @@ impl TabState {
     }
 }
 
-/// Issue #553 Phase A: typed in-process tear-out request. Created by
+/// Phase A: typed in-process tear-out request. Created by
 /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch (Win32
 /// `GetCursorPos` provides the screen-position field); drained by
 /// `drain_pending_window_creates` which calls the in-process child-window
@@ -1312,26 +1312,26 @@ pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
     pub(super) keymap: Keymap,
-    // PR-B1b (#293): `App.renderer` field removed; the main window's
+    // PR-B1b: `App.renderer` field removed; the main window's
     // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
     // Access via `Self::main_renderer()` / `Self::main_renderer_mut()`.
-    // PR-B2b (#365): `App.tabs` + `App.tab_states` fields removed; the
+    // PR-B2b: `App.tabs` + `App.tab_states` fields removed; the
     // main window's TabBar + TabState vec are now owned by
     // `self.windows[main_window_id]`. Access via `Self::main_tabs()` /
     // `Self::main_tabs_mut()` / `Self::main_tab_states()` /
     // `Self::main_tab_states_mut()`. Callers needing both at once should
     // go through `self.main_mut()` directly to avoid double-borrow.
-    // PR-B2c (#365): `App.panes` field removed; the main window's pane
+    // PR-B2c: `App.panes` field removed; the main window's pane
     // map is now owned by `self.windows[main_window_id]`. Access via
     // `Self::main_panes()` / `Self::main_panes_mut()`. Callers needing
     // panes + tabs/tab_states/renderer together should go through
     // `self.main_mut()` and split-borrow the fields disjointly.
-    // PR-B3b (#365): `App.last_render`, `App.cursor_visible`, and
+    // PR-B3b: `App.last_render`, `App.cursor_visible`, and
     // `App.hover_link` fields removed; now owned by
     // `self.windows[main_window_id]`. Access via
     // `self.main()?.last_render` / `self.main()?.cursor_visible` /
     // `self.main()?.hover_link`.
-    // PR-B3c (#365): `App.selection`, `App.copy_mode`, and `App.modifiers`
+    // PR-B3c: `App.selection`, `App.copy_mode`, and `App.modifiers`
     // fields removed; now owned by `self.windows[main_window_id]`.
     // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
     // direct field access through `self.main()?.copy_mode` etc.
@@ -1350,17 +1350,17 @@ pub struct App {
     /// Whether the PTY write ledger above is actually recorded. `false` in
     /// production so `dispatch_pty_write_effect` does no lock/clone/push per
     /// write (the ledger would otherwise grow unbounded for the whole
-    /// session — see issue #710). Set `true` when the app is built without an
+    /// session —). Set `true` when the app is built without an
     /// event-loop proxy (headless/test construction) so existing tests keep
     /// capturing writes with no per-test opt-in.
     #[doc(hidden)]
     pub(super) pty_write_log_enabled: bool,
-    // #404: `App`-level DPI and hovered_url fields deleted — both
+    // `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
     // (with safe-default fallbacks at call sites). The shadow-sync
     // path was deleted as the final Phase B2 leftover.
-    /// Epic #289 Phase E (Haiku follow-up): Action::NewWindow sets this
+    /// Phase E (Haiku follow-up): Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
     /// `create_new_terminal_window(el)`. Window creation requires an
     /// `ActiveEventLoop` reference
@@ -1368,7 +1368,7 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
-    /// Issue #553 Phase A: typed in-process tear-out request. Set by
+    /// Phase A: typed in-process tear-out request. Set by
     /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch with the
     /// recorded source tab handle + Win32 cursor screen position.
     /// Drained by `drain_pending_window_creates` AFTER `pending_new_window`
@@ -1376,7 +1376,7 @@ pub struct App {
     /// child-process spawn (`spawn_tearout_child`) — that code path
     /// becomes dead in Phase A and is removed in Phase B.
     pub(super) pending_tear_out: Option<PendingTearOut>,
-    /// Issue #462 (speculative defensive fix): deferred
+    /// (speculative defensive fix): deferred
     /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
     /// on the `DroppedOnEmpty` branch instead of cancelling inline,
     /// so any tear-out-spawn produced by the existing
@@ -1390,7 +1390,7 @@ pub struct App {
     /// WHETHER (preserves the `os_drag_cleanup.rs:172-201`
     /// idempotence guarantee).
     pub(super) pending_os_teardown: bool,
-    /// PR #533 Haiku Step-4 2nd-pass REVISE: test-only callback fired
+    /// Haiku Step-4 2nd-pass REVISE: test-only callback fired
     /// inside [`Self::cancel_drag_session`] AFTER the `self.windows.keys()`
     /// snapshot is collected but BEFORE the per-id iteration body runs.
     /// Lets the regression test (`os_drag_cleanup.rs::
@@ -1414,11 +1414,11 @@ pub struct App {
     /// needed because `run_action` does not have an `ActiveEventLoop`
     /// handle.
     pub(super) pending_exit: bool,
-    // PR-B3d (#365): `App.ime` and `App.ime_cursor_throttle` fields
+    // PR-B3d: `App.ime` and `App.ime_cursor_throttle` fields
     // removed; now owned by `self.windows[main_window_id]`. Access via
     // `self.main()?.ime` / `self.main_mut()?.ime_cursor_throttle`.
     pub(super) command_palette: CommandPalette,
-    /// Epic #289 Phase A follow-up — which window the (single, modal)
+    /// Phase A follow-up — which window the (single, modal)
     /// command palette is currently attached to. `None` means it's
     /// closed OR attached to the main window; `Some(id)` means it's
     /// attached to that child window. The render paths for the main
@@ -1427,10 +1427,10 @@ pub struct App {
     /// fixing the bug where Cmd+Shift+P typed in a torn-out child
     /// silently opened the palette on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
-    // PR-B3d (#365): `App.drag_session` field removed; per-window
+    // PR-B3d: `App.drag_session` field removed; per-window
     // drag sessions live on `WindowState`. Access via
     // `self.main_mut()?.drag_session` / per-window iteration.
-    /// Phase C2 (PR #295 review fix): set the moment a held-tab drag
+    /// Phase C2 (review fix): set the moment a held-tab drag
     /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
     /// before the user releases the button. Guards
     /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
@@ -1449,12 +1449,12 @@ pub struct App {
     /// legacy `App.window`/`renderer`/`tabs`/... fields — PR-B will
     /// switch them to read off `self.windows[main_window_id]`.
     pub(super) main_window_id: Option<WindowId>,
-    // PR-B4 (#365): `App.focused_child` removed; its job
+    // PR-B4: `App.focused_child` removed; its job
     // ("which torn-out child currently owns focus, or None for main")
     // is now strictly a subset of `frontmost_window` (which discriminates
     // main vs child via `frontmost_kind()`). All readers route through
     // `frontmost_window` / `frontmost_kind()`.
-    /// Epic #289 Phase A — most-recently-OS-frontmost window id, INCLUDING
+    /// Phase A — most-recently-OS-frontmost window id, INCLUDING
     /// the main window. The frontmost field tracks *every* sonic-owned
     /// terminal window with a single non-`Option` discriminant once the
     /// first focus arrives:
@@ -1475,7 +1475,7 @@ pub struct App {
     ///   * #2: Cmd+T after tear-out opens tab in WRONG window
     ///   * #3: Cmd+W in new window closes OLD window's tab
     pub(super) frontmost_window: Option<WindowId>,
-    // PR-B3d (#365): `App.drag_target` field removed; per-window
+    // PR-B3d: `App.drag_target` field removed; per-window
     // pending drop target lives on `WindowState`. Access via
     // `self.main_mut()?.drag_target`.
     /// OS-drag tab payloads received before the main [`WindowState`] exists.
@@ -1483,7 +1483,7 @@ pub struct App {
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    // PR-B4 (#365): `App.main_hidden` removed; the "main window is
+    // PR-B4: `App.main_hidden` removed; the "main window is
     // drained / hidden" latch lives on `WindowState.hidden`. Access via
     // `self.main_is_hidden()` (true when the field is set OR the main
     // entry is gone — both shapes mean "no visible main").
@@ -1510,7 +1510,7 @@ pub struct App {
     /// detected or forced via `[appearance].software_render_mode`). When set,
     /// `frame_period` is clamped to the software cap and per-frame scrollbar
     /// fade animation is suppressed so the CPU isn't asked to rasterize at full
-    /// refresh (issue #713). Resolved once after the renderer is created.
+    /// refresh. Resolved once after the renderer is created.
     pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
     /// after the previous render. `about_to_wait` schedules a
@@ -1539,12 +1539,12 @@ pub struct App {
     /// latency). Subsequent redraws driven purely by streaming PTY
     /// bytes within the same `frame_period` still coalesce onto the
     /// next vsync boundary via `pending_redraw`. Cleared on every
-    /// frame we actually render. See PR #132 Haiku review.
+    /// frame we actually render. See Haiku review.
     pub(super) input_dirty: bool,
     /// Shared with every VT-thread spawned in `spawn_pty_for_pane` (one
     /// per pane). Incremented by the VT loop whenever a non-empty chunk
     /// of PTY bytes is processed; sampled on each `RedrawRequested` to
-    /// decide whether to bypass the vsync coalescing gate. PR #133/#162.
+    /// decide whether to bypass the vsync coalescing gate. /.
     pub(super) pty_burst_gen: Arc<AtomicU32>,
     /// Last PTY-burst generation that a completed render observed. If
     /// the VT thread increments [`Self::pty_burst_gen`] during render,
@@ -1611,7 +1611,7 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only redraw request counter (PR #271 follow-up). Every
+    /// Test-only redraw request counter (follow-up). Every
     /// production code path that calls `window.request_redraw()` after
     /// a `run_action` dispatch also bumps this counter in lock-step.
     /// Tests assert against this rather than the live winit window
@@ -1620,7 +1620,7 @@ pub struct App {
     #[doc(hidden)]
     pub redraw_request_count: std::sync::atomic::AtomicUsize,
     /// Test-only counter incremented on every call to
-    /// [`Self::reap_empty_child`] (PR #302 Haiku follow-up). Lets tests
+    /// [`Self::reap_empty_child`] (Haiku follow-up). Lets tests
     /// distinguish "child window cleanup went through the unified reap
     /// contract" from "a direct `windows.remove` happened" — both would
     /// shrink the `windows` map, but only the former nulls out straggler
@@ -1628,7 +1628,7 @@ pub struct App {
     /// release builds whose tests don't touch it.
     #[doc(hidden)]
     pub reap_call_count: std::sync::atomic::AtomicUsize,
-    /// Test-only viewport override (PR #393 follow-up for #387). When
+    /// Test-only viewport override (follow-up). When
     /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
     /// uses `outer` instead of fetching the renderer's logical size and
     /// [`Self::resize_visible_panes`] uses `(cell_w, cell_h)` instead of
@@ -1665,7 +1665,7 @@ impl App {
         let Some(ws) = self.main() else { return Vec::new() };
         let tab_idx = ws.tabs.active_index();
         let Some(st) = ws.tab_states.get(tab_idx) else { return Vec::new() };
-        // Test-only viewport override (PR #393 follow-up for #387) — lets
+        // Test-only viewport override (follow-up) — lets
         // tests exercise this path without a live wgpu renderer. Production
         // leaves `test_viewport_override` at `None` and falls through to the
         // renderer-derived metrics below.
@@ -1738,6 +1738,10 @@ impl App {
         machine: sonicterm_app_core::AppStateMachine,
     ) -> Self {
         theme.apply_accessibility(&config.accessibility);
+        // Seed the process-global tab width cap from config before any tab
+        // bar is laid out, so a configured value takes effect on the very
+        // first frame (hot-reload updates it later via apply_new_config).
+        sonicterm_ui::tabbar_view::set_max_tab_width(config.tab_max_width);
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
             None
         } else {
@@ -1953,7 +1957,7 @@ impl App {
     ///
     /// Without this, a single contended `try_lock` during the
     /// input→output transition of a multi-round prompt (e.g.
-    /// `gh auth login`'s device-code flow, Issue #175) would silently
+    /// `gh auth login`'s device-code flow,) would silently
     /// drop the redraw request — the parsed bytes sat in the grid
     /// unrendered until an unrelated event (Ctrl+C, mouse move) woke
     /// the loop and triggered a fresh `RedrawRequested`.
@@ -1969,7 +1973,7 @@ impl App {
     /// `WaitUntil` at that child's next frame boundary and
     /// `new_events` re-requests the redraw there — instead of the child
     /// busy-spinning a bare `request_redraw()` that re-contends the very
-    /// parser lock the VT thread needs to drain a burst (Issue #43:
+    /// parser lock the VT thread needs to drain a burst (
     /// `ls -al` was smooth in main but laggy in a torn-out child because
     /// the child render path had neither the gate nor this backoff).
     /// Preserves the `input_dirty` flag captured at the top of the
@@ -2047,7 +2051,7 @@ impl App {
     /// a visible main window with tabs, or any torn-out child window. A
     /// hidden/drained main window is intentionally NOT active for process
     /// lifecycle purposes; once the final child is gone there is no window
-    /// the user can interact with, so #669 requires quitting instead of
+    /// the user can interact with, so requires quitting instead of
     /// leaving a dock-alive/headless process around.
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
@@ -2078,7 +2082,7 @@ impl App {
         }
     }
 
-    /// PR-B4 (#365): is the main window currently hidden / drained?
+    /// PR-B4: is the main window currently hidden / drained?
     /// `true` when the main `WindowState` is gone OR its `hidden` latch
     /// is set. The two shapes mean the same thing operationally — no
     /// visible main — so callers don't need to discriminate.
@@ -2278,7 +2282,7 @@ impl App {
             let pane_id = pane.0;
             let bytes = data.to_vec();
             // Test-only ledger: skipped entirely in production so we don't
-            // lock+clone+push on every PTY write (issue #710 — unbounded
+            // lock+clone+push on every PTY write (— unbounded
             // growth + per-keystroke overhead over a long session).
             if self.pty_write_log_enabled {
                 self.test_pty_writes.lock().push((pane_id, bytes.clone()));
@@ -2476,7 +2480,7 @@ impl App {
                 }
                 // TimerSchedule / TimerCancel: the boundary's redraw
                 // pacing uses winit's ControlFlow::WaitUntil directly
-                // (#132). The reducer emitting these surfaces a
+                // . The reducer emitting these surfaces a
                 // contract for future schedulers (e.g. cursor-blink
                 // refactor); record-only today.
                 AppEffect::TimerSchedule { id, at } => {
@@ -2971,7 +2975,7 @@ impl App {
         id
     }
 
-    /// Test-only (#438): inspect drag-gesture residue on a specific
+    /// Test-only: inspect drag-gesture residue on a specific
     /// child window so an integration test can assert
     /// [`Self::cancel_drag_session`] clears EVERY window's state, not
     /// just the main one.
@@ -2995,7 +2999,7 @@ impl App {
         self.windows.get(&id).map(|ws| ws.drag_target.is_some())
     }
 
-    /// Test-only (#438, PR #443 cycle-2): seed the headless drag-chip
+    /// Test-only: seed the headless drag-chip
     /// marker on a window so a subsequent [`Self::cancel_drag_session`]
     /// can be observed to have cleared it. Returns `false` if the window
     /// id is unknown. The marker is the cross-platform stand-in for
@@ -3013,7 +3017,7 @@ impl App {
         }
     }
 
-    /// Test-only (#438, PR #443 cycle-2): read the drag-chip marker for
+    /// Test-only: read the drag-chip marker for
     /// a window. `None` ⇒ window absent OR marker never seeded;
     /// `Some(true)` ⇒ marker set & not yet cleared by cancel;
     /// `Some(false)` ⇒ marker was set and cancel ran on this window.
@@ -3036,7 +3040,7 @@ impl App {
         self.__test_window_drag_chip_marker(synthetic_main_window_id())
     }
 
-    /// Test-only (#438): seed drag-gesture residue on a specific child
+    /// Test-only: seed drag-gesture residue on a specific child
     /// window — `pressed_tab`, `mouse_down`, and a synthetic
     /// `drag_session` — without driving a real winit pointer event
     /// sequence. Returns true on success.
@@ -3061,7 +3065,7 @@ impl App {
 
     /// Test-only: install a frontmost child id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// PR-B4 (#365) replaced `focused_child` with `frontmost_window`;
+    /// PR-B4 replaced `focused_child` with `frontmost_window`;
     /// this kept the old name so the existing regression tests don't
     /// need touching, but it now drives the unified tracker.
     #[doc(hidden)]
@@ -3071,7 +3075,7 @@ impl App {
     }
 
     /// Test-only: read back the current frontmost-child id.
-    /// PR-B4 (#365) — returns `Some(id)` when `frontmost_window` points
+    /// PR-B4 — returns `Some(id)` when `frontmost_window` points
     /// at a non-main entry, mirroring the old `focused_child` semantics.
     #[doc(hidden)]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
@@ -3089,7 +3093,7 @@ impl App {
 
     /// Test-only: install a `frontmost_window` id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// Used by Epic #289 Phase A regression tests to assert that
+    /// Used Phase A regression tests to assert that
     /// keymap-dispatched actions route to the right window's tab vec.
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
@@ -3097,7 +3101,7 @@ impl App {
     }
 
     /// Test-only: resolve a chord string through the App's keymap.
-    /// Used by `child_window_tab_actions_dispatch.rs` (issue #370) to
+    /// Used by `child_window_tab_actions_dispatch.rs` to
     /// pin down that the chords the child-window handler now dispatches
     /// (cmd+1, cmd+2, cmd+Right, cmd+Left) actually resolve to their
     /// expected Action variants.
@@ -3339,7 +3343,7 @@ impl App {
         self.handle_child_focus_changed(id, focused);
     }
 
-    /// Epic #289 Phase A — classify [`Self::frontmost_window`] without
+    /// Phase A — classify [`Self::frontmost_window`] without
     /// borrowing anything mutably. Returns:
     ///   * `FrontmostKind::None` if no sonic window has been focused yet,
     ///     focus is currently outside every sonic window, or the recorded
@@ -3382,7 +3386,7 @@ impl App {
         self.windows.get(&self.main_window_id?)?.window.as_ref()
     }
 
-    /// Phase B2 PR-B1b (#293) — borrow the main window's `GpuRenderer`
+    /// Phase B2 PR-B1b — borrow the main window's `GpuRenderer`
     /// from its `WindowState`. Sole source of truth for the main
     /// renderer (legacy `App.renderer` field was deleted in PR-B1b).
     /// Returns `None` before `do_resumed` has run.
@@ -3398,7 +3402,7 @@ impl App {
         self.windows.get_mut(&id)?.renderer.as_mut()
     }
 
-    /// Phase B2 PR-B2b (#365) — borrow the main window's [`TabBar`] from
+    /// Phase B2 PR-B2b — borrow the main window's [`TabBar`] from
     /// its [`WindowState`]. Sole source of truth (legacy `App.tabs` was
     /// deleted in PR-B2b). Returns `None` before `do_resumed` /
     /// `__test_synthetic_main` has populated the shadow entry.
@@ -3414,7 +3418,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tabs)
     }
 
-    /// Phase B2 PR-B2b (#365) — borrow the main window's `Vec<TabState>`
+    /// Phase B2 PR-B2b — borrow the main window's `Vec<TabState>`
     /// from its [`WindowState`]. Sole source of truth.
     #[doc(hidden)]
     pub fn main_tab_states(&self) -> Option<&[TabState]> {
@@ -3428,7 +3432,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tab_states)
     }
 
-    /// Phase B2 PR-B2c (#365) — borrow the main window's pane map from
+    /// Phase B2 PR-B2c — borrow the main window's pane map from
     /// its [`WindowState`]. Sole source of truth (legacy `App.panes`
     /// was deleted in PR-B2c). Returns `None` before `do_resumed` /
     /// `__test_synthetic_main` has populated the shadow entry.
@@ -3448,7 +3452,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.panes)
     }
 
-    /// Phase B2 PR-B3c (#365) — borrow the main window's selection
+    /// Phase B2 PR-B3c — borrow the main window's selection
     /// `Option<Selection>` from its [`WindowState`]. Sole source of
     /// truth (legacy `App.selection` field was deleted in PR-B3c).
     /// Returns `None` (no main window) — `Some(None)` (no selection)
@@ -3465,7 +3469,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.selection)
     }
 
-    /// Phase B2 PR-B3c (#365) — borrow the main window's
+    /// Phase B2 PR-B3c — borrow the main window's
     /// `ModifiersState` from its [`WindowState`]. Returns
     /// `ModifiersState::empty()` if the main window does not yet
     /// exist (safe default — no modifiers held).
@@ -3477,7 +3481,7 @@ impl App {
             .unwrap_or_else(ModifiersState::empty)
     }
 
-    /// PR-B3c (#365) — replace the main window's selection.
+    /// PR-B3c — replace the main window's selection.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn selection_set(&mut self, sel: Option<Selection>) {
@@ -3486,7 +3490,7 @@ impl App {
         }
     }
 
-    /// PR-B3c (#365) — replace the main window's copy-mode state.
+    /// PR-B3c — replace the main window's copy-mode state.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
@@ -3529,7 +3533,7 @@ impl App {
         FrontmostKind::None
     }
 
-    /// Epic #289 Phase A — if [`Self::frontmost_window`] is `Some(_)`
+    /// Phase A — if [`Self::frontmost_window`] is `Some(_)`
     /// but classifies as `None` (recorded id no longer matches any
     /// live window), clear it. Called by keymap_dispatch arms BEFORE
     /// falling back to main, so the next dispatch doesn't retry the
@@ -3553,7 +3557,7 @@ impl App {
     }
 
     /// Test-only invoker for [`Self::reap_empty_child`]. Used by the
-    /// PR #302 follow-up regression that pins `App::transfer_tab` onto
+    /// follow-up regression that pins `App::transfer_tab` onto
     /// the unified empty-window cleanup contract: a stale id is a
     /// silent no-op (no panic, no spurious `windows` mutation), which
     /// is the only behaviour we can reliably pin without a live
@@ -3613,7 +3617,7 @@ impl App {
 
     /// Test-only invoker for [`Self::close_active_pane`] (the main-window
     /// pane close path). Pairs with [`Self::test_viewport_override`] so
-    /// tests can exercise the production close path — including the #387
+    /// tests can exercise the production close path — including the
     /// post-close `resize_visible_panes` call that re-fits the surviving
     /// sibling's Grid + PtyHandle — without a live wgpu renderer.
     /// See `crates/sonicterm-app/tests/per_pane_resize.rs`.
@@ -3658,13 +3662,13 @@ impl App {
     /// `Action::NewWindow` dispatcher arm; consumed by
     /// `drain_pending_window_creates` (which needs a live
     /// `ActiveEventLoop` and so can't run in a unit test). The flag
-    /// is the testable seam — see Phase E Haiku follow-up on PR #297.
+    /// is the testable seam — see Phase E Haiku follow-up.
     #[doc(hidden)]
     pub fn __test_pending_new_window(&self) -> bool {
         self.pending_new_window
     }
 
-    /// Issue #553 Phase A test seam: read whether a typed in-process
+    /// Phase A test seam: read whether a typed in-process
     /// tear-out request has been queued (drained by
     /// `drain_pending_window_creates`). The request carries the
     /// source tab handle + Win32 cursor screen position from the
@@ -3676,14 +3680,14 @@ impl App {
             .map(|t| (t.source_window, t.source_tab_idx, t.drop_screen_pos))
     }
 
-    /// Issue #462 test seam: read the `pending_os_teardown` flag set
+    /// test seam: read the `pending_os_teardown` flag set
     /// by `handle_os_drag_ended` on the `DroppedOnEmpty` branch.
     #[doc(hidden)]
     pub fn __test_pending_os_teardown(&self) -> bool {
         self.pending_os_teardown
     }
 
-    /// Issue #462 test seam: directly set `pending_os_teardown` so
+    /// test seam: directly set `pending_os_teardown` so
     /// the race test can simulate the `DroppedOnEmpty` branch without
     /// forging a full OS-drag pending state.
     #[doc(hidden)]
@@ -3691,7 +3695,7 @@ impl App {
         self.pending_os_teardown = v;
     }
 
-    /// Issue #462 test seam: drive `drain_pending_os_teardown` from
+    /// test seam: drive `drain_pending_os_teardown` from
     /// integration tests (no `ActiveEventLoop` needed — the teardown
     /// drain doesn't create windows; only the window-create drain
     /// does).
@@ -3727,7 +3731,7 @@ impl App {
     /// crosses tear-out threshold → cursor finally enters another
     /// window's bar) is impossible: the threshold trip would clear the
     /// gesture before the user ever reaches a sibling bar. Haiku
-    /// review of PR #62 caught this.
+    /// review caught this.
     #[doc(hidden)]
     #[doc(hidden)]
     pub fn __test_set_drag_target(
@@ -3740,19 +3744,19 @@ impl App {
         }
     }
 
-    /// Test-only (#533 Haiku Step-4): remove a window from `self.windows`
+    /// Test-only: remove a window from `self.windows`
     /// without going through the production teardown paths. Used by
     /// `os_drag_cleanup.rs` to simulate the "window vanished between
     /// snapshot collection and iteration" race that `cancel_drag_session`
     /// tolerates via its `windows.get_mut(...) else { continue }` branch
-    /// (see #462 defensive snapshot at `mod.rs:3337`). Returns `true` if
+    /// . Returns `true` if
     /// the window existed and was removed, `false` otherwise.
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.windows.remove(&id).is_some()
     }
 
-    /// Test-only (#533 Haiku Step-4 2nd-pass REVISE): install a callback
+    /// Test-only: install a callback
     /// that fires INSIDE [`Self::cancel_drag_session`], AFTER the
     /// `self.windows.keys()` snapshot is collected but BEFORE the
     /// per-id iteration body runs. Lets tests exercise the exact
@@ -3784,7 +3788,7 @@ impl App {
         }
     }
 
-    /// Epic #289 Phase B — number of windows in the unified
+    /// Phase B — number of windows in the unified
     /// [`Self::windows`] map.
     /// Used by the regression suite to pin the rename + role tagging.
     #[doc(hidden)]
@@ -3792,7 +3796,7 @@ impl App {
         self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
-    /// Epic #289 Phase B — count entries in [`Self::windows`] whose
+    /// Phase B — count entries in [`Self::windows`] whose
     /// role matches the argument. Today every entry is `Terminal`;
     #[doc(hidden)]
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
@@ -3810,13 +3814,13 @@ impl App {
         self.main_window_id
     }
 
-    // #404: ShadowMainSnapshot helpers deleted — dpi + hovered_url
+    // ShadowMainSnapshot helpers deleted — dpi + hovered_url
     // now live exclusively on WindowState.
 
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
-        // Phase B2 PR-B2a (#365): ensure the synthetic main WindowState
+        // Phase B2 PR-B2a: ensure the synthetic main WindowState
         // entry exists before seeding. Future PRs B2b/c/d delete the
         // App.tabs/tab_states/panes fields outright, so seed writes
         // MUST land in `self.main_mut()` to survive that migration.
@@ -3831,7 +3835,7 @@ impl App {
         pane_id
     }
 
-    /// Phase B2 PR-B2a (#365): for tests that build an `App` without
+    /// Phase B2 PR-B2a: for tests that build an `App` without
     /// `do_resumed` running, insert a synthetic main `WindowState`
     /// entry (window=None, renderer=None) under a stable synthetic
     /// `WindowId` so test seeders can route writes through
@@ -3935,7 +3939,7 @@ impl App {
         self.main().map(|ws| ws.panes.keys().copied().collect()).unwrap_or_default()
     }
 
-    /// Test-only: read a pane's current `viewport_top_abs`. Used by #412
+    /// Test-only: read a pane's current `viewport_top_abs`. Used
     /// scrollback-scroll wiring tests to assert wheel + Scroll-keymap
     /// dispatch actually mutates the canonical field.
     #[doc(hidden)]
@@ -3959,7 +3963,7 @@ impl App {
         parser.grid().scrollback_len() as u64
     }
 
-    /// Test-only: viewport rows of a pane (for #412 PageUp/Down asserts).
+    /// Test-only: viewport rows of a pane.
     #[doc(hidden)]
     pub fn __test_pane_viewport_rows(&self, pane_id: u64) -> Option<u16> {
         let pane = self.main()?.panes.get(&pane_id)?;
@@ -4209,7 +4213,7 @@ impl App {
     /// cleanly while still implementing the unified entry point.
     ///
     /// Without this call, drops on torn-out child windows on Windows
-    /// silently never reach `IDropTarget::Drop` (Haiku #295 blocker).
+    /// silently never reach `IDropTarget::Drop` (blocker).
     pub fn register_window_with_os_drag_backend(
         &mut self,
         window_id: WindowId,
@@ -4276,7 +4280,7 @@ impl App {
                     ?drop_screen_pos,
                     "os_drag_session: DroppedOnEmpty — in-process tear-out (Phase A)"
                 );
-                // Issue #553 Phase A: replace the legacy
+                // Phase A: replace the legacy
                 // out-of-process tear-out (child-window via
                 // `spawn_tearout_child` → `Command::new`) with an
                 // in-process create. Enqueue a typed `PendingTearOut`
@@ -4297,7 +4301,7 @@ impl App {
                         "os_drag_session: DroppedOnEmpty without recorded source — no tear-out"
                     );
                 }
-                // Issue #462 (speculative defensive fix per PM
+                // (speculative defensive fix per PM
                 // override): do NOT call `cancel_drag_session` inline
                 // here. The `DroppedOnEmpty` path triggers a
                 // tear-out-spawn that creates a brand new top-level
@@ -4420,7 +4424,7 @@ impl App {
         self.tab_bar_visible
     }
 
-    /// Epic #289 Phase C — cancel an in-flight drag session. Wired
+    /// Phase C — cancel an in-flight drag session. Wired
     /// to the ESC key handler in `window_event.rs` (any window's
     /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
     /// the App's drag_session AND every per-window drag_session) so
@@ -4430,7 +4434,7 @@ impl App {
     #[doc(hidden)]
     pub fn cancel_drag_session(&mut self) -> bool {
         let mut had = false;
-        // Issue #462 (defensive): snapshot window-id keys BEFORE the
+        // (defensive): snapshot window-id keys BEFORE the
         // mutation loop. The loop body calls `clear_drag_chip` /
         // `request_redraw`, neither of which mutate `self.windows`
         // today, but a future per-window handler (or a winit reentrant
@@ -4442,7 +4446,7 @@ impl App {
         // `os_drag_cleanup.rs:172-201` asserts this on a re-armed
         // second invocation.
         let ids: Vec<_> = self.windows.keys().copied().collect();
-        // PR #533 Haiku Step-4 2nd-pass REVISE: invoke the test-only
+        // Haiku Step-4 2nd-pass REVISE: invoke the test-only
         // post-snapshot hook AFTER `ids` is collected but BEFORE the
         // iteration body starts. The `take()` releases the hook so it
         // never re-fires, and (more importantly) leaves no live borrow
@@ -4453,7 +4457,7 @@ impl App {
         if let Some(hook) = self.test_post_snapshot_hook.take() {
             hook(self);
         }
-        // Issue #438: clear ALL per-window drag residue, not just
+        // clear ALL per-window drag residue, not just
         // drag_session / drag_target. Previously `pressed_tab` and
         // `mouse_down` were only cleared on the main window, and the
         // renderer's `drag_chip` overlay was never cleared by this path
@@ -4466,7 +4470,7 @@ impl App {
         for id in ids {
             let Some(ws) = self.windows.get_mut(&id) else {
                 // Window vanished between snapshot and iteration —
-                // nothing to clean. Tolerant by design (#462).
+                // nothing to clean. Tolerant by design.
                 continue;
             };
             if ws.drag_session.take().is_some() {
@@ -4475,12 +4479,12 @@ impl App {
             ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
-            // Issue #711: also abandon any scrollbar/splitter drag residue —
+            // also abandon any scrollbar/splitter drag residue —
             // a global drag-cancel should leave no gesture half-held on any
             // window, mirroring the focus-loss cleanup.
             ws.scrollbar_drag = None;
             ws.splitter_drag = None;
-            // #447 follow-up to PR #443: clear the renderer's persistent
+            // follow-up to clear the renderer's persistent
             // drag-chip overlay AND the headless-test marker via a single
             // helper so production and test paths can never diverge. The
             // per-frame emitter at render/core.rs:3945+ keeps drawing
@@ -4500,7 +4504,7 @@ impl App {
         had
     }
 
-    /// Epic #289 Phase C — pure cross-window transfer API. Operates
+    /// Phase C — pure cross-window transfer API. Operates
     /// on the App's MAIN window only (`source` / `target` are both
     /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
     /// form in `crate::app::tab_transfer` directly; the App wrapper
@@ -4510,7 +4514,7 @@ impl App {
     ///
     /// Returns `Ok(())` when the transfer happened, or a
     /// [`TransferError`] describing the validation failure. The
-    /// pre-validation step is intentional: PR #294 review (Haiku) found
+    /// pre-validation step is intentional: review (Haiku) found
     /// that the prior `bool` API silently dropped the detached tab —
     /// killing its child shell via `PtyHandle::Drop` — when the target
     /// window vanished between gesture-start and drop. We now refuse to
@@ -4525,7 +4529,7 @@ impl App {
         target_idx: usize,
     ) -> Result<(), TransferError> {
         // 0) pre-validate BOTH endpoints before mutating any window.
-        //    Data-loss fix (PR #294, Haiku review): detaching and then
+        //    Data-loss fix (, Haiku review): detaching and then
         //    failing to attach drops the `PaneState`, which kills the
         //    child shell via `PtyHandle::Drop`.
         match source {
@@ -4601,7 +4605,7 @@ impl App {
             if let Some(id) = source {
                 // child window — route through the unified empty-window
                 // cleanup contract so straggler redraw targets get nulled
-                // and the "child reaped" trace fires (PR #302 follow-up:
+                // the "child reaped" trace fires (follow-up:
                 // bypassing this dropped to a raw `windows.remove` which
                 // skipped both bits of bookkeeping).
                 self.reap_empty_child(id);
@@ -4616,7 +4620,7 @@ impl App {
 }
 
 /// Why a transfer rejected the gesture without losing the tab. Returned
-/// by [`App::transfer_tab`]; introduced in PR #294 to fix the
+/// by [`App::transfer_tab`]; introduced to fix the
 /// Haiku-flagged data-loss bug where a missing-target attach silently
 /// dropped the detached `PaneState` (killing its child shell via
 /// `PtyHandle::Drop`).
@@ -4660,239 +4664,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-#[cfg(test)]
-mod click_count_tests {
-    use super::next_click_count;
-
-    #[test]
-    fn single_double_triple_then_wraps() {
-        // Same cell, within interval: 1 → 2 → 3 → back to 1.
-        let c1 = next_click_count(0, true, true); // fresh streak
-        assert_eq!(c1, 1);
-        let c2 = next_click_count(c1, true, true);
-        assert_eq!(c2, 2);
-        let c3 = next_click_count(c2, true, true);
-        assert_eq!(c3, 3);
-        let c4 = next_click_count(c3, true, true);
-        assert_eq!(c4, 1); // wraps after triple
-    }
-
-    #[test]
-    fn different_cell_resets_to_one() {
-        // A double-click is in progress (prev = 2) but the new press is
-        // on a different cell → streak restarts at 1.
-        assert_eq!(next_click_count(2, false, true), 1);
-        assert_eq!(next_click_count(1, false, true), 1);
-    }
-
-    #[test]
-    fn timeout_resets_to_one() {
-        // Same cell but past the multi-click interval → restart at 1.
-        assert_eq!(next_click_count(2, true, false), 1);
-        assert_eq!(next_click_count(1, true, false), 1);
-    }
-}
 
 #[cfg(test)]
-mod native_window_title_tests {
-    use super::NATIVE_WINDOW_TITLE;
-
-    #[test]
-    fn native_window_title_is_static_app_name() {
-        assert_eq!(NATIVE_WINDOW_TITLE, "SonicTerm");
-    }
-}
+#[path = "tests/click_count_tests.rs"]
+mod click_count_tests;
 
 #[cfg(test)]
-mod redraw_coalescing_tests {
-    //! Issue #43: the vsync coalescing gate shared by the main and child
-    //! `RedrawRequested` arms. These pin the exact deferral policy that
-    //! lets a bursty `ls -al` coalesce to one frame per vsync and stops a
-    //! torn-out child from busy-spinning the VT thread's parser lock. The
-    //! same predicate now backs BOTH windows, so this one spec covers
-    //! main/child parity for the gate.
-
-    use super::{should_defer_streaming_redraw, should_flush_pending_pty_redraw};
-    use std::time::Duration;
-
-    const FRAME: Duration = Duration::from_micros(16_667); // ~60Hz
-
-    #[test]
-    fn streaming_redraw_within_frame_defers() {
-        // Pure PTY-streaming repaint that already drew this vsync window:
-        // defer to the next boundary (the coalescing win).
-        assert!(should_defer_streaming_redraw(
-            false, // not input-driven
-            false, // no fresh burst
-            false, // hardware GPU
-            Duration::from_millis(2),
-            FRAME,
-        ));
-    }
-
-    #[test]
-    fn input_driven_redraw_never_defers() {
-        // Keystroke / resize / theme / IME must render immediately even
-        // inside the vsync window — gating them adds perceptible latency.
-        assert!(!should_defer_streaming_redraw(
-            true,
-            false,
-            false,
-            Duration::from_millis(1),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn pty_burst_within_frame_defers_like_other_streaming_redraws() {
-        // A PTY burst is still streaming work, not input. Rendering it early
-        // can block in surface acquisition waiting for the next drawable; defer
-        // inside the current frame window and render at the next boundary.
-        assert!(should_defer_streaming_redraw(false, true, false, Duration::from_millis(1), FRAME));
-    }
-
-    #[test]
-    fn past_frame_boundary_never_defers() {
-        // We're past this vsync window — render now, don't defer forever.
-        assert!(!should_defer_streaming_redraw(
-            false,
-            false,
-            false,
-            Duration::from_millis(20),
-            FRAME
-        ));
-        // Exactly at the boundary also renders (`<` is strict).
-        assert!(!should_defer_streaming_redraw(false, false, false, FRAME, FRAME));
-    }
-
-    #[test]
-    fn input_with_concurrent_burst_coalesces() {
-        // The typing case (issue #710): a keystroke sets input_dirty and the
-        // char's PTY echo arrives as a burst, so the echo's redraw is BOTH
-        // dirty AND a burst. It must coalesce like other streaming work, not
-        // render per echo chunk — otherwise fast typing / Claude Code streams
-        // storm the renderer.
-        assert!(should_defer_streaming_redraw(true, true, false, Duration::ZERO, FRAME));
-        // ...but only within the frame window; past the boundary it renders.
-        assert!(!should_defer_streaming_redraw(
-            true,
-            true,
-            false,
-            Duration::from_millis(20),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn software_render_defers_even_pure_input() {
-        // Issue #713: on a CPU rasterizer, even a pure input redraw (dirty,
-        // no burst) coalesces to the frame cap — fast typing must not force a
-        // full-screen software raster per keystroke. Within the frame window
-        // it defers...
-        assert!(should_defer_streaming_redraw(true, false, true, Duration::from_millis(1), FRAME));
-        // ...but still renders once past the boundary (bounded latency, not
-        // dropped).
-        assert!(!should_defer_streaming_redraw(
-            true,
-            false,
-            true,
-            Duration::from_millis(40),
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn pty_redraw_flush_waits_for_burst_window() {
-        assert!(!should_flush_pending_pty_redraw(512, Duration::from_millis(2)));
-        assert!(should_flush_pending_pty_redraw(512, Duration::from_millis(8)));
-    }
-
-    #[test]
-    fn pty_redraw_flushes_large_bursts_without_waiting() {
-        assert!(should_flush_pending_pty_redraw(super::PTY_REDRAW_FLUSH_BYTES, Duration::ZERO,));
-    }
-}
+#[path = "tests/native_window_title_tests.rs"]
+mod native_window_title_tests;
 
 #[cfg(test)]
-mod warm_window_pool_tests {
-    use super::{warm_window_pool_should_spawn, warm_window_pool_target, WARM_WINDOW_POOL_MAX};
-
-    #[test]
-    fn warm_window_pool_keeps_one_spare_after_consuming_one() {
-        assert_eq!(warm_window_pool_target(0), 2);
-        assert_eq!(warm_window_pool_target(1), 2);
-        assert_eq!(warm_window_pool_target(2), 2);
-        assert_eq!(warm_window_pool_target(99), WARM_WINDOW_POOL_MAX);
-    }
-
-    #[test]
-    fn warm_window_pool_spawns_until_target_is_reached() {
-        assert!(warm_window_pool_should_spawn(0, 2));
-        assert!(warm_window_pool_should_spawn(1, 2));
-        assert!(!warm_window_pool_should_spawn(2, 2));
-    }
-}
+#[path = "tests/redraw_coalescing_tests.rs"]
+mod redraw_coalescing_tests;
 
 #[cfg(test)]
-mod tear_out_timing_tests {
-    use super::TearOutTiming;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn tear_out_first_render_total_is_measured_from_start() {
-        let start = Instant::now();
-        let timing = TearOutTiming::new("main", start);
-        let total = timing.total_until_first_render_ms(start + Duration::from_millis(42));
-
-        assert!((41.0..=43.0).contains(&total));
-    }
-}
+#[path = "tests/warm_window_pool_tests.rs"]
+mod warm_window_pool_tests;
 
 #[cfg(test)]
-mod software_render_tests {
-    //! Issue #713: no-GPU degrade decision + frame-period clamp.
-    use super::{
-        should_degrade_for_software_render, software_render_frame_period,
-        SOFTWARE_RENDER_FRAME_PERIOD,
-    };
-    use sonicterm_cfg::config::SoftwareRenderMode;
-    use std::time::Duration;
+#[path = "tests/tear_out_timing_tests.rs"]
+mod tear_out_timing_tests;
 
-    #[test]
-    fn degrade_mode_combines_config_with_detection() {
-        // Auto follows detection.
-        assert!(should_degrade_for_software_render(SoftwareRenderMode::Auto, true));
-        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Auto, false));
-        // Force always degrades; Off never does — regardless of detection.
-        assert!(should_degrade_for_software_render(SoftwareRenderMode::Force, false));
-        assert!(!should_degrade_for_software_render(SoftwareRenderMode::Off, true));
-    }
-
-    #[test]
-    fn frame_period_clamps_only_when_degrading() {
-        let sixty = Duration::from_micros(16_667); // 60 Hz
-                                                   // Hardware path: untouched.
-        assert_eq!(software_render_frame_period(false, sixty), sixty);
-        // Software path: a fast monitor period is slowed to the software cap.
-        assert_eq!(software_render_frame_period(true, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-    }
-
-    #[test]
-    fn frame_period_uses_software_cap_when_degrading() {
-        let slow = Duration::from_millis(50);
-        assert_eq!(software_render_frame_period(true, slow), SOFTWARE_RENDER_FRAME_PERIOD);
-    }
-
-    #[test]
-    fn effective_frame_period_lowers_cap_while_composing() {
-        use super::{effective_frame_period, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD};
-        let sixty = Duration::from_micros(16_667);
-        // Hardware path: untouched whatever the flags.
-        assert_eq!(effective_frame_period(false, false, sixty), sixty);
-        assert_eq!(effective_frame_period(false, true, sixty), sixty);
-        // Software path, idle: software cap.
-        assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-        // Software path, composing: lower cap (issue #714) — composing wins.
-        assert_eq!(effective_frame_period(true, true, sixty), SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD);
-    }
-}
+#[cfg(test)]
+#[path = "tests/software_render_tests.rs"]
+mod software_render_tests;

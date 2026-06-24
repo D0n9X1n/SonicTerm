@@ -1,4 +1,4 @@
-//! Color / sRGB conversion helpers extracted from `render.rs` (issue #143).
+//! Color / sRGB conversion helpers extracted from `render.rs`.
 //!
 //! T13 (wezterm-takeover G3): `ChromeColor` replaces `legacy chrome color` as
 //! the chrome-text fg type. It carries the same 8-bit sRGB-encoded
@@ -218,7 +218,7 @@ pub fn hex_to_chrome_color(h: &str) -> ChromeColor {
 /// RGB triplet.
 ///
 /// Replaces the legacy `scale_the legacy chrome layer_alpha` helper (Phase D
-/// drag-feedback path, Epic #289) — same math, new type. Used to dim
+/// drag-feedback path,) — same math, new type. Used to dim
 /// the source-tab title text and the ghost-chip title text so they
 /// match their corresponding dimmed body quads.
 #[doc(hidden)]
@@ -234,7 +234,7 @@ pub fn scale_chrome_text_alpha(c: ChromeColor, factor: f32) -> ChromeColor {
 /// attribute (`SGR 2`): a faint cell's foreground is moved a fixed
 /// fraction toward its background so de-emphasized text (e.g. an editor's
 /// inline prediction / ghost suggestions) reads visibly fainter than
-/// normal-intensity text instead of identical to it. See #756.
+/// normal-intensity text instead of identical to it. See.
 ///
 /// Per-channel linear interpolation in the stored sRGB-encoded space —
 /// matching the other chrome blends in this module (`scale_chrome_text_alpha`,

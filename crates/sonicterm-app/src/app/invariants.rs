@@ -14,14 +14,14 @@
 //!    canonical render-path entry; calling the blocking-lock variant
 //!    [`assert_render_lock_forbidden`] panics in debug.
 //!
-//! 2. **PTY-thread redraw coalescer respects a minimum interval.** §4 / PR #132
+//! 2. **PTY-thread redraw coalescer respects a minimum interval.** §4 /
 //!    bound consecutive redraw requests apart so the OS does not flag the app
 //!    as unresponsive. [`RedrawCoalescerProbe`] is a debug-only tracker that
 //!    panics if two consecutive `note_redraw()` calls land closer than the
 //!    configured minimum.
 //!
 //! 3. **PTY burst flag is a monotonically-increasing generation counter.** §4
-//!    / PR #162 replaced the original `bool input_dirty` with a `AtomicU32`
+//!    replaced the original `bool input_dirty` with a `AtomicU32`
 //!    that only ever goes up. [`debug_assert_burst_gen_monotonic`] verifies
 //!    that a sampled generation value never went backwards.
 
@@ -73,11 +73,11 @@ pub fn assert_render_lock_forbidden() {
 /// timing math entirely.
 ///
 /// Note: the production coalescer in `spawn_pane.rs` currently uses a **3 ms**
-/// floor (Epic #300 P3, down from the original 16 ms) plus a 128 KB byte
+/// floor (P3, down from the original 16 ms) plus a 128 KB byte
 /// threshold for early flush. 3 ms is safe because the macOS "not responding"
 /// beach ball is driven by *main-thread* blocking, not by how often a
 /// *background* PTY thread posts redraw requests — the main thread coalesces
-/// RedrawRequested via vsync (PR #132). wezterm ships the same 3 ms / 128 KB
+/// RedrawRequested via vsync. wezterm ships the same 3 ms / 128 KB
 /// combo. CLAUDE.md §4 documents the rationale. This probe is a generic
 /// utility — call sites pass whichever interval they actually enforce so the
 /// probe matches the implementation rather than the historical doc value.
@@ -152,7 +152,7 @@ impl RedrawCoalescerProbe {
 // ---------------------------------------------------------------------------
 
 /// Debug-asserts that a newly observed burst-generation value is greater than
-/// or equal to a previously observed one. PR #162 replaced the original
+/// or equal to a previously observed one. replaced the original
 /// `bool input_dirty` with a monotonically-increasing `AtomicU32`; if anything
 /// ever subtracts from or resets that counter, the renderer's
 /// `pty_burst_snapshot != last_seen_burst_gen` test starts producing
@@ -165,6 +165,6 @@ pub fn debug_assert_burst_gen_monotonic(prev: u32, new: u32) {
     debug_assert!(
         new >= prev,
         "PTY burst generation counter went backwards: {prev} -> {new} \
-         (see CLAUDE.md §4 / PR #162 — counter must be monotonic)"
+         (the counter must be monotonic)"
     );
 }

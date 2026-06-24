@@ -84,7 +84,7 @@ impl OsDragSink for MacOsDragSink {
         } else {
             tracing::warn!("os_drag_mac: NSPasteboard.setString_forType returned NO");
         }
-        // DATA-LOSS FIX (PR #59 review): even a successful
+        // DATA-LOSS FIX (review): even a successful
         // pasteboard write is NOT a consumption ack — no receiver
         // may ever pick it up. Until v2 adds a reply-key heartbeat
         // we always tell the caller to keep the source tab alive.
@@ -98,7 +98,7 @@ impl OsDragSink for MacOsDragSink {
 /// common case — most pasteboard writes are unrelated text). Called
 /// by the destination process on application activation.
 ///
-/// DATA-LOSS FIX (PR #59 review): we previously called
+/// DATA-LOSS FIX (review): we previously called
 /// `clearContents()` *before* validating the JSON, which would wipe
 /// arbitrary unrelated clipboard contents from other apps whenever
 /// any string happened to be tagged with our type. Now we validate

@@ -1,4 +1,4 @@
-//! Issue #669: process lifecycle follows visible/active terminal windows.
+//! process lifecycle follows visible/active terminal windows.
 //!
 //! Closing the final child after the main window has already been hidden must
 //! request process exit. Likewise, closing the last tab in a child via the
@@ -67,7 +67,7 @@ fn visible_main_with_tabs_keeps_running_when_child_closes() {
 }
 
 #[test]
-fn issue_669_ready_no_active_windows_means_exit_even_if_main_is_hidden() {
+fn ready_no_active_windows_means_exit_even_if_main_is_hidden() {
     assert!(
         App::should_exit_pure(1, true, 0),
         "a hidden main window is not an active terminal window for lifecycle purposes"

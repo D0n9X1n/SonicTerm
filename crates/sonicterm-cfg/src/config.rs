@@ -41,7 +41,7 @@ pub struct Config {
     /// Appearance and compositor backdrop settings.
     #[serde(default)]
     pub appearance: AppearanceConfig,
-    /// Render pipeline implementation toggles (#621 v0.9.2 wezterm-parity).
+    /// Render pipeline implementation toggles.
     /// Each knob selects between v1 (legacy) and v2 (wezterm-parity) impls.
     /// Defaults to v2 everywhere; flip to v1 to revert per-symptom on a
     /// regression report. See `crates/sonicterm-text/src/swash_rasterizer.rs`
@@ -56,6 +56,14 @@ pub struct Config {
     /// drawn dim, brightening on hover of the × glyph itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
+    /// Maximum width, in logical pixels, of a single tab when the tab bar
+    /// has room to spare. With a few tabs in a wide window each tab grows up
+    /// to this width so long titles (paths, `Administrator: pwsh`, …) stay
+    /// readable; once the tabs would overflow the bar they shrink to share
+    /// the available width evenly, regardless of this value. Defaults to
+    /// `240.0`. Raise it for roomier tabs, lower it to pack more in.
+    #[serde(default = "default_tab_max_width")]
+    pub tab_max_width: f32,
     /// When `true`, the app exits as soon as the last window is closed
     /// (classic single-window-app behavior). When `false` (the default,
     /// matching Chrome/Firefox/Safari on macOS), the application process
@@ -154,7 +162,7 @@ pub enum BackdropKind {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-/// Scrollbar visibility policy (PR-A of #386).
+/// Scrollbar visibility policy (PR-A).
 pub enum ScrollbarMode {
     /// Show only on hover / active scroll (default). Auto-hide logic
     /// lives in the render layer (PR-B/D); the model treats Auto the
@@ -170,7 +178,7 @@ pub enum ScrollbarMode {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-/// How to handle the no-GPU / software-rasterizer case (issue #713).
+/// How to handle the no-GPU / software-rasterizer case.
 ///
 /// When wgpu falls back to a CPU rasterizer (WARP, llvmpipe, SwiftShader —
 /// common under RDP / VMs / VDI), every frame is drawn on the CPU. SonicTerm
@@ -202,7 +210,7 @@ pub struct AppearanceConfig {
     pub scrollbar: ScrollbarMode,
     /// Padding between overlay panel chrome and its inner content, in logical px.
     pub panel_padding: f32,
-    /// No-GPU / software-rasterizer handling (issue #713).
+    /// No-GPU / software-rasterizer handling.
     pub software_render_mode: SoftwareRenderMode,
 }
 
@@ -218,7 +226,7 @@ impl Default for AppearanceConfig {
     }
 }
 
-/// Render pipeline knobs (#621 v0.9.2 wezterm-parity).
+/// Render pipeline knobs.
 ///
 /// Each field selects between `v1` (legacy) and `v2` (wezterm-parity) impls.
 /// Defaults are `v2`, matching wezterm's behavior. Set a field to `v1` in
@@ -231,13 +239,13 @@ pub struct RenderConfig {
     /// Glyph-fit pipeline used by `sonicterm-text::swash_rasterizer::apply_symbol_fit`.
     /// `v2` (default) plumbs `num_cells` through shaping → rasterizer and
     /// allows `cell_width * (num_cells + 0.25)` headroom; `v1` is the
-    /// pre-#621 clamp-to-advance behavior that left Powerline triangles at
+    /// pre- clamp-to-advance behavior that left Powerline triangles at
     /// 1-cell width and over-scaled Nerd-Font PUA icons.
     pub glyph_fit: RenderImpl,
     /// Alt-screen background fill mode used by `sonicterm-gpu::core` paint.
     /// `v2` (default) keeps the wgpu clear-color opaque and emits a single
     /// full-viewport translucent bottom-layer quad carrying `bg_opacity`;
-    /// `v1` is the pre-#621 behavior that baked `bg_opacity` into the
+    /// `v1` is the pre- behavior that baked `bg_opacity` into the
     /// clear and produced a pale wash in vim/nvim alt-screen because
     /// default-bg cells skip their quad and reveal the translucent clear.
     pub alt_screen_bg_fill: RenderImpl,
@@ -247,7 +255,7 @@ pub struct RenderConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RenderImpl {
-    /// Legacy pre-#621 impl. Use if v2 regresses something in your env.
+    /// Legacy pre- impl. Use if v2 regresses something in your env.
     V1,
     /// wezterm-parity impl (default). Glyph-fit plumbing or opaque-clear
     /// + viewport-quad alt-screen bg, depending on which field this is on.
@@ -315,6 +323,13 @@ fn default_quit_on_last_window_close() -> bool {
     true
 }
 
+/// Default maximum width of a single tab, in logical pixels. Mirrors the
+/// renderer's historical built-in cap so unconfigured installs render tabs
+/// exactly as before.
+fn default_tab_max_width() -> f32 {
+    240.0
+}
+
 impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
@@ -378,6 +393,7 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             render: RenderConfig::default(),
             tab_close_button_color: None,
+            tab_max_width: default_tab_max_width(),
             quit_on_last_window_close: default_quit_on_last_window_close(),
             extra: toml::Table::new(),
         }
@@ -488,7 +504,7 @@ impl Config {
     /// Infallible startup loader. Calls [`Self::load_strict`] and, on any
     /// error, logs a warning at `target = "sonicterm-cfg"` and falls back
     /// to [`Self::default`] so the app can still launch with a broken
-    /// user config — see issue #522.
+    /// user config.
     pub fn load_or_default(path: &Path) -> Self {
         let mut warnings = Vec::new();
         let cfg = Self::load_or_default_collecting(path, &mut warnings);
@@ -502,7 +518,7 @@ impl Config {
     /// `tracing::warn!` directly, appends any fallback message to
     /// `warnings`. Use this from `main` BEFORE `sonicterm_logging::init`
     /// has run — otherwise the parse-failure warn is dropped because no
-    /// subscriber is installed yet (Haiku review of PR #534).
+    /// subscriber is installed yet.
     ///
     /// Callers MUST drain `warnings` after logging is initialised, e.g.
     /// ```ignore
@@ -625,6 +641,11 @@ locale = ""
 # If true, closing the last tab exits the app. If false, SonicTerm keeps the app
 # alive so a new window can be opened from the dock/taskbar/menu.
 quit_on_last_window_close = true
+
+# Maximum width of a single tab, in logical pixels, when the tab bar has room.
+# Tabs grow up to this width so long titles stay readable; with many tabs they
+# shrink to share the bar evenly. Default 240.
+tab_max_width = {tab_max_width}
 
 [font]
 # Font family and metrics. SonicTerm ships "Rec Mono St.Helens" by default.
@@ -764,6 +785,7 @@ threshold_secs = 10
         panel_padding = cfg.appearance.panel_padding,
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
+        tab_max_width = cfg.tab_max_width,
     )
 }
 

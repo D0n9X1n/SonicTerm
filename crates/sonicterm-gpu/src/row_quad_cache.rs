@@ -1,8 +1,8 @@
 //! Per-row quad cache for background / underline / hyperlink tint
-//! quads — Phase P2 of Epic #300.
+//! quads — Phase P2.
 //!
 //! Mirrors the shape of `sonicterm_text::row_glyph_cache::RowGlyphCache`
-//! (PR #140) but caches the `QuadInstance` slice each row emits for
+//! but caches the `QuadInstance` slice each row emits for
 //! its background fill instead of the glyph instances. Both layers
 //! cache for the same reason: dense-cell streams (cat large file,
 //! tail -f, htop) re-emit the same per-row geometry every frame even

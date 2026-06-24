@@ -68,6 +68,18 @@ Before opening a release PR, verify user-facing docs in README, `docs/`, and
 After pushing a release tag, verify the GitHub release workflow finishes and
 publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
+## Conventions
+
+- **Tests live in sibling files, never inline.** A module's unit tests go in
+  a sibling test file declared from the source with
+  `#[cfg(test)] #[path = "<module>/tests.rs"] mod tests;` (or `tests/<name>.rs`
+  for named groups). No `#[cfg(test)] mod tests { … }` blocks inside source
+  files. Tests stay in-crate so they keep private-item access via
+  `use super::*;`.
+- **Comments describe behavior, not history.** Explain what the code does and
+  the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
+  in comments, log strings, or panic messages.
+
 ## Release
 
 SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:

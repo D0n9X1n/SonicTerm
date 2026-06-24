@@ -280,7 +280,7 @@ impl App {
         // grid. In a split, hovering an INACTIVE pane at a row/col that
         // happens to match a URL in the active pane would otherwise highlight
         // the active pane's URL. Only proceed when the cursor is over the
-        // active pane itself. (#660 review)
+        // active pane itself.
         let active_id = self
             .main()
             .and_then(|ws| ws.tab_states.get(ws.tabs.active_index()))
@@ -619,18 +619,18 @@ impl App {
             self.pending_new_window = false;
             self.create_new_terminal_window(el);
         }
-        // Issue #553 Phase A: in-process tear-out drain. Replaces the
+        // Phase A: in-process tear-out drain. Replaces the
         // legacy `Command::new`-based spawn — Phase B will delete the
         // dead `spawn_tearout_child` + `--tear-out-payload` CLI flag.
         // Ordering MUST stay before `drain_pending_os_teardown` (the
-        // PR #533 invariant — `cancel_drag_session` must see the new
+        // invariant — `cancel_drag_session` must see the new
         // child window already inserted).
         if let Some(req) = self.pending_tear_out.take() {
             self.drain_pending_tear_out(el, req);
         }
     }
 
-    /// Issue #553 Phase A: resolve a queued `PendingTearOut` request
+    /// Phase A: resolve a queued `PendingTearOut` request
     /// into a real torn-out window. Locates the source tab via the
     /// recorded `(WindowId, tab_idx)` handle, detaches the tab state
     /// (which MOVES the live `PtyHandle` — see `tear_out.rs` for the
@@ -677,11 +677,11 @@ impl App {
         self.tear_out_apply_source_side(req.source_tab_idx);
         tracing::info!(
             at = ?req.drop_screen_pos,
-            "in-process tear-out completed (Issue #553 Phase A — no child process spawned)"
+            "in-process tear-out completed (Phase A — no child process spawned)"
         );
     }
 
-    /// Issue #462 (speculative defensive fix): drain a deferred
+    /// (speculative defensive fix): drain a deferred
     /// `cancel_drag_session` request raised by `handle_os_drag_ended`
     /// on the `DroppedOnEmpty` branch. Callers MUST invoke this
     /// AFTER [`Self::drain_pending_window_creates`] so any
@@ -698,7 +698,7 @@ impl App {
         }
     }
 
-    /// Epic #289 Phase E (Haiku follow-up on PR #297): create a fresh
+    /// Phase E (Haiku follow-up): create a fresh
     /// top-level terminal window, install its renderer, spawn one
     /// tab + PTY-backed pane, register it with the OS-drag backend,
     /// and mark it as the new frontmost window.
@@ -762,7 +762,7 @@ impl App {
                 return;
             }
         };
-        // Epic #300 P4 follow-up wire (NewWindow path).
+        // P4 follow-up wire (NewWindow path).
         if let Some(proxy) = self.event_loop_proxy.clone() {
             renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
         }
@@ -870,8 +870,8 @@ impl App {
     /// `ActiveEventLoop`-dependent window-creation drain. Used by the
     /// `close_pane_or_tab_semantics` regression suite to assert that a
     /// menubar-bridged action increments [`Self::redraw_request_count`]
-    /// exactly once per drained action batch — the contract PR #200
-    /// added (Cmd+W "two presses" bug) and the PR #271 follow-up
+    /// exactly once per drained action batch — the contract
+    /// added (Cmd+W "two presses" bug) and the follow-up
     /// audit hardened with a real counter assertion.
     #[doc(hidden)]
     pub fn __test_drain_menubar_actions(&mut self) {

@@ -41,7 +41,7 @@ fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Them
         // so lock() is intentional here. Dropping this update would leave OSC
         // 10/11/12 + OSC 4 palette replies stale for shells already attached to
         // the pane. Re-seeds the full set (fg/bg/cursor + 16-colour palette) so
-        // a theme swap also refreshes the OSC 4 palette. (#369, #661)
+        // a theme swap also refreshes the OSC 4 palette.
         let mut parser = pane.parser.lock();
         super::seed_parser_theme_colors(&mut parser, theme);
     }
@@ -78,7 +78,7 @@ pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> boo
 
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
-        // PR #132: any live-reload (theme/font/keymap) is user-driven
+        // any live-reload (theme/font/keymap) is user-driven
         // and must render immediately, not at the next vsync deadline.
         self.input_dirty = true;
         self.warm_window_pool.clear();
@@ -164,7 +164,7 @@ impl App {
             // Cell metrics changed → resize each pane to its own PaneRect.
             // See docs/specs/per-pane-grids.md for why this is per-pane,
             // not whole-window.
-            // PR-B2c (#365): main is in self.windows so the loop below
+            // PR-B2c: main is in self.windows so the loop below
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
@@ -221,7 +221,7 @@ impl App {
         // grid + PTY to match the renderer's new (cols, rows). Without the
         // resize the shell keeps reporting stale `stty size` and the grid
         // draws clipped against the old inner rect until a manual window
-        // resize. Mirrors the font-live-reload path above (PR #53).
+        // resize. Mirrors the font-live-reload path above.
         let padding_changed = (new_cfg.window.padding_left - self.config.window.padding_left).abs()
             > f32::EPSILON
             || (new_cfg.window.padding_right - self.config.window.padding_right).abs()
@@ -239,7 +239,7 @@ impl App {
             if let Some(r) = self.main_renderer_mut() {
                 r.set_padding(pad);
             }
-            // PR-B2c (#365): the loop below covers main + every child.
+            // PR-B2c: the loop below covers main + every child.
             for child in self.windows.values_mut() {
                 {
                     let Some(r) = child.renderer.as_mut() else { continue };
@@ -341,6 +341,14 @@ impl App {
             );
         }
 
+        // Tab maximum width (logical px). Held process-globally in
+        // `tabbar_view`, so updating it once reaches every window's layout
+        // and hit-testing on the next frame — no per-renderer push needed.
+        if (new_cfg.tab_max_width - self.config.tab_max_width).abs() > f32::EPSILON {
+            sonicterm_ui::tabbar_view::set_max_tab_width(new_cfg.tab_max_width);
+            tracing::info!("live-reload: tab_max_width -> {}", new_cfg.tab_max_width);
+        }
+
         // Tab close-button override (wezterm `tab_close_button_color`).
         // Diff against the live config so an edit that adds, changes,
         // or clears the value propagates to the main + every child
@@ -394,7 +402,7 @@ impl App {
         // Scrollback depth: re-apply to every live pane across all windows
         // (and all tabs — every pane lives in `ws.panes`, inactive tabs
         // included). Lowering the cap drains excess history immediately
-        // (issue #710). App-thread, not render hot path, so lock() is fine.
+        // . App-thread, not render hot path, so lock is fine.
         if new_cfg.terminal.scrollback != self.config.terminal.scrollback {
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
@@ -493,7 +501,7 @@ impl App {
         if let Some(r) = self.main_renderer_mut() {
             r.set_font(&family, size, line_h);
         }
-        // PR-B2c (#365): the loop below covers main + every child.
+        // PR-B2c: the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
                 let Some(r) = child.renderer.as_mut() else { continue };
@@ -526,7 +534,7 @@ impl App {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
-        // PR-B2c (#365): the loop below covers main + every child.
+        // PR-B2c: the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let changed = {
                 let Some(r) = child.renderer.as_mut() else { continue };

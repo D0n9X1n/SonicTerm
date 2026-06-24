@@ -5,6 +5,7 @@
 //! renderer / winit cursor events use.
 
 use crate::tabs::TabBar;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Pixel coordinate in tab-bar layout space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,8 +33,33 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
     (font_size * 2.0 + 12.0).max(36.0)
 }
 
-/// Maximum width of a single tab (a long-title tab is clamped to this).
+/// Default maximum width of a single tab (a long-title tab is clamped to
+/// this when the bar has room). User config can override the active value at
+/// runtime via [`set_max_tab_width`]; this constant is the built-in fallback
+/// and the value an unconfigured install renders with.
 pub const TAB_MAX_WIDTH: f32 = 240.0;
+
+/// Process-global active max tab width, in logical pixels, stored as the bit
+/// pattern of an `f32`. Seeded to [`TAB_MAX_WIDTH`] and updated on config load
+/// and hot-reload. Held globally (rather than threaded through every
+/// `compute*` call site) so the rendered bar and the hit-tested bar always
+/// read the same value with no signature churn.
+static MAX_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MAX_WIDTH.to_bits());
+
+/// Override the active maximum tab width. Called from config apply on startup
+/// and hot-reload. Non-finite or non-positive values are ignored so a bad
+/// config never collapses the tab bar.
+pub fn set_max_tab_width(width: f32) {
+    if width.is_finite() && width > 0.0 {
+        MAX_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Read the active maximum tab width, in logical pixels.
+#[must_use]
+pub fn max_tab_width() -> f32 {
+    f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
+}
 
 /// Preferred minimum width of a single tab. Acts as a soft floor: when the
 /// equal-share allocation per tab is ≥ this value, each tab is held at or
@@ -84,8 +110,6 @@ pub const ACTIVE_TOP_ACCENT_INSET: f32 = 2.0;
 /// "append at the end" (insertion slot `tabs.len()`). The bar background
 /// still extends the full window width — no extra drawing is required;
 /// the reserved zone simply shows the existing tab-bar background.
-///
-/// See issue #541.
 pub const TAB_END_DROP_ZONE_PX: f32 = 96.0;
 
 /// Rectangle in physical pixels.
@@ -235,7 +259,7 @@ impl TabBarLayout {
         Self::compute_with_height(bar, window_width, TAB_BAR_HEIGHT)
     }
 
-    /// Width of the Phase D insertion gap (Epic #289) in logical px.
+    /// Width of the Phase D insertion gap in logical px.
     /// Tabs at or after the insertion slot shift right by this amount
     /// while a drag is in progress, previewing the drop position.
     pub const INSERTION_GAP_PX: f32 = 8.0;
@@ -318,18 +342,17 @@ impl TabBarLayout {
         // edge of the bar, minus another `bar_left_pad` of breathing
         // room, and minus `end_drop` so there is always an empty slice
         // on the right that a dragged tab can be dropped into to mean
-        // "append at the end" (issue #541). The bar background itself
+        // "append at the end". The bar background itself
         // (`bar_rect.w`) still spans the full window width.
         let tabs_region = (window_width - bar_left_pad - bar_left_pad - end_drop).max(0.0);
         let total_gaps = tab_gap * (n as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
-        // TAB_MIN_WIDTH is a *soft* floor (a preferred minimum, not a hard
-        // clamp): tabs shrink to share the available space when the equal-
-        // share allocation falls below it, so the strip never overflows the
-        // right edge of the bar. When the strip has surplus, use the
-        // available equal share up to TAB_MAX_WIDTH so maximized windows can
-        // show long titles instead of staying pinned to the old narrow cap.
-        let per_tab = raw.min(TAB_MAX_WIDTH * scale);
+        // Tabs share the available width equally, capped at the configured
+        // maximum so a wide window with a few tabs shows long titles instead
+        // of staying pinned to a narrow width. When the equal share falls
+        // below the cap (many tabs / narrow window) the cap is inactive and
+        // tabs simply shrink to fit without overflowing the bar's right edge.
+        let per_tab = raw.min(max_tab_width() * scale);
 
         let bg_y = bar_y + TAB_VERT_INSET * scale;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
@@ -366,7 +389,7 @@ impl TabBarLayout {
     /// when the active index points past the laid-out tabs (defensive —
     /// stale state must never paint an accent floating in the empty
     /// right-edge area of the bar, which was the user-reported bug in
-    /// issue #171).
+    /// ).
     ///
     /// The rect is anchored to the active tab's own `bg.x`/`bg.y` — it
     /// MUST NOT be derived from `active_idx * tab_w`, because the bar
@@ -375,7 +398,7 @@ impl TabBarLayout {
     #[must_use]
     pub fn active_accent_rect(&self) -> Option<Rect> {
         let t = self.active_widget()?;
-        // Issue #257: the active indicator must be clipped to the active
+        // the active indicator must be clipped to the active
         // tab's post-layout width. Do not derive it from the whole strip or
         // shrink/grow it independently; wide two-tab Windows layouts exposed
         // that drift as an orange line overshooting into empty chrome.
@@ -557,5 +580,3 @@ pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_ins
     let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
     titlebar_inset + bar
 }
-
-// Unit tests live in `tests/src_tabbar_view.rs`.

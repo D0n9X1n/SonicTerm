@@ -1,13 +1,13 @@
-//! Scrollback scroll mutator + cursor→pane resolver (#412).
+//! Scrollback scroll mutator + cursor→pane resolver.
 //!
 //! Wires mouse-wheel and `Action::Scroll(_)` keymap actions into the
 //! canonical `PaneState.viewport_top_abs` field that the scrollbar drag
-//! path (#410) already writes to. Three callers converge here:
+//! path already writes to. Three callers converge here:
 //!
 //! * `WindowEvent::MouseWheel` — uses [`App::pane_at_cursor`] to pick the
 //!   pane under the cursor before scrolling.
 //! * `Action::Scroll(_)` keymap dispatch — always targets the active pane.
-//! * (Future) Copy-mode scroll — out of scope for #412.
+//! * (Future) Copy-mode scroll — out of scope.
 //!
 //! Alt-screen panes short-circuit: full-screen TUIs (vim/htop/fzf) own
 //! scroll semantics themselves and the host must not synthesize a viewport
@@ -28,7 +28,7 @@ impl App {
     /// semantics and the host must not synthesize a viewport shift behind
     /// their back.
     ///
-    /// Sole writer for wheel + keymap; scrollbar drag (#410) writes the
+    /// Sole writer for wheel + keymap; scrollbar drag writes the
     /// same field via `scrollbar_input::set_active_pane_view_top`.
     #[doc(hidden)]
     pub fn scroll_pane(&mut self, pane_id: u64, delta_lines: i32) {
@@ -67,7 +67,7 @@ impl App {
         if let Some(w) = ws.window.as_ref() {
             w.request_redraw();
         }
-        // #386 PR-D parity: any view_top jump from wheel/keymap is
+        // PR-D parity: any view_top jump from wheel/keymap is
         // scrollbar activity for auto-hide bookkeeping.
         self.mark_scrollbar_active(pane_id);
     }

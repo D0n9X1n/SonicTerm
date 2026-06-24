@@ -1,13 +1,13 @@
 use super::*;
 
-// --- Inline IME preedit opaque background (#758) -------------------------
+// --- Inline IME preedit opaque background -------------------------
 
 #[test]
 fn preedit_bg_rect_covers_the_glyph_run() {
     // The glyphs are emitted at emit_x = start_x + pad, across `pre_w`.
     // The background mask must start no later than start_x and extend past
     // the glyph run's right edge, so app placeholder/hint text under the
-    // composing pinyin is fully masked (#758).
+    // composing pinyin is fully masked.
     let start_x = 100.0;
     let top_y = 50.0;
     let pre_w = 64.0;
@@ -44,7 +44,7 @@ fn preedit_bg_rect_zero_pad_equals_pre_w() {
     assert_eq!(w, 40.0);
 }
 
-// --- Dim / faint text (SGR 2), #756 -------------------------------------
+// --- Dim / faint text (SGR 2), -------------------------------------
 
 #[test]
 fn dim_toward_endpoints_and_midpoint() {
@@ -85,7 +85,7 @@ fn cell_fg_dims_faint_text_toward_background() {
     let normal_c = cell_fg(&normal, &theme, default);
     let faint_c = cell_fg(&faint, &theme, default);
 
-    // Regression for #756: the faint cell must NOT equal the normal cell,
+    // Regression: the faint cell must NOT equal the normal cell,
     // and must be strictly dimmer on every channel (closer to the black bg).
     assert_ne!(faint_c, normal_c, "dim text must differ from normal text");
     assert!(faint_c.r() < normal_c.r(), "dim R should be lower");
@@ -228,7 +228,7 @@ fn preedit_overlay_draws_for_real_composition() {
 
 #[test]
 fn preedit_caret_advance_zero_for_whitespace_only() {
-    // #760: the terminal-cursor caret advance MUST use the same visible-ink
+    // the terminal-cursor caret advance MUST use the same visible-ink
     // gate as the glyph overlay. macOS delivers a whitespace-only marked
     // string during ordinary typing / bare Enter with a CJK source active;
     // advancing the cursor for it shoved the cursor-colored block into empty
@@ -311,7 +311,7 @@ fn custom_tab_color_brightens_on_hover() {
 
 #[test]
 fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
-    // Issue #714: the cache may only be reused when text + placement + color
+    // the cache may only be reused when text + placement + color
     // AND the atlas eviction epoch are identical — an epoch bump means a tile
     // may have been recycled, so the stored UVs could be stale.
     let c = PreeditGlyphCache {
@@ -412,7 +412,7 @@ fn dirty_rows_damage_rect_returns_none_for_no_dirty_rows() {
 
 #[test]
 fn dirty_rows_damage_rect_closes_fractional_cell_seam() {
-    // #773: at fractional DPI the cell height is non-integer. A single dirty
+    // at fractional DPI the cell height is non-integer. A single dirty
     // row's damage strip must extend down to the CEILED top of the next row,
     // otherwise the boundary pixel a full-cell inverse block (zsh's
     // reverse-video PROMPT_EOL_MARK `%`) painted into is never repainted when

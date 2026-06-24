@@ -1,7 +1,7 @@
 //! sonicterm-ui — pure-data UI state and layout for SonicTerm Terminal.
 //!
 //! Extracted from `sonicterm-shared` in PR-5 of the workspace refactor
-//! (issue #121). This crate carries only *state* and *layout* — no
+//! . This crate carries only *state* and *layout* — no
 //! winit, no wgpu, no the legacy chrome layer. The render layer in `sonicterm-shared` /
 //! `sonicterm-gpu` consumes these types to produce draw commands.
 //!

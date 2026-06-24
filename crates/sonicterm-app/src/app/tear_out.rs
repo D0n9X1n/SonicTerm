@@ -178,7 +178,7 @@ impl App {
         if self.try_os_drag_handoff(index) {
             return true;
         }
-        // Epic #289 Phase B: the single-tab guard is GONE. Tearing
+        // Phase B: the single-tab guard is GONE. Tearing
         // out the only tab in main hides main (existing drained-main
         // path) and the tab becomes its own new top-level window. The
         // PtyHandle MOVES via `detach_tab_state` — no respawn, no
@@ -196,7 +196,7 @@ impl App {
         true
     }
 
-    /// Issue #553 Phase A: factored-out child-window construction so
+    /// Phase A: factored-out child-window construction so
     /// both [`Self::tear_out_tab`] (cursor-leaves-windows path) and the
     /// in-process tear-out drain (`drain_pending_window_creates` →
     /// `pending_tear_out` enqueued from `DroppedOnEmpty`) build the
@@ -364,7 +364,7 @@ impl App {
         if let Some(child) = self.windows.get_mut(&win_id) {
             super::child_window::resize_visible_panes_in_child(child);
         }
-        // Phase C2 / Haiku #295: register the new window's HWND with
+        // Phase C2 / register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
         self.register_window_with_os_drag_backend(win_id, &window);
@@ -385,14 +385,14 @@ impl App {
         window.request_redraw();
         // The pool target is at least two, so consuming one still leaves one
         // hidden spare. Refill on the next idle tick, not on the drop path.
-        // Epic #289 Phase B: the new window becomes OS-frontmost after
+        // Phase B: the new window becomes OS-frontmost after
         // the hidden first frame is rendered and the child RedrawRequested
         // handler shows it.
         self.frontmost_window = Some(win_id);
         Some(win_id)
     }
 
-    /// Epic #289 Phase B — source-side post-tear-out cleanup, factored
+    /// Phase B — source-side post-tear-out cleanup, factored
     /// out so unit tests can drive it without an `ActiveEventLoop`.
     ///
     /// * If main is now empty, hide it (existing drained-main path).
@@ -519,12 +519,12 @@ impl App {
         // writes the pasteboard (winit intercepts mouse events, so
         // NSDraggingSession proper isn't reachable) — we still fall
         // through to the legacy sink, which also writes the pasteboard
-        // + returns NotAcknowledged (the PR #59 data-loss fix).
+        // returns NotAcknowledged (the data-loss fix).
         if self.os_drag_backend.is_some() {
             let payload_json = payload.to_json().unwrap_or_default();
             let source_window = self.main_window().map(|w| w.id());
             if let Some(src_id) = source_window {
-                // Issue #296: render a small PNG thumbnail of the
+                // render a small PNG thumbnail of the
                 // dragged tab so NSDraggingSession / OLE DoDragDrop
                 // have a real preview instead of an empty Vec<u8>.
                 // See `crates/sonicterm-app/src/tab_thumbnail.rs` for the
@@ -555,7 +555,7 @@ impl App {
                 true
             }
             crate::os_drag::DragAck::NotAcknowledged => {
-                // DATA-LOSS FIX (PR #59 review): no destination
+                // DATA-LOSS FIX (review): no destination
                 // confirmed adoption. Leave the source tab alive
                 // and fall back to the in-process tear-out path so
                 // the user does not lose a live shell.
@@ -615,7 +615,7 @@ impl App {
         true
     }
     pub fn tear_out_would_be_noop(&self) -> bool {
-        // Epic #289 Phase B: tear-out is now ALWAYS productive — a
+        // Phase B: tear-out is now ALWAYS productive — a
         // single-tab tear creates a new window with that tab and
         // hides the now-empty main. The CursorMoved handler no
         // longer needs to preserve gesture state for a "no-op" case;
@@ -625,7 +625,7 @@ impl App {
         false
     }
 
-    /// Epic #289 Phase B — tear a tab out of an existing child window
+    /// Phase B — tear a tab out of an existing child window
     /// into a brand-new top-level window. Mirrors
     /// [`Self::tear_out_tab`] (main → new) but with detach_from_child
     /// as the source. The torn Tab + its PaneState (incl. PtyHandle)
@@ -655,7 +655,7 @@ impl App {
         true
     }
 
-    /// Epic #289 Phase B — child-side post-tear-out cleanup. Mirrors
+    /// Phase B — child-side post-tear-out cleanup. Mirrors
     /// [`Self::tear_out_apply_source_side`] for a torn-from-child
     /// origin. Removes the source child window from
     /// `self.windows` if it became empty; else activates the

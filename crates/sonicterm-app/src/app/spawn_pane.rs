@@ -40,15 +40,15 @@ impl App {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         // Honour the user's configured scrollback depth instead of the
-        // Grid's built-in 10k default (issue #710).
+        // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface
-        // (#369). Also seeds the OSC 4 palette so CLIs like Copilot can read
-        // the full colour set and enable their prompt frame (#661).
+        // . Also seeds the OSC 4 palette so CLIs like Copilot can read
+        // the full colour set and enable their prompt frame.
         {
             let mut p = parser.lock();
             super::seed_parser_theme_colors(&mut p, &self.theme);
@@ -63,18 +63,18 @@ impl App {
             Arc::new(Mutex::new(Vec::new()));
         let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
             Arc::new(Mutex::new(Vec::new()));
-        // PR #400 fix: per-pane cursor_visible Arc lives outside the
+        // fix: per-pane cursor_visible Arc lives outside the
         // pty-spawn match so we can store it on PaneState even if pty
         // spawn failed (and so a no-pty pane still has a valid Arc).
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
         // Per-pane kitty-keyboard flags snapshot, mirrored out of the parser
-        // by the VT loop so the keypress path reads it lock-free (issue #710).
+        // by the VT loop so the keypress path reads it lock-free.
         let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
             Arc::new(std::sync::atomic::AtomicU8::new(0));
         // Per-pane DECCKM (application cursor keys) snapshot, mirrored out of
         // the parser by the VT loop so the keypress path reads it lock-free
-        // (#761, same rationale as kitty_flags / #710).
+        // .
         let app_cursor_keys_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pty = match PtyHandle::spawn_default_shell(
@@ -91,7 +91,7 @@ impl App {
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
-                // PR #400 fix: VT thread captures the same Arc that
+                // fix: VT thread captures the same Arc that
                 // PaneState below will own. Pre-fix this read
                 // `self.main().cursor_visible` on WindowState, which
                 // got replaced with a fresh Arc on tear-out — leaving
@@ -135,7 +135,7 @@ impl App {
                                 Duration::from_secs(3600)
                             }) {
                                 Ok(bytes) => {
-                                    // PR #133/#162: bump generation so the
+                                    // /: bump generation so the
                                     // next RedrawRequested bypasses the
                                     // vsync coalescing gate. Counter (not
                                     // bool) so a burst arriving during
@@ -232,14 +232,14 @@ impl App {
                                         // Mirror the parser's kitty-keyboard
                                         // flags while we still hold the lock,
                                         // so the keypress path can read them
-                                        // without locking (issue #710).
+                                        // without locking.
                                         kitty_flags.store(
                                             p.kitty_keyboard_flags(),
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
                                         // Mirror DECCKM (application cursor
                                         // keys) for the lock-free keypress
-                                        // encode path (#761).
+                                        // encode path.
                                         app_cursor_keys.store(
                                             p.application_cursor_keys(),
                                             std::sync::atomic::Ordering::Relaxed,
@@ -389,7 +389,7 @@ impl App {
         match outcome {
             (Some(i), _) => self.close_tab_at(i),
             (_, Some(_focus)) => {
-                // #387: the surviving sibling's PaneRect just grew to cover
+                // the surviving sibling's PaneRect just grew to cover
                 // the closed pane's area. Push the new layout into its Grid
                 // + PtyHandle (matches split / zoom / resize-split paths and
                 // mirrors `close_active_pane_in_child`). Without this the
@@ -480,7 +480,7 @@ impl App {
     pub(super) fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
         let (cw, ch) = match self.test_viewport_override {
-            // Test-only viewport override (PR #393 follow-up for #387) —
+            // Test-only viewport override (follow-up) —
             // lets tests exercise close_active_pane's resize wiring
             // without a live wgpu renderer. Production stays `None` and
             // falls through to the renderer-derived metrics below.

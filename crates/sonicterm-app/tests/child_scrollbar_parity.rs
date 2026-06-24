@@ -85,7 +85,7 @@ fn child_right_edge_hover_marks_scrollbar_active() {
 
 #[test]
 fn child_cursor_left_clears_edge_hover_so_fade_timing_matches_main() {
-    // Regression for #679: if the pointer left the child window directly from
+    // Regression: if the pointer left the child window directly from
     // the right-edge gutter, child kept `mouse_near_right_edge=true`, so Auto
     // mode considered the bar permanently hovered and the hide/fade timing
     // diverged from main. CursorLeft must clear the hover bit and let the

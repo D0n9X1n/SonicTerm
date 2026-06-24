@@ -1,4 +1,4 @@
-//! Scrollbar mouse-input wiring (#386 PR-C).
+//! Scrollbar mouse-input wiring.
 //!
 //! PR-A landed the pure-function model (`sonicterm_ui::scrollbar`); PR-B
 //! wired the renderer to emit the bar quads. This module is the input
@@ -22,7 +22,7 @@ use sonicterm_ui::scrollbar::{self, HitTarget, Point, Rect, ScrollbarGeometry};
 /// (also 8.0). Callers scale this by the renderer's `scale_factor()` so the
 /// grabbable band matches the *drawn* band — the renderer draws the bar at
 /// `8.0 * scale` raster px, so hit-testing the bare 8.0 leaves the left of
-/// the thumb dead on fractional-DPI displays (issue #711).
+/// the thumb dead on fractional-DPI displays.
 pub const SCROLLBAR_WIDTH_PX: f32 = 8.0;
 
 /// Active drag gesture on a pane's scrollbar thumb.
@@ -140,7 +140,7 @@ use winit::window::WindowId;
 /// right-aligned, the grabbable band sat ~`padding_right` px to the RIGHT of
 /// the visible thumb; at fractional DPI (e.g. 12 logical * 1.75 = 21 px right
 /// padding vs a 14 px bar) the two bands stopped overlapping and clicks on
-/// the visible thumb missed entirely (issue #711). Apply the same inset here.
+/// the visible thumb missed entirely. Apply the same inset here.
 fn content_inset_rect(pane: Rect, pl: f32, pr: f32, pt: f32, pb: f32) -> Rect {
     Rect::new(pane.x + pl, pane.y + pt, (pane.w - pl - pr).max(0.0), (pane.h - pt - pb).max(0.0))
 }
@@ -162,7 +162,7 @@ impl App {
             return HitOutcome::Miss;
         };
         // Inset by the renderer's content padding so the hit band lines up
-        // with the drawn (right-aligned) bar, not the raw pane edge (#711).
+        // with the drawn (right-aligned) bar, not the raw pane edge.
         let pane_rect = match self.main_renderer() {
             Some(r) => content_inset_rect(
                 Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
@@ -184,7 +184,7 @@ impl App {
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         drop(parser);
         // Match the renderer's DPI-scaled bar width so the whole drawn thumb
-        // is grabbable, not just the rightmost 8px (issue #711).
+        // is grabbable, not just the rightmost 8px.
         let scale = self.main_renderer().map_or(1.0, GpuRenderer::scale_factor);
         hit(
             pane_rect,
@@ -247,7 +247,7 @@ impl App {
         if let Some(w) = ws.window.as_ref() {
             w.request_redraw();
         }
-        // #386 PR-D: any view_top jump (track click, prompt-nav, copy
+        // PR-D: any view_top jump (track click, prompt-nav, copy
         // mode scroll, mouse-wheel) counts as scrollbar activity.
         self.mark_scrollbar_active(active_id);
     }
@@ -276,7 +276,7 @@ impl App {
             return HitOutcome::Miss;
         };
         // Inset by the child renderer's content padding so the hit band lines
-        // up with the drawn right-aligned bar (#711), same as the main path.
+        // up with the drawn right-aligned bar, same as the main path.
         let pane_rect = match child.renderer.as_ref() {
             Some(r) => content_inset_rect(
                 Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
@@ -294,7 +294,7 @@ impl App {
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         drop(parser);
-        // Match the renderer's DPI-scaled bar width (issue #711).
+        // Match the renderer's DPI-scaled bar width.
         let scale = child.renderer.as_ref().map_or(1.0, GpuRenderer::scale_factor);
         hit(
             pane_rect,

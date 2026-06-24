@@ -55,7 +55,7 @@ pub struct PtyHandle {
 /// pass `clean_e2e: true` to suppress profile/logo and emit shell-family-
 /// specific clean-startup args.
 ///
-/// Added per #457 — pre-PR examples sent POSIX `printf` to PowerShell,
+/// Added — pre-PR examples sent POSIX `printf` to PowerShell,
 /// producing zero output. PLAN v5 split the fix into:
 ///   1. (this) — add opts + WindowsApps stub filter + shell-path accessor
 ///   2. (next PR) — ShellDialect trait + golden fixtures + actual e2e fix
@@ -70,7 +70,7 @@ pub struct ShellSpawnOpts {
     pub term_program: String,
     /// Explicit shell program override from `[terminal] shell`. When
     /// `Some(non-empty)`, this is spawned verbatim instead of the
-    /// platform default (#737). `None` / empty → auto-detect.
+    /// platform default. `None` / empty → auto-detect.
     pub shell: Option<String>,
 }
 
@@ -111,7 +111,7 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        // LM-007 (#598): the previous `Arc::strong_count == 1` guard skipped
+        // LM-007: the previous `Arc::strong_count == 1` guard skipped
         // the kill in any code path that still held a cloned child Arc,
         // leaving an orphaned shell on tab close. It also relied on
         // portable-pty's `Child::kill`, which on Unix sends SIGHUP and only
@@ -196,7 +196,7 @@ impl PtyHandle {
     /// PowerShell clean_e2e) reach `CommandBuilder` consistently.
     ///
     /// Also `pub` (doc-hidden) so integration tests can spawn shells with
-    /// args (e.g. `bash -c "trap '' HUP; exec cat"` for the #598 LM-007
+    /// args (e.g. `bash -c "trap '' HUP; exec cat"` for the LM-007
     /// regression test) without re-implementing the whole pipeline.
     #[doc(hidden)]
     pub fn spawn_with_args(cmd: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
@@ -353,7 +353,7 @@ fn default_shell() -> String {
 }
 
 /// Resolve the shell to spawn: an explicit, non-empty `[terminal] shell`
-/// override wins; otherwise fall back to the platform auto-detect (#737).
+/// override wins; otherwise fall back to the platform auto-detect.
 /// Pure so it can be unit-tested without the live filesystem/PATH.
 fn resolve_spawn_shell(override_shell: Option<&str>) -> String {
     match override_shell {
@@ -460,7 +460,7 @@ fn interactive_shell_args(_shell_path: &str) -> Vec<String> {
 #[cfg(target_os = "windows")]
 fn default_shell_program() -> String {
     // Prefer PowerShell 7 (`pwsh.exe`): first via PATH, then by probing the
-    // Microsoft Store package dir directly. #737: when SonicTerm is launched
+    // Microsoft Store package dir directly.: when SonicTerm is launched
     // from Explorer (installed under `C:\Program Files\SonicTerm`), its
     // inherited PATH often contains ONLY the per-user App Execution Alias stub
     // (which we correctly skip) and NOT the real Store package dir, so PATH
@@ -563,7 +563,7 @@ fn path_lookup(name: &str) -> Option<String> {
             if !candidate.is_file() {
                 return false;
             }
-            // #457: skip Microsoft Store WindowsApps stubs for `pwsh.exe` /
+            // skip Microsoft Store WindowsApps stubs for `pwsh.exe` /
             // `powershell.exe`. The App Execution Alias produces zero output
             // under ConPTY when spawned bare, so the e2e gates silently fail.
             // Escape hatch: SONICTERM_ALLOW_WINDOWSAPPS_SHELL=1 to opt back in.

@@ -24,8 +24,8 @@ use crate::ime::ImeState;
 use crate::search::SearchState;
 use crate::tabbar_view::Rect;
 
-// TODO: switch to ui_tokens after #115 merges. Until then the design
-// tokens from issue #112 Round 1 live here as named constants so that
+// TODO: switch to ui_tokens after merges. Until then the design
+// tokens Round 1 live here as named constants so that
 // `render.rs` and the integration tests can reference them by name and
 // stay self-documenting.
 

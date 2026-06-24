@@ -22,8 +22,8 @@ fn windows_default_leaves_alt_v_for_terminal_apps() {
 
 /// Every bundled platform keymap must parse cleanly with the strict loader.
 ///
-/// Regression guard for #751: when an action is removed/renamed in the
-/// `Action` enum (as `show_keymap_cheatsheet` was in #652), the bundled
+/// Regression guard: when an action is removed/renamed in the
+/// `Action` enum (as `show_keymap_cheatsheet` was), the bundled
 /// keymap that still references it would make `toml::from_str::<Keymap>`
 /// fail on the unknown variant. At runtime that whole-document failure
 /// drops *every* binding and silently falls back to defaults. Parsing each
@@ -50,7 +50,7 @@ fn bundled_default_parses() {
     assert!(!km.bindings.is_empty(), "bundled default must have bindings");
 }
 
-/// Documents the raw-serde failure mode behind #751: a single unknown
+/// Documents the raw-serde failure mode: a single unknown
 /// action makes a *whole-document* `toml::from_str::<Keymap>` fail. This is
 /// the low-level behavior the resilient loader (`parse_resilient`) now wraps
 /// so a stale action no longer drops the user's whole keymap.
@@ -78,7 +78,7 @@ action = "show_keymap_cheatsheet"
     );
 }
 
-/// #751 fix: the resilient loader keeps valid bindings and drops only the
+/// fix: the resilient loader keeps valid bindings and drops only the
 /// one referencing a removed action — instead of discarding the whole
 /// keymap and falling back to defaults.
 #[test]

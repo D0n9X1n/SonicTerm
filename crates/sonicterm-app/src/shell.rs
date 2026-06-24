@@ -58,7 +58,7 @@ pub struct MacShell {
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
     pending: Option<TabPayload>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
-    /// #554: one-shot hook fired the instant `create_window` returns
+    /// one-shot hook fired the instant `create_window` returns
     /// with the raw AppKit window handle. The mac bin uses this slot
     /// to apply AppKit-only per-window setup. Mirrors
     /// [`WindowsShell::with_on_window_ready`].
@@ -130,7 +130,7 @@ impl MacShell {
         self
     }
 
-    /// #554: one-shot hook fired the instant `create_window` returns,
+    /// one-shot hook fired the instant `create_window` returns,
     /// with the raw AppKit window handle. Mirrors
     /// [`WindowsShell::with_on_window_ready`] — same signature, same
     /// plumbing into the cross-platform firing site in

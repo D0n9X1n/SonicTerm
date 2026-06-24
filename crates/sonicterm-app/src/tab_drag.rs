@@ -123,7 +123,7 @@ pub fn build_drag_chip_overlay(
         drop_line_x,
         drop_line_y: source_bar.bar_y_range(),
         scale,
-        // Phase D (Epic #289) — drag visual feedback:
+        // Phase D — drag visual feedback:
         //   D1: ghost_alpha 0.5 on the chip body
         //   D2: insertion_slot opens an 8 px gap in the destination
         //       bar at the drop slot when the cursor is over a bar

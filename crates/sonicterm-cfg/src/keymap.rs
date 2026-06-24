@@ -125,7 +125,7 @@ pub struct Keymap {
     pub bindings: Vec<Binding>,
 }
 
-/// Intermediate keymap shape used by [`Keymap::parse_resilient`] (#751).
+/// Intermediate keymap shape used by [`Keymap::parse_resilient`].
 ///
 /// Identical to [`Keymap`] except each binding's `action` stays an
 /// unresolved [`toml::Value`], so the structural parse of the whole
@@ -186,14 +186,14 @@ impl Keymap {
         Self::load_or_default(&Self::resolve_path(keymap, asset_dir))
     }
 
-    /// Load a keymap from a TOML file at `path`, resiliently (#751).
+    /// Load a keymap from a TOML file at `path`, resiliently.
     ///
     /// Historically this did one whole-document `toml::from_str::<Keymap>`,
     /// so a single binding referencing an unknown/removed action (e.g.
-    /// `show_keymap_cheatsheet` after #652) failed the entire parse — at
+    /// `show_keymap_cheatsheet` after) failed the entire parse — at
     /// which point `load_or_default` silently dropped *every* binding and
     /// fell back to the bundled default, discarding all the user's
-    /// customizations. See #751.
+    /// customizations. See.
     ///
     /// Now the parse is per-binding: each binding whose action can't be
     /// resolved is skipped with a `WARN` that names the offending `keys`,
@@ -214,7 +214,7 @@ impl Keymap {
     /// `source` is a human label used in warnings/errors (typically the
     /// quoted path). Returns `Err` only for structural TOML errors — a bad
     /// action in one binding never poisons the others. Pure (no
-    /// filesystem) so it is unit-testable. See #751.
+    /// filesystem) so it is unit-testable. See.
     pub fn parse_resilient(text: &str, source: &str) -> Result<Self> {
         // First pass: structural parse with the action left as a raw value
         // so an unknown action variant does NOT fail the whole document.
@@ -240,7 +240,7 @@ impl Keymap {
     }
 
     /// Infallible loader. On any error, logs a warning at
-    /// `target = "sonicterm-cfg"` and returns [`Self::default`] — see #522.
+    /// `target = "sonicterm-cfg"` and returns [`Self::default`].
     pub fn load_or_default(path: &Path) -> Self {
         match Self::load_strict(path) {
             Ok(km) => km,

@@ -1,7 +1,7 @@
 //! Outputs of the state machine: side-effects the platform shell
 //! must perform after a reduce.
 //!
-//! Per spec §2 (M6a-expand-2 FINAL, #429): 22 variants grouped into
+//! Per spec §2: 22 variants grouped into
 //! the 7-class ordering used by `AppStateMachine::dispatch`.
 
 use bytes::Bytes;
