@@ -1,4 +1,4 @@
-//! Issue #43 behavioral test: a torn-out CHILD window's deferred-redraw
+//! behavioral test: a torn-out CHILD window's deferred-redraw
 //! latch (`pending_redraw_windows`, driven by `defer_child_redraw`).
 //!
 //! The pure gate predicate (`should_defer_streaming_redraw`) is unit-tested

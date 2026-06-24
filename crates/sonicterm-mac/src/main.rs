@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     // `tracing_subscriber::try_init` only ever installs the first
     // subscriber, so the previous "bootstrap-then-reinit" dance
     // silently dropped the user-configured level (Haiku review of
-    // PR #222).
+    // ).
     sonicterm_logging::install_panic_hook(sonicterm_logging::log_dir());
     let bootstrap_cfg = sonicterm_logging::LoggingConfig::default();
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &bootstrap_cfg);
@@ -38,15 +38,14 @@ fn main() -> Result<()> {
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
     sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
     // Drain any warnings collected during pre-logging Config load so the
-    // #522 parse-failure WARN actually reaches sonicterm.log + stderr
-    // (Haiku review of PR #534).
+    // parse-failure WARN actually reaches sonicterm.log + stderr.
     for w in cfg_warnings.drain(..) {
         tracing::warn!(target: "sonicterm-cfg", "{w}");
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     let theme = load_theme(&config.theme);
     let keymap = load_keymap(&config.keymap);
-    // Initial load is infallible (#522 fallback); hot-reload loaders use
+    // Initial load is infallible; hot-reload loaders use
     // strict variants so user-visible errors are surfaced after startup.
     let theme_loader: sonicterm_app::ThemeLoader =
         Box::new(|name: &str| Theme::load_name_or_path(name, &asset_dir()));
@@ -65,7 +64,7 @@ fn main() -> Result<()> {
         // the AppKit event loop — installing it before
         // `event_loop.run_app` leaves AppKit with only the default
         // `Apple, sonicterm-mac` menu bar (release-binary smoke caught
-        // this on PR #114). The menubar_bridge proxy is installed by
+        // this). The menubar_bridge proxy is installed by
         // `MacShell::run` BEFORE the hook fires, so NSMenu selectors
         // can wake the loop on first click.
         //

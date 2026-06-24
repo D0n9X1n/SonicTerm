@@ -1,6 +1,6 @@
 //! Pure-function scrollbar geometry model.
 //!
-//! PR-A of #386: data layer only. No render emit, no input wiring.
+//! PR-A: data layer only. No render emit, no input wiring.
 //! Consumers (PR-B render, PR-C input) call [`compute`], [`hit_test`],
 //! and [`thumb_to_view_top`] without any global state.
 //!

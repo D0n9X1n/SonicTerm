@@ -5,7 +5,7 @@
 //! Without this, `cargo build` puts the binary at `target/<profile>/`
 //! but leaves `assets/` only at the repo root — the runtime then
 //! silently falls back to system fonts which may not be Nerd-patched
-//! (Powerline / icon glyphs render as tofu). See issue #439.
+//! (Powerline / icon glyphs render as tofu). See.
 //!
 //! The copy is incremental: a destination file is only rewritten when
 //! it's missing or older than the source. On metadata-read failure we

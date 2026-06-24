@@ -1,4 +1,4 @@
-//! Epic #289 Phase C — cross-window tab drag & drop.
+//! Phase C — cross-window tab drag & drop.
 //!
 //! Implements the *pure* tab-transfer primitive that moves a `Tab`
 //! (with its `TabState` and the full `PaneState` graph it owns)

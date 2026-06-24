@@ -124,12 +124,12 @@ impl App {
     ) {
         let theme = self.theme.clone();
         let config = self.config.clone();
-        // Epic #289 follow-up: snapshot the app-level overlay
+        // follow-up: snapshot the app-level overlay
         // attachments here, BEFORE the mutable `child` borrow below
         // pins `self.windows` for the rest of the match. Used only by
         // the `RedrawRequested` arm but cheap enough to compute once.
         let palette_here = self.palette_attached_window == Some(win_id);
-        // Issue #43: vsync coalescing inputs for the `RedrawRequested`
+        // vsync coalescing inputs for the `RedrawRequested`
         // arm, snapshotted BEFORE the long-lived `child` borrow of
         // `self.windows` below (these read disjoint `self` fields the
         // borrow would otherwise pin). Mirrors the main-window gate in
@@ -142,7 +142,7 @@ impl App {
         // following streaming redraw coalesces instead of over-rendering.
         let was_dirty = self.input_dirty;
         let frame_period = self.frame_period;
-        // Issue #713: snapshot the no-GPU degrade flag before the long-lived
+        // snapshot the no-GPU degrade flag before the long-lived
         // `child` borrow below so the fade-suppression check can read it.
         let software_render_degrade = self.software_render_degrade;
         let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
@@ -357,7 +357,7 @@ impl App {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
-                    // Epic #289 Phase C2 — drop this window's tab bar
+                    // Phase C2 — drop this window's tab bar
                     // snapshot so later OS drops can't false-positive
                     // hit-test against a stale rect.
                     self.os_drag_bars.remove(Some(win_id));
@@ -371,7 +371,7 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Issue #43: vsync coalescing gate — the torn-out child's
+                // vsync coalescing gate — the torn-out child's
                 // mirror of the main-window gate (window_event.rs). A
                 // redraw that is neither input-driven (`was_dirty`) nor
                 // carrying fresh PTY bytes (`pty_burst`), and which lands
@@ -385,7 +385,7 @@ impl App {
                 // one frame per vsync like the main window, instead of
                 // rendering on every VT tick. Input-driven redraws skip
                 // the gate so typing/resize/theme stay immediate.
-                // Issue #714: lower the cap while composing an IME preedit on the software path.
+                // lower the cap while composing an IME preedit on the software path.
                 let child_frame_period = crate::app::effective_frame_period(
                     software_render_degrade,
                     child.ime.is_composing(),
@@ -438,7 +438,7 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("layout");
                 }
-                // PR #199 Fix 1: try_lock EVERY pane in this child window's
+                // Fix 1: try_lock EVERY pane in this child window's
                 // tab and pass them all through to the renderer. Mirrors
                 // the main-window path in window_event.rs.
                 let parser_arcs: Vec<(
@@ -479,7 +479,7 @@ impl App {
                 if !all_locked {
                     drop(guards);
                     drop(parser_arcs);
-                    // Issue #43 lock-contention backoff: a bare
+                    // lock-contention backoff: a bare
                     // `child.request_redraw()` here re-enters this arm on
                     // the very next loop turn and re-contends the parser
                     // lock the VT thread (`spawn_pane.rs` `p.advance`)
@@ -599,7 +599,7 @@ impl App {
                     if let Some(t) = timing.as_mut() {
                         t.lap("pane_slice");
                     }
-                    // PR #400: cursor_visible is per-pane (lives on
+                    // cursor_visible is per-pane (lives on
                     // PaneState). Read from the active pane (already
                     // borrowed mutably above) so the DECTCEM flag
                     // survives tear-out of this child.
@@ -615,7 +615,7 @@ impl App {
                             child.copy_mode.as_ref(),
                             &child.tabs,
                             search,
-                            // Epic #289 follow-up: render the app-level
+                            // follow-up: render the app-level
                             // command palette HERE when it
                             // was opened while this child window was OS
                             // frontmost. Pre-fix these were hardcoded to
@@ -656,7 +656,7 @@ impl App {
                         );
                     }
                     child.last_render = first_render_at;
-                    // Issue #43: close the coalescing gate for the next
+                    // close the coalescing gate for the next
                     // streaming redraw. `input_dirty` is the shared
                     // main+child carve-out flag (see window_event.rs
                     // pre-dispatch block) — clear it now that this child
@@ -772,7 +772,7 @@ impl App {
                             }
                         }
                     }
-                    // Epic #289 Phase C2 — publish this child's tab bar
+                    // Phase C2 — publish this child's tab bar
                     // snapshot for cross-window OS drag hit-tests. See
                     // `App::publish_child_window_tab_bar` for the
                     // rationale on the main-window mirror.
@@ -805,7 +805,7 @@ impl App {
                     // Keep animating the scrollbar fade to completion (the
                     // 300ms auto-hide) even when no further input arrives —
                     // except in the no-GPU path, where the bar snaps instead
-                    // of burning CPU on the fade (issue #713).
+                    // of burning CPU on the fade.
                     if scrollbar_needs_more_frames && !software_render_degrade {
                         child.request_redraw();
                     }
@@ -903,7 +903,7 @@ impl App {
                 if child.mouse_down {
                     if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
                     {
-                        // WezTerm-style drag granularity (#651). The press set
+                        // WezTerm-style drag granularity. The press set
                         // `select_mode` + `select_anchor` (ABSOLUTE row);
                         // extend by Cell / Word / Line. Word/Line recompute the
                         // region from the live grid via try_lock (lock dropped
@@ -933,7 +933,7 @@ impl App {
                                 SelectMode::Cell => {
                                     // Mirror the main window: don't collapse an
                                     // anchored (word/line) selection on a plain
-                                    // cell move. (#651) Skip if abs row missing.
+                                    // cell move. Skip if abs row missing.
                                     if !sel.anchored {
                                         if let Some(abs) = cursor_abs_row {
                                             sel.extend(abs, col);
@@ -1060,7 +1060,7 @@ impl App {
                                 // re-entering &mut self via helpers.
                                 let _ = child;
                                 // Auto-reap is now inside
-                                // close_tab_at_in_child (PR #302
+                                // close_tab_at_in_child (
                                 // follow-up); no explicit reap call
                                 // needed at the call-site.
                                 self.close_tab_at_in_child(win_id, idx);
@@ -1129,7 +1129,7 @@ impl App {
                         // Record WezTerm-style drag granularity + anchor cell
                         // (mirrors the main-window path) so a held-button
                         // CursorMoved extends by cell / word / line. The
-                        // anchor row is ABSOLUTE. (#651)
+                        // anchor row is ABSOLUTE.
                         child.select_mode = match count {
                             2 => SelectMode::Word,
                             3 => SelectMode::Line,
@@ -1210,7 +1210,7 @@ impl App {
                                 self.merge_child_into_target(win_id, src_idx, target);
                             }
                             crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                // Epic #289 Phase B: tear out from a
+                                // Phase B: tear out from a
                                 // child window into a NEW top-level
                                 // window. The Tab + PaneState (incl.
                                 // PtyHandle) MOVE — no clone, no
@@ -1249,7 +1249,7 @@ impl App {
                     }
                     return;
                 }
-                // Epic #289 follow-up: when the command
+                // follow-up: when the command
                 // palette is attached to THIS child window, route the
                 // keystroke into the overlay handler exactly like the
                 // main window does in window_event.rs ~line 855. Without
@@ -1317,7 +1317,7 @@ impl App {
                     }
                     return;
                 }
-                // Issue #370: the previous narrow special-case only
+                // the previous narrow special-case only
                 // handled `EnterCopyMode` / `EnterQuickSelect` and
                 // dropped every other action (NextTab / PrevTab /
                 // ActivateTab / SplitRight / Cmd+T / Cmd+W / ...) into
@@ -1388,7 +1388,7 @@ impl App {
                 };
                 // Read the active child pane's kitty keyboard flags from the
                 // lock-free per-pane snapshot instead of taking the parser
-                // lock on the keypress path (issue #710 — the VT thread holds
+                // lock on the keypress path (— the VT thread holds
                 // that lock while parsing output). Non-zero flags drive CSI-u
                 // key encoding (Shift+Enter).
                 let kitty_flags = child
@@ -1490,9 +1490,9 @@ impl App {
         let mut focus_report: Option<(u64, Vec<u8>)> = None;
         if let Some(child) = self.windows.get_mut(&win_id) {
             if focused {
-                // Epic #289 Phase A — unified frontmost tracker;
+                // Phase A — unified frontmost tracker;
                 // discriminates main vs child via `frontmost_kind()`.
-                // PR-B4 (#365): `focused_child` removed — the child-only
+                // PR-B4: `focused_child` removed — the child-only
                 // subset is now derivable from `frontmost_window`.
                 self.frontmost_window = Some(win_id);
                 child.ime_cursor_throttle.reset();
@@ -1506,7 +1506,7 @@ impl App {
             child.ime.cancel();
             if !focused {
                 // Drop any in-flight drag interrupted by focus loss — it
-                // never gets a button-release otherwise (issue #711).
+                // never gets a button-release otherwise.
                 child.scrollbar_drag = None;
                 child.splitter_drag = None;
             }
@@ -1567,7 +1567,7 @@ impl App {
         }
     }
     pub(super) fn reap_empty_child(&mut self, win_id: WindowId) {
-        // PR #302 follow-up: bump the test-observable counter on EVERY
+        // follow-up: bump the test-observable counter on EVERY
         // invocation (even no-ops on stale ids) so tests can pin that
         // child-window cleanup truly routed through this contract rather
         // than a raw `windows.remove`.
@@ -1635,7 +1635,7 @@ impl App {
     /// reuse the same VT-loop + reply-forwarder setup without
     /// duplicating ~50 lines of thread-spawn boilerplate.
     ///
-    /// PR #400: cursor_visible is now a fresh per-pane Arc owned by
+    /// cursor_visible is now a fresh per-pane Arc owned by
     /// `PaneState`, no longer threaded in from the WindowState.
     pub(super) fn spawn_pane_state_for_child(
         &self,
@@ -1646,26 +1646,26 @@ impl App {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        // Honour the user's configured scrollback depth (issue #710); child
+        // Honour the user's configured scrollback depth; child
         // windows must match the main window, not the Grid's 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
         let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
-        // Seed theme defaults for OSC 10/11/12 (#369) + OSC 4 palette (#661).
+        // Seed theme defaults for OSC 10/11/12 + OSC 4 palette.
         {
             let mut p = parser.lock();
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
             Arc::new(Mutex::new(Some(child_window)));
-        // PR #400: per-pane cursor_visible Arc.
+        // per-pane cursor_visible Arc.
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
         // Per-pane kitty-keyboard flags snapshot read lock-free on the
-        // keypress path (issue #710); mirrors the main-window pane wiring.
+        // keypress path; mirrors the main-window pane wiring.
         let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
             Arc::new(std::sync::atomic::AtomicU8::new(0));
-        // Per-pane DECCKM snapshot read lock-free on the keypress path (#761);
+        // Per-pane DECCKM snapshot read lock-free on the keypress path;
         // mirrors the main-window pane wiring.
         let app_cursor_keys_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1730,13 +1730,13 @@ impl App {
                                         }
                                         // Mirror kitty-keyboard flags under the
                                         // lock so the keypress path reads them
-                                        // lock-free (issue #710).
+                                        // lock-free.
                                         kitty_flags.store(
                                             p.kitty_keyboard_flags(),
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
                                         // Mirror DECCKM for the lock-free
-                                        // keypress encode path (#761).
+                                        // keypress encode path.
                                         app_cursor_keys.store(
                                             p.application_cursor_keys(),
                                             std::sync::atomic::Ordering::Relaxed,
@@ -1840,7 +1840,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Epic #289 Phase A — per-child action helpers
+    // Phase A — per-child action helpers
     //
     // These mirror the equivalent main-window mutators in
     // `app/misc.rs` and `app/spawn_pane.rs` but operate on a child
@@ -1875,12 +1875,12 @@ impl App {
     /// passes the clicked index directly (not the active one). Returns
     /// `true` on success.
     ///
-    /// Auto-reap behavior (PR #302 follow-up): when this drains the
+    /// Auto-reap behavior (follow-up): when this drains the
     /// child to zero tabs we immediately invoke
     /// [`Self::reap_empty_child`] so callers never have to remember.
     /// The previous contract (caller-responsible reap) left Cmd+W and
     /// `CloseActivePaneOrTab` on a single-pane child window leaking a
-    /// ghost frame — Haiku finding on PR #302. Centralising the reap
+    /// ghost frame — a review. Centralising the reap
     /// here is the single-source-of-truth pattern: every close path
     /// (× button, Cmd+W, close-active-pane-or-tab) now flows through
     /// this function and gets the reap for free.
@@ -1981,7 +1981,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Epic #289 Phase A — per-child PANE mutators
+    // Phase A — per-child PANE mutators
     //
     // Mirror of the per-child tab helpers above, but for pane-level
     // actions (`Action::SplitRight`, `SplitDown`, `ClosePane`,
@@ -1994,7 +1994,7 @@ impl App {
     // Without these, Cmd+D / Cmd+Shift+D / Cmd+[ / Cmd+] / Cmd+Z typed
     // in a torn-out child window would silently mutate the MAIN App's
     // active tab — same bug class as #2/#3 but for pane actions. Haiku
-    // review of PR #291 caught this gap.
+    // review caught this gap.
     // ──────────────────────────────────────────────────────────────────
 
     /// Split the active pane of the given child window in `dir`. Returns

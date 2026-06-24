@@ -1,6 +1,6 @@
-//! Issue #296: render a small PNG preview for an OS-level tab drag.
+//! render a small PNG preview for an OS-level tab drag.
 //!
-//! Pre-#296, `try_os_drag_handoff` passed `Vec::new()` as the
+//! Pre-, `try_os_drag_handoff` passed `Vec::new` as the
 //! `drag_image_png` to every `OsTabDragBackend::begin_session` call —
 //! so when a user dragged a tab out of the window via NSDraggingSession
 //! / OLE `DoDragDrop`, the operating system rendered an empty (or
@@ -22,7 +22,7 @@
 //! 1. **Threading.** `begin_session` runs on the winit main thread.
 //!    Acquiring the wgpu `Device` + `Queue` + grabbing the shape /
 //!    atlas locks during a drag start risks the AB-BA pattern that
-//!    bit us in PR #36 and was caught by the §4 land-mine list. The
+//!    bit us and was caught by the §4 land-mine list. The
 //!    renderer uses `try_lock` precisely so a drag burst does NOT
 //!    deadlock the main thread — a synchronous offscreen render would
 //!    re-introduce that hazard.
@@ -102,7 +102,7 @@ pub fn tab_thumbnail_inputs_from_payload(title: &str) -> TabThumbnailInputs {
 ///
 /// Returns an empty `Vec<u8>` on encoder failure rather than panicking
 /// — the caller (`try_os_drag_handoff`) treats an empty buffer as
-/// "no preview, proceed without one," matching the pre-#296 behavior.
+/// "no preview, proceed without one," matching the pre- behavior.
 pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
     let width = THUMB_RASTER_WIDTH.max(8);
     let height = THUMB_RASTER_HEIGHT.max(8);

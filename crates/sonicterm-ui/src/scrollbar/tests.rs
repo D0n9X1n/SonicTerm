@@ -76,7 +76,7 @@ fn thumb_to_view_top_inverts_compute() {
     }
 }
 
-// Regression for issue #711: the hit-test width must match the *rendered*
+// Regression: the hit-test width must match the *rendered*
 // (DPI-scaled) width, or the left of the thumb is dead on fractional DPI.
 #[test]
 fn dpi_scaled_width_makes_the_full_drawn_thumb_grabbable() {
@@ -94,7 +94,7 @@ fn dpi_scaled_width_makes_the_full_drawn_thumb_grabbable() {
     assert_eq!(hit_test(&scaled, press), HitTarget::Thumb);
 }
 
-// Regression for issue #711 (second cause): the renderer draws the bar in
+// Regression (second cause): the renderer draws the bar in
 // the PADDED content rect, but hit-testing used the raw pane rect. With a
 // right-aligned track, the grabbable band was shifted `padding_right` px
 // to the right of the drawn thumb — at fractional DPI the two stopped

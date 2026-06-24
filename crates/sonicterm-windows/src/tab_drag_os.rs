@@ -167,7 +167,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
                 DragOutcome::DroppedOnBar { target_window: None, target_slot: source_tab_idx }
             }
             _ => {
-                // Issue #553 Phase A: DROPEFFECT_NONE means the user
+                // Phase A: DROPEFFECT_NONE means the user
                 // released over bare desktop / a non-SonicTerm window.
                 // Capture the cursor position via Win32 GetCursorPos
                 // (screen coordinates) so the App can spawn a torn-out

@@ -110,8 +110,8 @@ impl QuadInstance {
 /// (`[accent.r, accent.g, accent.b, 0.16]`) or the IME pre-edit
 /// background (`[0.10, 0.11, 0.14, 0.95]`) — must wrap them with this
 /// helper before stuffing them into a `QuadInstance`, otherwise the
-/// chrome renders much brighter than intended (the #375 regression
-/// caught in PR #377 review).
+/// chrome renders much brighter than intended (the regression
+/// caught review).
 ///
 /// Opaque colors (`a == 1.0`) pass through unchanged — premultiplying
 /// by 1.0 is the identity, so it's safe (and a no-op) to wrap every
@@ -131,7 +131,7 @@ pub fn premultiply(rgba: [f32; 4]) -> [f32; 4] {
 /// factors `src=SrcAlpha, dst=OneMinusSrcAlpha`) double-multiplies the
 /// alpha, which on transparent Win11 Mica surfaces makes dark tab chrome
 /// blend nearly into the clear backdrop — the invisible-tab-bar bug
-/// tracked by #375.
+/// tracked.
 #[must_use]
 pub fn premultiplied_alpha_blend() -> wgpu::BlendState {
     wgpu::BlendState {

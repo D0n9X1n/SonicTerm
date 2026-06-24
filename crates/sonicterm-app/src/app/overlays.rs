@@ -437,7 +437,7 @@ impl App {
             window: sonicterm_types::WindowKey::new(0),
         });
         if now_open {
-            // Epic #289 follow-up: tag with the frontmost window so the
+            // follow-up: tag with the frontmost window so the
             // palette appears on whatever window the user is looking at.
             // Pre-fix this was hardcoded to the main window's render
             // pass — typing Cmd+Shift+P in a torn-out child popped the
@@ -562,7 +562,7 @@ impl App {
         self.dispatch_intent(sonicterm_app_core::AppIntent::OpenSearch {
             window: sonicterm_types::WindowKey::new(0),
         });
-        // Epic #289 follow-up: route to the OS-frontmost window so
+        // follow-up: route to the OS-frontmost window so
         // Cmd+F typed in a torn-out child opens a search bar on
         // THAT child's active tab, not the main window's.
         if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -592,7 +592,7 @@ impl App {
         }
     }
 
-    /// Epic #289 follow-up — child-window mirror of `open_search`. Opens
+    /// follow-up — child-window mirror of `open_search`. Opens
     /// a search bar on the active tab of the given child window. Returns
     /// `true` on success, `false` if the recorded id is stale so the
     /// caller can fall back to the main App default.
@@ -614,7 +614,7 @@ impl App {
         true
     }
 
-    /// Epic #289 follow-up — redraw helper for app-level overlays
+    /// follow-up — redraw helper for app-level overlays
     /// (palette) that need to wake whichever window is
     /// currently hosting them. `None` ⇒ main window; `Some(id)` ⇒ that
     /// child window. Silently no-ops if the recorded id is stale.

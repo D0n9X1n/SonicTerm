@@ -1,4 +1,4 @@
-//! Regression tests for #671: inactive tabs must pick up the current window
+//! Regression tests: inactive tabs must pick up the current window
 //! size when they become active after a resize.
 //!
 //! The production resize paths size only the active tab's panes. That is fine

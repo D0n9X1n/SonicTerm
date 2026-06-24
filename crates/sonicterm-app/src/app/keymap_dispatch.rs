@@ -235,7 +235,7 @@ impl App {
     }
 
     pub fn run_action(&mut self, action: &Action) -> bool {
-        // Epic #289 Phase A — if `frontmost_window` was set to a stale id
+        // Phase A — if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
         // now so the routing arms below see `None` (safe main fallback)
         // AND the next action doesn't retry the dead window. This single
@@ -262,10 +262,10 @@ impl App {
                     window: sonicterm_types::WindowKey::new(0),
                     cwd: None,
                 });
-                // Epic #289 Phase A — route through the unified
+                // Phase A — route through the unified
                 // `frontmost_window` discriminator so a Cmd+T typed in a
                 // torn-out child opens a tab in THAT child, not in the
-                // main window. PR-B4 (#365) removed the `focused_child`
+                // main window. PR-B4 removed the `focused_child`
                 // fallback — `frontmost_window` is set by the same focus
                 // event so the back-compat path was redundant.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -287,7 +287,7 @@ impl App {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: active_idx,
                 });
-                // Epic #289 Phase A — route to frontmost window.
+                // Phase A — route to frontmost window.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_tab_in_child(id) {
                         return true;
@@ -345,7 +345,7 @@ impl App {
                 self.activate_last_main_tab();
             }
             Action::SplitRight => {
-                // Epic #289 Phase A — route to frontmost window so Cmd+D
+                // Phase A — route to frontmost window so Cmd+D
                 // typed in a torn-out child splits THAT window's active
                 // pane, not the main window's.
                 // M6a-expand-2c-pane: notify the reducer first so
@@ -390,7 +390,7 @@ impl App {
                 self.close_active_pane();
             }
             Action::CloseActivePaneOrTab => {
-                // Epic #289 Phase A — Cmd+W routes to frontmost window.
+                // Phase A — Cmd+W routes to frontmost window.
                 // Without this, a Cmd+W typed in a torn-out child window
                 // closed a tab in the original main window (bug #3).
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -554,14 +554,14 @@ impl App {
             Action::RenameTab => self.start_rename_active_tab(),
             Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
-                // Epic #289 Phase E (Haiku follow-up): set the pending
+                // Phase E (Haiku follow-up): set the pending
                 // flag; `drain_pending_window_creates` consumes it with
                 // the live `ActiveEventLoop` and builds a fresh
                 // top-level terminal window. Works whether or not
                 // `self.windows` is empty — the dock-alive
                 // post-close-last-window case (macOS,
                 // quit_on_last_window_close=false) is the motivating
-                // bug Haiku flagged on PR #297.
+                // bug Haiku flagged.
                 self.pending_new_window = true;
                 // M6a-expand-2c-window: notify the reducer the user
                 // asked for a new window. The reducer bumps
@@ -575,7 +575,7 @@ impl App {
                 });
             }
             Action::Scroll(kind) => {
-                // #412: replace the "not yet wired up" stub. Translate
+                // replace the "not yet wired up" stub. Translate
                 // ScrollAction → signed line delta and route through the
                 // canonical `scroll_pane` mutator (which also handles
                 // alt-screen no-op + clamping + auto-follow snap-back).
@@ -621,7 +621,7 @@ impl App {
         true
     }
 
-    /// Issue #539 — source-aware action dispatch. Identical to
+    /// — source-aware action dispatch. Identical to
     /// [`Self::run_action`] for every action that does NOT depend on
     /// the frontmost window, but for routed arms (NewTab, CloseTab,
     /// tab nav, Split*, ClosePane, FocusPane, resize/zoom/fullscreen,
@@ -897,7 +897,7 @@ impl App {
             // (clipboard, theme, config) or have their own routing
             // (NewWindow correctly creates a new top-level regardless
             // of source). OpenSearch / palette use the main-window
-            // overlay singleton today — see #539 follow-up for
+            // overlay singleton today — follow-up for
             // per-window overlay routing.
             _ => return self.run_action(action),
         }

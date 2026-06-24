@@ -1,4 +1,4 @@
-//! Cursor-related rendering helpers extracted from `render.rs` (issue #143).
+//! Cursor-related rendering helpers extracted from `render.rs`.
 //!
 //! Moved from `sonicterm-shared::render::cursor` in M7e of the workspace
 //! refactor: all helpers consume `QuadInstance` / `GlyphInstance` and
@@ -191,7 +191,7 @@ fn aabb_overlap_area(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
 /// [`crate::quad::px_to_ndc`] mapping to test rect intersection in
 /// pixel space (cleaner than reasoning about NDC sign conventions).
 ///
-/// **AABB intersection** (issue #568) rather than a center-point test:
+/// **AABB intersection** rather than a center-point test:
 /// shaped glyphs for ligatures (`=>`, `===`) and wide characters
 /// (CJK, emoji) emit a single [`GlyphInstance`] whose `rect` spans the
 /// full cluster of cells. A center-point test misses every cluster

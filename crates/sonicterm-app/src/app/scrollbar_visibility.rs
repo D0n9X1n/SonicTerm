@@ -1,4 +1,4 @@
-//! Per-pane scrollbar auto-hide + fade animation (#386 PR-D).
+//! Per-pane scrollbar auto-hide + fade animation.
 //!
 //! Pure helpers + a small `ScrollbarVisState` struct that the
 //! window-event + render plumbing in `app::` mutates. Kept as

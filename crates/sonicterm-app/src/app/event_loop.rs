@@ -60,7 +60,7 @@ impl App {
         let notification_wake = self.expire_notifications(Instant::now());
         // Schedule the next blink-only redraw via `WaitUntil(..)`
         // rather than `request_redraw()` from inside the render path
-        // (which produced the tight redraw loop flagged on PR #81).
+        // (which produced the tight redraw loop flagged).
         // The renderer hands us the exact instant of the next phase
         // bucket boundary; fall back to `Wait` when blinking is off,
         // the window is unfocused, or no renderer exists. Explicitly
@@ -85,7 +85,7 @@ impl App {
                 next = Some(last_render + period);
             }
         }
-        // Issue #43: same vsync-pacing schedule for any CHILD window that
+        // same vsync-pacing schedule for any CHILD window that
         // deferred a redraw (PTY-streaming gate or lock-contention
         // backoff). Each torn-out child keys off its own
         // `WindowState.last_render`, so fold each pending child's next
@@ -103,7 +103,7 @@ impl App {
             }
         }
         if let Some(r) = self.main_renderer() {
-            // PR #400: cursor_visible is per-pane — read from the
+            // cursor_visible is per-pane — read from the
             // active pane of the active tab so the DECTCEM flag
             // survives tear-out.
             let cursor_visible = self
@@ -134,7 +134,7 @@ impl App {
         // When our `WaitUntil(..)` timer expires, winit fires
         // `NewEvents(ResumeTimeReached)` and then nothing else unless
         // we explicitly ask. Request a redraw so the blink animation
-        // actually advances to the next phase bucket. PR #81 review.
+        // actually advances to the next phase bucket. review.
         // Perf audit #9: this same wakeup also services a vsync-paced
         // redraw deferred by the RedrawRequested handler — we clear
         // `pending_redraw` here so the next render call services it
@@ -143,7 +143,7 @@ impl App {
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
-            // Issue #43: also re-request the redraw on every CHILD window
+            // also re-request the redraw on every CHILD window
             // that deferred one (vsync gate or lock-contention backoff).
             // We do NOT clear an entry on request — exactly like the main
             // window's `pending_redraw`, the marker is cleared when the
@@ -189,7 +189,7 @@ impl App {
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
         self.drain_pending_window_creates(el);
-        // Issue #462 (speculative defensive fix): drain deferred
+        // (speculative defensive fix): drain deferred
         // OS-drag teardown AFTER `drain_pending_window_creates` so any
         // tear-out-spawn from the `DroppedOnEmpty` branch has produced
         // its new window before cross-window drag-residue cleanup
@@ -197,7 +197,7 @@ impl App {
         self.drain_pending_os_teardown();
     }
 
-    /// Drain a `UserEvent::ClearShapeCache` (Epic #300 P4 follow-up):
+    /// Drain a `UserEvent::ClearShapeCache` (P4 follow-up):
     /// an async font fallback family just landed in
     /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`]. Clear every
     /// live renderer's shape / row / line caches (bumping `style_rev`)
@@ -221,7 +221,7 @@ impl App {
         // winit has built the AppKit event loop, so `setMainMenu`
         // sticks. Installing it before `run_app` left AppKit with only
         // the default `Apple, sonicterm-mac` menubar (bug caught by the
-        // PR #114 release-binary smoke).
+        // release-binary smoke).
         if let Some(hook) = self.on_resumed.take() {
             hook();
         }
@@ -306,7 +306,7 @@ impl App {
         // user's GPU at all — no recovery path exists in a GPU-accelerated
         // terminal. Same justification as the `create_window` site above.
         .expect("init renderer");
-        // Epic #300 P4 follow-up wire: attach the async font fallback
+        // P4 follow-up wire: attach the async font fallback
         // loader so frame-time misses on CJK / emoji / nerd-font
         // codepoints trigger a background `request_load` and a
         // `UserEvent::ClearShapeCache` wake-up on completion. Skipped
@@ -322,7 +322,7 @@ impl App {
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
-        // Issue #713: resolve the no-GPU degrade decision now that the
+        // resolve the no-GPU degrade decision now that the
         // renderer (and its adapter) exists. Combine the config mode with
         // runtime software-rasterizer detection, then clamp the frame period
         // so the CPU isn't asked to rasterize at the monitor's full refresh.
@@ -344,7 +344,7 @@ impl App {
             );
         }
 
-        // Phase C2 / Haiku #295: register the main window's HWND with
+        // Phase C2 / register the main window's HWND with
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.
         let main_id = window.id();
@@ -366,10 +366,10 @@ impl App {
         // up on the very first paint, not after a config edit.
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        // PR-B1b (#293): renderer is now owned by `WindowState.renderer`.
+        // PR-B1b: renderer is now owned by `WindowState.renderer`.
         // Insert the main entry BEFORE `new_tab` so `spawn_pane` (which
         // reads cell size through `self.main_renderer()`) sees it.
-        // PR-B2a (#365): drop any synthetic main entry seeded by tests
+        // PR-B2a: drop any synthetic main entry seeded by tests
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {

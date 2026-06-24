@@ -72,7 +72,7 @@ fn insert_delete_and_erase_cells_use_bce_fill() {
     // ICH (CSI 2 @) at col 4 (the 'd'): insert 2 blanks, shift the cursor cell
     // and everything right of it RIGHT by 2, dropping what overflows the right
     // margin. "abcdefgh" → "abc" + 2 blanks + "def" (g,h overflow and drop) =
-    // "abc  def". #762: this previously read "abc    f" because
+    // "abc def".: this previously read "abc f" because
     // `insert_cells_with` pre-blanked the cells it then used as the shift's
     // copy source, destroying d,e — that assertion regression-locked the bug.
     assert_eq!(row_text(&parser, 0), "abc  def");

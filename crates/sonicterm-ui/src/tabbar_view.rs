@@ -110,8 +110,6 @@ pub const ACTIVE_TOP_ACCENT_INSET: f32 = 2.0;
 /// "append at the end" (insertion slot `tabs.len()`). The bar background
 /// still extends the full window width — no extra drawing is required;
 /// the reserved zone simply shows the existing tab-bar background.
-///
-/// See issue #541.
 pub const TAB_END_DROP_ZONE_PX: f32 = 96.0;
 
 /// Rectangle in physical pixels.
@@ -261,7 +259,7 @@ impl TabBarLayout {
         Self::compute_with_height(bar, window_width, TAB_BAR_HEIGHT)
     }
 
-    /// Width of the Phase D insertion gap (Epic #289) in logical px.
+    /// Width of the Phase D insertion gap in logical px.
     /// Tabs at or after the insertion slot shift right by this amount
     /// while a drag is in progress, previewing the drop position.
     pub const INSERTION_GAP_PX: f32 = 8.0;
@@ -344,7 +342,7 @@ impl TabBarLayout {
         // edge of the bar, minus another `bar_left_pad` of breathing
         // room, and minus `end_drop` so there is always an empty slice
         // on the right that a dragged tab can be dropped into to mean
-        // "append at the end" (issue #541). The bar background itself
+        // "append at the end". The bar background itself
         // (`bar_rect.w`) still spans the full window width.
         let tabs_region = (window_width - bar_left_pad - bar_left_pad - end_drop).max(0.0);
         let total_gaps = tab_gap * (n as f32 - 1.0).max(0.0);
@@ -391,7 +389,7 @@ impl TabBarLayout {
     /// when the active index points past the laid-out tabs (defensive —
     /// stale state must never paint an accent floating in the empty
     /// right-edge area of the bar, which was the user-reported bug in
-    /// issue #171).
+    /// ).
     ///
     /// The rect is anchored to the active tab's own `bg.x`/`bg.y` — it
     /// MUST NOT be derived from `active_idx * tab_w`, because the bar
@@ -400,7 +398,7 @@ impl TabBarLayout {
     #[must_use]
     pub fn active_accent_rect(&self) -> Option<Rect> {
         let t = self.active_widget()?;
-        // Issue #257: the active indicator must be clipped to the active
+        // the active indicator must be clipped to the active
         // tab's post-layout width. Do not derive it from the whole strip or
         // shrink/grow it independently; wide two-tab Windows layouts exposed
         // that drift as an orange line overshooting into empty chrome.

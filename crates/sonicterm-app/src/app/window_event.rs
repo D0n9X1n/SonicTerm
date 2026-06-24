@@ -65,7 +65,7 @@ impl App {
         win_id: WindowId,
         event: WindowEvent,
     ) {
-        // PR #132: mark any user-driven event so the next
+        // mark any user-driven event so the next
         // RedrawRequested bypasses the vsync coalescing gate. This
         // covers main and child windows uniformly. PTY-byte
         // redraws (the high-volume path) arrive as RedrawRequested
@@ -141,7 +141,7 @@ impl App {
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
                 // running. When no child remains, closing the main
-                // leaves no active terminal window, so quit (#669).
+                // leaves no active terminal window, so quit.
                 if self.child_window_count() == 0 {
                     self.hide_main_window();
                     el.exit();
@@ -163,13 +163,13 @@ impl App {
                 // then re-requests the redraw. Net effect: bursty PTY
                 // output coalesces into one frame per vsync instead of
                 // burning the GPU at the VT thread's 16ms tick rate.
-                // PR #132 review: input-driven redraws must be
+                // review: input-driven redraws must be
                 // immediate — gating them on the vsync deadline adds
                 // perceptible latency to typing/resize/theme changes.
                 // Only redraws that arrive purely from streaming PTY
                 // bytes (input_dirty stays false) get coalesced.
                 let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
-                // Issue #714: while composing an IME preedit on the software
+                // while composing an IME preedit on the software
                 // rasterizer, drop to a lower frame cap so a long pinyin run
                 // doesn't drive a full-surface raster at full cadence.
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
@@ -235,7 +235,7 @@ impl App {
                     t.lap("layout");
                 }
 
-                // #386 PR-D: per-pane scrollbar visibility/fade tick.
+                // PR-D: per-pane scrollbar visibility/fade tick.
                 // Built BEFORE the try_lock pass since it only needs
                 // logical-px rects (already in `pane_rects`) and the
                 // already-captured cursor pos / scrollbar_drag — no
@@ -288,7 +288,7 @@ impl App {
                     t.lap("scrollbar");
                 }
                 if scrollbar_needs_more_frames && !self.software_render_degrade {
-                    // Issue #713: in the no-GPU path, skip the fade-driven
+                    // in the no-GPU path, skip the fade-driven
                     // extra frames — the bar snaps instead of animating, but
                     // we don't burn CPU rasterizing a 300ms fade.
                     if let Some(w) = self.main_window() {
@@ -296,7 +296,7 @@ impl App {
                     }
                 }
 
-                // PR #199 Fix 1: try_lock EVERY pane in the tab and pass
+                // Fix 1: try_lock EVERY pane in the tab and pass
                 // them ALL through to the renderer. The previous single-
                 // element slice meant the per-pane loop inside
                 // `GpuRenderer::render` never iterated inactive panes in
@@ -419,7 +419,7 @@ impl App {
                 // `self.command_palette`, `self.ime` available for the
                 // disjoint mut borrows the render call needs in the same
                 // expression scope.
-                // PR-B2c (#365): panes now live in `ws` too, so they're
+                // PR-B2c: panes now live in `ws` too, so they're
                 // pulled from the same field-disjoint split borrow.
                 let main_id_opt = self.main_window_id;
                 let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
@@ -454,7 +454,7 @@ impl App {
                     Option<&sonicterm_ui::overlays::NotificationBubble>,
                 ) = match ws_opt {
                     Some(ws) => {
-                        // PR #400: cursor_visible is now per-pane; read
+                        // cursor_visible is now per-pane; read
                         // it from the active pane before splitting the
                         // mut borrow of `ws.panes`. Bool read, no
                         // lasting borrow.
@@ -463,10 +463,10 @@ impl App {
                             .get(&active_id)
                             .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
                             .unwrap_or(true);
-                        // PR-B3c (#365): selection + copy_mode now live on
+                        // PR-B3c: selection + copy_mode now live on
                         // `ws`. Pull immutable refs disjoint from the mut
                         // borrows of `ws.{renderer,tabs,tab_states,panes,last_render}`.
-                        // PR-B3d (#365): ime + ime_cursor_throttle also live
+                        // PR-B3d: ime + ime_cursor_throttle also live
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
@@ -522,7 +522,7 @@ impl App {
                     tab_states_opt,
                 ) {
                     let cursor_rc = {
-                        // PR #199 Fix 1: the active pane's parser guard is
+                        // Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
                         // above; locking it again here would AB-BA deadlock
                         // (we already hold it). Find the active guard via
@@ -560,7 +560,7 @@ impl App {
                             search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
                         }
                         let search = tab_states_mref.get(tab_idx).and_then(|t| t.search.as_ref());
-                        // PR #199 Fix 1: build the slice from ALL panes
+                        // Fix 1: build the slice from ALL panes
                         // (was previously a single-element slice for the
                         // active pane only). The renderer's per-pane loop
                         // now actually iterates every pane in production
@@ -601,7 +601,7 @@ impl App {
                             ws_copy_mode_ref,
                             tabs_mref,
                             search,
-                            // Epic #289 follow-up: only feed the palette
+                            // follow-up: only feed the palette
                             // to the main window when it's actually
                             // attached here (None == main). Otherwise the
                             // palette would paint on the wrong window.
@@ -619,7 +619,7 @@ impl App {
                             t.lap("render");
                         }
                         self.input_dirty = false;
-                        // PR #162: mark only the generation sampled at
+                        // mark only the generation sampled at
                         // the start of this RedrawRequested as seen.
                         // A burst arriving during render keeps the
                         // counter ahead of last_seen_burst_gen so the
@@ -631,11 +631,11 @@ impl App {
                         let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };
-                    // Epic #289 Phase C2 — refresh the OS-drag tab bar
+                    // Phase C2 — refresh the OS-drag tab bar
                     // snapshot so cross-window drop hit-tests see the
                     // current layout. Drops between PRs read this; an
                     // empty registry means every drop resolves to
-                    // `DroppedOnEmpty` (the bug PR #295 review caught).
+                    // `DroppedOnEmpty` (the bug review caught).
                     // (moved after the renderer borrow scope below)
                     // Tell the OS where the active text cursor lives so the
                     // IME candidate window (pinyin candidates, Japanese
@@ -648,7 +648,7 @@ impl App {
                             w.set_ime_cursor_area(pos, size);
                         } else if let Some(search_label) = search_ime_label.as_ref() {
                             let window_size = w.inner_size();
-                            // #651: window_size + the SearchBarLayout it feeds are
+                            // window_size + the SearchBarLayout it feeds are
                             // physical px, so every logical-px term here must be
                             // scaled by the renderer's scale factor or the IME
                             // caret rect drifts on HiDPI displays.
@@ -709,7 +709,7 @@ impl App {
                         }
                     }
                 }
-                // Epic #289 Phase C2 — refresh OS-drag tab bar snapshot
+                // Phase C2 — refresh OS-drag tab bar snapshot
                 // for the main window. Outside the renderer borrow scope
                 // so the immutable self borrow doesn't conflict with `r`.
                 self.publish_main_window_tab_bar();
@@ -736,10 +736,10 @@ impl App {
                 };
                 self.dispatch_intent(intent);
                 if focused {
-                    // Epic #289 Phase A — record the main window as
+                    // Phase A — record the main window as
                     // OS-frontmost so keymap_dispatch / menubar drain
                     // route subsequent Cmd+T / Cmd+W / Cmd+\\ to the
-                    // main window's tabs vec. PR-B4 (#365) removed the
+                    // main window's tabs vec. PR-B4 removed the
                     // sibling `focused_child` clear — `frontmost_window`
                     // discriminates main vs child via `frontmost_kind()`.
                     self.frontmost_window = Some(win_id);
@@ -764,7 +764,7 @@ impl App {
                     if !focused {
                         // A drag interrupted by focus loss never gets its
                         // button-release; drop the gesture so it doesn't
-                        // resume on the next stray cursor move (issue #711).
+                        // resume on the next stray cursor move.
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
                     }
@@ -1007,7 +1007,7 @@ impl App {
                     if let Some(ws) = self.main_mut() {
                         ws.drag_target = target;
                     }
-                    // Phase C2 (PR #295 review fix): start the OS-level
+                    // Phase C2 (review fix): start the OS-level
                     // drag session AS SOON AS the cursor crosses the
                     // drag-start threshold from its press point, not on
                     // mouse-release. Releasing first means `DoDragDrop`
@@ -1037,7 +1037,7 @@ impl App {
                     return;
                 }
                 if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
-                    // #386 PR-C: scrollbar drag takes priority over
+                    // PR-C: scrollbar drag takes priority over
                     // selection extension while a thumb is held. Match
                     // CLAUDE.md §4 — keep this branch fast; no parser
                     // lock is needed (geometry was snapshotted at press).
@@ -1068,7 +1068,7 @@ impl App {
                                 }
                             }
                         }
-                        // #386 PR-D: drag also counts as scrollbar activity.
+                        // PR-D: drag also counts as scrollbar activity.
                         self.mark_scrollbar_active(pane_id);
                         return;
                     }
@@ -1076,7 +1076,7 @@ impl App {
                         if let Some((row, col)) =
                             r.pixel_to_cell(position.x as f32, position.y as f32)
                         {
-                            // WezTerm-style drag granularity (#651 follow-up).
+                            // WezTerm-style drag granularity.
                             // The press recorded `select_mode` + `select_anchor`;
                             // extend by Cell / Word / Line accordingly.
                             //
@@ -1119,7 +1119,7 @@ impl App {
                             } else {
                                 None
                             };
-                            // PR-B3c (#365): selection lives on WindowState.
+                            // PR-B3c: selection lives on WindowState.
                             // Split-borrow `ws.selection` and `ws.panes`
                             // disjointly.
                             if let Some(ws) = self.main_mut() {
@@ -1130,7 +1130,7 @@ impl App {
                                             // collapse a double/triple-click
                                             // (word/line) selection down to the
                                             // cursor cell. Only a plain
-                                            // point-drag extends. (#651) Skip if
+                                            // point-drag extends. Skip if
                                             // the absolute row was unavailable.
                                             if !sel.anchored {
                                                 if let Some(abs) = cursor_abs_row {
@@ -1173,7 +1173,7 @@ impl App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                // #412: route wheel events to the pane under the cursor.
+                // route wheel events to the pane under the cursor.
                 // Default 3 lines per LineDelta tick (matches stock GTK
                 // / Cocoa wheel feel). PixelDelta divides by the live
                 // cell height so trackpad scrolls match font size.
@@ -1201,7 +1201,7 @@ impl App {
                 };
                 if delta_lines != 0 {
                     if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
-                        // Alt-screen wheel handling (#658). Full-screen TUIs
+                        // Alt-screen wheel handling. Full-screen TUIs
                         // live on the alt screen. Two cases:
                         //   * mouse tracking ON (?1000/?1002/?1003): the app
                         //     wants wheel as MOUSE events — send SGR (or legacy)
@@ -1297,7 +1297,7 @@ impl App {
                     if let Some(ws) = self.main_mut() {
                         ws.mouse_down = true;
                     }
-                    // Phase C2 (PR #295 review fix): re-arm the OS-drag
+                    // Phase C2 (review fix): re-arm the OS-drag
                     // handoff gate so the CursorMoved threshold check
                     // can fire once for the new gesture.
                     self.os_drag_handoff_started = false;
@@ -1391,7 +1391,7 @@ impl App {
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                         self.main_renderer().and_then(|r| r.pixel_to_cell(cp.0 as f32, cp.1 as f32))
                     };
-                    // #386 PR-C: scrollbar input has priority over
+                    // PR-C: scrollbar input has priority over
                     // selection start. Done BEFORE the pane-focus switch
                     // and selection-anchor path so a thumb-drag never
                     // doubles as a text drag. `scrollbar_hit_at` returns
@@ -1562,7 +1562,7 @@ impl App {
                             pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                         });
                     }
-                    // #386 PR-C: end any active scrollbar drag — do this
+                    // PR-C: end any active scrollbar drag — do this
                     // unconditionally on release so a drag that ended
                     // outside the bar still clears state.
                     if let Some(ws) = self.main_mut() {
@@ -1607,7 +1607,7 @@ impl App {
                                 // bar before releasing cancels the drag.
                             }
                             crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                // #535 + #540 — must move Tab +
+                                // — must move Tab +
                                 // TabState in lock-step, otherwise the
                                 // title moves but `tab_states[i]`
                                 // (active pane + PaneTree leaf-ids)
@@ -1800,7 +1800,7 @@ impl App {
                 // the parser after each batch). Avoids taking `parser.lock()`
                 // on the keypress path — that lock is held by the VT thread
                 // while parsing output, so blocking on it added input latency
-                // whenever output was streaming (issue #710). When non-zero,
+                // whenever output was streaming. When non-zero,
                 // `encode_key` emits CSI-u forms (e.g. Shift+Enter => CSI
                 // 13;2u) so modern TUIs treat Shift+Enter as "insert newline".
                 let kitty_flags = self

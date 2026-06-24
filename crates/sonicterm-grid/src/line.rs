@@ -1,4 +1,4 @@
-//! Line cluster compression for same-attribute runs (Epic #300, P5).
+//! Line cluster compression for same-attribute runs (P5).
 //!
 //! A terminal line frequently consists of long runs of consecutive cells that
 //! share the exact same attributes (theme background, default fg, no
@@ -22,7 +22,7 @@
 //! ≥ 2× — otherwise the bookkeeping costs more than it saves.
 //!
 //! NOTE: this module currently lives as an additive primitive. Wiring it into
-//! `Grid::scrollback` is a follow-up (#300-P5b) because every Row consumer in
+//! `Grid::scrollback` is a follow-up because every Row consumer in
 //! the codebase indexes through `Vec<Cell>` directly. Landing the data
 //! structure + invariants + tests first lets the integration PR focus purely
 //! on the call-site refactor.
@@ -95,7 +95,7 @@ impl LineStorage {
         }
     }
 
-    // --- PR-A: API completeness (#319). Pure additive on the primitive.
+    // --- PR-A: API completeness. Pure additive on the primitive.
     // These methods cover every operation `Line` callers will need in PR-B
     // (the Line::cells alias swap). Line itself is intentionally unchanged.
 
@@ -479,7 +479,7 @@ impl Line {
 
     /// Set the cell at logical column `idx`.
     ///
-    /// PR-D (#319) smart-degrade: when the storage is a single uniform
+    /// PR-D smart-degrade: when the storage is a single uniform
     /// Cluster and the new cell is byte-identical to the cluster's
     /// representative, this is a no-op and storage stays in Cluster form.
     /// Otherwise the storage is degraded to Flat before the write. This
@@ -592,7 +592,7 @@ impl Line {
     /// `&Cell` regardless of storage form without materializing the flat
     /// representation.
     ///
-    /// **PR-B2 follow-up (Haiku review on #381):** previously routed
+    /// **PR-B2 follow-up:** previously routed
     /// through `as_flat_slice()` which panicked on Cluster lines via
     /// `as_vec()`. That made PR-C's premise — actually produce Cluster
     /// lines from scrollback eject — impossible without rewriting every
@@ -656,7 +656,7 @@ impl Line {
         &self.storage
     }
 
-    // ----- PR-B1 (#319): shim accessors used by Grid's internal/public API
+    // ----- PR-B1: shim accessors used by Grid's internal/public API
     // while downstream callers still pass &Vec<Cell> / &[Cell] around. These
     // force the storage to Flat (cheap in B1 because the Grid never produces
     // Cluster yet) and expose the inner Vec directly so the lifetime chain
@@ -669,7 +669,7 @@ impl Line {
     /// or call [`Self::as_vec_mut`] / [`Self::degrade_to_flat`] first if a
     /// borrowed `Vec` reference is truly needed.
     ///
-    /// **PR-B2 (Haiku review on #381):** all of `iter` / `Hash` /
+    /// **PR-B2:** all of `iter` / `Hash` /
     /// range-index used to silently go through this method and panic on
     /// Cluster lines. They now use cluster-transparent paths; this method
     /// remains for the few legitimately-flat-only callers (e.g.
@@ -709,7 +709,7 @@ impl Line {
 
     /// Resize to `new_len`, padding with `fill` when growing.
     ///
-    /// PR-E (#319): Cluster-preserving resize. When the line is in Cluster
+    /// PR-E: Cluster-preserving resize. When the line is in Cluster
     /// form, this avoids degrading to Flat in the common cases:
     ///
     /// * **Shrink** — truncate the cluster's run-len; if the resulting
@@ -783,7 +783,7 @@ impl Line {
         self.as_flat_slice_mut().iter_mut()
     }
 
-    /// PR-C (#319): try to compress this line into a single Cluster when
+    /// PR-C: try to compress this line into a single Cluster when
     /// the entire row is uniform (every cell byte-identical). Called by
     /// `Grid::scroll_up` as a Line is ejected from visible into
     /// scrollback. Multi-Cluster compression of partially-uniform lines
@@ -813,7 +813,7 @@ impl Line {
         true
     }
 
-    /// PR-C (#319): force the storage to Flat. Use at any mutation site
+    /// PR-C: force the storage to Flat. Use at any mutation site
     /// that may operate on a scrollback Line that could now be in
     /// Cluster form (since PR-C produces Cluster lines on eject). All
     /// existing `as_vec_mut` / `set` / `iter_mut` paths already degrade,
@@ -853,7 +853,7 @@ impl std::ops::IndexMut<usize> for Line {
     }
 }
 
-// NOTE (Haiku review on #381): `Index<Range<usize>>` and friends were
+// NOTE: `Index<Range<usize>>` and friends were
 // removed because they fundamentally cannot return a real `&[Cell]` slice
 // from a Cluster line without materialising. Callers that want a windowed
 // view must use `Line::get_range(start, end)` which returns a

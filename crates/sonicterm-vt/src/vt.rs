@@ -210,7 +210,7 @@ impl Parser {
     /// Tell the parser the theme default foreground colour. Used to answer
     /// `OSC 10 ; ? ST` queries from the shell/TUI. nvim sends OSC 10/11
     /// at startup to learn the terminal's defaults so it can render cells
-    /// declared with `fg=NONE`/`bg=NONE` consistently — see issue #369.
+    /// declared with `fg=NONE`/`bg=NONE` consistently.
     pub fn set_theme_fg(&mut self, r: u8, g: u8, b: u8) {
         self.performer.theme_fg = Some((r, g, b));
     }
@@ -232,7 +232,7 @@ impl Parser {
     /// `OSC 4 ; <index> ; ? ST` queries. Indices map to the standard xterm
     /// layout: 0..=7 normal, 8..=15 bright. Some CLIs (e.g. GitHub Copilot)
     /// require the full palette query reply to enable their richer prompt
-    /// frame — without it they treat the terminal as colourless. (#661)
+    /// frame — without it they treat the terminal as colourless.
     pub fn set_theme_palette_color(&mut self, index: u8, r: u8, g: u8, b: u8) {
         if (index as usize) < self.performer.theme_palette.len() {
             self.performer.theme_palette[index as usize] = Some((r, g, b));
@@ -495,7 +495,7 @@ struct Performer {
     /// Theme default background (sRGB), used to answer OSC 11 `?` queries.
     /// nvim queries this to colour cells painted with `bg=NONE` (e.g.
     /// neo-tree icon cells); without a reply nvim guesses (27,29,30)
-    /// instead of SonicTerm's actual theme bg — see issue #369.
+    /// instead of SonicTerm's actual theme bg.
     theme_bg: Option<(u8, u8, u8)>,
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
@@ -503,7 +503,7 @@ struct Performer {
     /// 16-colour ANSI palette (sRGB) used to answer `OSC 4 ; <i> ; ? ST`
     /// queries (index 0..=15: 0-7 normal, 8-15 bright). Per-slot `None`
     /// suppresses that slot's reply so we never report a colour we were
-    /// not told. (#661)
+    /// not told.
     theme_palette: [Option<(u8, u8, u8)>; 16],
     /// SonicTerm's raw OSC4 capture handles full batched queries before vte's
     /// capped `osc_dispatch`; suppress the immediately-following duplicate.
@@ -999,7 +999,7 @@ impl Perform for Performer {
                 // LF/VT/FF — like IND, must scroll the active region
                 // (not the whole grid) when at the bottom margin so
                 // DECSTBM works for shells/apps that use LF rather
-                // than IND. #348.
+                // than IND.
                 let (top, bot) = self.effective_scroll_region();
                 if self.grid.cursor.row == bot
                     && (self.scroll_top.is_some() || self.scroll_bottom.is_some())
@@ -1237,7 +1237,7 @@ impl Perform for Performer {
             'X' => {
                 // ECH — Erase n cells starting at the cursor with the
                 // current SGR blank cell. Cursor is unchanged. neo-tree's
-                // per-row tail-clear pattern depends on this (#359).
+                // per-row tail-clear pattern depends on this.
                 let n = p0().max(1) as usize;
                 let cur = self.grid.cursor;
                 self.grid.erase_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
@@ -1284,7 +1284,7 @@ impl Perform for Performer {
                 // CSI Ps S — Scroll Up (SU). Scrolls the active region
                 // up by `n` lines, fills bottom with blanks. Dest rows
                 // are marked dirty by the grid, which is the fix for
-                // #348 (stale LineQuadCache entries after region scroll).
+                // (stale LineQuadCache entries after region scroll).
                 let n = p0().max(1);
                 let (top, bot) = self.effective_scroll_region();
                 self.grid.scroll_region_up_with(top, bot, n, self.erase_fill_cell());
@@ -1382,14 +1382,14 @@ impl Perform for Performer {
                 // Some CLIs (GitHub Copilot's prompt frame) gate their richer
                 // UI on being able to read backgroundSecondary via the full
                 // OSC 4 palette + OSC 10/11 set; without these replies they
-                // treat SonicTerm as colourless and disable the frame. (#661)
+                // treat SonicTerm as colourless and disable the frame.
                 //
                 // vte 0.15 keeps the full OSC payload in a private buffer but
                 // exposes only MAX_OSC_PARAMS split params here. Parser::advance
                 // therefore captures raw OSC 4 bytes in parallel and handles
                 // full 16-colour batch queries before this capped callback. Keep
                 // this path as a fallback for synthetic/direct Performer tests
-                // and for any capture miss, but avoid duplicate replies. (#667)
+                // for any capture miss, but avoid duplicate replies.
                 if self.suppress_next_osc4 {
                     self.suppress_next_osc4 = false;
                     return;
@@ -1409,11 +1409,9 @@ impl Perform for Performer {
                 // doesn't match SonicTerm's actual theme bg — neo-tree
                 // icon cells (painted with `bg=NONE`) then visibly
                 // differ from the surrounding theme-clear surface.
-                // See issue #369.
-                //
                 // OSC 10/11/12 *set* (payload is a colour, not `?`)
                 // is intentionally not implemented yet — diagnosis
-                // shows query-reply is sufficient to fix #369.
+                // shows query-reply is sufficient to fix.
                 let payload = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
                 if payload != Some("?") {
                     return;
@@ -1532,7 +1530,7 @@ impl Perform for Performer {
             b'D' => {
                 // IND — Index. Move cursor down one line; if at the
                 // bottom margin of the scroll region, scroll the
-                // region up. Must respect DECSTBM (#348).
+                // region up. Must respect DECSTBM.
                 let (top, bot) = self.effective_scroll_region();
                 if self.grid.cursor.row == bot {
                     self.grid.scroll_region_up(top, bot, 1);

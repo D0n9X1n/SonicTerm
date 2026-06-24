@@ -1,4 +1,4 @@
-//! Epic #289 Phase C2 — OS-level drag *session* hookup.
+//! Phase C2 — OS-level drag *session* hookup.
 //!
 //! This module is distinct from the *cross-process* drag wire format
 //! at [`crate::os_drag`]:

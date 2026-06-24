@@ -1,4 +1,4 @@
-//! Tab title span builders extracted from `render.rs` (issue #143).
+//! Tab title span builders extracted from `render.rs`.
 //!
 //! T14 (wezterm-takeover G3): the legacy the legacy chrome layer `Attrs` / `Color`
 //! types are gone. Spans are now built around two local types:
@@ -109,7 +109,7 @@ pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 /// the projection scale exactly 1.0, so tab glyphs reuse the grid atlas
 /// tiles 1:1 and render as crisply as terminal text. Restoring the larger
 /// size *without* the blur needs a size-keyed atlas (rasterize chrome
-/// glyphs natively at the tab px size) — tracked as the #698 follow-up.
+/// glyphs natively at the tab px size) — tracked as the follow-up.
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size

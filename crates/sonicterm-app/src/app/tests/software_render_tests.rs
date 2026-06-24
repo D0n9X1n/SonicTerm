@@ -1,4 +1,4 @@
-//! Issue #713: no-GPU degrade decision + frame-period clamp.
+//! no-GPU degrade decision + frame-period clamp.
 use super::{
     should_degrade_for_software_render, software_render_frame_period,
     SOFTWARE_RENDER_FRAME_PERIOD,
@@ -40,7 +40,7 @@ fn effective_frame_period_lowers_cap_while_composing() {
     assert_eq!(effective_frame_period(false, true, sixty), sixty);
     // Software path, idle: software cap.
     assert_eq!(effective_frame_period(true, false, sixty), SOFTWARE_RENDER_FRAME_PERIOD);
-    // Software path, composing: lower cap (issue #714) — composing wins.
+    // Software path, composing: lower cap — composing wins.
     assert_eq!(effective_frame_period(true, true, sixty), SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD);
 }
 

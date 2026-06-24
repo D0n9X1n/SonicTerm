@@ -176,7 +176,7 @@ impl OsTabDragBackend for MacOsTabDragBackend {
     ) {
         // macOS uses NSPasteboard publish/subscribe — there is no
         // per-window IDropTarget equivalent to register. Implemented
-        // for trait consistency only; Haiku #295 fix is Windows-only
+        // for trait consistency only; is Windows-only
         // in practice.
     }
 }

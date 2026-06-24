@@ -1,6 +1,6 @@
 //! Cell value types: color, attribute flags, single grid cell.
 //!
-//! # Compact layout (Epic #300 P1)
+//! # Compact layout (P1)
 //!
 //! [`Cell`] is sized to fit in **24 bytes** on a 64-bit target. The hot
 //! fields (`ch`, `fg`, `bg`, `flags`) stay inline; the rare attributes
@@ -121,7 +121,7 @@ impl FatAttributes {
 
 /// A single grid cell.
 ///
-/// Size goal (Epic #300 P1): **`size_of::<Cell>() <= 24`** on 64-bit
+/// Size goal (P1): **`size_of::<Cell> <= 24`** on 64-bit
 /// targets. Asserted in `tests/cell_size.rs`. The four inline fields
 /// account for 12 bytes (4 + 4 + 4 + 2) with 2 bytes of trailing pad
 /// before the 8-byte [`Option<Box<FatAttributes>>`]; total 24.

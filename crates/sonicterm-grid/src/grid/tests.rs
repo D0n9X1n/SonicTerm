@@ -113,7 +113,7 @@ fn assert_row_has_no_orphan_wide_cells(grid: &Grid) {
 
 #[test]
 fn insert_cells_before_preserves_shifted_text() {
-    // #762: inserting blank cells must shift the EXISTING text right intact,
+    // inserting blank cells must shift the EXISTING text right intact,
     // not blank the source cells before the shift. Pre-fix this dropped the
     // inserted-before text and kept only the originally-rightmost cell
     // ("0.1" + insert 2 at col 0 → "    1   " instead of "  0.1   ").

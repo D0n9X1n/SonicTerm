@@ -45,7 +45,7 @@ fn alt_character_encodes_legacy_meta_prefix() {
     );
 }
 
-// --- #761: DECCKM (application cursor keys) for arrows + Home/End ---
+// ---: DECCKM (application cursor keys) for arrows + Home/End ---
 
 /// Encode an unmodified named key in the given DECCKM state.
 fn ck(named: NamedKey, app_cursor: bool) -> Vec<u8> {
@@ -63,7 +63,7 @@ fn home_end_use_csi_when_decckm_off() {
 
 #[test]
 fn home_end_use_ss3_when_decckm_on() {
-    // #761: under DECCKM the introducer is SS3 (ESC O), which is what
+    // under DECCKM the introducer is SS3 (ESC O), which is what
     // terminfo khome/kend resolve to under smkx — so zsh ZLE / readline /
     // vim / less actually recognize Home and End.
     assert_eq!(ck(NamedKey::Home, true), b"\x1bOH".to_vec());

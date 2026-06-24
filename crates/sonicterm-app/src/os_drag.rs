@@ -208,7 +208,7 @@ impl TabPayload {
 /// Outcome of a single OS-drag handoff attempt.
 ///
 /// This is the load-bearing contract for the data-loss fix landed in
-/// the (review) follow-up to PR #59: the source tab is *only*
+/// the (review) follow-up to the source tab is *only*
 /// detached/killed when the sink reports [`Accepted`](Self::Accepted).
 /// Anything else — including "we wrote the payload to a pasteboard
 /// but have not heard back from a receiver" — leaves the source tab
@@ -227,7 +227,7 @@ pub enum DragAck {
     /// The sink published the payload (e.g. pasteboard write returned
     /// YES) OR it failed outright. In either case no receiver has
     /// confirmed adoption, so the source MUST NOT detach its local
-    /// tab — that's the data-loss path Haiku flagged on PR #59.
+    /// tab — that's the data-loss path Haiku flagged.
     /// Callers should log/observe but otherwise behave as if the OS
     /// handoff did not happen.
     NotAcknowledged,

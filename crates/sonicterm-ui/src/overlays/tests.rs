@@ -22,7 +22,7 @@ fn search_bar_second_row_sits_below_first_row() {
 
 #[test]
 fn search_bar_row1_clears_dpi_scaled_readonly_badge() {
-    // Regression (#657-adjacent): at scale 2.0 the read-only badge is
+    // Regression: at scale 2.0 the read-only badge is
     // SEARCH_BAR_HEIGHT*2 tall anchored at SEARCH_BAR_MARGIN. The search
     // bar at row 1 must sit BELOW the badge's bottom edge, not overlap it.
     let scale = 2.0;

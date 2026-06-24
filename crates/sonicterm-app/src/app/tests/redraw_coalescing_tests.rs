@@ -1,4 +1,4 @@
-//! Issue #43: the vsync coalescing gate shared by the main and child
+//! the vsync coalescing gate shared by the main and child
 //! `RedrawRequested` arms. These pin the exact deferral policy that
 //! lets a bursty `ls -al` coalesce to one frame per vsync and stops a
 //! torn-out child from busy-spinning the VT thread's parser lock. The
@@ -60,7 +60,7 @@ fn past_frame_boundary_never_defers() {
 
 #[test]
 fn input_with_concurrent_burst_coalesces() {
-    // The typing case (issue #710): a keystroke sets input_dirty and the
+    // The typing case: a keystroke sets input_dirty and the
     // char's PTY echo arrives as a burst, so the echo's redraw is BOTH
     // dirty AND a burst. It must coalesce like other streaming work, not
     // render per echo chunk — otherwise fast typing / Claude Code streams
@@ -78,7 +78,7 @@ fn input_with_concurrent_burst_coalesces() {
 
 #[test]
 fn software_render_defers_even_pure_input() {
-    // Issue #713: on a CPU rasterizer, even a pure input redraw (dirty,
+    // on a CPU rasterizer, even a pure input redraw (dirty,
     // no burst) coalesces to the frame cap — fast typing must not force a
     // full-screen software raster per keystroke. Within the frame window
     // it defers...

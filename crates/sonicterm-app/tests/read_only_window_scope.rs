@@ -1,4 +1,4 @@
-//! Regression tests for #680: READONLY mode is scoped to the dispatching
+//! Regression tests: READONLY mode is scoped to the dispatching
 //! window, not global app state.
 
 use sonicterm_app::app::App;

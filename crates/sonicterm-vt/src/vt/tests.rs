@@ -224,7 +224,7 @@ fn ris_resets_kitty_keyboard_flags() {
 
 #[test]
 fn osc4_palette_query_replies_with_seeded_color() {
-    // #661: OSC 4 ; <i> ; ? ST must reply with the seeded palette colour
+    // OSC 4; <i>; ? ST must reply with the seeded palette colour
     // so CLIs like Copilot can read the full colour set. Reply format is
     // `ESC ] 4 ; <i> ; rgb:RRRR/GGGG/BBBB ST` with 16-bit channels.
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -266,7 +266,7 @@ fn osc4_multi_pair_query_replies_per_index() {
 
 #[test]
 fn osc4_full_16_color_batch_query_replies_for_every_seeded_slot() {
-    // #667: vte 0.15 exposes only 16 split OSC params, which truncates a
+    // vte 0.15 exposes only 16 split OSC params, which truncates a
     // full `OSC 4;0;?;...;15;? ST` query. SonicTerm's parser keeps enough
     // raw OSC4 state to answer every seeded pair.
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -299,7 +299,7 @@ fn osc4_full_16_color_batch_query_replies_for_every_seeded_slot() {
     assert_eq!(row_text(&parser, 0), "Z       ");
 }
 
-// --- #762: insert-before must leave row content AND dirty state correct in a
+// ---: insert-before must leave row content AND dirty state correct in a
 // single pass. Reported symptom: "type 11, move before it, insert 0. → shows
 // 0.1 not 0.11; the missing 1 reappears only on the next keystroke." That is a
 // render-side staleness — these tests pin the VT/grid data layer as correct so

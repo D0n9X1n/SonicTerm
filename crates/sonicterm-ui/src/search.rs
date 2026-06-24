@@ -74,7 +74,7 @@ impl SearchState {
     /// renderer iterates only this window instead of all matches every frame,
     /// keeping per-frame highlight cost O(visible matches) rather than
     /// O(total matches) — the latter scales with scrollback depth for a
-    /// common query and stutters on deep history (issue #710). Returned
+    /// common query and stutters on deep history. Returned
     /// indices stay valid against the full `matches` slice, so the caller can
     /// still compare each against `self.current`.
     #[must_use]

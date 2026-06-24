@@ -494,7 +494,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
                 Ok(_p) => {
-                    // Phase C2 (PR #295 review fix): resolve the real
+                    // Phase C2 (review fix): resolve the real
                     // destination via the shared TabBarRegistry the App
                     // publishes into every frame. Falls back to
                     // DroppedOnEmpty (tear out at drop point) when the

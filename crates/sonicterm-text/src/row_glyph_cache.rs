@@ -1,5 +1,5 @@
 //! Per-row glyph cache layered on top of the dirty-bitset foundation
-//! landed in PR #130.
+//! landed.
 //!
 //! The terminal renderer (see `render.rs::render`) walks every visible
 //! row, groups cells into style runs, and feeds each run through
@@ -19,21 +19,21 @@
 //! key, we splice the cached `Vec` straight into the frame buffer and
 //! skip the shaping pass.
 //!
-//! **Per-pane keying (PR prerequisite for #199):** the cache is keyed
+//! **Per-pane keying (PR prerequisite):** the cache is keyed
 //! by `(pane_id, abs_row, hash)`. Before this change the key was just
-//! `(abs_row, hash)`, which assumed a single grid. Once #199 introduces
+//! `(abs_row, hash)`, which assumed a single grid. Once introduces
 //! the per-pane render loop, every pane would otherwise read/write the
 //! same slot for any matching `(abs_row, hash)` pair and corrupt each
 //! other's glyphs. Folding the pane identifier into the key makes the
 //! cache safe for the multi-pane traversal without changing today's
 //! single-pane behaviour (callers pass `0` as the placeholder pane id
-//! until #199 wires real pane identifiers through).
+//! until wires real pane identifiers through).
 //!
 //! Cursor movement does NOT need to be folded into the hash: the cursor
 //! is drawn as a quad (`render::render` builds it from the cursor
 //! position after the text pass, not from cached glyphs), and the row
 //! it moves out of is marked dirty by Grid's existing
-//! `mark_all_dirty()` hook in PR #130, so its cache entry is dropped
+//! `mark_all_dirty` hook, so its cache entry is dropped
 //! before it is reused.
 //!
 //! Selection IS folded in because selection inverts fg/bg per cell,
@@ -69,7 +69,7 @@ const CACHE_HEADROOM_FACTOR: usize = 4;
 
 /// Opaque per-pane identifier used as part of the cache key. Today the
 /// renderer only has one pane so callers pass `0`; once the per-pane
-/// render loop lands (#199) every pane will pass its own stable id.
+/// render loop lands every pane will pass its own stable id.
 pub type PaneId = u64;
 
 /// Cell-decoration run for an underlined span.
@@ -108,7 +108,7 @@ pub struct CachedRow {
 /// the same pane AND the same absolute row AND that row's content /
 /// styling / selection overlap is unchanged. Separating panes in the
 /// key prevents identical `(abs_row, hash)` pairs from colliding when
-/// the per-pane render loop (#199) walks more than one grid in a
+/// the per-pane render loop walks more than one grid in a
 /// single frame.
 #[derive(Default, Debug)]
 pub struct RowGlyphCache {
@@ -133,7 +133,7 @@ impl RowGlyphCache {
     /// no-op unless the row count changes; when it does, this updates the
     /// soft cap and drops stale entries from the old viewport geometry.
     ///
-    /// For multi-pane callers (#199), pass the sum of every pane's
+    /// For multi-pane callers, pass the sum of every pane's
     /// visible row count.
     #[inline]
     pub fn resize(&mut self, rows: u16) {
