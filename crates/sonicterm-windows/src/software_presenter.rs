@@ -305,5 +305,5 @@ unsafe extern "system" {
 
 
 #[cfg(test)]
-#[path = "software_presenter/tests.rs"]
+#[path = "../tests/software_presenter_tests.rs"]
 mod tests;

@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-font-config"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -18,3 +19,10 @@ bitflags = "2.11"
 lazy_static = "1.4"
 log = "0.4"
 ordered-float = { version = "5", features = ["serde"] }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

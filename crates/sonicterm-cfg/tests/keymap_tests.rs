@@ -32,9 +32,9 @@ fn windows_default_leaves_alt_v_for_terminal_apps() {
 #[test]
 fn every_bundled_keymap_parses_with_no_dead_actions() {
     let bundles: [(&str, &str); 3] = [
-        ("macos", include_str!("../../../../assets/keymaps/sonicterm-macos.toml")),
-        ("windows", include_str!("../../../../assets/keymaps/sonicterm-windows.toml")),
-        ("linux", include_str!("../../../../assets/keymaps/sonicterm-linux.toml")),
+        ("macos", include_str!("../../../assets/keymaps/sonicterm-macos.toml")),
+        ("windows", include_str!("../../../assets/keymaps/sonicterm-windows.toml")),
+        ("linux", include_str!("../../../assets/keymaps/sonicterm-linux.toml")),
     ];
     for (os, text) in bundles {
         let km: Keymap = toml::from_str(text)

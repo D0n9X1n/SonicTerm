@@ -449,5 +449,5 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
 }
 
 #[cfg(test)]
-#[path = "search/tests.rs"]
+#[path = "../tests/search_tests.rs"]
 mod tests;

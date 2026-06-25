@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-grid"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,3 +15,14 @@ workspace = true
 [dependencies]
 sonicterm-types.workspace = true
 unicode-width.workspace = true
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
+[[test]]
+name = "grid_core"
+path = "tests/grid_core/main.rs"

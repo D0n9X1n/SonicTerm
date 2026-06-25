@@ -361,5 +361,5 @@ impl App {
 }
 
 #[cfg(test)]
-#[path = "scrollbar_visibility/tests.rs"]
+#[path = "../../tests/scrollbar_visibility_tests.rs"]
 mod tests;

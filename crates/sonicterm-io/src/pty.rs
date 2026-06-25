@@ -637,5 +637,5 @@ fn shell_file_name(shell_path: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "pty/tests.rs"]
+#[path = "../tests/pty_tests.rs"]
 mod tests;

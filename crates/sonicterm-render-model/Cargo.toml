@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-render-model"
+autotests = false
 version = "1.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -10,3 +11,10 @@ sonicterm-text = { workspace = true }
 sonicterm-cfg = { workspace = true }
 sonicterm-grid = { workspace = true }
 sonicterm-engine = { path = "../sonicterm-engine", version = "1.0.0" }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

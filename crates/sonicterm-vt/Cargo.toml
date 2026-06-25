@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-vt"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,3 +19,18 @@ vte.workspace = true
 crossbeam-channel.workspace = true
 memchr = "2"
 tracing.workspace = true
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
+[[test]]
+name = "autowrap"
+path = "tests/autowrap/main.rs"
+
+[[test]]
+name = "control_sequences"
+path = "tests/control_sequences/main.rs"

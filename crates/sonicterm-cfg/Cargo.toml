@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-cfg"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,3 +20,10 @@ toml.workspace = true
 serde_plain.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

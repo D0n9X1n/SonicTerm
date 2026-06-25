@@ -70,12 +70,20 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
-- **Tests live in sibling files, never inline.** A module's unit tests go in
-  a sibling test file declared from the source with
-  `#[cfg(test)] #[path = "<module>/tests.rs"] mod tests;` (or `tests/<name>.rs`
-  for named groups). No `#[cfg(test)] mod tests { … }` blocks inside source
-  files. Tests stay in-crate so they keep private-item access via
-  `use super::*;`.
+- **Unit tests live in `tests/`, never in `src/`.** Every module's unit tests
+  go in `crates/<crate>/tests/<module>_tests.rs` (matching the source file
+  name: `vt.rs` → `tests/vt_tests.rs`). No `#[cfg(test)] mod tests { … }`
+  blocks inside source files, and no `tests.rs` siblings under `src/`.
+- **How private access is preserved.** Each crate sets `autotests = false` in
+  `Cargo.toml`. Unit-test files are pulled back into the lib from their source
+  module with `#[cfg(test)] #[path = "../tests/<module>_tests.rs"] mod tests;`
+  (adjust the `../` depth for nested modules), so they compile in-crate and keep
+  `use super::*;` private-item access. Real integration tests (that only need
+  the public API) are each registered with an explicit `[[test]]` entry in the
+  same `Cargo.toml`.
+- **Adding a test file is not automatic.** Because `autotests = false`, a new
+  integration test must be registered with a `[[test]]` block, and a new unit
+  test must be `#[path]`-included from its module — otherwise it will not run.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.

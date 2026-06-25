@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-io"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -40,3 +41,18 @@ windows = { workspace = true }
 # Needed by `PtyHandle::Drop` to send an explicit SIGKILL to the child
 # shell pid before invoking portable-pty's `Child::kill`. See #598 (LM-007).
 libc = "0.2"
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "macos_login_shell"
+path = "tests/macos_login_shell.rs"
+
+[[test]]
+name = "macos_utf8_locale"
+path = "tests/macos_utf8_locale.rs"
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

@@ -287,5 +287,5 @@ impl Default for Keymap {
 }
 
 #[cfg(test)]
-#[path = "keymap/tests.rs"]
+#[path = "../tests/keymap_tests.rs"]
 mod tests;

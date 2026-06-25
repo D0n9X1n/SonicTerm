@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-text"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -21,3 +22,10 @@ bytemuck.workspace = true
 lru = "0.16"
 tracing.workspace = true
 fast_image_resize = { version = "5.1", default-features = false }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

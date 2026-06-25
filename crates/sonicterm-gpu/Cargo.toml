@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-gpu"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -40,3 +41,10 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

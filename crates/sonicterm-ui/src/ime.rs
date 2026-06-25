@@ -162,5 +162,5 @@ impl ImeState {
 }
 
 #[cfg(test)]
-#[path = "ime/tests.rs"]
+#[path = "../tests/ime_tests.rs"]
 mod tests;

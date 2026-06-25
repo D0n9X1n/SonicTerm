@@ -296,5 +296,5 @@ where
 // `tests/row_glyph_cache_pane_isolation.rs`.
 
 #[cfg(test)]
-#[path = "row_glyph_cache/tests.rs"]
+#[path = "../tests/row_glyph_cache_tests.rs"]
 mod tests;

@@ -42,5 +42,5 @@ pub fn read_frame<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
 
 
 #[cfg(test)]
-#[path = "frame/tests.rs"]
+#[path = "../tests/frame_tests.rs"]
 mod tests;

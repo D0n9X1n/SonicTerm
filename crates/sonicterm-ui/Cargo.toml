@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-ui"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -36,3 +37,26 @@ fluent-langneg = "0.13"
 unic-langid = { version = "0.9", features = ["macros"] }
 intl-memoizer = "0.5"
 sys-locale = "0.3"
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
+[[test]]
+name = "tabbar_width"
+path = "tests/tabbar_width.rs"
+
+[[test]]
+name = "notification_bubble"
+path = "tests/notification_bubble/main.rs"
+
+[[test]]
+name = "search_badge"
+path = "tests/search_badge/main.rs"
+
+[[test]]
+name = "update_command"
+path = "tests/update_command/main.rs"

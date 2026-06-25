@@ -643,5 +643,5 @@ impl App {
 
 
 #[cfg(test)]
-#[path = "overlays/tests.rs"]
+#[path = "../../tests/overlays_tests.rs"]
 mod tests;

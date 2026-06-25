@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-mac"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -35,3 +36,10 @@ raw-window-handle = { workspace = true }
 [[bin]]
 name = "sonicterm-mac"
 path = "src/main.rs"
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

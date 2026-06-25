@@ -2093,5 +2093,5 @@ fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::R
 
 
 #[cfg(test)]
-#[path = "window_event/tests.rs"]
+#[path = "../../tests/window_event_tests.rs"]
 mod wheel_report_tests;

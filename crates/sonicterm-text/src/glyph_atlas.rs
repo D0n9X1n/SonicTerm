@@ -603,5 +603,5 @@ impl Rasterizer for SyntheticRasterizer {
 
 
 #[cfg(test)]
-#[path = "glyph_atlas/tests.rs"]
+#[path = "../tests/glyph_atlas_tests.rs"]
 mod tests;

@@ -281,5 +281,5 @@ fn byte_to_char_col(text: &str, byte: usize) -> usize {
 }
 
 #[cfg(test)]
-#[path = "copy_mode/tests.rs"]
+#[path = "../tests/copy_mode_tests.rs"]
 mod tests;

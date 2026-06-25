@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-engine"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,3 +14,10 @@ sonicterm-grid.workspace = true
 sonicterm-text.workspace = true
 sonicterm-font.workspace = true
 config = { package = "sonicterm-font-config", path = "../sonicterm-font-config" }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

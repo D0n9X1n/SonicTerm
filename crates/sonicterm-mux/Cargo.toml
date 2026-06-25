@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-mux"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,3 +30,10 @@ crossbeam-channel = { workspace = true }
 bincode = { version = "2", features = ["serde"] }
 interprocess = "2.2"
 portable-pty = { workspace = true }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

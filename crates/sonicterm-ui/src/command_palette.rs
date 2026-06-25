@@ -600,5 +600,5 @@ pub fn covers_every_variant_kind() -> bool {
 }
 
 #[cfg(test)]
-#[path = "command_palette/tests.rs"]
+#[path = "../tests/command_palette_tests.rs"]
 mod tests;

@@ -1,6 +1,7 @@
 [package]
 authors.workspace = true
 name = "sonicterm-freetype"
+autotests = false
 version.workspace = true
 edition = "2018"
 links = "freetype"
@@ -15,3 +16,10 @@ fixed.workspace = true
 
 [build-dependencies]
 cc.workspace = true
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"

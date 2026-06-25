@@ -155,5 +155,5 @@ pub fn thumb_to_view_top(
 
 
 #[cfg(test)]
-#[path = "scrollbar/tests.rs"]
+#[path = "../tests/scrollbar_tests.rs"]
 mod tests;

@@ -477,5 +477,5 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
 
 
 #[cfg(test)]
-#[path = "software_windows/tests.rs"]
+#[path = "../tests/software_windows_tests.rs"]
 mod tests;

@@ -212,5 +212,5 @@ pub struct SearchView {
 }
 
 #[cfg(test)]
-#[path = "inputs/tests.rs"]
+#[path = "../tests/inputs_tests.rs"]
 mod tests;

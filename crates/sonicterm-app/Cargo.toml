@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-app"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -57,3 +58,70 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "alt_v_passthrough"
+path = "tests/alt_v_passthrough.rs"
+
+[[test]]
+name = "child_broadcast"
+path = "tests/child_broadcast.rs"
+
+[[test]]
+name = "child_main_parity_regressions"
+path = "tests/child_main_parity_regressions.rs"
+
+[[test]]
+name = "child_redraw_coalescing"
+path = "tests/child_redraw_coalescing.rs"
+
+[[test]]
+name = "child_scrollbar_parity"
+path = "tests/child_scrollbar_parity.rs"
+
+[[test]]
+name = "child_split_pane_resize"
+path = "tests/child_split_pane_resize.rs"
+
+[[test]]
+name = "command_palette_window_parity"
+path = "tests/command_palette_window_parity.rs"
+
+[[test]]
+name = "inactive_tab_resize"
+path = "tests/inactive_tab_resize.rs"
+
+[[test]]
+name = "menu"
+path = "tests/menu.rs"
+
+[[test]]
+name = "pane_pty_close_resize"
+path = "tests/pane_pty_close_resize.rs"
+
+[[test]]
+name = "read_only_window_scope"
+path = "tests/read_only_window_scope.rs"
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
+[[test]]
+name = "window_lifecycle"
+path = "tests/window_lifecycle.rs"
+
+[[test]]
+name = "file_path_paste"
+path = "tests/file_path_paste/main.rs"
+
+[[test]]
+name = "update_check"
+path = "tests/update_check/main.rs"
+
+[[test]]
+name = "update_notification"
+path = "tests/update_notification/main.rs"

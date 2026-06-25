@@ -533,7 +533,7 @@ pub fn search_query_caret_prefix(search: &SearchState, preedit: &str) -> String 
 }
 
 #[cfg(test)]
-#[path = "overlays/tests.rs"]
+#[path = "../tests/overlays_tests.rs"]
 mod tests;
 /// Layout of the IME preedit popover, placed just below the text cursor.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,5 +1,6 @@
 [package]
 name = "sonicterm-windows"
+autotests = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -66,3 +67,10 @@ path-guid    = "8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22"
 license      = false
 eula         = false
 product-icon = "../../assets/icons/exports/sonic.ico"
+
+# Integration tests (autotests disabled; unit tests live in tests/*_tests.rs
+# and are #[path]-included from src for private access).
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
