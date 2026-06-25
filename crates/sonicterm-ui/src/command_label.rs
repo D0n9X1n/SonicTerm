@@ -321,4 +321,3 @@ pub fn pretty_keys(raw: &str) -> String {
         .join("")
 }
 
-// Unit tests live in `tests/src_command_label.rs`.

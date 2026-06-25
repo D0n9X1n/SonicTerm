@@ -275,4 +275,3 @@ pub fn find_drop_target_skipping_unrendered<W: Copy>(
     )
 }
 
-// Unit tests live in `tests/src_tab_drag.rs`.

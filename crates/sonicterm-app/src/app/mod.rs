@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicIsize, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -89,6 +89,8 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicIsize;
 #[cfg(target_os = "windows")]
 static WINDOW_BG_BRUSH: AtomicIsize = AtomicIsize::new(0);
 

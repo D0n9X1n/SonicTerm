@@ -790,7 +790,6 @@ pub struct GpuRenderer {
     splitter_color: [f32; 4],
     hyperlink_tint: [f32; 4],
     search_highlight: [f32; 4],
-    search_highlight_current: [f32; 4],
     search_fg: ChromeColor,
     search_bg: [f32; 4],
     // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
@@ -1428,9 +1427,6 @@ impl GpuRenderer {
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
-        // Current (selected) match draws in orange so it's distinguishable
-        // from the other yellow matches at a glance.
-        let search_highlight_current = [1.0, 0.5, 0.0, 0.55];
         let search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         // T13/T14: cosmic-text Buffer / Metrics allocations deleted.
@@ -1494,7 +1490,6 @@ impl GpuRenderer {
             splitter_color,
             hyperlink_tint,
             search_highlight,
-            search_highlight_current,
             search_fg,
             search_bg,
             drag_chip_visual: None,

@@ -253,4 +253,3 @@ pub fn blueprint() -> MenuBlueprint {
     ]
 }
 
-// Unit tests live in `tests/menu.rs`.

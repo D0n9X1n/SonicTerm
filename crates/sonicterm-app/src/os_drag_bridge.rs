@@ -114,4 +114,3 @@ pub fn __test_drain_files() -> Vec<Vec<PathBuf>> {
     drain_file_drops()
 }
 
-// Unit tests live in `tests/os_drag_bridge.rs`.
