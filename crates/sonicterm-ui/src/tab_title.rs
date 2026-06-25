@@ -100,4 +100,3 @@ fn cwd_two_components(cwd: &str) -> String {
     }
 }
 
-// Unit tests live in `tests/src_tab_title.rs`.
