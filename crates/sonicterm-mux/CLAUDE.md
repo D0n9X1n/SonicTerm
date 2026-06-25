@@ -16,6 +16,8 @@ the GUI process and frames protocol messages for attach/reattach paths.
 cargo build -p sonicterm-mux
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - The daemon owns long-lived PTYs; clean up on signal, disconnect, and
   explicit shutdown.

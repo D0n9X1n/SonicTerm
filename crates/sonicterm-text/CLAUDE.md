@@ -15,6 +15,8 @@ row glyph caching, and glyph atlas data consumed by the GPU renderer.
 cargo build -p sonicterm-text
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Cache keys must account for font identity, size, weight, style, DPI, and
   glyph variants that change output.

@@ -16,6 +16,8 @@ process information, and SSH-related seams.
 cargo build -p sonicterm-io
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
   release blockers.

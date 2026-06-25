@@ -15,6 +15,8 @@ handling live in `sonicterm-font`.
 cargo build -p sonicterm-freetype
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Do not hide unsafe lifetime or ownership rules here; wrap them in
   `sonicterm-font::ftwrap`.

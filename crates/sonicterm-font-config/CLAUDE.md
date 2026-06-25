@@ -13,6 +13,8 @@ font code does not hand-roll FFI constants.
 cargo build -p sonicterm-font-config
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Treat this as binding/support code; avoid broad rewrites for style only.
 - Keep numeric constants aligned with Fontconfig.

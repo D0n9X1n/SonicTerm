@@ -18,6 +18,8 @@ It loads config/theme/keymap, installs logging, then runs
 cargo build -p sonicterm-windows
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 Release MSI builds require the Windows Cairo setup script and WiX.
 
 ## Guardrails

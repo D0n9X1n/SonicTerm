@@ -15,6 +15,8 @@ tracking, wide-character handling, and hyperlink references.
 cargo test -p sonicterm-grid
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Wide and zero-width characters must keep cells visually and logically
   aligned after resize/scroll.

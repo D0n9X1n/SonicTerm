@@ -17,6 +17,8 @@ paths.
 cargo build -p sonicterm-block-glyph
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Keep pixel-unit conversions in `glue.rs` or `lib.rs`; do not leak them
   into the renderer.

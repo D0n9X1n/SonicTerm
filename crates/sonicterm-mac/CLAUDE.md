@@ -17,6 +17,8 @@ this process, wires OS tab drag/drop, then runs `sonicterm_app::MacShell`.
 cargo build -p sonicterm-mac
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Keep AppKit automatic tabbing disabled with
   `NSWindow.setAllowsAutomaticWindowTabbing(false)` plus per-window

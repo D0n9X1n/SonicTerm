@@ -14,6 +14,8 @@ grid through the terminal model.
 cargo test -p sonicterm-vt
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Preserve SWAR/ASCII fast paths when changing parser hot loops.
 - Do not flatten styled rows in ways that lose per-cell foreground,

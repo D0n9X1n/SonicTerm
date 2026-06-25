@@ -18,6 +18,8 @@ terminal/UI glyphs.
 cargo build -p sonicterm-gpu
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - Preserve per-cell foreground/background, inverse, underline, and 256-color

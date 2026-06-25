@@ -13,6 +13,8 @@ surface; ergonomic matching and fallback policy belong in
 cargo build -p sonicterm-fontconfig
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Do not edit generated bindings by hand unless the change is a targeted
   compatibility patch.

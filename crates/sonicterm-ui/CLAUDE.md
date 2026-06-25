@@ -18,6 +18,8 @@ scrollbar, broadcast UI, and shared UI tokens.
 cargo test -p sonicterm-ui
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Keep this crate renderer-agnostic; it should compute state/layout, not
   issue GPU commands.

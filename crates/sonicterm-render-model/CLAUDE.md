@@ -17,6 +17,8 @@ winit.
 cargo build -p sonicterm-render-model
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Keep renderer-specific GPU choices out of this crate.
 - Preserve enough per-cell style data for colors, inverse, underline,

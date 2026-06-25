@@ -13,6 +13,8 @@ shaping; safe buffer/font wrappers and shaping policy live in
 cargo build -p sonicterm-harfbuzz
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Avoid manual edits to generated bindings except targeted compatibility
   fixes.

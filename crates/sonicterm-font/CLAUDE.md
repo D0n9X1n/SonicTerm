@@ -19,6 +19,8 @@ keys. New font behavior should land here instead of depending on
 cargo build -p sonicterm-font
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Cache keys must include family, size, weight, style, stretch, and glyph
   variation data that affects output.

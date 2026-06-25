@@ -16,6 +16,8 @@ painter/window/clipboard/PTY boundaries.
 cargo test -p sonicterm-types
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Keep this crate dependency-light and backend-free.
 - Public API changes require `docs/CONTRACTS.md` updates and the documented

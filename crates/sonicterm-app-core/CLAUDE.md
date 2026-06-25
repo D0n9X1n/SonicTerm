@@ -19,6 +19,8 @@ Keep this crate free of `winit`, `wgpu`, platform handles, and blocking IO.
 cargo build -p sonicterm-app-core
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Add new behavior through reducer/effect boundaries instead of reaching
   back into `sonicterm-app`.

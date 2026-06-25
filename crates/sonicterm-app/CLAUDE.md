@@ -21,6 +21,8 @@ drag/tear-out, and the platform shell abstractions.
 cargo build -p sonicterm-app
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.

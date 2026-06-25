@@ -18,6 +18,8 @@ work so config-load failures and panics are visible.
 cargo test -p sonicterm-logging
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Do not log secrets, tokens, environment dumps, or full command payloads
   without sanitization.

@@ -18,6 +18,8 @@ and URL safety. This crate is the only place that should parse
 cargo test -p sonicterm-cfg
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Startup may fall back to defaults, but hot reload should surface parse
   errors clearly instead of silently accepting bad config.

@@ -17,6 +17,8 @@ Terminal parsing and grid state live in `sonicterm-vt` and
 cargo build -p sonicterm-engine
 ```
 
+Tests: unit tests live in `tests/<module>_tests.rs` (`#[path]`-included from `src`); see the root `CLAUDE.md` Conventions.
+
 ## Guardrails
 - Do not grow this into a second app core; keep it focused on engine seams.
 - Prefer moving stable contracts into `sonicterm-types` when multiple
