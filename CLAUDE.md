@@ -90,20 +90,31 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 
 ## Wiki
 
-The GitHub Wiki is a **separate git repository** from this one. There are two
-copies of the same Markdown:
+The GitHub Wiki is a **separate git repository** (`D0n9X1n/SonicTerm.wiki.git`)
+from this one. The **live wiki is the source of truth.** The `wiki/` folder in
+this repo is a mirror kept in sync with it so the docs can be reviewed in PRs.
 
-| Location | Repo | Serves |
+| Location | Repo | Role |
 | --- | --- | --- |
-| `wiki/` folder here | `D0n9X1n/SonicTerm.git` (this repo) | source/mirror copy, reviewed in PRs |
-| Live Wiki tab | `D0n9X1n/SonicTerm.wiki.git` | the rendered pages at `/SonicTerm/wiki/...` |
+| Live Wiki tab | `D0n9X1n/SonicTerm.wiki.git` (branch `master`) | **authoritative** — rendered at `/SonicTerm/wiki/...` |
+| `wiki/` folder here | `D0n9X1n/SonicTerm.git` (this repo) | mirror copy, reviewed in PRs |
 
-Editing `wiki/*.md` in this repo updates only the mirror. The live page does
-**not** change until the file is also pushed to the wiki repo. Always update
-both so they stay in sync.
+If the two ever disagree, the live wiki wins — refresh the mirror from it.
 
-To publish a wiki change to the live site (page file name = page title, e.g.
-`Keybindings.md` → `/wiki/Keybindings`):
+**To refresh the in-repo mirror from the live wiki** (do this before editing, so
+you start from the authoritative content):
+
+```bash
+WT=$(mktemp -d)
+git clone git@github.com:D0n9X1n/SonicTerm.wiki.git "$WT"
+cp "$WT"/*.md wiki/        # live -> repo mirror
+rm -rf "$WT"
+# commit the wiki/ changes on a branch
+```
+
+**To change a wiki page**, edit `wiki/<Page>.md` here, then publish the same
+file to the live wiki so it stays authoritative (page file name = page title,
+e.g. `Keybindings.md` → `/wiki/Keybindings`):
 
 ```bash
 WT=$(mktemp -d)
@@ -115,7 +126,7 @@ git -C "$WT" push origin master                # wiki default branch is `master`
 rm -rf "$WT"
 ```
 
-Then commit the matching `wiki/` edits in this repo (on a branch) so the mirror
+Commit the matching `wiki/` edits in this repo on the same branch so the mirror
 and the live wiki do not drift.
 
 ## WezTerm
