@@ -172,4 +172,3 @@ fn negotiate(requested: &str) -> String {
     supported.first().map(|id| id.to_string()).unwrap_or_else(|| "en".to_string())
 }
 
-// Unit tests live in `tests/src_i18n.rs`.

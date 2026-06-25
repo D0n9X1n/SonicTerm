@@ -81,4 +81,3 @@ pub fn redraw_interval() -> Duration {
     Duration::from_millis(BLINK_PERIOD_MS / PHASE_BUCKETS as u64)
 }
 
-// Unit tests live in `tests/src_cursor.rs`.

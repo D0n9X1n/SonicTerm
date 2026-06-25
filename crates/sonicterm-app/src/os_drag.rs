@@ -321,4 +321,3 @@ pub trait OsDragSink: Send + Sync {
     fn begin_drag(&self, payload: &TabPayload) -> DragAck;
 }
 
-// Unit tests live in `tests/os_drag.rs`.

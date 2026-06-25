@@ -72,4 +72,3 @@ pub fn __test_drain() -> Vec<Action> {
     drain()
 }
 
-// Unit tests live in `tests/menubar_bridge.rs`.

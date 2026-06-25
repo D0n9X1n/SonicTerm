@@ -292,8 +292,6 @@ where
     h.finish()
 }
 
-// Unit tests live in `tests/row_glyph_cache.rs` and
-// `tests/row_glyph_cache_pane_isolation.rs`.
 
 #[cfg(test)]
 #[path = "row_glyph_cache/tests.rs"]
