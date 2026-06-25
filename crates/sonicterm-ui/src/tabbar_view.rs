@@ -61,20 +61,6 @@ pub fn max_tab_width() -> f32 {
     f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
 }
 
-/// Preferred minimum width of a single tab. Acts as a soft floor: when the
-/// equal-share allocation per tab is ≥ this value, each tab is held at or
-/// above `TAB_MIN_WIDTH` (so the common 2–4 tab case at 1000 px wide keeps
-/// shell titles like `Administrator: cmd.exe` / `pwsh` readable). When the
-/// tab count grows large enough that holding the floor would overflow the
-/// right edge of the bar, the floor yields and tabs shrink to share the
-/// available space evenly.
-pub const TAB_MIN_WIDTH: f32 = 200.0;
-
-/// Deprecated: tab close buttons are no longer shown. Kept so older tests /
-/// callers that read the constant still compile while close hit-testing
-/// returns only whole-tab activation.
-pub const CLOSE_BUTTON_SIZE: f32 = 16.0;
-
 /// Inset between tabs and from the right edge of the bar.
 pub const TAB_GAP: f32 = 4.0;
 
@@ -310,7 +296,7 @@ impl TabBarLayout {
     ///
     /// All sizes (`bar_height`, `bar_y`, `window_width`) live in the
     /// **same coordinate system** the renderer uses (raster px post-G1a).
-    /// The logical-px constants (`CLOSE_BUTTON_SIZE`, `TAB_GAP`,
+    /// The logical-px constants (`TAB_GAP`,
     /// `BAR_LEFT_PAD`, `TAB_INNER_PAD`) are auto-scaled to that system
     /// by treating `bar_height` as the reference: the default unscaled
     /// `tab_bar_height(14.0)` is `40.0`, so `bar_height / 40.0` gives
