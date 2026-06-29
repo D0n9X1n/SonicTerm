@@ -18,6 +18,6 @@ sonicterm-types.workspace = true
 swash.workspace = true
 fontdb.workspace = true
 bytemuck.workspace = true
-lru = "0.16"
+lru = "0.18"
 tracing.workspace = true
 fast_image_resize = { version = "5.1", default-features = false }
