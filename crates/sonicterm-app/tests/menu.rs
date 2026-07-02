@@ -1,11 +1,11 @@
 //! Guard tests for the native menu blueprint.
 //!
 //! These pin two user-facing decisions that are easy to silently regress:
-//!   1. Cmd+Q must close the active pane/tab (NOT terminate the whole app).
-//!      The macOS convention is Cmd+Q = quit; SonicTerm deliberately remaps
-//!      it to `CloseActivePaneOrTab` so power users don't lose every tab on
-//!      a fat-finger. A refactor that restores `System("terminate:")` here
-//!      would be a real behavior regression.
+//!   1. The macOS Quit item must map to `QuitApp` and carry NO ⌘Q key
+//!      equivalent. ⌘Q is hold-to-quit, handled on winit's keyboard path so
+//!      the hold can be measured; if the NSMenu item owned a ⌘Q key
+//!      equivalent, AppKit would consume the chord and quit immediately,
+//!      defeating the guard. No blueprint item may bind ⌘Q at all.
 //!   2. The blueprint's top-level submenu set + ordering (the Window menu is
 //!      injected by the macOS layer via `setWindowsMenu:`, so it must NOT
 //!      appear in the shared blueprint, or AppKit would get two).
@@ -18,25 +18,29 @@ fn find_item<'a>(title: &str) -> Option<Item> {
 }
 
 #[test]
-fn cmd_q_closes_tab_not_terminates_app() {
-    let close = find_item("Close Tab").expect("'Close Tab' item must exist in the blueprint");
-    assert_eq!(close.key, "q", "Close Tab must be bound to the 'q' key");
-    assert_eq!(close.mods, KeyMods::Cmd, "Close Tab must use the Cmd modifier");
-    match close.binding {
-        Binding::Action(Action::CloseActivePaneOrTab) => {}
-        other => panic!(
-            "Cmd+Q must map to CloseActivePaneOrTab (close current tab), got {other:?} — \
-             a regression to terminate: would quit the whole app"
-        ),
+fn quit_item_maps_to_quit_app_without_cmd_q_key_equivalent() {
+    let quit =
+        find_item("Quit SonicTerm").expect("'Quit SonicTerm' item must exist in the blueprint");
+    assert_eq!(
+        quit.key, "",
+        "Quit must carry no key equivalent — ⌘Q is hold-to-quit on the keymap"
+    );
+    assert_eq!(quit.mods, KeyMods::None, "Quit must not register a modifier chord");
+    match quit.binding {
+        Binding::Action(Action::QuitApp) => {}
+        other => panic!("Quit must map to Action::QuitApp, got {other:?}"),
     }
-    // Belt-and-suspenders: no menu item anywhere may bind Cmd+Q to a
-    // terminate selector.
-    let terminates_on_q = blueprint().iter().flat_map(|sm| sm.items.iter()).any(|it| {
-        it.key == "q"
-            && it.mods == KeyMods::Cmd
-            && matches!(&it.binding, Binding::System(s) if s.contains("terminate"))
-    });
-    assert!(!terminates_on_q, "no Cmd+Q item may bind to terminate: — that would quit the app");
+    // No menu item anywhere may bind ⌘Q: the chord is owned by the keymap so
+    // the hold-to-quit guard can measure the press. An NSMenu key equivalent
+    // (whether Action or terminate:) would let AppKit consume it first.
+    let binds_cmd_q = blueprint()
+        .iter()
+        .flat_map(|sm| sm.items.iter())
+        .any(|it| it.key == "q" && it.mods == KeyMods::Cmd);
+    assert!(
+        !binds_cmd_q,
+        "no menu item may bind ⌘Q — it is handled by the hold-to-quit keymap path"
+    );
 }
 
 #[test]
@@ -57,10 +61,11 @@ fn blueprint_has_expected_top_level_menus_without_window() {
 }
 
 #[test]
-fn close_actions_are_consistent() {
-    // Both Cmd+W ("Close") and Cmd+Q ("Close Tab") route through the same
-    // close action so the two shortcuts behave identically.
+fn close_action_is_on_cmd_w() {
+    // Cmd+W ("Close") closes the active pane/tab. This is now the sole
+    // close-current chord (⌘Q became app-quit), so pin it explicitly.
     let close_w = find_item("Close").expect("'Close' (Cmd+W) item exists");
     assert_eq!(close_w.key, "w");
+    assert_eq!(close_w.mods, KeyMods::Cmd);
     assert!(matches!(close_w.binding, Binding::Action(Action::CloseActivePaneOrTab)));
 }

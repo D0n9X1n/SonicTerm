@@ -459,6 +459,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ResetFontSize => "ResetFontSize".into(),
         Action::NewWindow => "NewWindow".into(),
         Action::ToggleFullscreen => "ToggleFullscreen".into(),
+        Action::QuitApp => "QuitApp".into(),
         Action::OpenSearch => "OpenSearch".into(),
         Action::OpenCommandPalette => "OpenCommandPalette".into(),
         Action::EditConfigFile => "EditConfigFile".into(),
@@ -563,6 +564,7 @@ pub fn palette_actions() -> Vec<Action> {
         // Window
         Action::NewWindow,
         Action::ToggleFullscreen,
+        Action::QuitApp,
         // Search / palette / editable config files
         Action::OpenSearch,
         Action::OpenCommandPalette,
