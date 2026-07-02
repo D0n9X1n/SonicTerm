@@ -56,6 +56,13 @@ impl App {
             el.exit();
             return;
         }
+        // Hold-to-quit: if the Cmd+Q chord has been held past the threshold,
+        // exit now. Checked here (not from the keypress) because the hold
+        // completes on a timer wake, not on further input.
+        if self.quit_hold_elapsed() {
+            el.exit();
+            return;
+        }
         self.warm_window_pool_maintain(el);
         let notification_wake = self.expire_notifications(Instant::now());
         // Schedule the next blink-only redraw via `WaitUntil(..)`
@@ -68,6 +75,11 @@ impl App {
         // `WaitUntil` in place) is what keeps idle CPU near zero —
         // otherwise an unfocused window would keep waking at 26Hz.
         let mut next: Option<std::time::Instant> = notification_wake;
+        // Wake at the hold-to-quit deadline so the chord completes even when no
+        // other input arrives while Cmd+Q is held.
+        if let Some(at) = self.quit_hold.deadline() {
+            next = Some(next.map_or(at, |cur| cur.min(at)));
+        }
         // Perf audit #9: if a redraw was deferred for vsync pacing,
         // schedule the next wake at the upcoming frame boundary. This
         // takes priority over (and is bounded by) the blink deadline:

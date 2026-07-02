@@ -133,13 +133,16 @@ pub fn blueprint() -> MenuBlueprint {
                 },
                 sep(),
                 Item {
-                    title: "Close Tab",
-                    key: "q",
-                    mods: Cmd,
-                    // User preference: Cmd+Q closes the current pane/tab (like
-                    // Cmd+W) instead of terminating the whole app. Closing the
-                    // last tab still drains/quits via the normal close path.
-                    binding: Action(sonicterm_cfg::keymap::Action::CloseActivePaneOrTab),
+                    title: "Quit SonicTerm",
+                    // No key equivalent on purpose: the ⌘Q chord is
+                    // hold-to-quit, handled on winit's keyboard path
+                    // (`window_event.rs`) so the hold can be measured. Giving
+                    // the NSMenu item a ⌘Q key equivalent would let AppKit
+                    // consume the chord first and quit immediately, defeating
+                    // the guard. Clicking this item quits right away.
+                    key: "",
+                    mods: None,
+                    binding: Action(sonicterm_cfg::keymap::Action::QuitApp),
                 },
             ],
         },

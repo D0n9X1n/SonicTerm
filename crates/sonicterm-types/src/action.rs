@@ -139,6 +139,11 @@ pub enum Action {
     NewWindow,
     /// Toggle fullscreen on the active window.
     ToggleFullscreen,
+    /// Quit the whole application. When triggered from the keyboard this is
+    /// gated behind a hold (see the app-level quit-hold state machine): a
+    /// single press surfaces a red "hold to quit" prompt and only a sustained
+    /// hold actually exits. Menu/explicit invocations quit immediately.
+    QuitApp,
 
     // Search / palette
     /// Open the in-pane search overlay.

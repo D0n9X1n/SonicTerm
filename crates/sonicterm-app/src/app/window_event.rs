@@ -890,6 +890,12 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.modifiers = m.state();
                 }
+                // Releasing Cmd (or any modifier change that drops it) cancels
+                // a pending hold-to-quit: the Cmd+Q chord is no longer held, so
+                // the red prompt is dismissed and no exit fires.
+                if !m.state().super_key() {
+                    self.cancel_quit_hold();
+                }
                 // Releasing the open-URL modifier must clear any
                 // visible Cmd+hover URL underline (and revert the
                 // pointer to default if it was previously shown). We
@@ -1703,6 +1709,17 @@ impl App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Hold-to-quit guard: intercept the Cmd+Q chord before any
+                // mode routing (palette/search/copy-mode/PTY) so it behaves
+                // identically everywhere. A single press only arms the guard
+                // and shows the red prompt; the actual exit happens from the
+                // timer tick in `do_about_to_wait` once the hold completes.
+                if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
+                    if matches!(self.keymap.lookup(&key_str), Some(Action::QuitApp)) {
+                        self.on_quit_chord_pressed();
+                        return;
+                    }
+                }
                 if self.command_palette.is_open() {
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette

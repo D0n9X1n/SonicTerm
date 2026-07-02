@@ -55,6 +55,71 @@ pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action)
 }
 
 impl App {
+    /// Handle a Cmd+Q chord press from the keyboard path. First press arms the
+    /// hold-to-quit guard and surfaces the red prompt; auto-repeat presses are
+    /// absorbed. Returns `true` when the chord was consumed (so the caller does
+    /// not forward it as a normal action or to the PTY).
+    pub(super) fn on_quit_chord_pressed(&mut self) -> bool {
+        let now = Instant::now();
+        match self.quit_hold.on_press(now) {
+            super::quit_hold::QuitHoldAction::ShowPrompt { .. } => {
+                self.show_notification_for_kind_until(
+                    self.frontmost_kind(),
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    super::quit_hold::QUIT_HOLD_PROMPT.to_string(),
+                    // Safety net: self-clear a few seconds out in case a chord
+                    // release event is ever missed. The hold itself is far
+                    // shorter, so a completed quit or release clears it first.
+                    Some(now + std::time::Duration::from_secs(3)),
+                );
+                if let Some(w) = self.main_window() {
+                    w.request_redraw();
+                }
+            }
+            super::quit_hold::QuitHoldAction::None => {}
+            // `on_press` only ever emits ShowPrompt/None.
+            super::quit_hold::QuitHoldAction::Quit | super::quit_hold::QuitHoldAction::Dismiss => {}
+        }
+        true
+    }
+
+    /// Cancel any pending hold-to-quit (chord released, Cmd released, or focus
+    /// lost) and dismiss the red prompt if it is still showing.
+    pub(super) fn cancel_quit_hold(&mut self) {
+        if matches!(self.quit_hold.on_release(), super::quit_hold::QuitHoldAction::Dismiss) {
+            self.clear_quit_prompt();
+        }
+    }
+
+    /// Timer tick for the hold-to-quit guard. Returns `true` when the chord has
+    /// been held long enough that the app should exit now.
+    #[must_use]
+    pub(super) fn quit_hold_elapsed(&mut self) -> bool {
+        matches!(self.quit_hold.on_tick(Instant::now()), super::quit_hold::QuitHoldAction::Quit)
+    }
+
+    /// Remove the "hold to quit" prompt from whichever window currently shows
+    /// it (main or any torn-out child). Leaves unrelated notifications intact.
+    fn clear_quit_prompt(&mut self) {
+        let is_prompt = |bubble: &sonicterm_ui::overlays::NotificationBubble| {
+            bubble.message == super::quit_hold::QUIT_HOLD_PROMPT
+        };
+        if let Some(ws) = self.main_mut() {
+            if ws.notification.as_ref().is_some_and(is_prompt) {
+                ws.notification = None;
+            }
+        }
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        for child in self.windows.values_mut() {
+            if child.notification.as_ref().is_some_and(is_prompt) {
+                child.notification = None;
+                child.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn show_notification_for_kind(
         &mut self,
         kind: FrontmostKind,
@@ -616,6 +681,15 @@ impl App {
             }
             Action::ToggleFullscreen => {
                 self.toggle_fullscreen_for(self.frontmost_kind());
+            }
+            Action::QuitApp => {
+                // Explicit (menu / command palette) invocation quits
+                // immediately — the hold gate applies only to the keyboard
+                // chord, which is intercepted before it reaches here.
+                // `do_about_to_wait` drains `pending_exit` and calls
+                // `el.exit()` on the next loop turn.
+                self.quit_hold = super::quit_hold::QuitHold::new();
+                self.pending_exit = true;
             }
         }
         true
