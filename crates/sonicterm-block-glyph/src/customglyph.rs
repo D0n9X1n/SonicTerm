@@ -153,6 +153,7 @@ bitflags::bitflags! {
     //  │ ╲  ╱ │
     //  │LL╲╱LR│
     //  ╰──────╯
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct CellDiagonal: u8{
         const UPPER_LEFT = 1<<1;
         const UPPER_RIGHT = 1<<2;
@@ -168,6 +169,7 @@ bitflags::bitflags! {
     // │L╱╲ │
     // │╱ D╲│
     // ╰────╯
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Triangle: u8{
         const UPPER = 1<<1;
         const RIGHT = 1<<2;
@@ -177,6 +179,7 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ProgressChunk: u8{
         const LEFT = 1<<1;
         const RIGHT = 1<<2;
@@ -187,6 +190,7 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// Components to make up graph branch diagrams (eg. for git history)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Branch: u16{
         const VERTICAL = 1<<1;
         const HORIZONTAL = 1<<2;
