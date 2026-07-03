@@ -50,7 +50,7 @@ aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
 | Decrease font size | `Cmd+-` | `Alt+-` |
 | Reset font size | `Cmd+0` | `Alt+0` |
 | New window | `Cmd+N` | `Alt+N` |
-| Quit app (hold) | `Cmd+Q` **hold ~0.8s** | — |
+| Quit app (confirm) | `Cmd+Q`, then `Cmd+Q` again within 5s | — |
 | Toggle fullscreen | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
 | Search | `Cmd+F` | `Alt+F` |
 | Command palette | `Cmd+Shift+P` | `Alt+Shift+P` |
@@ -62,11 +62,11 @@ aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
 
 These are the bundled defaults; every row is editable in the keymap TOML below.
 
-> **Hold-to-quit (macOS).** `Cmd+Q` does not quit immediately. A single press
-> shows a red **“Hold ⌘Q to quit the app”** alert in the top-right corner;
-> the app exits only if you keep the chord held for about 0.8s. Release early
-> and nothing happens. This guards against losing every tab to a fat-fingered
-> `Cmd+Q`. The **Quit SonicTerm** menu item (no key equivalent) quits at once.
+> **Quit confirmation (macOS).** `Cmd+Q` does not quit immediately. The first
+> press shows a red **“Press ⌘Q one more time to quit”** alert in the top-right
+> corner. Press `Cmd+Q` again within 5 seconds to quit; otherwise the alert
+> closes automatically and nothing happens. The **Quit SonicTerm** menu item
+> (no key equivalent) quits at once.
 
 ### Edit the active keymap
 
