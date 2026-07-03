@@ -58,6 +58,22 @@ pub(super) fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count:
     out
 }
 
+/// Decide whether a key chord should trigger the hold-to-quit guard.
+///
+/// `key_str` is the normalized chord (e.g. `"super+q"`) and `bound` is the
+/// action the active keymap maps it to, if any. Cmd+Q is a macOS system
+/// chord, so on macOS an *unbound* `super+q` still quits — a user's edited or
+/// symlinked keymap frequently omits it, and falling through to the PTY (which
+/// types a literal `q`) is never what the user wants. An explicit `quit_app`
+/// binding is honored on every platform. If the user deliberately rebound
+/// `super+q` to some other action, we stand down and let that action run.
+pub(super) fn is_quit_chord(key_str: &str, bound: Option<&Action>) -> bool {
+    if matches!(bound, Some(Action::QuitApp)) {
+        return true;
+    }
+    cfg!(target_os = "macos") && key_str == "super+q" && bound.is_none()
+}
+
 impl App {
     pub(super) fn do_window_event(
         &mut self,
@@ -1714,8 +1730,15 @@ impl App {
                 // identically everywhere. A single press only arms the guard
                 // and shows the red prompt; the actual exit happens from the
                 // timer tick in `do_about_to_wait` once the hold completes.
+                //
+                // Cmd+Q is a macOS system chord, so on macOS it triggers the
+                // guard even when the active keymap has no `super+q` binding
+                // (a user's edited/symlinked keymap easily omits it). We only
+                // stand down if the user deliberately rebound `super+q` to a
+                // different action. An explicit `quit_app` binding on any
+                // platform is always honored.
                 if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                    if matches!(self.keymap.lookup(&key_str), Some(Action::QuitApp)) {
+                    if is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
                         self.on_quit_chord_pressed();
                         return;
                     }
