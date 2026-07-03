@@ -20,4 +20,4 @@ fontdb.workspace = true
 bytemuck.workspace = true
 lru = "0.18"
 tracing.workspace = true
-fast_image_resize = { version = "6.0", default-features = false }
+fast_image_resize = { version = "6.0", default-features = false, features = ["std"] }
