@@ -1221,8 +1221,24 @@ impl App {
                     }
                 }
             },
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
+                let child_mods = child.modifiers;
+                let _ = child;
+                if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                    if super::window_event::is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
+                        self.cancel_quit_hold();
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.frontmost_window = Some(win_id);
+                if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
+                    if super::window_event::is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
+                        let _ = child;
+                        self.on_quit_chord_pressed();
+                        return;
+                    }
+                }
                 if child.copy_mode.is_some() {
                     if child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()) {
                         let child_mods = child.modifiers;

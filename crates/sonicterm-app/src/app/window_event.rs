@@ -908,7 +908,8 @@ impl App {
                 }
                 // Releasing Cmd (or any modifier change that drops it) cancels
                 // a pending hold-to-quit: the Cmd+Q chord is no longer held, so
-                // the red prompt is dismissed and no exit fires.
+                // no exit fires. The red prompt stays visible briefly as normal
+                // notification feedback.
                 if !m.state().super_key() {
                     self.cancel_quit_hold();
                 }
@@ -1724,6 +1725,14 @@ impl App {
             }
 
             // -- Keyboard --
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
+                if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
+                    if is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
+                        self.cancel_quit_hold();
+                    }
+                }
+            }
+
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // Hold-to-quit guard: intercept the Cmd+Q chord before any
                 // mode routing (palette/search/copy-mode/PTY) so it behaves

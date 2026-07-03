@@ -35,6 +35,8 @@ use super::{
     WindowState,
 };
 
+const NOTIFICATION_AUTO_CLOSE_DURATION: Duration = Duration::from_secs(5);
+
 pub(super) fn read_only_allows_action(action: &Action) -> bool {
     matches!(
         action,
@@ -63,14 +65,10 @@ impl App {
         let now = Instant::now();
         match self.quit_hold.on_press(now) {
             super::quit_hold::QuitHoldAction::ShowPrompt { .. } => {
-                self.show_notification_for_kind_until(
+                self.show_notification_for_kind(
                     self.frontmost_kind(),
                     sonicterm_ui::overlays::NotificationLevel::Error,
                     super::quit_hold::QUIT_HOLD_PROMPT.to_string(),
-                    // Safety net: self-clear a few seconds out in case a chord
-                    // release event is ever missed. The hold itself is far
-                    // shorter, so a completed quit or release clears it first.
-                    Some(now + std::time::Duration::from_secs(3)),
                 );
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -84,11 +82,10 @@ impl App {
     }
 
     /// Cancel any pending hold-to-quit (chord released, Cmd released, or focus
-    /// lost) and dismiss the red prompt if it is still showing.
+    /// lost). The prompt remains visible for the normal notification lifetime so
+    /// a quick Cmd+Q tap still gives readable feedback without quitting.
     pub(super) fn cancel_quit_hold(&mut self) {
-        if matches!(self.quit_hold.on_release(), super::quit_hold::QuitHoldAction::Dismiss) {
-            self.clear_quit_prompt();
-        }
+        let _ = self.quit_hold.on_release();
     }
 
     /// Timer tick for the hold-to-quit guard. Returns `true` when the chord has
@@ -98,40 +95,13 @@ impl App {
         matches!(self.quit_hold.on_tick(Instant::now()), super::quit_hold::QuitHoldAction::Quit)
     }
 
-    /// Remove the "hold to quit" prompt from whichever window currently shows
-    /// it (main or any torn-out child). Leaves unrelated notifications intact.
-    fn clear_quit_prompt(&mut self) {
-        let is_prompt = |bubble: &sonicterm_ui::overlays::NotificationBubble| {
-            bubble.message == super::quit_hold::QUIT_HOLD_PROMPT
-        };
-        if let Some(ws) = self.main_mut() {
-            if ws.notification.as_ref().is_some_and(is_prompt) {
-                ws.notification = None;
-            }
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
-        for child in self.windows.values_mut() {
-            if child.notification.as_ref().is_some_and(is_prompt) {
-                child.notification = None;
-                child.request_redraw();
-            }
-        }
-    }
-
     pub(super) fn show_notification_for_kind(
         &mut self,
         kind: FrontmostKind,
         level: sonicterm_ui::overlays::NotificationLevel,
         message: String,
     ) {
-        self.show_notification_for_kind_until(
-            kind,
-            level,
-            message,
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(7)),
-        );
+        self.show_notification_for_kind_until(kind, level, message, None);
     }
 
     pub(super) fn show_notification_for_kind_until(
@@ -141,6 +111,8 @@ impl App {
         message: String,
         expires_at: Option<std::time::Instant>,
     ) {
+        let auto_close_at = std::time::Instant::now() + NOTIFICATION_AUTO_CLOSE_DURATION;
+        let expires_at = Some(expires_at.map_or(auto_close_at, |at| at.min(auto_close_at)));
         let bubble = sonicterm_ui::overlays::NotificationBubble { level, message, expires_at };
         match kind {
             FrontmostKind::Child(id) => {

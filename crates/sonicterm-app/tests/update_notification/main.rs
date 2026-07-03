@@ -32,7 +32,7 @@ fn notification_can_target_frontmost_child_window() {
 }
 
 #[test]
-fn regular_notification_expires_after_deadline() {
+fn notification_deadline_is_capped_at_five_seconds() {
     let mut app = app();
     app.__test_seed_tab("main");
     let now = Instant::now();
@@ -45,14 +45,14 @@ fn regular_notification_expires_after_deadline() {
     );
 
     assert_eq!(app.__test_main_notification_message(), Some("Done"));
-    assert!(app.__test_expire_notifications(now + Duration::from_secs(6)).is_some());
+    assert!(app.__test_expire_notifications(now + Duration::from_secs(4)).is_some());
     assert_eq!(app.__test_main_notification_message(), Some("Done"));
-    assert_eq!(app.__test_expire_notifications(now + Duration::from_secs(7)), None);
+    assert_eq!(app.__test_expire_notifications(now + Duration::from_secs(6)), None);
     assert_eq!(app.__test_main_notification_message(), None);
 }
 
 #[test]
-fn ongoing_notification_has_no_expiry_until_replaced() {
+fn notification_without_deadline_auto_closes_after_five_seconds() {
     let mut app = app();
     app.__test_seed_tab("main");
     let now = Instant::now();
@@ -64,15 +64,9 @@ fn ongoing_notification_has_no_expiry_until_replaced() {
         None,
     );
 
-    assert_eq!(app.__test_main_notification_ongoing(), Some(true));
-    assert_eq!(app.__test_expire_notifications(now + Duration::from_secs(600)), None);
-    assert_eq!(app.__test_main_notification_message(), Some("Checking for updates…"));
-
-    app.__test_show_notification_until(
-        FrontmostKind::Main,
-        NotificationLevel::Info,
-        "SonicTerm is up to date",
-        Some(now + Duration::from_secs(607)),
-    );
     assert_eq!(app.__test_main_notification_ongoing(), Some(false));
+    assert!(app.__test_expire_notifications(now + Duration::from_secs(4)).is_some());
+    assert_eq!(app.__test_main_notification_message(), Some("Checking for updates…"));
+    assert_eq!(app.__test_expire_notifications(now + Duration::from_secs(6)), None);
+    assert_eq!(app.__test_main_notification_message(), None);
 }
