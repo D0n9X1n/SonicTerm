@@ -1599,9 +1599,9 @@ pub struct App {
     /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
     /// are mirrored into matching receiver panes after the source PTY write.
     pub(super) broadcast: BroadcastState,
-    /// Hold-to-quit guard for the Cmd+Q chord. A single press arms it and
-    /// shows a red "hold to quit" prompt; the app only exits once the chord
-    /// has been held for the configured duration. See [`quit_hold`].
+    /// Quit confirmation guard for the Cmd+Q chord. A single press arms it and
+    /// shows a red "press again" prompt; the app exits on a second press during
+    /// the confirmation window. See [`quit_hold`].
     pub(super) quit_hold: quit_hold::QuitHold,
     /// One-shot hook fired the first time the winit `ApplicationHandler::
     /// resumed` callback runs — i.e. when NSApp / the platform event

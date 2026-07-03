@@ -134,12 +134,11 @@ pub fn blueprint() -> MenuBlueprint {
                 sep(),
                 Item {
                     title: "Quit SonicTerm",
-                    // No key equivalent on purpose: the ⌘Q chord is
-                    // hold-to-quit, handled on winit's keyboard path
-                    // (`window_event.rs`) so the hold can be measured. Giving
-                    // the NSMenu item a ⌘Q key equivalent would let AppKit
-                    // consume the chord first and quit immediately, defeating
-                    // the guard. Clicking this item quits right away.
+                    // No key equivalent on purpose: the ⌘Q chord is a two-step
+                    // confirmation handled on winit's keyboard path. Giving the
+                    // NSMenu item a ⌘Q key equivalent would let AppKit consume
+                    // the chord first and quit immediately, defeating the guard.
+                    // Clicking this item quits right away.
                     key: "",
                     mods: None,
                     binding: Action(sonicterm_cfg::keymap::Action::QuitApp),
@@ -255,4 +254,3 @@ pub fn blueprint() -> MenuBlueprint {
         },
     ]
 }
-

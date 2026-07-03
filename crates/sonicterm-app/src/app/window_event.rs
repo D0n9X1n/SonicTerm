@@ -58,7 +58,7 @@ pub(super) fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count:
     out
 }
 
-/// Decide whether a key chord should trigger the hold-to-quit guard.
+/// Decide whether a key chord should trigger the quit confirmation guard.
 ///
 /// `key_str` is the normalized chord (e.g. `"super+q"`) and `bound` is the
 /// action the active keymap maps it to, if any. Cmd+Q is a macOS system
@@ -906,13 +906,6 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.modifiers = m.state();
                 }
-                // Releasing Cmd (or any modifier change that drops it) cancels
-                // a pending hold-to-quit: the Cmd+Q chord is no longer held, so
-                // no exit fires. The red prompt stays visible briefly as normal
-                // notification feedback.
-                if !m.state().super_key() {
-                    self.cancel_quit_hold();
-                }
                 // Releasing the open-URL modifier must clear any
                 // visible Cmd+hover URL underline (and revert the
                 // pointer to default if it was previously shown). We
@@ -1725,20 +1718,11 @@ impl App {
             }
 
             // -- Keyboard --
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
-                if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                    if is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
-                        self.cancel_quit_hold();
-                    }
-                }
-            }
-
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // Hold-to-quit guard: intercept the Cmd+Q chord before any
+                // Quit confirmation guard: intercept the Cmd+Q chord before any
                 // mode routing (palette/search/copy-mode/PTY) so it behaves
-                // identically everywhere. A single press only arms the guard
-                // and shows the red prompt; the actual exit happens from the
-                // timer tick in `do_about_to_wait` once the hold completes.
+                // identically everywhere. The first press only arms the guard
+                // and shows the red prompt; a second non-repeat press quits.
                 //
                 // Cmd+Q is a macOS system chord, so on macOS it triggers the
                 // guard even when the active keymap has no `super+q` binding
@@ -1748,7 +1732,7 @@ impl App {
                 // platform is always honored.
                 if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
                     if is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
-                        self.on_quit_chord_pressed();
+                        self.on_quit_chord_pressed(event.repeat);
                         return;
                     }
                 }

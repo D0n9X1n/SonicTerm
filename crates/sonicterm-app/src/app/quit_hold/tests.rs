@@ -1,4 +1,4 @@
-//! Unit tests for the [`QuitHold`] hold-to-quit state machine.
+//! Unit tests for the [`QuitHold`] two-step quit confirmation state machine.
 
 use super::*;
 
@@ -12,78 +12,60 @@ fn t0() -> Instant {
 fn first_press_arms_and_requests_prompt() {
     let mut hold = QuitHold::new();
     let now = t0();
-    let action = hold.on_press(now);
-    assert_eq!(action, QuitHoldAction::ShowPrompt { deadline: now + QUIT_HOLD_DURATION });
+    let action = hold.on_press(now, false);
+    assert_eq!(action, QuitHoldAction::ShowPrompt {
+        deadline: now + QUIT_CONFIRM_DURATION
+    });
     assert!(hold.is_armed());
-    assert_eq!(hold.deadline(), Some(now + QUIT_HOLD_DURATION));
+    assert_eq!(hold.deadline(), Some(now + QUIT_CONFIRM_DURATION));
 }
 
 #[test]
 fn repeat_press_while_armed_is_noop() {
     let mut hold = QuitHold::new();
     let now = t0();
-    let _ = hold.on_press(now);
+    let _ = hold.on_press(now, false);
     // Auto-repeat: same chord fires again a bit later — must not re-emit the
-    // prompt nor move the deadline (the original arm instant governs the hold).
-    let repeat = hold.on_press(now + Duration::from_millis(50));
+    // prompt nor quit.
+    let repeat = hold.on_press(now + Duration::from_millis(50), true);
     assert_eq!(repeat, QuitHoldAction::None);
-    assert_eq!(hold.deadline(), Some(now + QUIT_HOLD_DURATION));
+    assert_eq!(hold.deadline(), Some(now + QUIT_CONFIRM_DURATION));
 }
 
 #[test]
-fn tick_before_deadline_does_not_quit() {
+fn second_non_repeat_press_before_deadline_quits() {
     let mut hold = QuitHold::new();
     let now = t0();
-    let _ = hold.on_press(now);
-    let early = hold.on_tick(now + QUIT_HOLD_DURATION - Duration::from_millis(1));
-    assert_eq!(early, QuitHoldAction::None);
-    assert!(hold.is_armed(), "still armed before the deadline");
-}
-
-#[test]
-fn tick_at_deadline_quits_once() {
-    let mut hold = QuitHold::new();
-    let now = t0();
-    let _ = hold.on_press(now);
-    let quit = hold.on_tick(now + QUIT_HOLD_DURATION);
+    let _ = hold.on_press(now, false);
+    let quit = hold.on_press(now + Duration::from_millis(50), false);
     assert_eq!(quit, QuitHoldAction::Quit);
-    assert!(!hold.is_armed(), "guard disarms after firing quit");
-    // A second tick must not quit again.
-    let again = hold.on_tick(now + QUIT_HOLD_DURATION + Duration::from_secs(1));
+    assert!(!hold.is_armed(), "guard disarms after confirmed quit");
+}
+
+#[test]
+fn tick_at_deadline_expires_without_quitting() {
+    let mut hold = QuitHold::new();
+    let now = t0();
+    let _ = hold.on_press(now, false);
+    let expired = hold.on_tick(now + QUIT_CONFIRM_DURATION);
+    assert_eq!(expired, QuitHoldAction::None);
+    assert!(!hold.is_armed(), "guard disarms after the confirmation expires");
+    let again = hold.on_tick(now + QUIT_CONFIRM_DURATION + Duration::from_secs(1));
     assert_eq!(again, QuitHoldAction::None);
 }
 
 #[test]
-fn release_before_deadline_cancels_and_dismisses() {
+fn press_after_expiry_starts_a_fresh_confirmation() {
     let mut hold = QuitHold::new();
     let now = t0();
-    let _ = hold.on_press(now);
-    let released = hold.on_release();
-    assert_eq!(released, QuitHoldAction::Dismiss);
-    assert!(!hold.is_armed());
-    // A tick after an early release must never quit.
-    let tick = hold.on_tick(now + QUIT_HOLD_DURATION + Duration::from_secs(1));
-    assert_eq!(tick, QuitHoldAction::None);
-}
-
-#[test]
-fn release_when_not_armed_is_noop() {
-    let mut hold = QuitHold::new();
-    assert_eq!(hold.on_release(), QuitHoldAction::None);
-    assert_eq!(hold.deadline(), None);
-}
-
-#[test]
-fn rearm_after_quit_starts_a_fresh_hold() {
-    let mut hold = QuitHold::new();
-    let now = t0();
-    let _ = hold.on_press(now);
-    assert_eq!(hold.on_tick(now + QUIT_HOLD_DURATION), QuitHoldAction::Quit);
-    // A later, separate Cmd+Q press must arm again from scratch.
-    let later = now + Duration::from_secs(5);
+    let _ = hold.on_press(now, false);
+    let _ = hold.on_tick(now + QUIT_CONFIRM_DURATION);
+    let later = now + QUIT_CONFIRM_DURATION + Duration::from_secs(1);
     assert_eq!(
-        hold.on_press(later),
-        QuitHoldAction::ShowPrompt { deadline: later + QUIT_HOLD_DURATION }
+        hold.on_press(later, false),
+        QuitHoldAction::ShowPrompt {
+            deadline: later + QUIT_CONFIRM_DURATION
+        }
     );
     assert!(hold.is_armed());
 }

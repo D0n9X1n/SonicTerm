@@ -1221,21 +1221,12 @@ impl App {
                     }
                 }
             },
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
-                let child_mods = child.modifiers;
-                let _ = child;
-                if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                    if super::window_event::is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
-                        self.cancel_quit_hold();
-                    }
-                }
-            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.frontmost_window = Some(win_id);
                 if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
                     if super::window_event::is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
                         let _ = child;
-                        self.on_quit_chord_pressed();
+                        self.on_quit_chord_pressed(event.repeat);
                         return;
                     }
                 }

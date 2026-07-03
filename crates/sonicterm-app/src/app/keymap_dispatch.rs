@@ -58,41 +58,34 @@ pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action)
 
 impl App {
     /// Handle a Cmd+Q chord press from the keyboard path. First press arms the
-    /// hold-to-quit guard and surfaces the red prompt; auto-repeat presses are
-    /// absorbed. Returns `true` when the chord was consumed (so the caller does
-    /// not forward it as a normal action or to the PTY).
-    pub(super) fn on_quit_chord_pressed(&mut self) -> bool {
+    /// quit confirmation guard and surfaces the red prompt; a second non-repeat
+    /// press quits. Returns `true` when the chord was consumed (so the caller
+    /// does not forward it as a normal action or to the PTY).
+    pub(super) fn on_quit_chord_pressed(&mut self, is_repeat: bool) -> bool {
         let now = Instant::now();
-        match self.quit_hold.on_press(now) {
+        match self.quit_hold.on_press(now, is_repeat) {
             super::quit_hold::QuitHoldAction::ShowPrompt { .. } => {
                 self.show_notification_for_kind(
                     self.frontmost_kind(),
                     sonicterm_ui::overlays::NotificationLevel::Error,
-                    super::quit_hold::QUIT_HOLD_PROMPT.to_string(),
+                    super::quit_hold::QUIT_CONFIRM_PROMPT.to_string(),
                 );
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
                 }
             }
             super::quit_hold::QuitHoldAction::None => {}
-            // `on_press` only ever emits ShowPrompt/None.
-            super::quit_hold::QuitHoldAction::Quit | super::quit_hold::QuitHoldAction::Dismiss => {}
+            super::quit_hold::QuitHoldAction::Quit => {
+                self.pending_exit = true;
+            }
         }
         true
     }
 
-    /// Cancel any pending hold-to-quit (chord released, Cmd released, or focus
-    /// lost). The prompt remains visible for the normal notification lifetime so
-    /// a quick Cmd+Q tap still gives readable feedback without quitting.
-    pub(super) fn cancel_quit_hold(&mut self) {
-        let _ = self.quit_hold.on_release();
-    }
-
-    /// Timer tick for the hold-to-quit guard. Returns `true` when the chord has
-    /// been held long enough that the app should exit now.
-    #[must_use]
-    pub(super) fn quit_hold_elapsed(&mut self) -> bool {
-        matches!(self.quit_hold.on_tick(Instant::now()), super::quit_hold::QuitHoldAction::Quit)
+    /// Timer tick for the quit confirmation guard. This expires stale first
+    /// presses; the central notification expiry clears the visible prompt.
+    pub(super) fn expire_quit_confirmation(&mut self) {
+        let _ = self.quit_hold.on_tick(Instant::now());
     }
 
     pub(super) fn show_notification_for_kind(
