@@ -53,7 +53,7 @@ parking_lot = "0.12"
 # `WeztermRasterizer` → shared `GlyphAtlas` → existing wgpu
 # `TextPipeline` (see `sonicterm-gpu/src/chrome_text.rs`). sonicterm-font
 # is the sole shaper + rasterizer.
-wgpu = "29"
+wgpu = "30"
 swash = "0.2"
 fontdb = "0.23"
 bytemuck = { version = "1.25", features = ["derive"] }
