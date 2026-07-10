@@ -20,16 +20,19 @@ struct GithubRelease {
 }
 
 pub fn check_latest_release(current: &str) -> UpdateCheckResult {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(6)).build();
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(6)))
+        .build();
+    let agent: ureq::Agent = config.into();
     let response = agent
         .get("https://api.github.com/repos/D0n9X1n/SonicTerm/releases")
-        .set("User-Agent", "SonicTerm")
-        .set("Accept", "application/vnd.github+json")
+        .header("User-Agent", "SonicTerm")
+        .header("Accept", "application/vnd.github+json")
         .call();
-    let Ok(response) = response else {
+    let Ok(mut response) = response else {
         return UpdateCheckResult::Unavailable;
     };
-    let Ok(body) = response.into_string() else {
+    let Ok(body) = response.body_mut().read_to_string() else {
         return UpdateCheckResult::Unavailable;
     };
     latest_release_from_json(current, &body).unwrap_or(UpdateCheckResult::Unavailable)
