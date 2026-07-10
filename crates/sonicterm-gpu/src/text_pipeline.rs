@@ -142,11 +142,11 @@ impl TextPipeline {
             vertex: VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: std::mem::size_of::<GlyphInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &INSTANCE_ATTRS,
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(FragmentState {

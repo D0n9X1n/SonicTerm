@@ -1293,6 +1293,7 @@ impl GpuRenderer {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 })
                 .await
                 .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
@@ -1356,6 +1357,7 @@ impl GpuRenderer {
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
@@ -5469,7 +5471,7 @@ impl GpuRenderer {
         gpu_lap!("render_pass");
         self.queue.submit(Some(encoder.finish()));
         gpu_lap!("queue_submit");
-        frame.present();
+        self.queue.present(frame);
         gpu_lap!("present");
         self.finish_successful_frame(
             key,
