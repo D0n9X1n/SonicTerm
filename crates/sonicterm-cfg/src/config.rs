@@ -790,5 +790,5 @@ threshold_secs = 10
 }
 
 #[cfg(test)]
-#[path = "config/tests.rs"]
-mod tests;
+#[path = "config_tests.rs"]
+mod config_tests;

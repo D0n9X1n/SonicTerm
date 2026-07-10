@@ -1246,5 +1246,5 @@ fn make_row(cols: u16) -> Line {
 }
 
 #[cfg(test)]
-#[path = "grid/tests.rs"]
-mod tests;
+#[path = "grid_tests.rs"]
+mod grid_tests;

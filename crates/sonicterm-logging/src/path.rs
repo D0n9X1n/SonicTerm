@@ -42,5 +42,5 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[path = "path/tests.rs"]
-mod tests;
+#[path = "path_tests.rs"]
+mod path_tests;

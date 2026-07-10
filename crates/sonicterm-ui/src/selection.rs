@@ -248,5 +248,5 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
 }
 
 #[cfg(test)]
-#[path = "selection/tests.rs"]
-mod tests;
+#[path = "selection_tests.rs"]
+mod selection_tests;

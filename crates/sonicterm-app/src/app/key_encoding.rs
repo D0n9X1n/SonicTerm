@@ -297,5 +297,5 @@ impl KeyName {
 }
 
 #[cfg(test)]
-#[path = "key_encoding/tests.rs"]
-mod tests;
+#[path = "key_encoding_tests.rs"]
+mod key_encoding_tests;

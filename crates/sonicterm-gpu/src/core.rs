@@ -6655,8 +6655,8 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 }
 
 #[cfg(test)]
-#[path = "core/tests.rs"]
-mod tests;
+#[path = "core_tests.rs"]
+mod core_tests;
 // T13/T14 (wezterm-takeover G3): `hex_to_the legacy chrome layer` and
 // `scale_the legacy chrome layer_alpha` have moved into `crate::color` under the
 // renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and

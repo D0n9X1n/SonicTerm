@@ -69,5 +69,5 @@ impl Default for LoggingConfig {
 }
 
 #[cfg(test)]
-#[path = "config/tests.rs"]
-mod tests;
+#[path = "config_tests.rs"]
+mod config_tests;

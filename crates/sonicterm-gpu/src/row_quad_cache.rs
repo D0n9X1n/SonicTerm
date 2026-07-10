@@ -242,5 +242,5 @@ where
 // Unit tests live in `crates/sonicterm-shared/tests/line_quad_cache_hit_miss.rs`.
 
 #[cfg(test)]
-#[path = "row_quad_cache/tests.rs"]
-mod tests;
+#[path = "row_quad_cache_tests.rs"]
+mod row_quad_cache_tests;

@@ -143,5 +143,5 @@ pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl
 }
 
 #[cfg(test)]
-#[path = "hovered_url/tests.rs"]
-mod tests;
+#[path = "hovered_url_tests.rs"]
+mod hovered_url_tests;

@@ -294,5 +294,5 @@ where
 
 
 #[cfg(test)]
-#[path = "row_glyph_cache/tests.rs"]
-mod tests;
+#[path = "row_glyph_cache_tests.rs"]
+mod row_glyph_cache_tests;

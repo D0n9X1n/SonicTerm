@@ -150,5 +150,5 @@ fn enhance_text_coverage(coverage: u8) -> u8 {
 }
 
 #[cfg(test)]
-#[path = "directwrite/tests.rs"]
-mod tests;
+#[path = "directwrite_tests.rs"]
+mod directwrite_tests;
