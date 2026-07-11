@@ -24,7 +24,8 @@ cargo build -p sonicterm-mux
 - Avoid user-global socket collisions; namespace IPC paths by user/session.
 
 ## Cross-references
-- Consumes: `portable-pty` (direct PTY host for the prototype daemon). The
-  `sonicterm-io`/`sonicterm-grid`/`sonicterm-vt` seams are planned but not yet
-  wired; see the architecture follow-up before adding them.
+- Consumes: `sonicterm-io` — PTY spawn/read/write/resize and kill-on-Drop go
+  through `sonicterm_io::pty::PtyHandle`, the same seam the GUI panes use, so
+  there is one PTY implementation. The `sonicterm-grid`/`sonicterm-vt` seams
+  are still planned (mux currently forwards raw bytes, no server-side parse).
 - Consumed by: external daemon clients and future app attach flows.
