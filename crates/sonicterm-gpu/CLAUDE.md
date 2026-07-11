@@ -8,7 +8,7 @@ terminal/UI glyphs.
 ## Key files
 - `core.rs` - renderer owner, frame assembly, surface lifecycle.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
-- `text_pipeline.rs` - glyphon/cosmic-text text draws.
+- `text_pipeline.rs` - glyph instance text draws via the shared atlas.
 - `atlas_upload.rs` - glyph atlas uploads.
 - `row_quad_cache.rs` - row background/quad caching.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers.
@@ -24,8 +24,9 @@ cargo build -p sonicterm-gpu
   semantics when moving data through the renderer.
 - Drop `wgpu::SurfaceTexture` before reconfiguring the surface after a
   suboptimal frame.
-- Upgrade `wgpu`, `glyphon`, and `cosmic-text` as a tested set, not one at
-  a time.
+- Upgrade `wgpu` and the `sonicterm-font`/`sonicterm-text` glyph stack as a
+  tested set, not one at a time. (`glyphon`/`cosmic-text` were removed; text
+  now flows through the Sonic-owned atlas + rasterizer.)
 
 ## Cross-references
 - Consumes: `sonicterm-render-model`, `sonicterm-text`,

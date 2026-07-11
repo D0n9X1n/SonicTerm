@@ -6,7 +6,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 sonicterm-types = { workspace = true }
-sonicterm-text = { workspace = true }
-sonicterm-cfg = { workspace = true }
 sonicterm-grid = { workspace = true }
-sonicterm-engine = { path = "../sonicterm-engine", version = "1.0.1" }

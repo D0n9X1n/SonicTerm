@@ -70,12 +70,21 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
-- **Tests live in sibling files, never inline.** A module's unit tests go in
-  a sibling test file declared from the source with
-  `#[cfg(test)] #[path = "<module>/tests.rs"] mod tests;` (or `tests/<name>.rs`
-  for named groups). No `#[cfg(test)] mod tests { … }` blocks inside source
-  files. Tests stay in-crate so they keep private-item access via
-  `use super::*;`.
+- **Unit tests live in a `<file>_tests.rs` sibling, never inline.** A module's
+  unit tests go in a flat sibling next to the source file, named
+  `<file>_tests.rs`, declared from the source with
+  `#[cfg(test)] #[path = "<file>_tests.rs"] mod <file>_tests;`. For example,
+  `keymap.rs` → `keymap_tests.rs` (`mod keymap_tests;`), and a crate root's
+  own smoke/surface checks live in `lib_tests.rs` (or `main_tests.rs` for a
+  binary crate). No `#[cfg(test)] mod tests { … }` blocks inside source files,
+  and no `<module>/tests.rs` subdirectories. Tests stay in-crate so they keep
+  private-item access via `use super::*;`, and `cargo test --lib` finds them.
+  Rust has no filename-based auto-discovery — the one-line `mod` declaration is
+  required per test file.
+- **`tests/` is for cross-crate integration only.** Reserve each crate's
+  `tests/` directory for genuine integration tests that exercise the crate
+  through its public API or across crate boundaries. Do not put trivial
+  "does this symbol export" checks there — fold those into `lib_tests.rs`.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.
