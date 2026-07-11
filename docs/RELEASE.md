@@ -4,12 +4,12 @@ SonicTerm releases are tag-driven.
 
 ## Version
 
-The workspace version is `1.0.1`. Release tags use `v<major>.<minor>.<patch>`,
+The workspace version is `1.0.2`. Release tags use `v<major>.<minor>.<patch>`,
 for example:
 
 ```sh
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 ## Automation
