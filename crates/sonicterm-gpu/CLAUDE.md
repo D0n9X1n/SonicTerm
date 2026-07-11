@@ -29,6 +29,9 @@ cargo build -p sonicterm-gpu
   now flows through the Sonic-owned atlas + rasterizer.)
 
 ## Cross-references
-- Consumes: `sonicterm-render-model`, `sonicterm-text`,
-  `sonicterm-types`, `sonicterm-cfg`, `sonicterm-ui`.
+- Consumes: `sonicterm-render-model`, `sonicterm-text`, `sonicterm-types`,
+  `sonicterm-engine`, `sonicterm-block-glyph`. Terminal-grid, config/theme, and
+  UI-state types are reached only through `render_model::boundary::{grid, cfg, ui}`
+  — the renderer no longer depends on `sonicterm-cfg`/`sonicterm-ui`/`sonicterm-grid`
+  directly, so `render-model` is the single declared vt/grid -> gpu and ui -> gpu seam.
 - Consumed by: `sonicterm-app`.

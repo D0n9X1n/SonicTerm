@@ -5339,13 +5339,10 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "sonicterm-block-glyph",
- "sonicterm-cfg",
  "sonicterm-engine",
- "sonicterm-grid",
  "sonicterm-render-model",
  "sonicterm-text",
  "sonicterm-types",
- "sonicterm-ui",
  "tracing",
  "unicode-width",
  "wgpu",
@@ -5438,8 +5435,10 @@ dependencies = [
 name = "sonicterm-render-model"
 version = "1.0.2"
 dependencies = [
+ "sonicterm-cfg",
  "sonicterm-grid",
  "sonicterm-types",
+ "sonicterm-ui",
 ]
 
 [[package]]

@@ -13,9 +13,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode};
-use sonicterm_cfg::theme::{Color as ThemeColor, Theme};
-use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
+use sonicterm_render_model::boundary::cfg::config::{BackdropKind, SoftwareRenderMode};
+use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
+use sonicterm_render_model::boundary::grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
@@ -30,8 +30,8 @@ use crate::color::{
     hex_to_wgpu_with_alpha, ChromeColor,
 };
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
-use sonicterm_ui::drag_chip::{DragChipOverlay, DragChipVisual};
-use sonicterm_ui::tab_spans::tab_title_font_size;
+use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
+use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
@@ -77,7 +77,7 @@ pub struct SurfaceAppearance {
     /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
     /// deferred to PR-D — until then `Auto` behaves like Always-when-
     /// scrollable.
-    pub scrollbar: sonicterm_cfg::config::ScrollbarMode,
+    pub scrollbar: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     pub panel_padding: f32,
     /// User override for the software-render degrade path.
@@ -309,7 +309,7 @@ pub fn emit_pane_scrollbar(
     viewport_rows: u16,
     total_rows: u64,
     view_top: u64,
-    mode: sonicterm_cfg::config::ScrollbarMode,
+    mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     theme: &Theme,
     sw: f32,
     sh: f32,
@@ -326,8 +326,8 @@ pub fn emit_pane_scrollbar(
     // bar keeps a constant physical size across displays, min 1px.
     let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
     let geom_rect =
-        sonicterm_ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
-    let Some(geom) = sonicterm_ui::scrollbar::compute(
+        sonicterm_render_model::boundary::ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
+    let Some(geom) = sonicterm_render_model::boundary::ui::scrollbar::compute(
         viewport_rows,
         total_rows,
         view_top,
@@ -416,7 +416,7 @@ use crate::{
     quad::{premultiply, px_to_ndc, QuadInstance},
     wezterm_pipeline::WeztermPipeline,
 };
-use sonicterm_cfg::config::CursorShape;
+use sonicterm_render_model::boundary::cfg::config::CursorShape;
 use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
@@ -435,7 +435,7 @@ use sonicterm_text::{
     // file outright.
     shape::{run_is_ascii_fast, RunStyle},
 };
-use sonicterm_ui::{
+use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
     cursor as ui_cursor,
@@ -614,7 +614,7 @@ pub fn emit_tab_bar_quads(
         if is_active && params.show_active_panel_marker {
             let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
             let inset = ACTIVE_TOP_ACCENT_INSET * scale;
-            let acc = sonicterm_ui::tabbar_view::Rect {
+            let acc = sonicterm_render_model::boundary::ui::tabbar_view::Rect {
                 x: t.bg_rect.x + inset,
                 y: t.bg_rect.y + 1.0 * scale,
                 w: (t.bg_rect.w - inset * 2.0).max(0.0),
@@ -730,7 +730,7 @@ pub struct GpuRenderer {
     bg_opacity: f32,
     /// Scrollbar visibility policy from config (PR-B). Read on
     /// every frame in the per-pane scrollbar emit loop.
-    scrollbar_mode: sonicterm_cfg::config::ScrollbarMode,
+    scrollbar_mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     panel_padding: f32,
     fg_default: ChromeColor,
@@ -1424,8 +1424,8 @@ impl GpuRenderer {
         let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         let splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_cfg::theme::Appearance::Dark => 0.14,
-            sonicterm_cfg::theme::Appearance::Light => 0.10,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => 0.14,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => 0.10,
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -1638,7 +1638,7 @@ impl GpuRenderer {
     /// path, so config changes must invalidate the frame key explicitly;
     /// otherwise an idle window could keep the previous scrollbar quads
     /// until some unrelated grid/theme/input change forced a redraw.
-    pub fn set_scrollbar_mode(&mut self, mode: sonicterm_cfg::config::ScrollbarMode) -> bool {
+    pub fn set_scrollbar_mode(&mut self, mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode) -> bool {
         if self.scrollbar_mode == mode {
             return false;
         }
@@ -1651,7 +1651,7 @@ impl GpuRenderer {
     /// live-reload path; production code pushes updates via
     /// [`Self::set_scrollbar_mode`].
     #[doc(hidden)]
-    pub fn scrollbar_mode(&self) -> sonicterm_cfg::config::ScrollbarMode {
+    pub fn scrollbar_mode(&self) -> sonicterm_render_model::boundary::cfg::config::ScrollbarMode {
         self.scrollbar_mode
     }
 
@@ -1886,7 +1886,7 @@ impl GpuRenderer {
     /// stops carrying the legacy parser.
     #[doc(hidden)]
     pub fn resolved_view_top_abs_legacy(
-        grid: &sonicterm_grid::grid::Grid,
+        grid: &sonicterm_render_model::boundary::grid::grid::Grid,
         viewport_top_abs: Option<u64>,
     ) -> u64 {
         let live_top_abs = grid.scrollback_len() as u64;
@@ -1917,7 +1917,7 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn copy_mode_view_top_after_move_legacy(
         copy_mode: &CopyModeState,
-        grid: &sonicterm_grid::grid::Grid,
+        grid: &sonicterm_render_model::boundary::grid::grid::Grid,
         viewport_top_abs: Option<u64>,
     ) -> Option<u64> {
         let view_top_abs = Self::resolved_view_top_abs_legacy(grid, viewport_top_abs);
@@ -2091,7 +2091,7 @@ impl GpuRenderer {
     }
 
     /// Logical cell metrics (width, height) in CSS pixels. Pair with a
-    /// `sonicterm_ui::pane::Rect` from `PaneTree::layout` to compute how many
+    /// `sonicterm_render_model::boundary::ui::pane::Rect` from `PaneTree::layout` to compute how many
     /// cells fit in that rect: `cols = (rect.w / cell_w).floor()`,
     /// similarly rows.
     ///
@@ -2429,8 +2429,8 @@ impl GpuRenderer {
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         self.splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_cfg::theme::Appearance::Dark => 0.14,
-            sonicterm_cfg::theme::Appearance::Light => 0.10,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => 0.14,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => 0.10,
         };
         self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -2925,13 +2925,13 @@ impl GpuRenderer {
                     )
                     .with_top_offset(self.tab_bar_y_offset());
                     for t in layout.tabwidgets() {
-                        match t.hover_at(Some(sonicterm_ui::tabbar_view::Point { x: cx, y: cy })) {
-                            sonicterm_ui::tabbar_view::TabHover::None => {}
-                            sonicterm_ui::tabbar_view::TabHover::Body => {
+                        match t.hover_at(Some(sonicterm_render_model::boundary::ui::tabbar_view::Point { x: cx, y: cy })) {
+                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {}
+                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body => {
                                 idx = t.idx as u32;
                                 break;
                             }
-                            sonicterm_ui::tabbar_view::TabHover::Close => {}
+                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Close => {}
                         }
                     }
                 }
@@ -3193,7 +3193,7 @@ impl GpuRenderer {
             // plain hover draws only a yellow underline, so compute lazily —
             // `[0.0;4]` otherwise. #perf
             let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
-                sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
             } else {
                 [0.0, 0.0, 0.0, 0.0]
             };
@@ -3968,7 +3968,7 @@ impl GpuRenderer {
                 // accent underline matching the recolored glyphs; plain hover
                 // → a yellow HINT underline only (no glyph recolor). #URL-hint
                 let hov_accent = if h.active {
-                    sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
                 } else {
                     hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
                 };
@@ -4117,7 +4117,7 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            let ui_palette = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
+            let ui_palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -4622,7 +4622,7 @@ impl GpuRenderer {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
             // Tokyo Night literals (see UiPalette::from_theme).
-            let palette_chrome = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -4724,7 +4724,7 @@ impl GpuRenderer {
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
                 let query_origin_x =
-                    layout.query_row.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                    layout.query_row.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
@@ -4809,7 +4809,7 @@ impl GpuRenderer {
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
                     let mut origin_x =
-                        row.rect.x + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                        row.rect.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
                     if let Some(hex) = swatch {
                         let color = hex_to_rgba(hex, 1.0);
                         let line_h = self.chrome_px(2.0).max(1.0);
@@ -4838,8 +4838,8 @@ impl GpuRenderer {
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
-                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X) * 2.0
-                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_COLUMN_GAP))
+                            - self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X) * 2.0
+                            - self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_COLUMN_GAP))
                         .max(0.0),
                         None => row.rect.w,
                     };
@@ -4862,7 +4862,7 @@ impl GpuRenderer {
                     );
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
-                            - self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X)
+                            - self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X)
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = 180;
@@ -4889,13 +4889,13 @@ impl GpuRenderer {
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
                         + self.chrome_px(self.panel_padding)
-                        + self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_PAD_X);
+                        + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
                     let empty_y_top = layout.query_row.y
                         + layout.query_row.h
                         + self.chrome_px(self.panel_padding);
                     // No row rect here (empty state), so derive the scaled row
                     // height via chrome_px — same DPI basis as the row path. #palette
-                    let empty_row_h = self.chrome_px(sonicterm_ui::overlays::PALETTE_ROW_HEIGHT);
+                    let empty_row_h = self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT);
                     let empty_baseline_y =
                         empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
@@ -4917,8 +4917,8 @@ impl GpuRenderer {
                     );
                     if let Some(hint) = &layout.empty_hint {
                         let hint_baseline_y = empty_baseline_y
-                            + sonicterm_ui::overlays::PALETTE_ROW_HEIGHT
-                            + sonicterm_ui::overlays::PALETTE_ROW_GAP;
+                            + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT
+                            + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_GAP;
                         emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
@@ -5192,7 +5192,7 @@ impl GpuRenderer {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
-                let mut line_color = sonicterm_ui::ui_tokens::UiPalette::from_theme(theme).accent;
+                let mut line_color = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent;
                 line_color[3] = 0.95;
                 // 3px line centered on lx; both the half-width offset and the
                 // width are logical px scaled by DPI.
@@ -6687,7 +6687,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     for r in 0..grid.rows {
         let row = grid.row(r);
         let mut start: Option<u16> = None;
-        let mut current: Option<sonicterm_grid::hyperlink::HyperlinkId> = None;
+        let mut current: Option<sonicterm_render_model::boundary::grid::hyperlink::HyperlinkId> = None;
         let mut last_col: u16 = 0;
         for (col, cell) in row.iter().enumerate() {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
@@ -6733,15 +6733,15 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
 /// Stable fingerprint for command badges, including wall-clock buckets that
 /// change when badge visibility can transition without a tab model mutation.
 #[doc(hidden)]
-pub fn command_status_hash(status: &sonicterm_ui::tabs::CommandStatus, now: Instant) -> u64 {
+pub fn command_status_hash(status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus, now: Instant) -> u64 {
     match status {
-        sonicterm_ui::tabs::CommandStatus::Idle => 0,
-        sonicterm_ui::tabs::CommandStatus::Running(started_at) => {
+        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Idle => 0,
+        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Running(started_at) => {
             let elapsed_secs = now.duration_since(*started_at).as_secs().min(5);
             let badge_visible = u64::from(now.duration_since(*started_at).as_secs() > 5);
             1 | (elapsed_secs << 32) | (badge_visible << 40)
         }
-        sonicterm_ui::tabs::CommandStatus::Done { exit, until } => {
+        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Done { exit, until } => {
             let is_past_expiry = u64::from(now >= *until);
             2 | (u64::from(exit.unwrap_or(255)) << 8) | (is_past_expiry << 32)
         }
@@ -6760,7 +6760,7 @@ pub fn command_status_hash(status: &sonicterm_ui::tabs::CommandStatus, now: Inst
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn selection_quad_rects(
-    sel: &sonicterm_ui::selection::Selection,
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     view_top_abs: u64,
     rows: u16,
     cols: u16,
