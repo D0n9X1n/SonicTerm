@@ -867,23 +867,11 @@ pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
-/// Quote a single path or word for POSIX-shell paste. Single-quotes
-/// everything and escapes embedded `'` as `'\''`. Mirrors the helper in
-/// `sonicterm-windows::os_drag_win::shell_quote` so file drops on either
-/// platform paste the same bytes. Pure function, exported for tests.
-pub fn shell_quote_posix(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
+/// Quote a single path or word for POSIX-shell paste. Re-exported from the
+/// shared `sonicterm-types` implementation so file drops on macOS and Windows
+/// paste the same bytes. Kept at this path so existing `super::shell_quote_posix`
+/// imports continue to resolve.
+pub use sonicterm_types::shell_quote_posix;
 
 /// Compute the absolute viewport-top row for "scroll to previous / next
 /// prompt". Returns `None` if there is no prompt in the requested

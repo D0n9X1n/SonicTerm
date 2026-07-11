@@ -655,21 +655,9 @@ fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
 // ---- Shell quoting for file-drop paste --------------------------------------
 
 /// Quote a path safely for paste into a POSIX-style shell prompt.
-/// Single quotes everything, escaping embedded `'` as `'\''`. Empty
-/// input becomes `''`.
-pub fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
+/// Re-exported from the shared `sonicterm-types` implementation so file
+/// drops on macOS and Windows paste the same bytes.
+pub use sonicterm_types::shell_quote_posix as shell_quote;
 
 // ---- IDropTarget registration ----------------------------------------------
 
