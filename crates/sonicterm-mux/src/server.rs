@@ -398,3 +398,7 @@ where
     let _ = writer_thread.join();
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;
