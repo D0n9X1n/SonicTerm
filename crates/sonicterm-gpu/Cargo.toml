@@ -14,9 +14,6 @@ workspace = true
 sonicterm-types.workspace = true
 sonicterm-text.workspace = true
 sonicterm-render-model.workspace = true
-sonicterm-grid.workspace = true
-sonicterm-cfg.workspace = true
-sonicterm-ui.workspace = true
 sonicterm-engine = { path = "../sonicterm-engine", version = "1.0.2" }
 # T9 (wezterm-takeover G2/C): `flush_shape_run` dispatches on
 # `BlockKey::from_char` at each cluster lead cell so box-drawing,

@@ -21,3 +21,33 @@ fn damage_rect_clips_and_unions_damage() {
 
     assert_eq!(damage.rect(), Some(PixelRect { x: 10, y: 10, w: 90, h: 70 }));
 }
+
+/// The `boundary` module is the single seam `sonicterm-gpu` reaches grid/cfg/ui
+/// through (#809). These asserts prove the re-exports resolve to the *same*
+/// types as the origin crates — a function typed against the origin path
+/// accepts a value built through the boundary path only if they are identical.
+/// If the seam ever breaks (wrong re-export, renamed module), this fails to
+/// compile, catching the regression before gpu does.
+#[test]
+fn boundary_reexports_are_type_identical_to_origin_crates() {
+    // grid: build a Grid via the boundary, hand it to code typed on the origin.
+    fn takes_origin_grid(g: &sonicterm_grid::grid::Grid) -> (u16, u16) {
+        (g.cols, g.rows)
+    }
+    let g = crate::boundary::grid::grid::Grid::new(4, 2);
+    assert_eq!(takes_origin_grid(&g), (4, 2));
+
+    // cfg: a boundary-typed Config equals an origin-typed Config default.
+    fn takes_origin_cfg(c: &sonicterm_cfg::config::Config) -> bool {
+        !c.theme.is_empty()
+    }
+    let cfg: crate::boundary::cfg::config::Config = Default::default();
+    assert!(takes_origin_cfg(&cfg));
+
+    // ui: a boundary-typed SearchState is the origin SearchState.
+    fn takes_origin_search(s: &sonicterm_ui::search::SearchState) -> bool {
+        s.query.is_empty()
+    }
+    let search = crate::boundary::ui::search::SearchState::new();
+    assert!(takes_origin_search(&search));
+}

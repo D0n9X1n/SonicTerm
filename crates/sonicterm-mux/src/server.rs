@@ -21,13 +21,12 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
+use sonicterm_io::pty::PtyHandle;
 
 use crate::proto::{ClientMsg, PaneId, PaneInfo, ServerMsg, SessionId, SessionInfo};
 
@@ -79,19 +78,20 @@ struct Pane {
     cmd: String,
     cols: u16,
     rows: u16,
-    in_tx: Sender<Vec<u8>>,
-    resize: Box<dyn Fn(u16, u16) + Send + Sync>,
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// PTY spawned through the shared `sonicterm-io` seam. Owns the child,
+    /// the reader/writer threads, the deduped resize closure, and the
+    /// robust kill-on-Drop. mux writes via `pty.in_tx` and resizes via
+    /// `pty.resize`; its own reader thread consumes `pty.out_rx`.
+    pty: PtyHandle,
     /// Most-recent bytes, cap = REPLAY_CAP. Bounded ring (FIFO trim from
     /// front when over capacity).
     replay: Arc<Mutex<VecDeque<u8>>>,
     /// Live subscriber (the attached client). When None, output is only
     /// appended to the replay buffer.
     subscriber: Arc<Mutex<Option<SubscriberSink>>>,
-    /// Signals the reader/writer threads to wind down on pane kill.
+    /// Signals the replay reader thread to wind down on pane kill.
     alive: Arc<AtomicBool>,
     _reader: JoinHandle<()>,
-    _writer: JoinHandle<()>,
 }
 
 impl Pane {
@@ -101,7 +101,7 @@ impl Pane {
 
     fn kill(&self) {
         self.alive.store(false, Ordering::Release);
-        let _ = self.child.lock().kill();
+        self.pty.kill();
     }
 }
 
@@ -214,7 +214,7 @@ impl ServerState {
     pub fn input(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
         let sessions = self.sessions.lock();
         let pane = find_pane(&sessions, pane_id)?;
-        pane.in_tx.send(bytes).map_err(|e| anyhow!("pane writer closed: {e}"))?;
+        pane.pty.in_tx.send(bytes).map_err(|e| anyhow!("pane writer closed: {e}"))?;
         Ok(())
     }
 
@@ -223,7 +223,7 @@ impl ServerState {
     pub fn resize(&self, pane_id: PaneId, cols: u16, rows: u16) -> Result<()> {
         let sessions = self.sessions.lock();
         let pane = find_pane(&sessions, pane_id)?;
-        (pane.resize)(cols, rows);
+        (pane.pty.resize)(cols, rows);
         Ok(())
     }
 
@@ -251,65 +251,41 @@ fn find_pane(sessions: &HashMap<SessionId, Session>, pane_id: PaneId) -> Result<
 }
 
 fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> {
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
-
-    let mut builder = CommandBuilder::new(cmd);
-    if let Ok(home) = std::env::var("HOME") {
-        builder.cwd(home);
-    }
-    builder.env("TERM", "xterm-256color");
-    builder.env("COLORTERM", "truecolor");
-    // Match the GUI PTY env (sonicterm-io/pty.rs) so programs see the same
-    // terminal identity over the mux daemon path.
-    builder.env("TERM_PROGRAM", "SonicTerm");
-    builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-
-    let child = pair.slave.spawn_command(builder)?;
-    drop(pair.slave);
-
-    let master = pair.master;
-    let mut reader = master.try_clone_reader()?;
-    let mut writer = master.take_writer()?;
-    let master = Arc::new(Mutex::new(master));
+    // Spawn through the shared sonicterm-io PTY seam. It owns the openpty,
+    // the reader/writer threads, the deduped resize closure, and the robust
+    // kill-on-Drop (SIGKILL + bounded reap) that the old hand-rolled path
+    // lacked. It also applies the same TERM/COLORTERM/TERM_PROGRAM child
+    // env as the GUI pane path via `apply_child_pty_env`.
+    let pty = PtyHandle::spawn(cmd, cols, rows)?;
 
     let replay = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(REPLAY_CAP)));
     let subscriber: Arc<Mutex<Option<SubscriberSink>>> = Arc::new(Mutex::new(None));
     let alive = Arc::new(AtomicBool::new(true));
 
-    let (in_tx, in_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-
-    // Reader thread: pty -> replay buffer + (optional) subscriber.
+    // Replay reader thread: drain the PTY's output channel into the replay
+    // ring + (optional) subscriber. crossbeam is MPMC, so cloning `out_rx`
+    // shares the same queue; the copy left in `pty` is never polled.
+    let out_rx = pty.out_rx.clone();
     let r_replay = replay.clone();
     let r_sub = subscriber.clone();
     let r_alive = alive.clone();
     let reader_thread = thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            if !r_alive.load(Ordering::Acquire) {
-                break;
-            }
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let slice = &buf[..n];
-                    {
-                        let mut rb = r_replay.lock();
-                        for &b in slice {
-                            rb.push_back(b);
-                        }
-                        while rb.len() > REPLAY_CAP {
-                            rb.pop_front();
-                        }
-                    }
-                    let sub = r_sub.lock().clone();
-                    if let Some(sink) = sub {
-                        let _ = sink
-                            .send_drop_oldest(ServerMsg::Output { pane_id, bytes: slice.to_vec() });
-                    }
+        while r_alive.load(Ordering::Acquire) {
+            // Recv blocks until data or channel close. On pane kill the PTY
+            // child dies, its reader thread drops the sender, and this recv
+            // returns Err — unblocking the loop even without the alive flag.
+            let Ok(chunk) = out_rx.recv() else { break };
+            {
+                let mut rb = r_replay.lock();
+                rb.extend(chunk.iter().copied());
+                while rb.len() > REPLAY_CAP {
+                    rb.pop_front();
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+            }
+            let sub = r_sub.lock().clone();
+            if let Some(sink) = sub {
+                let _ =
+                    sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: chunk.to_vec() });
             }
         }
         let sub = r_sub.lock().clone();
@@ -318,42 +294,16 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
         }
     });
 
-    // Writer thread.
-    let w_alive = alive.clone();
-    let writer_thread = thread::spawn(move || {
-        while w_alive.load(Ordering::Acquire) {
-            match in_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(bytes) => {
-                    if writer.write_all(&bytes).is_err() {
-                        break;
-                    }
-                    let _ = writer.flush();
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(_) => break,
-            }
-        }
-    });
-
-    let resize_master = master.clone();
-    let resize = Box::new(move |cols: u16, rows: u16| {
-        let _ =
-            resize_master.lock().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-    });
-
     Ok(Pane {
         id: pane_id,
         cmd: cmd.to_string(),
         cols,
         rows,
-        in_tx,
-        resize,
-        child: Arc::new(Mutex::new(child)),
+        pty,
         replay,
         subscriber,
         alive,
         _reader: reader_thread,
-        _writer: writer_thread,
     })
 }
 
@@ -448,3 +398,7 @@ where
     let _ = writer_thread.join();
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;

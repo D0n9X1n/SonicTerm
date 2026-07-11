@@ -5339,13 +5339,10 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "sonicterm-block-glyph",
- "sonicterm-cfg",
  "sonicterm-engine",
- "sonicterm-grid",
  "sonicterm-render-model",
  "sonicterm-text",
  "sonicterm-types",
- "sonicterm-ui",
  "tracing",
  "unicode-width",
  "wgpu",
@@ -5427,8 +5424,8 @@ dependencies = [
  "crossbeam-channel",
  "interprocess",
  "parking_lot",
- "portable-pty",
  "serde",
+ "sonicterm-io",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -5438,8 +5435,10 @@ dependencies = [
 name = "sonicterm-render-model"
 version = "1.0.2"
 dependencies = [
+ "sonicterm-cfg",
  "sonicterm-grid",
  "sonicterm-types",
+ "sonicterm-ui",
 ]
 
 [[package]]
@@ -5507,6 +5506,7 @@ dependencies = [
  "sonicterm-app-core",
  "sonicterm-cfg",
  "sonicterm-logging",
+ "sonicterm-types",
  "tracing",
  "window-vibrancy",
  "windows 0.62.2",

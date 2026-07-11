@@ -14,7 +14,7 @@ use crate::text_pipeline::GlyphInstance;
 /// payload (e.g. with the pane's bg color) without ripple changes.
 ///
 /// The rectangle is stored as raw `f32` fields (rather than a
-/// `sonicterm_ui::pane::Rect`) so this struct stays free of any
+/// `sonicterm_render_model::boundary::ui::pane::Rect`) so this struct stays free of any
 /// dependency on `sonicterm-ui` — `sonicterm-ui` already depends on
 /// `sonicterm-gpu`, and a back-edge would create a cycle.
 #[derive(Clone, Debug, PartialEq)]

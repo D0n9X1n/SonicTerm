@@ -1,5 +1,5 @@
 use super::*;
-use sonicterm_grid::line::{Cluster, Line};
+use sonicterm_render_model::boundary::grid::line::{Cluster, Line};
 
 #[test]
 fn row_quad_hash_cells_accepts_cluster_storage() {

@@ -7,3 +7,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 sonicterm-types = { workspace = true }
 sonicterm-grid = { workspace = true }
+sonicterm-cfg = { workspace = true }
+sonicterm-ui = { workspace = true }

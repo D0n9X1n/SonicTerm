@@ -19,6 +19,7 @@ name = "sonicterm_mux"
 path = "src/lib.rs"
 
 [dependencies]
+sonicterm-io = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -28,4 +29,3 @@ parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 bincode = { version = "2", features = ["serde"] }
 interprocess = "2.2"
-portable-pty = { workspace = true }

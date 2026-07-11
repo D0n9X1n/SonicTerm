@@ -29,6 +29,10 @@ platform shell -> sonicterm-app -> sonicterm-vt/grid -> render-model -> sonicter
 ## Design rules
 
 - The renderer never blocks on PTY locks during the event loop hot path.
+- `sonicterm-gpu` reaches terminal-grid, config/theme, and UI-state types only
+  through `sonicterm_render_model::boundary::{grid, cfg, ui}` — it does not depend
+  on `sonicterm-grid`/`sonicterm-cfg`/`sonicterm-ui` directly. `render-model` is
+  the single declared seam for the `vt/grid -> gpu` and `ui -> gpu` boundaries.
 - Platform crates stay thin; cross-platform behavior belongs in `sonicterm-app`
   or lower crates.
 - Public contracts live in `sonicterm-types`; changes there affect every crate.
