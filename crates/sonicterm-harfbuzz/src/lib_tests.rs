@@ -1,4 +1,7 @@
-use sonicterm_harfbuzz::{hb_codepoint_t, hb_direction_t};
+//! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
+//! Runs as a `--lib` unit test so it links once with the crate.
+
+use crate::{hb_codepoint_t, hb_direction_t};
 
 #[test]
 fn exports_harfbuzz_aliases_and_enums() {

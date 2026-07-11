@@ -16,3 +16,7 @@ pub use geometry::*;
 pub use inputs::*;
 pub use painter::*;
 pub use pane_render::{CursorStyle, InlineImage, PaneId, PaneRender};
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

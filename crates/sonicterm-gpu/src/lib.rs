@@ -68,3 +68,7 @@ pub mod wezterm_pipeline;
 /// the GPU side. `sonicterm-shared::render` is now a thin deprecated
 /// re-export shim around this module.
 pub mod core;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

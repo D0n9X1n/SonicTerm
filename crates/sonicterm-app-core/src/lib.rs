@@ -43,3 +43,7 @@ pub use sonicterm_types::{
     Action, Cell, CellFlags, Color, Direction, FatAttributes, GlyphKey, HyperlinkId, ModKey, Pos,
     ScrollAction, WindowKey,
 };
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

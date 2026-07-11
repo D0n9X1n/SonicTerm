@@ -17,3 +17,7 @@ pub mod url_scan;
 /// consumers can construct the field through the `sonicterm_cfg` facade
 /// without taking a direct dep on `sonicterm-logging`.
 pub use sonicterm_logging::LoggingConfig;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

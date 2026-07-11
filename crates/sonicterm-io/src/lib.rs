@@ -10,3 +10,7 @@ pub mod foreground_proc;
 pub mod proc_info;
 pub mod pty;
 pub mod ssh;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

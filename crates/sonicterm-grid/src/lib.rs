@@ -8,3 +8,7 @@
 pub mod grid;
 pub mod hyperlink;
 pub mod line;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

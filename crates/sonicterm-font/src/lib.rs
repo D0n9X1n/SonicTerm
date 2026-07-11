@@ -1040,3 +1040,7 @@ impl FontConfiguration {
         self.inner.locator.enumerate_all_fonts()
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

@@ -1,4 +1,7 @@
-use sonicterm_app_core::{AppState, WindowKey};
+//! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
+//! Runs as a `--lib` unit test so it links once with the crate.
+
+use crate::{AppState, WindowKey};
 
 #[test]
 fn exports_builder_and_contract_types() {

@@ -125,3 +125,7 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
 
     Ok(LoggingGuard { _file_guard: guard })
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

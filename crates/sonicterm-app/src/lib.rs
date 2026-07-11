@@ -24,3 +24,7 @@ pub mod tab_thumbnail;
 pub mod window_key_boundary;
 
 pub use app::{KeymapLoader, ThemeLoader};
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

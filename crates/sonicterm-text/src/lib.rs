@@ -65,3 +65,7 @@ pub struct GlyphInstance {
     /// The remaining components are reserved.
     pub flags: [f32; 4],
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

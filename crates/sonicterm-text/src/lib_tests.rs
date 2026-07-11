@@ -1,4 +1,7 @@
-use sonicterm_text::GlyphInstance;
+//! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
+//! Runs as a `--lib` unit test so it links once with the crate.
+
+use crate::GlyphInstance;
 
 #[test]
 fn exports_gpu_neutral_glyph_instance() {

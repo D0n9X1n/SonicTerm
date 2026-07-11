@@ -1,4 +1,7 @@
-use sonicterm_gpu::color::{chrome_color_to_linear_rgba, ChromeColor};
+//! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
+//! Runs as a `--lib` unit test so it links once with the crate.
+
+use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
 
 #[test]
 fn exports_color_conversion_helpers() {
