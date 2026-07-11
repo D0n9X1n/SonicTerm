@@ -6,3 +6,7 @@
 
 mod fontstack;
 pub use fontstack::{CellMetricsPx, FontStack};
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

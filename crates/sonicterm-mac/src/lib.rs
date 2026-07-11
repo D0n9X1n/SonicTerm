@@ -6,3 +6,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod menubar;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

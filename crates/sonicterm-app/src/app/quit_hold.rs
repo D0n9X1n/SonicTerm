@@ -104,5 +104,5 @@ impl QuitHold {
 }
 
 #[cfg(test)]
-#[path = "quit_hold/tests.rs"]
-mod tests;
+#[path = "quit_hold_tests.rs"]
+mod quit_hold_tests;

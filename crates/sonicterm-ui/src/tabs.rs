@@ -370,5 +370,5 @@ fn strip_index_prefix(title: &str) -> Option<&str> {
 
 
 #[cfg(test)]
-#[path = "tabs/tests.rs"]
-mod tests;
+#[path = "tabs_tests.rs"]
+mod tabs_tests;

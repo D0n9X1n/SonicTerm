@@ -611,3 +611,7 @@ pub fn show_error(error: &str) {
         callback(error);
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

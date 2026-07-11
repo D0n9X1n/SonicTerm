@@ -42,3 +42,7 @@ pub mod tab_title;
 pub mod tabbar_view;
 pub mod tabs;
 pub mod ui_tokens;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

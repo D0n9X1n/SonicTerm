@@ -42,3 +42,7 @@ pub fn block_sprite_with_cell_metrics(
     };
     block_sprite(&metrics, sized_key, anti_alias)
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

@@ -27,3 +27,7 @@ pub use hyperlink_id::HyperlinkId;
 pub use mod_key::ModKey;
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};
 pub use window_key::WindowKey;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

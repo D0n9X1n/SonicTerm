@@ -4674,25 +4674,25 @@ impl ApplicationHandler<UserEvent> for App {
 
 
 #[cfg(test)]
-#[path = "tests/click_count_tests.rs"]
+#[path = "click_count_tests.rs"]
 mod click_count_tests;
 
 #[cfg(test)]
-#[path = "tests/native_window_title_tests.rs"]
+#[path = "native_window_title_tests.rs"]
 mod native_window_title_tests;
 
 #[cfg(test)]
-#[path = "tests/redraw_coalescing_tests.rs"]
+#[path = "redraw_coalescing_tests.rs"]
 mod redraw_coalescing_tests;
 
 #[cfg(test)]
-#[path = "tests/warm_window_pool_tests.rs"]
+#[path = "warm_window_pool_tests.rs"]
 mod warm_window_pool_tests;
 
 #[cfg(test)]
-#[path = "tests/tear_out_timing_tests.rs"]
+#[path = "tear_out_timing_tests.rs"]
 mod tear_out_timing_tests;
 
 #[cfg(test)]
-#[path = "tests/software_render_tests.rs"]
+#[path = "software_render_tests.rs"]
 mod software_render_tests;

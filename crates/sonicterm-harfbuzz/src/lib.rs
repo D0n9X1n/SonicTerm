@@ -4737,3 +4737,7 @@ unsafe extern "C" {
         normalized_coords: *mut ::std::os::raw::c_int,
     );
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

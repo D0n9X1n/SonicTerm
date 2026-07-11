@@ -28,5 +28,6 @@ Release MSI builds require the Windows Cairo setup script and WiX.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
-  `sonicterm-io`, `sonicterm-logging`.
+  `sonicterm-logging`. ConPTY is hosted directly here via the Windows crates,
+  not through `sonicterm-io`.
 - Consumed by: Windows release packaging.

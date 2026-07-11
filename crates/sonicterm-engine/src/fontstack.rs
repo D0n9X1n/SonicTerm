@@ -229,5 +229,5 @@ fn build_config(
 }
 
 #[cfg(test)]
-#[path = "fontstack/tests.rs"]
-mod tests;
+#[path = "fontstack_tests.rs"]
+mod fontstack_tests;

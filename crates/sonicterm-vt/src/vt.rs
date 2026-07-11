@@ -1569,5 +1569,5 @@ impl Perform for Performer {
 }
 
 #[cfg(test)]
-#[path = "vt/tests.rs"]
-mod tests;
+#[path = "vt_tests.rs"]
+mod vt_tests;

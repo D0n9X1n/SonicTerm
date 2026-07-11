@@ -3005,3 +3005,7 @@ pub struct FT_SVG_DocumentRec_ {
 }
 pub type FT_SVG_DocumentRec = FT_SVG_DocumentRec_;
 pub type FT_SVG_Document = *mut FT_SVG_DocumentRec_;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

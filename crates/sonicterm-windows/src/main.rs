@@ -199,3 +199,7 @@ fn asset_dir() -> PathBuf {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;
