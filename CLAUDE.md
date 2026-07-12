@@ -9,6 +9,7 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture, invariants, verification, and release boundary.
 - [`docs/MODULES.md`](docs/MODULES.md) — crate map.
 - [`docs/LOGGING.md`](docs/LOGGING.md) — logs, diagnostics, and hang investigation.
+- [`docs/packaging/README.md`](docs/packaging/README.md) — maintained macOS and Windows packaging guidance.
 - `wiki/` — bilingual user-facing usage/config/keybinding/log/theme docs.
 
 When auditing docs for release blockers, typos, renamed paths, or user-facing
@@ -16,16 +17,17 @@ terminology, include `wiki/` alongside README and `docs/`; the wiki is part of
 the monitored documentation surface. Editing `wiki/` here does **not** change
 the live GitHub Wiki — see [Wiki](#wiki) for the two-repo publish step.
 
-**Canonical documentation rule:** the tracked `docs/` surface is
-`ARCHITECTURE.md`, `LOGGING.md`, and `MODULES.md`. Keep durable architecture,
-invariants, verification, and release-boundary information in
-`docs/ARCHITECTURE.md`; keep operational logging, diagnostics, and
-hang-investigation guidance in `docs/LOGGING.md`; keep `docs/MODULES.md` limited
-to the crate map. Do not track standalone implementation specs, plans, review
-audits, version-audit documents, or a separate release document in `docs/`.
-`docs/specs/`, `docs/plans/`, and `docs/reviews/` are ignored local working
-folders. Update README/wiki only when user-facing behavior changes; publishing
-the live wiki remains a separate owner-approved action.
+**Canonical documentation rule:** the core tracked `docs/` surface is
+`ARCHITECTURE.md`, `LOGGING.md`, and `MODULES.md`; maintained packaging guidance
+lives under `docs/packaging/`. Keep durable architecture, invariants,
+verification, and release-boundary information in `docs/ARCHITECTURE.md`; keep
+operational logging, diagnostics, and hang-investigation guidance in
+`docs/LOGGING.md`; keep `docs/MODULES.md` limited to the crate map. Do not track
+standalone implementation specs, plans, review audits, version-audit documents,
+or a separate release document in `docs/`. `docs/specs/`, `docs/plans/`, and
+`docs/reviews/` are ignored local working folders. Update README/wiki only when
+user-facing behavior changes; publishing the live wiki remains a separate
+owner-approved action.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
@@ -62,8 +64,9 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
 cargo test --workspace --lib --bins
+bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
-scripts/coverage/rust-logic.sh
+scripts/rust-logic-coverage.sh
 ```
 
 For release prep also run:
@@ -80,6 +83,12 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
+- **Keep first-party shell automation flat in `scripts/`.** Every SonicTerm-owned
+  `.sh` and `.ps1` file must be a direct child of `scripts/`; do not create
+  nested script folders or top-level `tools/` or `packaging/` directories.
+  Embedded upstream FreeType, libpng, zlib, and HarfBuzz scripts retain their
+  vendored layouts and are exempt. Packaging executables belong in `scripts/`,
+  while maintained packaging instructions belong in `docs/packaging/`.
 - **Unit tests use the exact flat `file_tests.rs` sibling pattern, never inline.**
   For every source file `foo.rs`, put its unit tests beside it in
   `foo_tests.rs` and declare them from `foo.rs` with
@@ -101,7 +110,7 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 
-- macOS universal `.dmg`
+- macOS Apple Silicon and Intel `.dmg` files
 - Windows x64 `.msi`
 - release notes from commits since the previous tag
 

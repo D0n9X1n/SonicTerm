@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build a macOS .app bundle and wrap it in a .dmg.
-# Usage: make-dmg.sh <path-to-binary> <version> [artifact-suffix]
+# Usage: scripts/make-macos-dmg.sh <path-to-binary> <version> [artifact-suffix]
 set -euo pipefail
 
 BIN="${1:?binary path required}"
 VERSION="${2:?version required}"
-ARTIFACT_SUFFIX="${3:-mac-universal}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ARTIFACT_SUFFIX="${3:-mac-local}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/SonicTerm.app"
 
@@ -23,7 +23,6 @@ cp "$ROOT/assets/icons/exports/sonic.icns" "$APP/Contents/Resources/" 2>/dev/nul
 # Bundle runtime assets/ tree — required by crates/sonicterm-mac/src/main.rs
 # which loads Contents/Resources/assets/{fonts,themes,keymaps,icons,i18n}/ at
 # startup. Without these, fresh-installed DMGs panic with 'Error: load theme'.
-# Fixes #451.
 mkdir -p "$APP/Contents/Resources/assets"
 cp -R "$ROOT/assets/fonts"   "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/themes"  "$APP/Contents/Resources/assets/"
@@ -72,7 +71,7 @@ done
 # cannot override. Re-signing the bundle ad-hoc AFTER all resources are in place
 # makes it internally consistent, downgrading that to the normal, overridable
 # "unidentified developer" prompt (right-click → Open, or strip quarantine).
-# See CLAUDE.md §9 and wiki install docs for the user-facing first-open steps.
+# See docs/packaging/macos.md for packaging and trust details.
 echo "==> Ad-hoc signing $APP (no Developer ID; not notarized)"
 codesign --force --deep --sign - "$APP"
 codesign --verify --strict --verbose=2 "$APP"

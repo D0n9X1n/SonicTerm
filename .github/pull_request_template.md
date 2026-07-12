@@ -22,8 +22,9 @@
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace --lib --bins`
+- [ ] `bash scripts/check-no-raw-process-exit.sh`
 - [ ] `bash scripts/check-workspace-crates.sh`
-- [ ] `scripts/coverage/rust-logic.sh`
+- [ ] `scripts/rust-logic-coverage.sh`
 - [ ] `bash scripts/test-release-notes.sh`
 - [ ] Relevant release/platform build or manual launch completed
 - [ ] Screenshots / recordings attached (UI changes)

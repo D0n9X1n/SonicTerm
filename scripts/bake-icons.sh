@@ -16,7 +16,7 @@
 #   magick for .ico
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/assets/icons/source"
 OUT="$ROOT/assets/icons/exports"
 PNG="$OUT/png"

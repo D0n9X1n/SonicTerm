@@ -1,4 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT/crates/sonicterm-freetype"
 
 bindgen bindings.h -o src/types.rs \
   --no-layout-tests \

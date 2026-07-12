@@ -19,8 +19,8 @@ PRs are all welcome.
    ```
 
 Crates live under `crates/`. Before changing boundaries or diagnostics, read
-[Architecture](docs/ARCHITECTURE.md), [Modules](docs/MODULES.md), and
-[Logging](docs/LOGGING.md).
+[Architecture](docs/ARCHITECTURE.md), [Modules](docs/MODULES.md),
+[Logging](docs/LOGGING.md), and [Packaging](docs/packaging/README.md).
 
 ## Before opening a PR
 
@@ -31,8 +31,9 @@ Windows. Run them locally first:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --lib --bins
+bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
-scripts/coverage/rust-logic.sh
+scripts/rust-logic-coverage.sh
 ```
 
 ## Branches

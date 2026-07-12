@@ -15,6 +15,9 @@ handling live in `sonicterm-font`.
 cargo build -p sonicterm-freetype
 ```
 
+Regenerate the bindings from the repository root with
+`bash scripts/regenerate-freetype.sh`, then review the generated diff.
+
 ## Guardrails
 - Do not hide unsafe lifetime or ownership rules here; wrap them in
   `sonicterm-font::ftwrap`.

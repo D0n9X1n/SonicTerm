@@ -84,18 +84,78 @@ fn arrows_track_decckm_introducer() {
 }
 
 #[test]
-fn modified_cursor_keys_stay_csi_even_under_decckm() {
-    // A held modifier keeps the legacy CSI form even when DECCKM is on:
-    // xterm sends SS3 only for the unmodified chord. (We don't yet emit the
-    // full CSI 1 ; <mod> form, but we must NOT emit SS3 here.)
-    assert_eq!(
-        encode_logical(&Key::Named(NamedKey::Home), ModifiersState::SHIFT, 0, true),
-        Some(b"\x1b[H".to_vec())
-    );
-    assert_eq!(
-        encode_logical(&Key::Named(NamedKey::ArrowLeft), ModifiersState::CONTROL, 0, true),
-        Some(b"\x1b[D".to_vec())
-    );
+fn ctrl_end_preserves_control_for_terminal_applications() {
+    for kitty_flags in [0, 1] {
+        assert_eq!(
+            encode_logical(&Key::Named(NamedKey::End), ModifiersState::CONTROL, kitty_flags, false,),
+            Some(b"\x1b[1;5F".to_vec())
+        );
+    }
+}
+
+#[test]
+fn modified_cursor_keys_preserve_modifiers_regardless_of_decckm() {
+    let keys = [
+        (NamedKey::ArrowUp, 'A'),
+        (NamedKey::ArrowDown, 'B'),
+        (NamedKey::ArrowRight, 'C'),
+        (NamedKey::ArrowLeft, 'D'),
+        (NamedKey::Home, 'H'),
+        (NamedKey::End, 'F'),
+    ];
+    let modifiers = [
+        (ModifiersState::SHIFT, 2),
+        (ModifiersState::ALT, 3),
+        (ModifiersState::CONTROL, 5),
+        (ModifiersState::SUPER, 9),
+        (ModifiersState::SHIFT | ModifiersState::CONTROL, 6),
+        (
+            ModifiersState::SHIFT
+                | ModifiersState::ALT
+                | ModifiersState::CONTROL
+                | ModifiersState::SUPER,
+            16,
+        ),
+    ];
+
+    for (named, final_char) in keys {
+        for (mods, modifier) in modifiers {
+            let expected = format!("\x1b[1;{modifier}{final_char}").into_bytes();
+            for app_cursor in [false, true] {
+                assert_eq!(
+                    encode_logical(&Key::Named(named), mods, 0, app_cursor),
+                    Some(expected.clone()),
+                    "{named:?} with modifier {modifier} and app_cursor={app_cursor}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn modified_tilde_keys_preserve_modifiers() {
+    let keys = [(NamedKey::PageUp, 5), (NamedKey::PageDown, 6), (NamedKey::Delete, 3)];
+    let modifiers = [
+        (ModifiersState::SHIFT, 2),
+        (ModifiersState::ALT, 3),
+        (ModifiersState::CONTROL, 5),
+        (ModifiersState::SUPER, 9),
+        (ModifiersState::SHIFT | ModifiersState::CONTROL, 6),
+    ];
+
+    for (named, code) in keys {
+        assert_eq!(
+            encode_logical(&Key::Named(named), ModifiersState::empty(), 0, false),
+            Some(format!("\x1b[{code}~").into_bytes()),
+        );
+        for (mods, modifier) in modifiers {
+            assert_eq!(
+                encode_logical(&Key::Named(named), mods, 0, false),
+                Some(format!("\x1b[{code};{modifier}~").into_bytes()),
+                "{named:?} with modifier {modifier}",
+            );
+        }
+    }
 }
 
 fn fk(named: NamedKey, mods: ModifiersState) -> Vec<u8> {

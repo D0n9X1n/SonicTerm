@@ -168,12 +168,12 @@ jobs:
       - name: Build icons
         run: |
           brew install create-dmg imagemagick
-          bash assets/icons/bake-icons.sh
+          bash scripts/bake-icons.sh
 
       - name: Build dmg
         run: |
-          bash packaging/mac/make-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
-          bash packaging/mac/make-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
+          bash scripts/make-macos-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
+          bash scripts/make-macos-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
 
       - uses: actions/upload-artifact@v5
         with:
