@@ -134,3 +134,54 @@ fn overwriting_hyperlink_updates_value_without_extra_boxes() {
     assert!(c.has_fat());
     assert_eq!(c.hyperlink(), Some(HyperlinkId(2)));
 }
+
+#[test]
+fn toml_round_trip_preserves_inline_and_all_rare_attributes() {
+    let mut cell = Cell::plain(
+        '界',
+        Color::Rgb(1, 2, 3),
+        Color::Indexed(17),
+        CellFlags::BOLD | CellFlags::ITALIC | CellFlags::UNDERLINE | CellFlags::WIDE,
+    );
+    cell.set_hyperlink(Some(HyperlinkId(99)));
+    cell.set_extras(Some("\u{fe0f}\u{200d}".to_string().into_boxed_str()));
+    cell.set_underline_style(UnderlineStyle::Curly);
+    cell.set_underline_color(Some(Color::Rgb(9, 8, 7)));
+
+    let encoded = toml::to_string(&cell).unwrap();
+    let decoded: Cell = toml::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded, cell);
+    assert!(decoded.has_fat());
+}
+
+#[test]
+fn legacy_six_field_toml_deserializes_with_default_underline_metadata() {
+    let legacy = r#"
+ch = "x"
+fg = { Rgb = [12, 34, 56] }
+bg = "Default"
+flags = 5
+hyperlink = 7
+extras = "́"
+"#;
+
+    let cell: Cell = toml::from_str(legacy).unwrap();
+
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(cell.fg, Color::Rgb(12, 34, 56));
+    assert_eq!(cell.bg, Color::Default);
+    assert_eq!(cell.flags, CellFlags::BOLD | CellFlags::UNDERLINE);
+    assert_eq!(cell.hyperlink(), Some(HyperlinkId(7)));
+    assert_eq!(cell.extras(), Some("\u{301}"));
+    assert_eq!(cell.underline_style(), UnderlineStyle::Single);
+    assert_eq!(cell.underline_color(), None);
+}
+
+#[test]
+fn minimal_toml_defaults_optional_colors_flags_and_rare_attributes() {
+    let cell: Cell = toml::from_str("ch = 'q'").unwrap();
+
+    assert_eq!(cell, Cell::plain('q', Color::Default, Color::Default, CellFlags::empty()));
+    assert!(!cell.has_fat());
+}

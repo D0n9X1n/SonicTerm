@@ -5460,6 +5460,7 @@ version = "1.1.0"
 dependencies = [
  "bitflags 2.11.1",
  "serde",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
