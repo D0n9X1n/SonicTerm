@@ -315,7 +315,7 @@ fn ich_insert_before_yields_full_line_in_one_pass() {
     parser.advance(b"\x1b[G"); // CHA → col 0
     parser.advance(b"\x1b[2@"); // ICH 2 → "  11"
     parser.advance(b"0."); // print → "0.11", cursor col 2
-    // The trailing '1' must be present immediately — no extra keystroke.
+                           // The trailing '1' must be present immediately — no extra keystroke.
     assert_eq!(row_text(&parser, 0), "0.11    ");
 }
 
@@ -335,4 +335,209 @@ fn ich_re_dirties_row_so_trailing_cell_repaints_same_frame() {
     assert_eq!(row_text(&parser, 0), "  0.1   ");
 }
 
+// --- Same-frame dirty propagation ------------------------------------------
+//
+// Each test clears prior damage (`clear_dirty`, modelling a consumed frame),
+// performs exactly ONE mutation, then asserts the exact set of rows marked
+// dirty BEFORE the renderer would consume the frame. This pins the VT/grid
+// data layer so a scroll/erase/insert marks every row it visually changed in
+// the SAME pass — no row can go stale until "the next keystroke".
 
+/// Row indices currently marked dirty, ascending.
+fn dirty_rows_vec(parser: &Parser) -> Vec<usize> {
+    parser.grid().dirty_rows().collect()
+}
+
+#[test]
+fn alt_screen_entry_dirties_every_row_same_frame() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"hi");
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[?1049h"); // enter alt screen
+
+    assert!(parser.grid().is_alt());
+    assert_eq!(dirty_rows_vec(&parser), vec![0, 1, 2, 3], "alt entry repaints the whole screen");
+}
+
+#[test]
+fn alt_screen_exit_dirties_every_row_same_frame() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"\x1b[?1049h");
+    parser.advance(b"alt");
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[?1049l"); // leave alt screen
+
+    assert!(!parser.grid().is_alt());
+    assert_eq!(dirty_rows_vec(&parser), vec![0, 1, 2, 3], "alt exit repaints the restored screen");
+}
+
+#[test]
+fn decstbm_linefeed_at_bottom_margin_dirties_only_the_region() {
+    // DECSTBM rows 2..5 (0-based 1..4). LF at the bottom margin scrolls the
+    // region up; rows outside [1,4] must stay clean.
+    let mut parser = Parser::new(Grid::new(8, 6));
+    parser.advance(b"\x1b[2;5r"); // set margins; cursor -> home
+    parser.advance(b"\x1b[5;1H"); // cursor to row 5 (0-based 4) = bottom margin
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\n"); // LF at bottom margin -> scroll region up
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![1, 2, 3, 4],
+        "LF at the bottom margin dirties only the DECSTBM region"
+    );
+}
+
+#[test]
+fn decstbm_reverse_index_at_top_margin_dirties_only_the_region() {
+    // RI at the top margin scrolls the region down; rows outside stay clean.
+    let mut parser = Parser::new(Grid::new(8, 6));
+    parser.advance(b"\x1b[2;5r"); // margins rows 1..4; cursor -> home
+    parser.advance(b"\x1b[2;1H"); // cursor to row 2 (0-based 1) = top margin
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1bM"); // RI at top margin -> scroll region down
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![1, 2, 3, 4],
+        "RI at the top margin dirties only the DECSTBM region"
+    );
+}
+
+#[test]
+fn insert_line_dirties_cursor_row_through_bottom_margin() {
+    let mut parser = Parser::new(Grid::new(8, 6));
+    parser.advance(b"\x1b[3;1H"); // cursor to row 3 (0-based 2)
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2L"); // IL 2
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![2, 3, 4, 5],
+        "IL dirties the cursor row through the bottom of the region"
+    );
+}
+
+#[test]
+fn delete_line_dirties_cursor_row_through_bottom_margin() {
+    let mut parser = Parser::new(Grid::new(8, 6));
+    parser.advance(b"\x1b[3;1H"); // cursor to row 3 (0-based 2)
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2M"); // DL 2
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![2, 3, 4, 5],
+        "DL dirties the cursor row through the bottom of the region"
+    );
+}
+
+#[test]
+fn reverse_index_off_the_top_margin_dirties_source_and_destination() {
+    // With no DECSTBM the top margin is row 0; RI below it just moves the
+    // cursor up one row and must dirty both the row it left and the row it
+    // entered (so the cursor quad tracks in the same frame).
+    let mut parser = Parser::new(Grid::new(8, 6));
+    parser.advance(b"\x1b[4;1H"); // cursor to row 4 (0-based 3)
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1bM"); // RI -> move up to row 2
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![2, 3],
+        "RI off the top margin dirties both the source and destination rows"
+    );
+}
+
+#[test]
+fn scroll_up_full_region_dirties_every_row() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"x");
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2S"); // SU 2 over the full (default) region
+
+    assert_eq!(dirty_rows_vec(&parser), vec![0, 1, 2, 3], "full-region SU dirties every row");
+}
+
+#[test]
+fn scroll_down_full_region_dirties_every_row() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"x");
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2T"); // SD 2 over the full (default) region
+
+    assert_eq!(dirty_rows_vec(&parser), vec![0, 1, 2, 3], "full-region SD dirties every row");
+}
+
+#[test]
+fn erase_below_dirties_cursor_row_through_screen_bottom() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"\x1b[2;1H"); // cursor to row 2 (0-based 1)
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[0J"); // ED 0 (erase below)
+
+    assert_eq!(
+        dirty_rows_vec(&parser),
+        vec![1, 2, 3],
+        "ED-below dirties the cursor row through the screen bottom"
+    );
+}
+
+#[test]
+fn erase_screen_dirties_every_row() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"\x1b[2;1H");
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2J"); // ED 2 (erase whole screen)
+
+    assert_eq!(dirty_rows_vec(&parser), vec![0, 1, 2, 3], "ED-all dirties every row");
+}
+
+#[test]
+fn erase_line_dirties_only_the_cursor_row() {
+    let mut parser = Parser::new(Grid::new(8, 4));
+    parser.advance(b"\x1b[2;1H"); // cursor to row 1
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance(b"\x1b[2K"); // EL 2 (erase whole line)
+
+    assert_eq!(dirty_rows_vec(&parser), vec![1], "EL dirties only the cursor row");
+}
+
+#[test]
+fn wide_char_edit_dirties_only_its_row_same_frame() {
+    let mut parser = Parser::new(Grid::new(8, 3));
+    parser.advance(b"\x1b[2;1H"); // cursor to row 1
+    parser.grid_mut().clear_dirty();
+    assert_eq!(parser.grid().dirty_count(), 0, "precondition: clean frame");
+
+    parser.advance("中".as_bytes()); // wide glyph occupies cols 0-1 of row 1
+
+    assert_eq!(dirty_rows_vec(&parser), vec![1], "a wide-cell edit dirties only its row");
+    let row = parser.grid().row(1);
+    assert!(row[0].flags.contains(CellFlags::WIDE), "lead cell is WIDE");
+    assert!(row[1].flags.contains(CellFlags::WIDE_CONT), "trailing cell is WIDE_CONT");
+}

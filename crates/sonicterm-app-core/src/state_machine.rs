@@ -92,3 +92,7 @@ impl AppStateMachine {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "state_machine_tests.rs"]
+mod state_machine_tests;

@@ -72,7 +72,7 @@ impl FontRasterizer for HarfbuzzRasterizer {
         }
 
         let mut bounds_adjust = Matrix::identity();
-        bounds_adjust.translate(left * -1., top * -1.);
+        bounds_adjust.translate(-left, -top);
         log::trace!("dims: {width}x{height} {bounds_adjust:?}");
 
         let target = ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
@@ -92,7 +92,7 @@ impl FontRasterizer for HarfbuzzRasterizer {
             height: height as usize,
             width: width as usize,
             bearing_x: PixelLength::new(left.min(0.)),
-            bearing_y: PixelLength::new(top * -1.),
+            bearing_y: PixelLength::new(-top),
             has_color,
             is_scaled: true,
         })
@@ -248,8 +248,8 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
                 let slanted_x_bearing =
                     extents.x_bearing as f64 - extents.y_bearing as f64 * slant as f64;
                 context.transform(Matrix::new(1., 0., slant.into(), 1., 0., 0.));
-                context.translate(slanted_x_bearing.into(), extents.y_bearing.into());
-                context.scale(slanted_width.into(), extents.height.into());
+                context.translate(slanted_x_bearing, extents.y_bearing.into());
+                context.scale(slanted_width, extents.height.into());
                 context.set_source(pattern)?;
                 context.paint()?;
                 context.restore()?;

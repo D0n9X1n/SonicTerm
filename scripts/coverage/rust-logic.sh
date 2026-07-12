@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Coverage target for v0.10.3: Rust logic modules that are deterministic and
-# unit-testable without GPU devices, native OS surfaces, PTYs, or generated FFI.
-# Full-workspace raw coverage is still useful for reports, but not as a release
-# gate until renderer/platform/native wrappers have dedicated harnesses.
-IGNORE_REGEX='crates/(sonicterm-(app|gpu|font|freetype|harfbuzz|fontconfig|mac|windows|mux|logging|io|text|cfg|vt|render-model)|sonicterm-block-glyph|sonicterm-engine|sonicterm-grid/src/(line|hyperlink)\.rs|sonicterm-ui/src/(pane|scrollbar|tab_spans|tab_title|tabbar_view|tabs|copy_mode|cursor|i18n|broadcast|command_palette|search|ui_tokens)\.rs|sonicterm-types/src/(cell|glyph_key|hyperlink_id|window_key)\.rs|/build\.rs$)'
+# Release coverage gate for deterministic Rust logic selected by the v1.1.0
+# audit. Native window/GPU/PTY paths, generated FFI, platform font discovery,
+# and large renderer-facing controllers use their build, integration, and
+# release-smoke substitutes. Exact crate roots keep app-core and font-config in
+# the measured surface while the audited cfg/grid/render/type/UI/font/mux
+# helpers remain visible.
+IGNORE_REGEX='crates/(sonicterm-(app|gpu|mac|windows|logging|io|engine|block-glyph|harfbuzz|fontconfig|vt)/|sonicterm-cfg/src/(config|keymap|lib)\.rs|sonicterm-render-model/src/(lib|painter|pane_render)\.rs|sonicterm-font/src/(db|fcwrap|ftwrap|hbwrap|lib)\.rs|sonicterm-font/src/(locator|rasterizer|shaper)/|sonicterm-freetype/(src/(lib|types)\.rs|build\.rs)|sonicterm-mux/src/(lib|main|server)\.rs|sonicterm-text/src/(lib|glyph_atlas|row_glyph_cache)\.rs|sonicterm-types/src/(action|geom|glyph_key|hyperlink_id|lib|window_key)\.rs|sonicterm-types/src/traits/|sonicterm-ui/src/(broadcast|command_palette|cursor|i18n|ime|overlays|pane|scrollbar|search|selection|ui_tokens)\.rs|/build\.rs$)'
 
 cargo llvm-cov --workspace --lib --bins --tests \
   --ignore-filename-regex "${IGNORE_REGEX}" \

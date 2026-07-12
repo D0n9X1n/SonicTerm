@@ -187,6 +187,11 @@ impl App {
             UserEvent::DragEnded => {
                 let _ = self.handle_os_drag_ended();
             }
+            UserEvent::RequestRedraw(window_id) => {
+                if let Some(window) = self.windows.get(&window_id) {
+                    window.request_redraw();
+                }
+            }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
@@ -319,7 +324,8 @@ impl App {
         // when tests construct the App without a proxy; the existing
         // tofu fallback keeps working in that case.
         if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
+            super::build_async_fallback_loader_for_proxy(proxy);
+            renderer.set_async_loader(());
         }
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Subsequent

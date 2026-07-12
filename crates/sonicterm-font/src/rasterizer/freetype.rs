@@ -90,7 +90,7 @@ impl FontRasterizer for FreeTypeRasterizer {
             unsafe { mem::transmute(u32::from(ft_glyph.bitmap.pixel_mode)) };
 
         // pitch is the number of bytes per source row
-        let pitch = ft_glyph.bitmap.pitch.abs() as usize;
+        let pitch = ft_glyph.bitmap.pitch.unsigned_abs() as usize;
         let data = unsafe {
             crate::ftwrap::from_raw_parts(
                 ft_glyph.bitmap.buffer,
@@ -131,7 +131,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = (width * height * 4) as usize;
+        let size = width * height * 4;
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch;
@@ -176,7 +176,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = (width * height * 4) as usize;
+        let size = width * height * 4;
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch;
@@ -216,10 +216,10 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize / 3;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = (width * height * 4) as usize;
+        let size = width * height * 4;
         let mut rgba = vec![0u8; size];
         for y in 0..height {
-            let src_offset = y * pitch as usize;
+            let src_offset = y * pitch;
             let dest_offset = y * width * 4;
             for x in 0..width {
                 let red = data[src_offset + (x * 3)];
@@ -383,9 +383,8 @@ impl FreeTypeRasterizer {
         log::trace!("Rasterizier wants {:?}", parsed);
         let lib = ftwrap::Library::new()?;
         let mut face = lib.face_from_locator(&parsed.handle)?;
-        let has_color = unsafe {
-            (((*face.face).face_flags as u32) & (ftwrap::FT_FACE_FLAG_COLOR as u32)) != 0
-        };
+        let has_color =
+            unsafe { (((*face.face).face_flags as u32) & ftwrap::FT_FACE_FLAG_COLOR) != 0 };
 
         if parsed.synthesize_italic {
             face.set_transform(Some(FT_Matrix {
@@ -406,7 +405,7 @@ impl FreeTypeRasterizer {
             freetype_render_target: parsed.freetype_render_target,
             display_pixel_geometry,
             scale: parsed.scale.unwrap_or(1.),
-            hb_raster: HarfbuzzRasterizer::from_locator(&parsed)?,
+            hb_raster: HarfbuzzRasterizer::from_locator(parsed)?,
         })
     }
 
@@ -474,7 +473,7 @@ fn rasterize_from_ops(
     }
 
     let mut bounds_adjust = Matrix::identity();
-    bounds_adjust.translate(left * -1., top * -1.);
+    bounds_adjust.translate(-left, -top);
     log::trace!("dims: {width}x{height} {bounds_adjust:?}");
 
     let target = ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
@@ -494,7 +493,7 @@ fn rasterize_from_ops(
         height: height as usize,
         width: width as usize,
         bearing_x: PixelLength::new(left.min(0.)),
-        bearing_y: PixelLength::new(top * -1.),
+        bearing_y: PixelLength::new(-top),
         has_color,
         is_scaled: true,
     })

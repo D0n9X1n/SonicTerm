@@ -98,6 +98,7 @@ impl<'a> PresentationWidth<'a> {
 
 pub trait FontShaper {
     /// Shape text and return a vector of GlyphInfo
+    #[allow(clippy::too_many_arguments)]
     fn shape(
         &self,
         text: &str,

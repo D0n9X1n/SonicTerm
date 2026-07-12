@@ -134,3 +134,7 @@ fn is_url_body_char(c: char) -> bool {
         '%' | '(' | ')'
     )
 }
+
+#[cfg(test)]
+#[path = "url_scan_tests.rs"]
+mod url_scan_tests;

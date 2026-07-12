@@ -2,9 +2,12 @@
 name = "sonicterm-font"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal — absorbed WezTerm font stack, shaping, fallback, and rasterization"
 
 [lints]
@@ -19,12 +22,12 @@ vendor-nerd-font-symbols = []
 [dependencies]
 anyhow.workspace = true
 cairo-rs = { version = "0.22", default-features = false }
-config = { package = "sonicterm-font-config", path = "../sonicterm-font-config" }
+config.workspace = true
 encoding_rs = "0.8"
 enum-display-derive = "0.1"
 euclid = { version = "0.22", default-features = false }
-freetype = { package = "sonicterm-freetype", path = "../sonicterm-freetype" }
-harfbuzz = { package = "sonicterm-harfbuzz", path = "../sonicterm-harfbuzz" }
+freetype.workspace = true
+harfbuzz.workspace = true
 image = "0.25"
 lazy_static = "1.4"
 log = "0.4"
@@ -38,7 +41,7 @@ thiserror.workspace = true
 walkdir = "2.5"
 
 [target.'cfg(any(target_os = "android", all(unix, not(target_os = "macos"))))'.dependencies]
-fontconfig = { package = "sonicterm-fontconfig", path = "../sonicterm-fontconfig" }
+fontconfig.workspace = true
 
 [target."cfg(windows)".dependencies]
 dwrote = "0.11"

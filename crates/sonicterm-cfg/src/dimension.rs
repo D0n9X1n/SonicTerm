@@ -28,3 +28,7 @@ impl Dimension {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "dimension_tests.rs"]
+mod dimension_tests;

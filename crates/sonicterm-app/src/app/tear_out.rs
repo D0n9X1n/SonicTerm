@@ -61,7 +61,8 @@ impl App {
 
     fn configure_child_renderer(&self, renderer: &mut GpuRenderer, window: &Window) {
         if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
+            super::build_async_fallback_loader_for_proxy(proxy);
+            renderer.set_async_loader(());
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
@@ -298,11 +299,11 @@ impl App {
         // sizing every pane to the full `(cols, rows)` here is what made a
         // torn-out split overlap (left pane painted across the right). #pane-geom
         let _ = (cols, rows);
+        let win_id = window.id();
         for pane in panes.values() {
-            *pane.redraw_target.lock() = Some(window.clone());
+            *pane.redraw_target.lock() = Some(win_id);
         }
 
-        let win_id = window.id();
         let mut child_tabs = TabBar::new();
         let active_pane = state.active_pane;
         child_tabs.push(tab);

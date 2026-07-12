@@ -51,7 +51,16 @@ impl PixelRect {
         let y0 = self.y.min(other.y);
         let x1 = self.right().max(other.right());
         let y1 = self.bottom().max(other.bottom());
-        PixelRect { x: x0, y: y0, w: (x1 - x0).max(0) as u32, h: (y1 - y0).max(0) as u32 }
+        // Widen the span to i64 before subtracting. At extreme coordinates
+        // (e.g. `x0 == i32::MIN` while `x1` has saturated to `i32::MAX`) the
+        // `x1 - x0` span exceeds `i32::MAX` and a narrow `i32` subtraction
+        // would overflow-panic in a debug build. Computing in i64 and then
+        // clamping back into the `u32` dimension range keeps the result
+        // identical for every in-range input while making the extreme case
+        // saturate instead of panic.
+        let w = (i64::from(x1) - i64::from(x0)).clamp(0, i64::from(u32::MAX)) as u32;
+        let h = (i64::from(y1) - i64::from(y0)).clamp(0, i64::from(u32::MAX)) as u32;
+        PixelRect { x: x0, y: y0, w, h }
     }
 }
 
@@ -131,3 +140,7 @@ pub fn snap_to_device_pixels(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f3
     let inv = 1.0 / scale;
     (x_dev * inv, y_dev * inv, (r_dev - x_dev) * inv, (b_dev - y_dev) * inv)
 }
+
+#[cfg(test)]
+#[path = "geometry_tests.rs"]
+mod geometry_tests;

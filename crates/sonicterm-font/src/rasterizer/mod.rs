@@ -79,9 +79,9 @@ pub(crate) fn swap_red_and_blue<Container: std::ops::Deref<Target = [u8]> + std:
     }
 }
 
-pub(crate) fn crop_to_non_transparent<'a, Container>(
-    image: &'a mut image::ImageBuffer<Rgba<u8>, Container>,
-) -> image::SubImage<&'a mut ImageBuffer<Rgba<u8>, Container>>
+pub(crate) fn crop_to_non_transparent<Container>(
+    image: &mut image::ImageBuffer<Rgba<u8>, Container>,
+) -> image::SubImage<&mut ImageBuffer<Rgba<u8>, Container>>
 where
     Container: std::ops::Deref<Target = [u8]>,
 {

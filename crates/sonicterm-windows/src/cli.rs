@@ -58,3 +58,7 @@ where
 pub fn parse_cli_from_env() -> Result<ParsedCli> {
     parse_cli_from(std::env::args())
 }
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod cli_tests;

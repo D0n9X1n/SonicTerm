@@ -1,12 +1,11 @@
 //! Higher level harfbuzz bindings
-use freetype;
 
 pub use harfbuzz::*;
 
 use crate::color::SrgbaPixel;
 use crate::locator::{FontDataHandle, FontDataSource};
 use crate::rasterizer::colr::{ColorLine, ColorStop, DrawOp};
-use anyhow::{ensure, Context, Error};
+use anyhow::{Context, Error, ensure};
 use cairo::Extend;
 use memmap2::{Mmap, MmapOptions};
 use std::ffi::CStr;
@@ -553,7 +552,7 @@ pub enum PaintOp {
 
 impl PaintOp {
     unsafe fn paint_data(data: *mut ::std::os::raw::c_void) -> &'static mut Vec<PaintOp> {
-        &mut *(data as *mut Vec<PaintOp>)
+        unsafe { &mut *(data as *mut Vec<PaintOp>) }
     }
 
     unsafe extern "C" fn push_transform(
@@ -567,7 +566,7 @@ impl PaintOp {
         dy: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PushTransform { xx, yx, xy, yy, dx, dy });
     }
 
@@ -576,7 +575,7 @@ impl PaintOp {
         paint_data: *mut ::std::os::raw::c_void,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PopTransform);
     }
 
@@ -589,7 +588,7 @@ impl PaintOp {
         ymax: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PushRectClip { xmin, ymin, xmax, ymax });
     }
 
@@ -598,7 +597,7 @@ impl PaintOp {
         paint_data: *mut ::std::os::raw::c_void,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PopClip);
     }
 
@@ -609,7 +608,7 @@ impl PaintOp {
         color: hb_color_t,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PaintSolid { is_foreground: is_foreground != 0, color });
     }
 
@@ -625,8 +624,8 @@ impl PaintOp {
         y2: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
-        let color_line = ColorLine::new_from_hb(color_line);
+        let ops = unsafe { Self::paint_data(paint_data) };
+        let color_line = unsafe { ColorLine::new_from_hb(color_line) };
         ops.push(Self::PaintLinearGradient { color_line, x0, y0, x1, y1, x2, y2 });
     }
 
@@ -642,8 +641,8 @@ impl PaintOp {
         r1: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
-        let color_line = ColorLine::new_from_hb(color_line);
+        let ops = unsafe { Self::paint_data(paint_data) };
+        let color_line = unsafe { ColorLine::new_from_hb(color_line) };
         ops.push(Self::PaintRadialGradient { color_line, x0, y0, r0, x1, y1, r1 });
     }
 
@@ -657,8 +656,8 @@ impl PaintOp {
         end_angle: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
-        let color_line = ColorLine::new_from_hb(color_line);
+        let ops = unsafe { Self::paint_data(paint_data) };
+        let color_line = unsafe { ColorLine::new_from_hb(color_line) };
         ops.push(Self::PaintSweepGradient { color_line, x0, y0, start_angle, end_angle });
     }
 
@@ -678,9 +677,9 @@ impl PaintOp {
             return 0;
         }
 
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         let image = Blob::with_reference(image);
-        let extents = if extents.is_null() { None } else { Some(*extents) };
+        let extents = if extents.is_null() { None } else { Some(unsafe { *extents }) };
         ops.push(Self::PaintImage { image, extents, width, height, format, slant });
 
         1
@@ -691,7 +690,7 @@ impl PaintOp {
         paint_data: *mut ::std::os::raw::c_void,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PushGroup);
     }
 
@@ -701,7 +700,7 @@ impl PaintOp {
         mode: hb_paint_composite_mode_t,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
         ops.push(Self::PopGroup { mode });
     }
 
@@ -712,14 +711,16 @@ impl PaintOp {
         font: *mut hb_font_t,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::paint_data(paint_data);
+        let ops = unsafe { Self::paint_data(paint_data) };
 
         let mut draw = vec![];
 
         let funcs = DrawFuncs::new().unwrap();
         macro_rules! func {
             ($hbfunc:ident, $method:ident) => {
-                $hbfunc(funcs.funcs, Some(DrawOp::$method), std::ptr::null_mut(), None);
+                unsafe {
+                    $hbfunc(funcs.funcs, Some(DrawOp::$method), std::ptr::null_mut(), None);
+                }
             };
         }
         func!(hb_draw_funcs_set_move_to_func, move_to);
@@ -728,7 +729,9 @@ impl PaintOp {
         func!(hb_draw_funcs_set_cubic_to_func, cubic_to);
         func!(hb_draw_funcs_set_close_path_func, close_path);
 
-        hb_font_draw_glyph(font, glyph, funcs.funcs, &mut draw as *mut Vec<DrawOp> as *mut _);
+        unsafe {
+            hb_font_draw_glyph(font, glyph, funcs.funcs, &mut draw as *mut Vec<DrawOp> as *mut _);
+        }
 
         ops.push(Self::PushGlyphClip { glyph, draw });
     }
@@ -736,7 +739,7 @@ impl PaintOp {
 
 impl DrawOp {
     unsafe fn draw_data(data: *mut ::std::os::raw::c_void) -> &'static mut Vec<DrawOp> {
-        &mut *(data as *mut Vec<DrawOp>)
+        unsafe { &mut *(data as *mut Vec<DrawOp>) }
     }
 
     unsafe extern "C" fn move_to(
@@ -747,7 +750,7 @@ impl DrawOp {
         to_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::draw_data(draw_data);
+        let ops = unsafe { Self::draw_data(draw_data) };
         ops.push(Self::MoveTo { to_x, to_y });
     }
 
@@ -759,7 +762,7 @@ impl DrawOp {
         to_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::draw_data(draw_data);
+        let ops = unsafe { Self::draw_data(draw_data) };
         ops.push(Self::LineTo { to_x, to_y });
     }
 
@@ -773,7 +776,7 @@ impl DrawOp {
         to_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::draw_data(draw_data);
+        let ops = unsafe { Self::draw_data(draw_data) };
         ops.push(Self::QuadTo { control_x, control_y, to_x, to_y });
     }
 
@@ -789,7 +792,7 @@ impl DrawOp {
         to_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::draw_data(draw_data);
+        let ops = unsafe { Self::draw_data(draw_data) };
         ops.push(Self::CubicTo { control1_x, control1_y, control2_x, control2_y, to_x, to_y });
     }
 
@@ -799,13 +802,16 @@ impl DrawOp {
         _st: *mut hb_draw_state_t,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
-        let ops = Self::draw_data(draw_data);
+        let ops = unsafe { Self::draw_data(draw_data) };
         ops.push(Self::ClosePath);
     }
 }
 
 impl ColorLine {
-    pub fn new_from_hb(line: *mut hb_color_line_t) -> Self {
+    /// # Safety
+    ///
+    /// `line` must point to a valid HarfBuzz color line for the duration of this call.
+    pub unsafe fn new_from_hb(line: *mut hb_color_line_t) -> Self {
         let num_stops = unsafe {
             hb_color_line_get_color_stops(line, 0, std::ptr::null_mut(), std::ptr::null_mut())
         };
@@ -1095,9 +1101,5 @@ pub fn hb_tag_to_string(tag: hb_tag_t) -> TagString {
 /// empty arrays in that way, and rust 1.78 will panic if a null
 /// ptr is passed in.
 pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T] {
-    if ptr.is_null() {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ptr, size)
-    }
+    if ptr.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(ptr, size) } }
 }

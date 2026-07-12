@@ -458,6 +458,7 @@ use sonicterm_render_model::boundary::ui::{
 };
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 fn dirty_rows_damage_rect<I>(
     dirty_rows: I,
     pane_rect: PixelRect,
@@ -496,6 +497,64 @@ where
         damage.add_clipped(PixelRect { x, y: top, w: row_w, h: row_h }, pane_bounds);
     }
     damage.rect()
+}
+
+/// Decide a pane's per-frame damage rectangle, given whether the pane is
+/// showing the alternate screen.
+///
+/// A hardware surface keeps the previous frame's pixels, so damage-limited
+/// repainting only redraws the rows the grid marked dirty. That is correct
+/// for a normal shell pane: a changed prompt line is a narrow edit and
+/// leaving the surrounding rows untouched is exactly what we want. It is
+/// WRONG for an alternate-screen app (vim/nvim/less/tmux). Those apps
+/// scroll, split, and repaint regions such that a row which was NOT
+/// re-emitted this frame can still be visually stale — the app moved
+/// content out from under it. For an alt-screen pane we therefore repaint
+/// the pane's whole clipped rectangle whenever ANY row is dirty, and
+/// nothing when the pane is clean.
+///
+/// Returns:
+/// * `None` for an alt-screen pane with no dirty rows (clean -> no repaint).
+/// * the full pane rectangle clipped to the surface for a dirty alt-screen
+///   pane — a complete pane repaint, never an unconditional full-window one.
+/// * the existing narrow dirty-row union ([`dirty_rows_damage_rect`]) for a
+///   normal-screen pane.
+///
+/// The alt-screen decision is independent of cell metrics, so sparse /
+/// scattered dirty rows and fractional cell heights all resolve to the same
+/// complete-pane repaint; the surface clip both bounds the rect to on-screen
+/// pixels and rejects a fully off-surface pane.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+fn pane_damage_rect<I>(
+    is_alt: bool,
+    dirty_rows: I,
+    pane_rect: PixelRect,
+    origin_x: f32,
+    origin_y: f32,
+    cols: u16,
+    cell_w: f32,
+    cell_h: f32,
+    surface_w: u32,
+    surface_h: u32,
+) -> Option<PixelRect>
+where
+    I: IntoIterator<Item = usize>,
+{
+    if is_alt {
+        // A clean alt pane contributes no damage. A dirty one repaints its
+        // whole rectangle, clipped to the on-screen surface (which also
+        // yields `None` for a fully off-surface pane).
+        let has_dirty = dirty_rows.into_iter().next().is_some();
+        return if has_dirty {
+            pane_rect.intersect(PixelRect { x: 0, y: 0, w: surface_w, h: surface_h })
+        } else {
+            None
+        };
+    }
+    dirty_rows_damage_rect(
+        dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, surface_w, surface_h,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1173,6 +1232,7 @@ fn measure_overlay_text_width(
     .width_px
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
     font_stack: &sonicterm_engine::FontStack,
@@ -1188,7 +1248,7 @@ pub fn emit_overlay_text_glyphs(
     sw: f32,
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
-    mut debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
+    debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
 ) {
     if text.is_empty() {
         return;
@@ -1209,7 +1269,7 @@ pub fn emit_overlay_text_glyphs(
     );
     let count_pre = glyph_instances.len();
     glyph_instances.extend(layout.glyphs.iter().copied());
-    if let Some(out) = debug.as_deref_mut() {
+    if let Some(out) = debug {
         for g in &glyph_instances[count_pre..] {
             let h = (-g.rect[3] * 0.5 * sh).abs();
             let w = (g.rect[2] * 0.5 * sw).abs();
@@ -2604,7 +2664,7 @@ impl GpuRenderer {
         copy_mode: Option<&CopyModeState>,
         tabs: &TabBar,
         search: Option<&SearchState>,
-        mut palette: Option<&mut CommandPalette>,
+        palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
         viewport_top_abs: Option<u64>,
         notification: Option<&NotificationBubble>,
@@ -2987,7 +3047,8 @@ impl GpuRenderer {
                     w: pv.rect_w.ceil().max(1.0) as u32,
                     h: pv.rect_h.ceil().max(1.0) as u32,
                 };
-                if let Some(rect) = dirty_rows_damage_rect(
+                if let Some(rect) = pane_damage_rect(
+                    pv.grid.is_alt(),
                     pv.grid.dirty_rows(),
                     pane_rect,
                     pv.origin_x,
@@ -3172,7 +3233,7 @@ impl GpuRenderer {
             // FontStack is the sole rasterizer; on test fixtures
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
-            let mut wt_raster = self.font_stack.as_ref().map(|s| s.clone());
+            let mut wt_raster = self.font_stack.clone();
             // T13/T14: the async fallback loader was wired into the
             // legacy SwashRasterizer. The wezterm path doesn't expose
             // an equivalent hook; missing glyphs are handled by
@@ -3181,7 +3242,7 @@ impl GpuRenderer {
             // loader plumb here. If future work re-introduces an async
             // hook on FontStack rasterization, it would attach in this
             // same scope.
-            let _ = self.async_loader.clone();
+            let _ = self.async_loader;
             // Theme accent for the Cmd-hovered URL recolor. `UiPalette::accent`
             // is a linear-sRGB `[f32;4]` (alpha 1.0), the same space the
             // per-glyph `color` field carries, so it drops in with no
@@ -4603,7 +4664,7 @@ impl GpuRenderer {
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
         let (palette_layout, palette_query_text, palette_caret_char) =
-            if let Some(p) = palette.as_deref_mut() {
+            if let Some(p) = palette {
                 let query_text = if palette_preedit.is_empty() {
                     None
                 } else {

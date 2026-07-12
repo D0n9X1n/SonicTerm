@@ -4,12 +4,12 @@ SonicTerm releases are tag-driven.
 
 ## Version
 
-The workspace version is `1.0.2`. Release tags use `v<major>.<minor>.<patch>`,
+The workspace version is `1.1.0`. Release tags use `v<major>.<minor>.<patch>`,
 for example:
 
 ```sh
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 ## Automation
@@ -27,11 +27,14 @@ git push origin v1.0.2
 ## Local release checks
 
 ```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
 bash scripts/check-workspace-crates.sh
-cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
-cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
+scripts/coverage/rust-logic.sh
 bash scripts/test-release-notes.sh
+cargo build --release -p sonicterm-mac
 ```
 
 Windows packaging is produced with `cargo wix` from

@@ -63,14 +63,14 @@ impl App {
         panes: HashMap<u64, PaneState>,
     ) {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
-        let main_window = self.main_window().cloned();
+        let main_window = self.main_window_id;
         if let Some(ws) = self.main_mut() {
             for (id, pane) in panes {
                 pane.parser.lock().grid_mut().resize(cols, rows);
                 if let Some(pty) = pane.pty.as_ref() {
                     (pty.resize)(cols, rows);
                 }
-                *pane.redraw_target.lock() = main_window.clone();
+                *pane.redraw_target.lock() = main_window;
                 ws.panes.insert(id, pane);
             }
             let idx = index.min(ws.tabs.len());
@@ -114,7 +114,7 @@ impl App {
             if let Some(pty) = pane.pty.as_ref() {
                 (pty.resize)(cols, rows);
             }
-            *pane.redraw_target.lock() = child.window.clone();
+            *pane.redraw_target.lock() = Some(dst_id);
             child.panes.insert(id, pane);
         }
         let idx = index.min(child.tabs.len());

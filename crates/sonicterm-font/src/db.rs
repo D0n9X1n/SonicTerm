@@ -1,7 +1,7 @@
 //! A font-database to keep track of fonts that we've located
 
 use crate::locator::{FontDataSource, FontOrigin};
-use crate::parser::{load_built_in_fonts, parse_and_collect_font_info, ParsedFont};
+use crate::parser::{ParsedFont, load_built_in_fonts, parse_and_collect_font_info};
 use crate::rangeset::RangeSet;
 use anyhow::Context;
 use config::{Config, FontAttributes};
@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 pub struct FontDatabase {
     by_full_name: HashMap<String, Vec<ParsedFont>>,
+}
+
+impl Default for FontDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FontDatabase {
@@ -19,15 +25,9 @@ impl FontDatabase {
     fn load_font_info(&mut self, font_info: Vec<ParsedFont>) {
         for parsed in font_info {
             if let Some(path) = parsed.handle.path_str() {
-                self.by_full_name
-                    .entry(path.to_string())
-                    .or_insert_with(Vec::new)
-                    .push(parsed.clone());
+                self.by_full_name.entry(path.to_string()).or_default().push(parsed.clone());
             }
-            self.by_full_name
-                .entry(parsed.names().full_name.clone())
-                .or_insert_with(Vec::new)
-                .push(parsed);
+            self.by_full_name.entry(parsed.names().full_name.clone()).or_default().push(parsed);
         }
     }
 

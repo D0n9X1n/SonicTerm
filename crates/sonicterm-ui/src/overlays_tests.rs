@@ -116,13 +116,15 @@ fn command_palette_query_label_places_preedit_at_caret() {
 
 #[test]
 fn command_palette_uses_compact_spacing_tokens() {
-    assert!(PALETTE_HEIGHT <= 400.0);
-    assert!(PALETTE_MAX_HEIGHT <= 460.0);
-    assert!(PALETTE_QUERY_HEIGHT <= 42.0);
-    assert!(PALETTE_QUERY_PAD_Y <= 6.0);
-    assert!(PALETTE_ROW_HEIGHT <= 28.0);
-    assert!(PALETTE_ROW_GAP <= 2.0);
-    assert!(PALETTE_FOOTER_HEIGHT <= 30.0);
+    const {
+        assert!(PALETTE_HEIGHT <= 400.0);
+        assert!(PALETTE_MAX_HEIGHT <= 460.0);
+        assert!(PALETTE_QUERY_HEIGHT <= 42.0);
+        assert!(PALETTE_QUERY_PAD_Y <= 6.0);
+        assert!(PALETTE_ROW_HEIGHT <= 28.0);
+        assert!(PALETTE_ROW_GAP <= 2.0);
+        assert!(PALETTE_FOOTER_HEIGHT <= 30.0);
+    }
 }
 
 #[test]

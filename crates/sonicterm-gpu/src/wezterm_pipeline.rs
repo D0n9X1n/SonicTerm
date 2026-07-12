@@ -344,6 +344,7 @@ fn push_quad_instances(out: &mut Vec<Vertex>, quads: &[QuadInstance], sw: f32, s
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_rect_vertices(
     out: &mut Vec<Vertex>,
     x: f32,

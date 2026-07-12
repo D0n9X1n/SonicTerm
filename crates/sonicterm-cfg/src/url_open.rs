@@ -49,7 +49,12 @@ pub fn validate(url: &str) -> io::Result<()> {
             '&' | '|' | '^' | '<' | '>' | '"' | '\'' | '`' | '\r' | '\n' | '\0' => {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "forbidden character"));
             }
-            c if (c as u32) < 0x20 => {
+            c if c.is_control() => {
+                // Rejects the full Unicode control set: C0 (< 0x20),
+                // DEL (0x7F), and C1 (0x80..=0x9F). A raw control code
+                // is never legitimate in a URI (it must be %-encoded),
+                // so refusing it keeps the allow-list honest against
+                // untrusted OSC 8 input.
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "control character"));
             }
             _ => {}
@@ -121,3 +126,7 @@ where
     let _ = open_fn(&uri);
     Some(uri)
 }
+
+#[cfg(test)]
+#[path = "url_open_tests.rs"]
+mod url_open_tests;

@@ -1,7 +1,7 @@
 # SonicTerm Architecture
 
-SonicTerm 1.0 is a native macOS + Windows terminal built around small Rust
-crates with a strict data-flow boundary:
+SonicTerm is a native macOS + Windows terminal built around small Rust crates
+with a strict data-flow boundary:
 
 ```text
 platform shell -> sonicterm-app -> sonicterm-vt/grid -> render-model -> sonicterm-gpu

@@ -26,3 +26,7 @@ bitflags! {
         const SUPER = 1 << 3;
     }
 }
+
+#[cfg(test)]
+#[path = "mod_key_tests.rs"]
+mod mod_key_tests;

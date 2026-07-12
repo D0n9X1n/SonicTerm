@@ -60,3 +60,7 @@ impl HyperlinkRegistry {
         self.by_id.is_empty()
     }
 }
+
+#[cfg(test)]
+#[path = "hyperlink_tests.rs"]
+mod hyperlink_tests;

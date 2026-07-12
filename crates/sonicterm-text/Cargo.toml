@@ -2,9 +2,12 @@
 name = "sonicterm-text"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal — headless text layer: shaping, swash rasterization, glyph atlas, per-row cache"
 
 [lints]

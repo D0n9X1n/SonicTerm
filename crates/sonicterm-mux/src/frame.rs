@@ -35,11 +35,16 @@ pub fn read_frame<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-        .map(|(msg, _)| msg)
-        .map_err(|e| io::Error::other(e.to_string()))
+    let (msg, consumed) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    if consumed != len {
+        return Err(io::Error::other(format!(
+            "frame payload has {} trailing bytes",
+            len - consumed
+        )));
+    }
+    Ok(msg)
 }
-
 
 #[cfg(test)]
 #[path = "frame_tests.rs"]

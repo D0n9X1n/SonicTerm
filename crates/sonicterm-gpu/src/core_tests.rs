@@ -477,6 +477,174 @@ fn dirty_rows_damage_rect_closes_fractional_cell_seam() {
     );
 }
 
+// --- pane_damage_rect: alt-screen whole-pane vs normal narrow damage ------
+
+#[test]
+fn pane_damage_rect_alt_clean_pane_has_no_damage() {
+    // An alt-screen pane with zero dirty rows contributes no damage
+    // (nothing changed -> no repaint), the same as a clean normal pane.
+    let d = pane_damage_rect(
+        true,
+        [],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 200, h: 480 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        12.0,
+        800,
+        600,
+    );
+    assert_eq!(d, None);
+}
+
+#[test]
+fn pane_damage_rect_alt_dirty_pane_repaints_whole_clipped_rect() {
+    // A single dirty row on the alt screen must expand to the ENTIRE pane
+    // rectangle (not a narrow row strip): the app may have scrolled content
+    // out from under rows it did not re-emit this frame.
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 200, h: 480 };
+    let d = pane_damage_rect(true, [5usize], pane, 0.0, 0.0, 80, 10.0, 12.0, 800, 600);
+    assert_eq!(d, Some(pane), "one dirty alt row must repaint the full pane");
+}
+
+#[test]
+fn pane_damage_rect_alt_dirty_pane_is_clipped_to_surface() {
+    // A dirty alt pane larger than the surface repaints only its on-screen
+    // intersection — a complete pane repaint, never a full-window repaint
+    // beyond the surface bounds.
+    //   pane   = {100,100,800,800}, right/bottom = 900/900
+    //   bounds = {0,0,400,300}
+    //   clip   = {100,100, 400-100=300, 300-100=200}
+    let d = pane_damage_rect(
+        true,
+        [0usize],
+        sonicterm_render_model::geometry::PixelRect { x: 100, y: 100, w: 800, h: 800 },
+        100.0,
+        100.0,
+        80,
+        10.0,
+        12.0,
+        400,
+        300,
+    );
+    assert_eq!(
+        d,
+        Some(sonicterm_render_model::geometry::PixelRect { x: 100, y: 100, w: 300, h: 200 })
+    );
+}
+
+#[test]
+fn pane_damage_rect_alt_offscreen_pane_has_no_damage() {
+    // A dirty alt pane wholly off the surface intersects nothing -> None.
+    let d = pane_damage_rect(
+        true,
+        [0usize],
+        sonicterm_render_model::geometry::PixelRect { x: 500, y: 500, w: 100, h: 100 },
+        500.0,
+        500.0,
+        80,
+        10.0,
+        12.0,
+        400,
+        400,
+    );
+    assert_eq!(d, None);
+}
+
+#[test]
+fn pane_damage_rect_alt_sparse_rows_still_repaint_whole_pane() {
+    // Scattered dirty rows [2, 37]: the alt pane repaints in full, while the
+    // same input on a normal pane stays narrow (union of two thin strips).
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 200, h: 480 };
+    let alt = pane_damage_rect(true, [2usize, 37usize], pane, 0.0, 0.0, 80, 10.0, 12.0, 800, 600);
+    assert_eq!(alt, Some(pane), "alt sparse rows -> whole pane");
+
+    let normal =
+        pane_damage_rect(false, [2usize, 37usize], pane, 0.0, 0.0, 80, 10.0, 12.0, 800, 600)
+            .expect("dirty normal pane has damage");
+    assert!(
+        normal.h < pane.h,
+        "normal sparse damage must stay narrow, got {normal:?} vs pane {pane:?}"
+    );
+}
+
+#[test]
+fn pane_damage_rect_normal_matches_narrow_helper() {
+    // A normal-screen pane delegates to the narrow dirty-row helper and
+    // produces exactly its rect for the same inputs (behavior preserved).
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 8, y: 10, w: 100, h: 50 };
+    let via_wrapper =
+        pane_damage_rect(false, [1usize, 3usize], pane, 8.0, 10.0, 10, 6.0, 12.0, 80, 80);
+    let direct = dirty_rows_damage_rect([1usize, 3usize], pane, 8.0, 10.0, 10, 6.0, 12.0, 80, 80);
+    assert_eq!(via_wrapper, direct);
+    assert_eq!(
+        via_wrapper,
+        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 60, h: 36 })
+    );
+}
+
+#[test]
+fn pane_damage_rect_normal_empty_input_is_none() {
+    // No dirty rows on a normal pane -> no damage.
+    let d = pane_damage_rect(
+        false,
+        [],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 100, h: 50 },
+        0.0,
+        0.0,
+        10,
+        6.0,
+        12.0,
+        100,
+        50,
+    );
+    assert_eq!(d, None);
+}
+
+#[test]
+fn pane_damage_rect_normal_closes_fractional_cell_seam() {
+    // Fractional DPI: a normal pane still routes through the seam-closing
+    // narrow logic. Row 2 at cell_h 20.4 spans [40, 62).
+    let d = pane_damage_rect(
+        false,
+        [2usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        20.4,
+        600,
+        800,
+    )
+    .expect("one dirty row yields damage");
+    assert_eq!(d.y, 40, "row top floored");
+    assert_eq!(d.y + d.h as i32, 62, "strip reaches the ceiled next-row top");
+}
+
+#[test]
+fn pane_damage_rect_normal_sparse_rows_clip_offscreen_row() {
+    // Scattered rows where the far row is off the surface: only the
+    // on-surface row contributes, clipped into the pane.
+    //   row 0   -> [floor(0), ceil(20.4)) = [0, 21)
+    //   row 100 -> top floor(2040) is past the 800px surface -> clipped away
+    let d = pane_damage_rect(
+        false,
+        [0usize, 100usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        20.4,
+        600,
+        800,
+    )
+    .expect("row 0 is on-surface");
+    assert_eq!(d, sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 21 });
+}
+
 #[test]
 fn full_repaint_forced_on_invalidation() {
     let damage = Some(sonicterm_render_model::geometry::PixelRect { x: 1, y: 2, w: 3, h: 4 });

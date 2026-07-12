@@ -193,7 +193,7 @@ impl TabBar {
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             // Only rewrite tabs that already carry a `#N ` prefix —
             // leave raw user/system titles ("A", "Welcome", …) alone.
-            let Some(body) = strip_index_prefix(&tab.title) else { continue };
+            let Some(body) = strip_index_prefix(&tab.auto_title) else { continue };
             let new_prefix = format!("#{}", i + 1);
             let mut s = String::with_capacity(new_prefix.len() + body.len());
             s.push_str(&new_prefix);
@@ -299,8 +299,11 @@ impl TabBar {
     pub fn detach(&mut self, id: TabId) -> Option<Tab> {
         let pos = self.tabs.iter().position(|t| t.id == id)?;
         let tab = self.tabs.remove(pos);
-        if self.active >= self.tabs.len() && !self.tabs.is_empty() {
-            self.active = self.tabs.len() - 1;
+        if pos < self.active {
+            self.active -= 1;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len().saturating_sub(1);
         }
         self.recompute_all_titles();
         Some(tab)
@@ -367,7 +370,6 @@ fn strip_index_prefix(title: &str) -> Option<&str> {
     }
     Some(&rest[digits_end..])
 }
-
 
 #[cfg(test)]
 #[path = "tabs_tests.rs"]

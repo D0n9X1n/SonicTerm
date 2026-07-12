@@ -70,6 +70,7 @@ pub enum HitOutcome {
 ///
 /// Returns [`HitOutcome::Miss`] when the scrollbar is hidden, when the
 /// grid isn't scrollable, or when the click falls outside the bar.
+#[allow(clippy::too_many_arguments)]
 pub fn hit(
     pane_rect: Rect,
     viewport_rows: u16,

@@ -6,6 +6,8 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal — pure-data UI state and layout (tabs, panes, selection, search, palette, overlays, ui_tokens). No winit, no wgpu, no glyphon."
 
 [lints]

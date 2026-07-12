@@ -1073,3 +1073,7 @@ impl<'a> ExactSizeIterator for LineIter<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "line_tests.rs"]
+mod line_tests;

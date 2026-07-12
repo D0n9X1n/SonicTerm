@@ -89,3 +89,56 @@ fn pick_highest_pwsh_chooses_newest_version() {
     // Empty list -> None.
     assert_eq!(pick_highest_pwsh(&[]), None);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn production_macos_zsh_starts_as_login_shell() {
+    assert_eq!(shell_startup_args("/bin/zsh", ShellSpawnOpts::default()), vec!["-l"]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn production_macos_bash_and_fish_start_as_login_shells() {
+    assert_eq!(shell_startup_args("/bin/bash", ShellSpawnOpts::default()), vec!["--login"]);
+    assert_eq!(
+        shell_startup_args("/opt/homebrew/bin/fish", ShellSpawnOpts::default()),
+        vec!["--login"]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn clean_e2e_keeps_profile_suppression() {
+    let opts = ShellSpawnOpts { clean_e2e: true, ..ShellSpawnOpts::default() };
+    assert_eq!(shell_startup_args("/bin/zsh", opts), vec!["-f"]);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn production_non_macos_shell_startup_stays_unchanged() {
+    assert!(shell_startup_args("/bin/zsh", ShellSpawnOpts::default()).is_empty());
+}
+
+#[test]
+fn applies_utf8_locale_when_launch_environment_has_no_locale() {
+    assert!(should_apply_utf8_locale_fallback(None, None, None));
+    assert_eq!(default_lang_utf8_locale(), "en_US.UTF-8");
+    assert_eq!(default_lc_ctype_utf8_locale(), "UTF-8");
+}
+
+#[test]
+fn skips_fallback_when_effective_locale_is_already_utf8() {
+    assert!(!should_apply_utf8_locale_fallback(None, Some("UTF-8"), None));
+    assert!(!should_apply_utf8_locale_fallback(None, None, Some("zh_CN.UTF-8")));
+    assert!(!should_apply_utf8_locale_fallback(None, None, Some("en_US.UTF8")));
+}
+
+#[test]
+fn fills_lc_ctype_when_lang_is_present_but_not_utf8() {
+    assert!(should_apply_utf8_locale_fallback(None, None, Some("C")));
+}
+
+#[test]
+fn preserves_explicit_lc_all_override() {
+    assert!(!should_apply_utf8_locale_fallback(Some("C"), None, None));
+}
