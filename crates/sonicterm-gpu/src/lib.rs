@@ -1,5 +1,4 @@
-//! sonicterm-gpu — GPU pipeline primitives split out of `sonicterm-shared` in PR 7a
-//! of the workspace refactor (see `docs/specs/2026-04-22-workspace-refactor.md`).
+//! sonicterm-gpu — wgpu pipeline primitives behind the renderer-model boundary.
 //!
 //! This crate owns the wgpu-touching primitives that the terminal renderer
 //! composes per frame:

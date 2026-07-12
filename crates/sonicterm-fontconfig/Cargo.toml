@@ -2,13 +2,20 @@
 authors.workspace = true
 name = "sonicterm-fontconfig"
 version.workspace = true
+# Generated bindings retain Rust 2018 until regenerated as a tested set.
 edition = "2018"
+rust-version.workspace = true
 links = "fontconfig"
 build = "build.rs"
 publish = false
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal - Fontconfig native binding backend"
+
+[lints]
+workspace = true
 
 [dependencies]
 libc.workspace = true

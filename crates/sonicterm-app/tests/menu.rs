@@ -13,7 +13,7 @@
 use sonicterm_app::menu::{blueprint, Binding, Item, KeyMods};
 use sonicterm_cfg::keymap::Action;
 
-fn find_item<'a>(title: &str) -> Option<Item> {
+fn find_item(title: &str) -> Option<Item> {
     blueprint().iter().flat_map(|sm| sm.items.iter()).find(|it| it.title == title).cloned()
 }
 
@@ -21,10 +21,7 @@ fn find_item<'a>(title: &str) -> Option<Item> {
 fn quit_item_maps_to_quit_app_without_cmd_q_key_equivalent() {
     let quit =
         find_item("Quit SonicTerm").expect("'Quit SonicTerm' item must exist in the blueprint");
-    assert_eq!(
-        quit.key, "",
-        "Quit must carry no key equivalent — ⌘Q is confirmed on the keymap"
-    );
+    assert_eq!(quit.key, "", "Quit must carry no key equivalent — ⌘Q is confirmed on the keymap");
     assert_eq!(quit.mods, KeyMods::None, "Quit must not register a modifier chord");
     match quit.binding {
         Binding::Action(Action::QuitApp) => {}

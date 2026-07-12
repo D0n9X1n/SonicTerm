@@ -5,23 +5,18 @@
 use serde::{Deserialize, Serialize};
 
 /// User-facing logging levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Only errors.
     Error,
     /// Warnings and errors.
+    #[default]
     Warn,
     /// Informational startup/runtime events plus warnings and errors.
     Info,
     /// Debug diagnostics, including performance/render timing.
     Debug,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Warn
-    }
 }
 
 /// Retention + level configuration. See field docs for defaults.

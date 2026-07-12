@@ -28,7 +28,7 @@ Thumbs.db
 crash-reports/
 /rust_out
 
-# Local dev docs (specs / plans / reviews) — never commit these
+# Local implementation and review drafts stay untracked.
 docs/specs/
 docs/plans/
 docs/reviews/

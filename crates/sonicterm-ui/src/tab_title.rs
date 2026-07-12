@@ -100,3 +100,6 @@ fn cwd_two_components(cwd: &str) -> String {
     }
 }
 
+#[cfg(test)]
+#[path = "tab_title_tests.rs"]
+mod tab_title_tests;

@@ -6,10 +6,15 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 bitflags = { workspace = true }
+
+[dev-dependencies]
+toml.workspace = true
 
 [lints]
 workspace = true

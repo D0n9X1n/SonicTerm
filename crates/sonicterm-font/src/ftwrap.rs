@@ -188,7 +188,7 @@ impl Face {
                     origin: self.source.origin.clone(),
                     coverage: self.source.coverage.clone(),
                 };
-                res.push(ParsedFont::from_face(&self, source)?);
+                res.push(ParsedFont::from_face(self, source)?);
             }
 
             FT_Done_MM_Var(self.lib, mm);
@@ -312,48 +312,71 @@ impl Face {
     }
 
     pub fn weight_and_width(&self) -> (u16, u16) {
-        let (mut weight, mut width) = self
+        let (base_weight, base_width) = self
             .get_os2_table()
             .map(|os2| (os2.usWeightClass as f64, os2.usWidthClass as f64))
             .unwrap_or((400., 5.));
 
+        weight_and_width_with_variation(base_weight, base_width, self.variation_axis_scalings())
+    }
+
+    /// Collect the wght/wdth-relevant variation axis scalings for the named
+    /// instance selected on this face. A FreeType error, null child pointer,
+    /// empty axis table, out-of-range named-instance index, or missing axis
+    /// coordinates is unusable and returns `Err`, causing the caller to retain
+    /// the base OS/2/default metrics. Any non-null `FT_MM_Var` allocation is
+    /// freed exactly once before returning, including FreeType's error path.
+    fn variation_axis_scalings(&self) -> Result<Vec<AxisScaling>, ()> {
         unsafe {
             let index = (*self.face).face_index;
             let variation = index >> 16;
-            if variation > 0 {
-                let vidx = (variation - 1) as usize;
+            if variation <= 0 {
+                return Ok(Vec::new());
+            }
+            let vidx = (variation - 1) as usize;
 
-                let mut mm = std::ptr::null_mut();
+            let mut mm = std::ptr::null_mut();
+            let status = FT_Get_MM_Var(self.face, &mut mm);
+            if mm.is_null() {
+                return Err(());
+            }
 
-                ft_result(FT_Get_MM_Var(self.face, &mut mm), ()).context("FT_Get_MM_Var").unwrap();
-                {
-                    let mm = &*mm;
-
-                    let styles = from_raw_parts(mm.namedstyle, mm.num_namedstyles as usize);
-                    let instance = &styles[vidx];
-                    let axes = from_raw_parts(mm.axis, mm.num_axis as usize);
-
-                    for (i, axis) in axes.iter().enumerate() {
-                        let coords = from_raw_parts(instance.coords, mm.num_axis as usize);
-                        let value = coords[i].to_num::<f64>();
-                        let default_value = axis.def.to_num::<f64>();
-                        let scale = if default_value != 0. { value / default_value } else { 1. };
-
-                        if axis.tag == ft_make_tag(b'w', b'g', b'h', b't') {
-                            weight = weight * scale;
-                        }
-
-                        if axis.tag == ft_make_tag(b'w', b'd', b't', b'h') {
-                            width = width * scale;
-                        }
-                    }
+            let result = (|| {
+                if !succeeded(status) {
+                    return Err(());
                 }
 
-                FT_Done_MM_Var(self.lib, mm);
-            }
-        }
+                let mm = &*mm;
+                if mm.num_namedstyles == 0
+                    || mm.namedstyle.is_null()
+                    || mm.num_axis == 0
+                    || mm.axis.is_null()
+                {
+                    return Err(());
+                }
 
-        (weight.round() as u16, width.round() as u16)
+                let styles = from_raw_parts(mm.namedstyle, mm.num_namedstyles as usize);
+                let instance = styles.get(vidx).ok_or(())?;
+                if instance.coords.is_null() {
+                    return Err(());
+                }
+
+                let axes = from_raw_parts(mm.axis, mm.num_axis as usize);
+                let coords = from_raw_parts(instance.coords, mm.num_axis as usize);
+                Ok(axes
+                    .iter()
+                    .zip(coords.iter())
+                    .map(|(axis, &coord)| AxisScaling {
+                        tag: axis.tag,
+                        value: coord.to_num::<f64>(),
+                        default_value: axis.def.to_num::<f64>(),
+                    })
+                    .collect())
+            })();
+
+            FT_Done_MM_Var(self.lib, mm);
+            result
+        }
     }
 
     pub fn italic(&self) -> bool {
@@ -394,7 +417,7 @@ impl Face {
                 // Fontconfig duplicates F000..F0FF to 0000..00FF
                 for ucs4 in 0xf00..0xf100 {
                     if coverage.contains(ucs4) {
-                        coverage.add(ucs4 as u32 - 0xf000);
+                        coverage.add(ucs4 - 0xf000);
                     }
                 }
             }
@@ -475,7 +498,7 @@ impl Face {
 
                 for (idx, info) in sizes.iter().enumerate() {
                     log::debug!("idx={} info={:?}", idx, info);
-                    let distance = (info.height - (pixel_height as i16)).abs() as usize;
+                    let distance = (info.height - (pixel_height as i16)).unsigned_abs() as usize;
                     let candidate = Best { idx, distance, height: info.height, width: info.width };
 
                     match best.take() {
@@ -801,15 +824,19 @@ impl Face {
             let mut ops = vec![];
 
             unsafe extern "C" fn move_to(to: *const FT_Vector, user: *mut c_void) -> c_int {
-                let ops = user as *mut Vec<DrawOp>;
-                let (to_x, to_y) = vector_x_y(&*to);
-                (*ops).push(DrawOp::MoveTo { to_x, to_y });
+                unsafe {
+                    let ops = user as *mut Vec<DrawOp>;
+                    let (to_x, to_y) = vector_x_y(&*to);
+                    (*ops).push(DrawOp::MoveTo { to_x, to_y });
+                }
                 0
             }
             unsafe extern "C" fn line_to(to: *const FT_Vector, user: *mut c_void) -> c_int {
-                let ops = user as *mut Vec<DrawOp>;
-                let (to_x, to_y) = vector_x_y(&*to);
-                (*ops).push(DrawOp::LineTo { to_x, to_y });
+                unsafe {
+                    let ops = user as *mut Vec<DrawOp>;
+                    let (to_x, to_y) = vector_x_y(&*to);
+                    (*ops).push(DrawOp::LineTo { to_x, to_y });
+                }
                 0
             }
             unsafe extern "C" fn conic_to(
@@ -817,10 +844,12 @@ impl Face {
                 to: *const FT_Vector,
                 user: *mut c_void,
             ) -> c_int {
-                let ops = user as *mut Vec<DrawOp>;
-                let (control_x, control_y) = vector_x_y(&*control);
-                let (to_x, to_y) = vector_x_y(&*to);
-                (*ops).push(DrawOp::QuadTo { control_x, control_y, to_x, to_y });
+                unsafe {
+                    let ops = user as *mut Vec<DrawOp>;
+                    let (control_x, control_y) = vector_x_y(&*control);
+                    let (to_x, to_y) = vector_x_y(&*to);
+                    (*ops).push(DrawOp::QuadTo { control_x, control_y, to_x, to_y });
+                }
                 0
             }
             unsafe extern "C" fn cubic_to(
@@ -829,18 +858,20 @@ impl Face {
                 to: *const FT_Vector,
                 user: *mut c_void,
             ) -> c_int {
-                let ops = user as *mut Vec<DrawOp>;
-                let (control1_x, control1_y) = vector_x_y(&*control1);
-                let (control2_x, control2_y) = vector_x_y(&*control2);
-                let (to_x, to_y) = vector_x_y(&*to);
-                (*ops).push(DrawOp::CubicTo {
-                    control1_x,
-                    control1_y,
-                    control2_x,
-                    control2_y,
-                    to_x,
-                    to_y,
-                });
+                unsafe {
+                    let ops = user as *mut Vec<DrawOp>;
+                    let (control1_x, control1_y) = vector_x_y(&*control1);
+                    let (control2_x, control2_y) = vector_x_y(&*control2);
+                    let (to_x, to_y) = vector_x_y(&*to);
+                    (*ops).push(DrawOp::CubicTo {
+                        control1_x,
+                        control1_y,
+                        control2_x,
+                        control2_y,
+                        to_x,
+                        to_y,
+                    });
+                }
                 0
             }
 
@@ -895,16 +926,15 @@ impl Face {
             // So, we probe here to look for color layer information: if we find it,
             // we don't call freetype's renderer and instead bubble up an error
             // that the embedding application can trap and decide what to do.
-            if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
-                if self
+            if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE
+                && self
                     .get_color_glyph_paint(
                         glyph_index,
                         FT_Color_Root_Transform::FT_COLOR_NO_ROOT_TRANSFORM,
                     )
                     .is_ok()
-                {
-                    return Err(IsColr1OrLater.into());
-                }
+            {
+                return Err(IsColr1OrLater.into());
             }
 
             ft_result(FT_Render_Glyph(slot, render_mode), ())
@@ -933,7 +963,7 @@ impl Face {
             unsafe { std::mem::transmute(u32::from(ft_glyph.bitmap.pixel_mode)) };
 
         // pitch is the number of bytes per source row
-        let pitch = ft_glyph.bitmap.pitch.abs() as usize;
+        let pitch = ft_glyph.bitmap.pitch.unsigned_abs() as usize;
         let data = unsafe {
             std::slice::from_raw_parts_mut(
                 ft_glyph.bitmap.buffer,
@@ -1336,19 +1366,23 @@ impl FreeTypeStream {
             return 0;
         }
 
-        let myself = &mut *((*stream).descriptor.pointer as *mut Self);
+        let myself = unsafe { &mut *((*stream).descriptor.pointer as *mut Self) };
         match &mut myself.backing {
             StreamBacking::Map(_) | StreamBacking::Static(_) | StreamBacking::Memory(_) => {
                 log::error!("read called on memory data {} !?", myself.name);
                 0
             }
             StreamBacking::File(file) => {
-                if let Err(err) = file.seek(SeekFrom::Start(offset.into())) {
+                #[cfg(windows)]
+                let seek_offset = u64::from(offset);
+                #[cfg(not(windows))]
+                let seek_offset = offset;
+                if let Err(err) = file.seek(SeekFrom::Start(seek_offset)) {
                     log::error!("failed to seek {} to offset {}: {:#}", myself.name, offset, err);
                     return 0;
                 }
 
-                let buf = std::slice::from_raw_parts_mut(buffer, count as usize);
+                let buf = unsafe { std::slice::from_raw_parts_mut(buffer, count as usize) };
                 match file.read(buf) {
                     Ok(len) => len as c_ulong,
                     Err(err) => {
@@ -1368,7 +1402,7 @@ impl FreeTypeStream {
 
     /// Called by freetype when the stream is closed
     unsafe extern "C" fn close(stream: FT_Stream) {
-        let myself = Box::from_raw((*stream).descriptor.pointer as *mut Self);
+        let myself = unsafe { Box::from_raw((*stream).descriptor.pointer as *mut Self) };
         drop(myself);
     }
 }
@@ -1382,7 +1416,7 @@ pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T
     if ptr.is_null() {
         &[]
     } else {
-        std::slice::from_raw_parts(ptr, size)
+        unsafe { std::slice::from_raw_parts(ptr, size) }
     }
 }
 
@@ -1453,3 +1487,73 @@ pub fn composite_mode_to_operator(mode: FT_Composite_Mode) -> cairo::Operator {
 fn ft_make_tag(a: u8, b: u8, c: u8, d: u8) -> FT_ULong {
     (a as FT_ULong) << 24 | (b as FT_ULong) << 16 | (c as FT_ULong) << 8 | (d as FT_ULong)
 }
+
+/// A single variation-axis observation for a selected named instance: its
+/// registered tag plus the instance's coordinate and the axis default, both
+/// already converted out of FreeType fixed point. This is a plain data view so
+/// the wght/wdth scaling math can be exercised without any FFI.
+#[derive(Debug, Clone, Copy)]
+struct AxisScaling {
+    tag: FT_ULong,
+    value: f64,
+    default_value: f64,
+}
+
+impl AxisScaling {
+    /// Ratio of the instance coordinate to the axis default. A zero (or
+    /// otherwise unusable) default yields a neutral scale of 1.0 so weight and
+    /// width are left unchanged rather than producing NaN/infinity.
+    fn scale(&self) -> f64 {
+        if self.default_value != 0. {
+            self.value / self.default_value
+        } else {
+            1.
+        }
+    }
+}
+
+/// Apply usable variation metadata or retain the base OS/2/default metrics
+/// when probing failed. This keeps the fallback decision independently
+/// testable without fabricating FreeType pointers.
+fn weight_and_width_with_variation(
+    base_weight: f64,
+    base_width: f64,
+    scalings: Result<Vec<AxisScaling>, ()>,
+) -> (u16, u16) {
+    match scalings {
+        Ok(scalings) => scaled_weight_and_width(base_weight, base_width, &scalings),
+        Err(()) => (base_weight.round() as u16, base_width.round() as u16),
+    }
+}
+
+/// Scale the base OS/2 (or default) weight and width by the `wght`/`wdth`
+/// variation axes, rounding to the nearest integer class. Axes other than
+/// `wght`/`wdth` are ignored, and an empty `scalings` slice returns the base
+/// metrics rounded. This is the pure core of `Face::weight_and_width`.
+fn scaled_weight_and_width(
+    base_weight: f64,
+    base_width: f64,
+    scalings: &[AxisScaling],
+) -> (u16, u16) {
+    let wght = ft_make_tag(b'w', b'g', b'h', b't');
+    let wdth = ft_make_tag(b'w', b'd', b't', b'h');
+
+    let mut weight = base_weight;
+    let mut width = base_width;
+
+    for axis in scalings {
+        let scale = axis.scale();
+        if axis.tag == wght {
+            weight *= scale;
+        }
+        if axis.tag == wdth {
+            width *= scale;
+        }
+    }
+
+    (weight.round() as u16, width.round() as u16)
+}
+
+#[cfg(test)]
+#[path = "ftwrap_tests.rs"]
+mod ftwrap_tests;

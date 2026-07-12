@@ -53,12 +53,9 @@ impl App {
             let mut p = parser.lock();
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
-        // Pre-create the redraw target Arc bound to the current parent
-        // window. If the pane later tears out, `tear_out_tab` swaps the
-        // inner Option to the child window's Arc<Window> so the VT
-        // thread re-targets without restarting.
-        let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
-            Arc::new(Mutex::new(self.main_window().cloned()));
+        // Pre-create the redraw target bound to the current parent window.
+        // Tear-out swaps the WindowId without restarting the pane's VT thread.
+        let redraw_target: Arc<Mutex<Option<WindowId>>> = Arc::new(Mutex::new(self.main_window_id));
         let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
             Arc::new(Mutex::new(Vec::new()));
         let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
@@ -91,6 +88,7 @@ impl App {
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
+                let redraw_proxy = self.event_loop_proxy.clone();
                 // fix: VT thread captures the same Arc that
                 // PaneState below will own. Pre-fix this read
                 // `self.main().cursor_visible` on WindowState, which
@@ -265,8 +263,15 @@ impl App {
                                         pending_bytes,
                                         pending_for,
                                     ) {
-                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.request_redraw();
+                                        if let Some(proxy) = redraw_proxy.as_ref() {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
                                         }
                                         let reason = if pending_bytes
                                             >= crate::app::PTY_REDRAW_FLUSH_BYTES
@@ -287,8 +292,15 @@ impl App {
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                                     // Quiescent: flush trailing redraw.
                                     if pending {
-                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.request_redraw();
+                                        if let Some(proxy) = redraw_proxy.as_ref() {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
                                         }
                                         // Quiescent-timeout flush only fires
                                         // after the channel has been silent

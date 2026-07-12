@@ -2,9 +2,12 @@
 name = "sonicterm-block-glyph"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal — vendored wezterm customglyph.rs (block / box-drawing / powerline / sextant geometry). MIT, attribution in LICENSE-WEZTERM."
 
 [lints]

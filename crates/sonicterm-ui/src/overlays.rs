@@ -550,6 +550,7 @@ impl ImePreeditLayout {
     /// pixels; `cell_w` and `cell_h` are the cell size. Returns `None`
     /// when there is no in-flight preedit text.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn compute(
         ime: &ImeState,
         cursor_x: f32,

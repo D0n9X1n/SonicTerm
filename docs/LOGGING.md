@@ -1,5 +1,7 @@
 # Logging
 
+Developer documentation: [Architecture](ARCHITECTURE.md) · [Modules](MODULES.md) · **Logging**
+
 SonicTerm writes rolling logs through `sonicterm-logging`.
 
 ## Paths
@@ -46,6 +48,37 @@ usable GPU (RDP / VM / VDI falls back to a CPU rasterizer) it also logs a
 `software-render degrade engaged` line showing the frame-cap change. If the
 terminal feels heavy on a remote/virtual machine, check these lines first — and
 see `[appearance].software_render_mode` in the Configuration wiki.
+
+The Windows software presenter retains full-surface repaint semantics. Its
+selection is controlled by `software_render_mode`: `auto` follows adapter
+software detection, `force` selects it, and `off` disables it. Dirty-rectangle
+messages in this path describe the area written into the software buffer; they
+do not opt the presenter into retained GPU rendering.
+
+## Redraw and window-lifecycle diagnostics
+
+PTY output is coalesced on VT workers, but native redraw requests are delivered
+as typed user events and executed on the winit event-loop thread. A worker must
+never call `Window::request_redraw()` while holding a pane redraw-target mutex.
+When a torn-out child is cleaned up, the app emits a line like:
+
+```text
+child window reaped after drag-merge; remaining children=0
+```
+
+Normal event-loop shutdown emits a `sonic_exit` line. A UI hang does not
+necessarily produce a Rust panic or crash dump; capture a macOS process sample
+before force-quitting:
+
+```sh
+sample <pid> 10 -file /tmp/sonicterm-hang.sample.txt
+grep -nE 'dispatch_sync_f_slow|redraw_target|__psynch_cvwait' \
+  /tmp/sonicterm-hang.sample.txt
+```
+
+For torn-out-window close reports, include whether multiple panes were producing
+continuous output, whether the original window remained responsive, and whether
+pane child processes were reaped after the child window closed.
 
 ## Bug report bundle
 

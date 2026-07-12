@@ -224,7 +224,7 @@ pub const MULTI_CLICK_MS: u128 = 400;
 /// streak restarts at 1. Pure so it is unit-testable without a real
 /// pointer event sequence.
 pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 {
-    if same_cell && within_interval && prev >= 1 && prev < 3 {
+    if same_cell && within_interval && (1..3).contains(&prev) {
         prev + 1
     } else {
         1
@@ -396,7 +396,7 @@ pub const WARM_WINDOW_POOL_MAX: usize = 5;
 #[must_use]
 pub fn warm_window_pool_target(configured: u8) -> usize {
     let requested = configured as usize;
-    requested.max(WARM_WINDOW_POOL_MIN_SPARE + 1).min(WARM_WINDOW_POOL_MAX)
+    requested.clamp(WARM_WINDOW_POOL_MIN_SPARE + 1, WARM_WINDOW_POOL_MAX)
 }
 
 #[must_use]
@@ -1102,6 +1102,10 @@ pub enum UserEvent {
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
     DragEnded,
+    /// A VT worker coalesced terminal output for this window. The event-loop
+    /// thread resolves the live window and requests its redraw; VT workers never
+    /// call native window APIs directly.
+    RequestRedraw(WindowId),
     /// P4 follow-up: a previously-deferred font fallback
     /// family finished loading in the
     /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`] background
@@ -1141,10 +1145,7 @@ pub enum UserEvent {
 /// `()`. Keeping the function shape and call site survives so the
 /// renderer's `Option<()>` slot stays populated and any future
 /// re-introduction of an async hook lands without breaking callers.
-#[must_use]
-pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) -> () {
-    ()
-}
+pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) {}
 
 mod child_window;
 pub use child_window::{
@@ -1162,6 +1163,7 @@ mod misc;
 pub mod os_drag;
 mod overlays;
 mod quit_hold;
+mod redraw_target;
 mod render_timing;
 mod scroll;
 pub mod scrollbar_input;
@@ -1193,15 +1195,14 @@ pub fn init_tracing_public() {
 /// Per-pane runtime state. The parser is shared with a per-pane VT thread
 /// that drains the pty out-channel; the pty handle owns the writer side.
 ///
-/// `redraw_target` is the window the pane's VT thread should request a
-/// redraw on. Wrapped in `Arc<Mutex<Option<Arc<Window>>>>` so the main
-/// thread can atomically swap it when the pane migrates to a torn-out
-/// child window — the VT thread reads the current target on each batch
-/// and notifies whichever window currently owns the pane.
+/// `redraw_target` identifies the window that owns the pane. The main thread
+/// swaps the `WindowId` when a pane migrates to a torn-out child; VT workers
+/// read the current id after coalescing and send a typed redraw event. Native
+/// window APIs remain confined to the winit event-loop thread.
 pub struct PaneState {
     pub parser: Arc<Mutex<Parser>>,
     pub pty: Option<PtyHandle>,
-    pub redraw_target: Arc<Mutex<Option<Arc<Window>>>>,
+    pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
     /// the visible viewport. `None` = "follow the live tail" (default).
     /// Currently set by the OSC 133 prompt-navigation actions. The render
@@ -4369,7 +4370,7 @@ impl App {
     /// so a test can assert the per-pane redraw indirection survives
     /// state transfers.
     #[doc(hidden)]
-    pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<Arc<Window>>>>> {
+    pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<WindowId>>>> {
         self.main()?.panes.get(&id).map(|p| p.redraw_target.clone())
     }
 
@@ -4659,7 +4660,6 @@ impl ApplicationHandler<UserEvent> for App {
         sonicterm_logging::record_loop_exiting();
     }
 }
-
 
 #[cfg(test)]
 #[path = "click_count_tests.rs"]

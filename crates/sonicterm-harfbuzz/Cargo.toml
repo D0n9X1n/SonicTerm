@@ -2,16 +2,23 @@
 authors.workspace = true
 name = "sonicterm-harfbuzz"
 version.workspace = true
+# Generated bindings retain Rust 2018 until regenerated as a tested set.
 edition = "2018"
+rust-version.workspace = true
 links = "harfbuzz"
 build = "build.rs"
 publish = false
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SonicTerm Terminal - HarfBuzz native binding backend"
 
+[lints]
+workspace = true
+
 [dependencies]
-freetype = { package = "sonicterm-freetype", path = "../sonicterm-freetype" }
+freetype.workspace = true
 
 [build-dependencies]
 cc.workspace = true

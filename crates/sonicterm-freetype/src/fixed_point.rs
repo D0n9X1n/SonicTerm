@@ -82,3 +82,7 @@ impl From<FT_Fixed> for FT_Pos {
         FT_Pos(src.to_bits())
     }
 }
+
+#[cfg(test)]
+#[path = "fixed_point_tests.rs"]
+mod fixed_point_tests;

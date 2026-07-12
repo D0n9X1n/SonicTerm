@@ -189,6 +189,7 @@ impl HarfbuzzShaper {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn do_shape(
         &self,
         mut font_idx: FallbackIdx,
@@ -555,7 +556,7 @@ impl FontShaper for HarfbuzzShaper {
         range: Option<Range<usize>>,
         presentation_width: Option<&PresentationWidth>,
     ) -> anyhow::Result<Vec<GlyphInfo>> {
-        let range = range.unwrap_or_else(|| 0..text.len());
+        let range = range.unwrap_or(0..text.len());
 
         log::trace!("shape {range:?} `{}` with presentation={presentation:?}", text.escape_debug());
         let start = std::time::Instant::now();
@@ -782,7 +783,7 @@ impl<'a> ClusterResolver<'a> {
             Some(pw) => {
                 let cell_idx = pw.byte_to_cell_idx(start);
                 let actual_start = self.start_by_cell_idx.get(&cell_idx)?;
-                self.map.get_mut(&actual_start)
+                self.map.get_mut(actual_start)
             }
             None => self.map.get_mut(&start),
         }
@@ -793,7 +794,7 @@ impl<'a> ClusterResolver<'a> {
             Some(pw) => {
                 let cell_idx = pw.byte_to_cell_idx(start);
                 let actual_start = self.start_by_cell_idx.get(&cell_idx)?;
-                self.map.get(&actual_start)
+                self.map.get(actual_start)
             }
             None => self.map.get(&start),
         }

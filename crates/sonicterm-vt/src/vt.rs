@@ -1060,13 +1060,11 @@ impl Perform for Performer {
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
-                'u' => {
+                'u' if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX => {
                     // Kitty keyboard protocol push: `CSI > flags u`. Push the
                     // requested flag set onto the stack. Cap the depth so a
                     // misbehaving app can't grow it without bound.
-                    if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
-                        self.kitty_kbd_flags.push(p0() as u8);
-                    }
+                    self.kitty_kbd_flags.push(p0() as u8);
                 }
                 _ => {}
             }

@@ -465,7 +465,10 @@ impl TabBarLayout {
         if !self.bar.contains(px, py) {
             return None;
         }
-        self.tabwidgets().iter().find_map(|t| t.hit(Point { x: px, y: py })).map(Into::into)
+        self.tabwidgets()
+            .iter()
+            .find(|tab| px >= tab.bg_rect.x && px < tab.bg_rect.x + tab.bg_rect.w)
+            .map(|tab| TabHit::Activate(tab.idx))
     }
 
     /// Whole-tab widgets for one-pass interaction/rendering decisions.
@@ -566,3 +569,7 @@ pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_ins
     let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
     titlebar_inset + bar
 }
+
+#[cfg(test)]
+#[path = "tabbar_view_tests.rs"]
+mod tabbar_view_tests;

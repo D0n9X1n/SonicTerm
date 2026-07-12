@@ -113,3 +113,7 @@ pub struct PaneInfo {
     /// Current PTY row count.
     pub rows: u16,
 }
+
+#[cfg(test)]
+#[path = "proto_tests.rs"]
+mod proto_tests;

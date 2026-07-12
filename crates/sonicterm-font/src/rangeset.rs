@@ -273,15 +273,15 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
 
         let mut first = None;
         if let Some(r) = self.ranges.get(idx) {
-            if intersects_range(r, range) || r.end == range.start {
+            if intersects_range(r, range) || r.end == range.start || range.end == r.start {
                 first = Some(idx);
             }
         }
         if let Some(r) = self.ranges.get(idx + 1) {
-            if intersects_range(r, range) || r.end == range.start {
-                if first.is_some() {
-                    return (first, Some(idx + 1));
-                }
+            if (intersects_range(r, range) || r.end == range.start || range.end == r.start)
+                && first.is_some()
+            {
+                return (first, Some(idx + 1));
             }
         }
         (first, None)
@@ -330,3 +330,7 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
         self.ranges.iter().flat_map(|r| num::range(r.start, r.end))
     }
 }
+
+#[cfg(test)]
+#[path = "rangeset_tests.rs"]
+mod rangeset_tests;

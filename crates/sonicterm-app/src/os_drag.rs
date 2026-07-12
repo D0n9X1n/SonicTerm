@@ -163,7 +163,7 @@ impl TabPayload {
             table[c as usize] = i as u8;
         }
         let bytes = b64.as_bytes();
-        if !bytes.len().is_multiple_of(4) {
+        if bytes.len() % 4 != 0 {
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4 * 3);

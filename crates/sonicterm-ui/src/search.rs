@@ -227,7 +227,7 @@ impl SearchState {
             .min_by_key(|(_, m)| {
                 let row_dist = m.row.abs_diff(row);
                 let col_dist =
-                    if row_dist == 0 { nearest_col_in_match(*m, col).abs_diff(col) } else { 0 };
+                    if row_dist == 0 { nearest_col_in_match(m, col).abs_diff(col) } else { 0 };
                 (row_dist, col_dist)
             })
             .map(|(i, _)| i);

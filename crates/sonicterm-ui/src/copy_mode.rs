@@ -5,7 +5,7 @@
 //! cursor plus an optional selection anchor.
 
 use sonicterm_cfg::url_scan::find_urls;
-use sonicterm_grid::grid::{CellFlags, Grid, Row};
+use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyMode {
@@ -30,11 +30,18 @@ impl QuickSelectState {
     pub fn from_grid(grid: &Grid) -> Self {
         let mut hints = Vec::new();
         for row_idx in grid.scrollback_len()..grid.scrollback_len() + grid.rows as usize {
-            let Some(line) = row_text(grid, row_idx) else { continue };
+            let Some(row) = visible_row(grid, row_idx) else { continue };
+            let line = row_text_of(row);
             for m in find_urls(&line) {
                 let Some(hint) = nth_hint(hints.len()) else { return Self { hints } };
-                let col_start = byte_to_char_col(&line, m.start);
-                let col_end = byte_to_char_col(&line, m.end).saturating_sub(1);
+                // `m.start`/`m.end` are byte offsets into `line`. The hint's
+                // `col_*` fields are consumed downstream as grid columns, so
+                // map through cell widths rather than a raw `char` count:
+                // wide cells span two columns and combining marks live in a
+                // lead cell's `extras()`, so a byte count and a grid column
+                // diverge whenever either precedes the URL.
+                let col_start = byte_to_grid_col(row, m.start);
+                let col_end = byte_to_grid_col(row, m.end.saturating_sub(1));
                 hints.push(QuickSelectHint { hint, row: row_idx, col_start, col_end, text: m.url });
             }
         }
@@ -257,10 +264,9 @@ fn last_non_blank_col(row: &Row) -> Option<usize> {
         (!cell.flags.contains(CellFlags::WIDE_CONT) && cell.ch != ' ').then_some(idx)
     })
 }
-fn row_text(grid: &Grid, row: usize) -> Option<String> {
-    let row = visible_row(grid, row)?;
+fn row_text_of(row: &Row) -> String {
     let mut text = String::with_capacity(row.len());
-    for cell in row {
+    for cell in row.iter() {
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             continue;
         }
@@ -269,15 +275,39 @@ fn row_text(grid: &Grid, row: usize) -> Option<String> {
             text.push_str(extras);
         }
     }
-    Some(text)
+    text
 }
 
 fn nth_hint(idx: usize) -> Option<char> {
     (idx < 26).then(|| (b'a' + idx as u8) as char)
 }
 
-fn byte_to_char_col(text: &str, byte: usize) -> usize {
-    text[..byte.min(text.len())].chars().count()
+/// Number of UTF-8 bytes a cell contributes to [`row_text_of`]: its lead
+/// `char` plus any combining marks stored in `extras()`.
+fn cell_text_len(cell: &Cell) -> usize {
+    cell.ch.len_utf8() + cell.extras().map_or(0, str::len)
+}
+
+/// Map a byte offset in [`row_text_of`]'s string back to the grid column of
+/// the cell that produced that byte. `WIDE_CONT` cells emit no text but still
+/// occupy a column, so this walks the row cell-by-cell keeping a byte cursor
+/// and a column cursor in lock-step. Offsets past the emitted text clamp to
+/// the last lead column, mirroring `saturating` movement elsewhere.
+fn byte_to_grid_col(row: &Row, byte: usize) -> usize {
+    let mut acc = 0usize;
+    let mut last_lead = 0usize;
+    for (col, cell) in row.iter().enumerate() {
+        if cell.flags.contains(CellFlags::WIDE_CONT) {
+            continue;
+        }
+        last_lead = col;
+        let next = acc + cell_text_len(cell);
+        if byte < next {
+            return col;
+        }
+        acc = next;
+    }
+    last_lead
 }
 
 #[cfg(test)]

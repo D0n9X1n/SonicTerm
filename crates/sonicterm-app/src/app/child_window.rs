@@ -1663,8 +1663,8 @@ impl App {
             let mut p = parser.lock();
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
-        let redraw_target: Arc<Mutex<Option<Arc<Window>>>> =
-            Arc::new(Mutex::new(Some(child_window)));
+        let redraw_target: Arc<Mutex<Option<WindowId>>> =
+            Arc::new(Mutex::new(Some(child_window.id())));
         // per-pane cursor_visible Arc.
         let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1690,6 +1690,7 @@ impl App {
                 let out_rx = pty.out_rx.clone();
                 let in_tx_reply = pty.in_tx.clone();
                 let redraw_target_thread = redraw_target.clone();
+                let redraw_proxy = self.event_loop_proxy.clone();
                 let cursor_visible = cursor_visible_pane.clone();
                 let kitty_flags = kitty_flags_pane.clone();
                 let app_cursor_keys = app_cursor_keys_pane.clone();
@@ -1756,8 +1757,15 @@ impl App {
                                         pending_bytes,
                                         pending_for,
                                     ) {
-                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.request_redraw();
+                                        if let Some(proxy) = redraw_proxy.as_ref() {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
                                         }
                                         let reason = if pending_bytes
                                             >= crate::app::PTY_REDRAW_FLUSH_BYTES
@@ -1777,8 +1785,15 @@ impl App {
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                                     if pending {
-                                        if let Some(w) = redraw_target_thread.lock().as_ref() {
-                                            w.request_redraw();
+                                        if let Some(proxy) = redraw_proxy.as_ref() {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
                                         }
                                         redraw_probe.note_redraw(
                                             crate::app::PTY_REDRAW_QUIESCENT,

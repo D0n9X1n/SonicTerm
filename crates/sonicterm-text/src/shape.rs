@@ -133,3 +133,7 @@ impl RunStyle {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shape_tests.rs"]
+mod shape_tests;

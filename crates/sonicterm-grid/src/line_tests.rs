@@ -1,0 +1,489 @@
+//! Behavior tests for [`Line`] cluster/flat storage.
+//!
+//! Coverage map:
+//! * cluster ⇄ flat range iteration and random access parity,
+//! * forward / backward (`DoubleEndedIterator`) walks and `Hash` parity
+//!   across storage forms,
+//! * smart same-cell no-op vs changed-cell degrade to Flat,
+//! * resize / truncate / compression storage transitions,
+//! * wide / wide-continuation / extras / hyperlink metadata fidelity through
+//!   compression and degradation.
+
+use super::*;
+use sonicterm_types::cell::{CellFlags, Color};
+use sonicterm_types::HyperlinkId;
+
+// --- helpers --------------------------------------------------------------
+
+fn blank() -> Cell {
+    Cell::default()
+}
+
+fn ch(c: char) -> Cell {
+    Cell::plain(c, Color::Default, Color::Default, CellFlags::empty())
+}
+
+fn ch_bold(c: char) -> Cell {
+    Cell::plain(c, Color::Default, Color::Default, CellFlags::BOLD)
+}
+
+/// A cell carrying every "fat"/flag channel we want to prove survives
+/// storage transitions: wide flag, truecolor fg, indexed bg, a hyperlink id,
+/// and trailing zero-width extras.
+fn rich(c: char) -> Cell {
+    let mut cell = Cell::plain(c, Color::Rgb(10, 20, 30), Color::Indexed(4), CellFlags::WIDE);
+    cell.set_hyperlink(Some(HyperlinkId(7)));
+    cell.set_extras(Some("\u{0301}".to_string().into_boxed_str())); // combining acute
+    cell
+}
+
+fn hash_of(line: &Line) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    line.hash(&mut h);
+    h.finish()
+}
+
+/// Build a Flat and a content-equal Cluster line from the same cell run list.
+fn flat_and_cluster(runs: &[(Cell, usize)]) -> (Line, Line) {
+    let mut flat_cells = Vec::new();
+    let mut clusters = Vec::new();
+    for (cell, count) in runs {
+        for _ in 0..*count {
+            flat_cells.push(cell.clone());
+        }
+        clusters.push(Cluster { cell: cell.clone(), count: *count });
+    }
+    (Line::from_flat(flat_cells), Line::from_clusters(clusters))
+}
+
+// --- cluster/flat range iteration + random access parity ------------------
+
+#[test]
+fn iteration_and_random_access_agree_across_forms() {
+    let (flat, clustered) =
+        flat_and_cluster(&[(blank(), 10), (ch('x'), 1), (blank(), 5), (ch('x'), 2), (blank(), 50)]);
+    assert!(!flat.is_clustered());
+    assert!(clustered.is_clustered());
+    assert_eq!(flat.len(), clustered.len());
+
+    let flat_iter: Vec<_> = flat.iter().cloned().collect();
+    let clust_iter: Vec<_> = clustered.iter_storage().cloned().collect();
+    assert_eq!(flat_iter, clust_iter);
+
+    for i in 0..flat.len() {
+        assert_eq!(flat.get(i), clustered.get(i), "mismatch at {i}");
+    }
+}
+
+#[test]
+fn get_range_matches_across_forms_and_clamps() {
+    let (flat, clustered) = flat_and_cluster(&[(ch('a'), 3), (ch('b'), 4), (ch('c'), 3)]);
+
+    // Interior window straddling cluster boundaries.
+    let f: Vec<_> = flat.get_range(2, 8).cloned().collect();
+    let c: Vec<_> = clustered.get_range(2, 8).cloned().collect();
+    assert_eq!(f, c);
+    assert_eq!(f, vec![ch('a'), ch('b'), ch('b'), ch('b'), ch('b'), ch('c')]);
+
+    // end clamps to len(); start==end and reversed ranges are empty.
+    assert_eq!(clustered.get_range(8, 999).count(), 2);
+    assert_eq!(clustered.get_range(4, 4).count(), 0);
+    assert_eq!(clustered.get_range(6, 2).count(), 0);
+    assert_eq!(flat.get_range(6, 2).count(), 0);
+}
+
+#[test]
+fn get_range_window_inside_single_cluster() {
+    let clustered = Line::from_clusters(vec![Cluster { cell: ch('z'), count: 20 }]);
+    let got: Vec<_> = clustered.get_range(5, 9).cloned().collect();
+    assert_eq!(got, vec![ch('z'); 4]);
+}
+
+#[test]
+fn storage_get_range_owned_matches_reference_range() {
+    // `LineStorage::get_range` yields owned cells over a u16 range; prove it
+    // agrees with the reference-yielding `Line::get_range`.
+    let (_flat, clustered) = flat_and_cluster(&[(ch('a'), 3), (ch('b'), 5)]);
+    let owned: Vec<Cell> = clustered.storage().get_range(2, 6).collect();
+    let borrowed: Vec<Cell> = clustered.get_range(2, 6).cloned().collect();
+    assert_eq!(owned, borrowed);
+    assert_eq!(owned, vec![ch('a'), ch('b'), ch('b'), ch('b')]);
+}
+
+// --- forward / backward iterator + hash parity ----------------------------
+
+#[test]
+fn reverse_iteration_agrees_across_forms() {
+    let (flat, clustered) = flat_and_cluster(&[(ch('a'), 3), (ch('b'), 1), (ch('c'), 4)]);
+    let fwd: Vec<_> = flat.iter().cloned().collect();
+
+    let flat_rev: Vec<_> = flat.iter().rev().cloned().collect();
+    let clust_rev: Vec<_> = clustered.iter().rev().cloned().collect();
+    assert_eq!(flat_rev, clust_rev);
+
+    let mut expect_rev = fwd.clone();
+    expect_rev.reverse();
+    assert_eq!(clust_rev, expect_rev);
+}
+
+#[test]
+fn double_ended_meet_in_middle_on_cluster() {
+    // Alternate popping from front and back; the two ends must meet without
+    // yielding a cell twice or skipping one.
+    let clustered = Line::from_clusters(vec![
+        Cluster { cell: ch('a'), count: 2 },
+        Cluster { cell: ch('b'), count: 3 },
+        Cluster { cell: ch('c'), count: 2 },
+    ]);
+    let mut it = clustered.iter();
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    while let Some(c) = it.next() {
+        front.push(c.clone());
+        if let Some(c) = it.next_back() {
+            back.push(c.clone());
+        }
+    }
+    back.reverse();
+    front.extend(back);
+    assert_eq!(front, clustered.to_vec());
+    assert_eq!(front.len(), 7);
+}
+
+#[test]
+fn exact_size_hint_tracks_remaining() {
+    let clustered = Line::from_clusters(vec![
+        Cluster { cell: ch('a'), count: 4 },
+        Cluster { cell: ch('b'), count: 2 },
+    ]);
+    let mut it = clustered.iter();
+    assert_eq!(it.len(), 6);
+    assert_eq!(it.size_hint(), (6, Some(6)));
+    it.next();
+    it.next_back();
+    assert_eq!(it.len(), 4);
+    assert_eq!(it.size_hint(), (4, Some(4)));
+}
+
+#[test]
+fn hash_parity_between_flat_and_equal_cluster() {
+    let (flat, clustered) = flat_and_cluster(&[(blank(), 10), (ch('x'), 2), (blank(), 8)]);
+    assert_eq!(
+        hash_of(&flat),
+        hash_of(&clustered),
+        "cluster and content-equal flat line must hash identically"
+    );
+}
+
+#[test]
+fn hash_differs_on_different_content() {
+    let a = Line::from_flat(vec![ch('a'), ch('b'), ch('c')]);
+    let b = Line::from_flat(vec![ch('a'), ch('z'), ch('c')]);
+    assert_ne!(hash_of(&a), hash_of(&b));
+}
+
+// --- smart same-cell no-op vs changed-cell degrade ------------------------
+
+fn clustered_uniform(cell: Cell, len: usize) -> Line {
+    let mut line = Line::from_flat(vec![cell; len]);
+    assert!(line.try_compress(), "uniform line must compress");
+    assert!(line.is_clustered());
+    line
+}
+
+#[test]
+fn set_same_cell_is_noop_and_stays_cluster() {
+    let mut line = clustered_uniform(blank(), 80);
+    assert!(line.set(10, blank()), "in-range write returns true");
+    assert!(line.is_clustered(), "same-cell write must NOT degrade");
+    assert_eq!(line.cluster_representative(), Some(blank()));
+}
+
+#[test]
+fn set_different_char_degrades_to_flat() {
+    let mut line = clustered_uniform(blank(), 80);
+    assert!(line.set(5, ch('X')));
+    assert!(!line.is_clustered(), "char mismatch must degrade");
+    assert_eq!(line.get(5), Some(&ch('X')));
+    assert_eq!(line.get(4), Some(&blank()));
+    assert_eq!(line.get(6), Some(&blank()));
+    assert_eq!(line.len(), 80);
+}
+
+#[test]
+fn set_different_attrs_degrades_to_flat() {
+    let mut line = clustered_uniform(ch(' '), 40);
+    assert!(line.set(10, ch_bold(' ')));
+    assert!(!line.is_clustered(), "attr mismatch must degrade");
+    assert_eq!(line.get(10).map(|c| c.flags), Some(CellFlags::BOLD));
+    assert_eq!(line.len(), 40);
+}
+
+#[test]
+fn set_out_of_range_returns_false_and_preserves_storage() {
+    let mut line = clustered_uniform(blank(), 8);
+    assert!(!line.set(100, ch('Z')));
+    assert!(line.is_clustered(), "rejected write must not degrade");
+}
+
+#[test]
+fn multi_cluster_set_has_no_representative_and_degrades() {
+    // A line with >1 cluster has no single representative, so even a write
+    // equal to the target cell degrades (the smart path only covers uniform).
+    let mut line = Line::from_clusters(vec![
+        Cluster { cell: ch('a'), count: 4 },
+        Cluster { cell: ch('b'), count: 4 },
+    ]);
+    assert_eq!(line.cluster_representative(), None);
+    assert!(line.set(0, ch('a')));
+    assert!(!line.is_clustered());
+    assert_eq!(line.get(0), Some(&ch('a')));
+    assert_eq!(line.get(4), Some(&ch('b')));
+}
+
+#[test]
+fn fill_range_matching_stays_cluster_mismatch_degrades() {
+    let mut keep = clustered_uniform(blank(), 80);
+    keep.fill_range(10, 50, blank());
+    assert!(keep.is_clustered(), "matching fill must NOT degrade");
+
+    let mut degrade = clustered_uniform(blank(), 80);
+    degrade.fill_range(10, 50, ch_bold(' '));
+    assert!(!degrade.is_clustered());
+    for i in 0..10 {
+        assert_eq!(degrade.get(i), Some(&blank()), "prefix {i}");
+    }
+    for i in 10..50 {
+        assert_eq!(degrade.get(i).map(|c| c.flags), Some(CellFlags::BOLD), "filled {i}");
+    }
+    for i in 50..80 {
+        assert_eq!(degrade.get(i), Some(&blank()), "suffix {i}");
+    }
+}
+
+#[test]
+fn fill_range_empty_or_reversed_is_noop() {
+    let mut line = clustered_uniform(blank(), 40);
+    line.fill_range(5, 5, ch('X'));
+    line.fill_range(10, 3, ch('X'));
+    assert!(line.is_clustered(), "no-op fills must not degrade");
+    assert_eq!(line.len(), 40);
+}
+
+// --- resize / truncate / compression transitions --------------------------
+
+#[test]
+fn resize_grow_matching_fill_stays_single_cluster() {
+    let mut l = Line::from_clusters(vec![Cluster { cell: blank(), count: 80 }]);
+    l.resize(100, blank());
+    assert!(l.is_clustered());
+    assert_eq!(l.len(), 100);
+    match l.storage() {
+        LineStorage::Cluster(cs) => {
+            assert_eq!(cs.len(), 1, "matching fill merges into one cluster");
+            assert_eq!(cs[0].count, 100);
+        }
+        _ => panic!("expected cluster"),
+    }
+}
+
+#[test]
+fn resize_grow_mismatched_fill_appends_second_cluster() {
+    let mut red = blank();
+    red.bg = Color::Indexed(1);
+    let mut l = Line::from_clusters(vec![Cluster { cell: red.clone(), count: 80 }]);
+    l.resize(100, blank());
+    assert!(l.is_clustered(), "stays clustered as multi-cluster");
+    match l.storage() {
+        LineStorage::Cluster(cs) => {
+            assert_eq!(cs.len(), 2);
+            assert_eq!(cs[0], Cluster { cell: red, count: 80 });
+            assert_eq!(cs[1], Cluster { cell: blank(), count: 20 });
+        }
+        _ => panic!("expected cluster"),
+    }
+}
+
+#[test]
+fn resize_shrink_delegates_to_truncate() {
+    let mut l = Line::from_flat(vec![ch('a'), ch('b'), ch('c'), ch('d'), ch('e')]);
+    l.resize(2, blank());
+    assert_eq!(l.len(), 2);
+    assert_eq!(l.to_vec(), vec![ch('a'), ch('b')]);
+}
+
+#[test]
+fn truncate_within_single_cluster_preserves_form() {
+    let mut l = Line::from_clusters(vec![Cluster { cell: blank(), count: 80 }]);
+    l.truncate(50);
+    assert!(l.is_clustered());
+    match l.storage() {
+        LineStorage::Cluster(cs) => {
+            assert_eq!(cs.len(), 1);
+            assert_eq!(cs[0].count, 50);
+        }
+        _ => panic!("expected cluster"),
+    }
+}
+
+#[test]
+fn truncate_across_clusters_and_to_zero() {
+    let mut red = blank();
+    red.bg = Color::Indexed(1);
+    let mut l = Line::from_clusters(vec![
+        Cluster { cell: red.clone(), count: 30 },
+        Cluster { cell: blank(), count: 50 },
+    ]);
+    l.truncate(40); // lands inside the second cluster
+    match l.storage() {
+        LineStorage::Cluster(cs) => {
+            assert_eq!(cs.len(), 2);
+            assert_eq!(cs[0].count, 30);
+            assert_eq!(cs[1].count, 10);
+        }
+        _ => panic!("expected cluster"),
+    }
+    l.truncate(20); // drops the second cluster entirely
+    match l.storage() {
+        LineStorage::Cluster(cs) => {
+            assert_eq!(cs.len(), 1);
+            assert_eq!(cs[0], Cluster { cell: red, count: 20 });
+        }
+        _ => panic!("expected cluster"),
+    }
+    l.truncate(0); // empties to Flat
+    assert!(l.is_empty());
+    assert!(!l.is_clustered());
+}
+
+#[test]
+fn truncate_noop_when_new_len_ge_current() {
+    let mut l = Line::from_flat(vec![ch('x'), ch('y')]);
+    l.truncate(10);
+    assert_eq!(l.len(), 2);
+}
+
+#[test]
+fn compact_if_beneficial_only_when_saving_is_large() {
+    // 200 identical cells: cluster is dramatically smaller -> compacts.
+    let mut uniform = Line::from_flat(vec![blank(); 200]);
+    assert!(uniform.compact_if_beneficial());
+    assert!(uniform.is_clustered());
+    assert_eq!(uniform.len(), 200);
+
+    // Already clustered -> no-op.
+    assert!(!uniform.compact_if_beneficial());
+
+    // Two alternating cells: cluster count ~= flat count, saving < 2x -> stays flat.
+    let mut alternating = Line::from_flat((0..40).map(|i| ch((b'a' + (i % 2)) as char)).collect());
+    assert!(!alternating.compact_if_beneficial());
+    assert!(!alternating.is_clustered());
+
+    // Empty flat -> no-op.
+    let mut empty = Line::from_flat(Vec::new());
+    assert!(!empty.compact_if_beneficial());
+}
+
+#[test]
+fn try_compress_requires_full_uniformity() {
+    let mut uniform = Line::from_flat(vec![blank(); 10]);
+    assert!(uniform.try_compress());
+    assert!(uniform.is_clustered());
+
+    // Non-uniform stays flat.
+    let mut mixed = Line::from_flat(vec![blank(), ch('x'), blank()]);
+    assert!(!mixed.try_compress());
+    assert!(!mixed.is_clustered());
+
+    // Already cluster and empty flat are both no-ops.
+    assert!(!uniform.try_compress());
+    let mut empty = Line::from_flat(Vec::new());
+    assert!(!empty.try_compress());
+}
+
+#[test]
+fn iter_mut_and_as_vec_mut_force_flat() {
+    let mut line = clustered_uniform(ch('a'), 3);
+    for slot in line.iter_mut() {
+        slot.ch = 'Z';
+    }
+    assert!(!line.is_clustered(), "iter_mut degrades to Flat");
+    assert_eq!(line.to_vec(), vec![ch('Z'), ch('Z'), ch('Z')]);
+
+    let mut line2 = clustered_uniform(ch('a'), 4);
+    line2.as_vec_mut().push(ch('b'));
+    assert!(!line2.is_clustered());
+    assert_eq!(line2.len(), 5);
+}
+
+// --- metadata fidelity: wide / wide-cont / extras / hyperlink -------------
+
+#[test]
+fn rich_metadata_survives_compression_and_access() {
+    // A uniform run of fully-decorated cells compresses; every access form
+    // must reproduce the wide flag, colors, hyperlink id, and extras.
+    let mut line = Line::from_flat(vec![rich('A'); 20]);
+    assert!(line.try_compress(), "uniform rich run compresses");
+    assert!(line.is_clustered());
+
+    let via_get = line.get(0).expect("cell 0");
+    assert_eq!(via_get, &rich('A'));
+    assert!(via_get.flags.contains(CellFlags::WIDE));
+    assert_eq!(via_get.hyperlink(), Some(HyperlinkId(7)));
+    assert_eq!(via_get.extras(), Some("\u{0301}"));
+    assert_eq!(via_get.fg, Color::Rgb(10, 20, 30));
+    assert_eq!(via_get.bg, Color::Indexed(4));
+
+    // Every iterated cell is byte-identical to the representative.
+    assert!(line.iter().all(|c| c == &rich('A')));
+    // Range access through the cluster preserves the fat channels too.
+    assert!(line.get_range(3, 7).all(|c| c.hyperlink() == Some(HyperlinkId(7))));
+}
+
+#[test]
+fn metadata_survives_degradation_from_cluster() {
+    let mut line = Line::from_flat(vec![rich('A'); 10]);
+    assert!(line.try_compress());
+    // Punch a different cell in the middle: storage degrades, but the
+    // untouched neighbours keep their full metadata.
+    assert!(line.set(5, ch('x')));
+    assert!(!line.is_clustered());
+    assert_eq!(line.get(5), Some(&ch('x')));
+    for i in (0..10).filter(|&i| i != 5) {
+        let c = line.get(i).expect("neighbour present");
+        assert_eq!(c, &rich('A'), "neighbour {i} lost metadata");
+        assert_eq!(c.extras(), Some("\u{0301}"));
+    }
+}
+
+#[test]
+fn wide_lead_and_continuation_pair_roundtrip() {
+    // Model a wide glyph as lead (WIDE) + continuation (WIDE_CONT): the pair
+    // must survive flat storage, cluster access, and hash parity.
+    let lead = Cell::plain('中', Color::Default, Color::Default, CellFlags::WIDE);
+    let cont = Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT);
+    let (flat, clustered) = flat_and_cluster(&[(lead.clone(), 1), (cont.clone(), 1), (blank(), 6)]);
+
+    assert_eq!(flat.get(0), clustered.get(0));
+    assert!(clustered.get(0).unwrap().flags.contains(CellFlags::WIDE));
+    assert!(clustered.get(1).unwrap().flags.contains(CellFlags::WIDE_CONT));
+    assert_eq!(flat.to_vec(), clustered.to_vec());
+    assert_eq!(hash_of(&flat), hash_of(&clustered));
+}
+
+// --- basic constructors / index surface -----------------------------------
+
+#[test]
+fn index_ops_and_len_reflect_storage() {
+    let mut line = Line::from_flat(vec![ch('a'), ch('b'), ch('c')]);
+    assert_eq!(line[1], ch('b'));
+    line[1] = ch('Z');
+    assert_eq!(line[1], ch('Z'));
+    assert!(!line.is_clustered(), "IndexMut degrades to Flat");
+
+    let filled = Line::flat_filled(5, blank());
+    assert_eq!(filled.len(), 5);
+    assert!(!filled.is_empty());
+    assert!(Line::from_flat(Vec::new()).is_empty());
+}

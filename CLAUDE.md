@@ -6,16 +6,26 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 
 ## Read first
 
-- `docs/ARCHITECTURE.md` — architecture and data flow.
-- `docs/MODULES.md` — crate map.
-- `docs/LOGGING.md` — logs and diagnostics.
-- `docs/RELEASE.md` — tag-driven release process.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture, invariants, verification, and release boundary.
+- [`docs/MODULES.md`](docs/MODULES.md) — crate map.
+- [`docs/LOGGING.md`](docs/LOGGING.md) — logs, diagnostics, and hang investigation.
 - `wiki/` — bilingual user-facing usage/config/keybinding/log/theme docs.
 
 When auditing docs for release blockers, typos, renamed paths, or user-facing
 terminology, include `wiki/` alongside README and `docs/`; the wiki is part of
 the monitored documentation surface. Editing `wiki/` here does **not** change
 the live GitHub Wiki — see [Wiki](#wiki) for the two-repo publish step.
+
+**Canonical documentation rule:** the tracked `docs/` surface is
+`ARCHITECTURE.md`, `LOGGING.md`, and `MODULES.md`. Keep durable architecture,
+invariants, verification, and release-boundary information in
+`docs/ARCHITECTURE.md`; keep operational logging, diagnostics, and
+hang-investigation guidance in `docs/LOGGING.md`; keep `docs/MODULES.md` limited
+to the crate map. Do not track standalone implementation specs, plans, review
+audits, version-audit documents, or a separate release document in `docs/`.
+`docs/specs/`, `docs/plans/`, and `docs/reviews/` are ignored local working
+folders. Update README/wiki only when user-facing behavior changes; publishing
+the live wiki remains a separate owner-approved action.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
@@ -70,17 +80,15 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
-- **Unit tests live in a `<file>_tests.rs` sibling, never inline.** A module's
-  unit tests go in a flat sibling next to the source file, named
-  `<file>_tests.rs`, declared from the source with
-  `#[cfg(test)] #[path = "<file>_tests.rs"] mod <file>_tests;`. For example,
-  `keymap.rs` → `keymap_tests.rs` (`mod keymap_tests;`), and a crate root's
-  own smoke/surface checks live in `lib_tests.rs` (or `main_tests.rs` for a
-  binary crate). No `#[cfg(test)] mod tests { … }` blocks inside source files,
-  and no `<module>/tests.rs` subdirectories. Tests stay in-crate so they keep
-  private-item access via `use super::*;`, and `cargo test --lib` finds them.
-  Rust has no filename-based auto-discovery — the one-line `mod` declaration is
-  required per test file.
+- **Unit tests use the exact flat `file_tests.rs` sibling pattern, never inline.**
+  For every source file `foo.rs`, put its unit tests beside it in
+  `foo_tests.rs` and declare them from `foo.rs` with
+  `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;`. Crate-root tests use
+  `lib_tests.rs` (or `main_tests.rs` for a binary) with the same declaration
+  pattern. Do not use `#[cfg(test)] mod tests { … }`, a generic `tests.rs`, or a
+  `<module>/tests.rs` subdirectory. Tests stay in-crate for private-item access
+  via `use super::*;`; Rust does not discover sibling files automatically, so
+  every `file_tests.rs` requires its source-module declaration.
 - **`tests/` is for cross-crate integration only.** Reserve each crate's
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial

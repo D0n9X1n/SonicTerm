@@ -764,7 +764,8 @@ impl App {
         };
         // P4 follow-up wire (NewWindow path).
         if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_async_loader(super::build_async_fallback_loader_for_proxy(proxy));
+            super::build_async_fallback_loader_for_proxy(proxy);
+            renderer.set_async_loader(());
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);

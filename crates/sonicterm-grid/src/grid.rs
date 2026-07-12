@@ -542,7 +542,8 @@ impl Grid {
         }
         loop {
             let old = (lo, hi);
-            for c in lo..hi {
+            let scan = lo..hi;
+            for c in scan {
                 let cell = &self.visible[row][c];
                 if cell.flags.contains(CellFlags::WIDE) {
                     hi = hi.max((c + 2).min(cols));

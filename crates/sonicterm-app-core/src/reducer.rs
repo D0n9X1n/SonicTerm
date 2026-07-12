@@ -605,3 +605,7 @@ pub(crate) fn reduce_leaf(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "reducer_tests.rs"]
+mod reducer_tests;

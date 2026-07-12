@@ -183,11 +183,18 @@ impl Theme {
     /// 2. user config dir: `<config-dir>/themes/<theme>.toml`,
     /// 3. bundled assets: `<asset-dir>/themes/<theme>.toml`.
     pub fn resolve_path(theme: &str, asset_dir: &Path) -> PathBuf {
+        Self::resolve_path_with(theme, asset_dir, crate::config::default_config_dir().as_deref())
+    }
+
+    /// Resolution core shared by [`Self::resolve_path`], with the user config
+    /// directory injected so the direct-path/user/bundled branches can be
+    /// exercised without touching real `$HOME` state.
+    fn resolve_path_with(theme: &str, asset_dir: &Path, user_config_dir: Option<&Path>) -> PathBuf {
         let raw = Path::new(theme);
         if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
             return raw.to_path_buf();
         }
-        if let Some(user) = crate::config::default_config_dir()
+        if let Some(user) = user_config_dir
             .map(|dir| dir.join("themes").join(format!("{theme}.toml")))
             .filter(|path| path.exists())
         {
@@ -312,3 +319,7 @@ fn canonical_theme_name(name: &str) -> String {
 
     out
 }
+
+#[cfg(test)]
+#[path = "theme_tests.rs"]
+mod theme_tests;

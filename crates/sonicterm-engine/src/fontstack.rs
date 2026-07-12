@@ -60,7 +60,7 @@ pub struct CellMetricsPx {
 
 /// Holds a single wezterm `FontConfiguration` keyed to a logical DPI
 /// + scale. Multiple sonicterm panes share one stack — sonicterm-font
-/// itself caches per-font face state internally.
+///   itself caches per-font face state internally.
 #[derive(Clone)]
 pub struct FontStack {
     fc: Rc<FontConfiguration>,
@@ -116,13 +116,7 @@ impl FontStack {
     /// Shape a text run using SonicTerm's current WezTerm font stack policy.
     pub fn shape_text(&self, text: &str) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
         let font = self.fc.default_font()?;
-        Ok(font.blocking_shape(
-            text,
-            Some(Presentation::Text),
-            Direction::LeftToRight,
-            None,
-            None,
-        )?)
+        font.blocking_shape(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
     }
 
     /// Return cell metrics for the default font, projected into the
