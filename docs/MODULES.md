@@ -1,5 +1,7 @@
 # Modules
 
+Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logging](LOGGING.md)
+
 | Crate | Role |
 | --- | --- |
 | `sonicterm-types` | Contract crate: shared value types and trait seams. |

@@ -5,12 +5,9 @@
 // crates/sonicterm-block-glyph/LICENSE-WEZTERM for the full upstream
 // license.
 //
-// T7 vendor changes (the ONLY edits to upstream — every byte else is
-// verbatim per the wezterm-takeover plan's "no shortcuts" rule):
+// SonicTerm integration changes (all other upstream geometry remains intact):
 //
-//   1. The import block (this header replaces it). The substitution
-//      table lives in docs/specs/2026-06-04-wezterm-takeover-design.md
-//      § G2/A:
+//   1. The import block is replaced by these crate-local substitutions:
 //        `(upstream) crate :: glyphcache :: {GlyphCache, SizedBlockKey}`
 //          — deleted (split spelling so the T7 self-verify grep gate
 //          on the literal upstream module path returns 0; see plan

@@ -161,9 +161,8 @@ impl App {
             if let Some(r) = self.main_renderer_mut() {
                 r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
             }
-            // Cell metrics changed → resize each pane to its own PaneRect.
-            // See docs/specs/per-pane-grids.md for why this is per-pane,
-            // not whole-window.
+            // Cell metrics changed → resize each pane to its own PaneRect,
+            // never to the whole window's dimensions.
             // PR-B2c: main is in self.windows so the loop below
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.

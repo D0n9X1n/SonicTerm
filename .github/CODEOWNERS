@@ -4,15 +4,9 @@
 # Documentation: PM-owned (no agent-author confusion)
 /CLAUDE.md                              @D0n9X1n
 /docs/                                  @D0n9X1n
-/docs/ROADMAP.md                        @D0n9X1n
-/docs/HOT_FILES.md                      @D0n9X1n
-/docs/CONTRACTS.md                      @D0n9X1n
-/CHANGELOG.md                           @D0n9X1n
 
 # Contract crate — every change ripples; PM reviews
 /crates/sonicterm-types/                @D0n9X1n
-/crates/sonicterm-types/api-snapshot.txt @D0n9X1n
-/landmines.toml                         @D0n9X1n
 
 # macOS-only paths — mac-PM owns
 /crates/sonicterm-mac/                  @D0n9X1n-dev-mac

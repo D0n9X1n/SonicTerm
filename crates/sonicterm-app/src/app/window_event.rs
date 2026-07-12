@@ -857,10 +857,8 @@ impl App {
                     rows: rows_u16,
                 });
                 // Per-pane sizing: each pane's grid + PTY is resized to
-                // its own PaneRect within the (new) window content area,
-                // not the whole window's (cols, rows). Pre-fix, inactive
-                // panes thought they were full-window-wide and TUIs drew
-                // past their visible border. See docs/specs/per-pane-grids.md.
+                // its own PaneRect within the new window content area,
+                // never to the whole window's dimensions.
                 let rects = self.compute_active_pane_rects();
                 let metrics = self.main_renderer().map(|r| {
                     (

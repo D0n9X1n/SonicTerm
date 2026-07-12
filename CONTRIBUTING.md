@@ -18,7 +18,9 @@ PRs are all welcome.
    cargo run -p sonicterm-windows    # Windows
    ```
 
-Crates live under `crates/`.
+Crates live under `crates/`. Before changing boundaries or diagnostics, read
+[Architecture](docs/ARCHITECTURE.md), [Modules](docs/MODULES.md), and
+[Logging](docs/LOGGING.md).
 
 ## Before opening a PR
 
