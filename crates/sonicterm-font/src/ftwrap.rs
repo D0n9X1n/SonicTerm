@@ -1373,7 +1373,11 @@ impl FreeTypeStream {
                 0
             }
             StreamBacking::File(file) => {
-                if let Err(err) = file.seek(SeekFrom::Start(offset)) {
+                #[cfg(windows)]
+                let seek_offset = u64::from(offset);
+                #[cfg(not(windows))]
+                let seek_offset = offset;
+                if let Err(err) = file.seek(SeekFrom::Start(seek_offset)) {
                     log::error!("failed to seek {} to offset {}: {:#}", myself.name, offset, err);
                     return 0;
                 }

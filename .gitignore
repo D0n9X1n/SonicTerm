@@ -28,9 +28,7 @@ Thumbs.db
 crash-reports/
 /rust_out
 
-# Local dev docs stay untracked except named release evidence.
-docs/specs/*
-!docs/specs/2026-07-11-v1.1.0-audit-design.md
+# Local implementation and review drafts stay untracked.
+docs/specs/
 docs/plans/
-docs/reviews/*
-!docs/reviews/2026-07-11-v1.1.0-architecture-and-tests.md
+docs/reviews/
