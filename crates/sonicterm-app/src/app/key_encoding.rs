@@ -20,18 +20,27 @@ pub(super) fn encode_key(
     encode_logical(&event.logical_key, mods, kitty_flags, app_cursor)
 }
 
-/// Encode an unmodified cursor / Home / End key, honoring DECCKM (?1,
-/// application cursor keys). When DECCKM is active the introducer is SS3
-/// (`ESC O x`) instead of CSI (`ESC [ x]`) — this is what terminfo's
-/// `kcuu1`/`khome`/`kend` resolve to under `smkx`, so readline, zsh ZLE,
-/// vim, less, etc. only recognize Home/End/arrows when we send the matching
-/// form. A held modifier keeps the legacy CSI form (the full xterm
-/// `CSI 1 ; <mod> x` modified-cursor encoding is intentionally out of scope).
+/// Encode a cursor / Home / End key, honoring DECCKM (?1, application cursor
+/// keys) for the unmodified chord. Modified chords use xterm's parameterized
+/// CSI form regardless of DECCKM so terminal applications retain every held
+/// modifier.
 fn cursor_seq(app_cursor: bool, mods: ModifiersState, final_byte: u8) -> Vec<u8> {
-    let any_mod =
-        mods.shift_key() || mods.control_key() || mods.alt_key() || mods.super_key();
-    let introducer = if app_cursor && !any_mod { b'O' } else { b'[' };
+    if let Some(modifier) = xterm_modifier_param(mods) {
+        let mut out = format!("\x1b[1;{modifier}").into_bytes();
+        out.push(final_byte);
+        return out;
+    }
+
+    let introducer = if app_cursor { b'O' } else { b'[' };
     vec![0x1b, introducer, final_byte]
+}
+
+/// Encode a PageUp / PageDown / Delete key using its xterm CSI tilde code.
+fn tilde_seq(code: u8, mods: ModifiersState) -> Vec<u8> {
+    match xterm_modifier_param(mods) {
+        Some(modifier) => format!("\x1b[{code};{modifier}~").into_bytes(),
+        None => format!("\x1b[{code}~").into_bytes(),
+    }
 }
 
 /// Encode a logical key + modifiers into the bytes to send to the PTY.
@@ -77,9 +86,9 @@ pub fn encode_logical(
             NamedKey::ArrowLeft => cursor_seq(app_cursor, mods, b'D'),
             NamedKey::Home => cursor_seq(app_cursor, mods, b'H'),
             NamedKey::End => cursor_seq(app_cursor, mods, b'F'),
-            NamedKey::PageUp => b"\x1b[5~".to_vec(),
-            NamedKey::PageDown => b"\x1b[6~".to_vec(),
-            NamedKey::Delete => b"\x1b[3~".to_vec(),
+            NamedKey::PageUp => tilde_seq(5, mods),
+            NamedKey::PageDown => tilde_seq(6, mods),
+            NamedKey::Delete => tilde_seq(3, mods),
             NamedKey::F1 => encode_function_key(1, mods),
             NamedKey::F2 => encode_function_key(2, mods),
             NamedKey::F3 => encode_function_key(3, mods),
@@ -154,7 +163,7 @@ fn encode_function_key(n: u8, mods: ModifiersState) -> Vec<u8> {
         }
     };
 
-    let modifier_param = function_key_modifier_param(mods);
+    let modifier_param = xterm_modifier_param(mods);
 
     match (n, modifier_param) {
         // Unmodified F1–F4: legacy SS3.
@@ -172,9 +181,9 @@ fn encode_function_key(n: u8, mods: ModifiersState) -> Vec<u8> {
     }
 }
 
-/// xterm modifier parameter (`1 + bitmask`) for a function-key chord, or `None`
-/// when no modifier is held. Bits: Shift=1, Alt=2, Ctrl=4, Super/Meta=8.
-fn function_key_modifier_param(mods: ModifiersState) -> Option<u8> {
+/// xterm modifier parameter (`1 + bitmask`), or `None` when no modifier is
+/// held. Bits: Shift=1, Alt=2, Ctrl=4, Super/Meta=8.
+fn xterm_modifier_param(mods: ModifiersState) -> Option<u8> {
     let mut bitmask = 0u8;
     if mods.shift_key() {
         bitmask |= 1;

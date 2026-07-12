@@ -24,7 +24,8 @@ Release MSI builds require the Windows Cairo setup script and WiX.
 - ConPTY resize returns an HRESULT; surface failures instead of ignoring.
 - Mica/backdrop changes must run after the HWND exists and is shown.
 - OLE drag/drop initialization must stay on the window thread.
-- Keep packaging paths in sync with `wix/main.wxs` and release workflow.
+- Keep packaging paths in sync with `wix/main.wxs`, `docs/packaging/`, and the
+  release workflow.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,

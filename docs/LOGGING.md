@@ -1,6 +1,6 @@
 # Logging
 
-Developer documentation: [Architecture](ARCHITECTURE.md) · [Modules](MODULES.md) · **Logging**
+Developer documentation: [Architecture](ARCHITECTURE.md) · [Modules](MODULES.md) · **Logging** · [Packaging](packaging/README.md)
 
 SonicTerm writes rolling logs through `sonicterm-logging`.
 

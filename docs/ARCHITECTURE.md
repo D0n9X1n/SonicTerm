@@ -1,6 +1,6 @@
 # SonicTerm Architecture
 
-Developer documentation: **Architecture** · [Modules](MODULES.md) · [Logging](LOGGING.md)
+Developer documentation: **Architecture** · [Modules](MODULES.md) · [Logging](LOGGING.md) · [Packaging](packaging/README.md)
 
 SonicTerm is a native macOS + Windows terminal built around small Rust crates
 with a strict data-flow boundary:
@@ -78,7 +78,8 @@ and release smoke checks rather than hollow unit tests.
 The workspace version in root `Cargo.toml` is authoritative for all first-party
 crates and internal requirements. Releases are created only by pushing an
 owner-approved `v*` tag. The tag workflow builds the expected macOS DMG(s),
-Windows MSI, generated release notes, and checksum manifest.
+Windows MSI, generated release notes, and checksum manifest. Maintained local
+packaging instructions live in `docs/packaging/`.
 
 The local release gate is:
 
@@ -87,8 +88,9 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
+bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
-scripts/coverage/rust-logic.sh
+scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
 cargo build --release -p sonicterm-mac
 ```

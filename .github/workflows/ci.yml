@@ -59,6 +59,10 @@ jobs:
         with:
           shared-key: unit-${{ matrix.os }}
 
+      - name: Check process exit paths
+        shell: bash
+        run: bash scripts/check-no-raw-process-exit.sh
+
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
 
@@ -77,4 +81,4 @@ jobs:
       - name: Run Rust logic coverage gate
         if: runner.os == 'macOS'
         shell: bash
-        run: scripts/coverage/rust-logic.sh
+        run: scripts/rust-logic-coverage.sh

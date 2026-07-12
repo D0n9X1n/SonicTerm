@@ -13,6 +13,9 @@ shaping; safe buffer/font wrappers and shaping policy live in
 cargo build -p sonicterm-harfbuzz
 ```
 
+Regenerate the bindings from the repository root with
+`bash scripts/regenerate-harfbuzz.sh`, then review the generated diff.
+
 ## Guardrails
 - Avoid manual edits to generated bindings except targeted compatibility
   fixes.

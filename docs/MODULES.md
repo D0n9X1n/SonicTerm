@@ -1,6 +1,6 @@
 # Modules
 
-Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logging](LOGGING.md)
+Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logging](LOGGING.md) · [Packaging](packaging/README.md)
 
 | Crate | Role |
 | --- | --- |

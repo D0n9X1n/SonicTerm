@@ -1,4 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT/crates/sonicterm-harfbuzz"
 
 bindgen bindings.h -o src/lib.rs \
   --no-layout-tests \
@@ -12,4 +16,4 @@ bindgen bindings.h -o src/lib.rs \
   --generate=functions,types,vars \
   --allowlist-function="hb_.*" \
   --allowlist-type="hb_.*" \
-  -- -Iharfbuzz/src -I../freetype/freetype2/include
+  -- -Iharfbuzz/src -I../sonicterm-freetype/freetype2/include
