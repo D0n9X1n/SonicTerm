@@ -29,4 +29,4 @@ cargo build -p sonicterm-font
 ## Cross-references
 - Consumes: `sonicterm-font-config`, `sonicterm-fontconfig`,
   `sonicterm-freetype`, `sonicterm-harfbuzz`.
-- Consumed by: `sonicterm-text`, renderer/font integration code.
+- Consumed by: `sonicterm-engine`.

@@ -2,34 +2,31 @@
 //!
 //! ## What this does on real hardware
 //!
-//! When `sonicterm-shared` detects a tab tear-out whose cursor has left
-//! every SonicTerm window, it calls [`MacOsDragSink::begin_drag`] with a
-//! serialized [`TabPayload`]. We write the JSON to the **general
-//! NSPasteboard** under the custom type
-//! [`sonicterm_app::os_drag::PASTEBOARD_TYPE`] (`com.sonic-terminal.tab.v1`).
+//! When `sonicterm-app` detects a tab tear-out whose cursor has left every
+//! SonicTerm window, it calls [`MacOsDragSink::begin_drag`] with a serialized
+//! [`TabPayload`]. We write the JSON to the **general NSPasteboard** under the
+//! custom type [`sonicterm_app::os_drag::PASTEBOARD_TYPE`]
+//! (`com.sonic-terminal.tab.v1`).
 //!
-//! A second running `SonicTerm.app` instance polls the pasteboard on
-//! window focus (`NSApplicationDidBecomeActive`) and consumes any
-//! pending payload by spawning a fresh tab with the supplied
-//! cwd/cmd/env. Source kills its local tab BEFORE the destination
-//! reads — so there is at most one live shell per torn tab even if
-//! the user is hyper-active with the cursor.
+//! A later `SonicTerm.app` activation may consume the payload and spawn a fresh
+//! tab with the captured cwd/cmd/env/history. Publishing is not receiver
+//! acknowledgement, so the sink returns `NotAcknowledged` and the source keeps
+//! its live tab; the app then falls back to the normal in-process tear-out path.
 //!
 //! ## Why not a full `NSDragging` session
 //!
 //! `NSDraggingSession` requires the source `NSWindow` / `NSView` to
 //! emit `beginDraggingSessionWithItems:event:source:` from a
-//! mouse-event handler the AppKit run loop directly invoked. winit
-//! intercepts mouse events at the `NSWindow` level and re-emits them
-//! through its own delegate, which means by the time `sonicterm-shared`
-//! decides to start a drag, AppKit no longer considers the current
+//! mouse-event handler the AppKit run loop directly invoked. winit intercepts
+//! mouse events at the `NSWindow` level and re-emits them through its own
+//! delegate, which means by the time `sonicterm-app` decides to start a drag,
+//! AppKit no longer considers the current
 //! event a drag-eligible mouse-down. Workarounds (re-injecting an
 //! `NSEvent`, swizzling winit's delegate) are large and fragile.
 //!
-//! v1 ships pasteboard-based handoff: same observable user behavior
-//! ("drag tab out → it appears in the other SonicTerm"), no drag preview
-//! image follows the cursor across the screen. We file the preview
-//! image work as a v2 follow-up.
+//! The current path is pasteboard publication only: it provides no live cursor
+//! capture, no native drag preview, and no positive adoption acknowledgement.
+//! A true native drag session requires a future AppKit/winit integration seam.
 //
 // FUTURE: implement true NSDraggingSession once we either (a) write
 // our own NSView atop CAMetalLayer and bypass winit's view, or (b)

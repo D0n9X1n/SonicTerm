@@ -1,16 +1,9 @@
 //! Per-pane render input bundle.
 //!
-//! Part B of the per-pane render refactor. The `GpuRenderer::render`
-//! signature is being changed from a single `&mut Grid` to a slice of
-//! `PaneRender<'_>` so the renderer iterates panes itself and anchors each
-//! pane's cell-emission loop at the pane's own pixel origin rather than the
-//! window-level `padding_left` / `top_inset()`.
-//!
-//! NOTE: This file is the foundation commit. The mechanical re-anchor of the
-//! 62 `self.padding_left` / `self.top_inset()` sites inside
-//! `crates/sonicterm-shared/src/render/core.rs::render()` is still pending and
-//! tracked in the PR. Until that pass lands, the renderer continues to draw
-//! only the active pane's content.
+//! `GpuRenderer::render` receives a slice of `PaneRender<'_>` and iterates every
+//! visible pane. Each pane carries its own pixel origin and mutable grid view so
+//! split panes, scrollback viewports, cursors, broadcast chrome, and inline
+//! images are assembled in one frame.
 
 use crate::geometry::PixelRect;
 use std::sync::Arc;
@@ -75,8 +68,8 @@ pub struct PaneRender<'a> {
     pub inline_images: Vec<InlineImage>,
 }
 
-/// Cursor presentation style. Mirrors the legacy enum in `sonicterm-ui::cursor`
-/// but kept here to avoid pulling sonicterm-ui into sonicterm-render-model.
+/// Cursor presentation style carried directly in the render boundary so the
+/// GPU does not depend on a concrete UI cursor-state representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorStyle {
     /// Solid filled block, no blink (DECSCUSR 2).

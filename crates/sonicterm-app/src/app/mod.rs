@@ -1091,13 +1091,14 @@ pub enum UserEvent {
     /// [`Self::MenuAction`] so a noisy drag stream does not flood the
     /// menubar drain path.
     OsDrag,
-    /// Phase C2: an OS-level drag *session* (NSDraggingSession on
-    /// macOS, OLE DoDragDrop on Windows) reported a cursor move. The
+    /// A platform drag backend reported a cursor move. Windows OLE can produce
+    /// these during a native session; the current macOS pasteboard backend does
+    /// not. The
     /// actual position is in the [`os_drag::PendingDragOutcome`]
     /// mailbox shared with the backend.
     DragMoved,
-    /// Phase C2: an OS-level drag *session* terminated (drop or
-    /// cancel). The outcome (drop target, tear-out, or cancel) is in
+    /// A platform drag backend terminated (drop or cancel). The outcome
+    /// (drop target, tear-out, or cancel) is in
     /// the [`os_drag::PendingDragOutcome`] mailbox; the dispatcher
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
@@ -1549,17 +1550,17 @@ pub struct App {
     /// Optional platform hook that takes a serialized tab payload and
     /// hands it off to the OS-level drag-and-drop system
     /// (`NSPasteboard` on macOS, OLE `DoDragDrop` on Windows). When
-    /// set, [`Self::tear_out_tab`] checks whether the cursor sits
-    /// outside every SonicTerm-owned window; if so, it invokes the sink
-    /// and KILLS the local tab instead of spawning a child window.
+    /// set, [`Self::tear_out_tab`] checks whether the cursor sits outside every
+    /// SonicTerm-owned window and invokes the sink. The local tab is detached
+    /// only if the sink returns an explicit `DragAck::Accepted`; current
+    /// platform paths preserve it and fall back to in-process tear-out.
     /// Installed by the platform shell via
     /// [`crate::shell::MacShell::with_os_drag_sink`] /
     /// [`crate::shell::WindowsShell::with_os_drag_sink`].
     pub(crate) os_drag_sink: Option<Arc<dyn crate::os_drag::OsDragSink>>,
-    /// Phase C2 OS-level drag *session* backend. Distinct from
-    /// `os_drag_sink` (cross-process wire format): this drives the
-    /// NSDraggingSession / OLE DoDragDrop call that captures the
-    /// cursor across window boundaries for same-process tab drags.
+    /// Platform OS-drag backend. Distinct from `os_drag_sink` (wire-format
+    /// publication): Windows drives OLE `DoDragDrop`; macOS currently publishes
+    /// the pasteboard payload and posts a cancelled outcome without cursor capture.
     /// Installed by the platform bin (`sonicterm-mac` / `sonicterm-windows`)
     /// at startup. `None` in tests + on platforms without an impl.
     pub(super) os_drag_backend: Option<Box<dyn os_drag::OsTabDragBackend>>,
@@ -4043,9 +4044,9 @@ impl App {
         self.os_drag_sink = Some(sink);
     }
 
-    /// Phase C2: install the platform OS-level drag-session backend.
-    /// `sonicterm-mac` calls this with an NSDraggingSession impl,
-    /// `sonicterm-windows` with an OLE DoDragDrop impl. Tests use it via
+    /// Install the platform OS handoff backend. `sonicterm-mac` supplies its
+    /// pasteboard publisher; `sonicterm-windows` supplies OLE `DoDragDrop`.
+    /// Tests use it via
     /// [`Self::__test_set_os_drag_backend`] to inject a mock.
     #[doc(hidden)]
     pub fn set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {

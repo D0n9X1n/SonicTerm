@@ -1,5 +1,6 @@
-//! Shared render-model: the seam between UI state and GPU drawing.
-//! UI builds these structs; GPU consumes them via the Painter trait.
+//! Shared render-model: the seam between app/UI state and GPU drawing.
+//! The app builds these snapshots; the production GPU renderer consumes them
+//! directly through `GpuRenderer::render`.
 
 // All pub items in this crate carry per-item doc comments.
 #![deny(missing_docs)]
@@ -8,7 +9,8 @@
 pub mod geometry;
 /// Per-frame, renderer-facing snapshot of the UI (panes, tabs, overlays).
 pub mod inputs;
-/// Abstract drawing surface trait the GPU backend implements.
+/// Small backend-agnostic drawing command trait. The production GPU renderer
+/// currently consumes frame snapshots directly rather than implementing it.
 pub mod painter;
 pub mod pane_render;
 
@@ -19,10 +21,10 @@ pub mod pane_render;
 /// ui -> gpu boundaries are declared. The types are re-exported unchanged (same
 /// identity), so this is a dependency re-layer with no behavior change.
 pub mod boundary {
-    /// Terminal grid/cell/line/hyperlink data the renderer reads per cell.
-    pub use sonicterm_grid as grid;
     /// Config + theme types the renderer resolves colors and modes from.
     pub use sonicterm_cfg as cfg;
+    /// Terminal grid/cell/line/hyperlink data the renderer reads per cell.
+    pub use sonicterm_grid as grid;
     /// UI layout/state (tabs, overlays, selection, scrollbar) the renderer composites.
     pub use sonicterm_ui as ui;
 }

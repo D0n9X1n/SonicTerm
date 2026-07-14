@@ -1,5 +1,7 @@
-//! GPU glyph atlas: a single R8 texture that stores rasterized glyph
-//! coverage masks, keyed by [`sonicterm_types::glyph_key::GlyphKey`].
+//! CPU-side BGRA8 glyph atlas keyed by
+//! [`sonicterm_types::glyph_key::GlyphKey`]. Monochrome coverage is
+//! replicated across channels so the same storage also carries subpixel text,
+//! color emoji, custom terminal glyphs, and inline images.
 //!
 //! The atlas is the centerpiece of the B3 GPU text path. Once warm, a
 //! cell renders by:
@@ -7,26 +9,20 @@
 //!   2. looking up the `GlyphInfo`          (≈30 ns, HashMap hit)
 //!   3. emitting an instance into the text pipeline's vertex buffer
 //!
-//! Only step 3 grows with frame complexity, and the GPU does it in
-//! parallel. Compare to glyphon-on-rich-text, which re-shapes the full
-//! screen of text and re-uploads tiles into its own atlas on every
-//! cache miss; the wins are biggest during heavy scrollback bursts
-//! where the *same* ASCII glyphs reappear thousands of times.
+//! Once warm, the per-cell hot path is a key calculation, a map lookup, and
+//! glyph-instance emission. Repeated terminal characters therefore reuse the
+//! same raster tile during heavy scrollback.
 //!
-//! ## Design choices, in one line each
+//! ## Design choices
 //!
-//! - Single 2048×2048 R8Unorm texture: 4 MiB, fits ~16k 16×16 tiles, way
-//!   more than any real terminal session needs. v0.7 grows by allocating
-//!   a new texture; v0.7 panics on overflow (loud failure beats silent
-//!   corruption).
-//! - Shelf packer: simplest layout that still gets ≥80 % occupancy on
-//!   monospace fonts, where all tiles are roughly the same height.
-//!   Atlas growth is O(1) amortized.
-//! - `Rasterizer` trait: the atlas does NOT depend on swash directly.
-//!   Production wires a swash-backed rasterizer; tests wire a synthetic
-//!   one (NxN ramp pattern) so atlas behavior is verifiable without a
-//!   font on disk.
-//! - Color lives on the instance, not on the tile. See `GlyphKey` docs.
+//! - One 2048×2048 BGRA8 atlas (~16 MiB) stores monochrome, subpixel, and
+//!   premultiplied color tiles.
+//! - A shelf packer handles similarly-sized terminal glyphs; a free-rectangle
+//!   list and deterministic LRU-quartile eviction reclaim space under pressure.
+//! - The `Rasterizer` trait keeps the atlas independent of a concrete font
+//!   backend and lets tests use synthetic tiles.
+//! - Foreground color remains on the instance for monochrome/subpixel text;
+//!   color tiles carry their own premultiplied pixels.
 
 use std::collections::HashMap;
 

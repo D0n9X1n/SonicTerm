@@ -255,6 +255,9 @@ impl PtyHandle {
             if last_resize.swap(packed, std::sync::atomic::Ordering::Relaxed) == packed {
                 return;
             }
+            // The public callback currently returns `()`, so this error cannot
+            // reach the caller. Keep the limitation explicit until the resize
+            // seam can report failures without changing every app call site.
             let _ = resize_master.lock().resize(PtySize {
                 rows,
                 cols,

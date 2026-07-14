@@ -272,8 +272,10 @@ mod live_impl {
             &mut self,
             _server_public_key: &key::PublicKey,
         ) -> Result<bool, Self::Error> {
-            // v1: TOFU — accept any host key. known_hosts integration is
-            // tracked as a follow-up and called out in the PR description.
+            // Host keys are currently accepted unconditionally. No key is
+            // persisted or compared on later connections, so this does not
+            // authenticate the server. A known-hosts policy belongs here
+            // before SSH is exposed as a complete user feature.
             Ok(true)
         }
     }

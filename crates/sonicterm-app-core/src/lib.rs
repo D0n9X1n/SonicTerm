@@ -5,15 +5,11 @@
 //! other backend — those concerns live in `sonicterm-app`. Pure-data
 //! types here can be unit-tested without spinning up a real window.
 //!
-//! Introduced at M6a as an ADDITIVE parallel crate. Consumers
-//! (sonicterm-mac, sonicterm-windows, sonicterm-app) migrate to it
-//! over M6b..d.
-//!
-//! M6a-expand-2a lands the `AppIntent` / `AppEffect` / `AppStateMachine`
-//! contract (63 + 22 variants + 7-class ordering + cascade-bound
-//! `drain_pending`). Per-Intent reducer arms are stubbed — the state
-//! machine returns an empty Effect batch for every Intent. Routing of
-//! `sonicterm-app` paths through the machine ships in 2b/2c.
+//! The contract includes 63 `AppIntent` variants, 22 `AppEffect` variants,
+//! stable seven-class effect ordering, and bounded `drain_pending` support.
+//! Reducer arms cover every intent family. `sonicterm-app` still owns the
+//! authoritative live window/tab/pane resources; `AppState` is the pure-data
+//! transition and observability model while those resources migrate behind ids.
 
 #![deny(missing_docs)]
 
@@ -33,12 +29,10 @@ pub use supporting::{
     PaletteChoice, PaneId, PendingDragOutcomeCore, PtyConfig, SplitDir, TabId, WindowRole,
 };
 
-// M6a-expand-1 type-relocation inventory (prep for M6a-expand-2).
-//
-// `BroadcastScope` is intentionally NOT re-exported here — the richer
-// `supporting::BroadcastScope` variant (carrying `Custom(Vec<PaneId>)`)
-// is the one Intent fan-out uses. The bare-action `sonicterm_types`
-// version stays available via direct path.
+// `BroadcastScope` is intentionally NOT re-exported from `sonicterm-types`
+// here: the richer supporting variant (including `Custom(Vec<PaneId>)`) is
+// the one intent fan-out uses. The action-level variant remains available
+// through its direct `sonicterm_types` path.
 pub use sonicterm_types::{
     Action, Cell, CellFlags, Color, Direction, FatAttributes, GlyphKey, HyperlinkId, ModKey, Pos,
     ScrollAction, WindowKey,

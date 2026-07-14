@@ -8,27 +8,16 @@
 //!
 //! ## Real work this performs
 //!
-//! 1. Builds the same-process drag identifier JSON
-//!    (`{"src_window_id":..,"src_tab_idx":..}`) so peer
-//!    NSDraggingDestination handlers on other SonicTerm windows can
-//!    recognise it as ours via the `com.sonic-terminal.tab.v1`
-//!    pasteboard type.
-//! 2. Writes that JSON to the general `NSPasteboard` under
-//!    [`sonicterm_app::os_drag::PASTEBOARD_TYPE`] — real AppKit FFI,
-//!    identical to the path `MacOsDragSink::begin_drag` already
-//!    exercises in production. This makes the payload visible to any
-//!    drop target that polls the pasteboard, which is the fallback
-//!    we rely on whenever the higher-fidelity NSDraggingSession path
-//!    is unavailable.
-//! 3. Stashes the [`AppHandle`] so any future NSDraggingSource
-//!    callback subclass can post `DragMoved` / `DragEnded` through it.
-//! 4. Posts a terminal [`DragOutcome::Cancelled`] synchronously via
-//!    the handle. The App's dispatcher consumes it on the next
-//!    `UserEvent::DragEnded` wake and clears `os_drag_source`. If a
-//!    peer NSDraggingDestination subsequently picks up the
-//!    pasteboard, the Phase C cross-process path takes over —
-//!    identical observable user behavior ("drag tab to other SonicTerm
-//!    window, it appears").
+//! 1. Builds a lightweight source identifier when the caller cannot serialize
+//!    the full [`TabPayload`].
+//! 2. Writes the full payload (or fallback identifier) to the general
+//!    `NSPasteboard` under [`sonicterm_app::os_drag::PASTEBOARD_TYPE`].
+//!    This makes it available to a later process activation; it does not prove
+//!    that any receiver adopted the payload.
+//! 3. Stashes the [`AppHandle`] for a future native AppKit callback path.
+//! 4. Posts [`DragOutcome::Cancelled`] synchronously so the app clears the
+//!    in-flight gesture and preserves the source tab. Same-process tab merging
+//!    remains handled by SonicTerm's in-process geometry/transfer path.
 //!
 //! ## Known integration constraint (tracked separately)
 //!
@@ -36,7 +25,7 @@
 //! `NSView` to emit the call from a mouse-event handler the AppKit
 //! run loop *directly* invoked. winit intercepts mouse events at the
 //! `NSWindow` level and re-emits them through its own delegate, so by
-//! the time `sonicterm-shared` decides to start a drag, AppKit no longer
+//! the time `sonicterm-app` decides to start a drag, AppKit no longer
 //! considers the current event a drag-eligible mouse-down. This is
 //! the same constraint already documented in
 //! [`crate::os_drag_mac`]; lifting it requires either (a) a custom
@@ -45,10 +34,9 @@
 //! user code. Both are large pieces of work — tracked as a follow-up
 //! to the Phase C2 PR rather than blocking it.
 //!
-//! Until that lifts, the dispatch contract this file implements is
-//! the *complete* same-process drag flow: pasteboard write happens,
-//! identifier is published, peer window picks it up via its own
-//! NSDraggingDestination polling, the user sees their tab move.
+//! Until that lifts, this backend is a pasteboard publisher plus a synchronous
+//! cancellation callback. It does not implement native cursor capture or a
+//! same-process AppKit drop target.
 
 #![cfg(target_os = "macos")]
 
@@ -141,9 +129,8 @@ impl OsTabDragBackend for MacOsTabDragBackend {
             payload_json
         };
 
-        // Real pasteboard write — identical to the cross-process
-        // Phase C1 path. This is the part that makes peer SonicTerm
-        // windows able to pick up the dragged tab.
+        // Publish the payload for a later SonicTerm process activation. This
+        // does not acknowledge adoption and does not move a same-process tab.
         let wrote = write_payload_to_pasteboard(&json);
 
         tracing::info!(
@@ -154,17 +141,9 @@ impl OsTabDragBackend for MacOsTabDragBackend {
             "MacOsTabDragBackend::begin_session — pasteboard payload published"
         );
 
-        // Post a terminal Cancelled outcome so the App's dispatcher
-        // releases its in-flight bookkeeping. If a peer
-        // NSDraggingDestination subsequently consumes the pasteboard
-        // payload, the cross-process Phase C path takes over and the
-        // user-visible result is identical to a successful drag.
-        //
-        // See the module docstring for the NSDraggingSession
-        // integration constraint that prevents posting a richer
-        // outcome here. Lifting that constraint is tracked as a
-        // follow-up; the dispatch contract this implements is
-        // already complete for the same-process drag path.
+        // Release the app's in-flight bookkeeping without transferring or
+        // deleting the source tab. A later process may independently consume
+        // the pasteboard payload and spawn a fresh shell from it.
         handle.post_drag_ended(DragOutcome::Cancelled);
     }
 

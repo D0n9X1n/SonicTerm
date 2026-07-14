@@ -60,6 +60,11 @@ aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
 | Scroll to top/bottom | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
 | Reload config | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
 
+The action model also supports prompt navigation (`scroll_to_prev_prompt`,
+`scroll_to_next_prompt`), theme application, update checks, and an experimental
+SSH-pane action. Those are not all bound by default; SSH transport is optional
+and its live GUI session is not yet a complete shipping feature.
+
 These are the bundled defaults; every row is editable in the keymap TOML below.
 
 > **Quit confirmation (macOS).** `Cmd+Q` does not quit immediately. The first
@@ -68,15 +73,17 @@ These are the bundled defaults; every row is editable in the keymap TOML below.
 > closes automatically and nothing happens. The **Quit SonicTerm** menu item
 > (no key equivalent) quits at once.
 
-### Edit the active keymap
+### Edit the platform-default user keymap
 
 1. Open the command palette.
-2. Run **Edit keymap.toml**.
-3. Change `~/.sonicterm/keymaps/<name>.toml`.
-4. Run **Reload Config** from the command palette.
+2. Run **Edit keymap.toml**. This opens the platform-default user file.
+3. Edit that file, or manually open the custom path named by `keymap`.
+4. If `<name>` is the platform-default keymap, save and run **Reload Config**.
+   Arbitrary custom-named keymap files are not watched directly; if the same
+   custom selector is already active, change/reselect it in `sonicterm.toml` or
+   restart after editing.
 
-The command palette reads the active keymap, so shortcut
-hints update after reload.
+When a keymap reloads successfully, command-palette shortcut hints update with it.
 
 ### Binding syntax
 
@@ -200,15 +207,16 @@ keys = "super+shift+l"
 action = { focus_pane = "right" }
 ```
 
-If a keymap file fails to parse, SonicTerm logs the error and falls back to the
-bundled platform default.
+At startup, an invalid selected keymap is logged and falls back to the bundled
+platform default. A failed hot reload leaves the current in-memory keymap active.
 
 ### READONLY mode shortcut policy
 
 `enter_copy_mode` opens READONLY mode. In this mode SonicTerm blocks terminal
 input and only allows shortcut actions for tab switching, pane focus, and search:
 `next_tab`, `prev_tab`, `{ activate_tab = N }`, `activate_last_tab`,
-`{ focus_pane = "left|right|up|down" }`, and `open_search`.
+`{ focus_pane = "left|right|up|down" }`, `open_search`, and
+`check_for_updates`.
 
 All other shortcuts are ignored by READONLY mode and are not forwarded to the
 terminal. Search remains editable inside READONLY mode.
@@ -262,6 +270,7 @@ macOS 上的应用修饰键是 `Cmd`；Windows 上是 `Alt`。在 Windows 上，
 | 减小字号 | `Cmd+-` | `Alt+-` |
 | 重置字号 | `Cmd+0` | `Alt+0` |
 | 新建窗口 | `Cmd+N` | `Alt+N` |
+| 退出应用（确认） | 先按 `Cmd+Q`，5 秒内再按一次 `Cmd+Q` | — |
 | 切换全屏 | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
 | 搜索 | `Cmd+F` | `Alt+F` |
 | 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` |
@@ -271,16 +280,27 @@ macOS 上的应用修饰键是 `Cmd`；Windows 上是 `Alt`。在 Windows 上，
 | 滚动到顶部 / 底部 | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
 | 重新加载配置 | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
 
+action 模型还支持 prompt 导航（`scroll_to_prev_prompt`、`scroll_to_next_prompt`）、
+应用主题、检查更新和实验性 SSH pane action。这些 action 并非全部带有默认绑定；SSH transport
+是可选实现，其实时 GUI session 目前还不是完整发布功能。
+
 以上是内置默认值；下面的 keymap TOML 里每一行都可以自定义。
 
-### 修改当前 keymap
+> **退出确认（macOS）。** `Cmd+Q` 不会立即退出。第一次按下时，右上角会显示红色的
+> **“Press ⌘Q one more time to quit”** 提示；5 秒内再次按 `Cmd+Q` 才会退出，
+> 超时后提示自动关闭且不执行任何操作。原生菜单里的 **Quit SonicTerm** 没有快捷键，
+> 点击该菜单项会立即退出。
+
+### 修改平台默认用户 keymap
 
 1. 打开命令面板。
-2. 执行 **Edit keymap.toml**。
-3. 修改 `~/.sonicterm/keymaps/<name>.toml`。
-4. 回到命令面板执行 **Reload Config**。
+2. 执行 **Edit keymap.toml**；它会打开平台默认用户文件。
+3. 编辑该文件，或手动打开 `keymap` 指向的自定义路径。
+4. 如果 `<name>` 是平台默认 keymap，保存后执行 **Reload Config**。任意自定义名称的 keymap
+   文件不会被直接监控；如果同一个自定义选择器已经生效，请在 `sonicterm.toml` 中改变/重新选择它，
+   或编辑后重启。
 
-命令面板会读取当前 keymap，所以 reload 之后快捷键提示也会更新。
+keymap 成功重载时，命令面板中的快捷键提示也会一起更新。
 
 ### 绑定格式
 
@@ -360,6 +380,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | URL 快速选择 | `enter_quick_select` |
 | 字体大小 | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | 新建窗口 | `new_window` |
+| 退出应用 | `quit_app` |
 | 全屏 | `toggle_fullscreen` |
 | 搜索 | `open_search` |
 | 命令面板 | `open_command_palette` |
@@ -402,13 +423,13 @@ keys = "super+shift+l"
 action = { focus_pane = "right" }
 ```
 
-如果 keymap 文件解析失败，SonicTerm 会写日志，并回退到当前平台的内置默认 keymap。
+启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；热重载失败时则继续使用当前内存中的 keymap。
 
 ### READONLY 模式快捷键策略
 
 `enter_copy_mode` 会进入 READONLY 模式。在这个模式下，SonicTerm 会阻止输入进入终端，
-只允许三个类别的快捷键：切换 Tab、切换 Pane 焦点、搜索。对应 action 是
+只允许四个类别的快捷键：切换 Tab、切换 Pane 焦点、搜索、检查更新。对应 action 是
 `next_tab`、`prev_tab`、`{ activate_tab = N }`、`activate_last_tab`、
-`{ focus_pane = "left|right|up|down" }` 和 `open_search`。
+`{ focus_pane = "left|right|up|down" }`、`open_search` 和 `check_for_updates`。
 
 其它快捷键会被 READONLY 模式忽略，也不会转发给终端。READONLY 中打开搜索框后，搜索框仍然可以编辑。

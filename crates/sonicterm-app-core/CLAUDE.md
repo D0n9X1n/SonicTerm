@@ -24,8 +24,8 @@ cargo build -p sonicterm-app-core
   back into `sonicterm-app`.
 - Keep public types serializable/testable where practical; this is the
   easiest crate to unit-test without a window.
-- If a public item is exposed through `sonicterm-types`, update
-  `docs/CONTRACTS.md` in the same PR.
+- If a public item is exposed through `sonicterm-types`, review the cross-crate
+  contract in `docs/ARCHITECTURE.md` and update affected documentation.
 
 ## Cross-references
 - Consumes: `sonicterm-types`.

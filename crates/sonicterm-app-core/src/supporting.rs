@@ -1,13 +1,8 @@
 //! Pure-data payload types shared by `intent.rs` and `effect.rs`.
 //!
-//! These are placeholders the M6a-expand-2a contract reserves so the
-//! Intent/Effect enums compile against a stable surface. Richer
-//! semantics (true `PaneId` from a future `sonicterm-pane` crate, full
-//! `PtyCommand` shape, etc.) land alongside the reducer arms in
-//! M6a-expand-2b / 2c.
-//!
-//! **Zero winit / wgpu / glyphon / cosmic-text references.** Reviewer
-//! gate (spec §12) requires this — keep it that way.
+//! These identifiers and boundary models intentionally avoid winit, wgpu,
+//! clipboard, renderer, and native process handles. Rich live resources stay
+//! in `sonicterm-app` and are addressed here through stable ids or snapshots.
 
 use std::path::PathBuf;
 
@@ -103,8 +98,7 @@ pub enum BroadcastScope {
     Custom(Vec<PaneId>),
 }
 
-/// Command-palette selection payload. The real Intent fan-out is
-/// implemented in M6a-expand-2b; here we just carry the user's pick.
+/// Command-palette selection payload carried across the backend-free boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaletteChoice {
     /// Unique identifier for the chosen command.
@@ -150,8 +144,7 @@ pub struct MenuModel {
     pub items: Vec<MenuItem>,
 }
 
-/// Single menubar item (placeholder shape — full schema lands with the
-/// reducer in M6a-expand-2b/2c).
+/// Single backend-free menubar item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem {
     /// Label as shown to the user.

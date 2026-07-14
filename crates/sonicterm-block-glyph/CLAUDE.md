@@ -23,5 +23,6 @@ cargo build -p sonicterm-block-glyph
 - Preserve attribution headers when touching imported code.
 
 ## Cross-references
-- Consumes: `sonicterm-engine`, `sonicterm-cfg`.
-- Consumed by: font/text/rendering code that needs block glyph sprites.
+- Consumes: no first-party SonicTerm crate; the public bitmap/metric boundary is
+  intentionally leaf-tight.
+- Consumed by: `sonicterm-gpu`.

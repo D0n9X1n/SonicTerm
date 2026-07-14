@@ -20,8 +20,12 @@ cargo build -p sonicterm-io
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
   release blockers.
 - Never hold parser/grid locks while writing to the PTY.
+- PTY/ConPTY resize can fail. The current callback cannot return that error;
+  make failures observable before adding more resize paths, and do not silently
+  discard errors in new code.
 - Keep platform-specific details behind this crate so app/UI code stays
   cross-platform.
 
 ## Cross-references
-- Consumed by: `sonicterm-app`, `sonicterm-mux`, platform binaries.
+- Consumed by: `sonicterm-app`, `sonicterm-mux`. Platform binaries reach it
+  through `sonicterm-app`.

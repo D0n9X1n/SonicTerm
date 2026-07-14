@@ -9,7 +9,7 @@ winit.
 - `pane_render.rs` - pane frame/model assembly.
 - `geometry.rs` - rectangles, sizes, and layout helpers.
 - `inputs.rs` - render input structs from app/grid/UI state.
-- `painter.rs` - painter command bridge.
+- `painter.rs` - small, currently unimplemented drawing-command abstraction.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -23,5 +23,6 @@ cargo build -p sonicterm-render-model
   hyperlinks, cursor, and search highlights.
 
 ## Cross-references
-- Consumes: `sonicterm-types`, `sonicterm-grid`, `sonicterm-ui`.
+- Consumes: `sonicterm-types`, `sonicterm-grid`, `sonicterm-cfg`,
+  `sonicterm-ui`.
 - Consumed by: `sonicterm-gpu`, `sonicterm-app`.

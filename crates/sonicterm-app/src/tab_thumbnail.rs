@@ -1,11 +1,9 @@
 //! render a small PNG preview for an OS-level tab drag.
 //!
-//! Pre-, `try_os_drag_handoff` passed `Vec::new` as the
-//! `drag_image_png` to every `OsTabDragBackend::begin_session` call —
-//! so when a user dragged a tab out of the window via NSDraggingSession
-//! / OLE `DoDragDrop`, the operating system rendered an empty (or
-//! placeholder) drag preview with no visual connection to the tab the
-//! user was actually moving.
+//! `try_os_drag_handoff` supplies this PNG to each platform backend. Windows
+//! OLE uses it as the native drag preview. The current macOS pasteboard-only
+//! backend receives the bytes for API parity but cannot display a native
+//! cursor-following preview.
 //!
 //! This module produces a small RGBA PNG (~200x40 raster px) that the
 //! platform backends pass to the OS as the drag
@@ -27,8 +25,8 @@
 //!    deadlock the main thread — a synchronous offscreen render would
 //!    re-introduce that hazard.
 //!
-//! 2. **Fontless thumbnail is fine.** The OS drag preview is ~200 px
-//!    wide at 1x; the tab title rasterized at that size is largely
+//! 2. **Fontless thumbnail is fine.** A native preview is ~200 px wide at
+//!    1x; the tab title rasterized at that size is largely
 //!    decorative and reads as "a tab-shaped chip following the
 //!    cursor." Solid color blocks + a color stripe convey the same
 //!    "this is the tab you grabbed" affordance without dragging the

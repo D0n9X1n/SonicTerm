@@ -6,20 +6,34 @@ SonicTerm is a native macOS + Windows terminal built around small Rust crates
 with a strict data-flow boundary:
 
 ```text
-platform shell -> sonicterm-app -> sonicterm-vt/grid -> render-model -> sonicterm-gpu
-                                      ^                         |
-                                      |                         v
-                                sonicterm-io              sonicterm-ui
+platform shell -> sonicterm-app -> sonicterm-render-model -> sonicterm-gpu
+                        |                    ^                    ^
+                        v                    |                    |
+                  sonicterm-io -> sonicterm-vt -> sonicterm-grid |
+                                             \-> sonicterm-ui ----/
+
+font-config/fontconfig/freetype/harfbuzz -> sonicterm-font
+                                          -> sonicterm-engine/text
+                                          -> sonicterm-gpu
 ```
+
+This diagram shows runtime data flow and the primary dependency seams. In the
+Cargo graph, `sonicterm-gpu` depends on `sonicterm-render-model`, while
+`render-model` depends on and re-exports grid/config/UI types through its
+`boundary` module; arrows do not imply the reverse Cargo dependency.
 
 ## Core flow
 
 1. `sonicterm-mac` / `sonicterm-windows` load config, logging, assets, and the
    platform event loop.
-2. `sonicterm-app` owns windows, tabs, panes, PTYs, command palette state,
-   selection, search, drag/drop, and redraw scheduling.
-3. `sonicterm-vt` parses terminal bytes into `sonicterm-grid`.
-4. `sonicterm-render-model` carries renderer-agnostic pane/frame inputs.
+2. `sonicterm-app` owns the authoritative live windows, tabs, pane trees,
+   PTYs/parsers, command palette state, selection, search, drag/drop, and redraw
+   scheduling. `sonicterm-app-core` supplies the backend-free intent/effect
+   reducer mirror; complete live topology has not migrated into it.
+3. `sonicterm-io` transports child bytes; `sonicterm-vt` parses them into
+   `sonicterm-grid` mutations and events.
+4. `sonicterm-render-model` carries renderer-agnostic pane/frame inputs and is
+   the declared boundary through which the GPU sees grid/config/UI types.
 5. `sonicterm-gpu` builds quads and glyph instances for wgpu presentation. When
    no usable GPU is present it falls back to a CPU rasterizer; on Windows the
    software path (`sonicterm-gpu/src/software_windows.rs` +

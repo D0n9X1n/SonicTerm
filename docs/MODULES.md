@@ -18,7 +18,7 @@ Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logg
 | `sonicterm-app-core` | Winit-independent app reducer/state machine. |
 | `sonicterm-app` | Cross-platform window/tab/pane orchestration. |
 | `sonicterm-mac` | macOS binary, NSMenu, AppKit hooks, mac drag/drop. |
-| `sonicterm-windows` | Windows binary, ConPTY, Mica, OLE drag/drop, software presenter, WiX packaging. |
+| `sonicterm-windows` | Windows binary, DPI/Win32 glue, Mica, OLE drag/drop, software presentation, WiX packaging; local ConPTY transport stays behind `sonicterm-io`. |
 | `sonicterm-mux` | Future persistent PTY mux daemon. |
 | `sonicterm-logging` | Logs, panic hooks, exit tracing. |
 | `sonicterm-engine` | WezTerm-compatible font engine adapter surface. |

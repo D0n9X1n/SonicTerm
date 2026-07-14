@@ -1,59 +1,12 @@
-//! Per-Intent reducer arms.
+//! Reducer arms for all application intent families.
 //!
-//! **M6a-expand-2b** (prior): leaf-only routing per FINAL spec §9.
+//! Direct intents translate to effects, while lifecycle and interaction
+//! intents also update the pure-data `AppState` mirror. Authoritative live
+//! window/tab/pane resources remain in `sonicterm-app`; the reducer records
+//! deterministic transitions and emits effects for the boundary to execute.
 //!
-//! **M6a-expand-2c-window** (THIS PR): adds the six window-lifecycle
-//! arms (NewWindow / WindowCloseRequested / WindowFocused /
-//! WindowBlurred / WindowResized / WindowMoved). These mutate
-//! `AppState::{focused_window, last_window_pos, cols, rows,
-//! live_window_count}` and emit the corresponding window-class
-//! Effects per spec §3.
-//!
-//! Leaf intents are those whose translation into Effects is a 1-to-2
-//! direct mapping that touches no fan-out state cascade (no pane-tree
-//! mutation, no tab/window lifecycle). The reducer arms for these
-//! variants emit Effects deterministically from the Intent payload
-//! alone — they read `AppState` for context (e.g. clipboard text for
-//! Copy), but do not mutate the pane/tab/window topology.
-//!
-//! Non-leaf intents (NewTab, SplitPane, ClosePane, etc.) still fall
-//! through to the empty arm; those land in M6a-expand-2c alongside
-//! the full pane-tree migration into `AppState`.
-//!
-//! Spec §3 mapping table (subset — leaf arms only):
-//!
-//! | Intent                | Effects                                   |
-//! |-----------------------|-------------------------------------------|
-//! | PtyWrite              | PtyWrite (1:1 pass-through)               |
-//! | PtyBurst              | Render(PtyBurst)                          |
-//! | PtyExit               | ChildExitPropagate + PtyClose             |
-//! | Key (pressed)         | Render(UserInput) (encoded write happens  |
-//! |                       |   at the platform boundary)               |
-//! | ImeCommit             | PtyWrite (text bytes) + Render(Ime)       |
-//! | ImePreedit            | Render(Ime)                               |
-//! | ImeStart / ImeEnd     | Render(Ime)                               |
-//! | Paste                 | PtyWrite (bracketed-wrapped at boundary)  |
-//! | CopySelection         | ClipboardSet (text fetched by boundary)   |
-//! | ClickUrl              | OpenURL                                   |
-//! | HoverUrl              | Render(Hover)                             |
-//! | ScrollUp/Down/Page*/  | Render(Scroll) (pane scroll mutation      |
-//! |   ToTop/ToBottom/     |   happens at boundary in 2b; the          |
-//! |   ToCursor            |   Render(Scroll) is the gate that the     |
-//! |                       |   boundary observes)                      |
-//! | MouseWheel            | Render(Scroll)                            |
-//! | FontSizeDelta         | Render(ConfigReload)                      |
-//! | ApplyTheme            | Render(ConfigReload)                      |
-//! | ConfigChanged         | Render(ConfigReload)                      |
-//! | FilesDropped          | (no effect — platform path handles)       |
-//! | RedrawRequested       | Render(Vsync)                             |
-//! | Tick                  | (no effect — clock only)                  |
-//! | Exit                  | Quit                                      |
-//!
-//! All other variants (window/tab/pane lifecycle, selection, search,
-//! palette, broadcast, OS drag) deliberately fall through to the
-//! empty arm pending 2c. The contract tests in
-//! `tests/intent_stubs.rs` track which arms remain stubs by
-//! asserting `out.is_empty()` for the unrouted variants.
+//! Multi-effect operations append their complete batch here. The public state
+//! machine then applies stable effect-class ordering before returning it.
 
 use smallvec::SmallVec;
 
@@ -62,9 +15,9 @@ use crate::effect::AppEffect;
 use crate::intent::{AppIntent, RedrawReason};
 use crate::supporting::LogicalSize;
 
-/// Route a single Intent through the leaf reducer, appending zero or
-/// more Effects to `out`. Does not sort — `AppStateMachine::handle`
-/// applies the spec §6 class ordering after this returns.
+/// Reduce one intent, appending zero or more effects to `out`. This function
+/// does not sort; `AppStateMachine::handle` applies canonical class ordering
+/// after it returns.
 pub(crate) fn reduce_leaf(
     _state: &mut AppState,
     intent: AppIntent,

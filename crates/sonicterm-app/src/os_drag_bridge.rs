@@ -1,9 +1,9 @@
 //! Bridge between the platform-specific OLE / NSPasteboard drop
 //! callbacks and the winit-driven [`crate::app::App`] event loop.
 //!
-//! Mirrors [`crate::menubar_bridge`] in shape: an off-main-thread
-//! callback (OLE worker, AppKit dragging session) cannot touch
-//! `&mut App` directly because the borrow lives behind
+//! Mirrors [`crate::menubar_bridge`] in shape: an off-main-thread callback
+//! (currently the Windows OLE worker; future native backends may also use it)
+//! cannot touch `&mut App` directly because the borrow lives behind
 //! `event_loop.run_app(&mut app)`. We split delivery in two:
 //!
 //! 1. **Static `Mutex<VecDeque<...>>` queues** — the platform DropTarget

@@ -2,12 +2,9 @@
 //! state machine as input. The state machine reduces an Intent into
 //! zero or more `AppEffect`s (see `effect.rs`).
 //!
-//! Per spec §1: 63 variants. Payload types
-//! are all pure data — zero winit / wgpu / glyphon / cosmic-text refs.
-//!
-//! M6a-expand-2a: enum + payload type surface. The per-Intent reducer
-//! logic ships in 2b/2c; the stub reducer in `state_machine.rs`
-//! returns an empty Effect batch for every variant.
+//! The 63 payload variants are pure data with no winit, wgpu, clipboard,
+//! renderer, or platform-handle references. `reducer.rs` maps every intent
+//! family to state changes and zero or more effects.
 
 use bytes::Bytes;
 use std::ops::Range;
@@ -80,8 +77,8 @@ pub enum SelectionMode {
     Block,
 }
 
-/// Inputs to the state machine. See spec §1 for the full mapping
-/// table; reducer arms land in M6a-expand-2b/2c.
+/// Pure-data inputs to the state machine. `reducer.rs` contains the mapping
+/// from each intent family to state changes and effects.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 #[allow(missing_docs)] // Each variant carries its own doc comment.

@@ -9,9 +9,10 @@
 //!
 //! ## Why this exists
 //!
-//! winit cross-process drag is not a thing. We have to talk to AppKit
-//! (`NSPasteboard` + `NSDraggingSession`) on macOS and OLE
-//! (`IDataObject` + `DoDragDrop`) on Windows. Both expect a typed blob
+//! winit cross-process drag is not a thing. The current macOS path publishes
+//! a typed payload through the general `NSPasteboard` without an
+//! `NSDraggingSession`; Windows uses OLE (`IDataObject` + `DoDragDrop`). Both
+//! paths use a typed blob
 //! identified by a stable, reverse-DNS-style format name. That name
 //! and the payload schema must match between *whichever* two SonicTerm
 //! processes happen to be involved — pinning v1 in the type name lets
@@ -25,10 +26,11 @@
 //! surface — the child process is still parented to the source app,
 //! the source app still has the controlling TTY, signals route to the
 //! wrong place. v1 takes the pragmatic route: serialize *intent*
-//! (cwd, cmd, env, scrollback as history), source kills its local
-//! tab, destination spawns a fresh one with the same cwd/cmd/env and
-//! shows the captured scrollback as read-only history above the new
-//! shell's first prompt.
+//! (cwd, cmd, env, scrollback as history). A source tab is detached only after
+//! an explicit [`DragAck::Accepted`]; current platform handoffs do not provide
+//! that acknowledgement, so they preserve the live source session. A process
+//! that later consumes the payload spawns a fresh shell with the captured
+//! intent/history rather than transferring the live PTY.
 //!
 //! ## Format ID stability
 //!
@@ -65,8 +67,9 @@ pub struct TabPayload {
     /// PID of the PTY child in the *source* process at the moment of
     /// drag. Purely informational on the destination side — used for
     /// the history banner ("torn from PID 12345") and for log
-    /// correlation. The destination MUST NOT try to act on this PID;
-    /// the source kills the child before releasing the drag.
+    /// correlation. The destination MUST NOT try to act on this PID; it
+    /// always spawns a fresh shell from the payload rather than adopting the
+    /// source process.
     pub pty_pid: i32,
     /// Human-readable tab title (typically the shell prompt or the
     /// last `OSC 0`/`OSC 2` title the source process saw).
@@ -235,11 +238,10 @@ pub enum DragAck {
 
 /// Trait implemented by platform-specific OS-drag senders.
 ///
-/// `sonicterm-shared` knows when a tab has been dragged outside every
+/// `sonicterm-app` knows when a tab has been dragged outside every
 /// SonicTerm-owned window — that's the trigger for an OS-level handoff.
-/// What it does NOT know is how to actually start an NSDragging
-/// session or a `DoDragDrop` call; those live in `sonicterm-mac` and
-/// `sonicterm-windows` respectively. The platform binary installs an
+/// The macOS binary publishes to NSPasteboard; the Windows binary performs
+/// OLE `DoDragDrop`. The platform binary installs an
 /// `OsDragSink` impl at startup; the app dispatches into it.
 ///
 /// The return value gates whether the source tab dies — see
@@ -302,17 +304,16 @@ impl PendingPayloadSlot {
 
 /// Trait implemented by platform-specific OS-drag senders.
 ///
-/// `sonicterm-shared` knows when a tab has been dragged outside every
+/// `sonicterm-app` knows when a tab has been dragged outside every
 /// SonicTerm-owned window — that's the trigger for an OS-level handoff.
-/// What it does NOT know is how to actually start an NSDragging
-/// session or a `DoDragDrop` call; those live in `sonicterm-mac` and
-/// `sonicterm-windows` respectively. The platform binary installs an
+/// The macOS binary publishes to NSPasteboard; the Windows binary performs
+/// OLE `DoDragDrop`. The platform binary installs an
 /// `OsDragSink` impl at startup; the app dispatches into it.
 pub trait OsDragSink: Send + Sync {
     /// Hand the payload off to the OS. On macOS this writes it to
-    /// the general `NSPasteboard` under [`PASTEBOARD_TYPE`]. On
-    /// Windows v1 this is a no-op stub. On unsupported platforms it
-    /// logs a warning.
+    /// the general `NSPasteboard` under [`PASTEBOARD_TYPE`]. On Windows it
+    /// delegates to the installed OLE path. Unsupported platforms log a
+    /// warning.
     ///
     /// Returns [`DragAck::Accepted`] *only* when the sink is certain
     /// a destination has taken ownership; otherwise

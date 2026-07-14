@@ -1024,11 +1024,10 @@ impl App {
                     // Phase C2 (review fix): start the OS-level
                     // drag session AS SOON AS the cursor crosses the
                     // drag-start threshold from its press point, not on
-                    // mouse-release. Releasing first means `DoDragDrop`
-                    // (Windows) or NSDraggingSession (macOS) get no
-                    // live button to capture the cursor with, so the
-                    // OS-level cross-window cursor capture never
-                    // engages. The `os_drag_handoff_started` flag
+                    // mouse-release. Windows `DoDragDrop` needs the live
+                    // button state for cursor capture. The current macOS
+                    // backend is pasteboard-only, but shares this trigger so
+                    // the payload is published once per gesture. The `os_drag_handoff_started` flag
                     // ensures we only attempt the handoff once per
                     // gesture; if it succeeds the backend owns the
                     // gesture end-to-end (Windows) or has already

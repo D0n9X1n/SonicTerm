@@ -1,8 +1,9 @@
 # sonicterm-windows
 
 ## Purpose
-Windows binary and Win32-only glue: ConPTY process host, `muda` menu,
-DWM/Mica backdrop, OLE drag/drop, CLI handling, and WiX packaging assets.
+Windows binary and Win32-only GUI glue: `muda` menu, DWM/Mica backdrop,
+OLE drag/drop, CLI handling, software presentation, and WiX packaging assets.
+Local ConPTY process transport is provided through `sonicterm-io`.
 It loads config/theme/keymap, installs logging, then runs
 `sonicterm_app::WindowsShell`.
 
@@ -21,7 +22,8 @@ cargo build -p sonicterm-windows
 Release MSI builds require the Windows Cairo setup script and WiX.
 
 ## Guardrails
-- ConPTY resize returns an HRESULT; surface failures instead of ignoring.
+- Keep ConPTY/process behavior behind `sonicterm-io`; this crate owns GUI-only
+  Win32 integration.
 - Mica/backdrop changes must run after the HWND exists and is shown.
 - OLE drag/drop initialization must stay on the window thread.
 - Keep packaging paths in sync with `wix/main.wxs`, `docs/packaging/`, and the
@@ -29,6 +31,6 @@ Release MSI builds require the Windows Cairo setup script and WiX.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,
-  `sonicterm-logging`. ConPTY is hosted directly here via the Windows crates,
-  not through `sonicterm-io`.
+  `sonicterm-logging`; local PTY/ConPTY behavior is reached through
+  `sonicterm-app` and `sonicterm-io`.
 - Consumed by: Windows release packaging.
