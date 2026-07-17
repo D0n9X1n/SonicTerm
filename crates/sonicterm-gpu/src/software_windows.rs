@@ -248,7 +248,14 @@ impl WindowsSoftwareFrame {
                     let sy = ay0 + (yy - y0) as u32;
                     bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
                 } else {
-                    sample_atlas_bilinear(atlas_pixels, atlas_w, atlas_h, sx, sy)
+                    sample_atlas_bilinear_in_rect(
+                        atlas_pixels,
+                        atlas_w,
+                        atlas_h,
+                        sx,
+                        sy,
+                        (ax0, ay0, ax1, ay1),
+                    )
                 };
                 let dst_off = row + xx as usize * 4;
                 if color_glyph {
@@ -384,16 +391,33 @@ fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
 }
 
+#[cfg(test)]
 fn sample_atlas_bilinear(pixels: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
-    if width == 0 || height == 0 || pixels.is_empty() {
+    sample_atlas_bilinear_in_rect(pixels, width, height, x, y, (0, 0, width, height))
+}
+
+fn sample_atlas_bilinear_in_rect(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    rect: (u32, u32, u32, u32),
+) -> [f32; 4] {
+    let (min_x, min_y, max_x, max_y) = rect;
+    let max_x = max_x.min(width);
+    let max_y = max_y.min(height);
+    if width == 0 || height == 0 || pixels.is_empty() || min_x >= max_x || min_y >= max_y {
         return [0.0; 4];
     }
-    let x = (x - 0.5).clamp(0.0, (width - 1) as f32);
-    let y = (y - 0.5).clamp(0.0, (height - 1) as f32);
+    // Atlas tiles are packed without padding, so both bilinear taps must stay
+    // inside this glyph's rectangle instead of borrowing a neighboring tile.
+    let x = (x - 0.5).clamp(min_x as f32, (max_x - 1) as f32);
+    let y = (y - 0.5).clamp(min_y as f32, (max_y - 1) as f32);
     let x0 = x.floor() as u32;
     let y0 = y.floor() as u32;
-    let x1 = (x0 + 1).min(width - 1);
-    let y1 = (y0 + 1).min(height - 1);
+    let x1 = (x0 + 1).min(max_x - 1);
+    let y1 = (y0 + 1).min(max_y - 1);
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
     let c00 = bgra_pixel_at(pixels, width, x0, y0);
