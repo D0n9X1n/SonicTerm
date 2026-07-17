@@ -92,7 +92,7 @@ fixed = "1.29"
 libc = "0.2"
 pkg-config = "0.3"
 serde_plain = "1"
-pollster = "0.4"
+pollster = "1.0"
 arboard = "3"
 regex = "1"
 
