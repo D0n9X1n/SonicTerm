@@ -1,8 +1,8 @@
 //! The `AppStateMachine`: the boundary the platform shell drives.
 //!
-//! M6a-expand-2a (THIS PR): API surface + cascade-bound guard + sort.
-//! Reducer arms return an empty Effect batch for every Intent; per-
-//! Intent state mutation logic lands in 2b/2c.
+//! `handle` reduces one intent and returns a stable class-sorted effect batch.
+//! `drain_pending` exposes the private bounded follow-on queue; the current
+//! reducer and production boundary do not enqueue into it.
 
 use smallvec::SmallVec;
 
@@ -10,19 +10,17 @@ use crate::app_state::AppState;
 use crate::effect::AppEffect;
 use crate::intent::AppIntent;
 
-/// Maximum cascade iterations a single `handle` call may execute
-/// inside `drain_pending` before the state machine considers itself
-/// broken. Per spec §5: 4× the deepest known legitimate cascade
-/// (close-last-tab → WindowCloseRequested → quit → flush all →
-/// menubar rebuild = 4).
+/// Maximum number of internal queued effects `drain_pending` accepts before
+/// treating the queue as broken. This does not bound the normal effect batch
+/// returned directly by `handle`.
 pub const MAX_CASCADE_DEPTH: usize = 16;
 
 /// Pure-data state machine driven by the platform shell.
 ///
-/// The shell calls `handle(intent)` once per Intent and consumes the
-/// returned `SmallVec<[AppEffect; 4]>`. Cascaded follow-on Intents
-/// reducer arms enqueue go through `pending`; `drain_pending`
-/// flattens them, bounded by `MAX_CASCADE_DEPTH`.
+/// The shell calls `handle(intent)` once per intent and consumes the returned
+/// `SmallVec<[AppEffect; 4]>`. Reducer arms express normal multi-effect
+/// operations in that batch. The private `pending` queue is retained as an
+/// internal/tested extension point but has no production enqueue path today.
 pub struct AppStateMachine {
     state: AppState,
     pending: SmallVec<[AppEffect; 8]>,
@@ -44,8 +42,6 @@ impl AppStateMachine {
     /// Dispatch one Intent, returning the sorted-by-`EffectClass`
     /// Effect batch.
     ///
-    /// M6a-expand-2a stub: every Intent returns `SmallVec::new()`.
-    /// Per-Intent reducer arms land in 2b/2c (see spec §9 + §3).
     pub fn handle(&mut self, intent: AppIntent) -> SmallVec<[AppEffect; 4]> {
         let mut out: SmallVec<[AppEffect; 4]> = SmallVec::new();
         crate::reducer::reduce_leaf(&mut self.state, intent, &mut out);
@@ -56,14 +52,12 @@ impl AppStateMachine {
         out
     }
 
-    /// Drain any side-effects the reducer queued internally during
-    /// cascade. The state machine never accumulates pending events
-    /// across `handle` calls in M6a-expand-2a (the stub reducer
-    /// pushes nothing); this method exists so the boundary the shell
-    /// integrates against is stable for 2b/2c.
+    /// Drain internal follow-on effects in canonical class order. The current
+    /// reducer and public boundary never seed this queue, so production calls
+    /// return an empty vector; in-crate tests exercise ordering and the bound.
     ///
-    /// Bounded by `MAX_CASCADE_DEPTH`. Debug builds panic on
-    /// overflow; release builds log at `error!` + truncate.
+    /// Bounded by `MAX_CASCADE_DEPTH`. Debug builds panic on overflow; release
+    /// builds log at `error!` and truncate.
     pub fn drain_pending(&mut self) -> Vec<AppEffect> {
         let mut out: Vec<AppEffect> = Vec::with_capacity(self.pending.len());
         let mut depth: usize = 0;

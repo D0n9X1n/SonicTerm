@@ -6,10 +6,10 @@ SonicTerm themes are TOML files. Bundled themes live in `assets/themes/`, and
 editable user themes live in:
 
 ```text
-~/.snoicterm/themes/
+~/.sonicterm/themes/
 ```
 
-The active theme is selected from `~/.snoicterm/sonicterm.toml`:
+The active theme is selected from `~/.sonicterm/sonicterm.toml`:
 
 ```toml
 theme = "wezterm"
@@ -22,17 +22,20 @@ You can also point `theme` at any TOML file path.
 1. Copy the seeded default theme:
 
    ```sh
-   cp ~/.snoicterm/themes/wezterm.toml ~/.snoicterm/themes/my-theme.toml
+   cp ~/.sonicterm/themes/wezterm.toml ~/.sonicterm/themes/my-theme.toml
    ```
 
-2. Edit `~/.snoicterm/themes/my-theme.toml`.
-3. Set the theme name in `~/.snoicterm/sonicterm.toml`:
+2. Edit `~/.sonicterm/themes/my-theme.toml`.
+3. Set the theme name in `~/.sonicterm/sonicterm.toml`:
 
    ```toml
    theme = "my-theme"
    ```
 
-4. Run **Reload Config** from the command palette.
+4. Run **Reload Config** after changing the `theme` selector. If `my-theme` is
+   already selected and you only edit its TOML contents, current reload logic
+   does not reliably re-read that file; temporarily select another theme and
+   select `my-theme` again, or restart SonicTerm.
 
 ### Theme file shape
 
@@ -89,7 +92,11 @@ close_button_fg = "#ff5555"
 | `selection_bg` / `selection_fg` | Text selection |
 | `colors.ansi` | Normal ANSI colors 0-7 |
 | `colors.bright` | Bright ANSI colors 8-15 |
-| `colors.tab` | Tab bar, active/inactive tabs, hover state, close button |
+| `colors.tab` | Tab bar, active/inactive tabs, and hover state |
+
+`colors.tab.close_button_fg` remains a required compatibility field in the
+current theme schema, but the close button is no longer drawn, so the value has
+no visual effect.
 
 Search highlighting also follows the active theme: all matches use the theme's
 yellow with background-colored text, while the current match uses the theme's
@@ -107,18 +114,19 @@ bright green with background-colored text.
   derives from them.
 - Use only `#rrggbb` colors.
 
-If a theme file fails to parse, SonicTerm logs the error and falls back to the
-bundled `wezterm` theme.
+At startup, an invalid selected theme is logged and falls back to the bundled
+`wezterm` theme. A failed live selector change leaves the current rendered theme
+active and logs the error.
 
 ## 中文
 
 SonicTerm 的主题是 TOML 文件。内置主题在 `assets/themes/`，用户可编辑主题在：
 
 ```text
-~/.snoicterm/themes/
+~/.sonicterm/themes/
 ```
 
-当前主题由 `~/.snoicterm/sonicterm.toml` 决定：
+当前主题由 `~/.sonicterm/sonicterm.toml` 决定：
 
 ```toml
 theme = "wezterm"
@@ -131,17 +139,19 @@ theme = "wezterm"
 1. 复制首次启动时生成的默认主题：
 
    ```sh
-   cp ~/.snoicterm/themes/wezterm.toml ~/.snoicterm/themes/my-theme.toml
+   cp ~/.sonicterm/themes/wezterm.toml ~/.sonicterm/themes/my-theme.toml
    ```
 
-2. 编辑 `~/.snoicterm/themes/my-theme.toml`。
-3. 在 `~/.snoicterm/sonicterm.toml` 里启用它：
+2. 编辑 `~/.sonicterm/themes/my-theme.toml`。
+3. 在 `~/.sonicterm/sonicterm.toml` 里启用它：
 
    ```toml
    theme = "my-theme"
    ```
 
-4. 打开命令面板，执行 **Reload Config**。
+4. 修改 `theme` 选择器后，在命令面板执行 **Reload Config**。如果已经选中 `my-theme`，
+   只是修改它的 TOML 内容，当前 reload 逻辑不会可靠地重新读取该文件；可先临时选择其它主题，
+   再重新选择 `my-theme`，或重启 SonicTerm。
 
 ### 主题文件结构
 
@@ -198,7 +208,10 @@ close_button_fg = "#ff5555"
 | `selection_bg` / `selection_fg` | 文本选区 |
 | `colors.ansi` | 普通 ANSI 颜色 0-7 |
 | `colors.bright` | 高亮 ANSI 颜色 8-15 |
-| `colors.tab` | Tab bar、active/inactive tab、hover 状态、关闭按钮 |
+| `colors.tab` | Tab bar、active/inactive tab 和 hover 状态 |
+
+`colors.tab.close_button_fg` 目前仍是主题 schema 要求的兼容字段，但关闭按钮已不再绘制，
+因此该值没有视觉效果。
 
 搜索高亮也跟随当前主题：所有命中使用主题里的黄色，并用背景色作为文字颜色；
 当前选中命中使用主题里的 bright green，并同样用背景色作为文字颜色。
@@ -211,4 +224,4 @@ close_button_fg = "#ff5555"
 - `ansi.yellow` 和 `bright.green` 会影响搜索高亮，所以要认真选择。
 - 颜色只使用 `#rrggbb` 格式。
 
-如果主题文件解析失败，SonicTerm 会写日志，并回退到内置 `wezterm` 主题。
+启动时，选中的主题解析失败会记录日志并回退到内置 `wezterm`；运行中切换主题失败时，当前已渲染主题保持不变并记录错误。

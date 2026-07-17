@@ -1,6 +1,8 @@
 use crate::geometry::PixelRect;
 
-/// Generic drawing surface. GPU impl provided by sonicterm-shared (later sonicterm-gpu).
+/// Backend-agnostic drawing command surface for simple rectangle and text emitters.
+/// No production backend currently implements this trait; `GpuRenderer::render`
+/// consumes `PaneRender` and `RenderInputs` directly.
 pub trait Painter {
     /// Fill an axis-aligned rectangle with a solid linear-sRGB RGBA color —
     /// used for cursor blocks, tab chrome, underlines, selection tint, etc.

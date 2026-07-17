@@ -106,7 +106,8 @@ impl MacShell {
         self
     }
 
-    /// Install the OS-level drag-session backend (NSDraggingSession on mac).
+    /// Install the OS handoff backend (NSPasteboard publication on macOS,
+    /// OLE drag/drop on Windows).
     #[must_use]
     pub fn with_os_drag_backend(mut self, backend: Box<dyn OsTabDragBackend>) -> Self {
         self.os_drag_backend = Some(backend);

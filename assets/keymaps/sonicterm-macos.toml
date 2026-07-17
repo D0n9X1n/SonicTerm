@@ -21,10 +21,10 @@ action = "new_tab"
 keys = "super+w"
 action = "close_active_pane_or_tab"
 
-# Hold ⌘Q to quit. A single press only shows a red "hold to quit" prompt in
-# the top-right; the app exits once the chord is held ~0.8s. The macOS Quit
-# menu item intentionally carries no ⌘Q key equivalent so this hold-gated
-# binding governs the chord instead of AppKit quitting immediately.
+# Two-press quit confirmation. The first ⌘Q shows a red prompt; press ⌘Q
+# again within five seconds to exit. Auto-repeat is ignored. The macOS Quit
+# menu item intentionally carries no key equivalent so this guarded binding
+# handles the chord instead of AppKit quitting immediately.
 [[binding]]
 keys = "super+q"
 action = "quit_app"

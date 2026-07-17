@@ -1,12 +1,9 @@
-//! sonicterm-app — winit app loop, OS drag-and-drop glue, menubar bridge,
-//! config watcher, and top-level event-loop wiring for SonicTerm Terminal.
+//! Cross-platform SonicTerm application orchestration.
 //!
-//! Extracted from `sonicterm-shared` in refactor PR 8a. The previous
-//! `sonicterm_app::app`, `sonicterm_app::menu`, `sonicterm_app::menubar_bridge`,
-//! `sonicterm_app::os_drag(_bridge)`, `sonicterm_app::tab_drag`, and
-//! `sonicterm_app::config_watch` import paths are the canonical homes;
-//! the deprecated `sonicterm-shared` façade still re-exports them for
-//! backwards compatibility.
+//! This crate owns the winit application loop, window/tab/pane lifecycle,
+//! PTY and parser wiring, input dispatch, redraw scheduling, config watching,
+//! overlays, tab transfer, OS-drag bridges, menubar abstractions, and the
+//! platform-shell builders consumed by the macOS and Windows binaries.
 
 // TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
 #![allow(missing_docs)]

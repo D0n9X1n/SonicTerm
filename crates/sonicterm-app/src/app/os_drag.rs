@@ -9,24 +9,22 @@
 //!   clipboard. That's the Phase C1 work that already shipped.
 //!
 //! * **This module** ([`crate::app::os_drag`]) defines the
-//!   [`OsTabDragBackend`] trait that lets the App start an OS-level
-//!   *drag session* (NSDraggingSession / OLE DoDragDrop) so the cursor
-//!   stays captured across window boundaries even while the user is
-//!   physically dragging a tab between two SonicTerm windows of the *same*
-//!   process.
+//!   [`OsTabDragBackend`] trait for platform handoff. Windows uses it for a
+//!   native OLE `DoDragDrop` session with cursor capture. The current macOS
+//!   implementation publishes to NSPasteboard and immediately cancels the
+//!   backend gesture; same-process merging stays in the in-process path.
 //!
 //! Phase C ([`crate::app::tab_transfer`]) added the pure
 //! [`crate::app::App::transfer_tab`] primitive — given a `(src_window,
 //! src_tab_idx, dst_window, dst_tab_idx)` 4-tuple, move a tab. Phase
-//! C1 added the cross-process wire format. **Phase C2 (this file)**
-//! wires up the actual NSDraggingSession / OLE-DoDragDrop calls so
-//! that a real user mouse drag ends up calling
-//! [`crate::app::App::transfer_tab`].
+//! C1 added the cross-process wire format. This file provides the shared
+//! outcome/registry contract used by the full Windows OLE backend and the
+//! pasteboard-only macOS backend.
 //!
 //! ## Why a trait
 //!
-//! NSDraggingSession lives in `sonicterm-mac`; OLE DoDragDrop lives in
-//! `sonicterm-windows`. The `sonicterm-app` crate is platform-agnostic and
+//! NSPasteboard/AppKit integration lives in `sonicterm-mac`; OLE `DoDragDrop`
+//! lives in `sonicterm-windows`. The `sonicterm-app` crate is platform-agnostic and
 //! cannot link AppKit / Win32 directly without breaking the
 //! cross-platform build. The trait is the seam:
 //!
@@ -36,7 +34,7 @@
 //!    └─ App owns Option<Box<dyn OsTabDragBackend>>
 //!
 //!  sonicterm-mac
-//!    └─ MacOsTabDragBackend: OsTabDragBackend  ← begins NSDragSession
+//!    └─ MacOsTabDragBackend: OsTabDragBackend  ← publishes NSPasteboard payload
 //!
 //!  sonicterm-windows
 //!    └─ WinOsTabDragBackend: OsTabDragBackend  ← begins OLE DoDragDrop
@@ -44,9 +42,8 @@
 //!
 //! ## Callback flow
 //!
-//! NSDraggingSource / IDropSource callbacks fire on a thread that is
-//! not winit's main loop (AppKit posts to the main RunLoop; OLE
-//! pumps a private message loop). The backend therefore cannot poke
+//! Native backend callbacks cannot borrow `App` directly while
+//! `event_loop.run_app(&mut app)` owns it. A backend therefore cannot poke
 //! `App` directly — it must hop through the winit
 //! [`winit::event_loop::EventLoopProxy`] to wake the main loop and
 //! deliver a `UserEvent::DragMoved` / `UserEvent::DragEnded`. The
@@ -58,9 +55,9 @@
 //!
 //! * It does NOT replace [`crate::tab_drag`]'s pure within-bar drag
 //!   geometry — that still handles "drag tab to slot 3 of the same
-//!   bar" reorders. This file only kicks in when the cursor leaves
-//!   the source window's tab bar, at which point we need OS cursor
-//!   capture to keep receiving events.
+//!   bar" reorders. This file only kicks in when the cursor leaves the source
+//!   window's tab bar. Windows then uses native cursor capture; macOS currently
+//!   publishes a pasteboard payload and cancels the backend gesture.
 //! * It does NOT touch the cross-process wire format in
 //!   [`crate::os_drag`]. Same-process drag uses the in-memory
 //!   `(src_window, src_idx, dst_window, dst_idx)` tuple; cross-process
@@ -123,22 +120,20 @@ pub enum DragOutcome {
 
 /// The trait every platform OS-drag backend implements.
 ///
-/// Single method — the rest of the dance (cursor capture, hit-testing
-/// the pasteboard format, callback dispatch) lives inside the
-/// backend's platform-specific impl. The backend takes ownership of
-/// the gesture once `begin_session` returns: from that moment until
-/// it posts [`UserEvent::DragEnded`] via the [`AppHandle`], the App
-/// should treat the source tab as "live but in flight" — render the
-/// drag-chip overlay, suppress other tab interactions, etc.
+/// Single method — payload publication, optional cursor capture/hit-testing,
+/// and callback dispatch live inside the platform implementation. The source
+/// tab remains live while the backend reports its outcome. Windows owns the
+/// native gesture end-to-end; macOS currently publishes to NSPasteboard and
+/// immediately posts a cancelled outcome.
 ///
 /// **Threading:** `begin_session` is called from the winit main
 /// thread. Platform backends may spin up worker threads internally
 /// (OLE does), but every interaction with [`AppHandle`] uses the
 /// thread-safe [`EventLoopProxy`] it wraps.
 pub trait OsTabDragBackend: Send {
-    /// Start an OS-level drag session. The backend is now responsible
-    /// for cursor capture and for posting `UserEvent::DragMoved` /
-    /// `UserEvent::DragEnded` back through the handle.
+    /// Start the platform handoff. A full backend owns cursor capture and posts
+    /// move/end events; a publication-only backend may post a terminal cancelled
+    /// outcome immediately after making the payload available.
     ///
     /// `payload_json` is the full [`crate::os_drag::TabPayload`]
     /// serialized to JSON, ready to be written to the platform
@@ -197,10 +192,10 @@ pub trait OsTabDragBackend: Send {
 
 /// Snapshot of a single window's tab bar, in **screen** coordinates,
 /// published by the App into a [`TabBarRegistry`] each frame so a
-/// platform OS-drag backend running off the winit thread (Windows OLE
-/// IDropTarget::Drop on the OLE worker thread, macOS NSDraggingDestination
-/// on the AppKit main loop) can hit-test the drop cursor without having
-/// to call back into the App's borrowed state.
+/// platform OS-drag backend running outside the app borrow (currently the
+/// Windows OLE `IDropTarget::Drop` path) can hit-test the drop cursor without
+/// calling back into `App` state. The macOS pasteboard-only backend does not
+/// consume this registry today.
 ///
 /// Tabs are described by their horizontal extents only (`tab_lefts` +
 /// `tab_rights`) — the vertical coordinate is covered by `bar_rect`'s

@@ -13,10 +13,9 @@
 //! - OSC 8 hyperlinks are NOT handled here; they already have their
 //!   own hover-underline path in the renderer.
 //!
-//! Tests live in `crates/sonicterm-app/tests/cmd_hover_url_underline.rs`
-//! and `…/cmd_hover_no_url_no_underline.rs`. They exercise this
-//! module directly so the contract can be verified without spinning
-//! up a real winit / wgpu context.
+//! Sibling tests in `hovered_url_tests.rs` exercise the renderer projection
+//! without a live winit or wgpu context; URL scan/open policy is covered in
+//! `sonicterm-cfg` tests.
 
 use sonicterm_render_model::inputs::UnderlineRect;
 

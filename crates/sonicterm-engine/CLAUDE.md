@@ -24,4 +24,6 @@ cargo build -p sonicterm-engine
 - Do not depend on vendor font modules; use Sonic-owned font crates.
 
 ## Cross-references
-- Consumed by: `sonicterm-block-glyph` and font/rendering code.
+- Consumes: `sonicterm-font-config`, `sonicterm-font`, `sonicterm-grid`,
+  `sonicterm-text`, `sonicterm-types`.
+- Consumed by: `sonicterm-gpu`.

@@ -17,11 +17,9 @@
 //! This module is intentionally winit-free: it only operates on
 //! integer pixel rects so it can be unit-tested without spawning a
 //! real event loop.
-//
-// FUTURE: cross-PROCESS drag (drag from one sonic process to another)
-// will need OS-level drag-and-drop (NSPasteboard / OLE / Wayland data
-// device). v1 is same-process only — we only look at our own
-// `windows: HashMap<WindowId, ...>`.
+// Cross-process publication lives in `os_drag`; these helpers intentionally
+// inspect only the current process's `windows` map and remain the authoritative
+// same-process reorder/merge geometry.
 
 use sonicterm_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
 

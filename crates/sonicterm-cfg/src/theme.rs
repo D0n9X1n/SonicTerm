@@ -132,7 +132,8 @@ pub struct TabColors {
     /// Foreground for the tab under the mouse cursor.
     #[serde(default = "default_hover_fg")]
     pub hover_fg: Hex,
-    /// Foreground for the per-tab close (×) button.
+    /// Deprecated compatibility color for the removed per-tab close button.
+    /// Theme files still carry this required field so existing palettes round-trip.
     pub close_button_fg: Hex,
 }
 

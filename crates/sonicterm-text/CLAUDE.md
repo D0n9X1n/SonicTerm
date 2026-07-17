@@ -23,5 +23,6 @@ cargo build -p sonicterm-text
   vendor font dependencies.
 
 ## Cross-references
-- Consumes: `sonicterm-font`, `sonicterm-types`.
-- Consumed by: `sonicterm-gpu`.
+- Consumes: `sonicterm-types` plus external headless text/image utilities.
+- Consumed by: `sonicterm-ui`, `sonicterm-engine`, `sonicterm-gpu`,
+  `sonicterm-app`.

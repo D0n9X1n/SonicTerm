@@ -48,12 +48,9 @@ pub struct Config {
     /// and `crates/sonicterm-gpu/src/core.rs`.
     #[serde(default)]
     pub render: RenderConfig,
-    /// Optional override for the tab close `×` button color. When set
-    /// (e.g. `"#ff5555"`), the close button is always visible in this
-    /// color, matching WezTerm's `tab_close_button_color` setting.
-    /// When `None` (the default), the close button follows WezTerm
-    /// fancy-mode parity: hidden until the user hovers the tab, then
-    /// drawn dim, brightening on hover of the × glyph itself.
+    /// Deprecated compatibility key for the former tab close `×` button.
+    /// The button is no longer drawn, so this value currently has no visual
+    /// effect. It remains deserializable so older config files keep loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
     /// Maximum width, in logical pixels, of a single tab when the tab bar
@@ -64,10 +61,9 @@ pub struct Config {
     /// `240.0`. Raise it for roomier tabs, lower it to pack more in.
     #[serde(default = "default_tab_max_width")]
     pub tab_max_width: f32,
-    /// When `true`, the app exits as soon as the last window is closed
-    /// (classic single-window-app behavior). When `false` (the default,
-    /// matching Chrome/Firefox/Safari on macOS), the application process
-    /// stays alive on macOS after the last window closes — keeping the
+    /// When `true` (the default), the app exits as soon as the last window is
+    /// closed. When `false`, the application process stays alive on macOS
+    /// after the last window closes — keeping the
     /// dock icon active so the user can open a fresh window via
     /// `Cmd+N` or the dock menu without paying cold-start cost. On
     /// non-macOS platforms there is no dock concept and we always exit
@@ -122,11 +118,14 @@ pub struct WindowConfig {
     pub padding_bottom: f32,
     /// Whether to draw native window decorations (titlebar + traffic lights).
     pub decorations: bool,
-    /// Window background opacity, 0.0–1.0.
+    /// Legacy window-opacity value retained for config compatibility. Current
+    /// rendering uses [`AppearanceConfig::opacity`] instead.
     pub opacity: f32,
-    /// Enable the macOS background blur effect (no-op on other platforms).
+    /// Legacy macOS blur value retained for config compatibility. Current
+    /// platform setup uses [`AppearanceConfig::backdrop`] instead.
     pub blur: bool,
-    /// Number of hidden child windows kept warm for instant tab tear-out.
+    /// Requested hidden child-window pool for tab tear-out. The app clamps the
+    /// effective target to 2..=5, so values below 2 do not disable the pool.
     pub warm_window_pool: u8,
 }
 
@@ -638,8 +637,9 @@ keymap = "{keymap}"
 # UI language. Empty string means auto-detect from the OS.
 locale = ""
 
-# If true, closing the last tab exits the app. If false, SonicTerm keeps the app
-# alive so a new window can be opened from the dock/taskbar/menu.
+# If true, closing the last window exits the app. If false, macOS keeps the
+# process alive so a new window can be opened from the Dock/menu. Other
+# platforms exit when no windows remain.
 quit_on_last_window_close = true
 
 # Maximum width of a single tab, in logical pixels, when the tab bar has room.
@@ -687,15 +687,13 @@ padding_bottom = {padding_bottom}
 # Native OS window decorations. Changing this usually requires restart.
 decorations = true
 
-# Legacy window opacity knob. Prefer [appearance].opacity for new config; this
-# remains for compatibility with older config files.
+# Legacy values accepted while reading old configs. Current startup/reload
+# behavior uses [appearance].opacity and [appearance].backdrop instead.
 opacity = 1.0
-
-# Legacy macOS blur knob. Prefer [appearance].backdrop for new config.
 blur = false
 
 # Hidden pre-created child windows kept warm for instant tab tear-out.
-# SonicTerm keeps at least one spare after consuming one; values above 5 are clamped.
+# The effective target is clamped to 2..=5; 0 or 1 does not disable the pool.
 warm_window_pool = 2
 
 [terminal]

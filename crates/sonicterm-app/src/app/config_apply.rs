@@ -348,10 +348,9 @@ impl App {
             tracing::info!("live-reload: tab_max_width -> {}", new_cfg.tab_max_width);
         }
 
-        // Tab close-button override (wezterm `tab_close_button_color`).
-        // Diff against the live config so an edit that adds, changes,
-        // or clears the value propagates to the main + every child
-        // renderer without a restart.
+        // Deprecated tab-close compatibility key. Propagate changes so every
+        // renderer drops its cached frame consistently; the close button is no
+        // longer drawn and the renderer setter intentionally has no visual effect.
         if new_cfg.tab_close_button_color != self.config.tab_close_button_color {
             if let Some(r) = self.main_renderer_mut() {
                 r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
