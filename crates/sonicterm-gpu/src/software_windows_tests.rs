@@ -20,6 +20,14 @@ impl Rasterizer for OneSubpixelGlyph {
     }
 }
 
+struct TileRasterizer(RasterTile);
+
+impl Rasterizer for TileRasterizer {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<RasterTile> {
+        Some(self.0.clone())
+    }
+}
+
 #[test]
 fn clear_uses_straight_alpha_background() {
     let frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
@@ -179,3 +187,61 @@ fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
     assert!(one_to_one);
 }
 
+#[test]
+fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
+    let mut atlas = GlyphAtlas::new(4, 8);
+    let line = atlas
+        .get_or_insert(
+            GlyphKey::new('─', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 4,
+                height: 4,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 4.0,
+                coverage: vec![
+                    0, 0, 0, 0, //
+                    255, 255, 255, 255, //
+                    0, 0, 0, 0, //
+                    0, 0, 0, 0,
+                ],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("line glyph inserts");
+    atlas
+        .get_or_insert(
+            GlyphKey::new('x', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 4,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 4.0,
+                coverage: vec![255; 4],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("neighbor glyph inserts below the line tile");
+
+    let mut frame = WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]);
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 4.0, 5.0, 4.0, 5.0),
+            uv: line.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [0.0; 4],
+        }],
+    );
+
+    for x in 0..4 {
+        assert_eq!(
+            frame.pixel_bgra(x, 4),
+            [0, 0, 0, 255],
+            "the scaled tile's transparent bottom edge must not sample the neighboring glyph"
+        );
+    }
+}
