@@ -763,6 +763,10 @@ pub struct GpuRenderer {
     // B3 GPU text path for terminal and chrome glyphs.
     glyph_atlas: GlyphAtlas,
     glyph_upload: AtlasUpload,
+    /// Monotonic identity of the current glyph-atlas allocation. Unlike the
+    /// atlas-local eviction count, this survives replacement and prevents an
+    /// old epoch-0 UV cache from matching a new epoch-0 atlas.
+    glyph_atlas_generation: u64,
     // Inline media is isolated so large images cannot evict glyph tiles
     // referenced by the row cache.
     image_atlas: GlyphAtlas,
@@ -885,8 +889,8 @@ pub struct GpuRenderer {
     /// is re-shaped from scratch every frame otherwise; while a composition is
     /// unchanged across frames (paused, or PTY-burst redraws while composing)
     /// this reuses the emitted glyphs. Keyed on the text + placement + color +
-    /// the atlas eviction epoch (so cached atlas UVs can never go stale — any
-    /// eviction bumps `evictions()` and invalidates the entry).
+    /// the atlas allocation generation + eviction epoch, so neither
+    /// replacement nor rectangle recycling can leave its UVs stale.
     preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
@@ -1046,17 +1050,22 @@ struct FrameKey {
 /// Memoized inline IME preedit overlay glyphs. Reused across
 /// frames when the composition text and its placement are unchanged so a
 /// paused or streaming-while-composing preedit isn't re-shaped every frame.
-/// `atlas_epoch` is the glyph atlas's cumulative eviction count at build time;
-/// any eviction bumps it and invalidates the cache, so the stored
-/// `GlyphInstance`s (which carry atlas UVs) can never reference a recycled
-/// tile.
+/// `atlas_epoch` combines a renderer-owned allocation generation with the
+/// atlas's cumulative eviction count. Replacement changes the generation;
+/// rectangle recycling changes the eviction count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GlyphAtlasEpoch {
+    generation: u64,
+    evictions: u64,
+}
+
 struct PreeditGlyphCache {
     text: String,
     font_size: f32,
     start_x: f32,
     top_y: f32,
     color_bits: u32,
-    atlas_epoch: u64,
+    atlas_epoch: GlyphAtlasEpoch,
     glyphs: Vec<GlyphInstance>,
 }
 
@@ -1070,7 +1079,7 @@ impl PreeditGlyphCache {
         start_x: f32,
         top_y: f32,
         color_bits: u32,
-        atlas_epoch: u64,
+        atlas_epoch: GlyphAtlasEpoch,
     ) -> bool {
         self.atlas_epoch == atlas_epoch
             && self.color_bits == color_bits
@@ -1534,6 +1543,7 @@ impl GpuRenderer {
             frame_blitter,
             glyph_atlas,
             glyph_upload,
+            glyph_atlas_generation: 0,
             image_atlas,
             image_upload,
             glyph_atlas_retry_without_eviction: false,
@@ -2336,6 +2346,7 @@ impl GpuRenderer {
         );
 
         self.glyph_atlas = GlyphAtlas::new(width, height);
+        self.mark_glyph_atlas_replaced();
         self.glyph_atlas.set_eviction_enabled(false);
         self.glyph_upload = AtlasUpload::new(
             &self.device,
@@ -2344,10 +2355,21 @@ impl GpuRenderer {
             self.present_pipeline.texture_bind_group_layout(),
         );
         self.row_glyph_cache.invalidate_all();
-        self.preedit_glyph_cache = None;
         self.glyph_atlas_retry_without_eviction = true;
         self.last_frame_key = None;
         self.window.request_redraw();
+    }
+
+    fn glyph_atlas_epoch(&self) -> GlyphAtlasEpoch {
+        GlyphAtlasEpoch {
+            generation: self.glyph_atlas_generation,
+            evictions: self.glyph_atlas.evictions(),
+        }
+    }
+
+    fn mark_glyph_atlas_replaced(&mut self) {
+        self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
+        self.preedit_glyph_cache = None;
     }
 
     fn reset_image_atlas(&mut self) {
@@ -2405,6 +2427,7 @@ impl GpuRenderer {
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
+        self.mark_glyph_atlas_replaced();
         self.glyph_atlas_retry_without_eviction = false;
         // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
@@ -2479,6 +2502,7 @@ impl GpuRenderer {
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
         self.glyph_atlas = GlyphAtlas::default_size();
+        self.mark_glyph_atlas_replaced();
         self.glyph_atlas_retry_without_eviction = false;
         // G1a: cell metrics are raster px end-to-end, so re-pull them
         // from sonicterm-font when the rasterizer target moves. Falls
@@ -5218,7 +5242,7 @@ impl GpuRenderer {
                     | (u32::from(preedit_fg.g) << 16)
                     | (u32::from(preedit_fg.b) << 8)
                     | u32::from(preedit_fg.a);
-                let atlas_epoch = self.glyph_atlas.evictions();
+                let atlas_epoch = self.glyph_atlas_epoch();
                 let cache_hit = self.preedit_glyph_cache.as_ref().is_some_and(|c| {
                     c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
                 });
@@ -5254,7 +5278,7 @@ impl GpuRenderer {
                         start_x: emit_x,
                         top_y: baseline_y,
                         color_bits,
-                        atlas_epoch: self.glyph_atlas.evictions(),
+                        atlas_epoch: self.glyph_atlas_epoch(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
                     });
                 }

@@ -320,18 +320,40 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
         start_x: 100.0,
         top_y: 50.0,
         color_bits: 0xAABBCCFF,
-        atlas_epoch: 7,
+        atlas_epoch: GlyphAtlasEpoch { generation: 1, evictions: 7 },
         glyphs: Vec::new(),
     };
     // Exact match.
-    assert!(c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, 7));
+    let epoch = GlyphAtlasEpoch { generation: 1, evictions: 7 };
+    assert!(c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch));
     // Any single field differing must miss.
-    assert!(!c.matches("ni'ha", 14.0, 100.0, 50.0, 0xAABBCCFF, 7)); // text grew
-    assert!(!c.matches("ni'hao", 15.0, 100.0, 50.0, 0xAABBCCFF, 7)); // font size
-    assert!(!c.matches("ni'hao", 14.0, 101.0, 50.0, 0xAABBCCFF, 7)); // x (scroll)
-    assert!(!c.matches("ni'hao", 14.0, 100.0, 51.0, 0xAABBCCFF, 7)); // y
-    assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0x11223344, 7)); // color
-    assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, 8)); // atlas evicted
+    assert!(!c.matches("ni'ha", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch)); // text grew
+    assert!(!c.matches("ni'hao", 15.0, 100.0, 50.0, 0xAABBCCFF, epoch)); // font size
+    assert!(!c.matches("ni'hao", 14.0, 101.0, 50.0, 0xAABBCCFF, epoch)); // x (scroll)
+    assert!(!c.matches("ni'hao", 14.0, 100.0, 51.0, 0xAABBCCFF, epoch)); // y
+    assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0x11223344, epoch)); // color
+    let evicted_epoch = GlyphAtlasEpoch { generation: 1, evictions: 8 };
+    assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, evicted_epoch));
+}
+
+#[test]
+fn preedit_cache_rejects_same_eviction_count_after_atlas_replacement() {
+    let old_epoch = GlyphAtlasEpoch { generation: 3, evictions: 0 };
+    let c = PreeditGlyphCache {
+        text: "ni'hao".to_string(),
+        font_size: 14.0,
+        start_x: 100.0,
+        top_y: 50.0,
+        color_bits: 0xAABBCCFF,
+        atlas_epoch: old_epoch,
+        glyphs: Vec::new(),
+    };
+    let replacement_epoch = GlyphAtlasEpoch { generation: 4, evictions: 0 };
+
+    assert!(
+        !c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, replacement_epoch),
+        "equal eviction counts from different atlas allocations must not reuse cached UVs"
+    );
 }
 
 struct OnePixelAtlasGlyph;
