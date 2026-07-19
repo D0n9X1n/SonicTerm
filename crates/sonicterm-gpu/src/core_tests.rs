@@ -861,6 +861,15 @@ fn palette_cursor_slice_handles_non_boundary_offsets() {
 }
 
 #[test]
+fn palette_cursor_uses_placeholder_only_for_an_empty_query() {
+    assert_eq!(palette_cursor_char("", 0, Some("Search commands…")), Some("S"));
+    assert_eq!(palette_cursor_char("", 0, Some("搜索命令")), Some("搜"));
+    assert_eq!(palette_cursor_char("abc", 0, Some("Search commands…")), Some("a"));
+    assert_eq!(palette_cursor_char("abc", 3, Some("Search commands…")), None);
+    assert_eq!(palette_cursor_char("", 0, None), None);
+}
+
+#[test]
 fn plain_url_hover_does_not_need_accent_palette() {
     use sonicterm_render_model::inputs::HoveredUrlCells;
 

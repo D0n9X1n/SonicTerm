@@ -54,6 +54,19 @@ fn cursor_char_slice_at(text: &str, cursor: usize) -> Option<&str> {
     Some(&text[c..c + ch.len_utf8()])
 }
 
+fn palette_cursor_char<'a>(
+    query: &'a str,
+    cursor: usize,
+    placeholder: Option<&'a str>,
+) -> Option<&'a str> {
+    cursor_char_slice_at(query, cursor).or_else(|| {
+        query
+            .is_empty()
+            .then(|| placeholder.and_then(|text| cursor_char_slice_at(text, 0)))
+            .flatten()
+    })
+}
+
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -4796,12 +4809,15 @@ impl GpuRenderer {
                 } else {
                     Some(command_palette_query_label(p, palette_preedit))
                 };
-                let caret_char = cursor_char_slice_at(p.query(), p.cursor()).map(str::to_string);
-                (
-                    PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor),
-                    query_text,
-                    caret_char,
+                let layout =
+                    PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
+                let caret_char = palette_cursor_char(
+                    p.query(),
+                    p.cursor(),
+                    layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
                 )
+                .map(str::to_string);
+                (layout, query_text, caret_char)
             } else {
                 (None, None, None)
             };
