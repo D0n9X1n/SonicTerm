@@ -17,7 +17,7 @@ fn resizing_per_pane_to_differing_row_counts_thrashes_the_cache() {
     let mut c = RowGlyphCache::new();
     // Two unequal panes: 10 and 30 rows.
     c.resize(10);
-    c.insert(0, 0, 1, CachedRow::default()); // pane 0 caches a row
+    c.insert(0, 0, 1, 0, CachedRow::default()); // pane 0 caches a row
     assert_eq!(c.len(), 1);
     c.resize(30); // peer pane resized with ITS row count → cap changes → clear
     assert!(c.is_empty(), "per-pane resize wiped pane 0's cached row");
@@ -32,14 +32,27 @@ fn sizing_once_to_total_rows_keeps_both_panes_cached() {
     let total = 10u16 + 30u16; // sum of both panes
     c.resize(total);
     // Both panes cache rows in the same frame; nothing is cleared.
-    c.insert(0, 0, 1, CachedRow::default()); // pane 0
-    c.insert(1, 0, 2, CachedRow::default()); // pane 1
-    c.insert(0, 1, 3, CachedRow::default()); // pane 0, another row
+    c.insert(0, 0, 1, 0, CachedRow::default()); // pane 0
+    c.insert(1, 0, 2, 0, CachedRow::default()); // pane 1
+    c.insert(0, 1, 3, 0, CachedRow::default()); // pane 0, another row
     assert_eq!(c.len(), 3);
     // A second frame re-sizes to the SAME total → no-op, entries survive.
     c.resize(total);
     assert_eq!(c.len(), 3, "stable cap must not clear the cache between frames");
     // Lookups still hit.
-    assert!(c.get(0, 0, 1).is_some());
-    assert!(c.get(1, 0, 2).is_some());
+    assert!(c.get(0, 0, 1, 0).is_some());
+    assert!(c.get(1, 0, 2, 0).is_some());
+}
+
+#[test]
+fn atlas_epoch_change_invalidates_cached_rows() {
+    let mut c = RowGlyphCache::new();
+    c.resize(1);
+    c.insert(0, 0, 1, 7, CachedRow::default());
+
+    assert!(c.get(0, 0, 1, 7).is_some(), "matching atlas epoch should reuse the row");
+    assert!(
+        c.get(0, 0, 1, 8).is_none(),
+        "an eviction epoch change must reject UVs cached against recycled atlas rectangles"
+    );
 }

@@ -606,6 +606,11 @@ pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> Rende
     }
 }
 
+#[must_use]
+fn atlas_evicted_during_frame(frame_epoch: u64, atlas: &GlyphAtlas) -> bool {
+    atlas.evictions() != frame_epoch
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -755,9 +760,21 @@ pub struct GpuRenderer {
     frame_view: TextureView,
     frame_blitter: wgpu::util::TextureBlitter,
 
-    // B3 GPU text path for the terminal grid.
+    // B3 GPU text path for terminal and chrome glyphs.
     glyph_atlas: GlyphAtlas,
     glyph_upload: AtlasUpload,
+    /// Monotonic identity of the current glyph-atlas allocation. Unlike the
+    /// atlas-local eviction count, this survives replacement and prevents an
+    /// old epoch-0 UV cache from matching a new epoch-0 atlas.
+    glyph_atlas_generation: u64,
+    // Inline media is isolated so large images cannot evict glyph tiles
+    // referenced by the row cache.
+    image_atlas: GlyphAtlas,
+    image_upload: AtlasUpload,
+    /// True after an eviction-triggered compaction. The rebuilt atlas has
+    /// eviction disabled until one frame presents successfully, bounding
+    /// retries when the visible glyph working set exceeds atlas capacity.
+    glyph_atlas_retry_without_eviction: bool,
 
     font_family: String,
     font_size: f32,
@@ -872,8 +889,8 @@ pub struct GpuRenderer {
     /// is re-shaped from scratch every frame otherwise; while a composition is
     /// unchanged across frames (paused, or PTY-burst redraws while composing)
     /// this reuses the emitted glyphs. Keyed on the text + placement + color +
-    /// the atlas eviction epoch (so cached atlas UVs can never go stale — any
-    /// eviction bumps `evictions()` and invalidates the entry).
+    /// the atlas allocation generation + eviction epoch, so neither
+    /// replacement nor rectangle recycling can leave its UVs stale.
     preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
@@ -1033,17 +1050,22 @@ struct FrameKey {
 /// Memoized inline IME preedit overlay glyphs. Reused across
 /// frames when the composition text and its placement are unchanged so a
 /// paused or streaming-while-composing preedit isn't re-shaped every frame.
-/// `atlas_epoch` is the glyph atlas's cumulative eviction count at build time;
-/// any eviction bumps it and invalidates the cache, so the stored
-/// `GlyphInstance`s (which carry atlas UVs) can never reference a recycled
-/// tile.
+/// `atlas_epoch` combines a renderer-owned allocation generation with the
+/// atlas's cumulative eviction count. Replacement changes the generation;
+/// rectangle recycling changes the eviction count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GlyphAtlasEpoch {
+    generation: u64,
+    evictions: u64,
+}
+
 struct PreeditGlyphCache {
     text: String,
     font_size: f32,
     start_x: f32,
     top_y: f32,
     color_bits: u32,
-    atlas_epoch: u64,
+    atlas_epoch: GlyphAtlasEpoch,
     glyphs: Vec<GlyphInstance>,
 }
 
@@ -1057,7 +1079,7 @@ impl PreeditGlyphCache {
         start_x: f32,
         top_y: f32,
         color_bits: u32,
-        atlas_epoch: u64,
+        atlas_epoch: GlyphAtlasEpoch,
     ) -> bool {
         self.atlas_epoch == atlas_epoch
             && self.color_bits == color_bits
@@ -1427,10 +1449,10 @@ impl GpuRenderer {
         };
         surface.configure(&device, &config);
 
-        // B3 GPU text path. Allocate the CPU + GPU side of the glyph
-        // atlas up front so the first frame can stream tiles into it.
+        // B3 GPU text path. Allocate independent glyph and inline-image
+        // atlases up front so media pressure cannot recycle text UVs.
         // T13/T14 (wezterm-takeover G3): no more SwashRasterizer
-        // prebake — chrome and grid share this single atlas, populated
+        // prebake — chrome and grid share the glyph atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
         let (frame_texture, frame_view) =
@@ -1444,6 +1466,13 @@ impl GpuRenderer {
             present_pipeline.texture_bind_group_layout(),
         );
         let _ = (&mut glyph_atlas,); // touch so `mut` binding stays in scope for downstream warmup loops
+        let image_atlas = GlyphAtlas::default_size();
+        let image_upload = AtlasUpload::new(
+            &device,
+            &queue,
+            &image_atlas,
+            present_pipeline.texture_bind_group_layout(),
+        );
 
         // G1a (T2) + T13: cell metrics come from sonicterm-font in raster
         // px directly. The cosmic-text `measure_cell` fallback is gone
@@ -1514,6 +1543,10 @@ impl GpuRenderer {
             frame_blitter,
             glyph_atlas,
             glyph_upload,
+            glyph_atlas_generation: 0,
+            image_atlas,
+            image_upload,
+            glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
             font_size,
             line_height,
@@ -2293,6 +2326,64 @@ impl GpuRenderer {
         in_bar(prev) || in_bar(next)
     }
 
+    fn reset_glyph_atlas_after_eviction(&mut self, frame_epoch: u64) {
+        let current_epoch = self.glyph_atlas.evictions();
+        let resident = self.glyph_atlas.len();
+        let hits = self.glyph_atlas.hits();
+        let misses = self.glyph_atlas.misses();
+        let width = self.glyph_atlas.width();
+        let height = self.glyph_atlas.height();
+        tracing::warn!(
+            target: "sonic::glyph_atlas",
+            frame_epoch,
+            current_epoch,
+            resident,
+            hits,
+            misses,
+            width,
+            height,
+            "glyph atlas evicted during frame assembly; rebuilding before presentation"
+        );
+
+        self.glyph_atlas = GlyphAtlas::new(width, height);
+        self.mark_glyph_atlas_replaced();
+        self.glyph_atlas.set_eviction_enabled(false);
+        self.glyph_upload = AtlasUpload::new(
+            &self.device,
+            &self.queue,
+            &self.glyph_atlas,
+            self.present_pipeline.texture_bind_group_layout(),
+        );
+        self.row_glyph_cache.invalidate_all();
+        self.glyph_atlas_retry_without_eviction = true;
+        self.last_frame_key = None;
+        self.window.request_redraw();
+    }
+
+    fn glyph_atlas_epoch(&self) -> GlyphAtlasEpoch {
+        GlyphAtlasEpoch {
+            generation: self.glyph_atlas_generation,
+            evictions: self.glyph_atlas.evictions(),
+        }
+    }
+
+    fn mark_glyph_atlas_replaced(&mut self) {
+        self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
+        self.preedit_glyph_cache = None;
+    }
+
+    fn reset_image_atlas(&mut self) {
+        let width = self.image_atlas.width();
+        let height = self.image_atlas.height();
+        self.image_atlas = GlyphAtlas::new(width, height);
+        self.image_upload = AtlasUpload::new(
+            &self.device,
+            &self.queue,
+            &self.image_atlas,
+            self.present_pipeline.texture_bind_group_layout(),
+        );
+    }
+
     /// Deprecated close-button color override. The button is no longer
     /// drawn, but accepting the setting keeps older configs harmless.
     pub fn set_tab_close_override(&mut self, color: Option<&str>) -> bool {
@@ -2336,6 +2427,8 @@ impl GpuRenderer {
         let w = self.glyph_atlas.width();
         let h = self.glyph_atlas.height();
         self.glyph_atlas = GlyphAtlas::new(w, h);
+        self.mark_glyph_atlas_replaced();
+        self.glyph_atlas_retry_without_eviction = false;
         // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
@@ -2409,6 +2502,8 @@ impl GpuRenderer {
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
         self.glyph_atlas = GlyphAtlas::default_size();
+        self.mark_glyph_atlas_replaced();
+        self.glyph_atlas_retry_without_eviction = false;
         // G1a: cell metrics are raster px end-to-end, so re-pull them
         // from sonicterm-font when the rasterizer target moves. Falls
         // back to the prior measurement if the font stack rejects the
@@ -2869,6 +2964,7 @@ impl GpuRenderer {
         // cached frame the bump is harmless and keeps the counter in
         // step with wall-clock frames for diagnostic dumps.
         self.glyph_atlas.tick_frame();
+        let atlas_epoch_at_frame_start = self.glyph_atlas.evictions();
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
         // change — skip text shaping, quad rebuild and GPU submit.
@@ -3127,6 +3223,8 @@ impl GpuRenderer {
             return Ok(());
         }
         let prev_key = self.last_frame_key.as_ref();
+        let inline_media_changed =
+            prev_key.is_none_or(|prev| prev.inline_media_hash != inline_media_hash);
         let render_mode = decide_render_mode(
             self.software_render_degrade,
             RenderSignals {
@@ -3159,6 +3257,9 @@ impl GpuRenderer {
         if matches!(render_mode, RenderMode::Noop) {
             self.last_frame_key = Some(key);
             return Ok(());
+        }
+        if inline_media_changed {
+            self.reset_image_atlas();
         }
         let emit_full_rows = matches!(render_mode, RenderMode::Full);
         gpu_lap!("frame_key");
@@ -3375,7 +3476,10 @@ impl GpuRenderer {
                         }
                         _ => key,
                     };
-                    if let Some(cached) = self.row_glyph_cache.get(pane_id, row_abs, key) {
+                    let atlas_epoch = self.glyph_atlas.evictions();
+                    if let Some(cached) =
+                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_epoch)
+                    {
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
                             underlines.push((pad, top_inset, grid.cols, r, *run));
@@ -3552,6 +3656,7 @@ impl GpuRenderer {
                         pane_id,
                         row_abs,
                         key,
+                        self.glyph_atlas.evictions(),
                         sonicterm_text::row_glyph_cache::CachedRow {
                             glyphs: row_glyphs,
                             underlines: row_underlines,
@@ -3570,18 +3675,39 @@ impl GpuRenderer {
         // terminal glyphs were bleeding through overlay dialogs.)
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
+        let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
+            .iter()
+            .flat_map(|pv| {
+                pv.inline_images
+                    .iter()
+                    .map(move |image| (image, pv.origin_x, pv.origin_y))
+            })
+            .enumerate()
+            .map(|(painter_order, (image, origin_x, origin_y))| InlineImagePlacement {
+                image,
+                origin_x,
+                origin_y,
+                painter_order,
+            })
+            .collect();
         let mut image_glyph_instances = Vec::new();
-        for pv in &pane_views {
-            emit_inline_image_instances(
-                &mut self.glyph_atlas,
-                &mut image_glyph_instances,
-                pv.inline_images,
-                pv.origin_x,
-                pv.origin_y,
-                cell_w,
-                cell_h,
-                sw,
-                sh,
+        let skipped_inline_images = emit_inline_image_instances(
+            &mut self.image_atlas,
+            &mut image_glyph_instances,
+            &inline_image_placements,
+            cell_w,
+            cell_h,
+            sw,
+            sh,
+        );
+        if inline_media_changed && skipped_inline_images > 0 {
+            tracing::warn!(
+                target: "sonic::glyph_atlas",
+                skipped = skipped_inline_images,
+                resident = self.image_atlas.len(),
+                width = self.image_atlas.width(),
+                height = self.image_atlas.height(),
+                "inline image atlas full; skipped older images without evicting text glyphs"
             );
         }
 
@@ -5116,7 +5242,7 @@ impl GpuRenderer {
                     | (u32::from(preedit_fg.g) << 16)
                     | (u32::from(preedit_fg.b) << 8)
                     | u32::from(preedit_fg.a);
-                let atlas_epoch = self.glyph_atlas.evictions();
+                let atlas_epoch = self.glyph_atlas_epoch();
                 let cache_hit = self.preedit_glyph_cache.as_ref().is_some_and(|c| {
                     c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
                 });
@@ -5152,7 +5278,7 @@ impl GpuRenderer {
                         start_x: emit_x,
                         top_y: baseline_y,
                         color_bits,
-                        atlas_epoch: self.glyph_atlas.evictions(),
+                        atlas_epoch: self.glyph_atlas_epoch(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
                     });
                 }
@@ -5372,9 +5498,10 @@ impl GpuRenderer {
         }
 
         gpu_lap!("overlays");
-        if !image_glyph_instances.is_empty() {
-            image_glyph_instances.extend(glyph_instances);
-            glyph_instances = image_glyph_instances;
+
+        if atlas_evicted_during_frame(atlas_epoch_at_frame_start, &self.glyph_atlas) {
+            self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);
+            return Ok(());
         }
 
         #[cfg(target_os = "windows")]
@@ -5390,12 +5517,15 @@ impl GpuRenderer {
             frame.prepare(self.config.width, self.config.height, bg_clear);
             frame.draw_layers(
                 &self.glyph_atlas,
+                &self.image_atlas,
                 &quads,
+                &image_glyph_instances,
                 &glyph_instances,
                 &quads_overlay,
                 &overlay_glyph_instances,
             );
             let _ = self.glyph_atlas.take_dirty_rects();
+            let _ = self.image_atlas.take_dirty_rects();
             frame.present(&self.window)?;
             gpu_lap!("software_present");
             self.finish_successful_frame(
@@ -5413,6 +5543,7 @@ impl GpuRenderer {
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
         // WezTerm presentation draw call in the render pass below.
+        self.image_upload.sync(&self.queue, &mut self.image_atlas);
         self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
         gpu_lap!("glyph_upload");
 
@@ -5514,15 +5645,18 @@ impl GpuRenderer {
             // WezTerm-style final presentation: every glyph and colored
             // geometry primitive flows through one vertex/shader/indexed-draw
             // path. The ordering preserves the previous painter stack:
-            // base quads -> base glyphs -> overlay quads -> overlay glyphs.
+            // base quads -> inline images -> base glyphs -> overlay quads
+            // -> overlay glyphs.
             self.present_pipeline.draw_frame(
                 &self.device,
                 &self.queue,
                 &mut pass,
+                self.image_upload.bind_group(),
                 self.glyph_upload.bind_group(),
                 sw,
                 sh,
                 &retained_quads,
+                &image_glyph_instances,
                 &glyph_instances,
                 &quads_overlay,
                 &overlay_glyph_instances,
@@ -5554,6 +5688,17 @@ impl GpuRenderer {
         damaged_rows: usize,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
+        if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
+            self.glyph_atlas.set_eviction_enabled(true);
+            self.row_glyph_cache.invalidate_all();
+            self.preedit_glyph_cache = None;
+            tracing::warn!(
+                target: "sonic::glyph_atlas",
+                resident = self.glyph_atlas.len(),
+                misses = self.glyph_atlas.misses(),
+                "glyph atlas compaction retry presented with eviction disabled"
+            );
+        }
         self.last_missing_chars = missing_chars_this_frame;
         self.last_frame_key = Some(key);
         if self.pane_focus_flash.is_some() {
@@ -6231,19 +6376,41 @@ fn color_to_chrome(color: Color, theme: &Theme, default: ChromeColor) -> ChromeC
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_inline_image_instances(
-    glyph_atlas: &mut GlyphAtlas,
-    out: &mut Vec<GlyphInstance>,
-    images: &[sonicterm_render_model::InlineImage],
+#[derive(Clone, Copy)]
+struct InlineImagePlacement<'a> {
+    image: &'a sonicterm_render_model::InlineImage,
     origin_x: f32,
     origin_y: f32,
+    painter_order: usize,
+}
+
+fn emit_inline_image_instances(
+    image_atlas: &mut GlyphAtlas,
+    out: &mut Vec<GlyphInstance>,
+    placements: &[InlineImagePlacement<'_>],
     cell_w: f32,
     cell_h: f32,
     sw: f32,
     sh: f32,
-) {
-    for image in images {
+) -> usize {
+    let mut skipped = 0usize;
+    let mut allocation_order: Vec<&InlineImagePlacement<'_>> = placements.iter().collect();
+    allocation_order.sort_unstable_by_key(|placement| std::cmp::Reverse(placement.image.id));
+    let mut emitted = Vec::with_capacity(placements.len());
+    // Prefer the globally newest retained images when the bounded atlas
+    // cannot hold the entire history, regardless of which pane owns them.
+    for placement in allocation_order {
+        let image = placement.image;
         if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+            continue;
+        }
+        let x = placement.origin_x + image.col as f32 * cell_w;
+        let y = placement.origin_y + image.row as f32 * cell_h;
+        if x >= sw
+            || y >= sh
+            || x + image.width as f32 <= 0.0
+            || y + image.height as f32 <= 0.0
+        {
             continue;
         }
         let key = sonicterm_types::glyph_key::GlyphKey {
@@ -6253,39 +6420,39 @@ fn emit_inline_image_instances(
             italic: false,
             glyph_id: fold_u64_to_u32(image.id),
         };
-        struct ImageRasterizer<'a> {
-            image: &'a sonicterm_render_model::InlineImage,
-        }
-        impl sonicterm_text::glyph_atlas::Rasterizer for ImageRasterizer<'_> {
-            fn rasterize(
-                &mut self,
-                _key: sonicterm_types::glyph_key::GlyphKey,
-            ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
-                Some(sonicterm_text::glyph_atlas::RasterTile {
-                    width: self.image.width,
-                    height: self.image.height,
+        let Some(info) = image_atlas.get_or_insert_lazy_without_eviction(
+            key,
+            image.width,
+            image.height,
+            || {
+                sonicterm_text::glyph_atlas::RasterTile {
+                    width: image.width,
+                    height: image.height,
                     offset_x: 0,
                     offset_y: 0,
-                    advance: self.image.width as f32,
-                    coverage: self.image.bgra.as_ref().to_vec(),
+                    advance: image.width as f32,
+                    coverage: image.bgra.as_ref().to_vec(),
                     is_color: true,
                     is_subpixel: false,
-                })
-            }
-        }
-        let mut raster = ImageRasterizer { image };
-        let Some(info) = glyph_atlas.get_or_insert(key, &mut raster) else {
+                }
+            },
+        ) else {
+            skipped += 1;
             continue;
         };
-        let x = origin_x + image.col as f32 * cell_w;
-        let y = origin_y + image.row as f32 * cell_h;
-        out.push(GlyphInstance {
-            rect: px_to_ndc(x, y, info.px_size[0] as f32, info.px_size[1] as f32, sw, sh),
-            uv: info.uv,
-            color: [1.0, 1.0, 1.0, 1.0],
-            flags: [1.0, 0.0, 0.0, 0.0],
-        });
+        emitted.push((
+            placement.painter_order,
+            GlyphInstance {
+                rect: px_to_ndc(x, y, info.px_size[0] as f32, info.px_size[1] as f32, sw, sh),
+                uv: info.uv,
+                color: [1.0, 1.0, 1.0, 1.0],
+                flags: [1.0, 0.0, 1.0, 0.0],
+            },
+        ));
     }
+    emitted.sort_unstable_by_key(|(painter_order, _)| *painter_order);
+    out.extend(emitted.into_iter().map(|(_, instance)| instance));
+    skipped
 }
 
 fn fold_u64_to_u32(value: u64) -> u32 {

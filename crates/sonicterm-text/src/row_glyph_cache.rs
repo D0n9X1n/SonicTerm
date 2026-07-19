@@ -44,12 +44,11 @@
 //! every mouse-move sample, which would mean a full re-shape of the
 //! whole viewport ~60×/sec while dragging.
 //!
-//! Atlas churn is handled with a single "invalidate everything" hook
-//! (`invalidate_all`) that the renderer fires whenever the atlas is
-//! re-allocated (font / theme / scale change rebuilds `GlyphAtlas`,
-//! and the LRU `glyph_atlas::evict` can land cache entries with stale
-//! UV coordinates). Bounding the cache by visible row count keeps the
-//! memory cost trivial.
+//! Atlas churn is guarded twice: every entry records the atlas eviction
+//! epoch it was built against, and the renderer invalidates the cache when
+//! eviction occurs during frame assembly. Epoch-gated lookups prevent stale
+//! UV reuse even if a future caller misses the wholesale invalidation hook.
+//! Bounding the cache by visible row count keeps the memory cost trivial.
 
 use crate::GlyphInstance;
 use std::borrow::Borrow;
@@ -103,6 +102,12 @@ pub struct CachedRow {
     pub missing_chars: Vec<char>,
 }
 
+#[derive(Clone, Debug)]
+struct CachedRowEntry {
+    atlas_epoch: u64,
+    row: CachedRow,
+}
+
 /// Per-row glyph cache. Keys are `(pane_id, abs_row, hash)` — a row's
 /// cached output is only valid if the renderer is currently looking at
 /// the same pane AND the same absolute row AND that row's content /
@@ -113,7 +118,7 @@ pub struct CachedRow {
 #[derive(Default, Debug)]
 pub struct RowGlyphCache {
     /// (pane_id, abs_row, hash) -> cached artefacts.
-    entries: HashMap<(PaneId, u64, u64), CachedRow>,
+    entries: HashMap<(PaneId, u64, u64), CachedRowEntry>,
     /// Soft cap so that long-running sessions with heavy scrollback
     /// don't grow without bound. The renderer calls `resize(grid.rows)`
     /// each frame; we keep ~4× headroom for scroll jiggle and call it
@@ -181,10 +186,21 @@ impl RowGlyphCache {
         self.entries.is_empty()
     }
 
-    /// Look up a cached row by key. None on miss.
+    /// Look up a cached row by key and atlas eviction epoch. UV-bearing
+    /// entries built before an eviction are rejected because their atlas
+    /// rectangles may now belong to unrelated glyphs.
     #[inline]
-    pub fn get(&self, pane_id: PaneId, abs_row: u64, hash: u64) -> Option<&CachedRow> {
-        self.entries.get(&(pane_id, abs_row, hash))
+    pub fn get(
+        &self,
+        pane_id: PaneId,
+        abs_row: u64,
+        hash: u64,
+        atlas_epoch: u64,
+    ) -> Option<&CachedRow> {
+        self.entries
+            .get(&(pane_id, abs_row, hash))
+            .filter(|entry| entry.atlas_epoch == atlas_epoch)
+            .map(|entry| &entry.row)
     }
 
     /// Insert (or replace) a cached row. If the cache is at capacity,
@@ -192,11 +208,18 @@ impl RowGlyphCache {
     /// homogeneous so an LRU buys little here and HashMap doesn't carry
     /// insertion order natively. The cap tracks the visible grid height
     /// via `resize` so this only fires after a long scroll session.
-    pub fn insert(&mut self, pane_id: PaneId, abs_row: u64, hash: u64, row: CachedRow) {
+    pub fn insert(
+        &mut self,
+        pane_id: PaneId,
+        abs_row: u64,
+        hash: u64,
+        atlas_epoch: u64,
+        row: CachedRow,
+    ) {
         if self.entries.len() >= self.cap {
             self.entries.clear();
         }
-        self.entries.insert((pane_id, abs_row, hash), row);
+        self.entries.insert((pane_id, abs_row, hash), CachedRowEntry { atlas_epoch, row });
     }
 }
 
