@@ -1772,10 +1772,10 @@ impl App {
                 }
                 if self.search_active() {
                     let mods = self.main_modifiers();
-                    let is_core_text_edit =
-                        super::text_edit::core_text_edit_for_key(&event.logical_key, mods)
+                    let is_search_text_edit =
+                        super::text_edit::search_text_edit_for_key(&event.logical_key, mods)
                             .is_some();
-                    if !is_core_text_edit {
+                    if !is_search_text_edit {
                         if let Some(key_str) = key_event_to_string(&event, mods) {
                             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                                 if !matches!(action, Action::OpenSearch) {

@@ -134,6 +134,51 @@ fn core_search_edits_match_between_main_and_child() {
 }
 
 #[test]
+fn named_search_edits_match_between_main_and_child_across_unicode() {
+    let (mut app, _main_pane, child, _child_pane) = main_and_child();
+    assert!(app.__test_set_main_search_query("a你🙂z"));
+    assert!(app.__test_set_child_search_query(child, "a你🙂z"));
+
+    for key in [
+        winit::keyboard::NamedKey::Home,
+        winit::keyboard::NamedKey::ArrowRight,
+        winit::keyboard::NamedKey::ArrowRight,
+        winit::keyboard::NamedKey::ArrowRight,
+        winit::keyboard::NamedKey::Delete,
+    ] {
+        let key = Key::Named(key);
+        assert!(app.__test_search_text_edit(None, &key, ModifiersState::empty()));
+        assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::empty()));
+    }
+    assert_eq!(app.__test_search_query_cursor(None), Some(("a你🙂", "a你🙂".len())));
+
+    for key in [
+        winit::keyboard::NamedKey::End,
+        winit::keyboard::NamedKey::ArrowLeft,
+    ] {
+        let key = Key::Named(key);
+        assert!(app.__test_search_text_edit(None, &key, ModifiersState::empty()));
+        assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::empty()));
+    }
+
+    assert_eq!(app.__test_search_query_cursor(None), app.__test_search_query_cursor(Some(child)),);
+    assert_eq!(app.__test_search_query_cursor(None), Some(("a你🙂", "a你".len())));
+}
+
+#[test]
+fn modified_named_search_keys_are_not_field_edits() {
+    let (mut app, _main_pane, child, _child_pane) = main_and_child();
+    assert!(app.__test_set_main_search_query("alpha"));
+    assert!(app.__test_set_child_search_query(child, "alpha"));
+    let key = Key::Named(winit::keyboard::NamedKey::ArrowLeft);
+
+    assert!(!app.__test_search_text_edit(None, &key, ModifiersState::SUPER));
+    assert!(!app.__test_search_text_edit(Some(child), &key, ModifiersState::SUPER));
+    assert_eq!(app.__test_search_query_cursor(None), Some(("alpha", "alpha".len())));
+    assert_eq!(app.__test_search_query_cursor(Some(child)), Some(("alpha", "alpha".len())));
+}
+
+#[test]
 fn active_search_ime_preedit_suppresses_core_editing_in_both_windows() {
     let (mut app, _main_pane, child, _child_pane) = main_and_child();
     assert!(app.__test_set_main_search_query("alpha beta"));
@@ -141,9 +186,13 @@ fn active_search_ime_preedit_suppresses_core_editing_in_both_windows() {
     assert!(app.__test_set_main_ime_preedit("ni"));
     assert!(app.__test_set_child_ime_preedit(child, "ni"));
 
-    let key = Key::Character("w".into());
-    assert!(app.__test_search_text_edit(None, &key, ModifiersState::CONTROL));
-    assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::CONTROL));
+    for (key, modifiers) in [
+        (Key::Character("w".into()), ModifiersState::CONTROL),
+        (Key::Named(winit::keyboard::NamedKey::ArrowLeft), ModifiersState::empty()),
+    ] {
+        assert!(app.__test_search_text_edit(None, &key, modifiers));
+        assert!(app.__test_search_text_edit(Some(child), &key, modifiers));
+    }
 
     assert_eq!(app.__test_search_query_cursor(None), Some(("alpha beta", "alpha beta".len())));
     assert_eq!(

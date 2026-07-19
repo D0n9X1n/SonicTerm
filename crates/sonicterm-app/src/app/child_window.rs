@@ -1306,10 +1306,10 @@ impl App {
                 if child_search_open {
                     let child_mods = child.modifiers;
                     let _ = child;
-                    let is_core_text_edit =
-                        super::text_edit::core_text_edit_for_key(&event.logical_key, child_mods)
+                    let is_search_text_edit =
+                        super::text_edit::search_text_edit_for_key(&event.logical_key, child_mods)
                             .is_some();
-                    if !is_core_text_edit {
+                    if !is_search_text_edit {
                         if let Some(key_str) = key_event_to_string(&event, child_mods) {
                             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                                 if !matches!(action, Action::OpenSearch) {

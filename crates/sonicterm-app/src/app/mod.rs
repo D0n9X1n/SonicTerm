@@ -3276,7 +3276,7 @@ impl App {
         key: &winit::keyboard::Key,
         modifiers: ModifiersState,
     ) -> bool {
-        let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else { return false };
+        let Some(edit) = text_edit::search_text_edit_for_key(key, modifiers) else { return false };
         let target = id.or(self.main_window_id);
         let Some(target) = target else { return false };
         let Some(ws) = self.windows.get_mut(&target) else { return false };
