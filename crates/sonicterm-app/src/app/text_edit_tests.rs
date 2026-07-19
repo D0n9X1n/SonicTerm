@@ -27,6 +27,29 @@ fn only_exact_core_control_chords_are_mapped() {
 }
 
 #[test]
+fn search_named_keys_map_only_without_modifiers() {
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    let cases = [
+        (NamedKey::ArrowLeft, TextEdit::MoveBackward),
+        (NamedKey::ArrowRight, TextEdit::MoveForward),
+        (NamedKey::Home, TextEdit::MoveStart),
+        (NamedKey::End, TextEdit::MoveEnd),
+        (NamedKey::Delete, TextEdit::DeleteForward),
+    ];
+    for (key, expected) in cases {
+        assert_eq!(
+            search_text_edit_for_key(&Key::Named(key), ModifiersState::empty()),
+            Some(expected),
+        );
+        assert_eq!(
+            search_text_edit_for_key(&Key::Named(key), ModifiersState::SUPER),
+            None,
+        );
+    }
+}
+
+#[test]
 fn logical_keys_and_modifier_state_use_the_same_exact_mapping() {
     use winit::keyboard::{Key, ModifiersState};
 

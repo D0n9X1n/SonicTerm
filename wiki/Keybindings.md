@@ -228,6 +228,10 @@ caret in both the main window and torn-out windows.
 | `Ctrl+U` | Delete from the start through the caret |
 | `Ctrl+K` | Delete from the caret through the end |
 
+Search also supports the standard unmodified `Left`, `Right`, `Home`, `End`,
+and `Delete` keys for caret movement and forward deletion, matching the command
+palette and tab rename fields.
+
 These are exact field-local chords; adding Shift, Alt, or Super does not alias
 them. The tab-color picker is selection-only and does not use text editing.
 When no SonicTerm text field is active, the same `Ctrl+<letter>` keys continue
@@ -465,6 +469,9 @@ action = { focus_pane = "right" }
 | `Ctrl+W` | 先删除光标左侧空白，再删除前一个连续非空白片段 |
 | `Ctrl+U` | 删除开头到光标之间的内容 |
 | `Ctrl+K` | 删除光标到结尾之间的内容 |
+
+搜索框还支持未带修饰键的 `Left`、`Right`、`Home`、`End` 和 `Delete`，用于移动
+光标和向前删除；这与命令面板和 Tab 重命名文本框保持一致。
 
 这些是文本框内的精确组合键；额外按下 Shift、Alt 或 Super 不会被当成同一个编辑命令。
 Tab 颜色选择器只用于选择，不属于文本输入。没有 SonicTerm 文本框处于活动状态时，同样的

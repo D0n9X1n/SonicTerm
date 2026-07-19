@@ -271,7 +271,7 @@ fn apply_search_key(
     anchor_row: u32,
     anchor_col: u16,
 ) -> (bool, bool, Option<Option<u64>>) {
-    let edit = super::text_edit::core_text_edit_for_key(&event.logical_key, mods);
+    let edit = super::text_edit::search_text_edit_for_key(&event.logical_key, mods);
     let (handled, keep_search) = if let Some(edit) = edit {
         search.apply_text_edit(edit, grid);
         (true, true)
