@@ -8,6 +8,7 @@
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
 use sonicterm_ui::{pane::Rect, pane::SplitAxis, selection::Selection};
+use winit::keyboard::{Key, ModifiersState};
 
 fn app() -> App {
     App::new(Theme::default(), Config::default(), Keymap::default())
@@ -113,6 +114,41 @@ fn child_focus_reports_decset_focus_to_child_active_pane() {
         app.__test_drain_pty_writes(),
         vec![(child_pane, b"\x1b[O".to_vec())],
         "child focus loss must send DECSET ?1004 focus-out to the child active pane"
+    );
+}
+
+#[test]
+fn core_search_edits_match_between_main_and_child() {
+    let (mut app, _main_pane, child, _child_pane) = main_and_child();
+    assert!(app.__test_set_main_search_query("alpha🙂 beta"));
+    assert!(app.__test_set_child_search_query(child, "alpha🙂 beta"));
+
+    for key in ["a", "f", "d", "e", "w"] {
+        let key = Key::Character(key.into());
+        assert!(app.__test_search_text_edit(None, &key, ModifiersState::CONTROL));
+        assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::CONTROL));
+    }
+
+    assert_eq!(app.__test_search_query_cursor(None), app.__test_search_query_cursor(Some(child)),);
+    assert_eq!(app.__test_search_query_cursor(None), Some(("apha🙂 ", "apha🙂 ".len())));
+}
+
+#[test]
+fn active_search_ime_preedit_suppresses_core_editing_in_both_windows() {
+    let (mut app, _main_pane, child, _child_pane) = main_and_child();
+    assert!(app.__test_set_main_search_query("alpha beta"));
+    assert!(app.__test_set_child_search_query(child, "alpha beta"));
+    assert!(app.__test_set_main_ime_preedit("ni"));
+    assert!(app.__test_set_child_ime_preedit(child, "ni"));
+
+    let key = Key::Character("w".into());
+    assert!(app.__test_search_text_edit(None, &key, ModifiersState::CONTROL));
+    assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::CONTROL));
+
+    assert_eq!(app.__test_search_query_cursor(None), Some(("alpha beta", "alpha beta".len())));
+    assert_eq!(
+        app.__test_search_query_cursor(Some(child)),
+        Some(("alpha beta", "alpha beta".len())),
     );
 }
 

@@ -97,6 +97,33 @@ fn palette_text_editing_supports_space_cjk_and_caret_movement() {
 }
 
 #[test]
+fn palette_core_text_edits_refilter_and_preserve_unicode_suffixes() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("rename 标题 tail");
+    let filtered_len = palette.len();
+
+    palette.apply_text_edit(crate::text_edit::TextEdit::DeletePreviousWord);
+
+    assert_eq!(palette.query(), "rename 标题 ");
+    assert_eq!(palette.cursor(), "rename 标题 ".len());
+    assert!(palette.len() >= filtered_len, "editing the command query must refilter results");
+}
+
+#[test]
+fn rename_mode_core_text_edits_use_the_current_caret() {
+    let mut palette = CommandPalette::new();
+    palette.start_rename_tab("alpha🙂omega");
+    palette.apply_text_edit(crate::text_edit::TextEdit::MoveStart);
+    palette.apply_text_edit(crate::text_edit::TextEdit::MoveForward);
+    palette.apply_text_edit(crate::text_edit::TextEdit::DeleteToEnd);
+
+    assert_eq!(palette.query(), "a");
+    assert_eq!(palette.cursor(), 1);
+    assert!(palette.visible().is_empty(), "rename mode must not refilter command actions");
+}
+
+#[test]
 fn tab_color_picker_exposes_selected_choice() {
     let mut palette = CommandPalette::new();
     palette.start_tab_color_picker(

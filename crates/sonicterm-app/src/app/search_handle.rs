@@ -271,75 +271,81 @@ fn apply_search_key(
     anchor_row: u32,
     anchor_col: u16,
 ) -> (bool, bool, Option<Option<u64>>) {
-    let (handled, keep_search) = match &event.logical_key {
-        Key::Named(NamedKey::Escape) => (true, false),
-        Key::Named(NamedKey::Enter) => {
-            if search.current.is_none() {
-                search.select_nearest(anchor_row, anchor_col);
-            } else if mods.shift_key() {
-                search.prev();
-            } else {
-                search.next();
+    let edit = super::text_edit::core_text_edit_for_key(&event.logical_key, mods);
+    let (handled, keep_search) = if let Some(edit) = edit {
+        search.apply_text_edit(edit, grid);
+        (true, true)
+    } else {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => (true, false),
+            Key::Named(NamedKey::Enter) => {
+                if search.current.is_none() {
+                    search.select_nearest(anchor_row, anchor_col);
+                } else if mods.shift_key() {
+                    search.prev();
+                } else {
+                    search.next();
+                }
+                (true, true)
             }
-            (true, true)
-        }
-        Key::Named(NamedKey::ArrowDown) => {
-            if search.current.is_none() {
-                search.next_from(anchor_row, anchor_col);
-            } else {
-                search.next();
+            Key::Named(NamedKey::ArrowDown) => {
+                if search.current.is_none() {
+                    search.next_from(anchor_row, anchor_col);
+                } else {
+                    search.next();
+                }
+                (true, true)
             }
-            (true, true)
-        }
-        Key::Named(NamedKey::ArrowUp) => {
-            if search.current.is_none() {
-                search.prev_from(anchor_row, anchor_col);
-            } else {
-                search.prev();
+            Key::Named(NamedKey::ArrowUp) => {
+                if search.current.is_none() {
+                    search.prev_from(anchor_row, anchor_col);
+                } else {
+                    search.prev();
+                }
+                (true, true)
             }
-            (true, true)
-        }
-        Key::Named(NamedKey::Backspace) => {
-            search.backspace(grid);
-            (true, true)
-        }
-        Key::Named(NamedKey::Space) => {
-            search.input_char(' ', grid);
-            (true, true)
-        }
-        Key::Character(s) => {
-            let mut consumed = false;
-            if mods.super_key() {
-                match s.as_ref() {
-                    "i" | "I" => {
-                        search.toggle_case_sensitive(grid);
-                        consumed = true;
-                    }
-                    "r" | "R" => {
-                        search.toggle_regex(grid);
-                        consumed = true;
-                    }
-                    "g" | "G" => {
-                        if search.current.is_none() {
-                            search.select_nearest(anchor_row, anchor_col);
-                        } else if mods.shift_key() {
-                            search.prev();
-                        } else {
-                            search.next();
+            Key::Named(NamedKey::Backspace) => {
+                search.backspace(grid);
+                (true, true)
+            }
+            Key::Named(NamedKey::Space) => {
+                search.input_char(' ', grid);
+                (true, true)
+            }
+            Key::Character(s) => {
+                let mut consumed = false;
+                if mods.super_key() {
+                    match s.as_ref() {
+                        "i" | "I" => {
+                            search.toggle_case_sensitive(grid);
+                            consumed = true;
                         }
-                        consumed = true;
+                        "r" | "R" => {
+                            search.toggle_regex(grid);
+                            consumed = true;
+                        }
+                        "g" | "G" => {
+                            if search.current.is_none() {
+                                search.select_nearest(anchor_row, anchor_col);
+                            } else if mods.shift_key() {
+                                search.prev();
+                            } else {
+                                search.next();
+                            }
+                            consumed = true;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            if !consumed {
-                for ch in s.chars() {
-                    search.input_char(ch, grid);
+                if !consumed {
+                    for ch in s.chars() {
+                        search.input_char(ch, grid);
+                    }
                 }
+                (true, true)
             }
-            (true, true)
+            _ => (false, true),
         }
-        _ => (false, true),
     };
     let requested_view_top = if handled && keep_search {
         search.requested_scroll_row.map(|row| centered_search_view_top(grid, row))

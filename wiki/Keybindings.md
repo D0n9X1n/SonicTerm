@@ -210,6 +210,30 @@ action = { focus_pane = "right" }
 At startup, an invalid selected keymap is logged and falls back to the bundled
 platform default. A failed hot reload leaves the current in-memory keymap active.
 
+### Terminal-style editing in app text fields
+
+When terminal search, command-palette filtering, or tab renaming owns keyboard
+input, SonicTerm provides the same core single-line editing controls in every
+field. Search has a movable caret; editing and IME composition occur at that
+caret in both the main window and torn-out windows.
+
+| Key | App text-field action |
+| --- | --- |
+| `Ctrl+A` | Move to the start |
+| `Ctrl+E` | Move to the end |
+| `Ctrl+B` / `Ctrl+F` | Move one Unicode character left / right |
+| `Ctrl+H` | Delete one Unicode character backward |
+| `Ctrl+D` | Delete one Unicode character forward |
+| `Ctrl+W` | Delete left whitespace, then the previous non-whitespace run |
+| `Ctrl+U` | Delete from the start through the caret |
+| `Ctrl+K` | Delete from the caret through the end |
+
+These are exact field-local chords; adding Shift, Alt, or Super does not alias
+them. The tab-color picker is selection-only and does not use text editing.
+When no SonicTerm text field is active, the same `Ctrl+<letter>` keys continue
+to the PTY as terminal control bytes, so shells and terminal applications keep
+their own readline/ZLE behavior.
+
 ### READONLY mode shortcut policy
 
 `enter_copy_mode` opens READONLY mode. In this mode SonicTerm blocks terminal
@@ -424,6 +448,28 @@ action = { focus_pane = "right" }
 ```
 
 启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；热重载失败时则继续使用当前内存中的 keymap。
+
+### 应用文本框中的终端风格编辑
+
+当终端搜索、命令面板筛选或 Tab 重命名文本框接管键盘输入时，SonicTerm 在所有文本框中
+提供一致的核心单行编辑键。搜索框现在也有可移动光标；主窗口和拖出的子窗口都会在该光标
+位置执行编辑和 IME 组合输入。
+
+| 按键 | 应用文本框行为 |
+| --- | --- |
+| `Ctrl+A` | 移到开头 |
+| `Ctrl+E` | 移到结尾 |
+| `Ctrl+B` / `Ctrl+F` | 向左 / 向右移动一个 Unicode 字符 |
+| `Ctrl+H` | 向后删除一个 Unicode 字符 |
+| `Ctrl+D` | 向前删除一个 Unicode 字符 |
+| `Ctrl+W` | 先删除光标左侧空白，再删除前一个连续非空白片段 |
+| `Ctrl+U` | 删除开头到光标之间的内容 |
+| `Ctrl+K` | 删除光标到结尾之间的内容 |
+
+这些是文本框内的精确组合键；额外按下 Shift、Alt 或 Super 不会被当成同一个编辑命令。
+Tab 颜色选择器只用于选择，不属于文本输入。没有 SonicTerm 文本框处于活动状态时，同样的
+`Ctrl+<字母>` 仍会作为终端控制字节发送给 PTY，因此 shell 和终端程序会继续使用自己的
+readline/ZLE 行为。
 
 ### READONLY 模式快捷键策略
 

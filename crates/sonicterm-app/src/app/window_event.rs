@@ -413,12 +413,11 @@ impl App {
                         r.cell_w,
                     )
                 });
-                // Search-bar IME geometry: the visible label (`/ {query}▏ —
-                // N/M`) drives the box width, but the caret/candidate-window
-                // anchor must sit at the END OF THE QUERY (the `▏`), not the
-                // end of the whole label. Produce both strings here from the
-                // same search state so the OS candidate area below agrees with
-                // the inline preedit drawn by the renderer.
+                // Search-bar IME geometry: the full label drives box width,
+                // but the caret/candidate-window anchor must follow the current
+                // query caret (`▏`), not the end of the label. Produce both
+                // strings from the same state so the OS candidate area agrees
+                // with the inline preedit drawn by the renderer.
                 let (search_ime_label, search_ime_prefix) = self
                     .main()
                     .and_then(|ws| {
@@ -1772,18 +1771,24 @@ impl App {
                     return;
                 }
                 if self.search_active() {
-                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if !matches!(action, Action::OpenSearch) {
-                                self.run_action_for_window(&action, win_id);
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
+                    let mods = self.main_modifiers();
+                    let is_core_text_edit =
+                        super::text_edit::core_text_edit_for_key(&event.logical_key, mods)
+                            .is_some();
+                    if !is_core_text_edit {
+                        if let Some(key_str) = key_event_to_string(&event, mods) {
+                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                                if !matches!(action, Action::OpenSearch) {
+                                    self.run_action_for_window(&action, win_id);
+                                    if let Some(w) = self.main_window() {
+                                        w.request_redraw();
+                                    }
+                                    return;
                                 }
-                                return;
                             }
                         }
                     }
-                    self.search_handle_key(&event, self.main_modifiers());
+                    self.search_handle_key(&event, mods);
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }

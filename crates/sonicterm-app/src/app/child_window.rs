@@ -1297,9 +1297,8 @@ impl App {
                     return;
                 }
                 // Search box routing (#pane-search): when this child's active
-                // tab has an open search box, keystrokes feed the box (not the
-                // PTY), EXCEPT keymap chords other than OpenSearch (so Cmd+G
-                // next/prev etc. still run). Mirrors the main-window gate.
+                // tab has an open search box, core editing chords belong to the
+                // field; other keymap actions may still run. Mirrors main.
                 let child_search_open = {
                     let i = child.tabs.active_index();
                     child.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
@@ -1307,14 +1306,19 @@ impl App {
                 if child_search_open {
                     let child_mods = child.modifiers;
                     let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            if !matches!(action, Action::OpenSearch) {
-                                self.run_action_for_window(&action, win_id);
-                                if let Some(c) = self.windows.get(&win_id) {
-                                    c.request_redraw();
+                    let is_core_text_edit =
+                        super::text_edit::core_text_edit_for_key(&event.logical_key, child_mods)
+                            .is_some();
+                    if !is_core_text_edit {
+                        if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                                if !matches!(action, Action::OpenSearch) {
+                                    self.run_action_for_window(&action, win_id);
+                                    if let Some(c) = self.windows.get(&win_id) {
+                                        c.request_redraw();
+                                    }
+                                    return;
                                 }
-                                return;
                             }
                         }
                     }

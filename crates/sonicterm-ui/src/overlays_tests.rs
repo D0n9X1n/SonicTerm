@@ -77,12 +77,29 @@ fn caret_prefix_is_label_text_up_to_the_caret_marker() {
     // (not after the ` — N/M` suffix). Build the label, split on `▏`, and
     // assert the prefix matches the leading half verbatim.
     let mut search = SearchState::new();
-    search.query = "ni hao".to_string();
+    search.set_query("ni hao", &sonicterm_grid::grid::Grid::new(8, 2));
     let label = search_bar_label(&search, "");
     let prefix = search_query_caret_prefix(&search, "");
     let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
     assert_eq!(prefix, head);
     assert_eq!(prefix, "/ ni hao");
+}
+
+#[test]
+fn search_label_places_preedit_and_caret_inside_the_query() {
+    let grid = sonicterm_grid::grid::Grid::new(8, 2);
+    let mut search = SearchState::new();
+    search.set_query("nihao", &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveBackward, &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveBackward, &grid);
+
+    let label = search_bar_label(&search, "中");
+    let prefix = search_query_caret_prefix(&search, "中");
+    let (head, tail) = label.split_once('▏').expect("label carries a caret marker");
+
+    assert_eq!(prefix, head);
+    assert_eq!(head, "/ nih中");
+    assert_eq!(tail, "ao · 0/0");
 }
 
 #[test]

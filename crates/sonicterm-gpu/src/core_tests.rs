@@ -3,6 +3,13 @@ use super::*;
 // --- Inline IME preedit opaque background -------------------------
 
 #[test]
+fn search_scroll_keeps_caret_visible_without_following_suffix() {
+    assert_eq!(search_text_scroll(40.0, 100.0), 0.0);
+    assert_eq!(search_text_scroll(140.0, 100.0), 40.0);
+    assert_eq!(search_text_scroll(0.0, 0.0), 0.0);
+}
+
+#[test]
 fn preedit_bg_rect_covers_the_glyph_run() {
     // The glyphs are emitted at emit_x = start_x + pad, across `pre_w`.
     // The background mask must start no later than start_x and extend past

@@ -41,6 +41,7 @@ pub mod tab_spans;
 pub mod tab_title;
 pub mod tabbar_view;
 pub mod tabs;
+pub mod text_edit;
 pub mod ui_tokens;
 
 #[cfg(test)]

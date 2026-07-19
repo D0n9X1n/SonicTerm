@@ -615,6 +615,10 @@ fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
 
+fn search_text_scroll(prefix_width: f32, visible_width: f32) -> f32 {
+    (prefix_width - visible_width).max(0.0)
+}
+
 fn create_frame_texture(
     device: &wgpu::Device,
     width: u32,
@@ -2973,6 +2977,7 @@ impl GpuRenderer {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 s.query.hash(&mut h);
+                s.cursor().hash(&mut h);
                 s.matches.len().hash(&mut h);
                 s.current.hash(&mut h);
                 h.finish()
@@ -4536,7 +4541,7 @@ impl GpuRenderer {
             }
         });
         // When search is active the inline IME preedit must anchor to the
-        // search box caret (end of the query text), not the terminal cursor.
+        // current search-box caret, not the terminal cursor.
         // Populated inside the search-render block below; read by the inline
         // preedit block further down. (cx = caret_left, by = box_top, bh =
         // box_height)
@@ -4569,15 +4574,6 @@ impl GpuRenderer {
                     - text_x)
                     .max(0.0);
                 let text_w = estimate_badge_text_width(label, search_font_size);
-                let scroll_x = (text_w - visible_w).max(0.0);
-                // Inline IME preedit anchor: the caret sits at the END OF THE
-                // QUERY (the `▏` in the label = width of `"/ " + query`), NOT
-                // at the end of the whole label — measuring the full label
-                // would land the composing text past the ` · N/M` suffix. So
-                // measure the prefix-only string, apply the SAME horizontal
-                // scroll the visible label uses, and clamp to the visible
-                // region so the composing text starts just past the caret
-                // instead of off the box edge.
                 let prefix_w = search
                     .map(|s| {
                         estimate_badge_text_width(
@@ -4586,6 +4582,10 @@ impl GpuRenderer {
                         )
                     })
                     .unwrap_or(text_w);
+                // Scroll only enough to keep the current caret visible. When
+                // the caret moves left, the committed suffix may be clipped on
+                // the right, but the insertion point remains inside the field.
+                let scroll_x = search_text_scroll(prefix_w, visible_w);
                 let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
                 search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;

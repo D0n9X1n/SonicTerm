@@ -102,7 +102,7 @@ impl App {
         }
     }
 
-    fn palette_ime_is_composing(&self) -> bool {
+    pub(super) fn palette_ime_is_composing(&self) -> bool {
         match self.palette_attached_window {
             Some(id) => self.windows.get(&id).map(|ws| ws.ime.is_composing()).unwrap_or(false),
             None => self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false),
@@ -180,6 +180,18 @@ impl App {
         ) {
             window.set_ime_cursor_area(pos, size);
         }
+    }
+
+    fn command_palette_text_edit(
+        &self,
+        event: &KeyEvent,
+    ) -> Option<sonicterm_ui::text_edit::TextEdit> {
+        let mods = match self.palette_attached_window {
+            Some(id) => self.windows.get(&id).map(|ws| ws.modifiers),
+            None => self.main().map(|ws| ws.modifiers),
+        }
+        .unwrap_or_else(ModifiersState::empty);
+        super::text_edit::core_text_edit_for_key(&event.logical_key, mods)
     }
 
     fn command_palette_tab_count(&self) -> usize {
@@ -266,6 +278,11 @@ impl App {
                 }
                 _ => true,
             }
+        } else if let Some(edit) = self.command_palette_text_edit(event) {
+            self.command_palette.apply_text_edit(edit);
+            self.update_command_palette_ime_cursor_area();
+            self.request_redraw_for_overlay(self.palette_attached_window);
+            true
         } else if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
@@ -640,7 +657,6 @@ impl App {
         ws.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
     }
 }
-
 
 #[cfg(test)]
 #[path = "overlays_tests.rs"]
