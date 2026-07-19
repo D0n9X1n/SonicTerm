@@ -391,6 +391,40 @@ impl GlyphAtlas {
         self.get_or_insert_impl(key, rasterizer, false)
     }
 
+    /// Look up or insert a known-size tile without eviction, building its
+    /// pixel payload only after an atlas rectangle has been reserved.
+    ///
+    /// Bounded image atlases use this to avoid cloning large pixel buffers
+    /// for entries that cannot fit. `build_tile` is not invoked on a cache
+    /// hit, an oversized request, or allocation failure.
+    pub fn get_or_insert_lazy_without_eviction<F>(
+        &mut self,
+        key: GlyphKey,
+        width: u32,
+        height: u32,
+        build_tile: F,
+    ) -> Option<GlyphInfo>
+    where
+        F: FnOnce() -> RasterTile,
+    {
+        if let Some(entry) = self.map.get_mut(&key) {
+            entry.last_used_frame = self.current_frame;
+            self.hits += 1;
+            return Some(entry.info);
+        }
+        self.misses += 1;
+        if width == 0 || height == 0 || width > self.width || height > self.height {
+            return None;
+        }
+        let (x, y, slot_w, slot_h) = self.alloc_rect(width, height)?;
+        let tile = build_tile();
+        if tile.is_empty() || tile.width != width || tile.height != height {
+            self.free_rects.push((x, y, slot_w, slot_h));
+            return None;
+        }
+        Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
+    }
+
     fn get_or_insert_impl<R: Rasterizer>(
         &mut self,
         key: GlyphKey,
@@ -444,14 +478,26 @@ impl GlyphAtlas {
         }
         // Allocate: try free-list first (slots reclaimed by prior
         // eviction), then the shelf packer, then evict-and-retry.
-        let (x, y) = match self.alloc_rect(tile.width, tile.height) {
-            Some(xy) => xy,
+        let (x, y, slot_w, slot_h) = match self.alloc_rect(tile.width, tile.height) {
+            Some(allocation) => allocation,
             None if allow_eviction && self.eviction_enabled => {
                 self.evict_lru_quartile();
                 self.alloc_rect(tile.width, tile.height)?
             }
             None => return None,
         };
+        Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
+    }
+
+    fn insert_tile(
+        &mut self,
+        key: GlyphKey,
+        tile: RasterTile,
+        x: u32,
+        y: u32,
+        slot_w: u32,
+        slot_h: u32,
+    ) -> GlyphInfo {
         // Blit rows into the CPU BGRA buffer. Monochrome tiles arrive
         // as `width*height` alpha bytes — replicate each into the four
         // BGRA channels so the shader can sample a single uniform
@@ -501,15 +547,17 @@ impl GlyphAtlas {
             AtlasEntry {
                 info,
                 last_used_frame: self.current_frame,
-                rect: Some((x, y, tile.width, tile.height)),
+                rect: Some((x, y, slot_w, slot_h)),
             },
         );
-        Some(info)
+        info
     }
 
-    /// Try to allocate `(w, h)` from the free-list first, then the
-    /// shelf packer. Caller handles the eviction retry on `None`.
-    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+    /// Try to allocate `(w, h)` from the free-list first, then the shelf
+    /// packer. Returns the placement plus the complete reserved slot size so
+    /// eviction or rollback can restore a larger reclaimed rectangle intact.
+    /// Caller handles the eviction retry on `None`.
+    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
         // First-fit on the free-list: any reclaimed rect at least as
         // large as the request. Reuses the full slot (no splitting),
         // which over-reserves vertically when the new tile is shorter
@@ -519,11 +567,10 @@ impl GlyphAtlas {
         for i in 0..self.free_rects.len() {
             let (_, _, fw, fh) = self.free_rects[i];
             if fw >= w && fh >= h {
-                let (fx, fy, _, _) = self.free_rects.swap_remove(i);
-                return Some((fx, fy));
+                return Some(self.free_rects.swap_remove(i));
             }
         }
-        self.packer.alloc(w, h)
+        self.packer.alloc(w, h).map(|(x, y)| (x, y, w, h))
     }
 
     /// Drop the bottom 25% of entries by `last_used_frame`, returning

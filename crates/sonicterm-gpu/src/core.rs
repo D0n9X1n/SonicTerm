@@ -6396,28 +6396,23 @@ fn emit_inline_image_instances(
             italic: false,
             glyph_id: fold_u64_to_u32(image.id),
         };
-        struct ImageRasterizer<'a> {
-            image: &'a sonicterm_render_model::InlineImage,
-        }
-        impl sonicterm_text::glyph_atlas::Rasterizer for ImageRasterizer<'_> {
-            fn rasterize(
-                &mut self,
-                _key: sonicterm_types::glyph_key::GlyphKey,
-            ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
-                Some(sonicterm_text::glyph_atlas::RasterTile {
-                    width: self.image.width,
-                    height: self.image.height,
+        let Some(info) = image_atlas.get_or_insert_lazy_without_eviction(
+            key,
+            image.width,
+            image.height,
+            || {
+                sonicterm_text::glyph_atlas::RasterTile {
+                    width: image.width,
+                    height: image.height,
                     offset_x: 0,
                     offset_y: 0,
-                    advance: self.image.width as f32,
-                    coverage: self.image.bgra.as_ref().to_vec(),
+                    advance: image.width as f32,
+                    coverage: image.bgra.as_ref().to_vec(),
                     is_color: true,
                     is_subpixel: false,
-                })
-            }
-        }
-        let mut raster = ImageRasterizer { image };
-        let Some(info) = image_atlas.get_or_insert_without_eviction(key, &mut raster) else {
+                }
+            },
+        ) else {
             skipped += 1;
             continue;
         };
