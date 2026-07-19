@@ -24,6 +24,7 @@ use nucleo_matcher::{
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 
 use crate::command_label::{keybinding_hint, search_haystack, ALL_VARIANT_KINDS};
+use crate::text_edit::{apply_edit, TextEdit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteMode {
@@ -217,19 +218,20 @@ impl CommandPalette {
         }
     }
 
+    pub fn apply_text_edit(&mut self, edit: TextEdit) {
+        let outcome = apply_edit(&mut self.query, self.cursor, edit);
+        self.cursor = outcome.cursor;
+        if outcome.changed {
+            self.selected = 0;
+            self.scroll_offset = 0;
+            if self.mode == CommandPaletteMode::Commands {
+                self.refilter();
+            }
+        }
+    }
+
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let Some((prev, ch)) = self.query[..self.cursor].char_indices().last() else { return };
-        self.query.drain(prev..self.cursor);
-        self.cursor = prev;
-        let _ = ch;
-        self.selected = 0;
-        self.scroll_offset = 0;
-        if self.mode == CommandPaletteMode::Commands {
-            self.refilter();
-        }
+        self.apply_text_edit(TextEdit::DeleteBackward);
     }
 
     pub fn start_rename_tab(&mut self, title_body: impl Into<String>) {
@@ -271,46 +273,23 @@ impl CommandPalette {
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        if let Some((prev, _)) = self.query[..self.cursor].char_indices().last() {
-            self.cursor = prev;
-        }
+        self.apply_text_edit(TextEdit::MoveBackward);
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor >= self.query.len() {
-            return;
-        }
-        let mut iter = self.query[self.cursor..].char_indices();
-        let _ = iter.next();
-        self.cursor = iter.next().map(|(idx, _)| self.cursor + idx).unwrap_or(self.query.len());
+        self.apply_text_edit(TextEdit::MoveForward);
     }
 
     pub fn move_cursor_home(&mut self) {
-        self.cursor = 0;
+        self.apply_text_edit(TextEdit::MoveStart);
     }
 
     pub fn move_cursor_end(&mut self) {
-        self.cursor = self.query.len();
+        self.apply_text_edit(TextEdit::MoveEnd);
     }
 
     pub fn delete_forward(&mut self) {
-        if self.cursor >= self.query.len() {
-            return;
-        }
-        let end = self.query[self.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(idx, _)| self.cursor + idx)
-            .unwrap_or(self.query.len());
-        self.query.drain(self.cursor..end);
-        self.selected = 0;
-        self.scroll_offset = 0;
-        if self.mode == CommandPaletteMode::Commands {
-            self.refilter();
-        }
+        self.apply_text_edit(TextEdit::DeleteForward);
     }
 
     pub fn move_selection_down(&mut self) {

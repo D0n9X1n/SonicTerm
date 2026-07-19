@@ -14,6 +14,8 @@
 use regex::Regex;
 use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 
+use crate::text_edit::{apply_edit, normalize_cursor, TextEdit};
+
 /// A single contiguous match on one row, in **absolute** row + visible
 /// column coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,7 @@ pub enum SearchMode {
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
     pub query: String,
+    cursor: usize,
     pub matches: Vec<MatchRange>,
     /// Index into `matches` of the "current" focused match, or `None`.
     pub current: Option<usize>,
@@ -86,25 +89,48 @@ impl SearchState {
         (start, end)
     }
 
+    #[must_use]
+    pub fn cursor(&self) -> usize {
+        normalize_cursor(&self.query, self.cursor)
+    }
+
+    pub fn set_query(&mut self, query: impl Into<String>, grid: &Grid) {
+        self.query = query.into();
+        self.cursor = self.query.len();
+        self.refresh(grid);
+    }
+
     pub fn input_char(&mut self, ch: char, grid: &Grid) {
         if matches!(ch, '\r' | '\n') {
             return;
         }
-        self.query.push(ch);
+        let cursor = self.cursor();
+        self.query.insert(cursor, ch);
+        self.cursor = cursor + ch.len_utf8();
         self.refresh(grid);
     }
 
     pub fn input_str(&mut self, text: &str, grid: &Grid) {
-        let old_len = self.query.len();
-        self.query.extend(text.chars().filter(|ch| !matches!(ch, '\r' | '\n')));
-        if self.query.len() != old_len {
+        let committed: String = text.chars().filter(|ch| !matches!(ch, '\r' | '\n')).collect();
+        if committed.is_empty() {
+            return;
+        }
+        let cursor = self.cursor();
+        self.query.insert_str(cursor, &committed);
+        self.cursor = cursor + committed.len();
+        self.refresh(grid);
+    }
+
+    pub fn apply_text_edit(&mut self, edit: TextEdit, grid: &Grid) {
+        let outcome = apply_edit(&mut self.query, self.cursor, edit);
+        self.cursor = outcome.cursor;
+        if outcome.changed {
             self.refresh(grid);
         }
     }
 
     pub fn backspace(&mut self, grid: &Grid) {
-        self.query.pop();
-        self.refresh(grid);
+        self.apply_text_edit(TextEdit::DeleteBackward, grid);
     }
 
     /// Toggle case sensitivity (Cmd+I) and recompute.

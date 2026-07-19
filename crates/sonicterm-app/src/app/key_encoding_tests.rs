@@ -38,6 +38,32 @@ fn plain_enter_stays_carriage_return_under_kitty() {
 }
 
 #[test]
+fn core_control_editing_keys_remain_terminal_control_bytes() {
+    for (ch, byte) in [
+        ('a', 0x01),
+        ('b', 0x02),
+        ('d', 0x04),
+        ('e', 0x05),
+        ('f', 0x06),
+        ('h', 0x08),
+        ('k', 0x0b),
+        ('u', 0x15),
+        ('w', 0x17),
+    ] {
+        assert_eq!(
+            encode_logical(
+                &Key::Character(ch.to_string().into()),
+                ModifiersState::CONTROL,
+                0,
+                false,
+            ),
+            Some(vec![byte]),
+            "Ctrl+{ch} must retain terminal encoding when no app text field owns input",
+        );
+    }
+}
+
+#[test]
 fn alt_character_encodes_legacy_meta_prefix() {
     assert_eq!(
         encode_logical(&Key::Character("v".into()), ModifiersState::ALT, 0, false),

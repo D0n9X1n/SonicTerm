@@ -50,6 +50,56 @@ fn search_accepts_ime_commit_text_as_single_line() {
 }
 
 #[test]
+fn search_inserts_committed_text_at_the_unicode_caret() {
+    let grid = Grid::new(20, 2);
+    let mut s = SearchState::new();
+    s.set_query("你🙂好", &grid);
+    s.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
+    s.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
+    s.input_str("A\r\nB", &grid);
+
+    assert_eq!(s.query, "你AB🙂好");
+    assert_eq!(s.cursor(), "你AB".len());
+}
+
+#[test]
+fn search_core_deletions_refresh_matches() {
+    let mut grid = Grid::new(20, 1);
+    for ch in "alpha beta".chars() {
+        grid.put_char(
+            ch,
+            sonicterm_grid::grid::Color::Default,
+            sonicterm_grid::grid::Color::Default,
+            CellFlags::empty(),
+        );
+    }
+    let mut s = SearchState::new();
+    s.set_query("alpha beta", &grid);
+    assert_eq!(s.matches.len(), 1);
+
+    s.apply_text_edit(crate::text_edit::TextEdit::DeletePreviousWord, &grid);
+
+    assert_eq!(s.query, "alpha ");
+    assert_eq!(s.cursor(), s.query.len());
+    assert_eq!(s.matches.len(), 1, "mutating the query must recompute search matches");
+}
+
+#[test]
+fn search_caret_movement_does_not_reset_the_current_match() {
+    let grid = Grid::new(20, 1);
+    let mut s = SearchState::new();
+    s.set_query("needle", &grid);
+    s.matches = state_with_matches().matches;
+    s.current = Some(1);
+
+    s.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
+    s.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
+
+    assert_eq!(s.cursor(), 1);
+    assert_eq!(s.current, Some(1));
+}
+
+#[test]
 fn visible_match_range_bounds_to_viewport() {
     // Rows 10, 20, 30 (matches the shared fixture's ordering).
     let s = state_with_matches();

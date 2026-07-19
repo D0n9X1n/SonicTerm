@@ -1174,6 +1174,7 @@ mod spawn_pane;
 mod tab_state;
 pub mod tab_transfer;
 mod tear_out;
+mod text_edit;
 #[doc(hidden)]
 pub mod update_check;
 mod window_event;
@@ -3134,6 +3135,34 @@ impl App {
         self.command_palette.cursor()
     }
 
+    /// Test-only: drive command-palette core editing without constructing a
+    /// platform-private winit `KeyEvent`.
+    #[doc(hidden)]
+    pub fn __test_command_palette_text_edit(
+        &mut self,
+        key: &winit::keyboard::Key,
+        modifiers: ModifiersState,
+    ) -> bool {
+        if !self.command_palette.is_open() || self.palette_ime_is_composing() {
+            return self.command_palette.is_open();
+        }
+        if self.command_palette.mode()
+            == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
+        {
+            return true;
+        }
+        let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else { return false };
+        self.command_palette.apply_text_edit(edit);
+        self.request_redraw_for_overlay(self.palette_attached_window);
+        true
+    }
+
+    /// Test-only: enter tab-rename mode with a known value.
+    #[doc(hidden)]
+    pub fn __test_start_rename_tab(&mut self, title: &str) {
+        self.command_palette.start_rename_tab(title);
+    }
+
     /// Test-only: drive command-palette key handling.
     #[doc(hidden)]
     pub fn __test_command_palette_handle_key(&mut self, event: &winit::event::KeyEvent) -> bool {
@@ -3208,6 +3237,75 @@ impl App {
     #[doc(hidden)]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
+    }
+
+    /// Test-only: open main search and install a known query.
+    #[doc(hidden)]
+    pub fn __test_set_main_search_query(&mut self, query: &str) -> bool {
+        self.open_search();
+        let Some(ws) = self.main_mut() else { return false };
+        let i = ws.tabs.active_index();
+        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
+        let Some(search) = tab.search.as_mut() else { return false };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        search.set_query(query, pane.parser.lock().grid());
+        true
+    }
+
+    /// Test-only: install a known query in an open child search field.
+    #[doc(hidden)]
+    pub fn __test_set_child_search_query(&mut self, id: WindowId, query: &str) -> bool {
+        if !self.open_search_in_child(id) {
+            return false;
+        }
+        let Some(ws) = self.windows.get_mut(&id) else { return false };
+        let i = ws.tabs.active_index();
+        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
+        let Some(search) = tab.search.as_mut() else { return false };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        search.set_query(query, pane.parser.lock().grid());
+        true
+    }
+
+    /// Test-only: apply a core edit to main or child search through the same
+    /// shared state operation used by production routing.
+    #[doc(hidden)]
+    pub fn __test_search_text_edit(
+        &mut self,
+        id: Option<WindowId>,
+        key: &winit::keyboard::Key,
+        modifiers: ModifiersState,
+    ) -> bool {
+        let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else { return false };
+        let target = id.or(self.main_window_id);
+        let Some(target) = target else { return false };
+        let Some(ws) = self.windows.get_mut(&target) else { return false };
+        if ws.ime.is_composing() {
+            return true;
+        }
+        let i = ws.tabs.active_index();
+        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
+        let Some(search) = tab.search.as_mut() else { return false };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        search.apply_text_edit(edit, pane.parser.lock().grid());
+        true
+    }
+
+    /// Test-only: read main or child search query and caret.
+    #[doc(hidden)]
+    pub fn __test_search_query_cursor(&self, id: Option<WindowId>) -> Option<(&str, usize)> {
+        let target = id.or(self.main_window_id)?;
+        let ws = self.windows.get(&target)?;
+        let search = ws.tab_states.get(ws.tabs.active_index())?.search.as_ref()?;
+        Some((search.query.as_str(), search.cursor()))
+    }
+
+    /// Test-only: seed main IME preedit state.
+    #[doc(hidden)]
+    pub fn __test_set_main_ime_preedit(&mut self, text: &str) -> bool {
+        let Some(ws) = self.main_mut() else { return false };
+        ws.ime.handle_preedit(text, Some((text.len(), text.len())));
+        true
     }
 
     /// Test-only: install an in-memory clipboard buffer. This avoids depending
