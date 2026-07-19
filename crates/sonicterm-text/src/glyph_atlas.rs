@@ -231,6 +231,10 @@ pub struct GlyphAtlas {
     current_frame: u64,
     /// Cumulative eviction count for diagnostics.
     evictions: u64,
+    /// Runtime policy used by the renderer's bounded compaction retry.
+    /// When false, a full atlas rejects new tiles instead of recycling
+    /// rectangles referenced earlier in the frame.
+    eviction_enabled: bool,
 }
 
 /// A rectangle of the atlas that has been written since the last drain.
@@ -267,6 +271,7 @@ impl GlyphAtlas {
             misses: 0,
             current_frame: 0,
             evictions: 0,
+            eviction_enabled: true,
         }
     }
 
@@ -325,6 +330,15 @@ impl GlyphAtlas {
         self.current_frame = self.current_frame.wrapping_add(1);
     }
 
+    /// Enable or disable LRU eviction for subsequent regular insertions.
+    ///
+    /// The renderer disables eviction for one clean retry after compaction.
+    /// If that frame's working set is itself too large, excess glyphs are
+    /// skipped rather than entering an endless evict-reset-redraw loop.
+    pub fn set_eviction_enabled(&mut self, enabled: bool) {
+        self.eviction_enabled = enabled;
+    }
+
     /// Borrow the CPU-side alpha buffer. Used by `AtlasUpload` to push
     /// the initial empty texture; the upload path normally uses
     /// `take_dirty_rects` + subregion writes.
@@ -359,6 +373,29 @@ impl GlyphAtlas {
         &mut self,
         key: GlyphKey,
         rasterizer: &mut R,
+    ) -> Option<GlyphInfo> {
+        self.get_or_insert_impl(key, rasterizer, true)
+    }
+
+    /// Look up or insert a glyph without evicting any resident entry.
+    ///
+    /// This is used by bounded secondary atlases such as inline media:
+    /// once full, the caller skips excess assets rather than recycling
+    /// rectangles that instances assembled earlier in the same frame
+    /// still reference.
+    pub fn get_or_insert_without_eviction<R: Rasterizer>(
+        &mut self,
+        key: GlyphKey,
+        rasterizer: &mut R,
+    ) -> Option<GlyphInfo> {
+        self.get_or_insert_impl(key, rasterizer, false)
+    }
+
+    fn get_or_insert_impl<R: Rasterizer>(
+        &mut self,
+        key: GlyphKey,
+        rasterizer: &mut R,
+        allow_eviction: bool,
     ) -> Option<GlyphInfo> {
         if let Some(entry) = self.map.get_mut(&key) {
             entry.last_used_frame = self.current_frame;
@@ -398,14 +435,22 @@ impl GlyphAtlas {
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         }
+        // A tile larger than the atlas can never fit. Do not evict valid
+        // entries before discovering that the retry is equally impossible;
+        // callers can skip or resize the oversized asset without invalidating
+        // every cached UV in the process.
+        if tile.width > self.width || tile.height > self.height {
+            return None;
+        }
         // Allocate: try free-list first (slots reclaimed by prior
         // eviction), then the shelf packer, then evict-and-retry.
         let (x, y) = match self.alloc_rect(tile.width, tile.height) {
             Some(xy) => xy,
-            None => {
+            None if allow_eviction && self.eviction_enabled => {
                 self.evict_lru_quartile();
                 self.alloc_rect(tile.width, tile.height)?
             }
+            None => return None,
         };
         // Blit rows into the CPU BGRA buffer. Monochrome tiles arrive
         // as `width*height` alpha bytes — replicate each into the four
@@ -504,6 +549,7 @@ impl GlyphAtlas {
             (*frame, u32::from(key.ch), key.font_slot, key.weight_bold, key.italic, key.glyph_id)
         });
         ages.truncate(evict_n);
+        let evictions_before = self.evictions;
         for (_, k) in ages {
             if let Some(entry) = self.map.remove(&k) {
                 if let Some(rect) = entry.rect {
@@ -512,6 +558,15 @@ impl GlyphAtlas {
                 self.evictions += 1;
             }
         }
+        tracing::debug!(
+            target: "sonic::glyph_atlas",
+            resident_before = total,
+            resident_after = self.map.len(),
+            evicted = self.evictions.saturating_sub(evictions_before),
+            eviction_epoch = self.evictions,
+            free_rects = self.free_rects.len(),
+            "glyph atlas reclaimed LRU entries"
+        );
     }
 
     /// Just-the-lookup variant — for cases where the caller already

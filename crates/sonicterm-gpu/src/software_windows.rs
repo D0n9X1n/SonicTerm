@@ -42,16 +42,19 @@ impl WindowsSoftwareFrame {
 
     pub(crate) fn draw_layers(
         &mut self,
-        atlas: &GlyphAtlas,
+        glyph_atlas: &GlyphAtlas,
+        image_atlas: &GlyphAtlas,
         quads: &[QuadInstance],
+        images: &[GlyphInstance],
         glyphs: &[GlyphInstance],
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
         self.draw_quads(quads);
-        self.draw_glyphs(atlas, glyphs);
+        self.draw_glyphs(image_atlas, images);
+        self.draw_glyphs(glyph_atlas, glyphs);
         self.draw_quads(overlay_quads);
-        self.draw_glyphs(atlas, overlay_glyphs);
+        self.draw_glyphs(glyph_atlas, overlay_glyphs);
     }
 
     pub(crate) fn present(&self, window: &Window) -> anyhow::Result<()> {

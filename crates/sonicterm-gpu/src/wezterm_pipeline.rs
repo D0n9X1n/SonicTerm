@@ -21,6 +21,7 @@ const V_BOT_RIGHT: u32 = 3;
 
 const IS_GLYPH: f32 = 0.0;
 const IS_COLOR_EMOJI: f32 = 1.0;
+const IS_IMAGE: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
@@ -222,21 +223,25 @@ impl WeztermPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'p>,
-        atlas_bind_group: &'p wgpu::BindGroup,
+        image_atlas_bind_group: &'p wgpu::BindGroup,
+        glyph_atlas_bind_group: &'p wgpu::BindGroup,
         surface_w: f32,
         surface_h: f32,
         quads: &[QuadInstance],
+        images: &[GlyphInstance],
         glyphs: &[GlyphInstance],
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
-        let total_quads = quads.len() + glyphs.len() + overlay_quads.len() + overlay_glyphs.len();
+        let total_quads =
+            quads.len() + images.len() + glyphs.len() + overlay_quads.len() + overlay_glyphs.len();
         if total_quads == 0 {
             return;
         }
 
         let mut vertices = Vec::with_capacity(total_quads * VERTICES_PER_QUAD);
         push_quad_instances(&mut vertices, quads, surface_w, surface_h);
+        push_glyph_instances(&mut vertices, images, surface_w, surface_h);
         push_glyph_instances(&mut vertices, glyphs, surface_w, surface_h);
         push_quad_instances(&mut vertices, overlay_quads, surface_w, surface_h);
         push_glyph_instances(&mut vertices, overlay_glyphs, surface_w, surface_h);
@@ -256,8 +261,8 @@ impl WeztermPipeline {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-        pass.set_bind_group(1, atlas_bind_group, &[]);
-        pass.set_bind_group(2, atlas_bind_group, &[]);
+        pass.set_bind_group(1, image_atlas_bind_group, &[]);
+        pass.set_bind_group(2, glyph_atlas_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
@@ -300,7 +305,13 @@ fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32
             continue;
         }
         let color = g.color;
-        let has_color = if g.flags[0] >= 0.5 { IS_COLOR_EMOJI } else { IS_GLYPH };
+        let has_color = if g.flags[2] >= 0.5 {
+            IS_IMAGE
+        } else if g.flags[0] >= 0.5 {
+            IS_COLOR_EMOJI
+        } else {
+            IS_GLYPH
+        };
         let [u0, v0, u1, v1] = g.uv;
         let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
         push_rect_vertices(out, x, y, w, h, sw, sh, color, has_color, tex, [[0.0; 4]; 4]);
@@ -453,6 +464,7 @@ struct VertexOutput {
 
 const IS_GLYPH: f32 = 0.0;
 const IS_COLOR_EMOJI: f32 = 1.0;
+const IS_IMAGE: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
@@ -534,6 +546,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let w = fwidth(d);
         let aa = 1.0 - smoothstep(-w, w, d);
         color = in.fg_color * aa;
+    } else if (in.has_color == IS_IMAGE) {
+        color = textureSample(atlas_linear_tex, atlas_linear_sampler, in.tex);
     } else if (in.has_color == IS_COLOR_EMOJI) {
         color = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
     } else if (in.has_color == IS_GLYPH) {
