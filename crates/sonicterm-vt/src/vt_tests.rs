@@ -1,4 +1,4 @@
-use super::{Parser, VtEvent, MAX_ESCAPE_SEQUENCE_BYTES};
+use super::{MediaProtocol, Parser, VtEvent, MAX_ESCAPE_SEQUENCE_BYTES};
 use sonicterm_grid::grid::{CellFlags, Grid};
 
 fn row_text(parser: &Parser, row: u16) -> String {
@@ -224,6 +224,26 @@ fn st_split_across_escape_limit_is_recognized() {
 
     assert!(!parser.discarding_oversized_escape);
     assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn large_sixel_uses_media_budget_not_generic_escape_limit() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1bPq".to_vec();
+    payload.extend(std::iter::repeat_n(b'?', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+    payload.extend_from_slice(b"\x1b\\");
+
+    let events = parser.advance(&payload);
+
+    let media = events
+        .into_iter()
+        .find_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .expect("large Sixel DCS should remain a media event");
+    assert_eq!(media.protocol, MediaProtocol::Sixel);
+    assert!(media.data.len() > MAX_ESCAPE_SEQUENCE_BYTES);
 }
 
 #[test]

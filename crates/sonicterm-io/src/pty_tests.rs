@@ -191,3 +191,15 @@ fn pty_input_queue_has_fixed_capacity() {
     assert!(pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES));
     assert!(!pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES + 1));
 }
+
+#[test]
+fn multi_megabyte_paste_fits_bounded_input_budget() {
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+    const MAX_QUEUED_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+    assert!(pty_input_message_allowed(TWO_MIB));
+    assert!(
+        max_pty_queued_input_bytes() <= MAX_QUEUED_INPUT_BYTES,
+        "supporting large pastes must not make queued input unbounded"
+    );
+}

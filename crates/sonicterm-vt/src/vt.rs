@@ -381,7 +381,11 @@ impl Parser {
                             _ => EscapeFamily::Esc,
                         };
                     }
-                    if self.escape_family != EscapeFamily::Ground && !started_escape {
+                    let media_capture_has_own_budget = self.performer.dcs_capture.is_some();
+                    if self.escape_family != EscapeFamily::Ground
+                        && !started_escape
+                        && !media_capture_has_own_budget
+                    {
                         self.escape_bytes_in_flight =
                             self.escape_bytes_in_flight.saturating_add(1);
                         if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
@@ -414,6 +418,7 @@ impl Parser {
         );
         self.inner = vte::Parser::new();
         self.raw_osc = None;
+        self.performer.dcs_capture = None;
         self.pending_esc = false;
         self.discarding_oversized_escape = true;
         self.discard_escape_pending_esc = pending_esc;

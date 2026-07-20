@@ -37,9 +37,9 @@ type Incoming = Bytes;
 /// apply backpressure instead of growing process memory without limit.
 pub const PTY_OUTPUT_QUEUE_CAPACITY: usize = 64;
 /// Maximum pending terminal-input messages retained per pane.
-pub const PTY_INPUT_QUEUE_CAPACITY: usize = 16;
+pub const PTY_INPUT_QUEUE_CAPACITY: usize = 4;
 /// Largest single terminal-input message accepted by first-party callers.
-pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
     crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
@@ -52,6 +52,12 @@ fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
 #[must_use]
 pub fn pty_input_message_allowed(bytes: usize) -> bool {
     bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
+}
+
+/// Maximum bytes that can wait in one pane's PTY input channel.
+#[must_use]
+pub fn max_pty_queued_input_bytes() -> usize {
+    PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
 }
 
 /// Handle to a running pty process.
