@@ -21,6 +21,46 @@ use crate::line::Line;
 /// (e.g. `row_hash`, `row_quad_hash`) get fed `row.as_flat_slice()`.
 pub type Row = Line;
 
+/// Maximum column or row count accepted by a grid allocation.
+pub const MAX_GRID_AXIS: u16 = 4096;
+/// Maximum visible + scrollback cells retained by one grid (roughly 24 MiB at
+/// 24 bytes/cell, excluding container overhead).
+pub const MAX_GRID_CELLS: u32 = 1024 * 1024;
+/// Maximum visible cells in one primary or alternate screen.
+pub const MAX_VISIBLE_GRID_CELLS: u32 = MAX_GRID_CELLS / 2;
+/// Maximum UTF-8 bytes of zero-width cluster data retained by one cell.
+pub const MAX_CELL_EXTRAS_BYTES: usize = 64;
+
+/// Clamp requested grid dimensions to a non-zero, memory-bounded shape.
+///
+/// Columns are bounded first, then rows are reduced to keep the total cell
+/// count within [`MAX_GRID_CELLS`]. This preserves wide-terminal behavior
+/// while preventing malformed window/config dimensions from allocating
+/// multi-gigabyte grids.
+#[must_use]
+pub fn bounded_grid_size(cols: u64, rows: u64) -> (u16, u16) {
+    let cols = cols.clamp(1, u64::from(MAX_GRID_AXIS)) as u16;
+    let row_cap =
+        (MAX_VISIBLE_GRID_CELLS / u32::from(cols)).clamp(1, u32::from(MAX_GRID_AXIS)) as u16;
+    let rows = rows.clamp(1, u64::from(row_cap)) as u16;
+    (cols, rows)
+}
+
+/// Clamp retained scrollback rows so visible cells plus history share one
+/// per-pane memory budget.
+#[must_use]
+pub fn bounded_scrollback_rows(
+    cols: u16,
+    visible_rows: u16,
+    requested_rows: usize,
+) -> usize {
+    let cols = u64::from(cols.max(1));
+    let visible_cells = cols.saturating_mul(u64::from(visible_rows));
+    let remaining_cells = u64::from(MAX_GRID_CELLS).saturating_sub(visible_cells);
+    let row_budget = remaining_cells / cols;
+    requested_rows.min(usize::try_from(row_budget).unwrap_or(usize::MAX))
+}
+
 /// A single shell prompt region recorded from OSC 133 markers. Rows are
 /// expressed in **scrollback-absolute coordinates** — `scrollback_len() +
 /// visible_row` at the time the marker was emitted — so the region remains
@@ -59,6 +99,8 @@ pub struct Grid {
     visible: VecDeque<Line>,
     /// Scrollback buffer (oldest at front).
     scrollback: VecDeque<Line>,
+    /// User-requested history depth before applying the total cell budget.
+    scrollback_requested_limit: usize,
     scrollback_limit: usize,
     /// Cursor position within the visible region.
     pub cursor: Pos,
@@ -85,13 +127,18 @@ pub struct Grid {
 impl Grid {
     /// Create a new grid with the given column/row count and default settings.
     pub fn new(cols: u16, rows: u16) -> Self {
+        let (cols, rows) = bounded_grid_size(u64::from(cols), u64::from(rows));
+        let scrollback_requested_limit = 1_000;
+        let scrollback_limit =
+            bounded_scrollback_rows(cols, rows, scrollback_requested_limit);
         let visible = (0..rows).map(|_| make_row(cols)).collect();
         Self {
             cols,
             rows,
             visible,
             scrollback: VecDeque::new(),
-            scrollback_limit: 1_000,
+            scrollback_requested_limit,
+            scrollback_limit,
             cursor: Pos::default(),
             default: Cell::default(),
             alt_screen: None,
@@ -244,6 +291,7 @@ impl Grid {
             rows,
             visible: saved_visible,
             scrollback: saved_scrollback,
+            scrollback_requested_limit: self.scrollback_requested_limit,
             scrollback_limit: self.scrollback_limit,
             cursor: saved_cursor,
             default: self.default.clone(),
@@ -255,6 +303,8 @@ impl Grid {
             pending_wrap: false,
         };
         self.alt_screen = Some(Box::new(saved));
+        self.scrollback_limit = 0;
+        self.enforce_alt_memory_budget();
         self.mark_all();
         self.bump();
     }
@@ -269,11 +319,21 @@ impl Grid {
         let saved = *saved;
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
+        self.scrollback_requested_limit = saved.scrollback_requested_limit;
+        self.scrollback_limit =
+            bounded_scrollback_rows(self.cols, self.rows, self.scrollback_requested_limit);
+        if self.scrollback.len() > self.scrollback_limit {
+            let excess = self.scrollback.len() - self.scrollback_limit;
+            self.scrollback.drain(0..excess);
+        }
         self.cursor = saved.cursor;
         if saved.cols != self.cols || saved.rows != self.rows {
             let cols = self.cols;
             let rows = self.rows;
             for row in &mut self.visible {
+                row.resize(cols as usize, Cell::default());
+            }
+            for row in &mut self.scrollback {
                 row.resize(cols as usize, Cell::default());
             }
             if (rows as usize) > self.visible.len() {
@@ -293,9 +353,25 @@ impl Grid {
     /// Resize the grid to `cols × rows`. Existing rows are clipped or
     /// padded with default cells.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = bounded_grid_size(u64::from(cols), u64::from(rows));
         self.clear_pending_wrap();
         if cols == self.cols && rows == self.rows {
             return;
+        }
+        self.scrollback_limit = if self.is_alt() {
+            0
+        } else {
+            bounded_scrollback_rows(cols, rows, self.scrollback_requested_limit)
+        };
+        if self.scrollback.len() > self.scrollback_limit {
+            let excess = self.scrollback.len() - self.scrollback_limit;
+            self.scrollback.drain(0..excess);
+        }
+        // Drop rows that will not survive before widening columns. Otherwise
+        // a tall-to-wide resize can transiently expand thousands of rows only
+        // to discard them immediately afterward.
+        if rows < self.rows {
+            self.visible.truncate(rows as usize);
         }
         // Reflow: a very basic implementation — clip or pad.
         for row in &mut self.visible {
@@ -313,8 +389,6 @@ impl Grid {
             for _ in self.rows..rows {
                 self.visible.push_back(make_row(cols));
             }
-        } else {
-            self.visible.truncate(rows as usize);
         }
         self.cols = cols;
         self.rows = rows;
@@ -327,6 +401,7 @@ impl Grid {
         if let Some(alt) = self.alt_screen.as_mut() {
             alt.resize(cols, rows);
         }
+        self.enforce_alt_memory_budget();
         self.bump();
     }
 
@@ -473,6 +548,10 @@ impl Grid {
                 return;
             }
             let lead = &mut self.visible[r][c];
+            let existing_len = lead.extras().map_or(0, str::len);
+            if existing_len.saturating_add(ch.len_utf8()) > MAX_CELL_EXTRAS_BYTES {
+                return;
+            }
             let mut s = match lead.take_extras() {
                 Some(boxed) => String::from(boxed),
                 None => String::new(),
@@ -1234,10 +1313,34 @@ impl Grid {
     /// `config.terminal.scrollback` actually bound retained history, both at
     /// pane creation and on config hot-reload.
     pub fn set_scrollback_limit(&mut self, limit: usize) {
-        self.scrollback_limit = limit;
-        if self.scrollback.len() > limit {
-            let excess = self.scrollback.len() - limit;
+        self.scrollback_requested_limit = limit;
+        self.scrollback_limit =
+            if self.is_alt() { 0 } else { bounded_scrollback_rows(self.cols, self.rows, limit) };
+        if self.scrollback.len() > self.scrollback_limit {
+            let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+        }
+        if let Some(primary) = self.alt_screen.as_mut() {
+            primary.set_scrollback_limit(limit);
+        }
+        self.enforce_alt_memory_budget();
+    }
+
+    fn enforce_alt_memory_budget(&mut self) {
+        let Some(primary) = self.alt_screen.as_mut() else { return };
+        let active_cells = u64::from(self.cols) * u64::from(self.rows);
+        let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
+        let remaining_cells = u64::from(MAX_GRID_CELLS)
+            .saturating_sub(active_cells.saturating_add(primary_visible_cells));
+        let history_rows = usize::try_from(remaining_cells / u64::from(primary.cols.max(1)))
+            .unwrap_or(usize::MAX);
+        primary.scrollback_limit = primary
+            .scrollback_limit
+            .min(history_rows)
+            .min(primary.scrollback_requested_limit);
+        if primary.scrollback.len() > primary.scrollback_limit {
+            let excess = primary.scrollback.len() - primary.scrollback_limit;
+            primary.scrollback.drain(0..excess);
         }
     }
 }

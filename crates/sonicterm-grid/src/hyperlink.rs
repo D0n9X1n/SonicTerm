@@ -10,6 +10,15 @@ use std::collections::HashMap;
 // it without depending on this crate. Re-exported for source compatibility.
 pub use sonicterm_types::HyperlinkId;
 
+/// Maximum distinct OSC 8 links retained by one parser/grid.
+pub const MAX_HYPERLINKS: usize = 16 * 1024;
+/// Maximum URI bytes accepted for one OSC 8 link.
+pub const MAX_HYPERLINK_URI_BYTES: usize = 8 * 1024;
+/// Maximum client-supplied OSC 8 id bytes accepted for one link.
+pub const MAX_HYPERLINK_CLIENT_ID_BYTES: usize = 1024;
+/// Maximum combined string bytes retained by the two hyperlink lookup maps.
+pub const MAX_HYPERLINK_METADATA_BYTES: usize = 8 * 1024 * 1024;
+
 /// A parsed OSC 8 hyperlink: optional client-supplied id + uri.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hyperlink {
@@ -24,6 +33,7 @@ pub struct Hyperlink {
 pub struct HyperlinkRegistry {
     by_key: HashMap<(Option<String>, String), HyperlinkId>,
     by_id: HashMap<HyperlinkId, Hyperlink>,
+    retained_bytes: usize,
 }
 
 impl HyperlinkRegistry {
@@ -33,16 +43,43 @@ impl HyperlinkRegistry {
     }
 
     /// Return the id for `(id, uri)`, creating a new entry on first sight.
+    ///
+    /// Returns the reserved invalid id `0` when memory limits reject a new
+    /// link; [`Self::lookup`] then returns `None`. New code that needs to
+    /// distinguish rejection should call [`Self::try_intern`].
     pub fn intern(&mut self, id: Option<&str>, uri: &str) -> HyperlinkId {
+        self.try_intern(id, uri).unwrap_or(HyperlinkId(0))
+    }
+
+    /// Fallible bounded variant of [`Self::intern`].
+    pub fn try_intern(&mut self, id: Option<&str>, uri: &str) -> Option<HyperlinkId> {
+        if uri.len() > MAX_HYPERLINK_URI_BYTES
+            || id.is_some_and(|value| value.len() > MAX_HYPERLINK_CLIENT_ID_BYTES)
+        {
+            return None;
+        }
         let key = (id.map(String::from), uri.to_string());
         if let Some(hid) = self.by_key.get(&key) {
-            return *hid;
+            return Some(*hid);
+        }
+        if self.by_id.len() >= MAX_HYPERLINKS {
+            return None;
+        }
+        let entry_bytes = key
+            .0
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(key.1.len())
+            .saturating_mul(2);
+        if self.retained_bytes.saturating_add(entry_bytes) > MAX_HYPERLINK_METADATA_BYTES {
+            return None;
         }
         let hid = HyperlinkId::next();
         let link = Hyperlink { id: key.0.clone(), uri: key.1.clone() };
         self.by_key.insert(key, hid);
         self.by_id.insert(hid, link);
-        hid
+        self.retained_bytes += entry_bytes;
+        Some(hid)
     }
 
     /// Resolve `hid` back to the interned `Hyperlink`.

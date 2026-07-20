@@ -30,6 +30,30 @@ type Outgoing = Vec<u8>;
 /// ring drains below capacity it reuses the same allocation.
 type Incoming = Bytes;
 
+/// Maximum unread PTY output chunks retained per pane.
+///
+/// Each chunk is at most the 64 KiB reader-ring size, so this bounds queued
+/// output to roughly 4 MiB. Once full, the reader blocks and lets the OS PTY
+/// apply backpressure instead of growing process memory without limit.
+pub const PTY_OUTPUT_QUEUE_CAPACITY: usize = 64;
+/// Maximum pending terminal-input messages retained per pane.
+pub const PTY_INPUT_QUEUE_CAPACITY: usize = 16;
+/// Largest single terminal-input message accepted by first-party callers.
+pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 1024 * 1024;
+
+fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
+    crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
+}
+
+fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
+    crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
+}
+
+#[must_use]
+pub fn pty_input_message_allowed(bytes: usize) -> bool {
+    bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
+}
+
 /// Handle to a running pty process.
 ///
 /// On drop, the child process is explicitly killed and the master writer is
@@ -44,6 +68,8 @@ pub struct PtyHandle {
     pub in_tx: Sender<Outgoing>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
+    reader_cancel: Sender<()>,
+    input_queue_warned: std::sync::atomic::AtomicBool,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
@@ -107,10 +133,48 @@ impl PtyHandle {
     pub fn shell_program_path(&self) -> &str {
         &self.shell_program_path
     }
+
+    /// Queue terminal input without blocking the event-loop thread.
+    pub fn send_input_nonblocking(&self, bytes: Vec<u8>) {
+        if !pty_input_message_allowed(bytes.len()) {
+            if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    bytes = bytes.len(),
+                    max_bytes = MAX_PTY_INPUT_MESSAGE_BYTES,
+                    "PTY input dropped because one message exceeds the byte limit"
+                );
+            }
+            return;
+        }
+        match self.in_tx.try_send(bytes) {
+            Ok(()) => {
+                self.input_queue_warned
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(crossbeam_channel::TrySendError::Full(bytes)) => {
+                if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        bytes = bytes.len(),
+                        capacity = PTY_INPUT_QUEUE_CAPACITY,
+                        "PTY input dropped because the writer queue is full"
+                    );
+                }
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(bytes)) => {
+                if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        bytes = bytes.len(),
+                        "PTY input dropped because the writer is disconnected"
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        let _ = self.reader_cancel.try_send(());
         // LM-007: the previous `Arc::strong_count == 1` guard skipped
         // the kill in any code path that still held a cloned child Arc,
         // leaving an orphaned shell on tab close. It also relied on
@@ -232,11 +296,12 @@ impl PtyHandle {
         let writer = master.take_writer()?;
         let master = Arc::new(Mutex::new(master));
 
-        let (out_tx, out_rx) = crossbeam_channel::unbounded::<Incoming>();
-        let (in_tx, in_rx) = crossbeam_channel::unbounded::<Outgoing>();
+        let (out_tx, out_rx) = pty_output_channel();
+        let (in_tx, in_rx) = pty_input_channel();
+        let (reader_cancel, reader_cancel_rx) = crossbeam_channel::bounded(1);
 
         // Reader thread: pty -> out_rx.
-        spawn_reader_thread(reader, out_tx);
+        spawn_reader_thread(reader, out_tx, reader_cancel_rx);
         // Writer thread: in_rx -> pty.
         spawn_writer_thread(writer, in_rx);
 
@@ -270,13 +335,26 @@ impl PtyHandle {
             out_rx,
             in_tx,
             resize,
+            reader_cancel,
+            input_queue_warned: std::sync::atomic::AtomicBool::new(false),
             child: Arc::new(Mutex::new(child)),
             shell_program_path: cmd.to_string(),
         })
     }
 }
 
-fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
+fn send_pty_output(tx: &Sender<Incoming>, cancel: &Receiver<()>, chunk: Incoming) -> bool {
+    crossbeam_channel::select! {
+        send(tx, chunk) -> result => result.is_ok(),
+        recv(cancel) -> _ => false,
+    }
+}
+
+fn spawn_reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    tx: Sender<Incoming>,
+    cancel: Receiver<()>,
+) {
     thread::Builder::new()
         .name("sonic-pty-reader".into())
         .spawn(move || {
@@ -316,7 +394,7 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
                     Ok(n) => {
                         buf.truncate(initial_len + n);
                         let chunk = buf.split().freeze();
-                        if tx.send(chunk).is_err() {
+                        if !send_pty_output(&tx, &cancel, chunk) {
                             break;
                         }
                     }

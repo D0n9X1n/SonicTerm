@@ -798,7 +798,7 @@ impl App {
                     if enabled {
                         if let Some(pty) = pane.pty.as_ref() {
                             let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                            let _ = pty.in_tx.send(seq.to_vec());
+                            pty.send_input_nonblocking(seq.to_vec());
                         }
                     }
                 }
@@ -826,8 +826,16 @@ impl App {
             }
 
             WindowEvent::Resized(size) => {
-                if let Some(r) = self.main_renderer_mut() {
-                    r.resize(size.width, size.height);
+                if self
+                    .main_renderer_mut()
+                    .is_some_and(|renderer| !renderer.try_resize(size.width, size.height))
+                {
+                    tracing::warn!(
+                        width = size.width,
+                        height = size.height,
+                        "main window resize ignored after renderer safety rejection"
+                    );
+                    return;
                 }
                 // M6a-expand-2c-window: notify the reducer of the
                 // new logical grid dimensions. Derive cols/rows from
@@ -1247,7 +1255,7 @@ impl App {
                             let payload = wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    pty.send_input_nonblocking(payload);
                                 }
                             }
                         } else if is_alt {
@@ -1270,7 +1278,7 @@ impl App {
                             }
                             if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    pty.send_input_nonblocking(payload);
                                 }
                             }
                         } else {

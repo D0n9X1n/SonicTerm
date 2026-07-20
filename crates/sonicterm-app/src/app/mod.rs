@@ -288,6 +288,19 @@ pub fn should_defer_streaming_redraw(
 pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
 pub const PTY_REDRAW_MAX_LATENCY: Duration = Duration::from_millis(8);
 pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
+pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
+pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
+
+fn append_bounded_command_events(
+    queue: &mut Vec<PaneCommandEvent>,
+    events: impl IntoIterator<Item = PaneCommandEvent>,
+) {
+    queue.extend(events);
+    if queue.len() > MAX_PANE_COMMAND_EVENTS {
+        let excess = queue.len() - MAX_PANE_COMMAND_EVENTS;
+        queue.drain(0..excess);
+    }
+}
 
 #[must_use]
 pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Duration) -> bool {
@@ -986,8 +999,10 @@ pub fn resize_panes_to_rects(
         let Some(pane) = panes.get(id) else { continue };
         let content_w = (rect.w - left - right).max(cell_w);
         let content_h = (rect.h - top - bottom).max(cell_h);
-        let cols = ((content_w / cell_w).floor() as i32).max(1) as u16;
-        let rows = ((content_h / cell_h).floor() as i32).max(1) as u16;
+        let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
+            (content_w / cell_w).floor() as u64,
+            (content_h / cell_h).floor() as u64,
+        );
         pane.parser.lock().grid_mut().resize(cols, rows);
         if let Some(pty) = pane.pty.as_ref() {
             (pty.resize)(cols, rows);
@@ -2249,7 +2264,7 @@ impl App {
         // winit-agnostic `AppStateMachine`. The reducer translates
         // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane,
         // data }`, and `dispatch_pty_write_effect` is the boundary
-        // method that performs the actual `pty.in_tx.send(...)`. The
+        // method that performs the actual bounded PTY input enqueue. The
         // net behaviour is identical to the pre-2b direct call; the
         // boundary is what changes so subsequent migration PRs
         // (2c+) can lift more state into the reducer without
@@ -2288,7 +2303,7 @@ impl App {
             }
             let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
-                let _ = pty.in_tx.send(bytes);
+                pty.send_input_nonblocking(bytes);
             }
         }
     }
@@ -4320,6 +4335,14 @@ impl App {
         backend.register_window(handle, window_id, window);
     }
 
+    pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
+        self.pending_redraw_windows.remove(&window_id);
+        self.os_drag_bars.remove(Some(window_id));
+        if let Some(backend) = self.os_drag_backend.as_mut() {
+            backend.unregister_window(window_id);
+        }
+    }
+
     /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.
     /// Drains the mailbox; currently a no-op beyond logging — the
     /// drag-chip overlay is rendered from `tab_drag` state, not from
@@ -4775,6 +4798,10 @@ mod redraw_coalescing_tests;
 #[cfg(test)]
 #[path = "warm_window_pool_tests.rs"]
 mod warm_window_pool_tests;
+
+#[cfg(test)]
+#[path = "command_event_tests.rs"]
+mod command_event_tests;
 
 #[cfg(test)]
 #[path = "tear_out_timing_tests.rs"]

@@ -4,8 +4,35 @@
 //! request process exit. Likewise, closing the last tab in a child via the
 //! keymap/tab-close path should not leave a hidden-main/no-child process alive.
 
-use sonicterm_app::app::App;
+use sonicterm_app::app::{
+    os_drag::{AppHandle, OsTabDragBackend, TabBarSnapshot},
+    App,
+};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+struct UnregisterTrackingBackend {
+    calls: Arc<AtomicUsize>,
+}
+
+impl OsTabDragBackend for UnregisterTrackingBackend {
+    fn begin_session(
+        &mut self,
+        _handle: AppHandle,
+        _source_window: winit::window::WindowId,
+        _source_tab_idx: usize,
+        _payload_json: String,
+        _drag_image_png: Vec<u8>,
+    ) {
+    }
+
+    fn unregister_window(&mut self, _window_id: winit::window::WindowId) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 fn app_with_hidden_main_and_child() -> (App, winit::window::WindowId) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -64,6 +91,58 @@ fn visible_main_with_tabs_keeps_running_when_child_closes() {
     assert_eq!(app.__test_windows_len(), 0, "child is reaped");
     assert!(!app.__test_main_hidden(), "main remains active");
     assert!(!app.__test_pending_exit(), "visible main tabs keep the process alive");
+}
+
+#[test]
+fn child_reap_purges_drag_snapshot_and_backend_registration() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    let registry = app.os_drag_bar_registry();
+    registry.publish(TabBarSnapshot {
+        window: Some(child),
+        window_rect: (0, 0, 100, 100),
+        bar_rect: (0, 0, 100, 20),
+        tab_lefts: vec![0],
+        tab_rights: vec![100],
+    });
+    let unregister_calls = Arc::new(AtomicUsize::new(0));
+    app.__test_set_os_drag_backend(Box::new(UnregisterTrackingBackend {
+        calls: unregister_calls.clone(),
+    }));
+
+    assert!(app.__test_invoke_close_active_tab_in_child(child));
+
+    assert!(registry.is_empty(), "reaped child must not retain tab-bar snapshots");
+    assert_eq!(
+        unregister_calls.load(Ordering::Relaxed),
+        1,
+        "reaped child must unregister its platform drag target"
+    );
+}
+
+#[test]
+fn failed_child_tear_out_source_cleanup_releases_empty_window() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let child = app.__test_seed_child_window(&[]);
+    let registry = app.os_drag_bar_registry();
+    registry.publish(TabBarSnapshot {
+        window: Some(child),
+        window_rect: (0, 0, 100, 100),
+        bar_rect: (0, 0, 100, 20),
+        tab_lefts: Vec::new(),
+        tab_rights: Vec::new(),
+    });
+    let unregister_calls = Arc::new(AtomicUsize::new(0));
+    app.__test_set_os_drag_backend(Box::new(UnregisterTrackingBackend {
+        calls: unregister_calls.clone(),
+    }));
+
+    app.tear_out_apply_child_source_side(child, 0);
+
+    assert_eq!(app.__test_windows_len(), 0);
+    assert!(registry.is_empty());
+    assert_eq!(unregister_calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]

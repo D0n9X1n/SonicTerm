@@ -142,3 +142,52 @@ fn fills_lc_ctype_when_lang_is_present_but_not_utf8() {
 fn preserves_explicit_lc_all_override() {
     assert!(!should_apply_utf8_locale_fallback(Some("C"), None, None));
 }
+
+#[test]
+fn pty_output_queue_applies_backpressure_at_fixed_capacity() {
+    let (tx, rx) = pty_output_channel();
+    for _ in 0..PTY_OUTPUT_QUEUE_CAPACITY {
+        tx.try_send(Bytes::from_static(b"x")).expect("queue has bounded capacity");
+    }
+
+    assert!(matches!(
+        tx.try_send(Bytes::from_static(b"overflow")),
+        Err(crossbeam_channel::TrySendError::Full(_))
+    ));
+    assert_eq!(rx.len(), PTY_OUTPUT_QUEUE_CAPACITY);
+}
+
+#[test]
+fn pty_output_send_can_be_cancelled_while_queue_is_full() {
+    let (tx, _rx) = pty_output_channel();
+    for _ in 0..PTY_OUTPUT_QUEUE_CAPACITY {
+        tx.try_send(Bytes::from_static(b"x")).expect("fill bounded queue");
+    }
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    std::thread::spawn(move || {
+        done_tx
+            .send(send_pty_output(&tx, &cancel_rx, Bytes::from_static(b"blocked")))
+            .expect("report send outcome");
+    });
+
+    cancel_tx.send(()).expect("signal cancellation");
+
+    assert!(!done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("reader unblocked"));
+}
+
+#[test]
+fn pty_input_queue_has_fixed_capacity() {
+    let (tx, rx) = pty_input_channel();
+    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+        tx.try_send(vec![b'x']).expect("queue has bounded capacity");
+    }
+
+    assert!(matches!(
+        tx.try_send(vec![b'y']),
+        Err(crossbeam_channel::TrySendError::Full(_))
+    ));
+    assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
+    assert!(pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES));
+    assert!(!pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES + 1));
+}

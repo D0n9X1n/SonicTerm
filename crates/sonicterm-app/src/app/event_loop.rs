@@ -237,8 +237,10 @@ impl App {
             hook();
         }
 
-        let cols = self.config.window.cols;
-        let rows = self.config.window.rows;
+        let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
+            u64::from(self.config.window.cols),
+            u64::from(self.config.window.rows),
+        );
 
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(

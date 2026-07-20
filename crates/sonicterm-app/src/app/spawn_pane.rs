@@ -38,7 +38,8 @@ use super::{
 impl App {
     pub(super) fn spawn_pane(&self) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
-        let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let (reply_tx, reply_rx) =
+            crossbeam_channel::bounded::<Vec<u8>>(super::PTY_REPLY_QUEUE_CAPACITY);
         // Honour the user's configured scrollback depth instead of the
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
@@ -222,6 +223,9 @@ impl App {
                                                         super::media::decode_inline_image(&media)
                                                     {
                                                         inline_images.push(image);
+                                                        super::media::trim_inline_images(
+                                                            &mut inline_images,
+                                                        );
                                                     }
                                                 }
                                                 _ => {}
@@ -246,14 +250,13 @@ impl App {
                                     if !inline_images.is_empty() {
                                         let mut images = inline_images_thread.lock();
                                         images.extend(inline_images);
-                                        const MAX_INLINE_IMAGES: usize = 128;
-                                        if images.len() > MAX_INLINE_IMAGES {
-                                            let drop = images.len() - MAX_INLINE_IMAGES;
-                                            images.drain(0..drop);
-                                        }
+                                        super::media::trim_inline_images(&mut images);
                                     }
                                     if !command_side_effects.is_empty() {
-                                        command_events_thread.lock().extend(command_side_effects);
+                                        super::append_bounded_command_events(
+                                            &mut command_events_thread.lock(),
+                                            command_side_effects,
+                                        );
                                     }
                                     let _ = new_title;
                                     let pending_for = pending_since

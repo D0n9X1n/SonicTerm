@@ -1,6 +1,7 @@
 use super::*;
 use crate::proto::ServerMsg;
 use crossbeam_channel::bounded;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 /// Cross-platform: a fresh server has no sessions, and control operations on
@@ -18,24 +19,61 @@ fn unknown_pane_and_session_ops_error() {
     assert!(state.attach(12345, sink).is_err(), "attach to unknown session must Err");
 }
 
-/// Cross-platform: the bounded subscriber mailbox drops the OLDEST queued
-/// message when full so the freshest output still reaches the client. This is
-/// the back-pressure contract the pane reader relies on.
+/// Cross-platform: the bounded subscriber mailbox never evicts control
+/// responses to make room for later messages.
 #[test]
-fn subscriber_sink_drops_oldest_when_full() {
+fn subscriber_sink_preserves_queued_control_when_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
 
     sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
-    // Mailbox is now full (cap 1). The next send must drop the oldest and
-    // still succeed, leaving only the newest message queued.
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 2 }).unwrap();
+    assert!(sink.send_drop_oldest(ServerMsg::Exit { pane_id: 2 }).is_err());
 
     match rx.try_recv() {
-        Ok(ServerMsg::Exit { pane_id }) => assert_eq!(pane_id, 2, "oldest should have been dropped"),
-        other => panic!("expected the newest Exit, got {other:?}"),
+        Ok(ServerMsg::Exit { pane_id }) => assert_eq!(pane_id, 1),
+        other => panic!("expected the original Exit, got {other:?}"),
     }
     assert!(rx.try_recv().is_err(), "only one message should remain");
+}
+
+#[test]
+fn subscriber_sink_drops_new_output_when_full() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+
+    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![1, 2, 3] }).unwrap();
+
+    assert!(matches!(rx.try_recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+}
+
+#[test]
+fn subscriber_sink_reserves_capacity_for_exit() {
+    let (tx, rx) = bounded(2);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![1] }).unwrap();
+    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![2] }).unwrap();
+
+    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+
+    assert!(matches!(rx.try_recv(), Ok(ServerMsg::Output { bytes, .. }) if bytes == vec![1]));
+    assert!(matches!(rx.try_recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+}
+
+#[test]
+fn subscriber_control_waits_for_capacity_instead_of_dropping() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    let (done_tx, done_rx) = bounded(1);
+    std::thread::spawn(move || {
+        done_tx.send(sink.send_control(ServerMsg::Exit { pane_id: 2 })).unwrap();
+    });
+
+    assert!(done_rx.try_recv().is_err(), "control send should wait while full");
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+    done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("send unblocked").unwrap();
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 2 })));
 }
 
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,

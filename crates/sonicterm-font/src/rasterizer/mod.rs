@@ -13,6 +13,62 @@ pub mod directwrite;
 pub mod freetype;
 pub mod harfbuzz;
 
+/// Largest glyph bitmap dimension accepted by the terminal atlas.
+pub const MAX_RASTERIZED_GLYPH_DIMENSION: usize = 2048;
+/// Largest RGBA glyph payload accepted before atlas insertion.
+pub const MAX_RASTERIZED_GLYPH_BYTES: usize =
+    MAX_RASTERIZED_GLYPH_DIMENSION * MAX_RASTERIZED_GLYPH_DIMENSION * 4;
+
+/// Validate glyph dimensions and return the checked RGBA byte length.
+pub fn checked_glyph_rgba_len(width: usize, height: usize) -> anyhow::Result<usize> {
+    if width > MAX_RASTERIZED_GLYPH_DIMENSION || height > MAX_RASTERIZED_GLYPH_DIMENSION {
+        anyhow::bail!(
+            "glyph bitmap {width}x{height} exceeds {}x{} atlas limit",
+            MAX_RASTERIZED_GLYPH_DIMENSION,
+            MAX_RASTERIZED_GLYPH_DIMENSION
+        );
+    }
+    let bytes = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("glyph bitmap byte length overflow for {width}x{height}"))?;
+    if bytes > MAX_RASTERIZED_GLYPH_BYTES {
+        anyhow::bail!("glyph bitmap requires {bytes} bytes, limit is {MAX_RASTERIZED_GLYPH_BYTES}");
+    }
+    Ok(bytes)
+}
+
+/// Convert a signed FreeType 26.6 extent to pixels and enforce the glyph limit.
+pub fn checked_freetype_26_6_extent(extent: i64) -> anyhow::Result<usize> {
+    let magnitude = extent
+        .checked_abs()
+        .ok_or_else(|| anyhow::anyhow!("FreeType 26.6 extent overflow: {extent}"))?
+        as u64;
+    let pixels = magnitude
+        .checked_add(63)
+        .ok_or_else(|| anyhow::anyhow!("FreeType 26.6 extent overflow: {extent}"))?
+        / 64;
+    if pixels > MAX_RASTERIZED_GLYPH_DIMENSION as u64 {
+        anyhow::bail!(
+            "FreeType outline extent {pixels}px exceeds {}px glyph limit",
+            MAX_RASTERIZED_GLYPH_DIMENSION
+        );
+    }
+    usize::try_from(pixels).map_err(|_| anyhow::anyhow!("FreeType extent exceeds usize"))
+}
+
+/// Validate the requested point-size/DPI conversion before native font calls.
+pub fn checked_raster_pixel_size(point_size: f64, scale: f64, dpi: u32) -> anyhow::Result<f64> {
+    let pixels = point_size * scale * f64::from(dpi) / 72.0;
+    if !pixels.is_finite()
+        || pixels <= 0.0
+        || pixels > MAX_RASTERIZED_GLYPH_DIMENSION as f64
+    {
+        anyhow::bail!("invalid raster pixel size {pixels}");
+    }
+    Ok(pixels)
+}
+
 /// A bitmap representation of a glyph.
 /// The data is stored as pre-multiplied RGBA 32bpp.
 #[derive(Debug)]
@@ -137,3 +193,7 @@ where
         last_line - first_line,
     )
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

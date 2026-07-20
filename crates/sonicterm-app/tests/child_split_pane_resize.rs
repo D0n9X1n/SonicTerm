@@ -76,3 +76,24 @@ fn child_close_pane_refits_survivor_to_full_width() {
         "the surviving pane must reclaim full window width after close"
     );
 }
+
+#[test]
+fn child_split_caps_malformed_viewport_grid_allocations() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let id = app.__test_seed_child_window(&["torn"]);
+    assert!(app.__test_set_child_pane_viewport(
+        id,
+        Rect::new(0.0, 0.0, 1_000_000.0, 1_000_000.0),
+        1.0,
+        1.0,
+    ));
+
+    assert!(app.__test_child_split_active_right(id));
+    for pane_id in app.__test_child_pane_ids(id).expect("pane ids") {
+        let (cols, rows) = app.__test_child_pane_grid_size(id, pane_id).expect("grid size");
+        assert!(
+            u32::from(cols) * u32::from(rows) <= sonicterm_grid::grid::MAX_GRID_CELLS,
+            "split pane exceeded the global grid memory budget: {cols}x{rows}"
+        );
+    }
+}

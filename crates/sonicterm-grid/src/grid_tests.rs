@@ -328,6 +328,85 @@ fn resize_shrink_dirties_every_remaining_row() {
 }
 
 #[test]
+fn bounded_grid_size_caps_axes_and_total_cells() {
+    let (cols, rows) = bounded_grid_size(u64::MAX, u64::MAX);
+
+    assert!(cols <= MAX_GRID_AXIS);
+    assert!(rows <= MAX_GRID_AXIS);
+    assert!(u32::from(cols) * u32::from(rows) <= MAX_GRID_CELLS);
+}
+
+#[test]
+fn grid_new_and_resize_apply_memory_bounds() {
+    let mut grid = Grid::new(u16::MAX, u16::MAX);
+    assert!(u32::from(grid.cols) * u32::from(grid.rows) <= MAX_GRID_CELLS);
+
+    grid.resize(u16::MAX, u16::MAX);
+    assert!(u32::from(grid.cols) * u32::from(grid.rows) <= MAX_GRID_CELLS);
+}
+
+#[test]
+fn scrollback_limit_shares_the_total_grid_cell_budget() {
+    assert_eq!(
+        bounded_scrollback_rows(
+            MAX_GRID_AXIS,
+            (MAX_GRID_CELLS / u32::from(MAX_GRID_AXIS)) as u16,
+            usize::MAX,
+        ),
+        0
+    );
+
+    let mut grid = Grid::new(100, 24);
+    grid.set_scrollback_limit(usize::MAX);
+    assert!(
+        u64::from(grid.cols)
+            * (u64::from(grid.rows) + grid.scrollback_limit as u64)
+            <= u64::from(MAX_GRID_CELLS)
+    );
+}
+
+#[test]
+fn scrollback_limit_update_trims_saved_primary_while_alt_is_active() {
+    let mut grid = Grid::new(4, 2);
+    for ch in "abcdefgh".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.goto(1, 0);
+    grid.linefeed();
+    assert_eq!(grid.scrollback_len(), 1);
+
+    grid.enter_alt_screen();
+    grid.set_scrollback_limit(0);
+    grid.leave_alt_screen();
+
+    assert_eq!(grid.scrollback_len(), 0);
+}
+
+#[test]
+fn alternate_screen_scrolling_does_not_retain_second_scrollback_budget() {
+    let mut grid = Grid::new(4, 2);
+    grid.enter_alt_screen();
+    for _ in 0..100 {
+        grid.scroll_up(1);
+    }
+
+    assert_eq!(grid.scrollback_len(), 0);
+}
+
+#[test]
+fn primary_and_alternate_storage_share_one_cell_budget() {
+    let mut grid = Grid::new(u16::MAX, u16::MAX);
+    grid.set_scrollback_limit(usize::MAX);
+    grid.enter_alt_screen();
+    let primary = grid.alt_screen.as_ref().expect("saved primary");
+    let retained_cells = u64::from(grid.cols) * u64::from(grid.rows)
+        + u64::from(primary.cols) * u64::from(primary.rows)
+        + u64::from(primary.cols) * primary.scrollback_limit as u64;
+
+    assert!(retained_cells <= u64::from(MAX_GRID_CELLS));
+}
+
+#[test]
 fn wide_char_put_dirties_only_its_row() {
     let mut grid = Grid::new(8, 3);
     grid.goto(1, 0);
@@ -338,4 +417,16 @@ fn wide_char_put_dirties_only_its_row() {
     assert_eq!(dirty_rows_vec(&grid), vec![1]);
     assert!(grid.row(1)[0].flags.contains(CellFlags::WIDE));
     assert!(grid.row(1)[1].flags.contains(CellFlags::WIDE_CONT));
+}
+
+#[test]
+fn zero_width_cluster_bytes_are_bounded_per_cell() {
+    let mut grid = Grid::new(8, 1);
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    for _ in 0..1000 {
+        grid.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
+    }
+
+    assert!(grid.row(0)[0].extras().expect("combining marks retained").len()
+        <= MAX_CELL_EXTRAS_BYTES);
 }

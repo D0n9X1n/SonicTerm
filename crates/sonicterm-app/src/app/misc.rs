@@ -778,7 +778,14 @@ impl App {
         let real_sf = window_dpi(&window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
-        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+        if !renderer.try_resize(real_inner.width.max(1), real_inner.height.max(1)) {
+            tracing::error!(
+                width = real_inner.width,
+                height = real_inner.height,
+                "Action::NewWindow rejected unsafe initial size"
+            );
+            return;
+        }
 
         let (cols, rows) = renderer.cells();
         let pane_state = self.spawn_pane_state_for_child(cols, rows, window.clone());

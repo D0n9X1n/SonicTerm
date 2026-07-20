@@ -87,9 +87,15 @@ pub struct SoftwareSurface {
 impl SoftwareSurface {
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
+        Self::try_new(width, height).expect("software surface dimensions exceed safety limits")
+    }
+
+    #[must_use]
+    pub fn try_new(width: u32, height: u32) -> Option<Self> {
         let width = width.max(1);
         let height = height.max(1);
-        Self { width, height, pixels: vec![0; pixel_len(width, height)], dirty: Vec::new() }
+        let len = pixel_len(width, height)?;
+        Some(Self { width, height, pixels: vec![0; len], dirty: Vec::new() })
     }
 
     #[must_use]
@@ -113,15 +119,25 @@ impl SoftwareSurface {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        let _ = self.try_resize(width, height);
+    }
+
+    pub fn try_resize(&mut self, width: u32, height: u32) -> bool {
         let width = width.max(1);
         let height = height.max(1);
         if self.width == width && self.height == height {
-            return;
+            return true;
         }
+        let Some(len) = pixel_len(width, height) else { return false };
         self.width = width;
         self.height = height;
-        self.pixels.resize(pixel_len(width, height), 0);
+        if len > self.pixels.capacity() || len < self.pixels.capacity() / 2 {
+            self.pixels = vec![0; len];
+        } else {
+            self.pixels.resize(len, 0);
+        }
         self.mark_dirty(DirtyRect { x: 0, y: 0, w: width, h: height });
+        true
     }
 
     pub fn mark_dirty(&mut self, rect: DirtyRect) {
@@ -149,12 +165,10 @@ impl SoftwareSurface {
 
     #[cfg(target_os = "windows")]
     pub fn present_dirty(&mut self, hwnd: windows::Win32::Foundation::HWND) -> std::io::Result<()> {
-        use std::ffi::c_void;
-
         if self.dirty.is_empty() {
             return Ok(());
         }
-        let hdc = unsafe { GetDC(hwnd.0 as *mut c_void) };
+        let hdc = unsafe { GetDC(hwnd.0) };
         if hdc.is_null() {
             return Err(std::io::Error::last_os_error());
         }
@@ -168,7 +182,7 @@ impl SoftwareSurface {
             }
         }
         unsafe {
-            let _ = ReleaseDC(hwnd.0 as *mut c_void, hdc);
+            let _ = ReleaseDC(hwnd.0, hdc);
         }
         if let Some(err) = first_error {
             Err(err)
@@ -179,8 +193,17 @@ impl SoftwareSurface {
     }
 }
 
-fn pixel_len(width: u32, height: u32) -> usize {
-    width as usize * height as usize * 4
+fn pixel_len(width: u32, height: u32) -> Option<usize> {
+    const MAX_DIMENSION: u32 = 16_384;
+    const MAX_BYTES: u64 = 160 * 1024 * 1024;
+    if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return None;
+    }
+    let bytes = u64::from(width).checked_mul(u64::from(height))?.checked_mul(4)?;
+    if bytes > MAX_BYTES {
+        return None;
+    }
+    usize::try_from(bytes).ok()
 }
 
 #[cfg(target_os = "windows")]

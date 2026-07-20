@@ -63,6 +63,13 @@ impl WinOsTabDragBackend {
     pub fn boxed() -> Box<dyn OsTabDragBackend> {
         Box::new(Self::new())
     }
+
+    fn take_registered_hwnd(&self, window_id: WindowId) -> Option<u64> {
+        self.registered_windows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&window_id)
+    }
 }
 
 impl Default for WinOsTabDragBackend {
@@ -224,4 +231,19 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         reg.insert(window_id, hwnd_val);
         tracing::info!(?window_id, hwnd = hwnd_val, "register_window: RegisterDragDrop installed");
     }
+
+    fn unregister_window(&mut self, window_id: WindowId) {
+        let Some(hwnd_val) = self.take_registered_hwnd(window_id) else {
+            return;
+        };
+        let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut _);
+        // SAFETY: App invokes this before dropping the WindowState, so the
+        // HWND is still alive and OLE remains initialized on the window thread.
+        unsafe { crate::os_drag_win::unregister_for_window(hwnd) };
+        tracing::info!(?window_id, hwnd = hwnd_val, "unregister_window: RevokeDragDrop complete");
+    }
 }
+
+#[cfg(test)]
+#[path = "tab_drag_os_tests.rs"]
+mod tab_drag_os_tests;

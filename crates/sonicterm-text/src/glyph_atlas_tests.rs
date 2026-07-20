@@ -42,6 +42,14 @@ impl Rasterizer for TileRasterizer {
     }
 }
 
+struct MissingRasterizer;
+
+impl Rasterizer for MissingRasterizer {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<RasterTile> {
+        None
+    }
+}
+
 #[test]
 fn subpixel_text_coverage_copies_bgra_channels() {
     let mut atlas = GlyphAtlas::new(4, 4);
@@ -175,4 +183,41 @@ fn disabled_eviction_bounds_regular_insertions_when_full() {
     assert!(second.is_none(), "disabled eviction must bound a full-atlas retry");
     assert_eq!(atlas.evictions(), epoch);
     assert!(atlas.get(first).is_some());
+}
+
+#[test]
+fn missing_glyph_metadata_stays_bounded() {
+    let mut atlas = GlyphAtlas::new(4, 4);
+    let mut rasterizer = MissingRasterizer;
+    for codepoint in 0..(MAX_ATLAS_ENTRIES as u32 + 100) {
+        let ch = char::from_u32(0xF0000 + codepoint).expect("private-use codepoint");
+        atlas.get_or_insert(GlyphKey::new(ch, false, false), &mut rasterizer);
+    }
+
+    assert!(atlas.len() <= MAX_ATLAS_ENTRIES);
+}
+
+#[test]
+fn lazy_insert_metadata_stays_bounded() {
+    let mut atlas = GlyphAtlas::default_size();
+    for codepoint in 0..(MAX_ATLAS_ENTRIES as u32 + 100) {
+        let ch = char::from_u32(0xF0000 + codepoint).expect("private-use codepoint");
+        atlas.get_or_insert_lazy_without_eviction(
+            GlyphKey::new(ch, false, false),
+            1,
+            1,
+            || RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255],
+                is_color: false,
+                is_subpixel: false,
+            },
+        );
+    }
+
+    assert!(atlas.len() <= MAX_ATLAS_ENTRIES);
 }

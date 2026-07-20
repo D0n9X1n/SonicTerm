@@ -937,6 +937,17 @@ impl Face {
                 return Err(IsColr1OrLater.into());
             }
 
+            if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
+                crate::rasterizer::checked_freetype_26_6_extent(
+                    slot.metrics.width.font_units() as i64,
+                )
+                .context("FreeType outline width rejected before rendering")?;
+                crate::rasterizer::checked_freetype_26_6_extent(
+                    slot.metrics.height.font_units() as i64,
+                )
+                .context("FreeType outline height rejected before rendering")?;
+            }
+
             ft_result(FT_Render_Glyph(slot, render_mode), ())
                 .context("load_and_render_glyph: FT_Render_Glyph")?;
 

@@ -15,7 +15,9 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use sonicterm_render_model::boundary::cfg::config::{BackdropKind, SoftwareRenderMode};
 use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
-use sonicterm_render_model::boundary::grid::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
+use sonicterm_render_model::boundary::grid::grid::{
+    bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
+};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
@@ -648,6 +650,35 @@ fn atlas_evicted_during_frame(frame_epoch: u64, atlas: &GlyphAtlas) -> bool {
 
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
+}
+
+pub(crate) const MAX_SURFACE_DIMENSION: u32 = 16_384;
+const MAX_SURFACE_BYTES: u64 = 160 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValidatedSurfaceSize {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: usize,
+}
+
+#[must_use]
+pub(crate) fn validated_surface_size(
+    width: u32,
+    height: u32,
+    device_max_dimension: u32,
+) -> Option<ValidatedSurfaceSize> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let max_dimension = device_max_dimension.clamp(1, MAX_SURFACE_DIMENSION);
+    if width > max_dimension || height > max_dimension {
+        return None;
+    }
+    let bytes = u64::from(width).checked_mul(u64::from(height))?.checked_mul(4)?;
+    if bytes > MAX_SURFACE_BYTES {
+        return None;
+    }
+    Some(ValidatedSurfaceSize { width, height, bytes: usize::try_from(bytes).ok()? })
 }
 
 fn search_text_scroll(prefix_width: f32, cursor_width: f32, visible_width: f32) -> f32 {
@@ -1453,6 +1484,30 @@ impl GpuRenderer {
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
+        let max_surface_dimension =
+            device.limits().max_texture_dimension_2d.min(MAX_SURFACE_DIMENSION);
+        let validated_size =
+            validated_surface_size(size.width, size.height, max_surface_dimension).ok_or_else(
+                || {
+                    anyhow!(
+                        "window surface {}x{} exceeds renderer limits (max dimension {}, max BGRA bytes {})",
+                        size.width,
+                        size.height,
+                        max_surface_dimension,
+                        MAX_SURFACE_BYTES
+                    )
+                },
+            )?;
+        tracing::debug!(
+            target: "memory",
+            requested_width = size.width,
+            requested_height = size.height,
+            width = validated_size.width,
+            height = validated_size.height,
+            bgra_bytes = validated_size.bytes,
+            software_rendering,
+            "renderer initial surface allocation accepted"
+        );
         // Prefer Mailbox when the backend exposes it: Mailbox drops in-flight
         // superseded frames so a fast-typing user always sees the newest
         // keystroke without waiting a full vblank. Fall back to Fifo on
@@ -1479,8 +1534,8 @@ impl GpuRenderer {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: validated_size.width,
+            height: validated_size.height,
             present_mode,
             alpha_mode,
             view_formats: vec![],
@@ -1652,8 +1707,44 @@ impl GpuRenderer {
     /// pixels. Clamps each dimension to ≥ 1 to keep wgpu happy on
     /// minimize. Forces the next frame to render fresh.
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.config.width = width.max(1);
-        self.config.height = height.max(1);
+        let _ = self.try_resize(width, height);
+    }
+
+    /// Checked resize used by window-event paths that must react to rejection.
+    pub fn try_resize(&mut self, width: u32, height: u32) -> bool {
+        let max_dimension =
+            self.device.limits().max_texture_dimension_2d.min(MAX_SURFACE_DIMENSION);
+        let Some(size) = validated_surface_size(width, height, max_dimension) else {
+            tracing::error!(
+                target: "memory",
+                requested_width = width,
+                requested_height = height,
+                current_width = self.config.width,
+                current_height = self.config.height,
+                max_dimension,
+                max_bgra_bytes = MAX_SURFACE_BYTES,
+                "renderer rejected unsafe surface resize"
+            );
+            return false;
+        };
+        if self.config.width == size.width && self.config.height == size.height {
+            return true;
+        }
+        tracing::debug!(
+            target: "memory",
+            window = self.render_timing_label,
+            old_width = self.config.width,
+            old_height = self.config.height,
+            requested_width = width,
+            requested_height = height,
+            width = size.width,
+            height = size.height,
+            bgra_bytes = size.bytes,
+            software_rendering = self.software_rendering,
+            "renderer surface resize accepted"
+        );
+        self.config.width = size.width;
+        self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
         let (frame_texture, frame_view) = create_frame_texture(
             &self.device,
@@ -1676,6 +1767,7 @@ impl GpuRenderer {
         // surface dims via the per-call `(sw, sh)` parameter. The
         // legacy `*_buffer.set_size(...)` block that lived here is
         // gone with the the legacy chrome layer plumbing.
+        true
     }
 
     /// Top inset reserved above the grid: OS titlebar band (when active)
@@ -2217,9 +2309,9 @@ impl GpuRenderer {
         let inner_w = (surf_w - self.padding_left * sf - self.padding_right * sf).max(self.cell_w);
         let inner_h = (surf_h - self.top_inset() - self.bottom_inset() - self.padding_bottom * sf)
             .max(self.cell_h);
-        let cols = (inner_w / self.cell_w).floor() as u16;
-        let rows = (inner_h / self.cell_h).floor() as u16;
-        (cols.max(1), rows.max(1))
+        let cols = (inner_w / self.cell_w).floor() as u64;
+        let rows = (inner_h / self.cell_h).floor() as u64;
+        bounded_grid_size(cols, rows)
     }
 
     /// Logical cell metrics (width, height) in CSS pixels. Pair with a
@@ -2283,6 +2375,10 @@ impl GpuRenderer {
             self.config.present_mode = self.hardware_present_mode;
             self.config.alpha_mode = self.hardware_alpha_mode;
             self.config.desired_maximum_frame_latency = 2;
+            #[cfg(target_os = "windows")]
+            {
+                self.software_frame = None;
+            }
         }
         self.surface.configure(&self.device, &self.config);
         self.last_frame_key = None;
@@ -5603,14 +5699,15 @@ impl GpuRenderer {
         #[cfg(target_os = "windows")]
         if self.software_render_degrade {
             let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
-            let frame = self.software_frame.get_or_insert_with(|| {
-                crate::software_windows::WindowsSoftwareFrame::new(
+            if self.software_frame.is_none() {
+                self.software_frame = Some(crate::software_windows::WindowsSoftwareFrame::new(
                     self.config.width,
                     self.config.height,
                     bg_clear,
-                )
-            });
-            frame.prepare(self.config.width, self.config.height, bg_clear);
+                )?);
+            }
+            let frame = self.software_frame.as_mut().expect("software frame initialized");
+            frame.prepare(self.config.width, self.config.height, bg_clear)?;
             frame.draw_layers(
                 &self.glyph_atlas,
                 &self.image_atlas,

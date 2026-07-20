@@ -30,29 +30,72 @@ impl Rasterizer for TileRasterizer {
 
 #[test]
 fn clear_uses_straight_alpha_background() {
-    let frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
+    let frame =
+        WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
     assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 255, 255]);
 }
 
 #[test]
 fn prepare_resizes_buffer_and_repaints_background() {
-    let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]);
-    frame.prepare(3, 1, [0.0, 1.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    frame.prepare(3, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
 }
 
 #[test]
 fn prepare_repaints_existing_buffer() {
-    let mut frame = WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]);
-    frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 255, 0, 255]);
     assert_eq!(frame.pixel_bgra(1, 0), [0, 255, 0, 255]);
 }
 
 #[test]
+fn prepare_shrink_releases_high_water_capacity() {
+    let mut frame =
+        WindowsSoftwareFrame::new(1024, 1024, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let large_capacity = frame.pixels.capacity();
+
+    frame.prepare(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid shrink");
+
+    assert!(
+        frame.pixels.capacity() < large_capacity / 2,
+        "shrinking a software frame must release its old high-water allocation"
+    );
+}
+
+#[test]
+fn software_frame_rejects_unsafe_size_without_mutating_existing_buffer() {
+    assert!(
+        WindowsSoftwareFrame::new(8192, 8192, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        "a 256 MiB BGRA frame exceeds the renderer budget"
+    );
+
+    let mut frame =
+        WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let before = frame.pixels.clone();
+    assert!(frame.prepare(u32::MAX, u32::MAX, [1.0, 0.0, 0.0, 1.0]).is_err());
+    assert_eq!((frame.width, frame.height), (2, 2));
+    assert_eq!(frame.pixels, before);
+}
+
+#[test]
+fn software_frame_growth_uses_exact_validated_capacity() {
+    let mut frame =
+        WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.prepare(100, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid growth");
+
+    assert_eq!(frame.pixels.capacity(), 100 * 100 * 4);
+}
+
+#[test]
 fn adjacent_sharp_rects_do_not_overlap_edges() {
-    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     frame.fill_rect(0.0, 1.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     assert_eq!(frame.pixel_bgra(0, 0), frame.pixel_bgra(0, 1));
@@ -61,7 +104,8 @@ fn adjacent_sharp_rects_do_not_overlap_edges() {
 
 #[test]
 fn premultiplied_quad_blends_over_background() {
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
     let px = frame.pixel_bgra(0, 0);
     assert!(
@@ -75,7 +119,8 @@ fn premultiplied_quad_blends_over_background() {
 
 #[test]
 fn rounded_rect_antialiases_corner_pixels() {
-    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [1.0, 1.0, 1.0, 1.0], 3.0);
     assert_eq!(frame.pixel_bgra(4, 4), [255, 255, 255, 255]);
     let corner = frame.pixel_bgra(1, 1);
@@ -87,7 +132,8 @@ fn rounded_rect_antialiases_corner_pixels() {
 
 #[test]
 fn line_quad_antialiases_near_segment() {
-    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let q = QuadInstance::line(
         px_to_ndc(1.0, 1.0, 6.0, 6.0, 8.0, 8.0),
         [0.0, 1.0, 0.0, 1.0],
@@ -144,7 +190,8 @@ fn subpixel_text_coverage_blends_each_channel() {
         .expect("subpixel glyph inserts");
     assert!(info.is_subpixel);
 
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {
@@ -226,7 +273,8 @@ fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
         )
         .expect("neighbor glyph inserts below the line tile");
 
-    let mut frame = WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame =
+        WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {

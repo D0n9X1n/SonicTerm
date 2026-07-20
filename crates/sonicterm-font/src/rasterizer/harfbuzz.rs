@@ -5,7 +5,9 @@ use crate::hbwrap::{
 use crate::rasterizer::colr::{
     apply_draw_ops_to_context, paint_linear_gradient, paint_radial_gradient, paint_sweep_gradient,
 };
-use crate::rasterizer::FAKE_ITALIC_SKEW;
+use crate::rasterizer::{
+    checked_glyph_rgba_len, checked_raster_pixel_size, FAKE_ITALIC_SKEW,
+};
 use crate::units::PixelLength;
 use crate::{FontRasterizer, ParsedFont, RasterizedGlyph};
 use cairo::{Content, Context, Format, ImageSurface, Matrix, Operator, RecordingSurface};
@@ -39,7 +41,7 @@ impl FontRasterizer for HarfbuzzRasterizer {
         size: f64,
         dpi: u32,
     ) -> anyhow::Result<RasterizedGlyph> {
-        let pixel_size = (size * dpi as f64 / 72.) as u32;
+        let pixel_size = checked_raster_pixel_size(size, 1.0, dpi)? as u32;
 
         let scale = pixel_size as i32 * 64;
         let ppem = pixel_size;
@@ -59,7 +61,12 @@ impl FontRasterizer for HarfbuzzRasterizer {
         let (left, top, width, height) = surface.ink_extents();
         log::trace!("extents: left={left} top={top} width={width} height={height}");
 
-        if width as usize == 0 || height as usize == 0 {
+        if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
+            anyhow::bail!("invalid HarfBuzz color glyph extents {width}x{height}");
+        }
+        let width_px = width as usize;
+        let height_px = height as usize;
+        if width_px == 0 || height_px == 0 {
             return Ok(RasterizedGlyph {
                 data: vec![],
                 height: 0,
@@ -70,12 +77,17 @@ impl FontRasterizer for HarfbuzzRasterizer {
                 is_scaled: true,
             });
         }
+        checked_glyph_rgba_len(width_px, height_px)?;
 
         let mut bounds_adjust = Matrix::identity();
         bounds_adjust.translate(-left, -top);
         log::trace!("dims: {width}x{height} {bounds_adjust:?}");
 
-        let target = ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
+        let target = ImageSurface::create(
+            Format::ARgb32,
+            i32::try_from(width_px)?,
+            i32::try_from(height_px)?,
+        )?;
         {
             let context = Context::new(&target)?;
             context.transform(bounds_adjust);
@@ -89,8 +101,8 @@ impl FontRasterizer for HarfbuzzRasterizer {
 
         Ok(RasterizedGlyph {
             data,
-            height: height as usize,
-            width: width as usize,
+            height: height_px,
+            width: width_px,
             bearing_x: PixelLength::new(left.min(0.)),
             bearing_y: PixelLength::new(-top),
             has_color,
@@ -197,6 +209,11 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
             }
             PaintOp::PaintImage { image, width: _, height: _, format, slant, extents } => {
                 let image_surface = if format == IS_PNG {
+                    let reader = image::ImageReader::new(std::io::Cursor::new(image.as_slice()))
+                        .with_guessed_format()?
+                        ;
+                    let (encoded_width, encoded_height) = reader.into_dimensions()?;
+                    checked_glyph_rgba_len(encoded_width as usize, encoded_height as usize)?;
                     let decoded = image::ImageReader::new(std::io::Cursor::new(image.as_slice()))
                         .with_guessed_format()?
                         .decode()?;
@@ -207,6 +224,7 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
                     }
 
                     let (width, height) = decoded.dimensions();
+                    checked_glyph_rgba_len(width as usize, height as usize)?;
                     let mut data = decoded.into_rgba8().into_vec();
 
                     // Cairo wants ARGB. Walk through the pixels and

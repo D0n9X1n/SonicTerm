@@ -59,7 +59,7 @@ impl App {
         }
     }
 
-    fn configure_child_renderer(&self, renderer: &mut GpuRenderer, window: &Window) {
+    fn configure_child_renderer(&self, renderer: &mut GpuRenderer, window: &Window) -> bool {
         if let Some(proxy) = self.event_loop_proxy.clone() {
             super::build_async_fallback_loader_for_proxy(proxy);
             renderer.set_async_loader(());
@@ -75,7 +75,7 @@ impl App {
         let real_sf = window_dpi(window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
-        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+        renderer.try_resize(real_inner.width.max(1), real_inner.height.max(1))
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
@@ -131,7 +131,10 @@ impl App {
                 return None;
             }
         };
-        self.configure_child_renderer(&mut renderer, &window);
+        if !self.configure_child_renderer(&mut renderer, &window) {
+            tracing::error!("warm-window-pool: renderer rejected unsafe initial size");
+            return None;
+        }
         Some(super::WarmWindow { window, renderer, created_at: Instant::now() })
     }
 
@@ -260,7 +263,7 @@ impl App {
                 let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
                 let renderer_settings = self.tear_out_renderer_settings();
                 let renderer_start = Instant::now();
-                let mut renderer = match shared_gpu.map_or_else(
+                let renderer = match shared_gpu.map_or_else(
                     || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
                     |ctx| {
                         GpuRenderer::new_with_shared_context(
@@ -279,13 +282,15 @@ impl App {
                     }
                 };
                 let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
-                self.configure_child_renderer(&mut renderer, &window);
                 (window, renderer, create_window_ms, renderer_init_ms)
             }
         };
 
         let resize_start = Instant::now();
-        self.configure_child_renderer(&mut renderer, &window);
+        if !self.configure_child_renderer(&mut renderer, &window) {
+            tracing::error!("tear-out: renderer rejected unsafe child size");
+            return None;
+        }
         let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
 
         let install_start = Instant::now();
@@ -640,6 +645,7 @@ impl App {
         let Some(win_id) = self.install_torn_out_window(el, tab, state, panes, None, "child")
         else {
             tracing::warn!("tear-out (child→new): install_torn_out_window failed");
+            self.tear_out_apply_child_source_side(src_id, index);
             return true;
         };
         self.frontmost_window = Some(win_id);
@@ -667,6 +673,7 @@ impl App {
                 // Drop the renderer + window explicitly; any leftover
                 // panes (there shouldn't be) drop here, which fires
                 // PtyHandle::Drop and kills their child shells.
+                self.release_child_window_registries(src_id);
                 drop(removed);
             }
             return;

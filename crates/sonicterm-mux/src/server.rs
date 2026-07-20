@@ -40,36 +40,44 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 /// each is a soft ceiling of ~32 MiB per attached pane.
 pub const CHANNEL_CAP: usize = 4096;
 
-/// One subscriber's mailbox: a bounded sender plus a clone of its receiver
-/// so the producer can drop the oldest queued message itself when the
-/// mailbox is full. crossbeam-channel is MPMC, so the extra receiver
-/// shares the same queue.
+/// One subscriber's bounded mailbox sender.
 #[derive(Clone)]
 pub struct SubscriberSink {
     tx: Sender<ServerMsg>,
-    rx: Receiver<ServerMsg>,
 }
 
 impl SubscriberSink {
-    /// Wrap a paired `tx`/`rx` into a subscriber sink. Both halves reference
-    /// the same crossbeam MPMC channel so `send_drop_oldest` can pop from the
-    /// front before retrying a push.
-    pub fn new(tx: Sender<ServerMsg>, rx: Receiver<ServerMsg>) -> Self {
-        Self { tx, rx }
+    /// Wrap a paired `tx`/`rx` into a subscriber sink. The receiver argument
+    /// is retained for source compatibility; ownership remains with the client.
+    pub fn new(tx: Sender<ServerMsg>, _rx: Receiver<ServerMsg>) -> Self {
+        Self { tx }
     }
 
-    /// Try to enqueue `msg`. If the mailbox is full, drop the oldest
-    /// pending message and retry once. Returns `Err` only if the
-    /// receiver side has been dropped entirely.
+    /// Try to enqueue `msg`. If the mailbox is full, new PTY output is
+    /// dropped while control responses return an error. Existing queued
+    /// control messages are never evicted.
     pub fn send_drop_oldest(&self, msg: ServerMsg) -> Result<()> {
+        if matches!(msg, ServerMsg::Output { .. })
+            && self.tx.capacity().is_some_and(|capacity| {
+                self.tx.len() >= capacity.saturating_sub(1)
+            })
+        {
+            return Ok(());
+        }
         match self.tx.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(msg)) => {
-                let _ = self.rx.try_recv();
-                self.tx.try_send(msg).map_err(|e| anyhow!("subscriber closed: {e}"))
+            Err(TrySendError::Full(ServerMsg::Output { .. })) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                Err(anyhow!("subscriber mailbox full; control message not queued"))
             }
             Err(TrySendError::Disconnected(_)) => Err(anyhow!("subscriber disconnected")),
         }
+    }
+
+    /// Deliver a control message without eviction. This may wait for a slow
+    /// client to consume bounded output, but it never drops pane termination.
+    pub fn send_control(&self, msg: ServerMsg) -> Result<()> {
+        self.tx.send(msg).map_err(|_| anyhow!("subscriber disconnected"))
     }
 }
 
@@ -212,10 +220,25 @@ impl ServerState {
     /// Forward client-side keystrokes / paste bytes to the named pane's PTY
     /// writer thread. Errors if the pane is unknown or already torn down.
     pub fn input(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
-        let sessions = self.sessions.lock();
-        let pane = find_pane(&sessions, pane_id)?;
-        pane.pty.in_tx.send(bytes).map_err(|e| anyhow!("pane writer closed: {e}"))?;
-        Ok(())
+        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            anyhow::bail!(
+                "pane input message is {} bytes; maximum is {}",
+                bytes.len(),
+                sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES
+            );
+        }
+        let sender = {
+            let sessions = self.sessions.lock();
+            find_pane(&sessions, pane_id)?.pty.in_tx.clone()
+        };
+        sender.try_send(bytes).map_err(|error| match error {
+            crossbeam_channel::TrySendError::Full(_) => {
+                anyhow!("pane writer queue is full")
+            }
+            crossbeam_channel::TrySendError::Disconnected(_) => {
+                anyhow!("pane writer is closed")
+            }
+        })
     }
 
     /// Propagate a client-side resize to the pane's PTY via `TIOCSWINSZ`
@@ -290,7 +313,7 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
         }
         let sub = r_sub.lock().clone();
         if let Some(sink) = sub {
-            let _ = sink.send_drop_oldest(ServerMsg::Exit { pane_id });
+            let _ = sink.send_control(ServerMsg::Exit { pane_id });
         }
     });
 

@@ -14,7 +14,9 @@ use std::rc::Rc;
 use std::sync::Once;
 
 use anyhow::Result;
-use sonicterm_font::{Direction, FontConfiguration, Presentation};
+use sonicterm_font::{
+    rasterizer::checked_glyph_rgba_len, Direction, FontConfiguration, Presentation,
+};
 use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
 use sonicterm_types::glyph_key::GlyphKey;
 
@@ -163,6 +165,17 @@ impl Rasterizer for FontStack {
 
         let rg = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
         if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
+            return None;
+        }
+        let expected_len = checked_glyph_rgba_len(rg.width, rg.height).ok()?;
+        if rg.data.len() != expected_len {
+            log::warn!(
+                "font rasterizer returned invalid {}x{} glyph buffer: {} bytes, expected {}",
+                rg.width,
+                rg.height,
+                rg.data.len(),
+                expected_len
+            );
             return None;
         }
         let (coverage, is_color, is_subpixel) = if rg.has_color {
