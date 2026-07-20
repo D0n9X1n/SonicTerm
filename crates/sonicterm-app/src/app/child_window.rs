@@ -727,10 +727,10 @@ impl App {
                                     sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
                                         * scale;
                                 let icon_w =
-                                    estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                                    r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                                 let content_w = icon_w
                                     + SEARCH_BAR_ICON_GAP * scale
-                                    + estimate_overlay_text_width(&search_label, font_size);
+                                    + r.measure_overlay_text_width(&search_label, font_size);
                                 let row = u8::from(
                                     child.copy_mode.as_ref().is_some_and(|cm| cm.is_read_only()),
                                 );
@@ -749,7 +749,7 @@ impl App {
                                     - SEARCH_BAR_PAD_RIGHT * scale)
                                     .max(text_x);
                                 let prefix_w =
-                                    estimate_overlay_text_width(&search_prefix, font_size);
+                                    r.measure_overlay_text_width(&search_prefix, font_size);
                                 let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                                 let pos = winit::dpi::PhysicalPosition::new(
                                     caret_x as i32,

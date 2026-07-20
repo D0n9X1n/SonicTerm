@@ -101,6 +101,28 @@ fn estimate_badge_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
 
+fn conservative_badge_text_width(fallback: f32, shaped: Option<f32>) -> f32 {
+    shaped.filter(|width| width.is_finite() && *width >= 0.0).unwrap_or(fallback).max(fallback)
+}
+
+fn search_badge_content_width(
+    icon: &str,
+    label: &str,
+    font_size: f32,
+    gap: f32,
+    font_stack: Option<&sonicterm_engine::FontStack>,
+) -> f32 {
+    let fallback = estimate_badge_text_width(icon, font_size)
+        + gap
+        + estimate_badge_text_width(label, font_size);
+    let shaped = font_stack.and_then(|stack| {
+        let icon_w = stack.measure_text_width(icon).ok()?;
+        let label_w = stack.measure_text_width(label).ok()?;
+        Some(icon_w + gap + label_w)
+    });
+    conservative_badge_text_width(fallback, shaped)
+}
+
 /// True when an IME preedit string carries visible ink worth drawing an
 /// inline composition overlay for.
 ///
@@ -628,8 +650,8 @@ fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
 
-fn search_text_scroll(prefix_width: f32, visible_width: f32) -> f32 {
-    (prefix_width - visible_width).max(0.0)
+fn search_text_scroll(prefix_width: f32, cursor_width: f32, visible_width: f32) -> f32 {
+    (prefix_width + cursor_width - visible_width).max(0.0)
 }
 
 fn create_frame_texture(
@@ -2222,6 +2244,16 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// Measure overlay text in raster pixels with the renderer's active font
+    /// stack, falling back conservatively when shaping is unavailable.
+    pub fn measure_overlay_text_width(&self, text: &str, font_size: f32) -> f32 {
+        let estimate = estimate_badge_text_width(text, font_size);
+        conservative_badge_text_width(
+            estimate,
+            self.font_stack.as_ref().and_then(|stack| stack.measure_text_width(text).ok()),
+        )
     }
 
     /// True when wgpu fell back to a CPU/software rasterizer for this window.
@@ -4535,18 +4567,24 @@ impl GpuRenderer {
         });
         let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
         // When search is active and the IME has a non-empty composing run, splice
-        // the preedit INTO the label (between the query and the ▏ caret) so the
-        // whole bar renders as one continuous string: the box grows to fit it and
-        // the ` · N/M` counter flows to the RIGHT of the composition instead of
-        // being overlapped. Display-only — the preedit does NOT drive matching
-        // (only committed text does). (#B14)
+        // the preedit into the label at the query caret so the whole bar renders
+        // as one continuous string: the box grows to fit it and the ` · N/M`
+        // counter flows to the right of the composition instead of being
+        // overlapped. Display-only — the preedit does not drive matching (only
+        // committed text does). (#B14)
         let search_preedit: &str =
             search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
-        let search_bar_layout = search_label.as_ref().map(|label| {
-            let content_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size)
-                + self.chrome_px(SEARCH_BAR_ICON_GAP)
-                + estimate_badge_text_width(label, search_font_size);
+        let search_content_width = search_label.as_ref().map(|label| {
+            search_badge_content_width(
+                SEARCH_BADGE_ICON,
+                label,
+                search_font_size,
+                self.chrome_px(SEARCH_BAR_ICON_GAP),
+                self.font_stack.as_ref(),
+            )
+        });
+        let search_bar_layout = search_content_width.map(|content_w| {
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
@@ -4577,29 +4615,48 @@ impl GpuRenderer {
             ));
             // T14: search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
-            if let Some(stack) = self.font_stack.as_ref() {
+            if let (Some(stack), Some(search_state)) = (self.font_stack.as_ref(), search) {
                 let mut wt = stack.clone();
-                let icon_w = estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size);
+                let icon_w = conservative_badge_text_width(
+                    estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
+                    stack.measure_text_width(SEARCH_BADGE_ICON).ok(),
+                );
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
                 let visible_w = (layout.border.x + layout.border.w
                     - self.chrome_px(SEARCH_BAR_PAD_RIGHT)
                     - text_x)
                     .max(0.0);
-                let text_w = estimate_badge_text_width(label, search_font_size);
-                let prefix_w = search
-                    .map(|s| {
-                        estimate_badge_text_width(
-                            &search_query_caret_prefix(s, search_preedit),
+                let caret_prefix = search_query_caret_prefix(search_state, search_preedit);
+                let prefix_w = measure_overlay_text_width(
+                    &mut self.glyph_atlas,
+                    stack,
+                    search_font_size,
+                    search_font_size,
+                    &mut wt,
+                    &caret_prefix,
+                    search_badge_fg,
+                );
+                let caret_w = cursor_char_slice_at(&search_state.query, search_state.cursor())
+                    .map(|ch| {
+                        measure_overlay_text_width(
+                            &mut self.glyph_atlas,
+                            stack,
                             search_font_size,
+                            search_font_size,
+                            &mut wt,
+                            ch,
+                            search_badge_fg,
                         )
+                        .max(4.0)
                     })
-                    .unwrap_or(text_w);
-                // Scroll only enough to keep the current caret visible. When
-                // the caret moves left, the committed suffix may be clipped on
-                // the right, but the insertion point remains inside the field.
-                let scroll_x = search_text_scroll(prefix_w, visible_w);
-                let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, text_x + visible_w);
+                    .unwrap_or_else(|| (self.cell_w * 0.70).max(4.0));
+                // Scroll only enough to keep the entire block cursor visible.
+                // When the caret moves left, the committed suffix may be clipped
+                // on the right, but the insertion point remains inside the field.
+                let scroll_x = search_text_scroll(prefix_w, caret_w, visible_w);
+                let caret_max_x = text_x + (visible_w - caret_w).max(0.0);
+                let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, caret_max_x);
                 search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
@@ -4640,6 +4697,29 @@ impl GpuRenderer {
                     }),
                 );
                 overlay_glyph_instances.extend(chrome_layout.glyphs);
+
+                // The badge is already cursor-yellow, so invert locally: a
+                // theme-background block with the covered glyph recolored to
+                // badge yellow. The block overlays existing text and contributes
+                // no advance, matching terminal and command-palette cursors.
+                let caret_h = (search_font_size * 1.15)
+                    .min((layout.border.h - self.chrome_px(8.0)).max(4.0));
+                let caret_y = layout.border.y + (layout.border.h - caret_h) * 0.5;
+                quads_overlay.push(QuadInstance {
+                    rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
+                    color: chrome_color_to_linear_rgba(search_badge_fg),
+                    ..Default::default()
+                });
+                recolor_cursor_glyphs(
+                    &mut overlay_glyph_instances,
+                    caret_x,
+                    caret_y,
+                    caret_w,
+                    caret_h,
+                    sw,
+                    sh,
+                    search_badge_bg,
+                );
             }
         }
 

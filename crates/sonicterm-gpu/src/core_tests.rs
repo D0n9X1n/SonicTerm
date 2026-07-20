@@ -3,10 +3,19 @@ use super::*;
 // --- Inline IME preedit opaque background -------------------------
 
 #[test]
-fn search_scroll_keeps_caret_visible_without_following_suffix() {
-    assert_eq!(search_text_scroll(40.0, 100.0), 0.0);
-    assert_eq!(search_text_scroll(140.0, 100.0), 40.0);
-    assert_eq!(search_text_scroll(0.0, 0.0), 0.0);
+fn search_scroll_keeps_the_full_block_cursor_visible_without_following_suffix() {
+    assert_eq!(search_text_scroll(40.0, 10.0, 100.0), 0.0);
+    assert_eq!(search_text_scroll(95.0, 10.0, 100.0), 5.0);
+    assert_eq!(search_text_scroll(140.0, 10.0, 100.0), 50.0);
+    assert_eq!(search_text_scroll(0.0, 0.0, 0.0), 0.0);
+}
+
+#[test]
+fn badge_width_never_uses_a_narrower_shaped_or_invalid_measurement() {
+    assert_eq!(conservative_badge_text_width(120.0, Some(160.0)), 160.0);
+    assert_eq!(conservative_badge_text_width(120.0, Some(90.0)), 120.0);
+    assert_eq!(conservative_badge_text_width(120.0, Some(f32::NAN)), 120.0);
+    assert_eq!(conservative_badge_text_width(120.0, None), 120.0);
 }
 
 #[test]
@@ -847,11 +856,13 @@ fn inverse_swaps_foreground_and_background_for_rendering() {
 }
 
 #[test]
-fn palette_cursor_slice_tracks_current_character() {
+fn cursor_slice_tracks_search_and_palette_unicode_characters() {
     assert_eq!(cursor_char_slice_at("abc", 0), Some("a"));
     assert_eq!(cursor_char_slice_at("a中b", 1), Some("中"));
+    assert_eq!(cursor_char_slice_at("a🙂b", 1), Some("🙂"));
     assert_eq!(cursor_char_slice_at("a中b", "a中".len()), Some("b"));
     assert_eq!(cursor_char_slice_at("a中", "a中".len()), None);
+    assert_eq!(cursor_char_slice_at("", 0), None);
 }
 
 #[test]
