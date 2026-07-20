@@ -31,10 +31,6 @@ use super::{mark_all_panes_dirty, App, FrontmostKind, TabState};
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
 
-fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
-}
-
 /// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
 /// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
 /// `sgr` true → SGR encoding `ESC[<Btn;col;row M` (1-based, unbounded).
@@ -413,11 +409,11 @@ impl App {
                         r.cell_w,
                     )
                 });
-                // Search-bar IME geometry: the full label drives box width,
-                // but the caret/candidate-window anchor must follow the current
-                // query caret (`▏`), not the end of the label. Produce both
-                // strings from the same state so the OS candidate area agrees
-                // with the inline preedit drawn by the renderer.
+                // Search-bar IME geometry: the full marker-free label drives
+                // box width, but the caret/candidate-window anchor must follow
+                // the current query caret, not the end of the label. Produce
+                // both strings from the same state so the OS candidate area
+                // agrees with the renderer-owned block cursor.
                 let (search_ime_label, search_ime_prefix) = self
                     .main()
                     .and_then(|ws| {
@@ -670,10 +666,11 @@ impl App {
                             let scale = r.scale_factor();
                             let font_size =
                                 sonicterm_ui::tab_spans::tab_title_font_size(r.font_size()) * scale;
-                            let icon_w = estimate_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                            let icon_w =
+                                r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
                                 + SEARCH_BAR_ICON_GAP * scale
-                                + estimate_overlay_text_width(search_label, font_size);
+                                + r.measure_overlay_text_width(search_label, font_size);
                             let row =
                                 u8::from(ws_copy_mode_ref.is_some_and(|cm| cm.is_read_only()));
                             let layout = SearchBarLayout::compute_at_row(
@@ -698,7 +695,7 @@ impl App {
                             // inner edge. `font_size` already folds in `scale`.
                             let prefix_w = search_ime_prefix
                                 .as_ref()
-                                .map(|p| estimate_overlay_text_width(p, font_size))
+                                .map(|p| r.measure_overlay_text_width(p, font_size))
                                 .unwrap_or(0.0);
                             let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                             let pos = winit::dpi::PhysicalPosition::new(

@@ -41,3 +41,22 @@ fn change_scaling_rescales_cell_metrics_with_dpi() {
         scaled.cell_h
     );
 }
+
+#[test]
+fn shaped_text_width_covers_mixed_ascii_cjk_and_status_text() {
+    let stack = match FontStack::try_new(72) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let ascii = match stack.measure_text_width("/ search · 0/0") {
+        Ok(width) => width,
+        Err(_) => return,
+    };
+    let mixed = stack
+        .measure_text_width("/ search法土大夫 · 0/0")
+        .expect("mixed fallback-font text should shape");
+
+    assert!(ascii.is_finite() && ascii > 0.0);
+    assert!(mixed.is_finite() && mixed > ascii, "CJK glyphs must contribute to badge width");
+}

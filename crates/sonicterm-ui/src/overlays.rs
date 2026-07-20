@@ -501,11 +501,12 @@ pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &st
     prefix
 }
 
-/// Produce the text label for the bottom-right search bar.
+/// Produce the marker-free text label for the bottom-right search bar.
 ///
 /// `N/M` is `current/total` (1-based) when there are matches; otherwise
 /// the bar shows `0/0`. An empty query renders as `/ ` so the user sees
-/// the prompt.
+/// the prompt. The renderer draws the caret as a non-spacing block over this
+/// text instead of inserting a cursor glyph into the label.
 #[must_use]
 pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     let total = search.matches.len();
@@ -514,7 +515,7 @@ pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     // Splice the in-flight IME composition at the current query caret so the
     // committed suffix and match counter stay to its right. (#B14)
     format!(
-        "/ {}{}▏{} · {}/{}",
+        "/ {}{}{} · {}/{}",
         &search.query[..cursor],
         preedit,
         &search.query[cursor..],
@@ -523,12 +524,12 @@ pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     )
 }
 
-/// The portion of [`search_bar_label`] that precedes the caret: the `/ `
-/// prompt prefix, committed query prefix, and active preedit. Measuring this
-/// string's width gives the x-offset of the inline-composition caret (the `▏`
-/// in the full label), before the committed suffix and match counter.
+/// The portion of [`search_bar_label`] that precedes the non-spacing caret:
+/// the `/ ` prompt prefix, committed query prefix, and active preedit.
+/// Measuring this string's width gives the x-offset of the renderer-owned
+/// block before the committed suffix and match counter.
 ///
-/// Both the inline preedit overlay ([`sonicterm-gpu`]) and the OS candidate
+/// Both the block-cursor renderer ([`sonicterm-gpu`]) and the OS candidate
 /// area ([`sonicterm-app`]) measure this same string so they agree on the
 /// caret position regardless of how long the suffix grows.
 #[must_use]

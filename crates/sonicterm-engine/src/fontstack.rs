@@ -119,6 +119,13 @@ impl FontStack {
         font.blocking_shape(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
     }
 
+    /// Measure a left-to-right text run in raster pixels using the same
+    /// fallback-font shaping policy as the renderer.
+    pub fn measure_text_width(&self, text: &str) -> Result<f32> {
+        let glyphs = self.shape_text(text)?;
+        Ok(glyphs.iter().map(|glyph| glyph.x_advance.get() as f32).sum())
+    }
+
     /// Return cell metrics for the default font, projected into the
     /// renderer-facing [`CellMetricsPx`] (raster px). G1a: wezterm's
     /// `FontMetrics` already lives in raster px, so this is a plain

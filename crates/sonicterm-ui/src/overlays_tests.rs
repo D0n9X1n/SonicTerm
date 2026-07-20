@@ -71,22 +71,21 @@ fn search_bar_position_is_window_anchored() {
 }
 
 #[test]
-fn caret_prefix_is_label_text_up_to_the_caret_marker() {
-    // The prefix must equal the slice of `search_bar_label` that precedes
-    // the `▏` caret, so both IME anchor sites land at the end of the query
-    // (not after the ` — N/M` suffix). Build the label, split on `▏`, and
-    // assert the prefix matches the leading half verbatim.
+fn caret_prefix_reaches_the_marker_free_label_suffix() {
     let mut search = SearchState::new();
     search.set_query("ni hao", &sonicterm_grid::grid::Grid::new(8, 2));
     let label = search_bar_label(&search, "");
     let prefix = search_query_caret_prefix(&search, "");
-    let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
-    assert_eq!(prefix, head);
+
+    assert_eq!(label, "/ ni hao · 0/0");
     assert_eq!(prefix, "/ ni hao");
+    assert!(label.starts_with(&prefix));
+    assert_eq!(&label[prefix.len()..], " · 0/0");
+    assert!(!label.contains('▏'));
 }
 
 #[test]
-fn search_label_places_preedit_and_caret_inside_the_query() {
+fn search_label_places_preedit_inside_the_query_without_spacing_marker() {
     let grid = sonicterm_grid::grid::Grid::new(8, 2);
     let mut search = SearchState::new();
     search.set_query("nihao", &grid);
@@ -95,11 +94,12 @@ fn search_label_places_preedit_and_caret_inside_the_query() {
 
     let label = search_bar_label(&search, "中");
     let prefix = search_query_caret_prefix(&search, "中");
-    let (head, tail) = label.split_once('▏').expect("label carries a caret marker");
 
-    assert_eq!(prefix, head);
-    assert_eq!(head, "/ nih中");
-    assert_eq!(tail, "ao · 0/0");
+    assert_eq!(label, "/ nih中ao · 0/0");
+    assert_eq!(prefix, "/ nih中");
+    assert!(label.starts_with(&prefix));
+    assert_eq!(&label[prefix.len()..], "ao · 0/0");
+    assert!(!label.contains('▏'));
 }
 
 #[test]
@@ -107,9 +107,12 @@ fn caret_prefix_empty_query_is_just_the_prompt() {
     let search = SearchState::new();
     let label = search_bar_label(&search, "");
     let prefix = search_query_caret_prefix(&search, "");
-    let (head, _tail) = label.split_once('▏').expect("label carries a caret marker");
-    assert_eq!(prefix, head);
+
+    assert_eq!(label, "/  · 0/0");
     assert_eq!(prefix, "/ ");
+    assert!(label.starts_with(&prefix));
+    assert_eq!(&label[prefix.len()..], " · 0/0");
+    assert!(!label.contains('▏'));
 }
 
 #[test]
