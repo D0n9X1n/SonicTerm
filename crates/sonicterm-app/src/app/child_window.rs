@@ -23,7 +23,7 @@ use sonicterm_ui::overlays::{
     SEARCH_BAR_PAD_RIGHT,
 };
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::{SelectMode, Selection};
+use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -2499,33 +2499,6 @@ fn child_copy_mode_selected_text(
     if start == end {
         return None;
     }
-    let mut out = String::new();
-    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
-    for row_idx in start.1..=last_row {
-        let Some(row) = child_copy_mode_row(grid, row_idx) else { break };
-        let col_start = if row_idx == start.1 { start.0 } else { 0 };
-        let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
-        let mut line = String::new();
-        for cell in row.get_range(col_start.min(row.len()), col_end) {
-            if cell.flags.contains(sonicterm_grid::grid::CellFlags::WIDE_CONT) {
-                continue;
-            }
-            line.push(cell.ch);
-        }
-        out.push_str(line.trim_end());
-        if row_idx < last_row {
-            out.push('\n');
-        }
-    }
+    let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
     (!out.is_empty()).then_some(out)
-}
-
-fn child_copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::Row> {
-    let sb = grid.scrollback_len();
-    if row_idx < sb {
-        grid.scrollback_row(row_idx)
-    } else {
-        let live = row_idx - sb;
-        (live < grid.rows as usize).then(|| grid.row(live as u16))
-    }
 }
