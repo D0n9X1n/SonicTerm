@@ -82,6 +82,12 @@ Generated FreeType/HarfBuzz/Fontconfig bindings stay in their wrapper crates;
 `sonicterm-font` owns safe allocation and fallback behavior. Variable-font
 metadata is optional: malformed, missing, or out-of-range variation metadata
 falls back to base OS/2/default weight and width rather than aborting the app.
+Embedded bitmap strikes are loaded metrics-only and checked against the glyph
+allocation budget before FreeType may decode their pixels.
+
+PTY handles own their native reader and writer threads. Teardown closes master
+ownership, cancels pending Windows synchronous I/O, terminates the Unix process
+group, and waits only for bounded thread and child-exit deadlines.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,

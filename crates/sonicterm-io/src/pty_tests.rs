@@ -203,3 +203,29 @@ fn multi_megabyte_paste_fits_bounded_input_budget() {
         "supporting large pastes must not make queued input unbounded"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn dropping_live_windows_pty_terminates_native_io_threads() {
+    let baseline = active_pty_io_threads();
+    let args = vec![
+        "/D".to_string(),
+        "/Q".to_string(),
+        "/C".to_string(),
+        "ping -t 127.0.0.1 >NUL".to_string(),
+    ];
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &args, 80, 24).expect("spawn Windows PTY");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while active_pty_io_threads() < baseline + 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(active_pty_io_threads(), baseline + 2);
+
+    drop(pty);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while active_pty_io_threads() != baseline && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(active_pty_io_threads(), baseline);
+}

@@ -9,8 +9,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{
     io::{Read, Write},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -40,6 +44,8 @@ pub const PTY_OUTPUT_QUEUE_CAPACITY: usize = 64;
 pub const PTY_INPUT_QUEUE_CAPACITY: usize = 4;
 /// Largest single terminal-input message accepted by first-party callers.
 pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
     crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
@@ -60,13 +66,75 @@ pub fn max_pty_queued_input_bytes() -> usize {
     PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
 }
 
+#[cfg(all(test, windows))]
+#[must_use]
+fn active_pty_io_threads() -> usize {
+    ACTIVE_PTY_IO_THREADS.load(Ordering::Acquire)
+}
+
+struct ActivePtyIoThread;
+
+impl ActivePtyIoThread {
+    fn enter() -> Self {
+        ACTIVE_PTY_IO_THREADS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ActivePtyIoThread {
+    fn drop(&mut self) {
+        ACTIVE_PTY_IO_THREADS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct PtyIoThread {
+    handle: Option<thread::JoinHandle<()>>,
+    done: Receiver<()>,
+}
+
+impl PtyIoThread {
+    #[cfg(windows)]
+    fn cancel_synchronous_io(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
+
+        let Some(handle) = self.handle.as_ref() else { return };
+        let thread_handle = HANDLE(handle.as_raw_handle());
+        // SAFETY: JoinHandle owns a live Windows thread handle. Cancellation
+        // only interrupts that thread's pending synchronous I/O.
+        unsafe {
+            if let Err(error) = CancelSynchronousIo(thread_handle) {
+                tracing::debug!(%error, "PTY I/O thread had no cancellable synchronous operation");
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn cancel_synchronous_io(&self) {}
+
+    fn finish(&mut self, name: &'static str) {
+        let finished = match self.done.recv_timeout(PTY_IO_SHUTDOWN_TIMEOUT) {
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => true,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
+        };
+        if finished {
+            if let Some(handle) = self.handle.take() {
+                if handle.join().is_err() {
+                    tracing::warn!("{name} panicked during shutdown");
+                }
+            }
+        } else {
+            tracing::warn!("{name} did not exit within the PTY shutdown timeout");
+            self.handle.take();
+        }
+    }
+}
+
 /// Handle to a running pty process.
 ///
-/// On drop, the child process is explicitly killed and the master writer is
-/// dropped, which closes the pty fd and triggers EOF on the reader thread
-/// so it exits cleanly. Without the explicit kill, dropping a `PtyHandle`
-/// (e.g. on `Action::ClosePane`) would leave the shell as an orphan
-/// connected to a closed pty until the OS reaps it.
+/// On drop, the child process is explicitly killed, pending native I/O is
+/// cancelled, and the PTY reader/writer threads are given a bounded interval
+/// to exit.
 pub struct PtyHandle {
     /// Channel of byte chunks read from the child's stdout/stderr.
     pub out_rx: Receiver<Incoming>,
@@ -75,6 +143,9 @@ pub struct PtyHandle {
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     reader_cancel: Sender<()>,
+    writer_cancel: Sender<()>,
+    reader_thread: PtyIoThread,
+    writer_thread: PtyIoThread,
     input_queue_warned: std::sync::atomic::AtomicBool,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Resolved shell program path (the command we actually spawned).
@@ -181,19 +252,18 @@ impl PtyHandle {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         let _ = self.reader_cancel.try_send(());
-        // LM-007: the previous `Arc::strong_count == 1` guard skipped
-        // the kill in any code path that still held a cloned child Arc,
-        // leaving an orphaned shell on tab close. It also relied on
-        // portable-pty's `Child::kill`, which on Unix sends SIGHUP and only
-        // escalates to SIGKILL after a timing window. Shells that trap
-        // SIGHUP (zsh by default, bash with `trap '' HUP`) survive that
-        // window and outlive the PTY as orphans.
-        //
-        // Fix: always kill — send SIGKILL directly via `libc::kill` first,
-        // then call portable-pty's `kill()` (covers any pid-namespace edge
-        // cases and the Windows `TerminateProcess` path), then reap with
-        // a bounded `try_wait` poll so a stuck child can never hang the
-        // app on tab close.
+        let _ = self.writer_cancel.try_send(());
+        // Drop the master handle retained by the resize closure before
+        // waiting for native I/O threads; this closes the pseudoterminal and
+        // wakes readers/writers on platforms where handle closure is enough.
+        let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
+        drop(resize);
+        self.reader_thread.cancel_synchronous_io();
+        self.writer_thread.cancel_synchronous_io();
+        // Terminate the full process group before the direct child so
+        // descendants cannot retain the PTY after their pane closes. The
+        // portable-pty kill remains as a cross-platform fallback, followed by
+        // a bounded reap so a stuck child cannot hang window teardown.
         let mut child = self.child.lock();
         #[cfg(unix)]
         let pid_for_log = child.process_id();
@@ -202,6 +272,7 @@ impl Drop for PtyHandle {
             // SAFETY: libc::kill is FFI; pid comes from portable-pty's
             // tracked child handle. ESRCH (already dead) is fine.
             unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
@@ -238,6 +309,9 @@ impl Drop for PtyHandle {
                 Err(_) => break,
             }
         }
+        drop(child);
+        self.reader_thread.finish("PTY reader thread");
+        self.writer_thread.finish("PTY writer thread");
     }
 }
 
@@ -305,11 +379,12 @@ impl PtyHandle {
         let (out_tx, out_rx) = pty_output_channel();
         let (in_tx, in_rx) = pty_input_channel();
         let (reader_cancel, reader_cancel_rx) = crossbeam_channel::bounded(1);
+        let (writer_cancel, writer_cancel_rx) = crossbeam_channel::bounded(1);
 
         // Reader thread: pty -> out_rx.
-        spawn_reader_thread(reader, out_tx, reader_cancel_rx);
+        let reader_thread = spawn_reader_thread(reader, out_tx, reader_cancel_rx);
         // Writer thread: in_rx -> pty.
-        spawn_writer_thread(writer, in_rx);
+        let writer_thread = spawn_writer_thread(writer, in_rx, writer_cancel_rx);
 
         let resize_master = master.clone();
         // Dedup no-op resizes. Callers (e.g. tab switch via
@@ -342,6 +417,9 @@ impl PtyHandle {
             in_tx,
             resize,
             reader_cancel,
+            writer_cancel,
+            reader_thread,
+            writer_thread,
             input_queue_warned: std::sync::atomic::AtomicBool::new(false),
             child: Arc::new(Mutex::new(child)),
             shell_program_path: cmd.to_string(),
@@ -360,10 +438,12 @@ fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<Incoming>,
     cancel: Receiver<()>,
-) {
-    thread::Builder::new()
+) -> PtyIoThread {
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    let handle = thread::Builder::new()
         .name("sonic-pty-reader".into())
         .spawn(move || {
+            let _active = ActivePtyIoThread::enter();
             // 64 KiB ring. We `split` the filled prefix into a `Bytes`
             // (refcounted view into the same allocation) on each read and
             // send it downstream. Once consumers drop their `Bytes`, the
@@ -405,34 +485,55 @@ fn spawn_reader_thread(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("pty read error: {e}");
+                        if cancel.try_recv().is_err() {
+                            tracing::warn!("pty read error: {e}");
+                        }
                         break;
                     }
                 }
             }
+            let _ = done_tx.send(());
         })
         // PANIC: thread::Builder::spawn only fails on OS-level resource
         // exhaustion (out of memory / out of process handles). At terminal
         // startup we cannot meaningfully recover — propagating a Result up
         // through `spawn_pane` would land on the same `expect`. Documented.
         .expect("spawn pty reader");
+    PtyIoThread { handle: Some(handle), done }
 }
 
-fn spawn_writer_thread(mut writer: Box<dyn Write + Send>, rx: Receiver<Outgoing>) {
-    thread::Builder::new()
+fn spawn_writer_thread(
+    mut writer: Box<dyn Write + Send>,
+    rx: Receiver<Outgoing>,
+    cancel: Receiver<()>,
+) -> PtyIoThread {
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    let handle = thread::Builder::new()
         .name("sonic-pty-writer".into())
         .spawn(move || {
-            while let Ok(bytes) = rx.recv() {
+            let _active = ActivePtyIoThread::enter();
+            loop {
+                let bytes = crossbeam_channel::select! {
+                    recv(cancel) -> _ => break,
+                    recv(rx) -> result => match result {
+                        Ok(bytes) => bytes,
+                        Err(_) => break,
+                    },
+                };
                 if let Err(e) = writer.write_all(&bytes) {
-                    tracing::warn!("pty write error: {e}");
+                    if cancel.try_recv().is_err() {
+                        tracing::warn!("pty write error: {e}");
+                    }
                     break;
                 }
                 let _ = writer.flush();
             }
+            let _ = done_tx.send(());
         })
         // PANIC: see `spawn_reader_thread` rationale above — OS-level
         // thread-spawn failure at PTY init is unrecoverable.
         .expect("spawn pty writer");
+    PtyIoThread { handle: Some(handle), done }
 }
 
 fn default_shell() -> String {
