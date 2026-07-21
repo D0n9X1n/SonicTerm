@@ -46,6 +46,7 @@ pub const SUBSCRIBER_OUTPUT_FRAME_BYTES: usize = 8 * 1024;
 const _: () = assert!((CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES <= 32 * 1024 * 1024);
 
 const SUBSCRIBER_CONTROL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 const PANE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PANE_EXIT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
@@ -490,12 +491,14 @@ where
     // Writer thread: drains rx -> stream.
     let mut write_half = write_half;
     let rx_writer = rx.clone();
+    let (writer_done_tx, writer_done_rx) = crossbeam_channel::bounded(1);
     let writer_thread = thread::spawn(move || {
         while let Ok(msg) = rx_writer.recv() {
             if crate::frame::write_frame(&mut write_half, &msg).is_err() {
                 break;
             }
         }
+        let _ = writer_done_tx.send(());
     });
 
     // Request loop on this thread.
@@ -576,9 +579,20 @@ where
     // `state.detach()` clears (3). We then explicitly drop (1) and (2)
     // before the `join` so the channel actually closes.
     state.detach();
+    drop(read_half);
     drop(tx);
     drop(sink);
-    let _ = writer_thread.join();
+    match writer_done_rx.recv_timeout(WRITER_SHUTDOWN_TIMEOUT) {
+        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            if writer_thread.join().is_err() {
+                tracing::warn!("mux client writer panicked during shutdown");
+            }
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            tracing::warn!("mux client writer did not exit within the shutdown timeout");
+            drop(writer_thread);
+        }
+    }
     request_error.map_or(Ok(()), Err)
 }
 

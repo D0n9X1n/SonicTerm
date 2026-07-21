@@ -45,6 +45,8 @@ pub const PTY_INPUT_QUEUE_CAPACITY: usize = 4;
 /// Largest single terminal-input message accepted by first-party callers.
 pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 /// A terminal-input message that could not be queued without blocking.
@@ -89,11 +91,13 @@ impl PtyChildExitProbe {
 struct ChildState {
     child: Box<dyn Child + Send + Sync>,
     exited: bool,
+    process_group_id: Option<u32>,
+    process_group_signalled: bool,
 }
 
 impl ChildState {
-    fn new(child: Box<dyn Child + Send + Sync>) -> Self {
-        Self { child, exited: false }
+    fn new(child: Box<dyn Child + Send + Sync>, process_group_id: Option<u32>) -> Self {
+        Self { child, exited: false, process_group_id, process_group_signalled: false }
     }
 
     fn has_exited(&mut self) -> std::io::Result<bool> {
@@ -111,10 +115,21 @@ impl ChildState {
     }
 }
 
-fn terminate_child<F>(child: &mut ChildState, mut signal_pid: F) -> std::io::Result<()>
+fn terminate_child<G, P>(
+    child: &mut ChildState,
+    mut signal_group: G,
+    mut signal_pid: P,
+) -> std::io::Result<()>
 where
-    F: FnMut(u32),
+    G: FnMut(u32),
+    P: FnMut(u32),
 {
+    if !child.process_group_signalled {
+        if let Some(process_group_id) = child.process_group_id {
+            signal_group(process_group_id);
+        }
+        child.process_group_signalled = true;
+    }
     if child.has_exited()? {
         return Ok(());
     }
@@ -122,6 +137,37 @@ where
         signal_pid(pid);
     }
     child.child.kill()
+}
+
+fn terminate_child_for_platform(child: &mut ChildState) -> std::io::Result<()> {
+    terminate_child(
+        child,
+        |process_group_id| {
+            #[cfg(unix)]
+            {
+                // SAFETY: process_group_id was captured from the live PTY
+                // master at spawn and identifies the group independently of
+                // the direct child's later pid reuse.
+                unsafe {
+                    libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = process_group_id;
+        },
+        |pid| {
+            #[cfg(unix)]
+            {
+                // SAFETY: ChildState::has_exited just returned false while
+                // holding the child mutex, so the direct pid is not reaped.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = pid;
+        },
+    )
 }
 
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
@@ -236,6 +282,8 @@ pub struct PtyHandle {
     reader_thread: PtyIoThread,
     writer_thread: PtyIoThread,
     child: Arc<Mutex<ChildState>>,
+    #[cfg(windows)]
+    conpty_drain_reader: Option<Box<dyn Read + Send>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
 }
@@ -283,7 +331,7 @@ impl PtyHandle {
     /// deterministic shutdown earlier.
     pub fn kill(&self) {
         let mut child = self.child.lock();
-        let _ = terminate_child(&mut child, |_| {});
+        let _ = terminate_child_for_platform(&mut child);
     }
 
     /// Process id of the underlying shell, if the platform reports it. Used
@@ -367,19 +415,7 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
 
     fn terminate_child(&mut self) {
         let mut child = self.handle.child.lock();
-        let result = terminate_child(&mut child, |pid| {
-            #[cfg(unix)]
-            {
-                // SAFETY: the child has just returned `try_wait() == None`,
-                // so its pid cannot have been reaped and reused.
-                unsafe {
-                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                }
-            }
-            #[cfg(not(unix))]
-            let _ = pid;
-        });
+        let result = terminate_child_for_platform(&mut child);
         if let Err(error) = result {
             tracing::warn!(%error, "failed to terminate PTY child");
         }
@@ -391,6 +427,17 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
     }
 
     fn close_master(&mut self) {
+        #[cfg(windows)]
+        if let (Some(reader), Some(resize)) =
+            (self.handle.conpty_drain_reader.take(), self.resize.take())
+        {
+            let completed =
+                close_master_with_drain(reader, move || drop(resize), CONPTY_CLOSE_TIMEOUT);
+            if !completed {
+                tracing::warn!("ConPTY master close did not finish within the shutdown timeout");
+            }
+            return;
+        }
         drop(self.resize.take());
     }
 
@@ -419,6 +466,67 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn close_master_with_drain(
+    mut reader: Box<dyn Read + Send>,
+    close_master: impl FnOnce() + Send + 'static,
+    timeout: Duration,
+) -> bool {
+    let (drain_done_tx, drain_done_rx) = crossbeam_channel::bounded(1);
+    let drain_thread =
+        match thread::Builder::new().name("sonic-conpty-drain".into()).spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = drain_done_tx.send(());
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                tracing::warn!(%error, "failed to spawn ConPTY drain thread");
+                std::mem::forget(close_master);
+                return false;
+            }
+        };
+    let (close_done_tx, close_done_rx) = crossbeam_channel::bounded(1);
+    let close_thread =
+        match thread::Builder::new().name("sonic-conpty-close".into()).spawn(move || {
+            close_master();
+            let _ = close_done_tx.send(());
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                tracing::warn!(%error, "failed to spawn ConPTY close thread");
+                std::mem::forget(drain_thread);
+                return false;
+            }
+        };
+
+    let close_finished = matches!(
+        close_done_rx.recv_timeout(timeout),
+        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    );
+    if close_finished {
+        let _ = close_thread.join();
+        let drain_finished = matches!(
+            drain_done_rx.recv_timeout(timeout),
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        if drain_finished {
+            let _ = drain_thread.join();
+        } else {
+            drop(drain_thread);
+        }
+    } else {
+        drop(close_thread);
+        drop(drain_thread);
+    }
+    close_finished
 }
 
 impl PtyHandle {
@@ -478,7 +586,14 @@ impl PtyHandle {
         drop(pair.slave);
 
         let master = pair.master;
+        #[cfg(unix)]
+        let process_group_id =
+            master.process_group_leader().and_then(|pgid| u32::try_from(pgid).ok());
+        #[cfg(not(unix))]
+        let process_group_id = None;
         let reader = master.try_clone_reader()?;
+        #[cfg(windows)]
+        let conpty_drain_reader = Some(master.try_clone_reader()?);
         let writer = master.take_writer()?;
         let master = Arc::new(Mutex::new(master));
 
@@ -526,7 +641,9 @@ impl PtyHandle {
             writer_cancel,
             reader_thread,
             writer_thread,
-            child: Arc::new(Mutex::new(ChildState::new(child))),
+            child: Arc::new(Mutex::new(ChildState::new(child, process_group_id))),
+            #[cfg(windows)]
+            conpty_drain_reader,
             shell_program_path: cmd.to_string(),
         })
     }

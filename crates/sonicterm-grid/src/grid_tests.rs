@@ -360,6 +360,34 @@ fn reshape_releases_row_capacity_above_visible_cell_budget() {
 }
 
 #[test]
+fn exact_half_reshape_stays_within_visible_capacity_budget() {
+    let mut grid = Grid::new(4096, 128);
+
+    grid.resize(2048, 256);
+
+    let retained_bytes = grid.rows_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(
+        retained_bytes <= visible_budget_bytes,
+        "exact-half reshape retains {retained_bytes} bytes above {visible_budget_bytes}"
+    );
+}
+
+#[test]
+fn narrow_exact_half_reshape_stays_within_visible_capacity_budget() {
+    let mut grid = Grid::new(1024, 512);
+
+    grid.resize(512, 1024);
+
+    let retained_bytes = grid.rows_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(
+        retained_bytes <= visible_budget_bytes,
+        "narrow exact-half reshape retains {retained_bytes} bytes above {visible_budget_bytes}"
+    );
+}
+
+#[test]
 fn adjacent_column_resize_preserves_populated_history_capacity() {
     let mut grid = Grid::new(100, 24);
     grid.scrollback_requested_limit = 256;

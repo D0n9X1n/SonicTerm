@@ -347,6 +347,7 @@ impl Grid {
             self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
+        self.enforce_visible_capacity_budget();
         self.mark_all();
         self.bump();
     }
@@ -392,6 +393,7 @@ impl Grid {
                 self.visible.push_back(make_row(cols));
             }
         }
+        self.enforce_visible_capacity_budget();
         self.cols = cols;
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
@@ -1346,6 +1348,18 @@ impl Grid {
             primary.scrollback.drain(0..excess);
         }
         compact_scrollback_capacity(&mut primary.scrollback);
+    }
+
+    fn enforce_visible_capacity_budget(&mut self) {
+        let retained_bytes =
+            self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+        let budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        if retained_bytes <= budget_bytes {
+            return;
+        }
+        for row in &mut self.visible {
+            row.shrink_capacity_to_fit();
+        }
     }
 }
 

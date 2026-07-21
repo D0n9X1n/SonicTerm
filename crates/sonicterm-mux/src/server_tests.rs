@@ -1,7 +1,36 @@
 use super::*;
-use crate::proto::ServerMsg;
+use crate::proto::{ClientMsg, ServerMsg};
 use crossbeam_channel::bounded;
+use std::io::{Cursor, Read, Write};
 use std::time::{Duration, Instant};
+
+struct BlockingWriteStream {
+    read: Cursor<Vec<u8>>,
+    block_first_write: bool,
+    write_started: crossbeam_channel::Sender<()>,
+    release_write: crossbeam_channel::Receiver<()>,
+}
+
+impl Read for BlockingWriteStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.read.read(buffer)
+    }
+}
+
+impl Write for BlockingWriteStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.block_first_write {
+            self.block_first_write = false;
+            let _ = self.write_started.try_send(());
+            self.release_write.recv().map_err(std::io::Error::other)?;
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Cross-platform: a fresh server has no sessions, and control operations on
 /// unknown panes/sessions surface an error instead of panicking. Guards the
@@ -116,6 +145,51 @@ fn request_reply_uses_the_bounded_control_deadline() {
         done_rx.recv_timeout(Duration::from_secs(1)).expect("request reply must have a deadline");
     assert!(result.is_err());
     assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+}
+
+#[test]
+fn blocked_writer_does_not_block_connection_cleanup() {
+    let mut requests = Vec::new();
+    for _ in 0..(CHANNEL_CAP + 4) {
+        crate::frame::write_frame(&mut requests, &ClientMsg::ListSessions).unwrap();
+    }
+    let (unused_started_tx, _unused_started_rx) = bounded(1);
+    let (_unused_release_tx, unused_release_rx) = bounded(1);
+    let read_half = BlockingWriteStream {
+        read: Cursor::new(requests),
+        block_first_write: false,
+        write_started: unused_started_tx,
+        release_write: unused_release_rx,
+    };
+    let (write_started_tx, write_started_rx) = bounded(1);
+    let (release_write_tx, release_write_rx) = bounded(1);
+    let write_half = BlockingWriteStream {
+        read: Cursor::new(Vec::new()),
+        block_first_write: true,
+        write_started: write_started_tx,
+        release_write: release_write_rx,
+    };
+    let state = ServerState::new();
+    let (done_tx, done_rx) = bounded(1);
+    let handler = std::thread::spawn(move || {
+        done_tx.send(handle_connection(state, read_half, write_half)).unwrap();
+    });
+
+    write_started_rx.recv_timeout(Duration::from_secs(1)).expect("writer blocked");
+    let completed_while_blocked = done_rx.recv_timeout(Duration::from_secs(1));
+    let completed_before_release = completed_while_blocked.is_ok();
+    release_write_tx.send(()).expect("release writer for test cleanup");
+    let final_result = match completed_while_blocked {
+        Ok(result) => result,
+        Err(_) => done_rx.recv_timeout(Duration::from_secs(2)).expect("handler cleanup"),
+    };
+    handler.join().expect("handler thread");
+
+    assert!(
+        completed_before_release,
+        "bounded reply failure must not join a blocked writer indefinitely"
+    );
+    assert!(final_result.is_err(), "full control mailbox must end the connection");
 }
 
 #[test]

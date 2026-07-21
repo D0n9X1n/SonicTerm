@@ -1,4 +1,5 @@
 use super::*;
+use crossbeam_channel::bounded;
 use portable_pty::{ChildKiller, ExitStatus};
 
 #[cfg(windows)]
@@ -321,22 +322,125 @@ fn child_exit_probe_observes_short_lived_process() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn observed_shell_exit_still_kills_background_process_group() {
+    let args = vec!["-c".to_string(), "trap '' HUP; sleep 30 & echo $!; exit 0".to_string()];
+    let pty = PtyHandle::spawn_with_args("/bin/sh", &args, 80, 24).expect("spawn shell");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut output = Vec::new();
+    while !output.contains(&b'\n') && std::time::Instant::now() < deadline {
+        match pty.out_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => output.extend_from_slice(&chunk),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                panic!("PTY output closed before background pid")
+            }
+        }
+    }
+    let background_pid = String::from_utf8_lossy(&output)
+        .trim()
+        .parse::<libc::pid_t>()
+        .expect("numeric background pid");
+    let probe = pty.child_exit_probe();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !probe.has_exited().expect("probe shell") && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(probe.has_exited().expect("shell exited"));
+    // SAFETY: signal 0 only probes existence and does not modify the process.
+    assert_eq!(unsafe { libc::kill(background_pid, 0) }, 0, "background child must still be live");
+
+    drop(pty);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while unsafe { libc::kill(background_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: signal 0 only probes existence and does not modify the process.
+    assert_eq!(unsafe { libc::kill(background_pid, 0) }, -1);
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
 #[test]
 fn observed_child_exit_prevents_later_kill_or_pid_signal() {
     let try_wait_calls = Arc::new(AtomicUsize::new(0));
     let kill_calls = Arc::new(AtomicUsize::new(0));
     let child =
         MockChild { try_wait_calls: try_wait_calls.clone(), kill_calls: kill_calls.clone() };
-    let child = Arc::new(Mutex::new(ChildState::new(Box::new(child))));
+    let child = Arc::new(Mutex::new(ChildState::new(Box::new(child), Some(4242))));
     let probe = PtyChildExitProbe { child: child.clone() };
 
     assert!(probe.has_exited().unwrap());
+    let mut signalled_groups = Vec::new();
     let mut signalled_pids = Vec::new();
-    terminate_child(&mut child.lock(), |pid| signalled_pids.push(pid)).unwrap();
+    terminate_child(
+        &mut child.lock(),
+        |pgid| signalled_groups.push(pgid),
+        |pid| signalled_pids.push(pid),
+    )
+    .unwrap();
+    terminate_child(
+        &mut child.lock(),
+        |pgid| signalled_groups.push(pgid),
+        |pid| signalled_pids.push(pid),
+    )
+    .unwrap();
 
+    assert_eq!(signalled_groups, [4242]);
     assert!(signalled_pids.is_empty());
     assert_eq!(kill_calls.load(Ordering::Relaxed), 0);
     assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(windows)]
+struct CloseGatedReader {
+    close_started: Receiver<()>,
+    drained: Sender<()>,
+    finished: bool,
+}
+
+#[cfg(windows)]
+impl std::io::Read for CloseGatedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.finished {
+            return Ok(0);
+        }
+        self.close_started.recv_timeout(Duration::from_secs(1)).map_err(std::io::Error::other)?;
+        buffer[0] = b'x';
+        self.drained.send(()).map_err(std::io::Error::other)?;
+        self.finished = true;
+        Ok(1)
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn conpty_close_runs_while_output_reader_is_draining() {
+    let (close_started_tx, close_started_rx) = bounded(1);
+    let (drained_tx, drained_rx) = bounded(1);
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let closed_thread = closed.clone();
+    let reader = Box::new(CloseGatedReader {
+        close_started: close_started_rx,
+        drained: drained_tx,
+        finished: false,
+    });
+
+    let completed = close_master_with_drain(
+        reader,
+        move || {
+            close_started_tx.send(()).expect("start old-style close");
+            drained_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("output must be drained during close");
+            closed_thread.store(true, Ordering::Release);
+        },
+        Duration::from_secs(1),
+    );
+
+    assert!(completed, "old-style close must complete within its deadline");
+    assert!(closed.load(Ordering::Acquire));
 }
 
 #[cfg(windows)]

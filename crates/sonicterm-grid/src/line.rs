@@ -29,9 +29,15 @@
 
 use sonicterm_types::cell::Cell;
 
+const MIN_EXACT_HALF_COMPACTION_ITEMS: usize = 1024;
+
 fn shrink_vec_if_excessive<T>(items: &mut Vec<T>) {
     let len = items.len();
-    if items.capacity() > len && (len == 0 || items.capacity() > len.saturating_mul(2)) {
+    let capacity = items.capacity();
+    let twice_len = len.saturating_mul(2);
+    let exact_half_is_material =
+        capacity == twice_len && capacity.saturating_sub(len) >= MIN_EXACT_HALF_COMPACTION_ITEMS;
+    if capacity > len && (len == 0 || capacity > twice_len || exact_half_is_material) {
         items.shrink_to_fit();
     }
 }
@@ -464,6 +470,14 @@ impl Line {
     /// Approximate reserved heap payload bytes for this line's storage.
     pub fn approx_capacity_byte_size(&self) -> usize {
         self.storage.approx_capacity_byte_size()
+    }
+
+    /// Release all unused inner storage capacity.
+    pub(crate) fn shrink_capacity_to_fit(&mut self) {
+        match &mut self.storage {
+            LineStorage::Flat(cells) => cells.shrink_to_fit(),
+            LineStorage::Cluster(clusters) => clusters.shrink_to_fit(),
+        }
     }
 
     /// Returns `true` if the line is currently in cluster form.

@@ -68,7 +68,9 @@ of terminal correctness rather than a paint optimization:
 - Grid geometry budgets include retained row allocation, not only visible
   `cols × rows`; material column shrink compacts surviving rows while adjacent
   resize oscillation retains reusable capacity, and history-limit reductions
-  release excess `VecDeque` capacity.
+  release excess `VecDeque` capacity. A grid-level aggregate check force-
+  compacts visible rows whenever retained capacity would exceed the visible
+  cell budget.
 - Clipboard serialization preserves isolated or incomplete right-edge
   box-drawing text and removes only a coherent multi-row side ending in a
   lower-right frame corner. Frame detection reads physical row ends without
@@ -97,16 +99,19 @@ allocation budget before FreeType may decode their pixels.
 
 PTY handles own their native reader and writer threads. Exit observation is
 cached across probes and teardown so a reaped Unix pid is never signalled
-again. Windows teardown cancels and finishes synchronous pipe I/O before
-closing the ConPTY master; Unix teardown terminates the process group before
-master close. Both use bounded thread and child-exit deadlines.
+again, while the original Unix process group is retained and signalled once so
+background descendants cannot survive their leader. Windows teardown keeps a
+dedicated cloned output reader draining concurrently with ConPTY master close,
+including the pre-Windows 11 24H2 blocking contract. Both platforms use
+bounded thread, close, and child-exit deadlines.
 Terminal-input enqueue remains non-blocking and bounded; saturation,
 disconnection, and oversized messages return typed errors that retain the
 rejected bytes instead of reporting false success. App callers forward those
 bytes to the event loop for a visible retry notification. The mux observes
 natural child exit independently of PTY output EOF, removes exited panes,
 prunes empty sessions, rechunks subscriber output to 8 KiB frames, bounds all
-control replies, and queues `Spawned` before enabling output, `Exit`, or reap.
+control replies and writer completion, and queues `Spawned` before enabling
+output, `Exit`, or reap.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,
