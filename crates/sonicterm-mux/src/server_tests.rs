@@ -1,8 +1,9 @@
 use super::*;
 use crate::proto::ServerMsg;
 use crossbeam_channel::bounded;
+use std::time::Duration;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Cross-platform: a fresh server has no sessions, and control operations on
 /// unknown panes/sessions surface an error instead of panicking. Guards the
@@ -61,19 +62,36 @@ fn subscriber_sink_reserves_capacity_for_exit() {
 }
 
 #[test]
-fn subscriber_control_waits_for_capacity_instead_of_dropping() {
+fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
     sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
     let (done_tx, done_rx) = bounded(1);
-    std::thread::spawn(move || {
+    let sender = std::thread::spawn(move || {
         done_tx.send(sink.send_control(ServerMsg::Exit { pane_id: 2 })).unwrap();
     });
 
-    assert!(done_rx.try_recv().is_err(), "control send should wait while full");
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("control delivery must have a deadline");
+    let error = result.expect_err("a full mailbox must reject control delivery after the deadline");
+    assert!(error.to_string().contains("mailbox remained full"), "unexpected error: {error}");
+    sender.join().expect("control sender thread");
     assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
-    done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("send unblocked").unwrap();
-    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 2 })));
+}
+
+#[test]
+fn pane_exit_releases_subscriber_when_control_mailbox_stays_full() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    let subscriber = Mutex::new(Some(sink));
+
+    notify_subscriber_exit(&subscriber, 2);
+
+    assert!(subscriber.lock().is_none(), "exited pane must release its subscriber sender");
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+    assert!(rx.try_recv().is_err(), "timed-out exit must not replace queued control");
 }
 
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,

@@ -21,10 +21,11 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TrySendError};
 use parking_lot::Mutex;
 use sonicterm_io::pty::PtyHandle;
 
@@ -39,6 +40,8 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 /// so the freshest output still reaches the client. 4096 frames @ ~8 KiB
 /// each is a soft ceiling of ~32 MiB per attached pane.
 pub const CHANNEL_CAP: usize = 4096;
+
+const SUBSCRIBER_CONTROL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// One subscriber's bounded mailbox sender.
 #[derive(Clone)]
@@ -74,10 +77,16 @@ impl SubscriberSink {
         }
     }
 
-    /// Deliver a control message without eviction. This may wait for a slow
-    /// client to consume bounded output, but it never drops pane termination.
+    /// Deliver a control message without eviction, waiting only for the
+    /// bounded control-delivery deadline.
     pub fn send_control(&self, msg: ServerMsg) -> Result<()> {
-        self.tx.send(msg).map_err(|_| anyhow!("subscriber disconnected"))
+        self.tx.send_timeout(msg, SUBSCRIBER_CONTROL_SEND_TIMEOUT).map_err(|error| match error {
+            SendTimeoutError::Timeout(_) => anyhow!(
+                "subscriber mailbox remained full for {} ms; control message not queued",
+                SUBSCRIBER_CONTROL_SEND_TIMEOUT.as_millis()
+            ),
+            SendTimeoutError::Disconnected(_) => anyhow!("subscriber disconnected"),
+        })
     }
 }
 
@@ -273,6 +282,19 @@ fn find_pane(sessions: &HashMap<SessionId, Session>, pane_id: PaneId) -> Result<
     Err(anyhow!("unknown pane {pane_id}"))
 }
 
+fn notify_subscriber_exit(subscriber: &Mutex<Option<SubscriberSink>>, pane_id: PaneId) {
+    let sink = subscriber.lock().take();
+    if let Some(sink) = sink {
+        if let Err(error) = sink.send_control(ServerMsg::Exit { pane_id }) {
+            tracing::debug!(
+                pane_id,
+                error = %error,
+                "pane exit notification was not delivered; subscriber detached"
+            );
+        }
+    }
+}
+
 fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> {
     // Spawn through the shared sonicterm-io PTY seam. It owns the openpty,
     // the reader/writer threads, the deduped resize closure, and the robust
@@ -311,10 +333,7 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
                     sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: chunk.to_vec() });
             }
         }
-        let sub = r_sub.lock().clone();
-        if let Some(sink) = sub {
-            let _ = sink.send_control(ServerMsg::Exit { pane_id });
-        }
+        notify_subscriber_exit(&r_sub, pane_id);
     });
 
     Ok(Pane {
