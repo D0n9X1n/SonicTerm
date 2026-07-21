@@ -1007,7 +1007,7 @@ impl App {
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    pty.send_input_nonblocking(payload);
+                                    Self::queue_pty_input(pty, payload);
                                 }
                             }
                         } else if is_alt {
@@ -1025,7 +1025,7 @@ impl App {
                             }
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    pty.send_input_nonblocking(payload);
+                                    Self::queue_pty_input(pty, payload);
                                 }
                             }
                         } else {

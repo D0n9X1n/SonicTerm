@@ -2303,8 +2303,20 @@ impl App {
             }
             let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
-                pty.send_input_nonblocking(bytes);
+                Self::queue_pty_input(pty, bytes);
             }
+        }
+    }
+
+    fn queue_pty_input(pty: &sonicterm_io::pty::PtyHandle, bytes: Vec<u8>) {
+        if let Err(error) = pty.send_input_nonblocking(bytes) {
+            let reason = error.to_string();
+            let rejected_bytes = error.into_bytes().len();
+            tracing::warn!(
+                rejected_bytes,
+                %reason,
+                "terminal input was not queued because the PTY writer is unavailable or saturated"
+            );
         }
     }
 

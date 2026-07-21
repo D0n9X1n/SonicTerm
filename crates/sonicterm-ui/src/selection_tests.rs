@@ -278,6 +278,22 @@ fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
 }
 
 #[test]
+fn copy_preserves_ambiguous_detached_box_glyph_at_right_edge() {
+    let grid = grid_with("foo     │");
+    let selection = Selection::line_at(&grid, 0);
+
+    assert_eq!(selection.as_text(&grid), "foo     │");
+}
+
+#[test]
+fn copy_preserves_incomplete_multiline_right_edge_frame_pattern() {
+    let grid = grid_rows(&["foo     │", "bar     │"]);
+    let selection = Selection::line_drag(&grid, 0, 1);
+
+    assert_eq!(selection.as_text(&grid), "foo     │\nbar     │");
+}
+
+#[test]
 fn copy_preserves_box_drawing_that_is_not_a_detached_right_edge_frame() {
     let grid = grid_with("Write-Output '│'");
     let selection = Selection::line_at(&grid, 0);

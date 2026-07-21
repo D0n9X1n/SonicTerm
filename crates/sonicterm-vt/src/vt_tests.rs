@@ -164,6 +164,23 @@ fn oversized_csi_resynchronizes_on_final_byte() {
 }
 
 #[test]
+fn can_and_sub_reset_escape_family_before_oversized_osc() {
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        parser.advance(&[0x1b, b'[', b'1', cancel]);
+
+        let mut payload = b"\x1b]0;".to_vec();
+        payload.extend(std::iter::repeat_n(b'1', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+        payload.push(0x07);
+        payload.push(b'Z');
+        parser.advance(&payload);
+
+        assert!(!parser.discarding_oversized_escape, "cancel byte {cancel:#x}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "cancel byte {cancel:#x}");
+    }
+}
+
+#[test]
 fn overflow_triggering_osc_terminator_is_not_lost() {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1b]8;;".to_vec();

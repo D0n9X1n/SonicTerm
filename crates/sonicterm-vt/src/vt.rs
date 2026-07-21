@@ -338,7 +338,11 @@ impl Parser {
                 };
                 self.observe_osc4_byte(bytes[i]);
                 self.performer.sequence_dispatched = false;
+                let byte = bytes[i];
                 self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
+                if matches!(byte, 0x18 | 0x1a) {
+                    self.reset_cancelled_escape();
+                }
                 if self.performer.ground || self.performer.sequence_dispatched {
                     self.escape_bytes_in_flight = 0;
                     self.escape_family = EscapeFamily::Ground;
@@ -398,8 +402,12 @@ impl Parser {
                     }
                     self.observe_osc4_byte(bytes[i]);
                     self.performer.sequence_dispatched = false;
+                    let byte = bytes[i];
                     self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
                     i += 1;
+                    if matches!(byte, 0x18 | 0x1a) {
+                        self.reset_cancelled_escape();
+                    }
                     if self.performer.ground || self.performer.sequence_dispatched {
                         self.escape_bytes_in_flight = 0;
                         self.escape_family = EscapeFamily::Ground;
@@ -409,6 +417,19 @@ impl Parser {
             }
         }
         std::mem::take(&mut self.performer.events)
+    }
+
+    fn reset_cancelled_escape(&mut self) {
+        self.raw_osc = None;
+        self.pending_esc = false;
+        self.apc_capture = None;
+        self.performer.dcs_capture = None;
+        self.escape_bytes_in_flight = 0;
+        self.discarding_oversized_escape = false;
+        self.discard_escape_pending_esc = false;
+        self.escape_family = EscapeFamily::Ground;
+        self.performer.ground = true;
+        self.performer.sequence_dispatched = true;
     }
 
     fn begin_discarding_oversized_escape(&mut self, pending_esc: bool) {
@@ -455,6 +476,10 @@ impl Parser {
     }
 
     fn consume_apc_byte(&mut self, byte: u8) {
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset_cancelled_escape();
+            return;
+        }
         let Some(capture) = self.apc_capture.as_mut() else { return };
         if capture.pending_esc {
             capture.pending_esc = false;

@@ -346,6 +346,20 @@ fn grid_new_and_resize_apply_memory_bounds() {
 }
 
 #[test]
+fn reshape_releases_row_capacity_above_visible_cell_budget() {
+    let mut grid = Grid::new(4096, 128);
+
+    grid.resize(128, 4096);
+
+    let retained_bytes = grid.rows_iter().map(|row| row.approx_capacity_byte_size()).sum::<usize>();
+    let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(
+        retained_bytes <= visible_budget_bytes,
+        "visible rows retain {retained_bytes} bytes above the {visible_budget_bytes}-byte budget"
+    );
+}
+
+#[test]
 fn scrollback_limit_shares_the_total_grid_cell_budget() {
     assert_eq!(
         bounded_scrollback_rows(

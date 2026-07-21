@@ -193,6 +193,47 @@ fn pty_input_queue_has_fixed_capacity() {
 }
 
 #[test]
+fn saturated_pty_input_queue_returns_the_rejected_bytes() {
+    let (tx, _rx) = pty_input_channel();
+    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+        tx.try_send(vec![b'x']).expect("fill bounded input queue");
+    }
+    let rejected = vec![b'y'];
+
+    assert!(matches!(
+        try_queue_pty_input(&tx, rejected.clone()),
+        Err(PtyInputError::QueueFull(bytes)) if bytes == rejected
+    ));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn child_exit_probe_observes_short_lived_process() {
+    #[cfg(unix)]
+    let command = "/usr/bin/true";
+    #[cfg(windows)]
+    let command = "whoami.exe";
+
+    let pty = PtyHandle::spawn(command, 80, 24).expect("spawn short-lived process");
+    let probe = pty.child_exit_probe();
+    #[cfg(windows)]
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut output = Vec::new();
+    while !probe.has_exited().expect("probe child") && std::time::Instant::now() < deadline {
+        while let Ok(chunk) = pty.out_rx.try_recv() {
+            output.extend_from_slice(&chunk);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(
+        probe.has_exited().expect("final child probe"),
+        "short-lived child remained active; output={output:?}"
+    );
+}
+
+#[test]
 fn multi_megabyte_paste_fits_bounded_input_budget() {
     const TWO_MIB: usize = 2 * 1024 * 1024;
     const MAX_QUEUED_INPUT_BYTES: usize = 64 * 1024 * 1024;

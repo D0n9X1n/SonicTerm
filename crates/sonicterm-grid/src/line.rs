@@ -191,7 +191,10 @@ impl LineStorage {
             return;
         }
         match self {
-            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Flat(v) => {
+                v.truncate(new_len);
+                v.shrink_to_fit();
+            }
             LineStorage::Cluster(cs) => {
                 let mut remaining = new_len;
                 let mut keep = 0;
@@ -209,6 +212,7 @@ impl LineStorage {
                     }
                 }
                 cs.truncate(keep);
+                cs.shrink_to_fit();
             }
         }
     }
@@ -756,7 +760,10 @@ impl Line {
             return;
         }
         match &mut self.storage {
-            LineStorage::Flat(v) => v.truncate(new_len),
+            LineStorage::Flat(v) => {
+                v.truncate(new_len);
+                v.shrink_to_fit();
+            }
             LineStorage::Cluster(cs) => {
                 let mut remaining = new_len;
                 let mut keep = 0;
@@ -774,6 +781,7 @@ impl Line {
                     }
                 }
                 cs.truncate(keep);
+                cs.shrink_to_fit();
             }
         }
     }

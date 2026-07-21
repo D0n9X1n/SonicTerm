@@ -180,12 +180,11 @@ impl Selection {
 
 /// Serialize a cell range as clipboard-safe plain text.
 ///
-/// Terminal UIs commonly draw a detached box frame in the pane's final
-/// column. A cross-row selection necessarily spans that column on every
-/// intermediate row, so blindly serializing cells copies `│`, `╯`, and
-/// related decoration even when the user selected only the framed content.
-/// Strip a box-drawing glyph only when it is at the physical right edge and
-/// separated from content by whitespace; box glyphs inside actual text remain.
+/// Terminal UIs commonly draw a detached box frame in the pane's final column.
+/// A cross-row selection necessarily spans that column on every intermediate
+/// row. Strip only a coherent multi-row right frame: vertical sides on every
+/// preceding row followed by a lower-right corner. Isolated or incomplete
+/// patterns remain literal text.
 pub fn plain_text_from_grid_range(
     grid: &Grid,
     mut start: (usize, u64),
@@ -195,6 +194,7 @@ pub fn plain_text_from_grid_range(
         std::mem::swap(&mut start, &mut end);
     }
     let ((start_col, start_row), (end_col, end_row)) = (start, end);
+    let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_col, end_row);
     let mut out = String::new();
     let mut first = true;
     for row_idx in start_row..=end_row {
@@ -207,7 +207,13 @@ pub fn plain_text_from_grid_range(
         first = false;
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
         let requested_end = if row_idx == end_row { end_col.saturating_add(1) } else { row.len() };
-        let col_end = plain_text_row_end(row, col_start, requested_end.min(row.len()));
+        let requested_end = requested_end.min(row.len());
+        let col_end = if strip_right_frame {
+            detached_right_frame(row, col_start, requested_end)
+                .map_or(requested_end, |(content_end, _)| content_end)
+        } else {
+            requested_end
+        };
         let mut line = String::new();
         for cell in row.get_range(col_start, col_end) {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
@@ -223,16 +229,48 @@ pub fn plain_text_from_grid_range(
     out
 }
 
-fn plain_text_row_end(row: &Row, col_start: usize, col_end: usize) -> usize {
+fn has_coherent_right_frame(
+    grid: &Grid,
+    start_col: usize,
+    start_row: u64,
+    end_col: usize,
+    end_row: u64,
+) -> bool {
+    if start_row >= end_row {
+        return false;
+    }
+    let mut saw_vertical_side = false;
+    for row_idx in start_row..=end_row {
+        let Some(row) = grid.row_at_abs(row_idx) else {
+            return false;
+        };
+        let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
+        let requested_end =
+            if row_idx == end_row { end_col.saturating_add(1) } else { row.len() }.min(row.len());
+        let Some((_, frame)) = detached_right_frame(row, col_start, requested_end) else {
+            return false;
+        };
+        if row_idx == end_row {
+            return saw_vertical_side && is_lower_right_frame_corner(frame);
+        }
+        if !is_vertical_frame_side(frame) {
+            return false;
+        }
+        saw_vertical_side = true;
+    }
+    false
+}
+
+fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(usize, char)> {
     if col_end != row.len() || col_end <= col_start {
-        return col_end;
+        return None;
     }
     let mut last_non_space = col_end;
     while last_non_space > col_start && row[last_non_space - 1].ch.is_whitespace() {
         last_non_space -= 1;
     }
     if last_non_space == col_start {
-        return col_end;
+        return None;
     }
     let frame_col = last_non_space - 1;
     let frame = row[frame_col].ch;
@@ -240,18 +278,22 @@ fn plain_text_row_end(row: &Row, col_start: usize, col_end: usize) -> usize {
     let detached = frame_col > col_start
         && !row[frame_col - 1].flags.contains(CellFlags::WIDE_CONT)
         && row[frame_col - 1].ch.is_whitespace();
-    if !at_right_edge || !detached || !is_box_drawing(frame) {
-        return col_end;
+    if !at_right_edge || !detached {
+        return None;
     }
     let mut content_end = frame_col;
     while content_end > col_start && row[content_end - 1].ch.is_whitespace() {
         content_end -= 1;
     }
-    content_end
+    Some((content_end, frame))
 }
 
-fn is_box_drawing(ch: char) -> bool {
-    ('\u{2500}'..='\u{257f}').contains(&ch)
+fn is_vertical_frame_side(ch: char) -> bool {
+    matches!(ch, '│' | '┃' | '┆' | '┇' | '┊' | '┋' | '╎' | '╏' | '║')
+}
+
+fn is_lower_right_frame_corner(ch: char) -> bool {
+    matches!(ch, '┘' | '┙' | '┚' | '┛' | '╛' | '╜' | '╝' | '╯')
 }
 
 /// Connector characters that count as part of a word in addition to

@@ -1,9 +1,7 @@
 use super::*;
 use crate::proto::ServerMsg;
 use crossbeam_channel::bounded;
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Cross-platform: a fresh server has no sessions, and control operations on
 /// unknown panes/sessions surface an error instead of panicking. Guards the
@@ -92,6 +90,56 @@ fn pane_exit_releases_subscriber_when_control_mailbox_stays_full() {
     assert!(subscriber.lock().is_none(), "exited pane must release its subscriber sender");
     assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
     assert!(rx.try_recv().is_err(), "timed-out exit must not replace queued control");
+}
+
+#[test]
+fn pane_exit_drain_forwards_all_buffered_output() {
+    let (out_tx, out_rx) = bounded(4);
+    out_tx.send(b"one".to_vec()).unwrap();
+    out_tx.send(b"two".to_vec()).unwrap();
+    let replay = Mutex::new(VecDeque::new());
+    let (subscriber_tx, subscriber_rx) = bounded(4);
+    let subscriber = Mutex::new(Some(SubscriberSink::new(subscriber_tx, subscriber_rx.clone())));
+
+    drain_ready_pane_output(&out_rx, &replay, &subscriber, 7);
+
+    assert_eq!(replay.lock().iter().copied().collect::<Vec<_>>(), b"onetwo");
+    assert!(matches!(
+        subscriber_rx.recv(),
+        Ok(ServerMsg::Output { pane_id: 7, bytes }) if bytes == b"one"
+    ));
+    assert!(matches!(
+        subscriber_rx.recv(),
+        Ok(ServerMsg::Output { pane_id: 7, bytes }) if bytes == b"two"
+    ));
+    assert!(subscriber_rx.try_recv().is_err());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn naturally_exited_pane_is_reaped_from_its_session() {
+    #[cfg(unix)]
+    let command = "/usr/bin/true";
+    #[cfg(windows)]
+    let command = "whoami.exe";
+
+    let state = ServerState::new();
+    let (session_id, pane_id) = state.spawn(command, 80, 24).expect("spawn short-lived shell");
+    #[cfg(windows)]
+    state.input(pane_id, b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while state.session_count() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(state.session_count(), 0, "natural exit must remove the empty session");
+    assert!(state.kill_pane(pane_id).is_err(), "naturally reaped pane must be unknown");
+    let (tx, rx) = bounded(CHANNEL_CAP);
+    assert!(
+        state.attach(session_id, SubscriberSink::new(tx, rx)).is_err(),
+        "empty reaped session must be unknown"
+    );
 }
 
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,

@@ -65,6 +65,11 @@ of terminal correctness rather than a paint optimization:
   Primary-screen panes retain narrow dirty-row damage.
 - VT/grid mutations mark affected rows in the same frame, including scrolling,
   insert/delete line, reverse index, erase, resize, and wide-cell repair.
+- Grid geometry budgets include retained row allocation, not only visible
+  `cols × rows`; column shrink compacts surviving rows before later row growth.
+- Clipboard serialization preserves isolated or incomplete right-edge
+  box-drawing text and removes only a coherent multi-row side ending in a
+  lower-right frame corner.
 - Windows software rendering keeps the established full-surface presenter path;
   it is not coupled to retained GPU damage decisions.
 - Pane VT workers never call native window APIs. After output coalescing they
@@ -88,6 +93,11 @@ allocation budget before FreeType may decode their pixels.
 PTY handles own their native reader and writer threads. Teardown closes master
 ownership, cancels pending Windows synchronous I/O, terminates the Unix process
 group, and waits only for bounded thread and child-exit deadlines.
+Terminal-input enqueue remains non-blocking and bounded; saturation,
+disconnection, and oversized messages return typed errors that retain the
+rejected bytes instead of reporting false success. The mux observes natural
+child exit independently of PTY output EOF, removes exited panes, and prunes
+empty sessions.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,

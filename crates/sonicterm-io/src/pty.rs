@@ -47,12 +47,63 @@ pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 
+/// A terminal-input message that could not be queued without blocking.
+#[derive(Debug, thiserror::Error)]
+pub enum PtyInputError {
+    /// The message exceeds [`MAX_PTY_INPUT_MESSAGE_BYTES`].
+    #[error("PTY input message exceeds the per-message byte limit")]
+    MessageTooLarge(Vec<u8>),
+    /// The bounded writer queue has no available slot.
+    #[error("PTY input writer queue is full")]
+    QueueFull(Vec<u8>),
+    /// The PTY writer has already stopped.
+    #[error("PTY input writer is disconnected")]
+    WriterDisconnected(Vec<u8>),
+}
+
+impl PtyInputError {
+    /// Recover the rejected bytes so a caller can retry or report their size.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::MessageTooLarge(bytes)
+            | Self::QueueFull(bytes)
+            | Self::WriterDisconnected(bytes) => bytes,
+        }
+    }
+}
+
+/// Cloneable, non-blocking probe for a PTY child process's exit state.
+#[derive(Clone)]
+pub struct PtyChildExitProbe {
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+}
+
+impl PtyChildExitProbe {
+    /// Return whether the child has exited without waiting for it.
+    pub fn has_exited(&self) -> Result<bool> {
+        Ok(self.child.lock().try_wait()?.is_some())
+    }
+}
+
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
     crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
 }
 
 fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
+}
+
+fn try_queue_pty_input(tx: &Sender<Outgoing>, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+    if !pty_input_message_allowed(bytes.len()) {
+        return Err(PtyInputError::MessageTooLarge(bytes));
+    }
+    tx.try_send(bytes).map_err(|error| match error {
+        crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
+        crossbeam_channel::TrySendError::Disconnected(bytes) => {
+            PtyInputError::WriterDisconnected(bytes)
+        }
+    })
 }
 
 #[must_use]
@@ -146,7 +197,6 @@ pub struct PtyHandle {
     writer_cancel: Sender<()>,
     reader_thread: PtyIoThread,
     writer_thread: PtyIoThread,
-    input_queue_warned: std::sync::atomic::AtomicBool,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
@@ -211,41 +261,18 @@ impl PtyHandle {
         &self.shell_program_path
     }
 
+    /// Build a cloneable probe for consumers that must observe natural exit
+    /// even when a platform PTY reader remains blocked until master teardown.
+    pub fn child_exit_probe(&self) -> PtyChildExitProbe {
+        PtyChildExitProbe { child: self.child.clone() }
+    }
+
     /// Queue terminal input without blocking the event-loop thread.
-    pub fn send_input_nonblocking(&self, bytes: Vec<u8>) {
-        if !pty_input_message_allowed(bytes.len()) {
-            if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!(
-                    bytes = bytes.len(),
-                    max_bytes = MAX_PTY_INPUT_MESSAGE_BYTES,
-                    "PTY input dropped because one message exceeds the byte limit"
-                );
-            }
-            return;
-        }
-        match self.in_tx.try_send(bytes) {
-            Ok(()) => {
-                self.input_queue_warned
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-            Err(crossbeam_channel::TrySendError::Full(bytes)) => {
-                if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    tracing::warn!(
-                        bytes = bytes.len(),
-                        capacity = PTY_INPUT_QUEUE_CAPACITY,
-                        "PTY input dropped because the writer queue is full"
-                    );
-                }
-            }
-            Err(crossbeam_channel::TrySendError::Disconnected(bytes)) => {
-                if !self.input_queue_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    tracing::warn!(
-                        bytes = bytes.len(),
-                        "PTY input dropped because the writer is disconnected"
-                    );
-                }
-            }
-        }
+    ///
+    /// On failure, the error retains the rejected bytes so the caller can
+    /// retry or notify the user instead of silently losing terminal input.
+    pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        try_queue_pty_input(&self.in_tx, bytes)
     }
 }
 
@@ -420,7 +447,6 @@ impl PtyHandle {
             writer_cancel,
             reader_thread,
             writer_thread,
-            input_queue_warned: std::sync::atomic::AtomicBool::new(false),
             child: Arc::new(Mutex::new(child)),
             shell_program_path: cmd.to_string(),
         })

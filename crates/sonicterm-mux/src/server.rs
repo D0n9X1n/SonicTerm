@@ -18,7 +18,7 @@ use std::{
     io::{Read, Write},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -42,6 +42,8 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 pub const CHANNEL_CAP: usize = 4096;
 
 const SUBSCRIBER_CONTROL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const PANE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const PANE_EXIT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 /// One subscriber's bounded mailbox sender.
 #[derive(Clone)]
@@ -163,13 +165,17 @@ impl ServerState {
     }
 
     /// Spawn a new pane in a fresh session and return (session_id, pane_id).
-    pub fn spawn(&self, cmd: &str, cols: u16, rows: u16) -> Result<(SessionId, PaneId)> {
+    pub fn spawn(self: &Arc<Self>, cmd: &str, cols: u16, rows: u16) -> Result<(SessionId, PaneId)> {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let pane_id = self.next_pane.fetch_add(1, Ordering::Relaxed);
-        let pane = build_pane(pane_id, cmd, cols, rows)?;
+        let (pane, exited) = build_pane(pane_id, cmd, cols, rows, Arc::downgrade(self))?;
         let mut sessions = self.sessions.lock();
         let session = Session { id: session_id, panes: HashMap::from([(pane_id, pane)]) };
         sessions.insert(session_id, session);
+        drop(sessions);
+        if exited.load(Ordering::Acquire) {
+            self.reap_pane(pane_id);
+        }
         Ok((session_id, pane_id))
     }
 
@@ -262,14 +268,36 @@ impl ServerState {
     /// Remove a pane from its session and SIGKILL its child. Errors if no
     /// session contains a pane with that id.
     pub fn kill_pane(&self, pane_id: PaneId) -> Result<()> {
-        let mut sessions = self.sessions.lock();
-        for session in sessions.values_mut() {
-            if let Some(pane) = session.panes.remove(&pane_id) {
-                pane.kill();
-                return Ok(());
+        let pane = self.take_pane(pane_id).ok_or_else(|| anyhow!("unknown pane {pane_id}"))?;
+        pane.kill();
+        Ok(())
+    }
+
+    fn reap_pane(&self, pane_id: PaneId) {
+        drop(self.take_pane(pane_id));
+    }
+
+    fn take_pane(&self, pane_id: PaneId) -> Option<Pane> {
+        let (pane, empty_session) = {
+            let mut sessions = self.sessions.lock();
+            let session_id = sessions.iter().find_map(|(session_id, session)| {
+                session.panes.contains_key(&pane_id).then_some(*session_id)
+            })?;
+            let session = sessions.get_mut(&session_id).expect("session found above");
+            let pane = session.panes.remove(&pane_id).expect("pane found above");
+            let empty_session = session.panes.is_empty().then_some(session_id);
+            if empty_session.is_some() {
+                sessions.remove(&session_id);
+            }
+            (pane, empty_session)
+        };
+        if let Some(session_id) = empty_session {
+            let mut attached = self.attached.lock();
+            if *attached == Some(session_id) {
+                *attached = None;
             }
         }
-        Err(anyhow!("unknown pane {pane_id}"))
+        Some(pane)
     }
 }
 
@@ -295,17 +323,56 @@ fn notify_subscriber_exit(subscriber: &Mutex<Option<SubscriberSink>>, pane_id: P
     }
 }
 
-fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> {
+fn forward_pane_output<T: AsRef<[u8]>>(
+    chunk: T,
+    replay: &Mutex<VecDeque<u8>>,
+    subscriber: &Mutex<Option<SubscriberSink>>,
+    pane_id: PaneId,
+) {
+    let bytes = chunk.as_ref();
+    {
+        let mut replay = replay.lock();
+        replay.extend(bytes.iter().copied());
+        while replay.len() > REPLAY_CAP {
+            replay.pop_front();
+        }
+    }
+    let subscriber = subscriber.lock().clone();
+    if let Some(sink) = subscriber {
+        let _ = sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: bytes.to_vec() });
+    }
+}
+
+fn drain_ready_pane_output<T: AsRef<[u8]>>(
+    out_rx: &Receiver<T>,
+    replay: &Mutex<VecDeque<u8>>,
+    subscriber: &Mutex<Option<SubscriberSink>>,
+    pane_id: PaneId,
+) {
+    while let Ok(chunk) = out_rx.try_recv() {
+        forward_pane_output(chunk, replay, subscriber, pane_id);
+    }
+}
+
+fn build_pane(
+    pane_id: PaneId,
+    cmd: &str,
+    cols: u16,
+    rows: u16,
+    server: Weak<ServerState>,
+) -> Result<(Pane, Arc<AtomicBool>)> {
     // Spawn through the shared sonicterm-io PTY seam. It owns the openpty,
     // the reader/writer threads, the deduped resize closure, and the robust
     // kill-on-Drop (SIGKILL + bounded reap) that the old hand-rolled path
     // lacked. It also applies the same TERM/COLORTERM/TERM_PROGRAM child
     // env as the GUI pane path via `apply_child_pty_env`.
     let pty = PtyHandle::spawn(cmd, cols, rows)?;
+    let child_exit = pty.child_exit_probe();
 
     let replay = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(REPLAY_CAP)));
     let subscriber: Arc<Mutex<Option<SubscriberSink>>> = Arc::new(Mutex::new(None));
     let alive = Arc::new(AtomicBool::new(true));
+    let exited = Arc::new(AtomicBool::new(false));
 
     // Replay reader thread: drain the PTY's output channel into the replay
     // ring + (optional) subscriber. crossbeam is MPMC, so cloning `out_rx`
@@ -314,39 +381,63 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
     let r_replay = replay.clone();
     let r_sub = subscriber.clone();
     let r_alive = alive.clone();
+    let r_exited = exited.clone();
     let reader_thread = thread::spawn(move || {
-        while r_alive.load(Ordering::Acquire) {
-            // Recv blocks until data or channel close. On pane kill the PTY
-            // child dies, its reader thread drops the sender, and this recv
-            // returns Err — unblocking the loop even without the alive flag.
-            let Ok(chunk) = out_rx.recv() else { break };
-            {
-                let mut rb = r_replay.lock();
-                rb.extend(chunk.iter().copied());
-                while rb.len() > REPLAY_CAP {
-                    rb.pop_front();
+        let mut exit_probe_warned = false;
+        let mut child_exit_observed = false;
+        let child_has_exited = |exit_probe_warned: &mut bool| match child_exit.has_exited() {
+            Ok(exited) => exited,
+            Err(error) => {
+                if !*exit_probe_warned {
+                    tracing::warn!(pane_id, %error, "failed to probe mux pane child exit");
+                    *exit_probe_warned = true;
                 }
+                false
             }
-            let sub = r_sub.lock().clone();
-            if let Some(sink) = sub {
-                let _ =
-                    sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: chunk.to_vec() });
-            }
+        };
+        while r_alive.load(Ordering::Acquire) {
+            let wait =
+                if child_exit_observed { PANE_EXIT_DRAIN_GRACE } else { PANE_EXIT_POLL_INTERVAL };
+            let chunk = match out_rx.recv_timeout(wait) {
+                Ok(chunk) => chunk,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if !r_alive.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if child_exit_observed {
+                        break;
+                    }
+                    if child_has_exited(&mut exit_probe_warned) {
+                        drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
+                        child_exit_observed = true;
+                    }
+                    continue;
+                }
+            };
+            forward_pane_output(chunk, &r_replay, &r_sub, pane_id);
         }
         notify_subscriber_exit(&r_sub, pane_id);
+        r_exited.store(true, Ordering::Release);
+        if let Some(server) = server.upgrade() {
+            server.reap_pane(pane_id);
+        }
     });
 
-    Ok(Pane {
-        id: pane_id,
-        cmd: cmd.to_string(),
-        cols,
-        rows,
-        pty,
-        replay,
-        subscriber,
-        alive,
-        _reader: reader_thread,
-    })
+    Ok((
+        Pane {
+            id: pane_id,
+            cmd: cmd.to_string(),
+            cols,
+            rows,
+            pty,
+            replay,
+            subscriber,
+            alive,
+            _reader: reader_thread,
+        },
+        exited,
+    ))
 }
 
 /// Handle one connected client: a request reader loop on the input stream,
