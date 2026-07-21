@@ -3,7 +3,7 @@
 //! Produces a string of the form `#N{icon} {parent}/{leaf}` where:
 //! - `N`  — 1-based tab index (the user-visible position in the bar).
 //! - `{icon}` — a Nerd Font glyph picked from the foreground process name
-//!   (zsh → console, nvim → vim icon, ssh → ssh icon, …). Falls back to a
+//!   (Zsh, Vim/Neovim, SSH, Claude Code, Copilot CLI, …). Falls back to a
 //!   folder glyph when the process is unknown but a cwd is reported.
 //! - `{parent}/{leaf}` — the last two path components of the pane's cwd.
 //!   A single-component path (e.g. `/tmp`) shows as just that component.
@@ -65,22 +65,82 @@ pub fn format_tab_title(
 fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
     if let Some(p) = process {
         match p.to_ascii_lowercase().as_str() {
-            "zsh" | "bash" | "fish" | "sh" | "dash" => return '\u{F018D}', // md_console
-            "nvim" | "vim" | "vi" | "nvi" => return '\u{E62B}',            // custom_vim
-            "ssh" | "mosh" => return '\u{F08C0}',                          // md_ssh
-            "git" | "lazygit" | "tig" => return '\u{F1D3}',                // fa_git
-            "cargo" | "rustc" | "rust-analyzer" => return '\u{F1617}',     // md_language_rust
-            "node" | "npm" | "npx" | "yarn" | "pnpm" | "deno" | "bun" => return '\u{F1842}', // md_nodejs
-            "python" | "python3" | "ipython" | "pip" | "pip3" => return '\u{F0320}', // fa_python
-            "docker" | "podman" => return '\u{F0867}',                               // md_docker
-            "make" | "gmake" | "cmake" | "ninja" => return '\u{F05B4}', // md_hammer_wrench
+            "claude" | "claude-code" => return '\u{F0674}', // md-creation
+            "copilot" | "github-copilot" | "github-copilot-cli" => {
+                return '\u{F4B8}'; // oct-copilot
+            }
+            "zsh" => return '\u{E84F}',                 // dev-ohmyzsh
+            "bash" => return '\u{E760}',                // dev-bash
+            "fish" => return '\u{EE41}',                // fa-fish
+            "sh" | "dash" => return '\u{E691}',         // seti-shell
+            "pwsh" | "powershell" => return '\u{EBC7}', // cod-terminal-powershell
+            "cmd" => return '\u{EBC4}',                 // cod-terminal-cmd
+            "nvim" | "vim" | "vi" | "nvi" => return '\u{E62B}', // custom-vim
+            "code" | "code-insiders" | "codium" | "vscodium" => {
+                return '\u{E8DA}'; // dev-vscode
+            }
+            "emacs" | "emacsclient" => return '\u{E7CF}', // dev-emacs
+            "nano" => return '\u{E838}',                  // dev-nano
+            "ssh" | "mosh" => return '\u{F08C0}',         // md-ssh
+            "tmux" => return '\u{EBC8}',                  // cod-terminal-tmux
+            "screen" => return '\u{EB4C}',                // cod-screen-full
+            "git" | "lazygit" | "tig" => return '\u{F1D3}', // fa-git
+            "gh" | "hub" => return '\u{F470}',            // oct-logo-github
+            "glab" => return '\u{E7EB}',                  // dev-gitlab
+            "cargo" | "rustc" | "rust-analyzer" => return '\u{F1617}', // md-language-rust
+            "python" | "python3" | "ipython" | "pip" | "pip3" => {
+                return '\u{F0320}'; // md-language-python
+            }
+            "go" | "gofmt" | "gopls" => return '\u{E724}', // dev-go
+            "java" | "javac" => return '\u{E738}',         // dev-java
+            "mvn" | "mvnw" => return '\u{E82C}',           // dev-maven
+            "gradle" | "gradlew" => return '\u{E7F2}',     // dev-gradle
+            "ruby" | "irb" | "bundle" | "bundler" | "gem" | "rails" => {
+                return '\u{E739}'; // dev-ruby
+            }
+            "php" | "php-fpm" => return '\u{E73D}', // dev-php
+            "composer" => return '\u{E783}',        // dev-composer
+            "lua" | "luajit" => return '\u{E826}',  // dev-lua
+            "swift" | "swiftc" => return '\u{E755}', // dev-swift
+            "zig" => return '\u{E8EF}',             // dev-zig
+            "dotnet" => return '\u{E77F}',          // dev-dotnet
+            "node" | "nodejs" => return '\u{E719}', // dev-nodejs
+            "npm" | "npx" => return '\u{E71E}',     // dev-npm
+            "pnpm" => return '\u{E865}',            // dev-pnpm
+            "yarn" | "yarnpkg" => return '\u{E8EC}', // dev-yarn
+            "deno" => return '\u{E7C0}',            // dev-denojs
+            "bun" => return '\u{E76F}',             // dev-bun
+            "docker" | "docker-compose" => return '\u{E7B0}', // dev-docker
+            "podman" => return '\u{E866}',          // dev-podman
+            "make" | "gmake" => return '\u{F1323}', // md-hammer-wrench
+            "cmake" => return '\u{E794}',           // dev-cmake
+            "ninja" => return '\u{F0774}',          // md-ninja
+            "kubectl" | "k9s" | "minikube" => return '\u{E81D}', // dev-kubernetes
+            "helm" => return '\u{E7FB}',            // dev-helm
+            "terraform" | "tofu" | "opentofu" => return '\u{E8BD}', // dev-terraform
+            "ansible" | "ansible-playbook" => return '\u{E723}', // dev-ansible
+            "pulumi" => return '\u{E873}',          // dev-pulumi
+            "aws" => return '\u{E7AD}',             // dev-aws
+            "az" | "azure" => return '\u{E754}',    // dev-azure
+            "gcloud" => return '\u{E7F1}',          // dev-googlecloud
+            "cloudflared" | "wrangler" => return '\u{E792}', // dev-cloudflare
+            "vercel" => return '\u{E8D3}',          // dev-vercel
+            "netlify" => return '\u{E83C}',         // dev-netlify
+            "psql" | "postgres" | "postmaster" => return '\u{E76E}', // dev-postgresql
+            "mysql" | "mysqld" => return '\u{E704}', // dev-mysql
+            "mariadb" | "mariadbd" => return '\u{E828}', // dev-mariadb
+            "redis-cli" | "redis-server" | "redis-sentinel" => {
+                return '\u{E76D}'; // dev-redis
+            }
+            "sqlite" | "sqlite3" => return '\u{E7C4}', // dev-sqlite
+            "mongo" | "mongod" | "mongosh" => return '\u{E7A4}', // dev-mongodb
             _ => {}
         }
     }
     if has_cwd {
-        '\u{F07B}' // fa_folder
+        '\u{F07B}' // fa-folder
     } else {
-        '\u{F489}' // nf-oct-terminal — generic shell fallback
+        '\u{F489}' // oct-terminal — generic shell fallback
     }
 }
 

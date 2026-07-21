@@ -33,15 +33,15 @@ pub fn foreground_process(_pid: u32) -> Option<String> {
     None
 }
 
-/// Normalize a process name reported by the OS into a stable key.
-/// - strips a leading `-` (login-shell convention)
-/// - returns only the file basename
-/// - lowercases on macOS (libproc is case-preserving but everyone matches
-///   on lowercase keys)
+/// Normalize a process name reported by the OS into a stable exact-match key.
+///
+/// Both POSIX and Windows paths reduce to their basename. One login-shell `-`
+/// prefix and one case-insensitive `.exe` suffix are removed before matching.
 pub fn normalize_proc_name(raw: &str) -> String {
-    let basename = raw.rsplit('/').next().unwrap_or(raw);
-    let trimmed = basename.strip_prefix('-').unwrap_or(basename);
-    trimmed.to_ascii_lowercase()
+    let basename = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let basename = basename.strip_prefix('-').unwrap_or(basename);
+    let lowercase = basename.to_ascii_lowercase();
+    lowercase.strip_suffix(".exe").unwrap_or(&lowercase).to_string()
 }
 
 #[cfg(target_os = "macos")]
@@ -93,4 +93,6 @@ mod macos {
     }
 }
 
-// Unit tests for `normalize_proc_name` live in `tests/proc_info.rs`.
+#[cfg(test)]
+#[path = "proc_info_tests.rs"]
+mod proc_info_tests;

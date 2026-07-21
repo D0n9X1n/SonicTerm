@@ -112,6 +112,82 @@ for family, style, weight, stretch, face index, variation, and codepoint coverag
 Variable-font metadata is optional; malformed or missing axes fall back to base
 weight/width values.
 
+## Tab title process icons
+
+When the OS reports a foreground executable, SonicTerm normalizes its basename
+and performs an exact-key lookup. Normalization accepts `/` and `\\` path
+separators, removes one login-shell `-` prefix and one case-insensitive trailing
+`.exe`, and lowercases the result. It does not inspect arguments, terminal output, or window
+titles. Unknown processes retain the folder or terminal fallback icon.
+
+These glyphs use Unicode Private Use Area (PUA) codepoints. A GitHub or browser
+preview can therefore show a blank box, replacement character, or unrelated
+symbol when its page font lacks the same mapping. SonicTerm renders them with
+its bundled Rec Mono St.Helens font; the identity column below is the exact
+glyph name in all four shipped font faces.
+
+| Category | Application / family | Normalized aliases | Glyph | Bundled glyph identity | Codepoint |
+| --- | --- | --- | :---: | --- | --- |
+| AI | Claude Code | `claude`, `claude-code` | 󰙴 | `md-creation` | U+F0674 |
+| AI | GitHub Copilot CLI | `copilot`, `github-copilot`, `github-copilot-cli` |  | `oct-copilot` | U+F4B8 |
+| Shell | Zsh | `zsh` |  | `dev-ohmyzsh` | U+E84F |
+| Shell | Bash | `bash` |  | `dev-bash` | U+E760 |
+| Shell | Fish | `fish` |  | `fa-fish` | U+EE41 |
+| Shell | POSIX shell | `sh`, `dash` |  | `seti-shell` | U+E691 |
+| Shell | PowerShell | `pwsh`, `powershell` |  | `cod-terminal-powershell` | U+EBC7 |
+| Shell | Command Prompt | `cmd` |  | `cod-terminal-cmd` | U+EBC4 |
+| Editor | Vim / Neovim | `nvim`, `vim`, `vi`, `nvi` |  | `custom-vim` | U+E62B |
+| Editor | Visual Studio Code | `code`, `code-insiders`, `codium`, `vscodium` |  | `dev-vscode` | U+E8DA |
+| Editor | Emacs | `emacs`, `emacsclient` |  | `dev-emacs` | U+E7CF |
+| Editor | Nano | `nano` |  | `dev-nano` | U+E838 |
+| Remote / mux | SSH / Mosh | `ssh`, `mosh` | 󰣀 | `md-ssh` | U+F08C0 |
+| Remote / mux | tmux | `tmux` |  | `cod-terminal-tmux` | U+EBC8 |
+| Remote / mux | GNU Screen | `screen` |  | `cod-screen-full` | U+EB4C |
+| Source control | Git | `git`, `lazygit`, `tig` |  | `fa-git` | U+F1D3 |
+| Source control | GitHub CLI | `gh`, `hub` |  | `oct-logo-github` | U+F470 |
+| Source control | GitLab CLI | `glab` |  | `dev-gitlab` | U+E7EB |
+| Language / build | Rust | `cargo`, `rustc`, `rust-analyzer` | 󱘗 | `md-language-rust` | U+F1617 |
+| Language / build | Python | `python`, `python3`, `ipython`, `pip`, `pip3` | 󰌠 | `md-language-python` | U+F0320 |
+| Language / build | Go | `go`, `gofmt`, `gopls` |  | `dev-go` | U+E724 |
+| Language / build | Java | `java`, `javac` |  | `dev-java` | U+E738 |
+| Language / build | Maven | `mvn`, `mvnw` |  | `dev-maven` | U+E82C |
+| Language / build | Gradle | `gradle`, `gradlew` |  | `dev-gradle` | U+E7F2 |
+| Language / build | Ruby | `ruby`, `irb`, `bundle`, `bundler`, `gem`, `rails` |  | `dev-ruby` | U+E739 |
+| Language / build | PHP | `php`, `php-fpm` |  | `dev-php` | U+E73D |
+| Language / build | Composer | `composer` |  | `dev-composer` | U+E783 |
+| Language / build | Lua | `lua`, `luajit` |  | `dev-lua` | U+E826 |
+| Language / build | Swift | `swift`, `swiftc` |  | `dev-swift` | U+E755 |
+| Language / build | Zig | `zig` |  | `dev-zig` | U+E8EF |
+| Language / build | .NET | `dotnet` |  | `dev-dotnet` | U+E77F |
+| Package / runtime | Node.js | `node`, `nodejs` |  | `dev-nodejs` | U+E719 |
+| Package / runtime | npm | `npm`, `npx` |  | `dev-npm` | U+E71E |
+| Package / runtime | pnpm | `pnpm` |  | `dev-pnpm` | U+E865 |
+| Package / runtime | Yarn | `yarn`, `yarnpkg` |  | `dev-yarn` | U+E8EC |
+| Package / runtime | Deno | `deno` |  | `dev-denojs` | U+E7C0 |
+| Package / runtime | Bun | `bun` |  | `dev-bun` | U+E76F |
+| Container / build | Docker | `docker`, `docker-compose` |  | `dev-docker` | U+E7B0 |
+| Container / build | Podman | `podman` |  | `dev-podman` | U+E866 |
+| Container / build | Make | `make`, `gmake` | 󱌣 | `md-hammer-wrench` | U+F1323 |
+| Container / build | CMake | `cmake` |  | `dev-cmake` | U+E794 |
+| Container / build | Ninja | `ninja` | 󰝴 | `md-ninja` | U+F0774 |
+| DevOps / cloud | Kubernetes | `kubectl`, `k9s`, `minikube` |  | `dev-kubernetes` | U+E81D |
+| DevOps / cloud | Helm | `helm` |  | `dev-helm` | U+E7FB |
+| DevOps / cloud | Terraform / OpenTofu | `terraform`, `tofu`, `opentofu` |  | `dev-terraform` | U+E8BD |
+| DevOps / cloud | Ansible | `ansible`, `ansible-playbook` |  | `dev-ansible` | U+E723 |
+| DevOps / cloud | Pulumi | `pulumi` |  | `dev-pulumi` | U+E873 |
+| DevOps / cloud | AWS CLI | `aws` |  | `dev-aws` | U+E7AD |
+| DevOps / cloud | Azure CLI | `az`, `azure` |  | `dev-azure` | U+E754 |
+| DevOps / cloud | Google Cloud CLI | `gcloud` |  | `dev-googlecloud` | U+E7F1 |
+| DevOps / cloud | Cloudflare | `cloudflared`, `wrangler` |  | `dev-cloudflare` | U+E792 |
+| DevOps / cloud | Vercel | `vercel` |  | `dev-vercel` | U+E8D3 |
+| DevOps / cloud | Netlify | `netlify` |  | `dev-netlify` | U+E83C |
+| Database | PostgreSQL | `psql`, `postgres`, `postmaster` |  | `dev-postgresql` | U+E76E |
+| Database | MySQL | `mysql`, `mysqld` |  | `dev-mysql` | U+E704 |
+| Database | MariaDB | `mariadb`, `mariadbd` |  | `dev-mariadb` | U+E828 |
+| Database | Redis | `redis-cli`, `redis-server`, `redis-sentinel` |  | `dev-redis` | U+E76D |
+| Database | SQLite | `sqlite`, `sqlite3` |  | `dev-sqlite` | U+E7C4 |
+| Database | MongoDB | `mongo`, `mongod`, `mongosh` |  | `dev-mongodb` | U+E7A4 |
+
 ## Rasterization
 
 `sonicterm-engine::FontStack` is the renderer-facing adapter. It implements the
@@ -305,6 +381,78 @@ HarfBuzz cluster 会映射回 cell 列。缺失 cluster 依次尝试 fallback fa
 内置主字体族是 `Rec Mono St.Helens`；回退链包含常见等宽字体、Nerd Font symbols 和彩色 emoji。
 匹配考虑 family、style、weight、stretch、face index、variation 和码点 coverage。可变字体 metadata 是可选项；
 损坏或缺失轴会回退到基础 weight/width。
+
+## 标签页进程图标
+
+OS 报告前台可执行文件后，SonicTerm 会规范化其 basename，并执行精确 key 查找。
+规范化同时接受 `/` 和 `\\` 路径分隔符，去掉一个 login-shell `-` 前缀与一个不区分大小写的末尾
+`.exe`，再转换为小写；不会检查参数、终端输出或窗口标题。未知进程仍使用文件夹或终端 fallback 图标。
+
+这些 glyph 使用 Unicode Private Use Area（PUA）码点。如果 GitHub 或浏览器页面字体没有相同映射，
+预览可能显示空框、替换字符或无关符号。SonicTerm 使用内置 Rec Mono St.Helens 字体渲染；
+下表 identity 列是全部四个随附字体 face 中的精确 glyph 名称。
+
+| 类别 | 应用 / 家族 | 规范化 alias | Glyph | 内置 glyph identity | 码点 |
+| --- | --- | --- | :---: | --- | --- |
+| AI | Claude Code | `claude`, `claude-code` | 󰙴 | `md-creation` | U+F0674 |
+| AI | GitHub Copilot CLI | `copilot`, `github-copilot`, `github-copilot-cli` |  | `oct-copilot` | U+F4B8 |
+| Shell | Zsh | `zsh` |  | `dev-ohmyzsh` | U+E84F |
+| Shell | Bash | `bash` |  | `dev-bash` | U+E760 |
+| Shell | Fish | `fish` |  | `fa-fish` | U+EE41 |
+| Shell | POSIX shell | `sh`, `dash` |  | `seti-shell` | U+E691 |
+| Shell | PowerShell | `pwsh`, `powershell` |  | `cod-terminal-powershell` | U+EBC7 |
+| Shell | Command Prompt | `cmd` |  | `cod-terminal-cmd` | U+EBC4 |
+| Editor | Vim / Neovim | `nvim`, `vim`, `vi`, `nvi` |  | `custom-vim` | U+E62B |
+| Editor | Visual Studio Code | `code`, `code-insiders`, `codium`, `vscodium` |  | `dev-vscode` | U+E8DA |
+| Editor | Emacs | `emacs`, `emacsclient` |  | `dev-emacs` | U+E7CF |
+| Editor | Nano | `nano` |  | `dev-nano` | U+E838 |
+| Remote / mux | SSH / Mosh | `ssh`, `mosh` | 󰣀 | `md-ssh` | U+F08C0 |
+| Remote / mux | tmux | `tmux` |  | `cod-terminal-tmux` | U+EBC8 |
+| Remote / mux | GNU Screen | `screen` |  | `cod-screen-full` | U+EB4C |
+| Source control | Git | `git`, `lazygit`, `tig` |  | `fa-git` | U+F1D3 |
+| Source control | GitHub CLI | `gh`, `hub` |  | `oct-logo-github` | U+F470 |
+| Source control | GitLab CLI | `glab` |  | `dev-gitlab` | U+E7EB |
+| Language / build | Rust | `cargo`, `rustc`, `rust-analyzer` | 󱘗 | `md-language-rust` | U+F1617 |
+| Language / build | Python | `python`, `python3`, `ipython`, `pip`, `pip3` | 󰌠 | `md-language-python` | U+F0320 |
+| Language / build | Go | `go`, `gofmt`, `gopls` |  | `dev-go` | U+E724 |
+| Language / build | Java | `java`, `javac` |  | `dev-java` | U+E738 |
+| Language / build | Maven | `mvn`, `mvnw` |  | `dev-maven` | U+E82C |
+| Language / build | Gradle | `gradle`, `gradlew` |  | `dev-gradle` | U+E7F2 |
+| Language / build | Ruby | `ruby`, `irb`, `bundle`, `bundler`, `gem`, `rails` |  | `dev-ruby` | U+E739 |
+| Language / build | PHP | `php`, `php-fpm` |  | `dev-php` | U+E73D |
+| Language / build | Composer | `composer` |  | `dev-composer` | U+E783 |
+| Language / build | Lua | `lua`, `luajit` |  | `dev-lua` | U+E826 |
+| Language / build | Swift | `swift`, `swiftc` |  | `dev-swift` | U+E755 |
+| Language / build | Zig | `zig` |  | `dev-zig` | U+E8EF |
+| Language / build | .NET | `dotnet` |  | `dev-dotnet` | U+E77F |
+| Package / runtime | Node.js | `node`, `nodejs` |  | `dev-nodejs` | U+E719 |
+| Package / runtime | npm | `npm`, `npx` |  | `dev-npm` | U+E71E |
+| Package / runtime | pnpm | `pnpm` |  | `dev-pnpm` | U+E865 |
+| Package / runtime | Yarn | `yarn`, `yarnpkg` |  | `dev-yarn` | U+E8EC |
+| Package / runtime | Deno | `deno` |  | `dev-denojs` | U+E7C0 |
+| Package / runtime | Bun | `bun` |  | `dev-bun` | U+E76F |
+| Container / build | Docker | `docker`, `docker-compose` |  | `dev-docker` | U+E7B0 |
+| Container / build | Podman | `podman` |  | `dev-podman` | U+E866 |
+| Container / build | Make | `make`, `gmake` | 󱌣 | `md-hammer-wrench` | U+F1323 |
+| Container / build | CMake | `cmake` |  | `dev-cmake` | U+E794 |
+| Container / build | Ninja | `ninja` | 󰝴 | `md-ninja` | U+F0774 |
+| DevOps / cloud | Kubernetes | `kubectl`, `k9s`, `minikube` |  | `dev-kubernetes` | U+E81D |
+| DevOps / cloud | Helm | `helm` |  | `dev-helm` | U+E7FB |
+| DevOps / cloud | Terraform / OpenTofu | `terraform`, `tofu`, `opentofu` |  | `dev-terraform` | U+E8BD |
+| DevOps / cloud | Ansible | `ansible`, `ansible-playbook` |  | `dev-ansible` | U+E723 |
+| DevOps / cloud | Pulumi | `pulumi` |  | `dev-pulumi` | U+E873 |
+| DevOps / cloud | AWS CLI | `aws` |  | `dev-aws` | U+E7AD |
+| DevOps / cloud | Azure CLI | `az`, `azure` |  | `dev-azure` | U+E754 |
+| DevOps / cloud | Google Cloud CLI | `gcloud` |  | `dev-googlecloud` | U+E7F1 |
+| DevOps / cloud | Cloudflare | `cloudflared`, `wrangler` |  | `dev-cloudflare` | U+E792 |
+| DevOps / cloud | Vercel | `vercel` |  | `dev-vercel` | U+E8D3 |
+| DevOps / cloud | Netlify | `netlify` |  | `dev-netlify` | U+E83C |
+| Database | PostgreSQL | `psql`, `postgres`, `postmaster` |  | `dev-postgresql` | U+E76E |
+| Database | MySQL | `mysql`, `mysqld` |  | `dev-mysql` | U+E704 |
+| Database | MariaDB | `mariadb`, `mariadbd` |  | `dev-mariadb` | U+E828 |
+| Database | Redis | `redis-cli`, `redis-server`, `redis-sentinel` |  | `dev-redis` | U+E76D |
+| Database | SQLite | `sqlite`, `sqlite3` |  | `dev-sqlite` | U+E7C4 |
+| Database | MongoDB | `mongo`, `mongod`, `mongosh` |  | `dev-mongodb` | U+E7A4 |
 
 ## 光栅化
 
