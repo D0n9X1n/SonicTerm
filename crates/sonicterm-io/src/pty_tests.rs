@@ -1,5 +1,13 @@
 use super::*;
 
+#[cfg(windows)]
+static LIVE_PTY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+fn lock_live_pty_test() -> std::sync::MutexGuard<'static, ()> {
+    LIVE_PTY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn env_str<'a>(builder: &'a CommandBuilder, name: &str) -> &'a str {
     builder.get_env(name).and_then(|v| v.to_str()).unwrap()
 }
@@ -209,6 +217,8 @@ fn saturated_pty_input_queue_returns_the_rejected_bytes() {
 #[cfg(any(unix, windows))]
 #[test]
 fn child_exit_probe_observes_short_lived_process() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
     #[cfg(unix)]
     let command = "/usr/bin/true";
     #[cfg(windows)]
@@ -248,6 +258,7 @@ fn multi_megabyte_paste_fits_bounded_input_budget() {
 #[cfg(windows)]
 #[test]
 fn dropping_live_windows_pty_terminates_native_io_threads() {
+    let _live_pty_guard = lock_live_pty_test();
     let baseline = active_pty_io_threads();
     let args = vec![
         "/D".to_string(),
