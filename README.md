@@ -28,8 +28,8 @@ runtime, no required GUI preferences pane, and no global dotfile sprawl. User
 state lives under one directory: `~/.sonicterm`.
 
 Need installation, configuration, keybindings, or theme authoring docs? Read the
-full bilingual docs in the [GitHub Wiki](https://github.com/D0n9X1n/SonicTerm/wiki).
-The README is only the product overview: why SonicTerm exists, what it feels like,
+full bilingual docs in the repository-tracked [`wiki/`](wiki/) directory. The
+README is only the product overview: why SonicTerm exists, what it feels like,
 and why you might want to use it.
 
 ## Screenshots

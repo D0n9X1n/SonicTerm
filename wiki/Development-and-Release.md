@@ -14,7 +14,7 @@ Cargo.toml                 workspace members, shared version/dependencies/lints
 crates/                    22 first-party Rust crates
 assets/                    fonts, themes, keymaps, icons, i18n, screenshots
 docs/                      canonical architecture/logging/modules/packaging docs
-wiki/                      reviewable mirror of the GitHub Wiki
+wiki/                      canonical bilingual user documentation
 scripts/                   flat first-party shell/PowerShell automation
 .github/                   CI, release, issue, PR, and dependency automation
 ```
@@ -185,9 +185,9 @@ if either a DMG or MSI is absent.
 
 ## Manual release checks
 
-Before a release, verify user-facing README, canonical docs, and all GitHub Wiki
-pages against changed config, input, logging, palette, rendering, and window
-behavior. Recommended smoke checks include:
+Before a release, verify user-facing README, canonical docs, and all tracked
+`wiki/` pages against changed config, input, logging, palette, rendering, and
+window behavior. Recommended smoke checks include:
 
 - launch the packaged app;
 - exercise Vim/nvim alternate-screen entry, scrolling, and exit;
@@ -196,20 +196,13 @@ behavior. Recommended smoke checks include:
   responsive and child processes are reaped;
 - inspect hardware/software adapter logs where relevant.
 
-## Documentation and GitHub Wiki workflow
+## Documentation and Wiki workflow
 
-The live GitHub Wiki is a separate repository:
-
-```text
-D0n9X1n/SonicTerm.wiki.git   branch: master   authoritative
-this repository/wiki/        mirror           reviewed in PRs
-```
-
-Always clone the live wiki before editing and synchronize its Markdown pages
-into `wiki/`. Edit and review the mirror with the code change. Publishing is a
-second operation: copy the same changed pages into the wiki repository, commit,
-and push `master`. If the two copies ever disagree, refresh from the live wiki
-before making further edits.
+The repository-tracked `wiki/` directory is the only source of truth for
+SonicTerm's bilingual user documentation. Edit the relevant Markdown pages in
+the same branch and pull request as the behavior they describe so code and user
+guidance are reviewed and versioned together. Do not maintain or publish a
+separate wiki repository.
 
 ## Other automation
 
@@ -252,7 +245,7 @@ Cargo.toml                 workspace member、共享版本/依赖/lint
 crates/                    22 个第一方 Rust crate
 assets/                    字体、主题、keymap、icon、i18n、截图
 docs/                      规范架构/日志/module/打包文档
-wiki/                      GitHub Wiki 的可审查镜像
+wiki/                      规范双语用户文档
 scripts/                   扁平第一方 shell/PowerShell 自动化
 .github/                   CI、发布、issue、PR 和依赖自动化
 ```
@@ -404,7 +397,7 @@ publish job 为全部 DMG/MSI 生成 `SHA256SUMS.txt`，并根据上一个 tag �
 
 ## 手工发布检查
 
-release 前，对照配置、输入、日志、palette、rendering 和 window 行为检查 README、规范 docs 和全部 GitHub Wiki 页面。
+release 前，对照配置、输入、日志、palette、rendering 和 window 行为检查 README、规范 docs 和仓库内全部 `wiki/` 页面。
 建议 smoke check：
 
 - 启动打包后的 app；
@@ -413,17 +406,9 @@ release 前，对照配置、输入、日志、palette、rendering 和 window �
 - 把 tab 拖到子窗口并关闭，确认存活窗口仍响应、子进程被回收；
 - 相关情况下检查硬件/软件 adapter 日志。
 
-## 文档与 GitHub Wiki 工作流
+## 文档与 Wiki 工作流
 
-live GitHub Wiki 是独立仓库：
-
-```text
-D0n9X1n/SonicTerm.wiki.git   branch: master   权威
-本仓库/wiki/                 mirror           经 PR 审查
-```
-
-编辑前总是 clone live wiki，并把 Markdown 同步进 `wiki/`。在代码变更中编辑并审查 mirror。
-发布是第二步：把相同页面复制到 wiki 仓库，commit 并 push `master`。如果两份不同，继续编辑前先从 live wiki 刷新。
+仓库内受版本控制的 `wiki/` 目录是 SonicTerm 双语用户文档的唯一事实来源。请在描述相关行为的同一分支和 pull request 中编辑对应 Markdown 页面，让代码和用户指南一起接受审查并保持版本一致。不要维护或发布独立的 wiki 仓库。
 
 ## 其它自动化
 

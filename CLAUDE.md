@@ -13,9 +13,8 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 - `wiki/` — bilingual user-facing usage/config/keybinding/log/theme docs.
 
 When auditing docs for release blockers, typos, renamed paths, or user-facing
-terminology, include `wiki/` alongside README and `docs/`; the wiki is part of
-the monitored documentation surface. Editing `wiki/` here does **not** change
-the live GitHub Wiki — see [Wiki](#wiki) for the two-repo publish step.
+terminology, include `wiki/` alongside README and `docs/`; `wiki/` is the
+canonical, repository-tracked user documentation surface.
 
 **Canonical documentation rule:** the core tracked `docs/` surface is
 `ARCHITECTURE.md`, `LOGGING.md`, and `MODULES.md`; maintained packaging guidance
@@ -25,9 +24,8 @@ operational logging, diagnostics, and hang-investigation guidance in
 `docs/LOGGING.md`; keep `docs/MODULES.md` limited to the crate map. Do not track
 standalone implementation specs, plans, review audits, version-audit documents,
 or a separate release document in `docs/`. `docs/specs/`, `docs/plans/`, and
-`docs/reviews/` are ignored local working folders. Update README/wiki only when
-user-facing behavior changes; publishing the live wiki remains a separate
-owner-approved action.
+`docs/reviews/` are ignored local working folders. Update README/`wiki/` only
+when user-facing behavior changes.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
@@ -116,44 +114,10 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 
 ## Wiki
 
-The GitHub Wiki is a **separate git repository** (`D0n9X1n/SonicTerm.wiki.git`)
-from this one. The **live wiki is the source of truth.** The `wiki/` folder in
-this repo is a mirror kept in sync with it so the docs can be reviewed in PRs.
-
-| Location | Repo | Role |
-| --- | --- | --- |
-| Live Wiki tab | `D0n9X1n/SonicTerm.wiki.git` (branch `master`) | **authoritative** — rendered at `/SonicTerm/wiki/...` |
-| `wiki/` folder here | `D0n9X1n/SonicTerm.git` (this repo) | mirror copy, reviewed in PRs |
-
-If the two ever disagree, the live wiki wins — refresh the mirror from it.
-
-**To refresh the in-repo mirror from the live wiki** (do this before editing, so
-you start from the authoritative content):
-
-```bash
-WT=$(mktemp -d)
-git clone git@github.com:D0n9X1n/SonicTerm.wiki.git "$WT"
-cp "$WT"/*.md wiki/        # live -> repo mirror
-rm -rf "$WT"
-# commit the wiki/ changes on a branch
-```
-
-**To change a wiki page**, edit `wiki/<Page>.md` here, then publish the same
-file to the live wiki so it stays authoritative (page file name = page title,
-e.g. `Keybindings.md` → `/wiki/Keybindings`):
-
-```bash
-WT=$(mktemp -d)
-git clone git@github.com:D0n9X1n/SonicTerm.wiki.git "$WT"
-cp wiki/Keybindings.md "$WT/Keybindings.md"   # repeat for each changed page
-git -C "$WT" add -A
-git -C "$WT" commit -m "docs(wiki): <summary>"
-git -C "$WT" push origin master                # wiki default branch is `master`
-rm -rf "$WT"
-```
-
-Commit the matching `wiki/` edits in this repo on the same branch so the mirror
-and the live wiki do not drift.
+The repository-tracked `wiki/` directory is the **only source of truth** for
+SonicTerm's bilingual user documentation. Edit and review wiki pages in the
+same branch and pull request as the behavior they describe. Do not clone,
+refresh from, publish to, or otherwise maintain a separate wiki repository.
 
 ## WezTerm
 
