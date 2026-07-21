@@ -669,13 +669,7 @@ impl App {
     pub fn tear_out_apply_child_source_side(&mut self, src_id: WindowId, removed_idx: usize) {
         let src_empty = self.windows.get(&src_id).map(|c| c.tabs.is_empty()).unwrap_or(false);
         if src_empty {
-            if let Some(removed) = self.windows.remove(&src_id) {
-                // Drop the renderer + window explicitly; any leftover
-                // panes (there shouldn't be) drop here, which fires
-                // PtyHandle::Drop and kills their child shells.
-                self.release_child_window_registries(src_id);
-                drop(removed);
-            }
+            self.reap_empty_child(src_id);
             return;
         }
         if let Some(c) = self.windows.get_mut(&src_id) {

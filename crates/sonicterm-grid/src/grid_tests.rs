@@ -360,6 +360,76 @@ fn reshape_releases_row_capacity_above_visible_cell_budget() {
 }
 
 #[test]
+fn adjacent_column_resize_preserves_populated_history_capacity() {
+    let mut grid = Grid::new(100, 24);
+    grid.scrollback_requested_limit = 256;
+    grid.scrollback_limit = 256;
+    for index in 0..256 {
+        let mut cells = vec![Cell::default(); 100];
+        cells[0].ch = char::from(b'a' + (index % 26) as u8);
+        grid.scrollback.push_back(Line::from_flat(cells));
+    }
+    let retained_before =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+
+    grid.resize(99, 24);
+    let retained_after_shrink =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    grid.resize(100, 24);
+    let retained_after_restore =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+
+    assert_eq!(retained_after_shrink, retained_before);
+    assert_eq!(retained_after_restore, retained_before);
+}
+
+#[test]
+fn grow_first_adjacent_resize_reuses_populated_history_capacity() {
+    let mut grid = Grid::new(100, 24);
+    grid.scrollback_requested_limit = 256;
+    grid.scrollback_limit = 256;
+    for index in 0..256 {
+        let mut cells = vec![Cell::default(); 100];
+        cells[0].ch = char::from(b'a' + (index % 26) as u8);
+        grid.scrollback.push_back(Line::from_flat(cells));
+    }
+
+    grid.resize(101, 24);
+    let retained_after_grow =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    grid.resize(100, 24);
+    let retained_after_restore =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    grid.resize(101, 24);
+    let retained_after_second_grow =
+        grid.scrollback_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+
+    assert_eq!(retained_after_restore, retained_after_grow);
+    assert_eq!(retained_after_second_grow, retained_after_grow);
+}
+
+#[test]
+fn scrollback_limit_releases_outer_high_water_capacity() {
+    let mut grid = Grid::new(1, 1);
+    grid.scrollback_requested_limit = 4096;
+    grid.scrollback_limit = 4096;
+    grid.scrollback = VecDeque::with_capacity(4096);
+    for _ in 0..4096 {
+        grid.scrollback.push_back(Line::flat_filled(1, Cell::default()));
+    }
+
+    grid.set_scrollback_limit(8);
+
+    assert_eq!(grid.scrollback_len(), 8);
+    assert!(
+        grid.scrollback_capacity() <= grid.scrollback_len().saturating_mul(2),
+        "scrollback len {} retained outer capacity {}",
+        grid.scrollback_len(),
+        grid.scrollback_capacity()
+    );
+}
+
+#[test]
 fn scrollback_limit_shares_the_total_grid_cell_budget() {
     assert_eq!(
         bounded_scrollback_rows(

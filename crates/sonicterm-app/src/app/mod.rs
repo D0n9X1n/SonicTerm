@@ -1134,6 +1134,20 @@ pub enum UserEvent {
     ClearShapeCache,
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
+    /// A bounded PTY input enqueue failed. Retains the rejected bytes until
+    /// the event-loop thread can show a user-actionable notification.
+    PtyInputRejected {
+        /// Original terminal input that was not sent.
+        bytes: Vec<u8>,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+}
+
+fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEvent {
+    let reason = error.to_string();
+    let bytes = error.into_bytes();
+    UserEvent::PtyInputRejected { bytes, reason }
 }
 
 /// Build an [`AsyncFallbackLoader`] whose notifier fires
@@ -2303,20 +2317,29 @@ impl App {
             }
             let Some(p) = self.pane_by_id(pane_id) else { return };
             if let Some(pty) = p.pty.as_ref() {
-                Self::queue_pty_input(pty, bytes);
+                Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes);
             }
         }
     }
 
-    fn queue_pty_input(pty: &sonicterm_io::pty::PtyHandle, bytes: Vec<u8>) {
+    fn queue_pty_input(
+        proxy: Option<&EventLoopProxy<UserEvent>>,
+        pty: &sonicterm_io::pty::PtyHandle,
+        bytes: Vec<u8>,
+    ) {
         if let Err(error) = pty.send_input_nonblocking(bytes) {
-            let reason = error.to_string();
-            let rejected_bytes = error.into_bytes().len();
+            let event = pty_input_rejected_event(error);
+            let UserEvent::PtyInputRejected { bytes, reason } = &event else {
+                unreachable!("PTY rejection helper must build a rejection event");
+            };
             tracing::warn!(
-                rejected_bytes,
+                rejected_bytes = bytes.len(),
                 %reason,
                 "terminal input was not queued because the PTY writer is unavailable or saturated"
             );
+            if let Some(proxy) = proxy {
+                let _ = proxy.send_event(event);
+            }
         }
     }
 
@@ -4822,3 +4845,7 @@ mod tear_out_timing_tests;
 #[cfg(test)]
 #[path = "software_render_tests.rs"]
 mod software_render_tests;
+
+#[cfg(test)]
+#[path = "pty_input_tests.rs"]
+mod pty_input_tests;

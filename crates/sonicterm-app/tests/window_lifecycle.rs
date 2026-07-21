@@ -141,6 +141,7 @@ fn failed_child_tear_out_source_cleanup_releases_empty_window() {
     app.tear_out_apply_child_source_side(child, 0);
 
     assert_eq!(app.__test_windows_len(), 0);
+    assert!(app.__test_pending_exit(), "failed final-child tear-out must request process exit");
     assert!(registry.is_empty());
     assert_eq!(unregister_calls.load(Ordering::Relaxed), 1);
 }

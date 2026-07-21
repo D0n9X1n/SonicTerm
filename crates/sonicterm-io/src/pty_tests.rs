@@ -1,4 +1,5 @@
 use super::*;
+use portable_pty::{ChildKiller, ExitStatus};
 
 #[cfg(windows)]
 static LIVE_PTY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -6,6 +7,83 @@ static LIVE_PTY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(windows)]
 fn lock_live_pty_test() -> std::sync::MutexGuard<'static, ()> {
     LIVE_PTY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug, Clone)]
+struct MockChild {
+    try_wait_calls: Arc<AtomicUsize>,
+    kill_calls: Arc<AtomicUsize>,
+}
+
+impl ChildKiller for MockChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.kill_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        Box::new(self.clone())
+    }
+}
+
+impl Child for MockChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.try_wait_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(ExitStatus::with_exit_code(0)))
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        Ok(ExitStatus::with_exit_code(0))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(4242)
+    }
+
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownStep {
+    SignalCancel,
+    CancelIo,
+    TerminateChild,
+    FinishIo,
+    CloseMaster,
+    ReapChild,
+}
+
+struct RecordingTeardown {
+    steps: Vec<TeardownStep>,
+}
+
+impl PtyTeardownOps for RecordingTeardown {
+    fn signal_cancel(&mut self) {
+        self.steps.push(TeardownStep::SignalCancel);
+    }
+
+    fn cancel_io(&mut self) {
+        self.steps.push(TeardownStep::CancelIo);
+    }
+
+    fn terminate_child(&mut self) {
+        self.steps.push(TeardownStep::TerminateChild);
+    }
+
+    fn finish_io(&mut self) {
+        self.steps.push(TeardownStep::FinishIo);
+    }
+
+    fn close_master(&mut self) {
+        self.steps.push(TeardownStep::CloseMaster);
+    }
+
+    fn reap_child(&mut self) {
+        self.steps.push(TeardownStep::ReapChild);
+    }
 }
 
 fn env_str<'a>(builder: &'a CommandBuilder, name: &str) -> &'a str {
@@ -240,6 +318,44 @@ fn child_exit_probe_observes_short_lived_process() {
     assert!(
         probe.has_exited().expect("final child probe"),
         "short-lived child remained active; output={output:?}"
+    );
+}
+
+#[test]
+fn observed_child_exit_prevents_later_kill_or_pid_signal() {
+    let try_wait_calls = Arc::new(AtomicUsize::new(0));
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let child =
+        MockChild { try_wait_calls: try_wait_calls.clone(), kill_calls: kill_calls.clone() };
+    let child = Arc::new(Mutex::new(ChildState::new(Box::new(child))));
+    let probe = PtyChildExitProbe { child: child.clone() };
+
+    assert!(probe.has_exited().unwrap());
+    let mut signalled_pids = Vec::new();
+    terminate_child(&mut child.lock(), |pid| signalled_pids.push(pid)).unwrap();
+
+    assert!(signalled_pids.is_empty());
+    assert_eq!(kill_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn teardown_cancels_and_finishes_io_before_closing_conpty_master() {
+    let mut teardown = RecordingTeardown { steps: Vec::new() };
+
+    run_pty_teardown(&mut teardown);
+
+    assert_eq!(
+        teardown.steps,
+        [
+            TeardownStep::SignalCancel,
+            TeardownStep::CancelIo,
+            TeardownStep::TerminateChild,
+            TeardownStep::FinishIo,
+            TeardownStep::CloseMaster,
+            TeardownStep::ReapChild,
+        ]
     );
 }
 

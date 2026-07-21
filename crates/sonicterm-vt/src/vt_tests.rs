@@ -181,6 +181,20 @@ fn can_and_sub_reset_escape_family_before_oversized_osc() {
 }
 
 #[test]
+fn can_and_sub_cancel_sixel_without_emitting_media() {
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let events = parser.advance(&[0x1b, b'P', b'q', b'a', b'b', b'c', cancel, b'Z']);
+
+        assert!(
+            events.iter().all(|event| !matches!(event, VtEvent::Media(_))),
+            "cancel byte {cancel:#x} emitted media"
+        );
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "cancel byte {cancel:#x}");
+    }
+}
+
+#[test]
 fn overflow_triggering_osc_terminator_is_not_lost() {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1b]8;;".to_vec();

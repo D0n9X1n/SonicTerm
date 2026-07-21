@@ -196,6 +196,16 @@ impl App {
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
+            UserEvent::PtyInputRejected { bytes, reason } => {
+                self.show_notification_for_kind(
+                    self.frontmost_kind(),
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    format!(
+                        "Terminal input was not sent ({reason}; {} bytes). Retry after the terminal responds.",
+                        bytes.len()
+                    ),
+                );
+            }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.

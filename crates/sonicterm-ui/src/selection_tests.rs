@@ -278,6 +278,24 @@ fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
 }
 
 #[test]
+fn partial_final_row_selection_omits_coherent_right_edge_frame() {
+    let mut grid = Grid::new(11, 3);
+    for (row, (text, frame)) in
+        [("first", '│'), ("middle", '│'), ("last", '┘')].into_iter().enumerate()
+    {
+        grid.goto(row as u16, 0);
+        for ch in text.chars() {
+            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.goto(row as u16, grid.cols - 1);
+        grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let selection = Selection { start: (0, 0), end: (2, 3), anchored: true };
+
+    assert_eq!(selection.as_text(&grid), "first\nmiddle\nlast");
+}
+
+#[test]
 fn copy_preserves_ambiguous_detached_box_glyph_at_right_edge() {
     let grid = grid_with("foo     │");
     let selection = Selection::line_at(&grid, 0);

@@ -29,6 +29,13 @@
 
 use sonicterm_types::cell::Cell;
 
+fn shrink_vec_if_excessive<T>(items: &mut Vec<T>) {
+    let len = items.len();
+    if items.capacity() > len && (len == 0 || items.capacity() > len.saturating_mul(2)) {
+        items.shrink_to_fit();
+    }
+}
+
 /// A run of `count` consecutive cells that are byte-identical to `cell`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cluster {
@@ -193,7 +200,7 @@ impl LineStorage {
         match self {
             LineStorage::Flat(v) => {
                 v.truncate(new_len);
-                v.shrink_to_fit();
+                shrink_vec_if_excessive(v);
             }
             LineStorage::Cluster(cs) => {
                 let mut remaining = new_len;
@@ -212,7 +219,7 @@ impl LineStorage {
                     }
                 }
                 cs.truncate(keep);
-                cs.shrink_to_fit();
+                shrink_vec_if_excessive(cs);
             }
         }
     }
@@ -762,7 +769,7 @@ impl Line {
         match &mut self.storage {
             LineStorage::Flat(v) => {
                 v.truncate(new_len);
-                v.shrink_to_fit();
+                shrink_vec_if_excessive(v);
             }
             LineStorage::Cluster(cs) => {
                 let mut remaining = new_len;
@@ -781,7 +788,7 @@ impl Line {
                     }
                 }
                 cs.truncate(keep);
-                cs.shrink_to_fit();
+                shrink_vec_if_excessive(cs);
             }
         }
     }

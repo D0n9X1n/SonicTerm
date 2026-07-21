@@ -294,6 +294,12 @@ impl Parser {
                 i += 1;
                 continue;
             }
+            if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                self.inner = vte::Parser::new();
+                self.reset_cancelled_escape();
+                i += 1;
+                continue;
+            }
             if self.performer.ground && bytes[i..].starts_with(b"\x1b_") {
                 self.performer.ground = false;
                 self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
@@ -360,6 +366,12 @@ impl Parser {
                 // stop the moment ground flips back to true.
                 let start = i;
                 while i < len && !self.performer.ground {
+                    if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                        self.inner = vte::Parser::new();
+                        self.reset_cancelled_escape();
+                        i += 1;
+                        break;
+                    }
                     let started_escape = if self.escape_family == EscapeFamily::Ground {
                         self.escape_family = match bytes[i] {
                             0x1b => EscapeFamily::Esc,

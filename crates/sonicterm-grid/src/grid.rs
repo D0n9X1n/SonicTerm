@@ -326,6 +326,7 @@ impl Grid {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
         }
+        compact_scrollback_capacity(&mut self.scrollback);
         self.cursor = saved.cursor;
         if saved.cols != self.cols || saved.rows != self.rows {
             let cols = self.cols;
@@ -367,6 +368,7 @@ impl Grid {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
         }
+        compact_scrollback_capacity(&mut self.scrollback);
         // Drop rows that will not survive before widening columns. Otherwise
         // a tall-to-wide resize can transiently expand thousands of rows only
         // to discard them immediately afterward.
@@ -1320,6 +1322,7 @@ impl Grid {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
         }
+        compact_scrollback_capacity(&mut self.scrollback);
         if let Some(primary) = self.alt_screen.as_mut() {
             primary.set_scrollback_limit(limit);
         }
@@ -1342,6 +1345,14 @@ impl Grid {
             let excess = primary.scrollback.len() - primary.scrollback_limit;
             primary.scrollback.drain(0..excess);
         }
+        compact_scrollback_capacity(&mut primary.scrollback);
+    }
+}
+
+fn compact_scrollback_capacity(scrollback: &mut VecDeque<Line>) {
+    let len = scrollback.len();
+    if scrollback.capacity() > len && (len == 0 || scrollback.capacity() >= len.saturating_mul(2)) {
+        scrollback.shrink_to_fit();
     }
 }
 

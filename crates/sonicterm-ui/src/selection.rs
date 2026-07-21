@@ -194,7 +194,7 @@ pub fn plain_text_from_grid_range(
         std::mem::swap(&mut start, &mut end);
     }
     let ((start_col, start_row), (end_col, end_row)) = (start, end);
-    let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_col, end_row);
+    let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_row);
     let mut out = String::new();
     let mut first = true;
     for row_idx in start_row..=end_row {
@@ -229,13 +229,7 @@ pub fn plain_text_from_grid_range(
     out
 }
 
-fn has_coherent_right_frame(
-    grid: &Grid,
-    start_col: usize,
-    start_row: u64,
-    end_col: usize,
-    end_row: u64,
-) -> bool {
+fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_row: u64) -> bool {
     if start_row >= end_row {
         return false;
     }
@@ -245,9 +239,7 @@ fn has_coherent_right_frame(
             return false;
         };
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
-        let requested_end =
-            if row_idx == end_row { end_col.saturating_add(1) } else { row.len() }.min(row.len());
-        let Some((_, frame)) = detached_right_frame(row, col_start, requested_end) else {
+        let Some((_, frame)) = detached_right_frame(row, col_start, row.len()) else {
             return false;
         };
         if row_idx == end_row {

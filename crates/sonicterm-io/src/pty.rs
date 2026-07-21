@@ -76,14 +76,52 @@ impl PtyInputError {
 /// Cloneable, non-blocking probe for a PTY child process's exit state.
 #[derive(Clone)]
 pub struct PtyChildExitProbe {
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    child: Arc<Mutex<ChildState>>,
 }
 
 impl PtyChildExitProbe {
     /// Return whether the child has exited without waiting for it.
     pub fn has_exited(&self) -> Result<bool> {
-        Ok(self.child.lock().try_wait()?.is_some())
+        Ok(self.child.lock().has_exited()?)
     }
+}
+
+struct ChildState {
+    child: Box<dyn Child + Send + Sync>,
+    exited: bool,
+}
+
+impl ChildState {
+    fn new(child: Box<dyn Child + Send + Sync>) -> Self {
+        Self { child, exited: false }
+    }
+
+    fn has_exited(&mut self) -> std::io::Result<bool> {
+        if self.exited {
+            return Ok(true);
+        }
+        if self.child.try_wait()?.is_some() {
+            self.exited = true;
+        }
+        Ok(self.exited)
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        (!self.exited).then(|| self.child.process_id()).flatten()
+    }
+}
+
+fn terminate_child<F>(child: &mut ChildState, mut signal_pid: F) -> std::io::Result<()>
+where
+    F: FnMut(u32),
+{
+    if child.has_exited()? {
+        return Ok(());
+    }
+    if let Some(pid) = child.process_id() {
+        signal_pid(pid);
+    }
+    child.child.kill()
 }
 
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
@@ -197,7 +235,7 @@ pub struct PtyHandle {
     writer_cancel: Sender<()>,
     reader_thread: PtyIoThread,
     writer_thread: PtyIoThread,
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    child: Arc<Mutex<ChildState>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
 }
@@ -244,7 +282,8 @@ impl PtyHandle {
     /// Called automatically on Drop, but exposed for callers that want
     /// deterministic shutdown earlier.
     pub fn kill(&self) {
-        let _ = self.child.lock().kill();
+        let mut child = self.child.lock();
+        let _ = terminate_child(&mut child, |_| {});
     }
 
     /// Process id of the underlying shell, if the platform reports it. Used
@@ -278,67 +317,107 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        let _ = self.reader_cancel.try_send(());
-        let _ = self.writer_cancel.try_send(());
-        // Drop the master handle retained by the resize closure before
-        // waiting for native I/O threads; this closes the pseudoterminal and
-        // wakes readers/writers on platforms where handle closure is enough.
         let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
-        drop(resize);
-        self.reader_thread.cancel_synchronous_io();
-        self.writer_thread.cancel_synchronous_io();
-        // Terminate the full process group before the direct child so
-        // descendants cannot retain the PTY after their pane closes. The
-        // portable-pty kill remains as a cross-platform fallback, followed by
-        // a bounded reap so a stuck child cannot hang window teardown.
-        let mut child = self.child.lock();
-        #[cfg(unix)]
-        let pid_for_log = child.process_id();
-        #[cfg(unix)]
-        if let Some(pid) = child.process_id() {
-            // SAFETY: libc::kill is FFI; pid comes from portable-pty's
-            // tracked child handle. ESRCH (already dead) is fine.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let mut teardown = PtyHandleTeardown { handle: self, resize: Some(resize) };
+        run_pty_teardown(&mut teardown);
+    }
+}
+
+trait PtyTeardownOps {
+    fn signal_cancel(&mut self);
+    fn cancel_io(&mut self);
+    fn terminate_child(&mut self);
+    fn finish_io(&mut self);
+    fn close_master(&mut self);
+    fn reap_child(&mut self);
+}
+
+fn run_pty_teardown(teardown: &mut impl PtyTeardownOps) {
+    teardown.signal_cancel();
+    teardown.cancel_io();
+    teardown.terminate_child();
+    #[cfg(windows)]
+    {
+        teardown.finish_io();
+        teardown.close_master();
+    }
+    #[cfg(not(windows))]
+    {
+        teardown.close_master();
+        teardown.finish_io();
+    }
+    teardown.reap_child();
+}
+
+struct PtyHandleTeardown<'a> {
+    handle: &'a mut PtyHandle,
+    resize: Option<Box<dyn Fn(u16, u16) + Send + Sync>>,
+}
+
+impl PtyTeardownOps for PtyHandleTeardown<'_> {
+    fn signal_cancel(&mut self) {
+        let _ = self.handle.reader_cancel.try_send(());
+        let _ = self.handle.writer_cancel.try_send(());
+    }
+
+    fn cancel_io(&mut self) {
+        self.handle.reader_thread.cancel_synchronous_io();
+        self.handle.writer_thread.cancel_synchronous_io();
+    }
+
+    fn terminate_child(&mut self) {
+        let mut child = self.handle.child.lock();
+        let result = terminate_child(&mut child, |pid| {
+            #[cfg(unix)]
+            {
+                // SAFETY: the child has just returned `try_wait() == None`,
+                // so its pid cannot have been reaped and reused.
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
             }
+            #[cfg(not(unix))]
+            let _ = pid;
+        });
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to terminate PTY child");
         }
-        // portable-pty escalation as defense in depth (Windows
-        // TerminateProcess, Unix pid-namespace edge cases).
-        let _ = child.kill();
-        // Bounded reap. After SIGKILL the kernel typically delivers the
-        // exit status in well under 10ms; the 500ms budget is huge
-        // headroom for pathological scheduling. We must never block the
-        // app indefinitely on tab close: if the child somehow doesn't
-        // reap (kernel bug, exotic process-group state) we log and move
-        // on rather than hang Drop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    }
+
+    fn finish_io(&mut self) {
+        self.handle.reader_thread.finish("PTY reader thread");
+        self.handle.writer_thread.finish("PTY writer thread");
+    }
+
+    fn close_master(&mut self) {
+        drop(self.resize.take());
+    }
+
+    fn reap_child(&mut self) {
+        let mut child = self.handle.child.lock();
+        if child.exited {
+            return;
+        }
+        let pid_for_log = child.process_id();
+        let deadline = std::time::Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
         loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    #[cfg(unix)]
-                    {
-                        tracing::warn!(
-                            pid = pid_for_log,
-                            "PtyHandle::Drop: child did not exit within 500ms after SIGKILL"
-                        );
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        tracing::warn!(
-                            "PtyHandle::Drop: child did not exit within 500ms after kill"
-                        );
-                    }
+            match child.has_exited() {
+                Ok(true) => break,
+                Ok(false) if std::time::Instant::now() >= deadline => {
+                    tracing::warn!(
+                        pid = pid_for_log,
+                        "PTY child did not exit within the shutdown timeout"
+                    );
                     break;
                 }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Err(_) => break,
+                Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to reap PTY child");
+                    break;
+                }
             }
         }
-        drop(child);
-        self.reader_thread.finish("PTY reader thread");
-        self.writer_thread.finish("PTY writer thread");
     }
 }
 
@@ -447,7 +526,7 @@ impl PtyHandle {
             writer_cancel,
             reader_thread,
             writer_thread,
-            child: Arc::new(Mutex::new(child)),
+            child: Arc::new(Mutex::new(ChildState::new(child))),
             shell_program_path: cmd.to_string(),
         })
     }

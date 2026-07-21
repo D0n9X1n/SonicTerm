@@ -66,10 +66,15 @@ of terminal correctness rather than a paint optimization:
 - VT/grid mutations mark affected rows in the same frame, including scrolling,
   insert/delete line, reverse index, erase, resize, and wide-cell repair.
 - Grid geometry budgets include retained row allocation, not only visible
-  `cols × rows`; column shrink compacts surviving rows before later row growth.
+  `cols × rows`; material column shrink compacts surviving rows while adjacent
+  resize oscillation retains reusable capacity, and history-limit reductions
+  release excess `VecDeque` capacity.
 - Clipboard serialization preserves isolated or incomplete right-edge
   box-drawing text and removes only a coherent multi-row side ending in a
-  lower-right frame corner.
+  lower-right frame corner. Frame detection reads physical row ends without
+  widening the selected output span.
+- CAN/SUB cancellation resets VT escape accounting before cancelled DCS media
+  can reach `unhook` and emit an incomplete image.
 - Windows software rendering keeps the established full-surface presenter path;
   it is not coupled to retained GPU damage decisions.
 - Pane VT workers never call native window APIs. After output coalescing they
@@ -90,14 +95,18 @@ falls back to base OS/2/default weight and width rather than aborting the app.
 Embedded bitmap strikes are loaded metrics-only and checked against the glyph
 allocation budget before FreeType may decode their pixels.
 
-PTY handles own their native reader and writer threads. Teardown closes master
-ownership, cancels pending Windows synchronous I/O, terminates the Unix process
-group, and waits only for bounded thread and child-exit deadlines.
+PTY handles own their native reader and writer threads. Exit observation is
+cached across probes and teardown so a reaped Unix pid is never signalled
+again. Windows teardown cancels and finishes synchronous pipe I/O before
+closing the ConPTY master; Unix teardown terminates the process group before
+master close. Both use bounded thread and child-exit deadlines.
 Terminal-input enqueue remains non-blocking and bounded; saturation,
 disconnection, and oversized messages return typed errors that retain the
-rejected bytes instead of reporting false success. The mux observes natural
-child exit independently of PTY output EOF, removes exited panes, and prunes
-empty sessions.
+rejected bytes instead of reporting false success. App callers forward those
+bytes to the event loop for a visible retry notification. The mux observes
+natural child exit independently of PTY output EOF, removes exited panes,
+prunes empty sessions, rechunks subscriber output to 8 KiB frames, bounds all
+control replies, and queues `Spawned` before enabling output, `Exit`, or reap.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,

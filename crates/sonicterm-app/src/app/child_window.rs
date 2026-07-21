@@ -349,6 +349,7 @@ impl App {
         let broadcast_receivers = self.broadcast_receivers();
         let palette_for_render: Option<&mut CommandPalette> =
             if palette_here { Some(&mut self.command_palette) } else { None };
+        let pty_event_proxy = self.event_loop_proxy.clone();
         let Some(child) = self.windows.get_mut(&win_id) else { return };
         match event {
             WindowEvent::CloseRequested => {
@@ -1007,7 +1008,7 @@ impl App {
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty, payload);
+                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
                                 }
                             }
                         } else if is_alt {
@@ -1025,7 +1026,7 @@ impl App {
                             }
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty, payload);
+                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
                                 }
                             }
                         } else {

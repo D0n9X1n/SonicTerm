@@ -60,6 +60,28 @@ fn subscriber_sink_reserves_capacity_for_exit() {
 }
 
 #[test]
+fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
+    let (tx, rx) = bounded(5);
+    let sink = SubscriberSink::new(tx, rx.clone());
+
+    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![b'x'; 64 * 1024] }).unwrap();
+
+    let queued = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(queued.len(), 4, "one slot must remain reserved for control");
+    assert!(queued.iter().all(|message| {
+        matches!(message, ServerMsg::Output { bytes, .. } if bytes.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES)
+    }));
+    let queued_bytes = queued
+        .iter()
+        .map(|message| match message {
+            ServerMsg::Output { bytes, .. } => bytes.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert!(queued_bytes <= 4 * SUBSCRIBER_OUTPUT_FRAME_BYTES);
+}
+
+#[test]
 fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -75,6 +97,24 @@ fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let error = result.expect_err("a full mailbox must reject control delivery after the deadline");
     assert!(error.to_string().contains("mailbox remained full"), "unexpected error: {error}");
     sender.join().expect("control sender thread");
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+}
+
+#[test]
+fn request_reply_uses_the_bounded_control_deadline() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    let (done_tx, done_rx) = bounded(1);
+    std::thread::spawn(move || {
+        done_tx
+            .send(send_reply(&sink, ServerMsg::Sessions(Vec::new())))
+            .expect("report reply outcome");
+    });
+
+    let result =
+        done_rx.recv_timeout(Duration::from_secs(1)).expect("request reply must have a deadline");
+    assert!(result.is_err());
     assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
 }
 
@@ -140,6 +180,54 @@ fn naturally_exited_pane_is_reaped_from_its_session() {
         state.attach(session_id, SubscriberSink::new(tx, rx)).is_err(),
         "empty reaped session must be unknown"
     );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn paused_spawn_queues_spawned_before_exit_and_reap() {
+    #[cfg(unix)]
+    let command = "/usr/bin/true";
+    #[cfg(windows)]
+    let command = "whoami.exe";
+
+    let state = ServerState::new();
+    let pending = state.spawn_paused(command, 80, 24).expect("spawn paused pane");
+    let session_id = pending.session_id;
+    let pane_id = pending.pane_id;
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(state.session_count(), 1, "paused pane must remain published until announced");
+
+    let (tx, rx) = bounded(CHANNEL_CAP);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    state.subscribe_if_unattached(session_id, sink.clone());
+    send_reply(&sink, ServerMsg::Spawned { session_id, pane_id }).unwrap();
+    pending.start().unwrap();
+    #[cfg(windows)]
+    state.input(pane_id, b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Ok(ServerMsg::Spawned { session_id: actual_session, pane_id: actual_pane })
+            if actual_session == session_id && actual_pane == pane_id
+    ));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut saw_exit = false;
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ServerMsg::Exit { pane_id: actual }) if actual == pane_id => {
+                saw_exit = true;
+                break;
+            }
+            Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_exit, "announced short-lived pane must emit Exit");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while state.session_count() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(state.session_count(), 0);
 }
 
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,
