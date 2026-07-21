@@ -93,19 +93,19 @@ back when the context belongs with the original session again.
 - **WezTerm-inspired behavior** — terminal, font, keymap, and rendering details
   follow WezTerm-proven semantics where SonicTerm has absorbed them.
 
-## Documentation lives in the wiki
+## Documentation lives in `wiki/`
 
 The README intentionally avoids operational details. If you want to install it,
 change preferences, edit keybindings, author a theme, inspect logs, or build from
-source, use the bilingual wiki:
+source, use the repository-tracked bilingual documentation:
 
-| Topic | Wiki page |
+| Topic | Documentation page |
 | --- | --- |
-| Usage and installation | [Usage](https://github.com/D0n9X1n/SonicTerm/wiki/Usage) |
-| Preferences and `sonicterm.toml` | [Configuration](https://github.com/D0n9X1n/SonicTerm/wiki/Configuration) |
-| Keymap editing | [Keybindings](https://github.com/D0n9X1n/SonicTerm/wiki/Keybindings) |
-| Theme authoring | [Themes](https://github.com/D0n9X1n/SonicTerm/wiki/Themes) |
-| Logs and diagnostics | [Logging](https://github.com/D0n9X1n/SonicTerm/wiki/Logging) |
+| Usage and installation | [Usage](wiki/Usage.md) |
+| Preferences and `sonicterm.toml` | [Configuration](wiki/Configuration.md) |
+| Keymap editing | [Keybindings](wiki/Keybindings.md) |
+| Theme authoring | [Themes](wiki/Themes.md) |
+| Logs and diagnostics | [Logging](wiki/Logging.md) |
 
 ## Thanks, WezTerm
 
