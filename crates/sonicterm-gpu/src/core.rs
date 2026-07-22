@@ -648,6 +648,10 @@ fn atlas_evicted_during_frame(frame_epoch: u64, atlas: &GlyphAtlas) -> bool {
     atlas.evictions() != frame_epoch
 }
 
+fn atlas_texture_rebuild_required(current: (u32, u32), next: (u32, u32)) -> bool {
+    current != next
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -1555,7 +1559,6 @@ impl GpuRenderer {
         let mut glyph_atlas = GlyphAtlas::default_size();
         let glyph_upload = AtlasUpload::new(
             &device,
-            &queue,
             &glyph_atlas,
             present_pipeline.texture_bind_group_layout(),
         );
@@ -1563,7 +1566,6 @@ impl GpuRenderer {
         let image_atlas = GlyphAtlas::default_size();
         let image_upload = AtlasUpload::new(
             &device,
-            &queue,
             &image_atlas,
             present_pipeline.texture_bind_group_layout(),
         );
@@ -2493,12 +2495,7 @@ impl GpuRenderer {
         self.glyph_atlas = GlyphAtlas::new(width, height);
         self.mark_glyph_atlas_replaced();
         self.glyph_atlas.set_eviction_enabled(false);
-        self.glyph_upload = AtlasUpload::new(
-            &self.device,
-            &self.queue,
-            &self.glyph_atlas,
-            self.present_pipeline.texture_bind_group_layout(),
-        );
+        self.rebuild_glyph_upload_if_needed();
         self.row_glyph_cache.invalidate_all();
         self.glyph_atlas_retry_without_eviction = true;
         self.last_frame_key = None;
@@ -2521,12 +2518,7 @@ impl GpuRenderer {
         let width = self.image_atlas.width();
         let height = self.image_atlas.height();
         self.image_atlas = GlyphAtlas::new(width, height);
-        self.image_upload = AtlasUpload::new(
-            &self.device,
-            &self.queue,
-            &self.image_atlas,
-            self.present_pipeline.texture_bind_group_layout(),
-        );
+        self.rebuild_image_upload_if_needed();
     }
 
     /// Deprecated close-button color override. The button is no longer
@@ -2686,12 +2678,7 @@ impl GpuRenderer {
         // `glyph_upload.sync(...)` would either write out-of-bounds or
         // sample tiles at stale UVs. Rebuild the upload so its texture +
         // bind group match the new atlas dimensions exactly.
-        self.glyph_upload = AtlasUpload::new(
-            &self.device,
-            &self.queue,
-            &self.glyph_atlas,
-            self.present_pipeline.texture_bind_group_layout(),
-        );
+        self.rebuild_glyph_upload_if_needed();
         self.last_frame_key = None;
         if let Some(w) = Some(&self.window) {
             w.request_redraw();
@@ -2702,6 +2689,30 @@ impl GpuRenderer {
             self.glyph_atlas.height(),
             self.raster_px(self.font_size),
         );
+    }
+
+    fn rebuild_glyph_upload_if_needed(&mut self) {
+        let current = (self.glyph_upload.width(), self.glyph_upload.height());
+        let next = (self.glyph_atlas.width(), self.glyph_atlas.height());
+        if atlas_texture_rebuild_required(current, next) {
+            self.glyph_upload = AtlasUpload::new(
+                &self.device,
+                &self.glyph_atlas,
+                self.present_pipeline.texture_bind_group_layout(),
+            );
+        }
+    }
+
+    fn rebuild_image_upload_if_needed(&mut self) {
+        let current = (self.image_upload.width(), self.image_upload.height());
+        let next = (self.image_atlas.width(), self.image_atlas.height());
+        if atlas_texture_rebuild_required(current, next) {
+            self.image_upload = AtlasUpload::new(
+                &self.device,
+                &self.image_atlas,
+                self.present_pipeline.texture_bind_group_layout(),
+            );
+        }
     }
 
     /// Apply a new color theme without reconstructing the renderer.

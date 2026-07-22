@@ -96,6 +96,9 @@ metadata is optional: malformed, missing, or out-of-range variation metadata
 falls back to base OS/2/default weight and width rather than aborting the app.
 Embedded bitmap strikes are loaded metrics-only and checked against the glyph
 allocation budget before FreeType may decode their pixels.
+Glyph/image atlas textures initialize lazily through dirty-tile uploads, and
+same-dimension CPU atlas resets retain the existing GPU texture and bind group
+instead of creating a transient second 2048×2048 allocation.
 
 PTY handles own their native reader and writer threads. Unix natural exit is
 observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every

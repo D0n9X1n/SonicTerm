@@ -413,6 +413,12 @@ fn atlas_eviction_during_frame_requires_retry() {
 }
 
 #[test]
+fn same_size_atlas_reset_reuses_gpu_texture() {
+    assert!(!atlas_texture_rebuild_required((2048, 2048), (2048, 2048)));
+    assert!(atlas_texture_rebuild_required((1024, 1024), (2048, 2048)));
+}
+
+#[test]
 fn inline_image_atlas_skips_older_images_without_eviction() {
     let older = sonicterm_render_model::InlineImage {
         id: 1,
